@@ -8,7 +8,9 @@ on demand for active work instead of renting one full VM per user. The long-term
 whether 1,000 logical agents can be served with good responsiveness, safe isolation, and sane
 cost while only active tasks consume expensive runtime.
 
-> **Scope of this repository right now:** P0B-01 (repository foundation) only.
+> **Scope of this repository right now:** P0B-01 (repository foundation, merged on
+> `main`) and P0B-02 (domain models, state machines and contracts, implemented in this PR).
+> There is still no task API, worker, sandbox provider, or business database schema.
 > Nothing here proves sandbox isolation, real LLM behaviour, or 1,000-agent production
 > performance. See [P0-B status](#p0-b-status) below.
 
@@ -16,8 +18,8 @@ cost while only active tasks consume expensive runtime.
 
 | Work package | Scope                                                                                                                | Status                     |
 | ------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Implemented in this PR** |
-| P0B-02       | Domain types, task state machine, Zod schemas                                                                        | Not started                |
+| **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Merged on `main`**       |
+| **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Implemented in this PR** |
 | P0B-03       | Task/Run/Event/Artifact schema, repositories, idempotent task creation                                               | Not started                |
 | P0B-04       | Worker claim/lease/fencing/retry                                                                                     | Not started                |
 | P0B-05       | Execution router, deterministic mock LLM, fake sandbox                                                               | Not started                |
@@ -37,6 +39,8 @@ Ember/
   apps/
     api/                  # Hono HTTP service (app factory + Node listener)
   packages/
+    domain/               # pure domain types, Task/Run state machines, errors
+    contracts/            # Zod input/output schemas, DTOs, cross-module interfaces
     postgres/             # DB config, pool factory, migration runner + CLI
   infra/
     local/
@@ -47,8 +51,10 @@ Ember/
     unit/                 # no database, no fixed ports
     integration/          # real PostgreSQL, unique throwaway schema per run
   docs/
-    P0B-IMPLEMENTATION.md # architecture decisions and deferred boundaries
-    P0B-ACCEPTANCE.md     # acceptance checklist with real command results
+    P0B-IMPLEMENTATION.md      # P0B-01 architecture decisions and deferred boundaries
+    P0B-ACCEPTANCE.md          # P0B-01 acceptance checklist with real command results
+    P0B-02-IMPLEMENTATION.md   # P0B-02 domain/contracts design and state machines
+    P0B-02-ACCEPTANCE.md       # P0B-02 verification evidence and B-T01–B-T04 status
   .github/workflows/ci.yml
   .env.example
   package.json
@@ -56,9 +62,27 @@ Ember/
   tsconfig*.json
 ```
 
-`packages/domain` and `packages/contracts` are deliberately **not** created yet: they would
-only contain empty placeholders. They arrive together with P0B-02 domain code. The rationale
-is recorded in [docs/P0B-IMPLEMENTATION.md](docs/P0B-IMPLEMENTATION.md).
+`packages/domain` and `packages/contracts` are now real packages (P0B-02). The domain package
+has no runtime dependencies and owns Task/Run state semantics; the contracts package depends on
+the domain and Zod. They are deliberately **not** wired into a task API or database yet: those
+arrive in P0B-03 and P0B-07.
+
+## Domain and contracts (P0B-02)
+
+- `@ember/domain` is pure TypeScript: no Hono, PostgreSQL, filesystem, network or clock. It
+  defines `AuthContext`, `TaskCommand`, `TaskView`, `LeasedRun`, `TaskEvent`, `TaskStatus`,
+  `RunStatus`, the Task/Run transition tables, terminal-state rules and stable `DomainError`s.
+- `@ember/contracts` validates boundaries with Zod 4: strict per-kind mock inputs, UUIDs,
+  bounded deadlines, header-only idempotency keys, receipts/events and their snake_case HTTP
+  DTOs, plus provider-neutral `TaskRepository`/`LeaseQueue`/`ArtifactStore`/`SandboxProvider`
+  interfaces. No fake implementations exist.
+- **Task** is the user's overall intent, **Run** is one execution attempt, and **Event** is a
+  fact that happened. `accepted` is an event, not a `TaskStatus`; `waiting_external` is outside
+  P0-B. Terminal Task states (`completed`, `failed`, `cancelled`) have no outgoing edges, and
+  same-state assignment is rejected rather than treated as an implicit no-op.
+
+See [docs/P0B-02-IMPLEMENTATION.md](docs/P0B-02-IMPLEMENTATION.md) for the complete transition
+tables, input semantics and open design questions.
 
 ## Prerequisites
 
@@ -183,20 +207,23 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 3 files, 37 tests (no database)
+pnpm test:unit        # 7 files, 233 tests (no database)
 pnpm test:integration # 6 tests against real PostgreSQL
 ```
 
-- Unit tests cover env validation (including the strict loopback guard for malformed IPv4/IPv6
-  and non-loopback hosts, plus IPv6 bracket normalisation), whitelist-only database log
-  metadata, migration file parsing, `/healthz` and `/readyz` over `app.request`, a real IPv4
-  loopback socket, and a real IPv6 (`::1`) loopback socket bound to port `0`.
+- Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,
+  whitelist-only database log metadata, migration file parsing, `/healthz` and `/readyz`, real
+  IPv4/IPv6 loopback sockets) plus P0B-02 domain contracts: the complete Task and Run state
+  matrices, terminal-state invariants, stable transition errors, all mock input schemas,
+  forged tenant/principal fields, idempotency keys, receipt/event DTOs and validation-error
+  redaction.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
   silently passing. They verify connection, first migration, repeat migration, the recorded
   version, readiness, checksum tamper detection, and renamed-migration detection.
 
 Exact results for this PR, including CI, are recorded in
-[docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md).
+[docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md). The historical P0B-01 report remains
+in [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) and is not rewritten.
 
 ## CI
 
@@ -236,7 +263,11 @@ These measures are development hygiene, not a security certification.
 
 ## Documentation
 
-- [docs/P0B-IMPLEMENTATION.md](docs/P0B-IMPLEMENTATION.md) — architecture decisions, module
-  boundaries, deferred work.
+- [docs/P0B-IMPLEMENTATION.md](docs/P0B-IMPLEMENTATION.md) — P0B-01 architecture decisions,
+  module boundaries, deferred work.
 - [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) — P0B-01 acceptance checklist with real
-  command output and status.
+  command output and status (historical, not rewritten).
+- [docs/P0B-02-IMPLEMENTATION.md](docs/P0B-02-IMPLEMENTATION.md) — P0B-02 domain model,
+  state machines, schemas and error model.
+- [docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md) — P0B-02 command evidence,
+  B-T01–B-T04 status, risks and deferred scope.

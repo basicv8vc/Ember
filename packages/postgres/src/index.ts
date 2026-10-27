@@ -1,8 +1,10 @@
 export {
   ConfigError,
+  describeDatabaseTarget,
+  formatDatabaseTarget,
   loadDatabaseConfig,
-  redactDatabaseUrl,
   type DatabaseConfig,
+  type DatabaseTarget,
 } from './config.js';
 export { createPool, type PoolHooks } from './pool.js';
 export {

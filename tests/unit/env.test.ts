@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import {
   ConfigError,
+  describeDatabaseTarget,
+  formatDatabaseTarget,
   loadDatabaseConfig,
-  redactDatabaseUrl,
 } from '../../packages/postgres/src/config.js';
 import { ApiConfigError, isLoopbackHost, loadApiConfig } from '../../apps/api/src/env.js';
 
@@ -43,6 +44,12 @@ describe('loadApiConfig', () => {
     expect(() => loadApiConfig({ EMBER_HOST: '192.168.1.10' })).toThrow(ApiConfigError);
   });
 
+  it('treats malformed loopback-looking addresses as non-loopback', () => {
+    for (const host of ['127.999.999.999', '127.0.0.256', '127.1', '::2', '0.0.0.0']) {
+      expect(() => loadApiConfig({ EMBER_HOST: host })).toThrow(ApiConfigError);
+    }
+  });
+
   it('allows a non-loopback bind only when explicitly enabled', () => {
     const config = loadApiConfig({
       EMBER_HOST: '0.0.0.0',
@@ -55,13 +62,58 @@ describe('loadApiConfig', () => {
 });
 
 describe('isLoopbackHost', () => {
-  it('recognises loopback hosts and rejects public ones', () => {
-    expect(isLoopbackHost('127.0.0.1')).toBe(true);
-    expect(isLoopbackHost('127.10.20.30')).toBe(true);
-    expect(isLoopbackHost('localhost')).toBe(true);
-    expect(isLoopbackHost('::1')).toBe(true);
-    expect(isLoopbackHost('0.0.0.0')).toBe(false);
-    expect(isLoopbackHost('example.com')).toBe(false);
+  it('accepts valid IPv4 loopback addresses and localhost', () => {
+    for (const host of ['127.0.0.1', '127.10.20.30', '127.255.255.254', 'localhost', 'LOCALHOST']) {
+      expect(isLoopbackHost(host)).toBe(true);
+    }
+  });
+
+  it('accepts the IPv6 loopback address in equivalent spellings', () => {
+    for (const host of [
+      '::1',
+      '0:0:0:0:0:0:0:1',
+      '[::1]',
+      '0000:0000:0000:0000:0000:0000:0000:0001',
+    ]) {
+      expect(isLoopbackHost(host)).toBe(true);
+    }
+  });
+
+  it('rejects malformed IP addresses that only look like loopback', () => {
+    for (const host of [
+      '127.999.999.999',
+      '127.0.0.256',
+      '127.0.0',
+      '127.1',
+      '127.0.0.1.5',
+      '127.0.0.1:8787',
+      '0127.0.0.1',
+      '127.0.0.-1',
+    ]) {
+      expect(isLoopbackHost(host)).toBe(false);
+    }
+  });
+
+  it('rejects other IPv6 addresses, including IPv4-mapped loopback', () => {
+    for (const host of ['::2', 'fe80::1', '2001:db8::1', '::ffff:127.0.0.1', '[::2]']) {
+      expect(isLoopbackHost(host)).toBe(false);
+    }
+  });
+
+  it('rejects unspecified, LAN, public and non-IP hosts', () => {
+    for (const host of [
+      '0.0.0.0',
+      '192.168.1.10',
+      '10.0.0.1',
+      '8.8.8.8',
+      'example.com',
+      'localhost.attacker.example',
+      'localhost.',
+      '',
+      '   ',
+    ]) {
+      expect(isLoopbackHost(host)).toBe(false);
+    }
   });
 });
 
@@ -105,16 +157,74 @@ describe('loadDatabaseConfig', () => {
   });
 });
 
-describe('redactDatabaseUrl', () => {
-  it('removes the password but keeps host and database', () => {
-    const redacted = redactDatabaseUrl('postgres://ember:top-secret@127.0.0.1:55432/ember');
+describe('describeDatabaseTarget', () => {
+  it('returns only whitelisted metadata', () => {
+    const target = describeDatabaseTarget('postgres://ember:secret@db.internal:5433/ember');
 
-    expect(redacted).not.toContain('top-secret');
-    expect(redacted).toContain('127.0.0.1:55432');
-    expect(redacted).toContain('/ember');
+    expect(target).toEqual({ host: 'db.internal', port: 5433, database: 'ember' });
+  });
+
+  it('never leaks credentials or sensitive query parameters', () => {
+    const connectionString =
+      'postgres://ember:top-secret@db.internal:5432/ember' +
+      '?password=another-secret&sslpassword=third-secret&sslmode=require';
+    const serialized = JSON.stringify(describeDatabaseTarget(connectionString));
+
+    expect(serialized).not.toContain('top-secret');
+    expect(serialized).not.toContain('another-secret');
+    expect(serialized).not.toContain('third-secret');
+    expect(serialized).not.toContain('password');
+    expect(serialized).not.toContain('sslmode');
+    expect(serialized).not.toContain('ember:');
+  });
+
+  it('drops percent-encoded passwords', () => {
+    const target = describeDatabaseTarget('postgres://user:p%40ss%3Aword@127.0.0.1:55432/ember');
+    const serialized = JSON.stringify(target);
+
+    expect(serialized).not.toContain('p%40ss');
+    expect(serialized).not.toContain('p@ss');
+    expect(target).toEqual({ host: '127.0.0.1', port: 55432, database: 'ember' });
+  });
+
+  it('handles missing port, IPv6 hosts and unix-socket query parameters', () => {
+    expect(describeDatabaseTarget('postgres://user:secret@db.internal/ember')).toEqual({
+      host: 'db.internal',
+      port: null,
+      database: 'ember',
+    });
+    expect(describeDatabaseTarget('postgres://user:secret@[::1]:5432/ember')).toEqual({
+      host: '::1',
+      port: 5432,
+      database: 'ember',
+    });
+
+    const unixSocket = describeDatabaseTarget(
+      'postgres:///ember?host=%2Fvar%2Frun%2Fpostgresql&password=another-secret',
+    );
+    expect(unixSocket).toEqual({ host: null, port: null, database: 'ember' });
+    expect(JSON.stringify(unixSocket)).not.toContain('another-secret');
+    expect(JSON.stringify(unixSocket)).not.toContain('/var/run');
   });
 
   it('never throws on malformed input', () => {
-    expect(redactDatabaseUrl('not a url')).toBe('<invalid-database-url>');
+    expect(describeDatabaseTarget('not a url')).toEqual({
+      host: null,
+      port: null,
+      database: null,
+    });
+    expect(formatDatabaseTarget(describeDatabaseTarget('not a url'))).toBe(
+      '<unknown-host>:<default-port>/<unknown-database>',
+    );
+  });
+
+  it('formats metadata without any credential material', () => {
+    const formatted = formatDatabaseTarget(
+      describeDatabaseTarget('postgres://ember:top-secret@127.0.0.1:55432/ember?password=another'),
+    );
+
+    expect(formatted).toBe('127.0.0.1:55432/ember');
+    expect(formatted).not.toContain('top-secret');
+    expect(formatted).not.toContain('another');
   });
 });

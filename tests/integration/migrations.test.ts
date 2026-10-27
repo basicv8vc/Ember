@@ -99,6 +99,33 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(versions.rows[0]?.count).toBe('1');
   });
 
+  it('rejects a renamed migration with identical contents', async () => {
+    const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
+
+    try {
+      const original = await readFile(
+        path.join(migrationsDir, '0001_platform_metadata.sql'),
+        'utf8',
+      );
+      await writeFile(
+        path.join(tempMigrationsDir, '0001_platform_metadata_renamed.sql'),
+        original,
+        'utf8',
+      );
+
+      await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
+        /must not be renamed/,
+      );
+
+      const versions = await requirePool().query<{ count: string }>(
+        'SELECT count(*)::text AS count FROM schema_migrations',
+      );
+      expect(versions.rows[0]?.count).toBe('1');
+    } finally {
+      await rm(tempMigrationsDir, { recursive: true, force: true });
+    }
+  });
+
   it('reports ready against the migrated schema', async () => {
     const readiness = await createDatabaseReadiness(requirePool())();
 

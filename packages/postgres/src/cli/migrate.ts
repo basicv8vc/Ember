@@ -1,8 +1,9 @@
 import { fileURLToPath } from 'node:url';
 import {
   createPool,
+  describeDatabaseTarget,
+  formatDatabaseTarget,
   loadDatabaseConfig,
-  redactDatabaseUrl,
   runMigrations,
   type MigrationLogger,
 } from '../index.js';
@@ -25,7 +26,9 @@ async function main(): Promise<void> {
   });
 
   process.stdout.write(`running migrations from ${migrationsDir}\n`);
-  process.stdout.write(`database: ${redactDatabaseUrl(config.connectionString)}\n`);
+  process.stdout.write(
+    `database: ${formatDatabaseTarget(describeDatabaseTarget(config.connectionString))}\n`,
+  );
 
   try {
     const result = await runMigrations(pool, migrationsDir, { logger });

@@ -35,7 +35,7 @@ apps/api/
   tsconfig.json     开发 / 类型检查用（paths 指向源码，不产出）
   tsconfig.build.json 构建用（composite，输出 dist）
 packages/postgres/
-  src/config.ts     DATABASE_URL 等校验、密码脱敏
+  src/config.ts     DATABASE_URL 等校验、日志用连接元数据白名单
   src/pool.ts       pg.Pool 工厂（懒连接、statement_timeout、search_path）
   src/migrator.ts   迁移发现、校验、advisory lock、事务化执行
   src/cli/migrate.ts pnpm db:migrate 入口
@@ -75,12 +75,14 @@ P0B-01 任务书把它们标记为“未来 P0B-02 的占位边界”，同时�
 
 ## 4. 测试策略
 
-- **单元**：环境变量（默认值、端口范围、loopback 拒绝、显式 opt-in、无效 `DATABASE_URL` 不回显
-  密码）、`redactDatabaseUrl`、迁移文件发现与命名/顺序/空文件校验、`/healthz` 与 `/readyz` 的
+- **单元**：环境变量（默认值、端口范围、严格 loopback 判定与非法 IPv4/IPv6 负向用例、显式
+  opt-in、无效 `DATABASE_URL` 不回显密码）、`describeDatabaseTarget` 白名单（含 `?password=` 等
+  敏感 query 参数不出现）、迁移文件发现与命名/顺序/空文件校验、`/healthz` 与 `/readyz` 的
   `app.request` 断言，以及在 `127.0.0.1:0` 真实 socket 上验证“数据库 down 时 `/healthz` 仍 200、
   `/readyz` 503”。
 - **集成**：真实 PostgreSQL 上的连接、空 schema 首次迁移、重复迁移幂等、`schema_migrations`
-  版本与 checksum 记录、`platform_metadata` 数据、readiness up、篡改已应用迁移的 checksum 被拒绝。
+  版本与 checksum 记录、`platform_metadata` 数据、readiness up、篡改已应用迁移的 checksum 被拒绝、
+  重命名已应用迁移（内容不变）被拒绝。
 - 缺少 `TEST_DATABASE_URL` 时集成测试**失败**而不是跳过，避免“未执行却显示通过”。
 - 测试不会启动 Fixed Port、不会访问公网、不会调用任何外部 API。
 

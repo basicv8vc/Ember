@@ -105,17 +105,41 @@ export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Databa
 }
 
 /**
- * Render a connection string for logs with the password removed.
- * Never log the raw `DATABASE_URL`.
+ * Non-sensitive database connection metadata. This is the only database connection
+ * information allowed in logs.
  */
-export function redactDatabaseUrl(rawUrl: string): string {
+export interface DatabaseTarget {
+  readonly host: string | null;
+  readonly port: number | null;
+  readonly database: string | null;
+}
+
+/**
+ * Extract whitelisted connection metadata (host, port, database) for logging.
+ *
+ * The raw connection string is never returned: credentials, usernames, and query
+ * parameters (for example `?password=…` or `?sslpassword=…`) are dropped entirely.
+ */
+export function describeDatabaseTarget(connectionString: string): DatabaseTarget {
   try {
-    const url = new URL(rawUrl);
-    if (url.password !== '') {
-      url.password = '***';
-    }
-    return url.toString();
+    const url = new URL(connectionString);
+    const port = url.port === '' ? null : Number(url.port);
+    const databasePath = url.pathname.replace(/^\//, '');
+
+    return {
+      host: url.hostname === '' ? null : url.hostname.replace(/^\[|\]$/g, ''),
+      port: Number.isInteger(port) ? port : null,
+      database: databasePath === '' ? null : databasePath,
+    };
   } catch {
-    return '<invalid-database-url>';
+    return { host: null, port: null, database: null };
   }
+}
+
+/** Human-readable form of {@link describeDatabaseTarget} for CLI output. */
+export function formatDatabaseTarget(target: DatabaseTarget): string {
+  const host = target.host ?? '<unknown-host>';
+  const port = target.port === null ? '<default-port>' : String(target.port);
+  const database = target.database ?? '<unknown-database>';
+  return `${host}:${port}/${database}`;
 }

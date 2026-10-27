@@ -1,6 +1,6 @@
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
-import { createPool, loadDatabaseConfig, redactDatabaseUrl } from '@ember/postgres';
+import { createPool, describeDatabaseTarget, loadDatabaseConfig } from '@ember/postgres';
 import { createApp, SERVICE_NAME } from './app.js';
 import { isLoopbackHost, loadApiConfig } from './env.js';
 import { createLogger, type Logger } from './logger.js';
@@ -78,7 +78,7 @@ function main(): void {
         env: apiConfig.env,
         host: info.address,
         port: info.port,
-        database: redactDatabaseUrl(databaseConfig.connectionString),
+        database: describeDatabaseTarget(databaseConfig.connectionString),
       });
     },
   );

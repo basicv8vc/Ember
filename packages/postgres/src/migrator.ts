@@ -125,7 +125,8 @@ export async function loadMigrations(migrationsDir: string): Promise<Migration[]
  * - Uses a PostgreSQL advisory lock so concurrent runners serialize.
  * - Each migration runs in its own transaction together with its version row.
  * - Already-applied migrations are skipped, so repeated runs are safe.
- * - Checksums of applied migrations are verified; edited history is rejected.
+ * - Applied migrations are verified by id, filename and checksum; edited or renamed
+ *   history is rejected.
  *
  * This runner owns only `schema_migrations`. It does not define P0B-03 business tables.
  */
@@ -158,6 +159,12 @@ export async function runMigrations(
         if (migration === undefined) {
           throw new MigrationError(
             `Applied migration id ${row.id} (${row.name}) is missing from "${migrationsDir}"`,
+          );
+        }
+        if (migration.name !== row.name) {
+          throw new MigrationError(
+            `Applied migration id ${row.id} was recorded as "${row.name}" but the file is now ` +
+              `"${migration.name}"; already-applied migrations must not be renamed`,
           );
         }
         if (migration.checksum !== row.checksum) {

@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { z } from 'zod';
 
 export class ApiConfigError extends Error {
@@ -15,7 +16,7 @@ export interface ApiConfig {
   readonly allowNonLoopbackBind: boolean;
 }
 
-const LOOPBACK_HOSTNAMES = new Set(['localhost', '::1', '[::1]']);
+const LOOPBACK_HOSTNAMES = new Set(['localhost']);
 
 const apiEnvSchema = z.object({
   EMBER_ENV: z.enum(['local', 'test', 'ci']).default('local'),
@@ -36,12 +37,50 @@ function formatIssues(error: z.ZodError): string {
     .join('; ');
 }
 
-/** True for `localhost`, `::1`, and the whole IPv4 127.0.0.0/8 range. */
+/**
+ * Canonicalise a syntactically valid IPv6 address so `0:0:0:0:0:0:0:1` and `::1`
+ * compare equal. Returns `null` when the address cannot be normalised.
+ */
+function canonicalizeIpv6(address: string): string | null {
+  try {
+    return new URL(`http://[${address}]/`).hostname.replace(/^\[|\]$/g, '').toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Strict loopback check.
+ *
+ * Accepts only:
+ * - the controlled hostname `localhost`;
+ * - syntactically valid IPv4 addresses inside `127.0.0.0/8`;
+ * - the IPv6 loopback address `::1` (any equivalent spelling).
+ *
+ * Invalid input such as `127.999.999.999` or `127.1` is rejected: the policy must
+ * not depend on how the OS or DNS later interprets a malformed address.
+ */
 export function isLoopbackHost(host: string): boolean {
-  if (LOOPBACK_HOSTNAMES.has(host.toLowerCase())) {
+  const candidate = host.trim().toLowerCase();
+
+  if (LOOPBACK_HOSTNAMES.has(candidate)) {
     return true;
   }
-  return /^127(?:\.\d{1,3}){3}$/.test(host);
+
+  const address =
+    candidate.startsWith('[') && candidate.endsWith(']') ? candidate.slice(1, -1) : candidate;
+  const family = isIP(address);
+
+  if (family === 4) {
+    const [firstOctet] = address.split('.').map(Number);
+    return firstOctet === 127;
+  }
+
+  if (family === 6) {
+    return canonicalizeIpv6(address) === '::1';
+  }
+
+  return false;
 }
 
 /**

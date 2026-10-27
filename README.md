@@ -171,7 +171,8 @@ The app factory (`apps/api/src/app.ts`) is separate from the listener
   - files are `NNNN_lower_snake_case.sql` in `migrations/`, applied in ascending order;
   - one session-level advisory lock serialises concurrent runners;
   - each migration and its `schema_migrations` version row commit in one transaction;
-  - applied checksums are verified, so editing history fails loudly;
+  - applied id, filename, and checksum are verified, so edited or renamed history fails
+    loudly;
   - re-running is a no-op. There are no down migrations in P0.
 - Only `0001_platform_metadata.sql` exists: it creates infrastructure metadata, **not** the
   P0B-03 task/run/event/artifact schema.
@@ -182,16 +183,17 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 3 files, 23 tests (no database)
-pnpm test:integration # 5 tests against real PostgreSQL
+pnpm test:unit        # 3 files, 32 tests (no database)
+pnpm test:integration # 6 tests against real PostgreSQL
 ```
 
-- Unit tests cover env validation (including the loopback guard), log redaction, migration
-  file parsing, `/healthz` and `/readyz` over `app.request` **and** over a real loopback socket
-  bound to port `0`.
+- Unit tests cover env validation (including the strict loopback guard for malformed IPv4/IPv6
+  and non-loopback hosts), whitelist-only database log metadata, migration file parsing,
+  `/healthz` and `/readyz` over `app.request` **and** over a real loopback socket bound to
+  port `0`.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
   silently passing. They verify connection, first migration, repeat migration, the recorded
-  version, readiness, and checksum tamper detection.
+  version, readiness, checksum tamper detection, and renamed-migration detection.
 
 Exact results for this PR, including CI, are recorded in
 [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md).
@@ -208,9 +210,12 @@ secrets, no cloud account, no deployments, and no automatic merge.
 
 ## Security and cost boundaries
 
+- Loopback detection is strict: only `localhost`, syntactically valid `127.0.0.0/8` addresses,
+  and `::1` are treated as loopback; malformed addresses such as `127.999.999.999` are not.
 - Listener defaults to loopback; public binding requires an explicit opt-in variable.
 - No real LLM, sandbox provider, cloud deployment, OAuth, payments, or user data.
-- Database credentials come from local env files; logs redact the password.
+- Database credentials come from local env files. Logs and CLI output only contain whitelisted
+  connection metadata (host, port, database) — never userinfo, passwords, or query parameters.
 - No arbitrary code execution or host shell exists in this phase.
 - Dependencies are open-source npm packages pinned by `pnpm-lock.yaml`; no paid services.
 

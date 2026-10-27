@@ -1,0 +1,24 @@
+packages:
+  - apps/*
+  - packages/*
+
+# pnpm blocks dependency lifecycle scripts by default. Keep the allow-list explicit
+# so a fresh `pnpm install` behaves identically on every machine.
+allowBuilds:
+  esbuild: true
+
+# pnpm 12's supply-chain policy refuses very recent package versions by default.
+# The lockfile pins these exact versions, so the exceptions are recorded here to keep
+# `pnpm install --frozen-lockfile` reproducible right after a dependency bump.
+minimumReleaseAgeExclude:
+  - '@typescript-eslint/eslint-plugin@8.72.1'
+  - '@typescript-eslint/parser@8.72.1'
+  - '@typescript-eslint/project-service@8.72.1'
+  - '@typescript-eslint/scope-manager@8.72.1'
+  - '@typescript-eslint/tsconfig-utils@8.72.1'
+  - '@typescript-eslint/type-utils@8.72.1'
+  - '@typescript-eslint/types@8.72.1'
+  - '@typescript-eslint/typescript-estree@8.72.1'
+  - '@typescript-eslint/utils@8.72.1'
+  - '@typescript-eslint/visitor-keys@8.72.1'
+  - typescript-eslint@8.72.1

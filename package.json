@@ -1,0 +1,42 @@
+{
+  "name": "ember",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Ember — Personal Agent Platform (P0-B minimum vertical slice)",
+  "type": "module",
+  "packageManager": "pnpm@12.15.0",
+  "engines": {
+    "node": ">=24.0.0 <25",
+    "pnpm": ">=12.0.0"
+  },
+  "scripts": {
+    "dev": "pnpm --filter @ember/api dev",
+    "start": "pnpm --filter @ember/api start",
+    "build": "tsc -b tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "pnpm run test:unit && pnpm run test:integration",
+    "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:integration": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
+    "dev:db": "docker compose -f infra/local/compose.yaml up -d --wait",
+    "dev:db:down": "docker compose -f infra/local/compose.yaml down",
+    "db:migrate": "node --env-file-if-exists=.env.local --import tsx packages/postgres/src/cli/migrate.ts"
+  },
+  "devDependencies": {
+    "@eslint/js": "9.39.5",
+    "@hono/node-server": "2.1.5",
+    "@types/node": "24.19.2",
+    "eslint": "9.39.5",
+    "eslint-config-prettier": "10.1.8",
+    "globals": "17.13.0",
+    "hono": "4.13.14",
+    "prettier": "3.9.10",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.72.1",
+    "vitest": "5.0.5"
+  }
+}

@@ -1,0 +1,84 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege: no repository writes, no packages, no deployments.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (Node 24 LTS + PostgreSQL 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: ember
+          POSTGRES_PASSWORD: ember_ci_only
+          POSTGRES_DB: ember_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ember -d ember_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      # Throwaway credentials for the ephemeral CI service container only.
+      DATABASE_URL: postgres://ember:ember_ci_only@127.0.0.1:5432/ember_test
+      TEST_DATABASE_URL: postgres://ember:ember_ci_only@127.0.0.1:5432/ember_test
+      EMBER_ENV: ci
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.15.0
+          run_install: false
+
+      - name: Install Node.js (LTS from .nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies (reproducible)
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Check formatting
+        run: pnpm format:check
+
+      - name: Typecheck (strict)
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test:unit
+
+      - name: Build
+        run: pnpm build
+
+      - name: Migrate database (first run)
+        run: pnpm db:migrate
+
+      - name: Migrate database (idempotent re-run)
+        run: pnpm db:migrate
+
+      - name: Integration tests (real PostgreSQL)
+        run: pnpm test:integration

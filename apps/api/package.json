@@ -1,0 +1,17 @@
+{
+  "name": "@ember/api",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env.local --import tsx --watch src/index.ts",
+    "start": "node --env-file-if-exists=../../.env.local dist/index.js",
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {
+    "@ember/postgres": "workspace:*",
+    "@hono/node-server": "2.1.5",
+    "hono": "4.13.14",
+    "zod": "4.6.7"
+  }
+}

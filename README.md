@@ -8,19 +8,21 @@ on demand for active work instead of renting one full VM per user. The long-term
 whether 1,000 logical agents can be served with good responsiveness, safe isolation, and sane
 cost while only active tasks consume expensive runtime.
 
-> **Scope of this repository right now:** P0B-01 (repository foundation, merged on
-> `main`) and P0B-02 (domain models, state machines and contracts, implemented in this PR).
-> There is still no task API, worker, sandbox provider, or business database schema.
-> Nothing here proves sandbox isolation, real LLM behaviour, or 1,000-agent production
-> performance. See [P0-B status](#p0-b-status) below.
+> **Scope of this repository right now:** P0B-01 (repository foundation) and P0B-02
+> (domain models, state machines and contracts) are merged on `main`. P0B-03 adds the
+> PostgreSQL business schema, tenant-scoped repositories and idempotent durable task
+> creation in this Draft PR. There is still no task HTTP API, worker, sandbox provider,
+> execution loop or cancellation implementation. Nothing here proves sandbox isolation,
+> real LLM behaviour, or 1,000-agent production performance. See
+> [P0-B status](#p0-b-status) below.
 
 ## P0-B status
 
 | Work package | Scope                                                                                                                | Status                     |
 | ------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------- |
 | **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Merged on `main`**       |
-| **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Implemented in this PR** |
-| P0B-03       | Task/Run/Event/Artifact schema, repositories, idempotent task creation                                               | Not started                |
+| **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Merged on `main`**       |
+| **P0B-03**   | PostgreSQL business schema, tenant-scoped repositories, canonical digest, atomic/idempotent task creation            | **Implemented in this PR** |
 | P0B-04       | Worker claim/lease/fencing/retry                                                                                     | Not started                |
 | P0B-05       | Execution router, deterministic mock LLM, fake sandbox                                                               | Not started                |
 | P0B-06       | Artifact store, workspace CAS, checkpoints                                                                           | Not started                |
@@ -29,8 +31,9 @@ cost while only active tasks consume expensive runtime.
 | P0B-09       | Telemetry, chaos and local load tests                                                                                | Not started                |
 | P0B-10       | Demo commands, results report, final review                                                                          | Not started                |
 
-There is intentionally **no task API, no worker, no sandbox, and no business schema** yet.
-`GET /healthz` returning 200 is not evidence that P0-B works end to end.
+P0B-03 now persists tasks, agents/workspaces and the first accepted event in PostgreSQL.
+There is intentionally **no task HTTP API, no worker, no lease/fencing implementation, and
+no sandbox** yet. `GET /healthz` returning 200 is not evidence that P0-B works end to end.
 
 ## Repository layout
 
@@ -41,12 +44,12 @@ Ember/
   packages/
     domain/               # pure domain types, Task/Run state machines, errors
     contracts/            # Zod input/output schemas, DTOs, cross-module interfaces
-    postgres/             # DB config, pool factory, migration runner + CLI
+    postgres/             # DB config, pool factory, migration runner, repositories
   infra/
     local/
       compose.yaml        # local PostgreSQL only (loopback-bound)
       initdb/             # creates the integration-test database on first start
-  migrations/             # ordered SQL migrations (infrastructure metadata only)
+  migrations/             # ordered SQL migrations (0001 metadata, 0002 business schema)
   tests/
     unit/                 # no database, no fixed ports
     integration/          # real PostgreSQL, unique throwaway schema per run
@@ -55,6 +58,8 @@ Ember/
     P0B-ACCEPTANCE.md          # P0B-01 acceptance checklist with real command results
     P0B-02-IMPLEMENTATION.md   # P0B-02 domain/contracts design and state machines
     P0B-02-ACCEPTANCE.md       # P0B-02 verification evidence and B-T01–B-T04 status
+    P0B-03-IMPLEMENTATION.md   # P0B-03 schema, transactions, digest and idempotency design
+    P0B-03-ACCEPTANCE.md       # P0B-03 verification evidence and B-T06–B-T08 status
   .github/workflows/ci.yml
   .env.example
   package.json
@@ -62,10 +67,10 @@ Ember/
   tsconfig*.json
 ```
 
-`packages/domain` and `packages/contracts` are now real packages (P0B-02). The domain package
-has no runtime dependencies and owns Task/Run state semantics; the contracts package depends on
-the domain and Zod. They are deliberately **not** wired into a task API or database yet: those
-arrive in P0B-03 and P0B-07.
+`packages/domain` and `packages/contracts` are real packages (P0B-02). The domain package has
+no runtime dependencies and owns Task/Run state semantics; the contracts package depends on the
+domain and Zod. P0B-03 wires them into real PostgreSQL repositories, but **not** into a task
+HTTP API: that remains P0B-07.
 
 ## Domain and contracts (P0B-02)
 
@@ -85,6 +90,31 @@ arrive in P0B-03 and P0B-07.
 
 See [docs/P0B-02-IMPLEMENTATION.md](docs/P0B-02-IMPLEMENTATION.md) for the complete transition
 tables, input semantics and open design questions.
+
+## Durable task inbox (P0B-03)
+
+- `migrations/0002_durable_task_inbox.sql` adds `tenants`, `principals`, `agents`,
+  `workspaces`, `tasks`, `runs` (reserved structure only) and `task_events`.
+- `PostgresAgentRepository` creates an agent and its single version-0 workspace in one
+  transaction. `PostgresTaskRepository.create()` writes a `queued` task and exactly one
+  `accepted` event in the same transaction and returns a receipt only **after commit**.
+- `UNIQUE (tenant_id, idempotency_key)` is enforced by PostgreSQL. 24 truly concurrent
+  identical requests produce one task and one accepted event: one `replayed: false` and 23
+  `replayed: true` receipts. Different tenants may reuse the same key; the same key with a
+  different canonical command returns `IDEMPOTENCY_CONFLICT`.
+- The command digest is a versioned SHA-256 over `agentId`, `kind`, validated `input` and a
+  UTC-normalised `deadlineAt`. Object key order does not matter; array order does. The
+  idempotency key is not part of the digest, and commands over 64 KiB UTF-8 bytes are
+  rejected before persistence.
+- Tenant-owned rows use explicit `tenant_id` plus composite foreign keys such as
+  `(tenant_id, agent_id)` and `(tenant_id, task_id)`, so direct SQL cannot attach another
+  tenant's agent or task. Reads return `null`/`NOT_FOUND` without revealing existence.
+- `requestCancel()` only records `cancel_requested_at`; it does **not** transition the task
+  or implement cooperative cancellation (P0B-08, see OQ-1). Worker claim/lease/fencing,
+  retry scheduling, `runs` execution, artifacts, HTTP endpoints and SSE do not exist yet.
+
+See [docs/P0B-03-IMPLEMENTATION.md](docs/P0B-03-IMPLEMENTATION.md) and
+[docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md).
 
 ## Prerequisites
 
@@ -200,8 +230,11 @@ The app factory (`apps/api/src/app.ts`) is separate from the listener
   - applied id, filename, and checksum are verified, so edited or renamed history fails
     loudly;
   - re-running is a no-op. There are no down migrations in P0.
-- Only `0001_platform_metadata.sql` exists: it creates infrastructure metadata, **not** the
-  P0B-03 task/run/event/artifact schema.
+- `0001_platform_metadata.sql` creates infrastructure metadata only.
+- `0002_durable_task_inbox.sql` is the P0B-03 business schema. It includes tasks, runs
+  (structure only), task events, agents/workspaces and tenants/principals; artifact,
+  checkpoint, approval, budget and inbound-event tables remain future work.
+- Neither migration is edited after being applied; checksum and filename guards fail loudly.
 
 Integration tests create a schema named `ember_it_<random hex>`, run migrations inside it, and
 drop only that schema afterwards. They never truncate or delete `public` or other schemas.
@@ -209,8 +242,8 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 7 files, 239 tests (no database)
-pnpm test:integration # 6 tests against real PostgreSQL
+pnpm test:unit        # 9 files, 249 tests (no database)
+pnpm test:integration # 30 tests against real PostgreSQL
 ```
 
 - Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,
@@ -218,14 +251,18 @@ pnpm test:integration # 6 tests against real PostgreSQL
   IPv4/IPv6 loopback sockets) plus P0B-02 domain contracts: the complete Task and Run state
   matrices, terminal-state invariants, stable transition errors, all mock input schemas,
   forged tenant/principal fields, idempotency keys, receipt/event DTOs, public/internal error
-  separation and validation-error redaction.
+  separation and validation-error redaction. P0B-03 adds canonical digest/UTF-8 tests and
+  SQL-vocabulary alignment checks.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
-  silently passing. They verify connection, first migration, repeat migration, the recorded
-  version, readiness, checksum tamper detection, and renamed-migration detection.
+  silently passing. They verify connection, `0001` + `0002`, repeat migration, readiness,
+  checksum/rename tamper detection, Durable Ack (including injected event/COMMIT failures),
+  24-request concurrent idempotency, conflicts, tenant-safe FKs, event ordering and the
+  database payload allowlist.
 
-Exact results for this PR, including CI, are recorded in
-[docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md). The historical P0B-01 report remains
-in [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) and is not rewritten.
+Exact P0B-03 results, including the CI run, are recorded in
+[docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md). P0B-01 and P0B-02 acceptance reports
+remain in [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) and
+[docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md); they are not rewritten.
 
 ## CI
 
@@ -273,3 +310,7 @@ These measures are development hygiene, not a security certification.
   state machines, schemas and error model.
 - [docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md) — P0B-02 command evidence,
   B-T01–B-T04 status, risks and deferred scope.
+- [docs/P0B-03-IMPLEMENTATION.md](docs/P0B-03-IMPLEMENTATION.md) — P0B-03 schema,
+  transactions, canonical digest and idempotency strategy.
+- [docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md) — P0B-03 command evidence,
+  B-T06–B-T08 status, concurrency samples and risks.

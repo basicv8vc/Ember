@@ -38,23 +38,23 @@
 
 所有命令在仓库根目录执行；`P` 代表使用 Node 24.22.1 + pnpm 12.15.0。
 
-| #   | 命令                             | 实际结果                                                                  | 状态 |
-| --- | -------------------------------- | ------------------------------------------------------------------------- | ---- |
-| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误；lockfile 已包含 workspace 依赖更新      | PASS |
-| 2   | `pnpm lint`                      | `eslint .` 退出码 0                                                       | PASS |
-| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                              | PASS |
-| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新仓储与测试）               | PASS |
-| 5   | `pnpm test:unit`                 | **9 个文件 / 249 个测试通过**（P0B-02 的 239 + P0B-03 新增 10）           | PASS |
-| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；postgres dist 生成 Repository 导出 | PASS |
-| 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                    | PASS |
-| 8   | `pnpm db:migrate`（第 1 次）     | `0 applied, 2 already applied`（本地卷此前首次应用 `0002` 用时 132ms）    | PASS |
-| 9   | `pnpm db:migrate`（第 2 次）     | `0 applied, 2 already applied`；重复迁移零变更                            | PASS |
-| 10  | `pnpm test:integration`          | **3 个文件 / 30 个测试通过**（真实 PostgreSQL 17）                        | PASS |
-| 11  | `git diff --check`               | 无 whitespace 错误                                                        | PASS |
-| 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，创建 Agent/Task 成功   | PASS |
-| 13  | 现有 API 回归                    | 构建产物 `127.0.0.1:8798`：`/healthz` 200、`/readyz` 200（DB up）         | PASS |
-| 14  | GitHub Actions                   | 见第 9 节（推送后填写实际 run）                                           | 待补 |
-| 15  | Draft PR                         | 见第 9 节（推送后填写实际 URL）                                           | 待补 |
+| #   | 命令                             | 实际结果                                                                                                        | 状态 |
+| --- | -------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---- |
+| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误；lockfile 已包含 workspace 依赖更新                                            | PASS |
+| 2   | `pnpm lint`                      | `eslint .` 退出码 0                                                                                             | PASS |
+| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                    | PASS |
+| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新仓储与测试）                                                     | PASS |
+| 5   | `pnpm test:unit`                 | **9 个文件 / 249 个测试通过**（P0B-02 的 239 + P0B-03 新增 10）                                                 | PASS |
+| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；postgres dist 生成 Repository 导出                                       | PASS |
+| 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                                                          | PASS |
+| 8   | `pnpm db:migrate`（第 1 次）     | `0 applied, 2 already applied`（本地卷此前首次应用 `0002` 用时 132ms）                                          | PASS |
+| 9   | `pnpm db:migrate`（第 2 次）     | `0 applied, 2 already applied`；重复迁移零变更                                                                  | PASS |
+| 10  | `pnpm test:integration`          | **3 个文件 / 30 个测试通过**（真实 PostgreSQL 17）                                                              | PASS |
+| 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
+| 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，创建 Agent/Task 成功                                         | PASS |
+| 13  | 现有 API 回归                    | 构建产物 `127.0.0.1:8798`：`/healthz` 200、`/readyz` 200（DB up）                                               | PASS |
+| 14  | GitHub Actions                   | run [40523325611](https://github.com/basicv8vc/Ember/actions/runs/40523325611) — success（code HEAD `34e4a85`） | PASS |
+| 15  | Draft PR                         | [#3](https://github.com/basicv8vc/Ember/pull/3)，Draft/Open，base `main`，未合并                                | PASS |
 
 > 注：本地默认 Node 23.11.0 不满足 `engines >=24 <25`；验收显式使用 Node 24.22.1。
 > 没有通过降低 `engines`、关闭 strict、删除测试或使用 `--ignore-engines` 获得通过。

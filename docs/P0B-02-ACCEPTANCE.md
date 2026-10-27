@@ -51,7 +51,7 @@
 | 9   | `pnpm db:migrate`（连续两次）    | 现有 `0001_platform_metadata.sql` 均成功；第二次 `0 applied, 1 already applied`                                      | **PASS** |
 | 10  | 构建后 ESM 消费                  | `node` 直接 `import('./packages/domain/dist/index.js')` 与 `contracts/dist/index.js`，状态转换、Schema、DTO 正常工作 | **PASS** |
 | 11  | 现有 API 行为回归                | 构建产物启动于 `127.0.0.1:8799`：`/healthz` 200、`/readyz` 200（DB up）                                              | **PASS** |
-| 12  | GitHub Actions                   | run [40507205145](https://github.com/basicv8vc/Ember/actions/runs/40507205145) — success（代码 HEAD `3191aa3`）      | **PASS** |
+| 12  | GitHub Actions                   | run [40511272633](https://github.com/basicv8vc/Ember/actions/runs/40511272633) — success（代码 HEAD `47bd97a`）      | **PASS** |
 
 ### 3.1 单元测试实际输出
 
@@ -188,7 +188,7 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 13  | 根目录 Build 成功                          | **PASS**                                                             |
 | 14  | 新旧单元测试全部通过                       | **PASS**（239/239，包含 P0B-01 的 37 个）                            |
 | 15  | PostgreSQL 集成测试无回归                  | **PASS**（6/6）                                                      |
-| 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40507205145）                                |
+| 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40511272633）                                |
 | 17  | 文档完整准确                               | **PASS**（本文件 + `P0B-02-IMPLEMENTATION.md`）                      |
 | 18  | 未扩大到 P0B-03～P0B-05 实现范围           | **PASS**（无业务表、无 Repo、无 Worker、无 Router/FakeSandbox 实现） |
 | 19  | 无真实凭据、外部模型调用或付费云开销       | **PASS**（仅本地 Docker PostgreSQL 与开源 npm 依赖）                 |
@@ -214,14 +214,16 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 项目                 | 值                                                                                                                                 |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | 分支                 | `feature/p0b-02-domain-state-machine`                                                                                              |
-| 已验证代码 HEAD      | `3191aa30ae580ff9528d6bbad2ffcb13ef160e8a`                                                                                         |
+| 已验证代码 HEAD      | `47bd97ace8a41675df7c2efdfd1254a74a0daf7e`                                                                                         |
 | Draft PR             | <https://github.com/basicv8vc/Ember/pull/2>（`isDraft: true`，`state: OPEN`，base `main`；未合并）                                 |
-| CI 运行（代码 HEAD） | [40507205145](https://github.com/basicv8vc/Ember/actions/runs/40507205145) — **success**（`3191aa3`，Node 24 LTS + PostgreSQL 17） |
+| CI 运行（代码 HEAD） | [40511272633](https://github.com/basicv8vc/Ember/actions/runs/40511272633) — **success**（`47bd97a`，Node 24 LTS + PostgreSQL 17） |
 | CI 步骤              | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                |
 | CI 环境              | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets、无部署                                     |
 | `main` 状态          | 未修改（`a169d80`）、未合并                                                                                                        |
 
-历史运行：[40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450)（`1601a87`）与
+历史运行：[40507205145](https://github.com/basicv8vc/Ember/actions/runs/40507205145)（`3191aa3`）、
+[40507414375](https://github.com/basicv8vc/Ember/actions/runs/40507414375)（`c1a2c45`）、
+[40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450)（`1601a87`）与
 [40506715013](https://github.com/basicv8vc/Ember/actions/runs/40506715013)（`cc6062e`）均为 success。
 CI 中唯一提示是 `ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像，不是失败项。
 本报告更新提交为 docs-only；其最新 CI 结果见 PR Checks 页面。
@@ -259,10 +261,12 @@ CI 中唯一提示是 `ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 �
 | P1-2 | `TaskEventPayloadSchema` 只限制形状/长度，无法阻止任意 Prompt、Token、API Key 或工具输出通过字符串值进入 Event Payload         | 改为**封闭 allowlist**：只有 16 个字段，全部是枚举、UUID、非负整数或布尔值，没有自由文本字段；`z.strictObject` 拒绝所有其他键。`toTaskEventDto()` 在映射前重新解析完整事件，运行时篡改对象 fail closed                                             | 新增负向测试：`prompt`/`messages`/`token`/`apiKey`/`authorization`/`toolOutput`/`stdout`/`stderr`/`content`/`text`/`sql`/`password`/`path`/`stack`/`input`/`output` 等键被拒绝；秘密塞入 `taskKind`/`runId`/`errorCode` 等允许字段也被拒绝；嵌套/数组/null 和 100,000 字符未知键被拒绝；`TASK_EVENT_PAYLOAD_KEYS` 固定并 frozen |
 
 修复后单元测试从 235 增至 **239**，全部通过；没有降低类型检查或删除原有测试。
+代码 HEAD `47bd97a` 的 CI run [40511272633](https://github.com/basicv8vc/Ember/actions/runs/40511272633) 为 **success**。
 
 ## 11. 最终结论
 
 P0B-02 的领域层与契约层实现、单元测试、构建、真实 PostgreSQL 集成测试与 CI 均通过。
+Review Round 1 的 P1-1（错误序列化安全）与 P1-2（Event Payload 脱敏契约）已修复并回归通过。
 Draft PR 已创建且未合并；B-T01（纯逻辑范围）与 B-T04 为 **PASS**，B-T02/B-T03 明确为
 **DEFERRED**，没有用接口或假实现冒充通过。P0B-03～P0B-10 仍未实现。
 

@@ -38,20 +38,20 @@
 所有命令均在仓库根目录执行；`P` 代表
 `node ~/.cache/node/corepack/v1/pnpm/12.15.0/bin/pnpm.mjs`（本机 pnpm 12.15.0）。
 
-| #   | 命令                             | 实际结果                                                                                                             | 状态                    |
-| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误；新增两个 workspace importer 已写入 lockfile                                        | **PASS**                |
-| 2   | `pnpm lint`                      | `eslint .` 退出码 0，无 error/warning                                                                                | **PASS**                |
-| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                         | **PASS**                |
-| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新包与测试）                                                            | **PASS**                |
-| 5   | `pnpm test:unit`                 | 7 个文件 / **233** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 196 个）                                            | **PASS**                |
-| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 domain/contracts/postgres/api dist                                       | **PASS**                |
-| 7   | `pnpm test:integration`          | 1 个文件 / **6** 个测试通过（真实 PostgreSQL 17）                                                                    | **PASS**                |
-| 8   | `git diff --check`               | 无空白错误                                                                                                           | **PASS**                |
-| 9   | `pnpm db:migrate`（连续两次）    | 现有 `0001_platform_metadata.sql` 均成功；第二次 `0 applied, 1 already applied`                                      | **PASS**                |
-| 10  | 构建后 ESM 消费                  | `node` 直接 `import('./packages/domain/dist/index.js')` 与 `contracts/dist/index.js`，状态转换、Schema、DTO 正常工作 | **PASS**                |
-| 11  | 现有 API 行为回归                | 构建产物启动于 `127.0.0.1:8799`：`/healthz` 200、`/readyz` 200（DB up）                                              | **PASS**                |
-| 12  | GitHub Actions                   | 见第 7 节（PR 创建后更新实际 run）                                                                                   | **PENDING / 见第 7 节** |
+| #   | 命令                             | 实际结果                                                                                                             | 状态     |
+| --- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------- | -------- |
+| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误；新增两个 workspace importer 已写入 lockfile                                        | **PASS** |
+| 2   | `pnpm lint`                      | `eslint .` 退出码 0，无 error/warning                                                                                | **PASS** |
+| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                         | **PASS** |
+| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新包与测试）                                                            | **PASS** |
+| 5   | `pnpm test:unit`                 | 7 个文件 / **233** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 196 个）                                            | **PASS** |
+| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 domain/contracts/postgres/api dist                                       | **PASS** |
+| 7   | `pnpm test:integration`          | 1 个文件 / **6** 个测试通过（真实 PostgreSQL 17）                                                                    | **PASS** |
+| 8   | `git diff --check`               | 无空白错误                                                                                                           | **PASS** |
+| 9   | `pnpm db:migrate`（连续两次）    | 现有 `0001_platform_metadata.sql` 均成功；第二次 `0 applied, 1 already applied`                                      | **PASS** |
+| 10  | 构建后 ESM 消费                  | `node` 直接 `import('./packages/domain/dist/index.js')` 与 `contracts/dist/index.js`，状态转换、Schema、DTO 正常工作 | **PASS** |
+| 11  | 现有 API 行为回归                | 构建产物启动于 `127.0.0.1:8799`：`/healthz` 200、`/readyz` 200（DB up）                                              | **PASS** |
+| 12  | GitHub Actions                   | run [40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450) — success（代码 HEAD `1601a87`）      | **PASS** |
 
 ### 3.1 单元测试实际输出
 
@@ -186,11 +186,11 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 13  | 根目录 Build 成功                          | **PASS**                                                             |
 | 14  | 新旧单元测试全部通过                       | **PASS**（233/233，包含 P0B-01 的 37 个）                            |
 | 15  | PostgreSQL 集成测试无回归                  | **PASS**（6/6）                                                      |
-| 16  | CI 全部通过                                | **见第 7 节**                                                        |
+| 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40506386450）                                |
 | 17  | 文档完整准确                               | **PASS**（本文件 + `P0B-02-IMPLEMENTATION.md`）                      |
 | 18  | 未扩大到 P0B-03～P0B-05 实现范围           | **PASS**（无业务表、无 Repo、无 Worker、无 Router/FakeSandbox 实现） |
 | 19  | 无真实凭据、外部模型调用或付费云开销       | **PASS**（仅本地 Docker PostgreSQL 与开源 npm 依赖）                 |
-| 20  | PR 为 Draft、未合并 `main`                 | **见第 7 节**                                                        |
+| 20  | PR 为 Draft、未合并 `main`                 | **PASS**（PR #2，`isDraft: true`，`state: OPEN`）                    |
 
 ## 6. 未实现范围（不计入通过）
 
@@ -209,17 +209,18 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 
 ## 7. GitHub Actions / Draft PR
 
-> 本节在 PR 创建并完成 CI 后填写实际结果。
+| 项目                 | 值                                                                                                                                 |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
+| 分支                 | `feature/p0b-02-domain-state-machine`                                                                                              |
+| 已验证代码 HEAD      | `1601a8740284c7e68fdbd9cfabadc74946201595`                                                                                         |
+| Draft PR             | <https://github.com/basicv8vc/Ember/pull/2>（`isDraft: true`，`state: OPEN`，base `main`；未合并）                                 |
+| CI 运行（代码 HEAD） | [40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450) — **success**（`1601a87`，Node 24 LTS + PostgreSQL 17） |
+| CI 步骤              | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                |
+| CI 环境              | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets、无部署                                     |
+| `main` 状态          | 未修改（`a169d80`）、未合并                                                                                                        |
 
-| 项目            | 值                                                                                                          |
-| --------------- | ----------------------------------------------------------------------------------------------------------- |
-| 分支            | `feature/p0b-02-domain-state-machine`                                                                       |
-| 已验证代码 HEAD | 待填写（提交后）                                                                                            |
-| Draft PR        | 待填写                                                                                                      |
-| CI 运行         | 待填写                                                                                                      |
-| CI 步骤         | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests |
-| CI 环境         | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets、无部署              |
-| `main` 状态     | 未修改、未合并                                                                                              |
+CI 中唯一提示是 `ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像，不是失败项。
+本报告更新提交为 docs-only；其最新 CI 结果见 PR Checks 页面。
 
 ## 8. 已知风险与后续建议
 
@@ -245,3 +246,11 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 - 本地 PostgreSQL 仅绑定 `127.0.0.1:55432`；`.env.local` 被 `.gitignore` 忽略。
 - 新依赖只有 workspace 包与既有 `zod@4.6.7`，没有引入网络/云 SDK。
 - 本阶段产生的唯一成本为本地机器资源。
+
+## 10. 最终结论
+
+P0B-02 的领域层与契约层实现、单元测试、构建、真实 PostgreSQL 集成测试与 CI 均通过。
+Draft PR 已创建且未合并；B-T01（纯逻辑范围）与 B-T04 为 **PASS**，B-T02/B-T03 明确为
+**DEFERRED**，没有用接口或假实现冒充通过。P0B-03～P0B-10 仍未实现。
+
+本 PR 可以提交 CTO Code Review；在 Review 完成前不进入 P0B-03，也不合并 `main`。

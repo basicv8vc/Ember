@@ -32,22 +32,22 @@ Node 版本选择依据：执行时 nodejs.org 的版本索引中 `v26.12.1` 的
 
 ## 3. 验收清单逐项结果
 
-| #   | 验收项                                                         | 命令 / 证据                                                               | 实际结果                                                                                                                        | 状态        |
-| --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ----------- |
-| 1   | 仓库状态核验，PR 来自独立 feature 分支                         | `git status`、`git ls-remote`、`git branch`                               | 分支为 `feature/p0b-01-repository-foundation`；`main` 保持 `f182c11`                                                            | **PASS**    |
-| 2   | `pnpm install --frozen-lockfile` 成功                          | 删除全部 `node_modules` 与 `dist` 后执行 `pnpm install --frozen-lockfile` | `Done in 562ms`（本机 pnpm store 已预热），0 错误                                                                               | **PASS**    |
-| 3   | `pnpm lint` 成功                                               | `pnpm lint`                                                               | `eslint .` 退出码 0，无 error/warning                                                                                           | **PASS**    |
-| 4   | `pnpm typecheck` 成功（strict）                                | `pnpm typecheck`                                                          | `tsc -p tsconfig.json` 退出码 0                                                                                                 | **PASS**    |
-| 5   | `pnpm test:unit` 成功，含真实 `/healthz` HTTP 断言             | `pnpm test:unit`                                                          | 3 个文件 / 23 个测试全部通过；包含 `app.request('/healthz')` 与 `127.0.0.1:0` 真实 socket 上的 200 断言                         | **PASS**    |
-| 6   | `pnpm build` 成功，生成可运行 Node 产物                        | `pnpm build`                                                              | `tsc -b tsconfig.build.json` 退出码 0；`apps/api/dist/index.js` + `packages/postgres/dist/*` 生成                               | **PASS**    |
-| 7   | `pnpm dev` 默认 loopback 启动，`GET /healthz` 200              | `pnpm dev`，然后 `curl -i 127.0.0.1:8787/healthz`                         | HTTP 200，`{"status":"ok","service":"ember-api",...}`；`lsof` 显示仅 `127.0.0.1:8787 (LISTEN)`；`/readyz` 200，DB `up`          | **PASS**    |
-| 8   | `pnpm dev:db` 可启动本地 PostgreSQL                            | `pnpm dev:db`                                                             | Compose 创建卷/网络/容器，`Up (healthy)`，端口 `127.0.0.1:55432->5432`；同时创建 `ember` 与 `ember_test`                        | **PASS**    |
-| 9   | `pnpm db:migrate` 空库首次成功，重复执行成功                   | 新建空数据库 `ember_p0b01_verify` 后连续执行两次（`DATABASE_URL` 覆盖）   | 第一次 `1 applied, 0 already applied`；第二次 `0 applied, 1 already applied`；`schema_migrations` 仅 1 行；验证后删除临时数据库 | **PASS**    |
-| 10  | `pnpm test:integration` 至少完成真实 PG 连接与 Migration 验证  | `pnpm test:integration`                                                   | 1 个文件 / 5 个测试通过（真实 PostgreSQL 17）：连接、首次迁移、重复迁移、版本记录、readiness、checksum 篡改拒绝                 | **PASS**    |
-| 11  | GitHub Actions 工作流实际执行                                  | `.github/workflows/ci.yml` + Draft PR 的 Actions 运行                     | 见第 5 节（CI 状态在推送后更新）                                                                                                | **PENDING** |
-| 12  | `.env.example` 无真实密钥；默认不公开监听；无付费依赖          | 人工检查 `.env.example`、`env.ts`、`package.json`、`pnpm-lock.yaml`       | 仅本地占位口令；非 loopback 绑定需显式 opt-in；依赖全部为开源 npm 包，无付费服务                                                | **PASS**    |
-| 13  | `git diff --check` 通过；README/验收报告准确区分已实现与未实现 | `git add`（排除本地参考文档）后 `git diff --cached --check`               | 见第 6 节                                                                                                                       | **PASS**    |
-| 14  | Draft PR 已创建、描述完整、未合并 `main`                       | `gh pr create --draft`                                                    | 见第 5 节                                                                                                                       | **PENDING** |
+| #   | 验收项                                                         | 命令 / 证据                                                               | 实际结果                                                                                                                        | 状态     |
+| --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| 1   | 仓库状态核验，PR 来自独立 feature 分支                         | `git status`、`git ls-remote`、`git branch`                               | 分支为 `feature/p0b-01-repository-foundation`；`main` 保持 `f182c11`                                                            | **PASS** |
+| 2   | `pnpm install --frozen-lockfile` 成功                          | 删除全部 `node_modules` 与 `dist` 后执行 `pnpm install --frozen-lockfile` | `Done in 562ms`（本机 pnpm store 已预热），0 错误                                                                               | **PASS** |
+| 3   | `pnpm lint` 成功                                               | `pnpm lint`                                                               | `eslint .` 退出码 0，无 error/warning                                                                                           | **PASS** |
+| 4   | `pnpm typecheck` 成功（strict）                                | `pnpm typecheck`                                                          | `tsc -p tsconfig.json` 退出码 0                                                                                                 | **PASS** |
+| 5   | `pnpm test:unit` 成功，含真实 `/healthz` HTTP 断言             | `pnpm test:unit`                                                          | 3 个文件 / 23 个测试全部通过；包含 `app.request('/healthz')` 与 `127.0.0.1:0` 真实 socket 上的 200 断言                         | **PASS** |
+| 6   | `pnpm build` 成功，生成可运行 Node 产物                        | `pnpm build`                                                              | `tsc -b tsconfig.build.json` 退出码 0；`apps/api/dist/index.js` + `packages/postgres/dist/*` 生成                               | **PASS** |
+| 7   | `pnpm dev` 默认 loopback 启动，`GET /healthz` 200              | `pnpm dev`，然后 `curl -i 127.0.0.1:8787/healthz`                         | HTTP 200，`{"status":"ok","service":"ember-api",...}`；`lsof` 显示仅 `127.0.0.1:8787 (LISTEN)`；`/readyz` 200，DB `up`          | **PASS** |
+| 8   | `pnpm dev:db` 可启动本地 PostgreSQL                            | `pnpm dev:db`                                                             | Compose 创建卷/网络/容器，`Up (healthy)`，端口 `127.0.0.1:55432->5432`；同时创建 `ember` 与 `ember_test`                        | **PASS** |
+| 9   | `pnpm db:migrate` 空库首次成功，重复执行成功                   | 新建空数据库 `ember_p0b01_verify` 后连续执行两次（`DATABASE_URL` 覆盖）   | 第一次 `1 applied, 0 already applied`；第二次 `0 applied, 1 already applied`；`schema_migrations` 仅 1 行；验证后删除临时数据库 | **PASS** |
+| 10  | `pnpm test:integration` 至少完成真实 PG 连接与 Migration 验证  | `pnpm test:integration`                                                   | 1 个文件 / 5 个测试通过（真实 PostgreSQL 17）：连接、首次迁移、重复迁移、版本记录、readiness、checksum 篡改拒绝                 | **PASS** |
+| 11  | GitHub Actions 工作流实际执行                                  | `.github/workflows/ci.yml` + Draft PR 的 Actions 运行                     | CI run [40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681)：**success**，48s，全部步骤通过               | **PASS** |
+| 12  | `.env.example` 无真实密钥；默认不公开监听；无付费依赖          | 人工检查 `.env.example`、`env.ts`、`package.json`、`pnpm-lock.yaml`       | 仅本地占位口令；非 loopback 绑定需显式 opt-in；依赖全部为开源 npm 包，无付费服务                                                | **PASS** |
+| 13  | `git diff --check` 通过；README/验收报告准确区分已实现与未实现 | `git add`（排除本地参考文档）后 `git diff --cached --check`               | 见第 6 节                                                                                                                       | **PASS** |
+| 14  | Draft PR 已创建、描述完整、未合并 `main`                       | `gh pr create --draft`                                                    | [PR #1](https://github.com/basicv8vc/Ember/pull/1)，`isDraft: true`，`state: OPEN`，base `main`；未合并                         | **PASS** |
 
 ## 4. 实测命令与关键输出
 
@@ -140,14 +140,18 @@ exit=1
 
 ## 5. GitHub Actions / Draft PR
 
-> 首次推送后补充实际 run 链接与结果。
+| 项目            | 值                                                                                                                                                                     |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 分支            | `feature/p0b-01-repository-foundation`                                                                                                                                 |
+| 已验证代码 HEAD | `4ea68e4b021ecb597b659127bbcff85050f446c2`                                                                                                                             |
+| Draft PR        | <https://github.com/basicv8vc/Ember/pull/1>（`isDraft: true`，`state: OPEN`，base `main`）                                                                             |
+| CI 运行 #1      | [40469650009](https://github.com/basicv8vc/Ember/actions/runs/40469650009) — **success**，51s（首版 workflow，Actions 仍为 v4 major）                                  |
+| CI 运行 #2      | [40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681) — **success**，48s（当前 workflow：`checkout@v7`、`pnpm/action-setup@v6`、`setup-node@v7`） |
+| CI 步骤         | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                                                    |
+| CI 环境         | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets，无部署                                                                         |
+| `main` 状态     | 未修改（`f182c11`）、未合并                                                                                                                                            |
 
-| 项目        | 值                                     |
-| ----------- | -------------------------------------- |
-| 分支        | `feature/p0b-01-repository-foundation` |
-| Draft PR    | 待创建后填写                           |
-| CI 运行     | 待填写                                 |
-| `main` 状态 | 未修改、未合并                         |
+CI 中仅剩一条信息性提示（`ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像），不是失败项。
 
 ## 6. 代码质量与仓库卫生
 

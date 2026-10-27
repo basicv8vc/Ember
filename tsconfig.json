@@ -5,6 +5,8 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
+      "@ember/contracts": ["./packages/contracts/src/index.ts"],
+      "@ember/domain": ["./packages/domain/src/index.ts"],
       "@ember/postgres": ["./packages/postgres/src/index.ts"]
     }
   },

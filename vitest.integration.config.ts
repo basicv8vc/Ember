@@ -8,6 +8,10 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   resolve: {
     alias: {
+      '@ember/contracts': fileURLToPath(
+        new URL('./packages/contracts/src/index.ts', import.meta.url),
+      ),
+      '@ember/domain': fileURLToPath(new URL('./packages/domain/src/index.ts', import.meta.url)),
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),

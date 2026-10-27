@@ -51,7 +51,7 @@
 | 9   | `pnpm db:migrate`（连续两次）    | 现有 `0001_platform_metadata.sql` 均成功；第二次 `0 applied, 1 already applied`                                      | **PASS** |
 | 10  | 构建后 ESM 消费                  | `node` 直接 `import('./packages/domain/dist/index.js')` 与 `contracts/dist/index.js`，状态转换、Schema、DTO 正常工作 | **PASS** |
 | 11  | 现有 API 行为回归                | 构建产物启动于 `127.0.0.1:8799`：`/healthz` 200、`/readyz` 200（DB up）                                              | **PASS** |
-| 12  | GitHub Actions                   | run [40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450) — success（代码 HEAD `1601a87`）      | **PASS** |
+| 12  | GitHub Actions                   | run [40507205145](https://github.com/basicv8vc/Ember/actions/runs/40507205145) — success（代码 HEAD `3191aa3`）      | **PASS** |
 
 ### 3.1 单元测试实际输出
 
@@ -186,7 +186,7 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 13  | 根目录 Build 成功                          | **PASS**                                                             |
 | 14  | 新旧单元测试全部通过                       | **PASS**（235/235，包含 P0B-01 的 37 个）                            |
 | 15  | PostgreSQL 集成测试无回归                  | **PASS**（6/6）                                                      |
-| 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40506386450）                                |
+| 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40507205145）                                |
 | 17  | 文档完整准确                               | **PASS**（本文件 + `P0B-02-IMPLEMENTATION.md`）                      |
 | 18  | 未扩大到 P0B-03～P0B-05 实现范围           | **PASS**（无业务表、无 Repo、无 Worker、无 Router/FakeSandbox 实现） |
 | 19  | 无真实凭据、外部模型调用或付费云开销       | **PASS**（仅本地 Docker PostgreSQL 与开源 npm 依赖）                 |
@@ -212,13 +212,15 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 项目                 | 值                                                                                                                                 |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------- |
 | 分支                 | `feature/p0b-02-domain-state-machine`                                                                                              |
-| 已验证代码 HEAD      | `1601a8740284c7e68fdbd9cfabadc74946201595`                                                                                         |
+| 已验证代码 HEAD      | `3191aa30ae580ff9528d6bbad2ffcb13ef160e8a`                                                                                         |
 | Draft PR             | <https://github.com/basicv8vc/Ember/pull/2>（`isDraft: true`，`state: OPEN`，base `main`；未合并）                                 |
-| CI 运行（代码 HEAD） | [40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450) — **success**（`1601a87`，Node 24 LTS + PostgreSQL 17） |
+| CI 运行（代码 HEAD） | [40507205145](https://github.com/basicv8vc/Ember/actions/runs/40507205145) — **success**（`3191aa3`，Node 24 LTS + PostgreSQL 17） |
 | CI 步骤              | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                |
 | CI 环境              | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets、无部署                                     |
 | `main` 状态          | 未修改（`a169d80`）、未合并                                                                                                        |
 
+历史运行：[40506386450](https://github.com/basicv8vc/Ember/actions/runs/40506386450)（`1601a87`）与
+[40506715013](https://github.com/basicv8vc/Ember/actions/runs/40506715013)（`cc6062e`）均为 success。
 CI 中唯一提示是 `ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像，不是失败项。
 本报告更新提交为 docs-only；其最新 CI 结果见 PR Checks 页面。
 

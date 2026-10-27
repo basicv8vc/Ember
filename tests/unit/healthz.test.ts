@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import { serve } from '@hono/node-server';
 import { describe, expect, it } from 'vitest';
 import { createApp } from '../../apps/api/src/app.js';
+import { loadApiConfig } from '../../apps/api/src/env.js';
 import type { ReadinessCheck } from '../../apps/api/src/readiness.js';
 
 const fixedNow = (): Date => new Date('2026-01-01T00:00:00.000Z');
@@ -68,6 +69,53 @@ describe('GET /healthz (liveness)', () => {
         status: 'unavailable',
         checks: { database: { status: 'down' } },
       });
+    } finally {
+      server.close();
+      await once(server, 'close');
+    }
+  });
+});
+
+describe('IPv6 loopback listener', () => {
+  it('binds the normalised host returned by loadApiConfig', async (context) => {
+    const config = loadApiConfig({ EMBER_HOST: '[::1]' });
+    expect(config.host).toBe('::1');
+
+    const app = createApp({ readiness: readyCheck, now: fixedNow });
+    let server: ReturnType<typeof serve> | undefined;
+
+    try {
+      server = serve({
+        fetch: app.fetch,
+        hostname: config.host,
+        port: 0,
+        overrideGlobalObjects: false,
+      });
+      if (!server.listening) {
+        await once(server, 'listening');
+      }
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EADDRNOTAVAIL' || code === 'EAFNOSUPPORT') {
+        context.skip(`IPv6 loopback is unavailable in this environment (${code})`);
+        return;
+      }
+      throw error;
+    }
+
+    if (server === undefined) {
+      throw new Error('expected the test server to start');
+    }
+
+    const address = server.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('expected a TCP address from the test server');
+    }
+
+    try {
+      const response = await fetch(`http://[::1]:${address.port}/healthz`);
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({ status: 'ok' });
     } finally {
       server.close();
       await once(server, 'close');

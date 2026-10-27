@@ -78,8 +78,9 @@ P0B-01 任务书把它们标记为“未来 P0B-02 的占位边界”，同时�
 - **单元**：环境变量（默认值、端口范围、严格 loopback 判定与非法 IPv4/IPv6 负向用例、显式
   opt-in、无效 `DATABASE_URL` 不回显密码）、`describeDatabaseTarget` 白名单（含 `?password=` 等
   敏感 query 参数不出现）、迁移文件发现与命名/顺序/空文件校验、`/healthz` 与 `/readyz` 的
-  `app.request` 断言，以及在 `127.0.0.1:0` 真实 socket 上验证“数据库 down 时 `/healthz` 仍 200、
-  `/readyz` 503”。
+  `app.request` 断言，以及在 `127.0.0.1:0` IPv4 socket 与 `[::1]` IPv6 socket 上的真实 HTTP
+  验证（含“数据库 down 时 `/healthz` 仍 200、`/readyz` 503”）。IPv6 测试在缺少 IPv6 loopback
+  的环境中会显式 skip 并标注原因。
 - **集成**：真实 PostgreSQL 上的连接、空 schema 首次迁移、重复迁移幂等、`schema_migrations`
   版本与 checksum 记录、`platform_metadata` 数据、readiness up、篡改已应用迁移的 checksum 被拒绝、
   重命名已应用迁移（内容不变）被拒绝。

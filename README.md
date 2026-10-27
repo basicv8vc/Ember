@@ -131,20 +131,20 @@ pnpm start
 All variables are validated with Zod at startup. Invalid values stop the process with a
 message that names the variable but never echoes credentials.
 
-| Variable                        | Default              | Purpose                                                                         |
-| ------------------------------- | -------------------- | ------------------------------------------------------------------------------- |
-| `EMBER_ENV`                     | `local`              | `local` \| `test` \| `ci`                                                       |
-| `EMBER_HOST`                    | `127.0.0.1`          | Listener address. A non-loopback host is refused unless the opt-in below is set |
-| `EMBER_PORT`                    | `8787`               | Listener port (1–65535)                                                         |
-| `EMBER_LOG_LEVEL`               | `info`               | `debug` \| `info` \| `warn` \| `error`                                          |
-| `EMBER_ALLOW_NON_LOOPBACK_BIND` | `false`              | Must be `true` to bind anything other than loopback                             |
-| `DATABASE_URL`                  | — (required)         | Application database, `postgres://…`                                            |
-| `TEST_DATABASE_URL`             | — (integration only) | Database used by `pnpm test:integration`                                        |
-| `EMBER_DB_POOL_MAX`             | `10`                 | Pool size (1–50)                                                                |
-| `EMBER_DB_CONNECT_TIMEOUT_MS`   | `5000`               | Connection timeout                                                              |
-| `EMBER_DB_IDLE_TIMEOUT_MS`      | `30000`              | Idle connection timeout                                                         |
-| `EMBER_DB_STATEMENT_TIMEOUT_MS` | `10000`              | Server-side statement timeout                                                   |
-| `EMBER_MIGRATIONS_DIR`          | `./migrations`       | Optional override used by the migration CLI                                     |
+| Variable                        | Default              | Purpose                                                                                                                                   |
+| ------------------------------- | -------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `EMBER_ENV`                     | `local`              | `local` \| `test` \| `ci`                                                                                                                 |
+| `EMBER_HOST`                    | `127.0.0.1`          | Listener address. Bracketed IPv6 literals are normalised (`[::1]` → `::1`). A non-loopback host is refused unless the opt-in below is set |
+| `EMBER_PORT`                    | `8787`               | Listener port (1–65535)                                                                                                                   |
+| `EMBER_LOG_LEVEL`               | `info`               | `debug` \| `info` \| `warn` \| `error`                                                                                                    |
+| `EMBER_ALLOW_NON_LOOPBACK_BIND` | `false`              | Must be `true` to bind anything other than loopback                                                                                       |
+| `DATABASE_URL`                  | — (required)         | Application database, `postgres://…`                                                                                                      |
+| `TEST_DATABASE_URL`             | — (integration only) | Database used by `pnpm test:integration`                                                                                                  |
+| `EMBER_DB_POOL_MAX`             | `10`                 | Pool size (1–50)                                                                                                                          |
+| `EMBER_DB_CONNECT_TIMEOUT_MS`   | `5000`               | Connection timeout                                                                                                                        |
+| `EMBER_DB_IDLE_TIMEOUT_MS`      | `30000`              | Idle connection timeout                                                                                                                   |
+| `EMBER_DB_STATEMENT_TIMEOUT_MS` | `10000`              | Server-side statement timeout                                                                                                             |
+| `EMBER_MIGRATIONS_DIR`          | `./migrations`       | Optional override used by the migration CLI                                                                                               |
 
 `.env.local` is loaded by the scripts through Node's `--env-file-if-exists`; it is gitignored.
 `.env.example` contains local-only placeholder credentials and no real secrets.
@@ -183,14 +183,14 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 3 files, 32 tests (no database)
+pnpm test:unit        # 3 files, 37 tests (no database)
 pnpm test:integration # 6 tests against real PostgreSQL
 ```
 
 - Unit tests cover env validation (including the strict loopback guard for malformed IPv4/IPv6
-  and non-loopback hosts), whitelist-only database log metadata, migration file parsing,
-  `/healthz` and `/readyz` over `app.request` **and** over a real loopback socket bound to
-  port `0`.
+  and non-loopback hosts, plus IPv6 bracket normalisation), whitelist-only database log
+  metadata, migration file parsing, `/healthz` and `/readyz` over `app.request`, a real IPv4
+  loopback socket, and a real IPv6 (`::1`) loopback socket bound to port `0`.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
   silently passing. They verify connection, first migration, repeat migration, the recorded
   version, readiness, checksum tamper detection, and renamed-migration detection.

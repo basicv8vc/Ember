@@ -5,7 +5,12 @@ import {
   formatDatabaseTarget,
   loadDatabaseConfig,
 } from '../../packages/postgres/src/config.js';
-import { ApiConfigError, isLoopbackHost, loadApiConfig } from '../../apps/api/src/env.js';
+import {
+  ApiConfigError,
+  isLoopbackHost,
+  loadApiConfig,
+  normalizeHost,
+} from '../../apps/api/src/env.js';
 
 describe('loadApiConfig', () => {
   it('defaults to local mode on 127.0.0.1:8787', () => {
@@ -50,6 +55,24 @@ describe('loadApiConfig', () => {
     }
   });
 
+  it('normalises bracketed IPv6 and surrounding whitespace for the listener', () => {
+    expect(loadApiConfig({ EMBER_HOST: '[::1]' }).host).toBe('::1');
+    expect(loadApiConfig({ EMBER_HOST: '[0:0:0:0:0:0:0:1]' }).host).toBe('0:0:0:0:0:0:0:1');
+    expect(loadApiConfig({ EMBER_HOST: ' 127.0.0.1 ' }).host).toBe('127.0.0.1');
+  });
+
+  it('rejects an empty host after normalisation', () => {
+    expect(() => loadApiConfig({ EMBER_HOST: '[]' })).toThrow(/must not be empty/);
+    expect(() => loadApiConfig({ EMBER_HOST: '   ' })).toThrow(ApiConfigError);
+  });
+
+  it('applies the loopback policy to the normalised host', () => {
+    expect(() => loadApiConfig({ EMBER_HOST: '[::2]' })).toThrow(/EMBER_ALLOW_NON_LOOPBACK_BIND/);
+    expect(loadApiConfig({ EMBER_HOST: '[::2]', EMBER_ALLOW_NON_LOOPBACK_BIND: 'true' }).host).toBe(
+      '::2',
+    );
+  });
+
   it('allows a non-loopback bind only when explicitly enabled', () => {
     const config = loadApiConfig({
       EMBER_HOST: '0.0.0.0',
@@ -58,6 +81,17 @@ describe('loadApiConfig', () => {
 
     expect(config.host).toBe('0.0.0.0');
     expect(config.allowNonLoopbackBind).toBe(true);
+  });
+});
+
+describe('normalizeHost', () => {
+  it('strips exactly one pair of IPv6 brackets and trims whitespace', () => {
+    expect(normalizeHost('[::1]')).toBe('::1');
+    expect(normalizeHost('  [::1]  ')).toBe('::1');
+    expect(normalizeHost('127.0.0.1')).toBe('127.0.0.1');
+    expect(normalizeHost('localhost')).toBe('localhost');
+    expect(normalizeHost('[[::1]]')).toBe('[::1]');
+    expect(normalizeHost('[]')).toBe('');
   });
 });
 

@@ -20,7 +20,7 @@ const LOOPBACK_HOSTNAMES = new Set(['localhost']);
 
 const apiEnvSchema = z.object({
   EMBER_ENV: z.enum(['local', 'test', 'ci']).default('local'),
-  EMBER_HOST: z.string().min(1).max(255).default('127.0.0.1'),
+  EMBER_HOST: z.string().trim().min(1).max(255).default('127.0.0.1'),
   EMBER_PORT: z.coerce
     .number()
     .int('EMBER_PORT must be an integer')
@@ -50,12 +50,24 @@ function canonicalizeIpv6(address: string): string | null {
 }
 
 /**
+ * Normalise a listener host into the form Node's `server.listen()` expects.
+ *
+ * Bracketed IPv6 literals such as `[::1]` are valid in URLs but are resolved as a
+ * hostname by `server.listen()`, which fails with `ENOTFOUND`. Store and pass the
+ * unbracketed address so validation and the actual socket bind agree.
+ */
+export function normalizeHost(host: string): string {
+  const trimmed = host.trim();
+  return trimmed.startsWith('[') && trimmed.endsWith(']') ? trimmed.slice(1, -1) : trimmed;
+}
+
+/**
  * Strict loopback check.
  *
  * Accepts only:
  * - the controlled hostname `localhost`;
  * - syntactically valid IPv4 addresses inside `127.0.0.0/8`;
- * - the IPv6 loopback address `::1` (any equivalent spelling).
+ * - the IPv6 loopback address `::1` (any equivalent spelling, brackets allowed).
  *
  * Invalid input such as `127.999.999.999` or `127.1` is rejected: the policy must
  * not depend on how the OS or DNS later interprets a malformed address.
@@ -101,16 +113,21 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
 
   const values = parsed.data;
   const allowNonLoopbackBind = values.EMBER_ALLOW_NON_LOOPBACK_BIND === 'true';
+  const host = normalizeHost(values.EMBER_HOST);
 
-  if (!isLoopbackHost(values.EMBER_HOST) && !allowNonLoopbackBind) {
+  if (host === '') {
+    throw new ApiConfigError('EMBER_HOST must not be empty');
+  }
+
+  if (!isLoopbackHost(host) && !allowNonLoopbackBind) {
     throw new ApiConfigError(
-      `Refusing to bind non-loopback host "${values.EMBER_HOST}" without EMBER_ALLOW_NON_LOOPBACK_BIND=true`,
+      `Refusing to bind non-loopback host "${host}" without EMBER_ALLOW_NON_LOOPBACK_BIND=true`,
     );
   }
 
   return {
     env: values.EMBER_ENV,
-    host: values.EMBER_HOST,
+    host,
     port: values.EMBER_PORT,
     logLevel: values.EMBER_LOG_LEVEL,
     allowNonLoopbackBind,

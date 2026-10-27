@@ -170,12 +170,15 @@ exit=1
 | 已验证代码 HEAD     | `9de20b80d5f038f449ef59838e93cb9b61fdd3c2`                                                                                                                                                                                                                                    |
 | Draft PR            | <https://github.com/basicv8vc/Ember/pull/1>（`isDraft: true`，`state: OPEN`，base `main`）                                                                                                                                                                                    |
 | CI 运行（当前代码） | [40472007272](https://github.com/basicv8vc/Ember/actions/runs/40472007272) — **success**（HEAD `9de20b8`，Review Round 1 修复）                                                                                                                                               |
+| 报告更新提交        | `b4218ed`（docs-only，测试计数与 Review Round 1 证据）→ CI run [40472322816](https://github.com/basicv8vc/Ember/actions/runs/40472322816) **success**                                                                                                                         |
 | 历史 CI 运行        | [40469650009](https://github.com/basicv8vc/Ember/actions/runs/40469650009)（51s）、[40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681)（48s）、[40470138097](https://github.com/basicv8vc/Ember/actions/runs/40470138097)（docs-only）— 均 **success** |
 | CI 步骤             | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                                                                                                                                                           |
 | CI 环境             | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets，无部署                                                                                                                                                                                |
 | `main` 状态         | 未修改（`f182c11`）、未合并                                                                                                                                                                                                                                                   |
 
 CI 中仅剩一条信息性提示（`ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像），不是失败项。
+
+本报告不再包含代码变更；之后若有 docs-only 提交，其 CI 结果见 PR Checks 页面的最新运行。
 
 ## 7. 代码质量与仓库卫生
 

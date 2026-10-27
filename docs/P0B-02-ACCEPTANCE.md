@@ -8,7 +8,7 @@
 
 | 项目       | 值                                                             |
 | ---------- | -------------------------------------------------------------- |
-| 日期       | 2026-10-27（本地时区 UTC+8；日志中的 UTC 时间为 12:3x）        |
+| 日期       | 2026-10-27（本地时区 UTC+8）                                   |
 | OS         | macOS (Darwin 25.3.0, arm64)                                   |
 | Node.js    | v24.22.1（LTS "Krypton"，与 `.nvmrc` 一致）                    |
 | pnpm       | 12.15.0（`packageManager` 固定）                               |
@@ -44,7 +44,7 @@
 | 2   | `pnpm lint`                      | `eslint .` 退出码 0，无 error/warning                                                                                | **PASS** |
 | 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                         | **PASS** |
 | 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新包与测试）                                                            | **PASS** |
-| 5   | `pnpm test:unit`                 | 7 个文件 / **235** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 198 个）                                            | **PASS** |
+| 5   | `pnpm test:unit`                 | 7 个文件 / **239** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 202 个）                                            | **PASS** |
 | 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 domain/contracts/postgres/api dist                                       | **PASS** |
 | 7   | `pnpm test:integration`          | 1 个文件 / **6** 个测试通过（真实 PostgreSQL 17）                                                                    | **PASS** |
 | 8   | `git diff --check`               | 无空白错误                                                                                                           | **PASS** |
@@ -60,8 +60,8 @@ $ pnpm test:unit
  RUN  v5.0.5 /Users/a1-6/Downloads/Ember
 
  Test Files  7 passed (7)
-      Tests  235 passed (235)
-   Duration  245ms
+      Tests  239 passed (239)
+   Duration  302ms
 ```
 
 P0B-02 新增 4 个测试文件：
@@ -88,10 +88,12 @@ P0B-02 新增 4 个测试文件：
   - TaskReceipt 内部/DTO、校验错误不泄露原始值、issue 数量上限。
 - `tests/unit/domain-contracts.test.ts`
   - 15 个领域错误码（含扩展 `INVALID_STATE_TRANSITION`）完整性与唯一性；
-  - 每个 code 的 retryability、默认消息、`toJSON`；
+  - 每个 code 的 retryability、固定 public message、`toJSON`；
+  - `publicMessage` / `diagnostic` 分离：DB 密码、API Token、SQL 错误和宿主路径只存在于内部诊断，
+    不出现在 `message`、`toJSON()`、`toErrorResponse()` 或 `JSON.stringify(error)`；
   - `isDomainError` 不依赖消息文本；
   - `ErrorResponse` 严格 Schema 与 `toErrorResponse`；
-  - TaskEvent phase/sequence/payload 边界、DTO 映射；
+  - TaskEvent 固定 payload allowlist、敏感键/伪装秘密/嵌套/null 负向用例、DTO 映射与运行时篡改 fail closed；
   - `TaskRepository` / `LeaseQueue` / `ExecutionRouter` / `ArtifactStore` /
     `WorkspaceStore` / `SandboxProvider` 签名的编译期断言。
 
@@ -103,7 +105,7 @@ $ pnpm test:integration
 
  Test Files  1 passed (1)
       Tests  6 passed (6)
-   Duration  183ms
+   Duration  205ms
 ```
 
 集成测试仍使用 P0B-01 的隔离方式：每次运行创建 `ember_it_<12 hex>` schema，只迁移和断言该
@@ -184,7 +186,7 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 11  | AuthContext 与客户端输入边界明确           | **PASS**（Body 无 tenant/principal；Header Key 独立）                |
 | 12  | TypeScript strict typecheck                | **PASS**                                                             |
 | 13  | 根目录 Build 成功                          | **PASS**                                                             |
-| 14  | 新旧单元测试全部通过                       | **PASS**（235/235，包含 P0B-01 的 37 个）                            |
+| 14  | 新旧单元测试全部通过                       | **PASS**（239/239，包含 P0B-01 的 37 个）                            |
 | 15  | PostgreSQL 集成测试无回归                  | **PASS**（6/6）                                                      |
 | 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40507205145）                                |
 | 17  | 文档完整准确                               | **PASS**（本文件 + `P0B-02-IMPLEMENTATION.md`）                      |
@@ -249,7 +251,16 @@ CI 中唯一提示是 `ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 �
 - 新依赖只有 workspace 包与既有 `zod@4.6.7`，没有引入网络/云 SDK。
 - 本阶段产生的唯一成本为本地机器资源。
 
-## 10. 最终结论
+## 10. Review Round 1 修复记录
+
+| 编号 | 问题                                                                                                                           | 修复                                                                                                                                                                                                                                               | 证据                                                                                                                                                                                                                                                                                                                            |
+| ---- | ------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-1 | `DomainError` 接受任意自定义文本，`toJSON()` / `toErrorResponse()` 直接输出该文本，可能泄露 DB 密码、API Token、SQL 或宿主路径 | `DomainError.message` 改为按 `code` 固定的安全 `publicMessage`；内部诊断改存 `WeakMap`，仅通过显式 `error.diagnostic` 读取，不参与枚举/序列化。`toJSON()` 和 `toErrorResponse()` 只使用 `publicMessage`；公开消息上限独立为 512，内部诊断上限 2048 | 新增负向测试：同一 `DomainError` 的 `diagnostic` 含 DB 密码、Bearer Token、SQL 与 `/Users/...` 宿主路径时，`message`、`publicMessage`、`JSON.stringify(error)`、`toJSON()`、`toErrorResponse()` 均不包含这些值；`Object.keys(error)` 不含 `diagnostic`                                                                          |
+| P1-2 | `TaskEventPayloadSchema` 只限制形状/长度，无法阻止任意 Prompt、Token、API Key 或工具输出通过字符串值进入 Event Payload         | 改为**封闭 allowlist**：只有 16 个字段，全部是枚举、UUID、非负整数或布尔值，没有自由文本字段；`z.strictObject` 拒绝所有其他键。`toTaskEventDto()` 在映射前重新解析完整事件，运行时篡改对象 fail closed                                             | 新增负向测试：`prompt`/`messages`/`token`/`apiKey`/`authorization`/`toolOutput`/`stdout`/`stderr`/`content`/`text`/`sql`/`password`/`path`/`stack`/`input`/`output` 等键被拒绝；秘密塞入 `taskKind`/`runId`/`errorCode` 等允许字段也被拒绝；嵌套/数组/null 和 100,000 字符未知键被拒绝；`TASK_EVENT_PAYLOAD_KEYS` 固定并 frozen |
+
+修复后单元测试从 235 增至 **239**，全部通过；没有降低类型检查或删除原有测试。
+
+## 11. 最终结论
 
 P0B-02 的领域层与契约层实现、单元测试、构建、真实 PostgreSQL 集成测试与 CI 均通过。
 Draft PR 已创建且未合并；B-T01（纯逻辑范围）与 B-T04 为 **PASS**，B-T02/B-T03 明确为

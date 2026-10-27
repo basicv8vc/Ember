@@ -4,6 +4,8 @@ import {
   DomainError,
   InvalidArgumentError,
   InvalidStateTransitionError,
+  MAX_DIAGNOSTIC_MESSAGE_LENGTH,
+  MAX_PUBLIC_ERROR_MESSAGE_LENGTH,
   isDomainError,
 } from '@ember/domain';
 import type {
@@ -22,6 +24,7 @@ import {
   DomainErrorCodeSchema,
   ErrorResponseSchema,
   MockChatInputSchema,
+  TASK_EVENT_PAYLOAD_KEYS,
   TaskEventDtoSchema,
   TaskEventPayloadSchema,
   TaskEventSchema,
@@ -143,7 +146,7 @@ describe('domain error codes', () => {
 });
 
 describe('DomainError', () => {
-  it('carries a stable code, a safe default message and a retry classification', () => {
+  it('carries a stable code, a safe public message and a retry classification', () => {
     for (const code of DOMAIN_ERROR_CODES) {
       const error = new DomainError(code);
       expect(error).toBeInstanceOf(Error);
@@ -151,34 +154,77 @@ describe('DomainError', () => {
       expect(error.name).toBe('DomainError');
       expect(error.code).toBe(code);
       expect(error.retryable).toBe(EXPECTED_RETRYABILITY[code]);
-      expect(error.message.length).toBeGreaterThan(0);
-      expect(error.message.length).toBeLessThanOrEqual(512);
+      expect(error.publicMessage).toBe(error.message);
+      expect(error.publicMessage.length).toBeGreaterThan(0);
+      expect(error.publicMessage.length).toBeLessThanOrEqual(MAX_PUBLIC_ERROR_MESSAGE_LENGTH);
     }
   });
 
-  it('serialises only stable safe fields', () => {
+  it('serialises only the fixed public message, never caller diagnostics', () => {
     const error = new DomainError('INVALID_ARGUMENT', 'agentId: invalid format');
     const json = error.toJSON();
 
     expect(json).toEqual({
       code: 'INVALID_ARGUMENT',
-      message: 'agentId: invalid format',
+      message: 'Invalid request input',
       retryable: 'not_retryable',
     });
+    expect(JSON.stringify(json)).not.toContain('agentId');
     expect(JSON.stringify(json)).not.toContain('stack');
     expect(JSON.stringify(json)).not.toContain('cause');
   });
 
-  it('bounds custom messages so the wire error contract stays valid', () => {
-    const error = new DomainError('NOT_FOUND', 'x'.repeat(1_000));
+  it('never exposes DB, token, SQL or host-path diagnostics in public serialisations', () => {
+    const diagnostic = [
+      'postgres://ember:db-password-value@db.internal:5432/ember',
+      'Authorization: Bearer sk_live_api_token_value',
+      "SELECT * FROM users WHERE email = 'alice@example.com'",
+      '/Users/alice/.ssh/id_ed25519',
+    ].join(' | ');
+    const secrets = [
+      'db-password-value',
+      'sk_live_api_token_value',
+      'SELECT * FROM users',
+      'alice@example.com',
+      '/Users/alice/.ssh/id_ed25519',
+    ];
+    const error = new DomainError('DB_UNAVAILABLE', diagnostic);
 
-    expect(error.message.length).toBe(512);
-    expect(error.message.endsWith('...')).toBe(true);
+    expect(error.message).toBe('Database is unavailable');
+    expect(error.publicMessage).toBe('Database is unavailable');
+    expect(error.diagnostic).toBe(diagnostic);
+
+    const publicStrings = [
+      error.message,
+      error.publicMessage,
+      JSON.stringify(error),
+      JSON.stringify(error.toJSON()),
+      JSON.stringify(toErrorResponse(error)),
+      JSON.stringify(toErrorResponse(error, 'request-123')),
+    ];
+
+    for (const text of publicStrings) {
+      for (const secret of secrets) {
+        expect(text).not.toContain(secret);
+      }
+    }
+
+    expect(Object.keys(error)).not.toContain('diagnostic');
+    expect(Object.keys(error)).not.toContain('message');
+  });
+
+  it('bounds diagnostics internally and never uses them as the public message', () => {
+    const error = new DomainError('NOT_FOUND', 'x'.repeat(5_000));
+
+    expect(error.diagnostic.length).toBe(MAX_DIAGNOSTIC_MESSAGE_LENGTH);
+    expect(error.diagnostic.endsWith('...')).toBe(true);
+    expect(error.message).toBe('Resource not found');
+    expect(error.message.length).toBeLessThanOrEqual(MAX_PUBLIC_ERROR_MESSAGE_LENGTH);
     const body = toErrorResponse(error);
     expect(ErrorResponseSchema.parse(body)).toEqual(body);
   });
 
-  it('falls back to a safe default when a custom message is empty', () => {
+  it('uses the safe default public message when diagnostic is empty', () => {
     expect(new DomainError('NOT_FOUND', '').message).toBe('Resource not found');
     expect(new DomainError('NOT_FOUND', '   ').message).toBe('Resource not found');
   });
@@ -193,7 +239,7 @@ describe('DomainError', () => {
     expect(isDomainError(null)).toBe(false);
   });
 
-  it('keeps invalid transition details structured and deterministic', () => {
+  it('keeps invalid transition details diagnostic-only', () => {
     const first = new InvalidStateTransitionError('task', 'completed', 'running');
     const second = new InvalidStateTransitionError('task', 'completed', 'running');
 
@@ -203,6 +249,9 @@ describe('DomainError', () => {
     expect(first.from).toBe('completed');
     expect(first.to).toBe('running');
     expect(first.message).toBe(second.message);
+    expect(first.message).toBe('The requested state transition is not allowed');
+    expect(first.diagnostic).toContain('Illegal task state transition');
+    expect(JSON.stringify(first)).not.toContain('completed -> running');
     expect(first.retryable).toBe('not_retryable');
   });
 
@@ -215,6 +264,8 @@ describe('DomainError', () => {
     );
 
     expect(error.code).toBe('INVALID_ARGUMENT');
+    expect(error.message).toBe('Invalid request input');
+    expect(error.diagnostic).toContain('field_0');
     expect(error.issues).toHaveLength(10);
     expect(Object.isFrozen(error.issues)).toBe(true);
     expect(Object.isFrozen(error.issues[0])).toBe(true);
@@ -238,7 +289,12 @@ describe('DomainError', () => {
     expect(error.issues.map((issue) => issue.path)).toEqual(
       expect.arrayContaining(['maxOutputTokens', '<root>']),
     );
-    expect(JSON.stringify({ message: error.message, issues: error.issues })).not.toContain(secret);
+    const serialized = JSON.stringify({
+      message: error.message,
+      publicMessage: error.publicMessage,
+      issues: error.issues,
+    });
+    expect(serialized).not.toContain(secret);
   });
 });
 
@@ -282,13 +338,72 @@ describe('task event contract', () => {
   const event: TaskEvent = {
     taskId: UUID,
     sequence: 1,
-    phase: 'accepted',
+    phase: 'started',
     occurredAt: ISO_TIME,
     traceId: OTHER_UUID,
-    payload: { taskKind: 'mock.compute', attempt: 1, replayed: false, note: null },
+    payload: {
+      taskKind: 'mock.compute',
+      runId: OTHER_UUID,
+      attempt: 1,
+      route: 'fast',
+      fromStatus: 'queued',
+      toStatus: 'running',
+      runStatus: 'running',
+      errorCode: 'MOCK_TOOL_FAILED',
+      artifactId: UUID,
+      workspaceVersion: 1,
+      sandboxId: OTHER_UUID,
+      durationMs: 10,
+      replayed: false,
+      cancelRequested: false,
+      policyVersion: 1,
+      simulated: true,
+    },
   };
 
-  it('parses a valid internal event', () => {
+  it('publishes only the closed safe payload allowlist', () => {
+    expect(TASK_EVENT_PAYLOAD_KEYS).toEqual([
+      'taskKind',
+      'runId',
+      'attempt',
+      'route',
+      'fromStatus',
+      'toStatus',
+      'runStatus',
+      'errorCode',
+      'artifactId',
+      'workspaceVersion',
+      'sandboxId',
+      'durationMs',
+      'replayed',
+      'cancelRequested',
+      'policyVersion',
+      'simulated',
+    ]);
+
+    for (const forbidden of [
+      'prompt',
+      'token',
+      'apiKey',
+      'authorization',
+      'toolOutput',
+      'stdout',
+      'stderr',
+      'content',
+      'text',
+      'sql',
+      'password',
+      'path',
+      'input',
+      'output',
+    ]) {
+      expect(TASK_EVENT_PAYLOAD_KEYS).not.toContain(forbidden);
+    }
+
+    expect(Object.isFrozen(TASK_EVENT_PAYLOAD_KEYS)).toBe(true);
+  });
+
+  it('parses an allowlisted internal event', () => {
     expect(TaskEventSchema.parse(event)).toEqual(event);
   });
 
@@ -300,11 +415,75 @@ describe('task event contract', () => {
     expect(TaskEventSchema.safeParse({ ...event, sequence: 1.5 }).success).toBe(false);
   });
 
-  it('rejects nested or unbounded payload values', () => {
+  it('rejects prompt, token, API key, SQL, host-path and tool-output keys', () => {
+    const sensitiveKeys = [
+      'prompt',
+      'messages',
+      'system',
+      'token',
+      'apiKey',
+      'api_key',
+      'apiToken',
+      'authorization',
+      'cookie',
+      'credentials',
+      'toolOutput',
+      'stdout',
+      'stderr',
+      'content',
+      'text',
+      'sql',
+      'password',
+      'databaseUrl',
+      'dbUrl',
+      'stack',
+      'path',
+      'filePath',
+      'headers',
+      'input',
+      'output',
+      'raw',
+      'secret',
+    ];
+
+    for (const key of sensitiveKeys) {
+      expect(TaskEventPayloadSchema.safeParse({ [key]: 'sk_live_secret_value' }).success).toBe(
+        false,
+      );
+    }
+  });
+
+  it('rejects secrets disguised inside allowlisted fields', () => {
+    const secret = 'sk_live_51H8xDoNotPersist';
+
+    for (const payload of [
+      { taskKind: secret },
+      { runId: secret },
+      { attempt: secret },
+      { route: secret },
+      { fromStatus: secret },
+      { toStatus: secret },
+      { runStatus: secret },
+      { errorCode: secret },
+      { artifactId: secret },
+      { workspaceVersion: secret },
+      { sandboxId: secret },
+      { durationMs: secret },
+      { replayed: secret },
+      { cancelRequested: secret },
+      { policyVersion: secret },
+      { simulated: secret },
+    ]) {
+      expect(TaskEventPayloadSchema.safeParse(payload).success).toBe(false);
+    }
+  });
+
+  it('rejects nested, array and null values and does not rely on length limits', () => {
     expect(TaskEventPayloadSchema.safeParse({ nested: { prompt: 'secret' } }).success).toBe(false);
     expect(TaskEventPayloadSchema.safeParse({ list: ['a', 'b'] }).success).toBe(false);
-    expect(TaskEventPayloadSchema.safeParse({ prompt: 'x'.repeat(2_049) }).success).toBe(false);
+    expect(TaskEventPayloadSchema.safeParse({ note: null }).success).toBe(false);
     expect(TaskEventPayloadSchema.safeParse({ 'bad key': 'value' }).success).toBe(false);
+    expect(TaskEventPayloadSchema.safeParse({ prompt: 'x'.repeat(100_000) }).success).toBe(false);
     expect(
       TaskEventPayloadSchema.safeParse(
         Object.fromEntries(Array.from({ length: 33 }, (_, index) => [`key_${index}`, index])),
@@ -312,18 +491,47 @@ describe('task event contract', () => {
     ).toBe(false);
   });
 
-  it('maps to the snake_case event DTO', () => {
+  it('maps valid events to the DTO and fails closed on tampered runtime payloads', () => {
     const dto = toTaskEventDto(event);
 
     expect(dto).toEqual({
       task_id: UUID,
       sequence: 1,
-      phase: 'accepted',
+      phase: 'started',
       occurred_at: ISO_TIME,
       trace_id: OTHER_UUID,
       payload: event.payload,
     });
     expect(TaskEventDtoSchema.parse(dto)).toEqual(dto);
     expect(TaskEventDtoSchema.safeParse({ ...dto, taskId: UUID }).success).toBe(false);
+    expect(TaskEventSchema.safeParse({ ...event, secret: 'top-level' }).success).toBe(false);
+
+    const tampered = {
+      ...event,
+      payload: {
+        ...event.payload,
+        prompt: 'raw prompt that must never be persisted',
+        apiToken: 'sk_live_tampered_token',
+      },
+    } as unknown as TaskEvent;
+
+    try {
+      toTaskEventDto(tampered);
+      expect.unreachable('expected the tampered event to be rejected');
+    } catch (error) {
+      expect(error).toBeInstanceOf(InvalidArgumentError);
+      const invalid = error as InvalidArgumentError;
+      expect(invalid.code).toBe('INVALID_ARGUMENT');
+      expect(invalid.issues.length).toBeGreaterThan(0);
+
+      const serialized = JSON.stringify({
+        message: invalid.message,
+        publicMessage: invalid.publicMessage,
+        issues: invalid.issues,
+        response: toErrorResponse(invalid),
+      });
+      expect(serialized).not.toContain('raw prompt');
+      expect(serialized).not.toContain('sk_live_tampered_token');
+    }
   });
 });

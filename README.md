@@ -75,7 +75,9 @@ arrive in P0B-03 and P0B-07.
 - `@ember/contracts` validates boundaries with Zod 4: strict per-kind mock inputs, UUIDs,
   bounded deadlines, header-only idempotency keys, receipts/events and their snake_case HTTP
   DTOs, plus provider-neutral `TaskRepository`/`LeaseQueue`/`ArtifactStore`/`SandboxProvider`
-  interfaces. No fake implementations exist.
+  interfaces. No fake implementations exist. Event payloads use a closed safe-metadata
+  allowlist (enums, UUIDs, integers, booleans only), and error DTOs expose only a fixed
+  public message; internal `diagnostic` text is never serialised.
 - **Task** is the user's overall intent, **Run** is one execution attempt, and **Event** is a
   fact that happened. `accepted` is an event, not a `TaskStatus`; `waiting_external` is outside
   P0-B. Terminal Task states (`completed`, `failed`, `cancelled`) have no outgoing edges, and
@@ -207,7 +209,7 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 7 files, 235 tests (no database)
+pnpm test:unit        # 7 files, 239 tests (no database)
 pnpm test:integration # 6 tests against real PostgreSQL
 ```
 
@@ -215,8 +217,8 @@ pnpm test:integration # 6 tests against real PostgreSQL
   whitelist-only database log metadata, migration file parsing, `/healthz` and `/readyz`, real
   IPv4/IPv6 loopback sockets) plus P0B-02 domain contracts: the complete Task and Run state
   matrices, terminal-state invariants, stable transition errors, all mock input schemas,
-  forged tenant/principal fields, idempotency keys, receipt/event DTOs and validation-error
-  redaction.
+  forged tenant/principal fields, idempotency keys, receipt/event DTOs, public/internal error
+  separation and validation-error redaction.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
   silently passing. They verify connection, first migration, repeat migration, the recorded
   version, readiness, checksum tamper detection, and renamed-migration detection.

@@ -6,6 +6,8 @@
  * decides what they mean.
  */
 
+import type { DomainErrorCode } from './errors.js';
+
 /**
  * Server-generated UUID (RFC 9562). Clients never choose an `Id`.
  *
@@ -202,8 +204,32 @@ export const TASK_EVENT_PHASES = [
 
 export type TaskEventPhase = (typeof TASK_EVENT_PHASES)[number];
 
-/** Flat, scrubbed, bounded metadata. Never raw prompts, tokens, or stack traces. */
-export type TaskEventPayload = Readonly<Record<string, string | number | boolean | null>>;
+/**
+ * Closed set of safe event metadata. Every field is an enum, UUID, non-negative integer or
+ * boolean, so there is no free-text channel for prompts, tokens, API keys or tool output.
+ * Adding a field requires an explicit contract change and redaction review.
+ *
+ * Phase-specific required fields (for example `taskKind` on `accepted`) are enforced by the
+ * later event-store/application layer, not by P0B-02.
+ */
+export interface TaskEventPayload {
+  readonly taskKind?: TaskKind;
+  readonly runId?: Id;
+  readonly attempt?: number;
+  readonly route?: ExecutionPath;
+  readonly fromStatus?: TaskStatus;
+  readonly toStatus?: TaskStatus;
+  readonly runStatus?: RunStatus;
+  readonly errorCode?: DomainErrorCode;
+  readonly artifactId?: Id;
+  readonly workspaceVersion?: number;
+  readonly sandboxId?: Id;
+  readonly durationMs?: number;
+  readonly replayed?: boolean;
+  readonly cancelRequested?: boolean;
+  readonly policyVersion?: number;
+  readonly simulated?: boolean;
+}
 
 /** Append-only fact used by the event log, pollers and SSE clients. */
 export interface TaskEvent {

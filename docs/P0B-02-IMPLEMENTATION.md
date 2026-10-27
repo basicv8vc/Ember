@@ -111,6 +111,24 @@ Task / Run / Event 的边界：
 避免出现两套互相矛盾的字段定义。HTTP 状态码映射（例如 `INVALID_ARGUMENT` → 400）属于 P0B-07，
 本阶段没有建立 `/v1/tasks`，也没有声称已实现 HTTP 4xx。
 
+### 3.5 Event payload 脱敏契约
+
+`TaskEventPayload` 不是任意 JSON 对象，而是一个**封闭的安全元数据 allowlist**。允许的字段仅有：
+
+- 枚举：`taskKind`、`route`、`fromStatus`、`toStatus`、`runStatus`、`errorCode`；
+- UUID：`runId`、`artifactId`、`sandboxId`；
+- 非负整数：`attempt`、`workspaceVersion`、`durationMs`、`policyVersion`；
+- 布尔：`replayed`、`cancelRequested`、`simulated`。
+
+没有自由文本字段。`TaskEventPayloadSchema` 使用 `z.strictObject`，因此 `prompt`、`messages`、
+`token`、`apiKey`、`authorization`、`toolOutput`、`stdout`、`stderr`、`content`、`text`、
+`sql`、`password`、`path`、`stack`、`input`、`output` 等键一律被拒绝；把秘密塞进已允许字段
+也必须满足该字段的枚举/UUID/整数/布尔类型，不能作为字符串携带。
+
+`toTaskEventDto()` 在映射前重新解析完整 `TaskEvent`，运行时被篡改并附带额外字段的对象会 fail closed
+并返回安全的 `INVALID_ARGUMENT`。`TASK_EVENT_PAYLOAD_KEYS` 与测试固定了当前 allowlist；未来新增
+自由文本或工具输出字段必须先修改 Contract Test 并完成脱敏评审，不能仅靠长度限制放行。
+
 ## 4. Task 状态机
 
 实现位置：`packages/domain/src/task-state-machine.ts`。
@@ -201,11 +219,18 @@ isTerminalRunStatus(status: RunStatus): status is RunTerminalStatus;
 
 实现位置：`packages/domain/src/errors.ts`、`packages/contracts/src/error-schemas.ts`。
 
-`DomainError` 至少包含：
+`DomainError` 包含：
 
 - 稳定的 `code`（联合类型，不是任意字符串）；
-- 安全的 `message`（不含请求体、凭据、SQL、宿主路径或堆栈）；
+- `message` / `publicMessage`：由 `code` 选择的固定安全文本，是唯一允许进入 `toJSON()` 或
+  HTTP DTO 的文本；
+- `diagnostic`：内部诊断文本（例如驱动消息、SQL 片段），**从不序列化**，只供内部日志/调试；
 - `retryable` 建议分类：`not_retryable` / `bounded_retry` / `conditional`。
+
+内部诊断存放在 `WeakMap` 中，只能通过显式 `error.diagnostic` 读取；它不会出现在 `Object.keys()`、
+`JSON.stringify(error)`、`toJSON()` 或 `toErrorResponse()` 中。`toErrorResponse()` 只使用
+`error.publicMessage`，因此任意自定义诊断——包括数据库密码、API Token、SQL 错误和宿主文件路径——
+都不会进入公开 DTO。
 
 | Code                         | Retryability                   |
 | ---------------------------- | ------------------------------ |
@@ -232,9 +257,12 @@ isTerminalRunStatus(status: RunStatus): status is RunTerminalStatus;
 - `conditional` 明确表示“是否可重试取决于执行阶段、Deadline、Lease 或工具定义”，由后续应用层判断；
   不在纯领域层假装给出全局答案。
 - 调用者必须用 `code`/`instanceof`/`isDomainError()` 判断错误，禁止依赖 `message` 字符串匹配。
-- `InvalidArgumentError` 只保留字段路径与规则码，不保留被拒绝的值。
+- `InvalidArgumentError` 只保留字段路径与规则码，不保留被拒绝的值；其 `diagnostic` 用于内部排查，
+  公开文本仍是固定安全消息。
 - `toErrorResponse()` 只输出 `{ error: { code, message, request_id? } }`，不输出 `stack`、`cause`、
-  SQL 或原始输入。
+  `diagnostic`、SQL 或原始输入。
+- 公开消息上限为 `MAX_PUBLIC_ERROR_MESSAGE_LENGTH = 512`；内部诊断上限为
+  `MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2048`，两者独立。
 
 ## 7. 跨模块接口契约
 
@@ -263,7 +291,10 @@ isTerminalRunStatus(status: RunStatus): status is RunTerminalStatus;
   同状态与不可变性。
 - Zod：所有合法 kind/input、未知 kind、缺失/多余字段、非法 UUID、超长、非法 Deadline、
   Tenant/Principal 伪造字段、Header Key 边界、wire/internal 映射。
-- 错误契约：全部错误码、retryability、`DomainError` 序列化、非法转换统一抛错、校验错误不泄露输入。
+- 错误契约：全部错误码、retryability、`DomainError` 的 public/diagnostic 分离、非法转换统一抛错；
+  使用含数据库密码、API Token、SQL 错误和宿主路径的诊断做负向序列化测试，确认公开 DTO 不泄露。
+- Event 脱敏：固定 allowlist 的键/类型、敏感键负向用例、把秘密塞入允许字段的负向用例、嵌套/数组/null
+  拒绝，以及 `toTaskEventDto()` 对运行时篡改对象 fail closed。
 - 因本阶段没有数据库和 Router/FakeSandbox 实现，B-T01/B-T04 只覆盖纯逻辑部分；
   B-T02/B-T03 仅准备接口，状态为 `DEFERRED`，不计入 PASS。详见验收报告。
 

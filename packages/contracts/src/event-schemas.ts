@@ -1,23 +1,58 @@
 import { TASK_EVENT_PHASES } from '@ember/domain';
 import type { Id, TaskEvent, TaskEventPayload } from '@ember/domain';
 import { z } from 'zod';
-import { IdSchema, IsoDateTimeSchema } from './task-schemas.js';
+import { DomainErrorCodeSchema } from './error-schemas.js';
+import {
+  ExecutionPathSchema,
+  IdSchema,
+  IsoDateTimeSchema,
+  RunStatusSchema,
+  TaskKindSchema,
+  TaskStatusSchema,
+} from './task-schemas.js';
+import { toInvalidArgumentError } from './validation.js';
 
 export const TaskEventPhaseSchema = z.enum(TASK_EVENT_PHASES);
 
+const nonNegativeInteger = z.number().int().nonnegative();
+
 /**
- * Event payloads are flat, scrubbed metadata only: no nested objects, no arrays, no raw
- * prompts or tokens. Keys and string values are bounded.
+ * Closed payload allowlist. Every field is an enum, UUID, non-negative integer or boolean;
+ * there is no free-text field, so a prompt, token, API key, SQL fragment, host path or tool
+ * output cannot be represented directly. `z.strictObject` rejects every other key.
+ *
+ * Length limits are not used as a substitute for this redaction boundary: a secret under an
+ * unknown key is rejected regardless of its length, and a secret inside an allowlisted field
+ * must still satisfy that field's enum/UUID/number/boolean type.
  */
-export const TaskEventPayloadSchema: z.ZodType<TaskEventPayload> = z
-  .record(
-    z.string().regex(/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/, 'must be a safe metadata key'),
-    z.union([z.string().max(2_048), z.number().finite(), z.boolean(), z.null()]),
-  )
-  .refine(
-    (payload) => Object.keys(payload).length <= 32,
-    'payload must not contain more than 32 keys',
-  );
+const TaskEventPayloadObject = z.strictObject({
+  taskKind: TaskKindSchema.optional(),
+  runId: IdSchema.optional(),
+  attempt: nonNegativeInteger.optional(),
+  route: ExecutionPathSchema.optional(),
+  fromStatus: TaskStatusSchema.optional(),
+  toStatus: TaskStatusSchema.optional(),
+  runStatus: RunStatusSchema.optional(),
+  errorCode: DomainErrorCodeSchema.optional(),
+  artifactId: IdSchema.optional(),
+  workspaceVersion: nonNegativeInteger.optional(),
+  sandboxId: IdSchema.optional(),
+  durationMs: nonNegativeInteger.optional(),
+  replayed: z.boolean().optional(),
+  cancelRequested: z.boolean().optional(),
+  policyVersion: nonNegativeInteger.optional(),
+  simulated: z.boolean().optional(),
+});
+
+/** Persistent and public event payloads are restricted to the closed allowlist above. */
+export const TaskEventPayloadSchema: z.ZodType<TaskEventPayload> = TaskEventPayloadObject;
+
+export type TaskEventPayloadKey = keyof TaskEventPayload;
+
+/** Runtime list of allowed payload keys, exported for contract tests and documentation. */
+export const TASK_EVENT_PAYLOAD_KEYS: readonly TaskEventPayloadKey[] = Object.freeze(
+  Object.keys(TaskEventPayloadObject.shape) as TaskEventPayloadKey[],
+);
 
 /** Internal event shape used by the event store. */
 export const TaskEventSchema: z.ZodType<TaskEvent> = z.strictObject({
@@ -48,14 +83,26 @@ export const TaskEventDtoSchema: z.ZodType<TaskEventDto> = z.strictObject({
   payload: TaskEventPayloadSchema,
 });
 
-/** Explicit internal → wire conversion. */
+/**
+ * Explicit internal → wire conversion.
+ *
+ * Re-validates the complete event before mapping so an object assembled with extra runtime
+ * fields cannot smuggle a prompt/token/tool output into the public DTO. Invalid events fail
+ * closed with a safe `INVALID_ARGUMENT` error.
+ */
 export function toTaskEventDto(event: TaskEvent): TaskEventDto {
+  const parsed = TaskEventSchema.safeParse(event);
+
+  if (!parsed.success) {
+    throw toInvalidArgumentError(parsed.error);
+  }
+
   return {
-    task_id: event.taskId,
-    sequence: event.sequence,
-    phase: event.phase,
-    occurred_at: event.occurredAt,
-    trace_id: event.traceId,
-    payload: event.payload,
+    task_id: parsed.data.taskId,
+    sequence: parsed.data.sequence,
+    phase: parsed.data.phase,
+    occurred_at: parsed.data.occurredAt,
+    trace_id: parsed.data.traceId,
+    payload: parsed.data.payload,
   };
 }

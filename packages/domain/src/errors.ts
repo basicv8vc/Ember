@@ -2,8 +2,12 @@
  * Stable domain error vocabulary.
  *
  * Callers must branch on `code` / `instanceof`, never on human-readable message text.
- * Messages are safe to log or return: they must never contain raw request bodies,
- * credentials, SQL, filesystem paths or stack traces.
+ *
+ * There are two deliberately separate text channels:
+ * - `message` / `publicMessage`: a fixed, safe message selected by `code`. This is the only
+ *   text allowed in `toJSON()` or an HTTP error DTO.
+ * - `diagnostic`: internal-only context for logs and debugging (for example a database
+ *   driver message). It is never serialised and must not be returned to clients.
  */
 
 export const DOMAIN_ERROR_CODES = [
@@ -41,10 +45,36 @@ export type DomainErrorCode = (typeof DOMAIN_ERROR_CODES)[number];
  */
 export type Retryability = 'not_retryable' | 'bounded_retry' | 'conditional';
 
-/** Upper bound shared with the HTTP error contract (`ErrorResponseSchema`). */
-export const MAX_SAFE_ERROR_MESSAGE_LENGTH = 512;
+/** Upper bound for the public message shared with `ErrorResponseSchema`. */
+export const MAX_PUBLIC_ERROR_MESSAGE_LENGTH = 512;
 
-const DEFAULT_MESSAGES: Readonly<Record<DomainErrorCode, string>> = Object.freeze({
+/** Internal diagnostics are bounded for log hygiene, but are never serialised to clients. */
+export const MAX_DIAGNOSTIC_MESSAGE_LENGTH = 2_048;
+
+/**
+ * Fixed client-safe messages. These are stable by error code and never contain request
+ * input, SQL, credentials, host paths, file paths, driver messages or stack traces.
+ */
+const PUBLIC_MESSAGES: Readonly<Record<DomainErrorCode, string>> = Object.freeze({
+  INVALID_ARGUMENT: 'Invalid request input',
+  UNAUTHENTICATED: 'Authentication required',
+  NOT_FOUND: 'Resource not found',
+  POLICY_DENIED: 'Operation denied by policy',
+  BUDGET_EXCEEDED: 'Budget exceeded',
+  IDEMPOTENCY_CONFLICT: 'Idempotency key conflicts with an existing command',
+  WORKSPACE_VERSION_CONFLICT: 'Workspace version is stale',
+  STALE_LEASE: 'Lease is stale or no longer owned by this worker',
+  DB_UNAVAILABLE: 'Database is unavailable',
+  SANDBOX_NOT_READY: 'Sandbox is not ready',
+  EXECUTION_TIMEOUT: 'Execution timed out',
+  MOCK_TOOL_FAILED: 'Mock tool failed',
+  DEADLINE_EXCEEDED: 'Task deadline exceeded',
+  CANCELLED: 'Operation was cancelled',
+  INVALID_STATE_TRANSITION: 'The requested state transition is not allowed',
+});
+
+/** Internal defaults used only when a caller does not provide a diagnostic. */
+const DEFAULT_DIAGNOSTICS: Readonly<Record<DomainErrorCode, string>> = Object.freeze({
   INVALID_ARGUMENT: 'Invalid argument',
   UNAUTHENTICATED: 'Authentication required',
   NOT_FOUND: 'Resource not found',
@@ -80,31 +110,54 @@ const RETRYABILITY: Readonly<Record<DomainErrorCode, Retryability>> = Object.fre
   INVALID_STATE_TRANSITION: 'not_retryable',
 });
 
+/**
+ * Internal diagnostics are stored out-of-band so they cannot be reached by enumerating or
+ * serialising the error object. Only the explicit `diagnostic` getter exposes them.
+ */
+const diagnostics = new WeakMap<DomainError, string>();
+
+function truncate(value: string, maxLength: number): string {
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength - 3)}...`;
+}
+
 /** Structured, transport-neutral domain failure. */
 export class DomainError extends Error {
   override readonly name: string = 'DomainError';
   readonly code: DomainErrorCode;
   readonly retryable: Retryability;
+  /** Fixed client-safe text. Never derived from arbitrary caller input. */
+  readonly publicMessage: string;
 
-  constructor(code: DomainErrorCode, message?: string) {
-    const candidate =
-      message !== undefined && message.trim() !== '' ? message : DEFAULT_MESSAGES[code];
-    super(
-      candidate.length <= MAX_SAFE_ERROR_MESSAGE_LENGTH
-        ? candidate
-        : `${candidate.slice(0, MAX_SAFE_ERROR_MESSAGE_LENGTH - 3)}...`,
-    );
+  constructor(code: DomainErrorCode, diagnostic?: string) {
+    const publicMessage = PUBLIC_MESSAGES[code];
+    super(publicMessage);
     this.code = code;
     this.retryable = RETRYABILITY[code];
+    this.publicMessage = publicMessage;
+
+    const internal =
+      diagnostic !== undefined && diagnostic.trim() !== '' ? diagnostic : DEFAULT_DIAGNOSTICS[code];
+    diagnostics.set(this, truncate(internal, MAX_DIAGNOSTIC_MESSAGE_LENGTH));
   }
 
-  /** Stable serialisable form. Deliberately excludes `cause`, stacks and arbitrary details. */
+  /**
+   * Internal-only diagnostic context. Never include this value in an HTTP response or any
+   * other public serialisation; it may contain driver text or other sensitive details.
+   */
+  get diagnostic(): string {
+    return diagnostics.get(this) ?? this.publicMessage;
+  }
+
+  /**
+   * Stable serialisable form. Uses `publicMessage`, never `diagnostic`, and deliberately
+   * excludes `cause`, stacks and arbitrary details.
+   */
   toJSON(): {
     readonly code: DomainErrorCode;
     readonly message: string;
     readonly retryable: Retryability;
   } {
-    return { code: this.code, message: this.message, retryable: this.retryable };
+    return { code: this.code, message: this.publicMessage, retryable: this.retryable };
   }
 }
 
@@ -140,7 +193,8 @@ const MAX_REPORTED_VALIDATION_ISSUES = 10;
 
 /**
  * Invalid command/body input. Only field paths and rule codes are retained so a validation
- * error can never echo the rejected values back to a client.
+ * error can never echo the rejected values back to a client. The human-readable diagnostic
+ * is internal; public output uses the fixed `INVALID_ARGUMENT` message.
  */
 export class InvalidArgumentError extends DomainError {
   override readonly name = 'InvalidArgumentError';

@@ -40,6 +40,18 @@ function captureTransitionError(from: RunStatus, to: RunStatus): InvalidStateTra
 }
 
 describe('Run state machine — legal transitions', () => {
+  it('publishes exactly the approved run status set', () => {
+    expect(RUN_STATUSES).toEqual([
+      'created',
+      'running',
+      'succeeded',
+      'failed_retryable',
+      'failed_terminal',
+      'lease_expired',
+      'cancelled',
+    ]);
+  });
+
   it.each(APPROVED_RUN_TRANSITIONS)('allows %s → %s', (from, to) => {
     expect(canTransitionRun(from, to)).toBe(true);
     expect(transitionRun(from, to)).toBe(to);

@@ -44,7 +44,7 @@
 | 2   | `pnpm lint`                      | `eslint .` 退出码 0，无 error/warning                                                                                | **PASS** |
 | 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                         | **PASS** |
 | 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含新包与测试）                                                            | **PASS** |
-| 5   | `pnpm test:unit`                 | 7 个文件 / **233** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 196 个）                                            | **PASS** |
+| 5   | `pnpm test:unit`                 | 7 个文件 / **235** 个测试全部通过（P0B-01 的 37 个 + P0B-02 新增 198 个）                                            | **PASS** |
 | 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 domain/contracts/postgres/api dist                                       | **PASS** |
 | 7   | `pnpm test:integration`          | 1 个文件 / **6** 个测试通过（真实 PostgreSQL 17）                                                                    | **PASS** |
 | 8   | `git diff --check`               | 无空白错误                                                                                                           | **PASS** |
@@ -60,8 +60,8 @@ $ pnpm test:unit
  RUN  v5.0.5 /Users/a1-6/Downloads/Ember
 
  Test Files  7 passed (7)
-      Tests  233 passed (233)
-   Duration  255ms
+      Tests  235 passed (235)
+   Duration  245ms
 ```
 
 P0B-02 新增 4 个测试文件：
@@ -103,7 +103,7 @@ $ pnpm test:integration
 
  Test Files  1 passed (1)
       Tests  6 passed (6)
-   Duration  188ms
+   Duration  183ms
 ```
 
 集成测试仍使用 P0B-01 的隔离方式：每次运行创建 `ember_it_<12 hex>` schema，只迁移和断言该
@@ -184,7 +184,7 @@ contracts: mock.compute sha256 22222222-2222-4222-8222-222222222222
 | 11  | AuthContext 与客户端输入边界明确           | **PASS**（Body 无 tenant/principal；Header Key 独立）                |
 | 12  | TypeScript strict typecheck                | **PASS**                                                             |
 | 13  | 根目录 Build 成功                          | **PASS**                                                             |
-| 14  | 新旧单元测试全部通过                       | **PASS**（233/233，包含 P0B-01 的 37 个）                            |
+| 14  | 新旧单元测试全部通过                       | **PASS**（235/235，包含 P0B-01 的 37 个）                            |
 | 15  | PostgreSQL 集成测试无回归                  | **PASS**（6/6）                                                      |
 | 16  | CI 全部通过                                | **PASS**（代码 HEAD run 40506386450）                                |
 | 17  | 文档完整准确                               | **PASS**（本文件 + `P0B-02-IMPLEMENTATION.md`）                      |

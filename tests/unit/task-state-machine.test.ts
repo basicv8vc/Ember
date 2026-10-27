@@ -52,6 +52,18 @@ function captureTransitionError(from: TaskStatus, to: TaskStatus): InvalidStateT
 }
 
 describe('Task state machine — legal transitions', () => {
+  it('publishes exactly the approved task status set', () => {
+    expect(TASK_STATUSES).toEqual([
+      'queued',
+      'running',
+      'waiting_approval',
+      'retryable_failed',
+      'completed',
+      'failed',
+      'cancelled',
+    ]);
+  });
+
   it.each(APPROVED_TASK_TRANSITIONS)('allows %s → %s', (from, to) => {
     expect(canTransitionTask(from, to)).toBe(true);
     expect(transitionTask(from, to)).toBe(to);

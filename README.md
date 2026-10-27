@@ -207,7 +207,7 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 7 files, 233 tests (no database)
+pnpm test:unit        # 7 files, 235 tests (no database)
 pnpm test:integration # 6 tests against real PostgreSQL
 ```
 

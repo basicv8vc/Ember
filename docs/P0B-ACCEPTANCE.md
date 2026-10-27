@@ -32,22 +32,22 @@ Node 版本选择依据：执行时 nodejs.org 的版本索引中 `v26.12.1` 的
 
 ## 3. 验收清单逐项结果
 
-| #   | 验收项                                                         | 命令 / 证据                                                               | 实际结果                                                                                                                        | 状态     |
-| --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| 1   | 仓库状态核验，PR 来自独立 feature 分支                         | `git status`、`git ls-remote`、`git branch`                               | 分支为 `feature/p0b-01-repository-foundation`；`main` 保持 `f182c11`                                                            | **PASS** |
-| 2   | `pnpm install --frozen-lockfile` 成功                          | 删除全部 `node_modules` 与 `dist` 后执行 `pnpm install --frozen-lockfile` | `Done in 562ms`（本机 pnpm store 已预热），0 错误                                                                               | **PASS** |
-| 3   | `pnpm lint` 成功                                               | `pnpm lint`                                                               | `eslint .` 退出码 0，无 error/warning                                                                                           | **PASS** |
-| 4   | `pnpm typecheck` 成功（strict）                                | `pnpm typecheck`                                                          | `tsc -p tsconfig.json` 退出码 0                                                                                                 | **PASS** |
-| 5   | `pnpm test:unit` 成功，含真实 `/healthz` HTTP 断言             | `pnpm test:unit`                                                          | 3 个文件 / 23 个测试全部通过；包含 `app.request('/healthz')` 与 `127.0.0.1:0` 真实 socket 上的 200 断言                         | **PASS** |
-| 6   | `pnpm build` 成功，生成可运行 Node 产物                        | `pnpm build`                                                              | `tsc -b tsconfig.build.json` 退出码 0；`apps/api/dist/index.js` + `packages/postgres/dist/*` 生成                               | **PASS** |
-| 7   | `pnpm dev` 默认 loopback 启动，`GET /healthz` 200              | `pnpm dev`，然后 `curl -i 127.0.0.1:8787/healthz`                         | HTTP 200，`{"status":"ok","service":"ember-api",...}`；`lsof` 显示仅 `127.0.0.1:8787 (LISTEN)`；`/readyz` 200，DB `up`          | **PASS** |
-| 8   | `pnpm dev:db` 可启动本地 PostgreSQL                            | `pnpm dev:db`                                                             | Compose 创建卷/网络/容器，`Up (healthy)`，端口 `127.0.0.1:55432->5432`；同时创建 `ember` 与 `ember_test`                        | **PASS** |
-| 9   | `pnpm db:migrate` 空库首次成功，重复执行成功                   | 新建空数据库 `ember_p0b01_verify` 后连续执行两次（`DATABASE_URL` 覆盖）   | 第一次 `1 applied, 0 already applied`；第二次 `0 applied, 1 already applied`；`schema_migrations` 仅 1 行；验证后删除临时数据库 | **PASS** |
-| 10  | `pnpm test:integration` 至少完成真实 PG 连接与 Migration 验证  | `pnpm test:integration`                                                   | 1 个文件 / 5 个测试通过（真实 PostgreSQL 17）：连接、首次迁移、重复迁移、版本记录、readiness、checksum 篡改拒绝                 | **PASS** |
-| 11  | GitHub Actions 工作流实际执行                                  | `.github/workflows/ci.yml` + Draft PR 的 Actions 运行                     | CI run [40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681)：**success**，48s，全部步骤通过               | **PASS** |
-| 12  | `.env.example` 无真实密钥；默认不公开监听；无付费依赖          | 人工检查 `.env.example`、`env.ts`、`package.json`、`pnpm-lock.yaml`       | 仅本地占位口令；非 loopback 绑定需显式 opt-in；依赖全部为开源 npm 包，无付费服务                                                | **PASS** |
-| 13  | `git diff --check` 通过；README/验收报告准确区分已实现与未实现 | `git add`（排除本地参考文档）后 `git diff --cached --check`               | 见第 6 节                                                                                                                       | **PASS** |
-| 14  | Draft PR 已创建、描述完整、未合并 `main`                       | `gh pr create --draft`                                                    | [PR #1](https://github.com/basicv8vc/Ember/pull/1)，`isDraft: true`，`state: OPEN`，base `main`；未合并                         | **PASS** |
+| #   | 验收项                                                         | 命令 / 证据                                                               | 实际结果                                                                                                                                                   | 状态     |
+| --- | -------------------------------------------------------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| 1   | 仓库状态核验，PR 来自独立 feature 分支                         | `git status`、`git ls-remote`、`git branch`                               | 分支为 `feature/p0b-01-repository-foundation`；`main` 保持 `f182c11`                                                                                       | **PASS** |
+| 2   | `pnpm install --frozen-lockfile` 成功                          | 删除全部 `node_modules` 与 `dist` 后执行 `pnpm install --frozen-lockfile` | `Done in 562ms`（本机 pnpm store 已预热），0 错误                                                                                                          | **PASS** |
+| 3   | `pnpm lint` 成功                                               | `pnpm lint`                                                               | `eslint .` 退出码 0，无 error/warning                                                                                                                      | **PASS** |
+| 4   | `pnpm typecheck` 成功（strict）                                | `pnpm typecheck`                                                          | `tsc -p tsconfig.json` 退出码 0                                                                                                                            | **PASS** |
+| 5   | `pnpm test:unit` 成功，含真实 `/healthz` HTTP 断言             | `pnpm test:unit`                                                          | 3 个文件 / 32 个测试全部通过；包含 `app.request('/healthz')`、`127.0.0.1:0` 真实 socket 上的 200 断言、严格 loopback 负向用例与日志白名单用例              | **PASS** |
+| 6   | `pnpm build` 成功，生成可运行 Node 产物                        | `pnpm build`                                                              | `tsc -b tsconfig.build.json` 退出码 0；`apps/api/dist/index.js` + `packages/postgres/dist/*` 生成                                                          | **PASS** |
+| 7   | `pnpm dev` 默认 loopback 启动，`GET /healthz` 200              | `pnpm dev`，然后 `curl -i 127.0.0.1:8787/healthz`                         | HTTP 200，`{"status":"ok","service":"ember-api",...}`；`lsof` 显示仅 `127.0.0.1:8787 (LISTEN)`；`/readyz` 200，DB `up`                                     | **PASS** |
+| 8   | `pnpm dev:db` 可启动本地 PostgreSQL                            | `pnpm dev:db`                                                             | Compose 创建卷/网络/容器，`Up (healthy)`，端口 `127.0.0.1:55432->5432`；同时创建 `ember` 与 `ember_test`                                                   | **PASS** |
+| 9   | `pnpm db:migrate` 空库首次成功，重复执行成功                   | 新建空数据库 `ember_p0b01_verify` 后连续执行两次（`DATABASE_URL` 覆盖）   | 第一次 `1 applied, 0 already applied`；第二次 `0 applied, 1 already applied`；`schema_migrations` 仅 1 行；验证后删除临时数据库                            | **PASS** |
+| 10  | `pnpm test:integration` 至少完成真实 PG 连接与 Migration 验证  | `pnpm test:integration`                                                   | 1 个文件 / 6 个测试通过（真实 PostgreSQL 17）：连接、首次迁移、重复迁移、版本记录、readiness、checksum 篡改拒绝、重命名拒绝                                | **PASS** |
+| 11  | GitHub Actions 工作流实际执行                                  | `.github/workflows/ci.yml` + Draft PR 的 Actions 运行                     | CI run [40472007272](https://github.com/basicv8vc/Ember/actions/runs/40472007272)（Review Round 1 修复后的代码 HEAD `9de20b8`）：**success**，全部步骤通过 | **PASS** |
+| 12  | `.env.example` 无真实密钥；默认不公开监听；无付费依赖          | 人工检查 `.env.example`、`env.ts`、`package.json`、`pnpm-lock.yaml`       | 仅本地占位口令；非 loopback 绑定需显式 opt-in；依赖全部为开源 npm 包，无付费服务                                                                           | **PASS** |
+| 13  | `git diff --check` 通过；README/验收报告准确区分已实现与未实现 | `git add`（排除本地参考文档）后 `git diff --cached --check`               | 见第 7 节                                                                                                                                                  | **PASS** |
+| 14  | Draft PR 已创建、描述完整、未合并 `main`                       | `gh pr create --draft`                                                    | [PR #1](https://github.com/basicv8vc/Ember/pull/1)，`isDraft: true`，`state: OPEN`，base `main`；未合并                                                    | **PASS** |
 
 ## 4. 实测命令与关键输出
 
@@ -57,8 +57,8 @@ Node 版本选择依据：执行时 nodejs.org 的版本索引中 `v26.12.1` 的
 $ pnpm test:unit
  RUN  v5.0.5 /Users/a1-6/Downloads/Ember
  Test Files  3 passed (3)
-      Tests  23 passed (23)
-   Duration  255ms
+      Tests  32 passed (32)
+   Duration  299ms
 ```
 
 覆盖内容：
@@ -66,8 +66,11 @@ $ pnpm test:unit
 - `tests/unit/healthz.test.ts`：`/healthz` 固定响应；真实 loopback socket 上数据库 down 时
   `/healthz` 仍 200 而 `/readyz` 503；未配置探针时 `/readyz` 503 + `not_configured`；未知路由
   JSON 404。
-- `tests/unit/env.test.ts`：默认 `local` / `127.0.0.1` / `8787`；端口范围；拒绝 `0.0.0.0` 与
-  `192.168.x.x`；显式 opt-in 放行；`DATABASE_URL` 校验错误不包含密码；日志脱敏。
+- `tests/unit/env.test.ts`：默认 `local` / `127.0.0.1` / `8787`；端口范围；严格 loopback 判定
+  （合法 `127.0.0.0/8`、`::1` 等价写法、`localhost`；拒绝 `127.999.999.999`、`127.1`、
+  `127.0.0.1:8787`、`::2`、`::ffff:127.0.0.1`、`localhost.attacker.example` 等）；显式 opt-in
+  放行；`DATABASE_URL` 校验错误不包含密码；`describeDatabaseTarget()` 白名单（用户信息、
+  `?password=`/`?sslpassword=`/unix socket `host=` 参数均不出现）。
 - `tests/unit/migrator.test.ts`：真实 `migrations/` 目录解析、命名/顺序/空文件/缺失目录校验。
 
 ### 4.2 集成测试（真实 PostgreSQL）
@@ -76,8 +79,8 @@ $ pnpm test:unit
 $ pnpm test:integration
  RUN  v5.0.5 /Users/a1-6/Downloads/Ember
  Test Files  1 passed (1)
-      Tests  5 passed (5)
-   Duration  231ms
+      Tests  6 passed (6)
+   Duration  416ms
 
 $ docker exec ember-local-postgres psql -U ember -d ember_test -tAc \
     "select count(*) from pg_namespace where nspname like 'ember_it_%'"
@@ -87,13 +90,16 @@ $ docker exec ember-local-postgres psql -U ember -d ember_test -tAc \
 隔离方式：每次运行创建 `ember_it_<12 hex>` schema，迁移与断言只在该 schema 内进行，结束后仅
 DROP 该 schema。没有 TRUNCATE / DROP 其他 schema，也没有清理开发者的其他数据。
 
+Review Round 1 新增：内容完全一致但文件被重命名的迁移（`0001_platform_metadata_renamed.sql`）
+会被拒绝（`must not be renamed`），且已应用状态保持不变。
+
 ### 4.3 数据库迁移（空库首次 + 幂等）
 
 ```text
 ### 1st run on empty database
 running migrations from /Users/a1-6/Downloads/Ember/migrations
-database: postgres://ember:***@127.0.0.1:55432/ember_p0b01_verify
-applied migration 0001_platform_metadata.sql in 3ms
+database: 127.0.0.1:55432/ember_p0b01_verify
+applied migration 0001_platform_metadata.sql in 10ms
 migrations complete: 1 applied, 0 already applied
 
 ### 2nd run
@@ -105,7 +111,8 @@ migrations complete: 0 applied, 1 already applied
  0001  | 0001_platform_metadata.sql | 2026-10-27 07:46:44.722055+00
 ```
 
-日志中的连接串密码显示为 `***`，未输出真实口令。
+执行时使用的连接串包含 `?password=…&sslpassword=should-never-appear`，CLI 输出中这些值与
+用户名/密码的出现次数为 **0**（`grep -c`），只打印白名单元数据 `host:port/database`。
 
 ### 4.4 API 行为
 
@@ -120,6 +127,10 @@ HTTP/1.1 200 OK
 
 $ lsof -nP -iTCP:8787 -sTCP:LISTEN
 node ... TCP 127.0.0.1:8787 (LISTEN)
+
+# 启动日志只包含白名单连接元数据
+{"level":"info",...,"message":"api listening","service":"ember-api","env":"local",
+ "host":"127.0.0.1","port":8787,"database":{"host":"127.0.0.1","port":55432,"database":"ember"}}
 
 ### 构建产物 + 不可达数据库（liveness 不受影响）
 $ DATABASE_URL=postgres://ember:whatever@127.0.0.1:55999/nope node apps/api/dist/index.js
@@ -138,22 +149,35 @@ api failed to start: Invalid database environment: DATABASE_URL: Invalid input: 
 exit=1
 ```
 
-## 5. GitHub Actions / Draft PR
+## 5. Review Round 1 修复记录
 
-| 项目            | 值                                                                                                                                                                     |
-| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 分支            | `feature/p0b-01-repository-foundation`                                                                                                                                 |
-| 已验证代码 HEAD | `4ea68e4b021ecb597b659127bbcff85050f446c2`                                                                                                                             |
-| Draft PR        | <https://github.com/basicv8vc/Ember/pull/1>（`isDraft: true`，`state: OPEN`，base `main`）                                                                             |
-| CI 运行 #1      | [40469650009](https://github.com/basicv8vc/Ember/actions/runs/40469650009) — **success**，51s（首版 workflow，Actions 仍为 v4 major）                                  |
-| CI 运行 #2      | [40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681) — **success**，48s（当前 workflow：`checkout@v7`、`pnpm/action-setup@v6`、`setup-node@v7`） |
-| CI 步骤         | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                                                    |
-| CI 环境         | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets，无部署                                                                         |
-| `main` 状态     | 未修改（`f182c11`）、未合并                                                                                                                                            |
+| 编号 | 问题                                                                       | 修复                                                                                                                                                    | 证据                                                                                                                                                                             |
+| ---- | -------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-1 | `isLoopbackHost()` 用正则接受 `127.999.999.999` 等非法地址                 | 改用 `node:net` 的 `isIP()` 严格校验：仅接受 `localhost`、合法的 `127.0.0.0/8` IPv4、以及经 URL 规范化的 `::1`；括号形式 `[::1]` 也仅在该地址合法时接受 | `tests/unit/env.test.ts` 新增合法/非法 IPv4、IPv6（含 `::ffff:127.0.0.1`）、端口后缀、域名等 20+ 断言；`loadApiConfig()` 对非法地址在无 opt-in 时拒绝                            |
+| P1-2 | `redactDatabaseUrl()` 仅替换密码，query 参数（`?password=`）仍可能进入日志 | 删除部分脱敏函数，改为白名单 `describeDatabaseTarget()` / `formatDatabaseTarget()`：只输出 host、port、database；用户信息与全部 query 参数整体丢弃      | API 启动日志与 `pnpm db:migrate` 输出均为 `127.0.0.1:55432/ember` 形式；单元测试断言 `password`/`sslpassword`/编码密码/unix socket `host=` 均不出现；CLI 实际输出 `grep -c` 为 0 |
+| P2-1 | 迁移只校验 id + checksum，重命名后仍通过                                   | `runMigrations()` 在 checksum 之前增加已记录文件名一致性检查，重命名时报 `must not be renamed`                                                          | 集成测试第 5 项（真实 PostgreSQL）覆盖；单测同步更新                                                                                                                             |
+| P2-2 | 验收报告的 HEAD/CI 与最终提交不一致                                        | 本报告更新为代码 HEAD `9de20b8` 及其 CI 运行 `40472007272`；本提交（docs-only）的 CI 运行见 PR Checks                                                   | 第 6 节                                                                                                                                                                          |
+
+修复后本地实测：`pnpm lint`、`pnpm format:check`、`pnpm typecheck`、`pnpm build` 均通过；
+`pnpm test:unit` 3 文件 / **32** 测试通过；`pnpm test:integration` 1 文件 / **6** 测试通过；
+`pnpm db:migrate` 在空库首次与重复执行均成功。
+
+## 6. GitHub Actions / Draft PR
+
+| 项目                | 值                                                                                                                                                                                                                                                                            |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 分支                | `feature/p0b-01-repository-foundation`                                                                                                                                                                                                                                        |
+| 已验证代码 HEAD     | `9de20b80d5f038f449ef59838e93cb9b61fdd3c2`                                                                                                                                                                                                                                    |
+| Draft PR            | <https://github.com/basicv8vc/Ember/pull/1>（`isDraft: true`，`state: OPEN`，base `main`）                                                                                                                                                                                    |
+| CI 运行（当前代码） | [40472007272](https://github.com/basicv8vc/Ember/actions/runs/40472007272) — **success**（HEAD `9de20b8`，Review Round 1 修复）                                                                                                                                               |
+| 历史 CI 运行        | [40469650009](https://github.com/basicv8vc/Ember/actions/runs/40469650009)（51s）、[40469868681](https://github.com/basicv8vc/Ember/actions/runs/40469868681)（48s）、[40470138097](https://github.com/basicv8vc/Ember/actions/runs/40470138097)（docs-only）— 均 **success** |
+| CI 步骤             | frozen install → lint → format check → typecheck → unit tests → build → `db:migrate` ×2 → integration tests，全部 ✓                                                                                                                                                           |
+| CI 环境             | 临时 `postgres:17-alpine` service container，`permissions: contents: read`，无 secrets，无部署                                                                                                                                                                                |
+| `main` 状态         | 未修改（`f182c11`）、未合并                                                                                                                                                                                                                                                   |
 
 CI 中仅剩一条信息性提示（`ubuntu-latest` 将于 2026-10-19 后迁移到 Ubuntu 26 镜像），不是失败项。
 
-## 6. 代码质量与仓库卫生
+## 7. 代码质量与仓库卫生
 
 | 检查                        | 结果                                                                                                                |
 | --------------------------- | ------------------------------------------------------------------------------------------------------------------- |
@@ -162,7 +186,7 @@ CI 中仅剩一条信息性提示（`ubuntu-latest` 将于 2026-10-19 后迁移�
 | 敏感文件                    | `.env.local` 被 `.gitignore` 忽略；`node_modules/`、`dist/`、`*.tsbuildinfo` 均忽略                                 |
 | 依赖许可/成本               | 全部为开源 npm 包（Hono、pg、Zod、Vitest、ESLint、Prettier、TypeScript、tsx）；无付费云、无 AI Key、无外部 API 调用 |
 
-## 7. 未执行 / 未完成项
+## 8. 未执行 / 未完成项
 
 以下项目**不属于** P0B-01，均未实现，也**不**计入通过：
 

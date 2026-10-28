@@ -96,23 +96,31 @@ async function main(): Promise<void> {
 
     // Both loops share one stop signal: a shutdown drains the reaper and stops claiming new
     // Runs, while in-flight simulations observe the abort and discard their results.
-    const summary = await Promise.all([
-      reaper,
-      runPollLoop({
-        queue,
-        handler,
-        clock: systemClock,
-        workerId: config.workerId,
-        concurrency: config.concurrency,
-        heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
-        idleIntervalMs: config.intervalMs,
-        errorBackoffMs: config.errorBackoffMs,
-        logger,
-        signal: controller.signal,
-      }),
-    ]).then(([, pollSummary]) => pollSummary);
+    try {
+      const summary = await Promise.all([
+        reaper,
+        runPollLoop({
+          queue,
+          handler,
+          clock: systemClock,
+          workerId: config.workerId,
+          concurrency: config.concurrency,
+          heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
+          idleIntervalMs: config.intervalMs,
+          errorBackoffMs: config.errorBackoffMs,
+          logger,
+          signal: controller.signal,
+        }),
+      ]).then(([, pollSummary]) => pollSummary);
 
-    logger.info('poll loop stopped', { ...summary, workerId: config.workerId });
+      logger.info('poll loop stopped', { ...summary, workerId: config.workerId });
+    } catch (error) {
+      // A failing poll loop must never leave the reaper running: abort first, then drain it,
+      // so the pool can be closed exactly once below.
+      controller.abort();
+      await reaper.catch(() => undefined);
+      throw error;
+    }
   } finally {
     await pool.end();
     logger.info('worker stopped', { workerId: config.workerId });

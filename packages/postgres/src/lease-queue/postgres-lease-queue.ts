@@ -10,6 +10,7 @@ import {
   type RunTerminalStatus,
   type TaskEventPayload,
   type TaskEventPhase,
+  type TaskKind,
   type TaskStatus,
 } from '@ember/domain';
 import type pg from 'pg';
@@ -24,6 +25,7 @@ import {
 import { planRetry } from './retry-policy.js';
 import {
   nextLeaseEpoch,
+  parseClaimableKinds,
   parseLeaseEpoch,
   parseLeasedRun,
   parsePersistedTimestamp,
@@ -76,6 +78,7 @@ const CLAIM_CANDIDATE_SQL = `
 SELECT ${TASK_COLUMNS}
   FROM tasks
  WHERE status IN ('queued', 'retryable_failed')
+   AND kind = ANY($2::text[])
    AND next_run_at <= $1
  ORDER BY next_run_at ASC, created_at ASC, id ASC
  LIMIT 1
@@ -201,6 +204,15 @@ const MAX_CLAIM_SKIPS = 16;
 export interface PostgresLeaseQueueOptions extends LeaseQueueConfigOverrides {
   /** Single clock seam. Defaults to the real UTC system clock. */
   readonly clock?: Clock;
+  /**
+   * Task kinds this queue instance may claim (P0B-05 claim eligibility).
+   *
+   * Defaults to every known kind, which is the exact P0B-04 behaviour. The predicate is part
+   * of the claim transaction's `SELECT … FOR UPDATE SKIP LOCKED`, so an ineligible Task can
+   * never receive a Run, an attempt increment, an epoch increment or a failure event, and it
+   * cannot block an eligible Task that is due later in the queue.
+   */
+  readonly claimableKinds?: readonly TaskKind[];
 }
 
 interface FinishConvergence {
@@ -237,17 +249,24 @@ export class PostgresLeaseQueue implements LeaseQueue {
   private readonly pool: pg.Pool;
   private readonly clock: Clock;
   private readonly config: LeaseQueueConfig;
+  private readonly claimableKinds: readonly TaskKind[];
 
   constructor(pool: pg.Pool, options: PostgresLeaseQueueOptions = {}) {
-    const { clock = systemClock, ...overrides } = options;
+    const { clock = systemClock, claimableKinds, ...overrides } = options;
     this.pool = pool;
     this.clock = clock;
     this.config = resolveLeaseQueueConfig(overrides);
+    this.claimableKinds = parseClaimableKinds(claimableKinds);
   }
 
   /** Effective, validated configuration (useful for a worker loop's heartbeat cadence). */
   get configuration(): LeaseQueueConfig {
     return this.config;
+  }
+
+  /** Task kinds this queue instance is allowed to claim. */
+  get claimableTaskKinds(): readonly TaskKind[] {
+    return this.claimableKinds;
   }
 
   async claimNext(workerId: string, now: Date): Promise<LeasedRun | null> {
@@ -257,7 +276,10 @@ export class PostgresLeaseQueue implements LeaseQueue {
     try {
       return await withTransaction(this.pool, async (client) => {
         for (let skip = 0; skip < MAX_CLAIM_SKIPS; skip += 1) {
-          const candidate = await client.query<TaskRow>(CLAIM_CANDIDATE_SQL, [claimedAt]);
+          const candidate = await client.query<TaskRow>(CLAIM_CANDIDATE_SQL, [
+            claimedAt,
+            this.claimableKinds.slice(),
+          ]);
           const task = candidate.rows[0];
 
           if (task === undefined) {

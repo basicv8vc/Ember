@@ -1,9 +1,12 @@
 import { IdSchema, IsoDateTimeSchema, toInvalidArgumentError } from '@ember/contracts';
 import {
   DomainError,
+  InvalidArgumentError,
   RUN_TERMINAL_STATUSES,
+  TASK_KINDS,
   type LeasedRun,
   type RunTerminalStatus,
+  type TaskKind,
 } from '@ember/domain';
 import { z } from 'zod';
 
@@ -31,6 +34,39 @@ export const LeasedRunSchema = z.strictObject({
 });
 
 export const RunTerminalStatusSchema = z.enum(RUN_TERMINAL_STATUSES);
+
+/**
+ * Validate the Task kinds a queue instance may claim.
+ *
+ * `undefined` keeps the complete P0B-04 behaviour (every known kind). An explicit list must be
+ * non-empty and drawn from the domain vocabulary; duplicates are collapsed. The result is
+ * frozen so a caller cannot widen eligibility after construction.
+ */
+export function parseClaimableKinds(value: unknown): readonly TaskKind[] {
+  if (value === undefined) {
+    return TASK_KINDS;
+  }
+
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new InvalidArgumentError([{ path: 'claimableKinds', code: 'too_small' }]);
+  }
+
+  const unique: TaskKind[] = [];
+
+  for (const entry of value) {
+    if (typeof entry !== 'string' || !(TASK_KINDS as readonly string[]).includes(entry)) {
+      throw new InvalidArgumentError([{ path: 'claimableKinds', code: 'invalid_enum_value' }]);
+    }
+
+    const kind = entry as TaskKind;
+
+    if (!unique.includes(kind)) {
+      unique.push(kind);
+    }
+  }
+
+  return Object.freeze(unique);
+}
 
 export function parseWorkerId(workerId: string): string {
   const parsed = WorkerIdSchema.safeParse(workerId);

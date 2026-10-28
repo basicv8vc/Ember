@@ -3,8 +3,10 @@ import type {
   ExecutionPath,
   Id,
   LeasedRun,
+  MockTaskInput,
   RunTerminalStatus,
   TaskCommand,
+  TaskKind,
   TaskReceipt,
   TaskView,
 } from '@ember/domain';
@@ -56,6 +58,48 @@ export interface RouteDecision {
 /** Deterministic execution-path policy. Actual Fast/Standard decisions land in P0B-05. */
 export interface ExecutionRouter {
   decide(ctx: AuthContext, cmd: TaskCommand): Promise<RouteDecision>;
+}
+
+/**
+ * Trusted execution context for one already-leased Run (P0B-05).
+ *
+ * A worker does not have the end-user `AuthContext`: it read a durable Task row, not a
+ * request. This type therefore keeps the four identities separate instead of inventing a
+ * principal:
+ * - `tenantId` — persisted owner of the Task/Run, never a client-supplied value;
+ * - `agentId` + `policyVersion` — trusted agent configuration read from the agent row;
+ * - `workerId` — the operational execution identity recorded on the Run;
+ * - end-user principal — deliberately absent, because P0B-05 has no verified request
+ *   identity at execution time.
+ *
+ * `kind`/`input` are the persisted Task values, re-validated by the reader before use.
+ */
+export interface RunExecutionContext {
+  readonly tenantId: Id;
+  readonly taskId: Id;
+  readonly runId: Id;
+  readonly agentId: Id;
+  readonly attempt: number;
+  readonly leaseEpoch: number;
+  readonly leaseExpiresAt: string;
+  readonly deadlineAt: string | null;
+  /** Agent policy version from the trusted agent row. Never taken from Task input. */
+  readonly policyVersion: number;
+  readonly kind: TaskKind;
+  readonly input: MockTaskInput;
+  /** Worker that currently owns the Run lease; `null` only for an unclaimed historical row. */
+  readonly workerId: string | null;
+}
+
+/**
+ * Reads the trusted execution context of a claimed Run.
+ *
+ * Implementations must locate the row by tenant + task + run, verify the current run
+ * pointer, lease epoch and attempt, re-validate the persisted payload, and must not hold a
+ * transaction or row lock for the duration of the execution.
+ */
+export interface RunExecutionContextReader {
+  read(lease: LeasedRun, now: Date): Promise<RunExecutionContext>;
 }
 
 export interface ArtifactRef {

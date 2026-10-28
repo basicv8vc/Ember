@@ -395,7 +395,7 @@ describe('tenant-scoped reads and repository behaviour', () => {
     await expectDomainFailure(tasks.requestCancel(ctxB, created.taskId), 'NOT_FOUND');
   });
 
-  it('persists cancel intent without pretending the task is cancelled', async () => {
+  it('applies ADR-0001 cancellation to a queued task exactly once', async () => {
     const key = newKey('cancel');
     const created = await tasks.create(ctxA, chatCommand(agentA.agentId, key));
 
@@ -405,7 +405,7 @@ describe('tenant-scoped reads and repository behaviour', () => {
       [ctxA.tenantId, created.taskId],
     );
 
-    expect(first.rows[0]?.status).toBe('queued');
+    expect(first.rows[0]?.status).toBe('cancelled');
     expect(first.rows[0]?.cancel_requested_at).toBeInstanceOf(Date);
 
     await tasks.requestCancel(ctxA, created.taskId);
@@ -414,13 +414,14 @@ describe('tenant-scoped reads and repository behaviour', () => {
       [ctxA.tenantId, created.taskId],
     );
 
-    expect(second.rows[0]?.status).toBe('queued');
+    expect(second.rows[0]?.status).toBe('cancelled');
     expect(second.rows[0]?.cancel_requested_at.toISOString()).toBe(
       first.rows[0]?.cancel_requested_at.toISOString(),
     );
+    expect(await countEvents(created.taskId)).toBe(2);
 
     const replay = await tasks.create(ctxA, chatCommand(agentA.agentId, key));
-    expect(replay.status).toBe('queued');
+    expect(replay.status).toBe('cancelled');
   });
 });
 

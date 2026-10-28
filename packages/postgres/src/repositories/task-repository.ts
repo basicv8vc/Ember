@@ -8,6 +8,8 @@ import {
 } from '@ember/contracts';
 import {
   DomainError,
+  isTerminalTaskStatus,
+  transitionTask,
   type AuthContext,
   type Id,
   type TaskCommand,
@@ -18,6 +20,7 @@ import {
 } from '@ember/domain';
 import type pg from 'pg';
 import { prepareTaskCommand, type PreparedTaskCommand } from '../task-digest.js';
+import { appendTaskEvent } from './event-store.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 
 interface TaskRow {
@@ -32,6 +35,7 @@ interface TaskRow {
   created_at: Date | string;
   updated_at: Date | string;
   deadline_at: Date | string | null;
+  cancel_requested_at: Date | string | null;
   digest: string;
 }
 
@@ -46,7 +50,7 @@ interface TaskEventRow {
 
 const TASK_COLUMNS = `
   id, tenant_id, agent_id, kind, status, current_run_id, attempt_count,
-  accepted_at, created_at, updated_at, deadline_at, digest
+  accepted_at, created_at, updated_at, deadline_at, cancel_requested_at, digest
 `;
 
 const INSERT_TASK_SQL = `
@@ -88,12 +92,27 @@ SELECT task_id, sequence, phase, occurred_at, trace_id, payload
  ORDER BY sequence ASC
 `;
 
-const REQUEST_CANCEL_SQL = `
-UPDATE tasks
-   SET cancel_requested_at = COALESCE(cancel_requested_at, now()),
-       updated_at = CASE WHEN cancel_requested_at IS NULL THEN now() ELSE updated_at END
+const LOCK_TASK_FOR_CANCEL_SQL = `
+SELECT ${TASK_COLUMNS}
+  FROM tasks
  WHERE tenant_id = $1 AND id = $2
-RETURNING id
+ FOR UPDATE
+`;
+
+const RECORD_RUNNING_CANCEL_SQL = `
+UPDATE tasks
+   SET cancel_requested_at = COALESCE(cancel_requested_at, $1),
+       updated_at = CASE WHEN cancel_requested_at IS NULL THEN $1 ELSE updated_at END
+ WHERE tenant_id = $2 AND id = $3 AND status = 'running'
+`;
+
+const CANCEL_OPEN_TASK_SQL = `
+UPDATE tasks
+   SET status = $1,
+       cancel_requested_at = COALESCE(cancel_requested_at, $2),
+       lease_expires_at = NULL,
+       updated_at = $3
+ WHERE tenant_id = $4 AND id = $5
 `;
 
 const MAX_IDEMPOTENT_INSERT_ATTEMPTS = 3;
@@ -232,24 +251,83 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
   }
 
   /**
-   * Persist cancellation *intent* only.
+   * Apply the ADR-0001 cancellation policy in one Task-locked transaction.
    *
-   * P0B-03 does not transition the task, stop a run, or claim cooperative cancellation.
-   * Those semantics (and OQ-1: cancelling `retryable_failed`) belong to P0B-08.
+   * - `queued`, `retryable_failed` and `waiting_approval` become `cancelled` immediately,
+   *   with one terminal event and no new Run.
+   * - `running` only records the first cancellation intent; the current valid Run or the
+   *   Reaper converges the Task later.
+   * - terminal Tasks are an idempotent no-op: status, timestamps and events are untouched.
+   * - repeated cancellation preserves the first `cancel_requested_at`.
+   *
+   * External cooperative aborting, approval propagation and the public HTTP endpoint remain
+   * P0B-08 concerns. Cancellation cannot roll back external side effects.
    */
   async requestCancel(ctx: AuthContext, taskId: Id): Promise<void> {
     const validatedContext = parseContext(ctx);
     const validatedTaskId = parseTaskId(taskId);
 
     try {
-      const result = await this.pool.query(REQUEST_CANCEL_SQL, [
-        validatedContext.tenantId,
-        validatedTaskId,
-      ]);
+      await withTransaction(this.pool, async (client) => {
+        const locked = await client.query<TaskRow>(LOCK_TASK_FOR_CANCEL_SQL, [
+          validatedContext.tenantId,
+          validatedTaskId,
+        ]);
+        const task = locked.rows[0];
 
-      if (result.rowCount === 0) {
-        throw new DomainError('NOT_FOUND', 'task is not visible in this tenant');
-      }
+        if (task === undefined) {
+          throw new DomainError('NOT_FOUND', 'task is not visible in this tenant');
+        }
+
+        const status = task.status as TaskStatus;
+
+        if (isTerminalTaskStatus(status)) {
+          return;
+        }
+
+        const nowResult = await client.query<{ now: Date }>('SELECT now() AS now');
+        const now = nowResult.rows[0]?.now;
+
+        if (now === undefined) {
+          throw new DomainError('DB_UNAVAILABLE', 'could not read the database clock');
+        }
+
+        if (status === 'running') {
+          // Keep `running`; the currently leased Run or the Reaper resolves it. This is a
+          // monotonic write-once intent, so a repeat does not change timestamps or events.
+          await client.query(RECORD_RUNNING_CANCEL_SQL, [
+            now,
+            validatedContext.tenantId,
+            validatedTaskId,
+          ]);
+          return;
+        }
+
+        const nextStatus = transitionTask(status, 'cancelled');
+        const updated = await client.query(CANCEL_OPEN_TASK_SQL, [
+          nextStatus,
+          now,
+          now,
+          validatedContext.tenantId,
+          validatedTaskId,
+        ]);
+
+        if (updated.rowCount !== 1) {
+          throw new DomainError('DB_UNAVAILABLE', 'could not apply cancellation to the task');
+        }
+
+        await appendTaskEvent(client, {
+          tenantId: validatedContext.tenantId,
+          taskId: validatedTaskId,
+          phase: 'cancelled',
+          occurredAt: now,
+          payload: {
+            fromStatus: status,
+            toStatus: nextStatus,
+            cancelRequested: true,
+          },
+        });
+      });
     } catch (error) {
       throw asDomainError(error);
     }

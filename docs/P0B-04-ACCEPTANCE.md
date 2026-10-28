@@ -8,20 +8,20 @@
 
 ## 1. 执行环境
 
-| 项目       | 值                                                                                       |
-| ---------- | ---------------------------------------------------------------------------------------- |
-| 日期       | 2026-10-28（本地时区 UTC+9）                                                             |
-| OS         | macOS 26.3（Darwin 25D125，arm64）                                                       |
-| Node.js    | **v24.22.1 LTS**（与 `.nvmrc` 一致；系统默认 `node` 为 23.11.0，验收显式使用 24.22.1）   |
-| pnpm       | **12.15.0**（`packageManager` 固定）                                                     |
-| TypeScript | 5.9.3，`strict: true`，NodeNext ESM                                                      |
-| Zod        | 4.6.7                                                                                    |
-| Vitest     | 5.0.5                                                                                    |
-| PostgreSQL | **17.11**（Docker `postgres:17-alpine`，容器 `ember-local-postgres`）                    |
-| Docker     | Client/Server 29.0.1 + Compose v2                                                        |
-| Base       | `origin/main` @ `01ef99723134339daccf79db43765c68f8b00a7a`（P0B-03 merge）               |
-| 分支       | `feature/p0b-04-durable-worker-lease`                                                    |
-| ADR 来源   | `origin/docs/adr-0001-cancellation-retry-coordination` @ `7c7125d`，原样引入，未改写内容 |
+| 项目       | 值                                                                                                            |
+| ---------- | ------------------------------------------------------------------------------------------------------------- |
+| 日期       | 2026-10-28（本地时区 UTC+9）                                                                                  |
+| OS         | macOS 26.3（Darwin 25D125，arm64）                                                                            |
+| Node.js    | **v24.22.1 LTS**（与 `.nvmrc` 一致；系统默认 `node` 为 23.11.0，验收显式使用 24.22.1）                        |
+| pnpm       | **12.15.0**（`packageManager` 固定）                                                                          |
+| TypeScript | 5.9.3，`strict: true`，NodeNext ESM                                                                           |
+| Zod        | 4.6.7                                                                                                         |
+| Vitest     | 5.0.5                                                                                                         |
+| PostgreSQL | **17.11**（Docker `postgres:17-alpine`，容器 `ember-local-postgres`）                                         |
+| Docker     | Client/Server 29.0.1 + Compose v2                                                                             |
+| Base       | `origin/main` @ `01ef99723134339daccf79db43765c68f8b00a7a`（P0B-03 merge）                                    |
+| 分支       | `feature/p0b-04-durable-worker-lease`                                                                         |
+| ADR 来源   | `origin/docs/adr-0001-cancellation-retry-coordination` @ `04dad2e`，原样引入（Prettier 表格对齐），未改写语义 |
 
 本地测试数据库为 `ember_test`，每个集成测试文件创建自己的 `ember_it_<12 hex>` Schema；
 没有对 `public` 或其他 Schema 执行 TRUNCATE/DROP。ESM smoke 使用独立

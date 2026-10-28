@@ -19,13 +19,13 @@ We need an explicit policy that remains correct after process restarts and with 
 
 ### 1. Task status and cancellation intent
 
-| Current Task status | Behavior after an authorized cancellation request |
-| --- | --- |
-| `queued` | Atomically record cancellation intent and transition to `cancelled`; do not claim. |
-| `retryable_failed` | Atomically record cancellation intent and transition directly to `cancelled`; do not requeue. |
-| `waiting_approval` | Atomically record cancellation intent and transition to `cancelled`; pending approval must not resurrect the Task. |
-| `running` | Atomically record cancellation intent, keep `running` until the active Run is resolved by the worker or reaper, and prohibit further retries. |
-| `completed`, `failed`, `cancelled` | Idempotent terminal no-op: leave status, timestamps, final result and events unchanged. |
+| Current Task status                | Behavior after an authorized cancellation request                                                                                             |
+| ---------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `queued`                           | Atomically record cancellation intent and transition to `cancelled`; do not claim.                                                            |
+| `retryable_failed`                 | Atomically record cancellation intent and transition directly to `cancelled`; do not requeue.                                                 |
+| `waiting_approval`                 | Atomically record cancellation intent and transition to `cancelled`; pending approval must not resurrect the Task.                            |
+| `running`                          | Atomically record cancellation intent, keep `running` until the active Run is resolved by the worker or reaper, and prohibit further retries. |
+| `completed`, `failed`, `cancelled` | Idempotent terminal no-op: leave status, timestamps, final result and events unchanged.                                                       |
 
 - `tasks.cancel_requested_at` is a **monotonic, write-once intent** while the Task is nonterminal. Repeated requests must not overwrite it, create duplicate events or reset retry schedules.
 - Idempotent cancellation requests are API/repository semantics, **not** same-state Task FSM transitions. The existing FSM rule rejecting `cancelled → cancelled` remains unchanged.
@@ -58,15 +58,15 @@ Stopping a local process or external request is best-effort; the guarantee is a 
 
 Take a Task-level row lock (`SELECT … FOR UPDATE` or an equivalent atomic conditional write) for each competing cancellation, claim, requeue, finish and reaper transition. Evaluate predicates **after** acquiring the relevant locks; each path uses a consistent lock order to avoid deadlocks.
 
-| Race | Required result |
-| --- | --- |
-| Cancel commits before claim/requeue | Claim/requeue fails or skips; no new Run is created. |
-| Claim commits before cancel | Its new Run is valid; cancellation records intent on `running`, and the Run must subsequently cancel or expire. |
-| Cancel commits before worker finish | Worker finish may not commit `completed`, `failed` or a retry; resolve cancellation if lease/fencing permits. |
-| Worker finish commits a terminal Task before cancel | Task stays terminal; later cancel is an idempotent no-op. |
-| Cancel commits before retry timer fires | Retry scheduler skips; Task becomes/stays `cancelled`. |
-| Cancel commits before reaper handles expired Run | Reaper resolves the expired Run and leaves the Task `cancelled`; it may not requeue. |
-| Reaper/retry/deadline terminal transition commits before cancel | The already-committed terminal status wins; later cancellation is a no-op. |
+| Race                                                            | Required result                                                                                                 |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Cancel commits before claim/requeue                             | Claim/requeue fails or skips; no new Run is created.                                                            |
+| Claim commits before cancel                                     | Its new Run is valid; cancellation records intent on `running`, and the Run must subsequently cancel or expire. |
+| Cancel commits before worker finish                             | Worker finish may not commit `completed`, `failed` or a retry; resolve cancellation if lease/fencing permits.   |
+| Worker finish commits a terminal Task before cancel             | Task stays terminal; later cancel is an idempotent no-op.                                                       |
+| Cancel commits before retry timer fires                         | Retry scheduler skips; Task becomes/stays `cancelled`.                                                          |
+| Cancel commits before reaper handles expired Run                | Reaper resolves the expired Run and leaves the Task `cancelled`; it may not requeue.                            |
+| Reaper/retry/deadline terminal transition commits before cancel | The already-committed terminal status wins; later cancellation is a no-op.                                      |
 
 If cancellation and expiry/retry conditions are both visible **at the time a transaction holds the Task lock**, apply cancellation first. Terminal states are immutable; never rewrite a previously committed `completed`/`failed` outcome.
 

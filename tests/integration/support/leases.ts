@@ -240,3 +240,53 @@ export async function parkOtherOpenTasks(pool: TestPool, keepTaskId: string): Pr
     [keepTaskId],
   );
 }
+
+/**
+ * Minimal structural view of a `pg` client: enough to read the backend pid.
+ *
+ * `pg.PoolClient` declares overloaded `query` signatures, so deriving a client type from
+ * `Pool.connect` is not possible; a structural interface accepts the real client instead.
+ */
+interface LockHolder {
+  query<R extends Record<string, unknown>>(sql: string): Promise<{ readonly rows: readonly R[] }>;
+}
+
+/**
+ * Wait until this exact blocker session is blocking another backend on a row lock.
+ *
+ * Scoping by `pg_blocking_pids(pid)` (instead of matching SQL text) keeps concurrently
+ * running integration test files — which share one database but use separate schemas —
+ * from satisfying this wait accidentally.
+ */
+export async function waitForTaskLockWaiter(
+  pool: TestPool,
+  blocker: LockHolder,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const pidRow = await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const pid = pidRow.rows[0]?.pid;
+
+  if (pid === undefined) {
+    throw new Error('could not read the blocker backend pid');
+  }
+
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND $1 = ANY(pg_blocking_pids(pid))`,
+      [pid],
+    );
+
+    if (Number(result.rows[0]?.count ?? '0') > 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error('timed out waiting for a task row lock waiter');
+}

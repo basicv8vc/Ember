@@ -44,6 +44,88 @@ async function syncClock(): Promise<void> {
   clock.set(await databaseNow(db.pool));
 }
 
+/**
+ * Inject a failure on the second `leased` event (the retry claim) after the intermediate
+ * `retryable_failed → queued` promotion has already been written. This proves that the
+ * promotion, its event and the new Run share one transaction.
+ */
+async function installSecondLeaseEventFailureTrigger(): Promise<void> {
+  await db.pool.query(`
+    CREATE OR REPLACE FUNCTION p0b04_reject_second_lease()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF NEW.phase = 'leased' AND (NEW.payload->>'attempt')::int >= 2 THEN
+        RAISE EXCEPTION 'injected second lease failure';
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    CREATE TRIGGER p0b04_reject_second_lease_trg
+      BEFORE INSERT ON task_events
+      FOR EACH ROW EXECUTE FUNCTION p0b04_reject_second_lease();
+  `);
+}
+
+async function removeSecondLeaseEventFailureTrigger(): Promise<void> {
+  await db.pool.query(`
+    DROP TRIGGER IF EXISTS p0b04_reject_second_lease_trg ON task_events;
+    DROP FUNCTION IF EXISTS p0b04_reject_second_lease();
+  `);
+}
+
+/**
+ * Record every real `tasks.status` change in this test schema.
+ *
+ * A durable event alone cannot prove that the intermediate `queued` state was written to
+ * PostgreSQL, so this audit table observes the actual row updates.
+ */
+async function installTaskStatusAudit(): Promise<void> {
+  await db.pool.query(`
+    CREATE TABLE p0b04_task_status_audit (
+      id bigserial PRIMARY KEY,
+      task_id uuid NOT NULL,
+      from_status text NOT NULL,
+      to_status text NOT NULL,
+      changed_at timestamptz NOT NULL
+    );
+    CREATE OR REPLACE FUNCTION p0b04_audit_task_status()
+    RETURNS trigger LANGUAGE plpgsql AS $$
+    BEGIN
+      IF OLD.status IS DISTINCT FROM NEW.status THEN
+        INSERT INTO p0b04_task_status_audit (task_id, from_status, to_status, changed_at)
+        VALUES (NEW.id, OLD.status, NEW.status, now());
+      END IF;
+      RETURN NEW;
+    END;
+    $$;
+    CREATE TRIGGER p0b04_audit_task_status_trg
+      AFTER UPDATE ON tasks
+      FOR EACH ROW EXECUTE FUNCTION p0b04_audit_task_status();
+  `);
+}
+
+async function readTaskStatusAudit(
+  taskId: string,
+): Promise<readonly { from_status: string; to_status: string }[]> {
+  const result = await db.observerPool.query<{ from_status: string; to_status: string }>(
+    `SELECT from_status, to_status
+       FROM p0b04_task_status_audit
+      WHERE task_id = $1
+      ORDER BY id ASC`,
+    [taskId],
+  );
+
+  return result.rows;
+}
+
+async function removeTaskStatusAudit(): Promise<void> {
+  await db.pool.query(`
+    DROP TRIGGER IF EXISTS p0b04_audit_task_status_trg ON tasks;
+    DROP FUNCTION IF EXISTS p0b04_audit_task_status();
+    DROP TABLE IF EXISTS p0b04_task_status_audit;
+  `);
+}
+
 beforeAll(async () => {
   db = await createTestDatabase({ maxConnections: 24 });
   agents = new PostgresAgentRepository(db.pool);
@@ -130,6 +212,119 @@ describe('B-T10 lease expiry and recovery', () => {
     expect(taskAfterRetry.current_run_id).toBe(retried?.runId);
     expect(taskAfterRetry.attempt_count).toBe(2);
     expect(taskAfterRetry.lease_epoch).toBe('2');
+
+    // P1-1: the durable event trail must show both approved edges, not a direct
+    // retryable_failed -> running transition.
+    const eventsAfterRetry = await listEventSnapshots(
+      db.observerPool,
+      ctx.tenantId,
+      created.taskId,
+    );
+    expect(eventsAfterRetry.map((event) => event.phase)).toEqual([
+      'accepted',
+      'leased',
+      'started',
+      'retry_scheduled',
+      'retry_scheduled',
+      'leased',
+      'started',
+    ]);
+    expect(eventsAfterRetry[3]?.payload['fromStatus']).toBe('running');
+    expect(eventsAfterRetry[3]?.payload['toStatus']).toBe('retryable_failed');
+    expect(eventsAfterRetry[4]?.payload['fromStatus']).toBe('retryable_failed');
+    expect(eventsAfterRetry[4]?.payload['toStatus']).toBe('queued');
+    expect(eventsAfterRetry[5]?.payload['fromStatus']).toBe('queued');
+    expect(eventsAfterRetry[5]?.payload['toStatus']).toBe('running');
+    expect(eventsAfterRetry[5]?.payload['runId']).toBe(retried?.runId);
+    expect(eventsAfterRetry[5]?.payload['attempt']).toBe(2);
+    expect(eventsAfterRetry[6]?.payload['runStatus']).toBe('running');
+  });
+
+  it('rolls back the retry promotion and its event when the retry claim fails', async () => {
+    const created = await createQueuedTask(tasks, ctx, agent.agentId, 'retry-atomic');
+    await syncClock();
+    await parkOtherOpenTasks(db.pool, created.taskId);
+    const first = await queue.claimNext('worker-retry-atomic', clock.now());
+    expect(first).not.toBeNull();
+
+    clock.advance(RECOVERY_OPTIONS.leaseDurationMs as number);
+    await queue.reapExpired(clock.now());
+
+    const afterReap = await readTask(db.observerPool, ctx.tenantId, created.taskId);
+    expect(afterReap.status).toBe('retryable_failed');
+    clock.set(afterReap.next_run_at);
+    await parkOtherOpenTasks(db.pool, created.taskId);
+
+    const taskBefore = afterReap;
+    const runsBefore = await listRuns(db.observerPool, ctx.tenantId, created.taskId);
+    const eventsBefore = await listEventSnapshots(db.observerPool, ctx.tenantId, created.taskId);
+
+    await installSecondLeaseEventFailureTrigger();
+
+    let caught: unknown;
+    try {
+      await queue.claimNext('worker-retry-atomic-2', clock.now());
+    } catch (error) {
+      caught = error;
+    } finally {
+      await removeSecondLeaseEventFailureTrigger();
+    }
+
+    expect(isDomainError(caught)).toBe(true);
+    expect((caught as { code: string }).code).toBe('DB_UNAVAILABLE');
+
+    // The in-transaction promotion and its event must be gone with the failed claim.
+    const taskAfter = await readTask(db.observerPool, ctx.tenantId, created.taskId);
+    expect(taskAfter).toEqual(taskBefore);
+    expect(taskAfter.status).toBe('retryable_failed');
+    expect(taskAfter.attempt_count).toBe(1);
+    expect(taskAfter.lease_epoch).toBe('1');
+    expect(taskAfter.current_run_id).toBe(first?.runId);
+    expect(await listRuns(db.observerPool, ctx.tenantId, created.taskId)).toEqual(runsBefore);
+    expect(await listEventSnapshots(db.observerPool, ctx.tenantId, created.taskId)).toEqual(
+      eventsBefore,
+    );
+
+    const promotions = eventsBefore.filter(
+      (event) => event.phase === 'retry_scheduled' && event.payload['toStatus'] === 'queued',
+    );
+    expect(promotions).toHaveLength(0);
+  });
+
+  it('persists retryable_failed -> queued -> running as real database transitions', async () => {
+    await installTaskStatusAudit();
+
+    try {
+      const created = await createQueuedTask(tasks, ctx, agent.agentId, 'retry-persistence');
+      await syncClock();
+      await parkOtherOpenTasks(db.pool, created.taskId);
+
+      const first = await queue.claimNext('worker-persist-1', clock.now());
+      expect(first).not.toBeNull();
+
+      clock.advance(RECOVERY_OPTIONS.leaseDurationMs as number);
+      await queue.reapExpired(clock.now());
+
+      const afterReap = await readTask(db.observerPool, ctx.tenantId, created.taskId);
+      expect(afterReap.status).toBe('retryable_failed');
+
+      clock.set(afterReap.next_run_at);
+      await parkOtherOpenTasks(db.pool, created.taskId);
+
+      const second = await queue.claimNext('worker-persist-2', clock.now());
+      expect(second?.attempt).toBe(2);
+
+      // Every edge must exist as a real `tasks` row update, including the intermediate
+      // `retryable_failed -> queued` promotion that is invisible after COMMIT.
+      expect(await readTaskStatusAudit(created.taskId)).toEqual([
+        { from_status: 'queued', to_status: 'running' },
+        { from_status: 'running', to_status: 'retryable_failed' },
+        { from_status: 'retryable_failed', to_status: 'queued' },
+        { from_status: 'queued', to_status: 'running' },
+      ]);
+    } finally {
+      await removeTaskStatusAudit();
+    }
   });
 
   it('lets two independent reapers terminalize the same expired run only once', async () => {
@@ -230,6 +425,31 @@ describe('B-T10 lease expiry and recovery', () => {
     expect(events[1]?.payload['fromStatus']).toBe('queued');
     expect(events[1]?.payload['toStatus']).toBe('failed');
     expect(events[1]?.payload['errorCode']).toBe('DEADLINE_EXCEEDED');
+  });
+
+  it('converges a queued task with an exhausted execution budget (ADR-0002)', async () => {
+    const created = await createQueuedTask(tasks, ctx, agent.agentId, 'preclaim-budget');
+    await syncClock();
+    await db.pool.query('UPDATE tasks SET attempt_count = max_attempts WHERE id = $1', [
+      created.taskId,
+    ]);
+    await parkOtherOpenTasks(db.pool, created.taskId);
+
+    const claimed = await queue.claimNext('worker-budget-exhausted', clock.now());
+    expect(claimed).toBeNull();
+
+    const task = await readTask(db.observerPool, ctx.tenantId, created.taskId);
+    expect(task.status).toBe('failed');
+    expect(task.attempt_count).toBe(task.max_attempts);
+    expect(task.lease_epoch).toBe('0');
+    expect(task.current_run_id).toBeNull();
+    expect(await listRuns(db.observerPool, ctx.tenantId, created.taskId)).toHaveLength(0);
+
+    const events = await listEventSnapshots(db.observerPool, ctx.tenantId, created.taskId);
+    expect(events.map((event) => event.phase)).toEqual(['accepted', 'failed']);
+    expect(events[1]?.payload['fromStatus']).toBe('queued');
+    expect(events[1]?.payload['toStatus']).toBe('failed');
+    expect(events[1]?.payload['errorCode']).toBeUndefined();
   });
 
   it('reaps a running task at its deadline even before the lease expires', async () => {

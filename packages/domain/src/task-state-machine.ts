@@ -9,10 +9,11 @@ import { TASK_TERMINAL_STATUSES, type TaskStatus, type TaskTerminalStatus } from
  *
  * The table intentionally does NOT include:
  * - `waiting_external` (reserved by the RFC, outside P0-B);
- * - `queued → failed` except for the P0B-04 OQ-2 proposal: a Task that is already past
- *   its deadline before the first claim cannot legally be claimed and must not be left in
- *   the queue forever. That edge is additive and is awaiting CTO review (see
- *   `docs/P0B-04-IMPLEMENTATION.md`, section "OQ-2 proposal").
+ * - `queued → failed` except for the conditional OQ-2 decision in ADR-0002: a Task that
+ *   is already past its deadline or has no execution budget before any claim cannot be
+ *   claimed and must not be left in the queue forever. This edge is never used to report
+ *   a Run outcome or to fabricate a Run (see
+ *   `docs/adr/0002-preclaim-deadline-failure.md`).
  *
  * OQ-1 was accepted in ADR-0001: cancelling a `retryable_failed` Task is legal because a
  * cancellation intent wins over any not-yet-scheduled retry. The edge is added here; no

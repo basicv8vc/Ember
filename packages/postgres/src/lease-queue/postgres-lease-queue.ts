@@ -128,6 +128,12 @@ UPDATE tasks
  WHERE tenant_id = $7 AND id = $8
 `;
 
+const PROMOTE_RETRY_SQL = `
+UPDATE tasks
+   SET status = $1, updated_at = $2
+ WHERE tenant_id = $3 AND id = $4 AND status = $5
+`;
+
 const HEARTBEAT_RUN_SQL = `
 UPDATE runs
    SET leased_until = $1, updated_at = $2
@@ -300,7 +306,7 @@ export class PostgresLeaseQueue implements LeaseQueue {
 
   async heartbeat(run: LeasedRun, now: Date): Promise<boolean> {
     const leased = parseLeasedRun(run);
-    const heartbeatAt = parseNow(now);
+    const requestedAt = parseNow(now);
 
     try {
       return await withTransaction(this.pool, async (client) => {
@@ -324,7 +330,7 @@ export class PostgresLeaseQueue implements LeaseQueue {
 
         const taskEpoch = parseLeaseEpoch(task.lease_epoch);
 
-        return await this.renewLease(client, task, leased, taskEpoch, heartbeatAt);
+        return await this.renewLease(client, task, leased, taskEpoch, requestedAt);
       });
     } catch (error) {
       throw asDomainError(error);
@@ -340,8 +346,6 @@ export class PostgresLeaseQueue implements LeaseQueue {
     if (validatedOutcome === 'lease_expired') {
       throw new InvalidArgumentError([{ path: 'outcome', code: 'lease_expired_is_reaper_only' }]);
     }
-
-    const finishedAt = parseNow(this.clock.now(), 'clock.now()');
 
     try {
       return await withTransaction(this.pool, async (client) => {
@@ -386,16 +390,22 @@ export class PostgresLeaseQueue implements LeaseQueue {
           return false;
         }
 
+        // Sample the clock only after both row locks are held. A Finish that waited behind
+        // another transaction must never accept a Lease that expired during that wait.
+        const finishedAt = this.sampleAfterLock();
+
         const taskLeaseExpiry = parsePersistedTimestamp(task.lease_expires_at);
         if (taskLeaseExpiry === null || taskLeaseExpiry.getTime() <= finishedAt.getTime()) {
           return false;
         }
 
-        if (runRow.leased_until !== null) {
-          const runLeaseExpiry = toDate(runRow.leased_until);
-          if (runLeaseExpiry.getTime() <= finishedAt.getTime()) {
-            return false;
-          }
+        if (runRow.leased_until === null) {
+          // Without a persisted Run lease expiry there is no authoritative evidence that
+          // this Run still owns the lease. Fail closed with no write and no event.
+          return false;
+        }
+        if (toDate(runRow.leased_until).getTime() <= finishedAt.getTime()) {
+          return false;
         }
 
         const deadlineAt = parsePersistedTimestamp(task.deadline_at);
@@ -461,27 +471,30 @@ export class PostgresLeaseQueue implements LeaseQueue {
     }
   }
 
+  /**
+   * Re-read the injected clock after the final row lock of a transaction has been acquired.
+   *
+   * A caller timestamp is only an observation from before the transaction started; it may
+   * predate an arbitrary lock wait. Every liveness decision must therefore use the later of
+   * the caller's sample and a fresh post-lock sample, otherwise a Lease that expired while
+   * waiting behind another transaction could still be renewed or finished.
+   */
+  private sampleAfterLock(observedAt?: Date): Date {
+    const lockedAt = parseNow(this.clock.now(), 'clock.now()');
+
+    return observedAt === undefined || lockedAt.getTime() > observedAt.getTime()
+      ? lockedAt
+      : new Date(observedAt.getTime());
+  }
+
   private async renewLease(
     client: pg.PoolClient,
     task: TaskRow,
     leased: LeasedRun,
     taskEpoch: number,
-    heartbeatAt: Date,
+    requestedAt: Date,
   ): Promise<boolean> {
-    const taskLeaseExpiry = parsePersistedTimestamp(task.lease_expires_at);
-
-    if (taskLeaseExpiry === null || taskLeaseExpiry.getTime() <= heartbeatAt.getTime()) {
-      return false;
-    }
-
     if (taskEpoch !== leased.leaseEpoch) {
-      return false;
-    }
-
-    const deadlineAt = parsePersistedTimestamp(task.deadline_at);
-
-    if (deadlineAt !== null && deadlineAt.getTime() <= heartbeatAt.getTime()) {
-      // The worker must stop; the Reaper will converge the Task without retry.
       return false;
     }
 
@@ -499,6 +512,22 @@ export class PostgresLeaseQueue implements LeaseQueue {
     const runEpoch = parseLeaseEpoch(runRow.lease_epoch);
 
     if (runEpoch !== leased.leaseEpoch || runRow.attempt !== leased.attempt) {
+      return false;
+    }
+
+    // Both the Task and the Run row locks are now held. Only here is "now" authoritative:
+    // a Heartbeat that waited for either lock may no longer rely on the caller timestamp.
+    const heartbeatAt = this.sampleAfterLock(requestedAt);
+    const taskLeaseExpiry = parsePersistedTimestamp(task.lease_expires_at);
+
+    if (taskLeaseExpiry === null || taskLeaseExpiry.getTime() <= heartbeatAt.getTime()) {
+      return false;
+    }
+
+    const deadlineAt = parsePersistedTimestamp(task.deadline_at);
+
+    if (deadlineAt !== null && deadlineAt.getTime() <= heartbeatAt.getTime()) {
+      // The worker must stop; the Reaper will converge the Task without retry.
       return false;
     }
 
@@ -560,11 +589,36 @@ export class PostgresLeaseQueue implements LeaseQueue {
     }
 
     // The approved retry path must pass through retryable_failed → queued → running,
-    // never retryable_failed → running directly.
-    const queuedStatus =
-      currentStatus === 'retryable_failed'
-        ? transitionTask(currentStatus, 'queued')
-        : currentStatus;
+    // never retryable_failed → running directly. Persist the intermediate state and append
+    // its event in this same transaction so the durable event trail matches the database
+    // transitions even though the intermediate `queued` state is not visible after COMMIT.
+    let queuedStatus = currentStatus;
+    if (currentStatus === 'retryable_failed') {
+      queuedStatus = transitionTask(currentStatus, 'queued');
+      const promoted = await client.query(PROMOTE_RETRY_SQL, [
+        queuedStatus,
+        claimedAt,
+        task.tenant_id,
+        task.id,
+        currentStatus,
+      ]);
+
+      if (promoted.rowCount !== 1) {
+        throw new DomainError('DB_UNAVAILABLE', 'could not persist retry promotion to queued');
+      }
+
+      await appendTaskEvent(client, {
+        tenantId: task.tenant_id,
+        taskId: task.id,
+        phase: 'retry_scheduled',
+        occurredAt: claimedAt,
+        payload: {
+          fromStatus: currentStatus,
+          toStatus: queuedStatus,
+        },
+      });
+    }
+
     const runningStatus = transitionTask(queuedStatus, 'running');
     transitionRun('created', 'running');
 

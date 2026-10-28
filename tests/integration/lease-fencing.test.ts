@@ -20,6 +20,7 @@ import {
   readRun,
   readTask,
   parkOtherOpenTasks,
+  waitForTaskLockWaiter,
 } from './support/leases.js';
 
 const FENCING_OPTIONS: LeaseQueueConfigOverrides = {
@@ -269,5 +270,135 @@ describe('B-T11 fencing and late results', () => {
     } finally {
       await unreachablePool.end();
     }
+  });
+
+  it('rejects finish when the Run lease expiry is missing', async () => {
+    const created = await createQueuedTask(tasks, ctxA, agentA.agentId, 'missing-run-lease');
+    await syncClock();
+    await parkOtherOpenTasks(db.pool, created.taskId);
+    const leased = await queue.claimNext('worker-missing-lease', clock.now());
+    expect(leased).not.toBeNull();
+
+    await db.pool.query(
+      'UPDATE runs SET leased_until = NULL WHERE tenant_id = $1 AND task_id = $2 AND id = $3',
+      [ctxA.tenantId, created.taskId, leased?.runId],
+    );
+
+    const before = await snapshot(ctxA.tenantId, created.taskId);
+    expect(await queue.finish(leased as NonNullable<typeof leased>, 'succeeded')).toBe(false);
+    expect(await snapshot(ctxA.tenantId, created.taskId)).toEqual(before);
+    expect(
+      (await readRun(db.observerPool, ctxA.tenantId, created.taskId, leased?.runId as string))
+        ?.status,
+    ).toBe('running');
+  });
+
+  it('does not renew a lease that expires while heartbeat waits for the task lock', async () => {
+    const created = await createQueuedTask(tasks, ctxA, agentA.agentId, 'heartbeat-lock-race');
+    await syncClock();
+    await parkOtherOpenTasks(db.pool, created.taskId);
+    const leased = await queue.claimNext('worker-heartbeat-race', clock.now());
+    expect(leased).not.toBeNull();
+
+    const before = await snapshot(ctxA.tenantId, created.taskId);
+    const blocker = await db.pool.connect();
+
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [
+        ctxA.tenantId,
+        created.taskId,
+      ]);
+
+      const pending = queue.heartbeat(leased as NonNullable<typeof leased>, clock.now());
+      await waitForTaskLockWaiter(db.observerPool, blocker);
+
+      // The caller observed a valid lease, but the lease expires while the lock is held.
+      clock.advance(FENCING_OPTIONS.leaseDurationMs as number);
+      await blocker.query('COMMIT');
+
+      await expect(pending).resolves.toBe(false);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+    }
+
+    expect(await snapshot(ctxA.tenantId, created.taskId)).toEqual(before);
+  });
+
+  it('does not finish a lease that expires while finish waits for the task lock', async () => {
+    const created = await createQueuedTask(tasks, ctxA, agentA.agentId, 'finish-lock-race');
+    await syncClock();
+    await parkOtherOpenTasks(db.pool, created.taskId);
+    const leased = await queue.claimNext('worker-finish-race', clock.now());
+    expect(leased).not.toBeNull();
+
+    const before = await snapshot(ctxA.tenantId, created.taskId);
+    const blocker = await db.pool.connect();
+
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [
+        ctxA.tenantId,
+        created.taskId,
+      ]);
+
+      const pending = queue.finish(leased as NonNullable<typeof leased>, 'succeeded');
+      await waitForTaskLockWaiter(db.observerPool, blocker);
+
+      clock.advance(FENCING_OPTIONS.leaseDurationMs as number);
+      await blocker.query('COMMIT');
+
+      await expect(pending).resolves.toBe(false);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+    }
+
+    expect(await snapshot(ctxA.tenantId, created.taskId)).toEqual(before);
+  });
+
+  it('accepts heartbeat and finish after a lock wait while the lease is still valid', async () => {
+    const created = await createQueuedTask(tasks, ctxA, agentA.agentId, 'lock-race-valid');
+    await syncClock();
+    await parkOtherOpenTasks(db.pool, created.taskId);
+    const leased = await queue.claimNext('worker-valid-race', clock.now());
+    expect(leased).not.toBeNull();
+
+    const blocker = await db.pool.connect();
+
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT id FROM tasks WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [
+        ctxA.tenantId,
+        created.taskId,
+      ]);
+
+      const pending = queue.heartbeat(leased as NonNullable<typeof leased>, clock.now());
+      await waitForTaskLockWaiter(db.observerPool, blocker);
+
+      // Still well inside the lease: the post-lock re-sample must not reject a valid lease.
+      clock.advance((FENCING_OPTIONS.leaseDurationMs as number) / 2);
+      await blocker.query('COMMIT');
+
+      await expect(pending).resolves.toBe(true);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+    }
+
+    const renewed = await readTask(db.observerPool, ctxA.tenantId, created.taskId);
+    expect(renewed.lease_expires_at?.getTime()).toBe(
+      clock.now().getTime() + (FENCING_OPTIONS.leaseDurationMs as number),
+    );
+
+    expect(await queue.finish(leased as NonNullable<typeof leased>, 'succeeded')).toBe(true);
+    expect((await readTask(db.observerPool, ctxA.tenantId, created.taskId)).status).toBe(
+      'completed',
+    );
+    expect(
+      (await readRun(db.observerPool, ctxA.tenantId, created.taskId, leased?.runId as string))
+        ?.status,
+    ).toBe('succeeded');
   });
 });

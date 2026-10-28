@@ -18,7 +18,7 @@ import type { TaskStatus } from '@ember/domain';
 const APPROVED_TASK_TRANSITIONS = [
   ['queued', 'running'],
   ['queued', 'cancelled'],
-  // OQ-2 proposal (P0B-04): deadline already elapsed before the first claim.
+  // OQ-2 / ADR-0002: deadline or budget already exhausted before the first claim.
   ['queued', 'failed'],
   ['running', 'completed'],
   ['running', 'waiting_approval'],
@@ -92,7 +92,7 @@ describe('Task state machine — legal transitions', () => {
     expect(transitionTask('running', 'cancelled')).toBe('cancelled');
   });
 
-  it('does not add undocumented edges beyond ADR-0001 and the OQ-2 proposal', () => {
+  it('does not add undocumented edges beyond ADR-0001 and ADR-0002', () => {
     expect(canTransitionTask('waiting_approval', 'running')).toBe(false);
     expect(canTransitionTask('waiting_approval', 'retryable_failed')).toBe(false);
     expect(canTransitionTask('created' as TaskStatus, 'running')).toBe(false);

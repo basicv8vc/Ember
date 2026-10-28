@@ -7,6 +7,7 @@ pnpm-lock.yaml
 
 # Local reference material kept outside the repository history.
 Ember_P0B-01_Pi_Agent_Implementation_Prompt.md
+Ember_P0B-03_Pi_Agent_Implementation_Prompt.md
 Personal_Agent_Platform_Architecture_RFC_v0.1.md
 Personal_Agent_Platform_Architecture_RFC_v0.2.md
 Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md

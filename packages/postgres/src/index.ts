@@ -18,3 +18,16 @@ export {
   type MigrationRunResult,
   type RunMigrationsOptions,
 } from './migrator.js';
+export {
+  PostgresAgentRepository,
+  type AgentRepository,
+  type AgentView,
+  type CreateAgentCommand,
+} from './repositories/agent-repository.js';
+export { PostgresTaskRepository } from './repositories/task-repository.js';
+export {
+  prepareTaskCommand,
+  TASK_COMMAND_DIGEST_VERSION,
+  TASK_COMMAND_MAX_BYTES,
+  type PreparedTaskCommand,
+} from './task-digest.js';

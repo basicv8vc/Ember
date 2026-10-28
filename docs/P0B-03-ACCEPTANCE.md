@@ -10,7 +10,7 @@
 
 | 项目       | 值                                                                                       |
 | ---------- | ---------------------------------------------------------------------------------------- |
-| 日期       | 2026-10-27（本地时区 UTC+8）                                                             |
+| 日期       | 2026-10-27 ~ 2026-10-28（P1-1 修复；本地时区 UTC+9）                                     |
 | OS         | macOS 26.3（Darwin 25D125，arm64）                                                       |
 | Node.js    | **v24.22.1 LTS**（与 `.nvmrc` 一致；本机默认 `node` 为 23.11.0，验收时显式使用 24.22.1） |
 | pnpm       | **12.15.0**（`packageManager` 固定）                                                     |
@@ -54,7 +54,7 @@
 | 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
 | 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，创建 Agent/Task 成功                                         | PASS |
 | 13  | 现有 API 回归                    | 构建产物 `127.0.0.1:8798`：`/healthz` 200、`/readyz` 200（DB up）                                               | PASS |
-| 14  | GitHub Actions                   | run [40523325611](https://github.com/basicv8vc/Ember/actions/runs/40523325611) — success（code HEAD `34e4a85`） | PASS |
+| 14  | GitHub Actions                   | run [40613480994](https://github.com/basicv8vc/Ember/actions/runs/40613480994) — success（code HEAD `8b830be`） | PASS |
 | 15  | Draft PR                         | [#3](https://github.com/basicv8vc/Ember/pull/3)，Draft/Open，base `main`，未合并                                | PASS |
 
 > 注：本地默认 Node 23.11.0 不满足 `engines >=24 <25`；验收显式使用 Node 24.22.1。
@@ -269,17 +269,20 @@ ALTER TABLE tasks
 
 ## 9. GitHub Actions / Draft PR
 
-| 项目                | 值                                  |
-| ------------------- | ----------------------------------- |
-| 分支                | `feature/p0b-03-durable-task-inbox` |
-| Draft PR            | 待推送后填写                        |
-| CI 运行             | 待推送后填写                        |
-| `main` 状态         | 未修改（`a74d68d`）、未合并         |
-| 强制推送 / 自动合并 | 无                                  |
-| 修改保护规则 / 部署 | 无                                  |
+| 项目                 | 值                                                                                                      |
+| -------------------- | ------------------------------------------------------------------------------------------------------- |
+| 分支                 | `feature/p0b-03-durable-task-inbox`                                                                     |
+| 已验证代码 HEAD      | `8b830be2c7e04ec49a64a3186dfb74c1a339efe7`                                                              |
+| Draft PR             | <https://github.com/basicv8vc/Ember/pull/3>（`isDraft: true`，`state: OPEN`，base `main`）              |
+| CI 运行（代码 HEAD） | [40613480994](https://github.com/basicv8vc/Ember/actions/runs/40613480994) — success                    |
+| CI 日志核对          | unit `249 passed`；integration `32 passed`；migration `3 applied` / 重复 `0 applied, 3 already applied` |
+| `main` 状态          | 未修改（`a74d68d`）、未合并                                                                             |
+| 强制推送 / 自动合并  | 无                                                                                                      |
+| 修改保护规则 / 部署  | 无                                                                                                      |
 
 CI 工作流未修改：仍为 `permissions: contents: read`、临时 `postgres:17-alpine`
-service container、无 secrets、无部署。
+service container、无 secrets、无部署。P1-1 修复在同一个 Draft PR #3 推送，未新建 PR、
+未合并 `main`、未强推。
 
 ## 10. 安全与成本
 

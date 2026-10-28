@@ -42,23 +42,23 @@
 
 所有命令在仓库根目录执行，使用 Node 24.22.1 + pnpm 12.15.0。
 
-| #   | 命令                             | 实际结果                                                                                     | 状态 |
-| --- | -------------------------------- | -------------------------------------------------------------------------------------------- | ---- |
-| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误（lockfile 已包含 `apps/worker`）                            | PASS |
-| 2   | `pnpm lint`                      | `eslint .` 退出码 0                                                                          | PASS |
-| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                 | PASS |
-| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含 queue、worker、全部测试）                      | PASS |
-| 5   | `pnpm test:unit`                 | **11 个文件 / 265 个测试通过**（P0B-03 的 249 + P0B-04 新增 16）                             | PASS |
-| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 `packages/postgres/dist` 与 `apps/worker/dist`   | PASS |
-| 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                                       | PASS |
-| 8   | `pnpm db:migrate`（0004 首次）   | `applied migration 0004_lease_fencing_and_retry.sql in 42ms`；`1 applied, 3 already applied` | PASS |
-| 9   | `pnpm db:migrate`（重复两次）    | `0 applied, 4 already applied`；重复迁移零变更                                               | PASS |
-| 10  | `pnpm test:integration`          | **7 个文件 / 65 个测试通过**（真实 PostgreSQL 17；P0B-03 32 个回归 + P0B-04 33 个）          | PASS |
-| 11  | `git diff --check`               | 无 whitespace 错误                                                                           | PASS |
-| 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，Claim/Heartbeat/Finish 成功（见 3.3）     | PASS |
-| 13  | Worker 进程 smoke                | `reaper-only` 启动、SIGTERM 优雅关闭；`poll` 模式明确拒绝（见 3.4）                          | PASS |
-| 14  | GitHub Actions                   | PENDING — 推送后补充 run URL                                                                 | TBD  |
-| 15  | Draft PR                         | PENDING — 推送后补充 URL；只能是 Draft，base `main`，不合并                                  | TBD  |
+| #   | 命令                             | 实际结果                                                                                                        | 状态 |
+| --- | -------------------------------- | --------------------------------------------------------------------------------------------------------------- | ---- |
+| 1   | `pnpm install --frozen-lockfile` | `Lockfile is up to date`，0 错误（lockfile 已包含 `apps/worker`）                                               | PASS |
+| 2   | `pnpm lint`                      | `eslint .` 退出码 0                                                                                             | PASS |
+| 3   | `pnpm format:check`              | `All matched files use Prettier code style!`                                                                    | PASS |
+| 4   | `pnpm typecheck`                 | `tsc -p tsconfig.json` 退出码 0（strict，包含 queue、worker、全部测试）                                         | PASS |
+| 5   | `pnpm test:unit`                 | **11 个文件 / 265 个测试通过**（P0B-03 的 249 + P0B-04 新增 16）                                                | PASS |
+| 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；生成 `packages/postgres/dist` 与 `apps/worker/dist`                      | PASS |
+| 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                                                          | PASS |
+| 8   | `pnpm db:migrate`（0004 首次）   | `applied migration 0004_lease_fencing_and_retry.sql in 42ms`；`1 applied, 3 already applied`                    | PASS |
+| 9   | `pnpm db:migrate`（重复两次）    | `0 applied, 4 already applied`；重复迁移零变更                                                                  | PASS |
+| 10  | `pnpm test:integration`          | **7 个文件 / 65 个测试通过**（真实 PostgreSQL 17；P0B-03 32 个回归 + P0B-04 33 个）                             | PASS |
+| 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
+| 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，Claim/Heartbeat/Finish 成功（见 3.3）                        | PASS |
+| 13  | Worker 进程 smoke                | `reaper-only` 启动、SIGTERM 优雅关闭；`poll` 模式明确拒绝（见 3.4）                                             | PASS |
+| 14  | GitHub Actions                   | run [40630263890](https://github.com/basicv8vc/Ember/actions/runs/40630263890) — success（代码 HEAD `ea9d02d`） | PASS |
+| 15  | Draft PR                         | [#5](https://github.com/basicv8vc/Ember/pull/5)，Draft/Open，base `main`，未合并                                | PASS |
 
 > 本地默认 Node 23.11.0 不满足 `engines >=24 <25`；验收显式使用 Node 24.22.1。
 > 没有通过降低 `engines`、关闭 strict、删除测试或使用 `--ignore-engines` 获得通过。
@@ -285,16 +285,17 @@ Limit
 
 ## 10. GitHub Actions / Draft PR
 
-| 项目                 | 值                                                      |
-| -------------------- | ------------------------------------------------------- |
-| 分支                 | `feature/p0b-04-durable-worker-lease`                   |
-| Base SHA             | `01ef99723134339daccf79db43765c68f8b00a7a`              |
-| 代码 HEAD            | PENDING — 推送后补充                                    |
-| Draft PR             | PENDING — 推送后补充；必须 `isDraft: true`，base `main` |
-| CI 运行（代码 HEAD） | PENDING — 推送后补充                                    |
-| `main` 状态          | 未修改、未合并、未强推                                  |
-| 强制推送 / 自动合并  | 无                                                      |
-| 修改保护规则 / 部署  | 无                                                      |
+| 项目                 | 值                                                                                                          |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| 分支                 | `feature/p0b-04-durable-worker-lease`                                                                       |
+| Base SHA             | `01ef99723134339daccf79db43765c68f8b00a7a`                                                                  |
+| 代码 HEAD            | `ea9d02d1792102b54b01a7832de9c8c7663021f1`                                                                  |
+| Draft PR             | [#5](https://github.com/basicv8vc/Ember/pull/5)（`isDraft: true`，`state: OPEN`，base `main`）              |
+| CI 运行（代码 HEAD） | [40630263890](https://github.com/basicv8vc/Ember/actions/runs/40630263890) — success                        |
+| CI 日志核对          | unit `265 passed`；integration `65 passed`；migration 首次 `4 applied`，重复 `0 applied, 4 already applied` |
+| `main` 状态          | 未修改、未合并、未强推                                                                                      |
+| 强制推送 / 自动合并  | 无                                                                                                          |
+| 修改保护规则 / 部署  | 无                                                                                                          |
 
 CI 工作流未修改：仍为 `permissions: contents: read`、临时 `postgres:17-alpine` service
 container、无 secrets、无付费云、无部署。

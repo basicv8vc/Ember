@@ -68,6 +68,8 @@ Ember/
     adr/0001-cancellation-and-retry-coordination.md  # Accepted OQ-1 decision
     P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and ADR-0002
     P0B-04-ACCEPTANCE.md       # P0B-04 command evidence and B-T09–B-T11 status
+    architecture/              # design docs: upstream RFCs, P0-B spec, V1 proposals
+    prompts/                   # per-task Pi Agent implementation prompts (P0B-01/03/04)
   .github/workflows/ci.yml
   .env.example
   package.json
@@ -392,3 +394,33 @@ These measures are development hygiene, not a security certification.
   fencing, transaction ordering, retry policy, ADR-0002 and worker boundaries.
 - [docs/P0B-04-ACCEPTANCE.md](docs/P0B-04-ACCEPTANCE.md) — P0B-04 command evidence,
   B-T09–B-T11 concurrency samples, CI and remaining risks.
+
+### Upstream design inputs
+
+These documents define the scope implemented by P0B-01–P0B-05. They are historical inputs:
+accepted decisions are restated in the per-task implementation docs and ADRs above, and are not
+retro-actively rewritten here.
+
+- [docs/architecture/Personal_Agent_Platform_Architecture_RFC_v0.2.md](docs/architecture/Personal_Agent_Platform_Architecture_RFC_v0.2.md)
+  — current architecture RFC (control plane, elastic sandbox, Fast/Standard/Heavy routing).
+- [docs/architecture/Personal_Agent_Platform_Architecture_RFC_v0.1.md](docs/architecture/Personal_Agent_Platform_Architecture_RFC_v0.1.md)
+  — superseded RFC baseline, kept as an independent historical record.
+- [docs/architecture/Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md](docs/architecture/Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md)
+  — P0-B minimum vertical slice task specification (B-T01–B-T30).
+- [docs/prompts/Ember_P0B-01_Pi_Agent_Implementation_Prompt.md](docs/prompts/Ember_P0B-01_Pi_Agent_Implementation_Prompt.md)
+  — P0B-01 repository foundation prompt.
+- [docs/prompts/Ember_P0B-03_Pi_Agent_Implementation_Prompt.md](docs/prompts/Ember_P0B-03_Pi_Agent_Implementation_Prompt.md)
+  — P0B-03 durable task inbox prompt.
+- [docs/prompts/Ember_P0B-04_Pi_Agent_Implementation_Prompt.md](docs/prompts/Ember_P0B-04_Pi_Agent_Implementation_Prompt.md)
+  — P0B-04 durable worker/lease/fencing prompt.
+
+### V1 design proposals
+
+Forward-looking designs that are **not yet implemented** and require explicit approval before
+any code follows them.
+
+- [docs/architecture/v1-execution-placement.md](docs/architecture/v1-execution-placement.md) —
+  proposed V1 execution placement (cloud vs. authorized Mac), separation of placement from the
+  `fast | standard | heavy` router, Executor Gateway trust boundary, and the open decisions
+  D-01–D-05. Status: Proposed, pending CTO and product-owner sign-off; it changes no P0B-01–05
+  code and introduces no new Task/Run state.

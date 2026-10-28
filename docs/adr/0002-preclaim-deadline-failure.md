@@ -41,6 +41,12 @@ Under a Task row lock, the writer must verify:
 
 No in-memory-only transition is sufficient. The state update and its event must commit in the same transaction as all related authoritative writes.
 
+`PostgresLeaseQueue.convergeBeforeClaim()` enforces this precondition before any write: it
+queries for a `created`/`running` Run while holding the Task row lock. If one exists, it
+throws `DB_UNAVAILABLE` and the surrounding transaction rolls back, leaving Task, Run and
+Event untouched. Both callers — the Claim path and the Reaper — go through this method, so
+the invariant violation can never be "repaired" by terminalizing the Task.
+
 ### 3. Cancellation priority
 
 If a committed `cancel_requested_at` is visible while the Task row is locked:
@@ -83,8 +89,9 @@ The event payload must pass the existing Zod and PostgreSQL allowlists. No promp
 
 - `TASK_TRANSITION_TABLE.queued` includes `failed`.
 - `PostgresLeaseQueue.claimNext` checks the locked Task and calls the pre-claim convergence path; the Reaper has the same open-deadline scan.
+- The convergence helper rejects the transition when a `created`/`running` Run exists, so an anomalous Task can never strand an active Run.
 - Failure events are appended through `appendTaskEvent` under the Task row lock.
-- Tests cover: pre-claim deadline, attempt-budget exhaustion, cancellation precedence, no Run creation, unchanged attempt/epoch, and all negative state-machine edges.
+- Tests cover: pre-claim deadline, attempt-budget exhaustion, cancellation precedence, no Run creation, unchanged attempt/epoch, active-Run rejection on both Claim and Reaper, and all negative state-machine edges.
 
 ## References
 

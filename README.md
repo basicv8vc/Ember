@@ -305,7 +305,7 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 
 ```bash
 pnpm test:unit        # 11 files, 265 tests (no database)
-pnpm test:integration # 72 tests against real PostgreSQL 17
+pnpm test:integration # 74 tests against real PostgreSQL 17
 ```
 
 - Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,

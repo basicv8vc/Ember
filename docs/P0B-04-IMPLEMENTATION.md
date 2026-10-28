@@ -316,6 +316,7 @@ P0B-03 的历史验收文档未被改写。
 | B-T09 双 Worker / 24 并发 Claim / 事务回滚          | `tests/integration/lease-claim.test.ts`                     |
 | B-T10 Lease 到期 / Crash / Reaper / 重试 / Deadline | `tests/integration/lease-recovery.test.ts`                  |
 | P1-1 重试中间态持久化 / Event 审计 / 原子回滚       | `tests/integration/lease-recovery.test.ts`                  |
+| P1-4 ADR-0002 无活跃 Run：Claim/Reaper 负向         | `tests/integration/lease-recovery.test.ts`                  |
 | B-T11 Fencing / 迟到结果 / 单次终态 / 锁等待竞争    | `tests/integration/lease-fencing.test.ts`                   |
 | OQ-1 取消与重试竞争                                 | `tests/integration/cancellation-retry.test.ts`              |
 | 状态机全矩阵（含 ADR-0001/ADR-0002）                | `tests/unit/task-state-machine.test.ts`                     |
@@ -369,6 +370,29 @@ P0B-03 的历史验收文档未被改写。
 真实 PostgreSQL 并发测试使用独立连接持有 Task 行锁，`pg_blocking_pids(pid)` 精确等待该
 连接造成的锁等待后推进测试时钟越过到期点，再释放锁；Heartbeat 与 Finish 均返回 `false`，
 持久状态不变。另有正向测试证明：锁等待期间租约仍有效时，Heartbeat 与 Finish 继续成功。
+
+### P1-4 ADR-0002「无活跃 Run」前置条件落实
+
+**代码位置：** `packages/postgres/src/lease-queue/postgres-lease-queue.ts` 的
+`convergeBeforeClaim()`（`ACTIVE_RUN_SQL` 检查）。
+
+在写入任何状态或 Event 之前，先查询该 Task 是否存在 `created`/`running` 的 Run：
+
+- 存在 → 抛 `DB_UNAVAILABLE`，不执行 `transitionTask`、不更新 Task、不追加 Event；
+  `withTransaction` 回滚整个事务，Task/Run/Event 保持原样。
+- `claimNext()` 与 `reapExpired()` 都通过该方法收敛，因此两条路径都受保护；Reaper 的
+  整批事务同样回滚，不会留下部分已收敛的 Task。
+- 正常路径的活跃 Run 唯一索引与 Claim 前的显式检查保持不变。
+
+真实 PostgreSQL 负向测试（`tests/integration/lease-recovery.test.ts`）：
+
+- Claim：`queued` Task 直接插入一个 `running` Run 并把 Deadline 设为已过期 → `claimNext`
+  抛 `DB_UNAVAILABLE`；Task 仍 `queued`、`attempt_count=0`、`lease_epoch=0`、Run 仍
+  `running`、Event 只有 `accepted`。
+- Reaper：同 schema 内先放一个合法过期 Task、再放异常 Task → `reapExpired` 抛
+  `DB_UNAVAILABLE`；合法 Task 与其 `failed` Event 一并回滚，异常 Task/Run/Event 不变。
+  这同时证明整批事务的原子回滚。
+- 测试在 `finally` 中清理异常 Task，避免污染后续用例。
 
 ## 16. 遗留风险
 

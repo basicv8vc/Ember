@@ -21,6 +21,7 @@ let tasks: PostgresTaskRepository;
 let tenantA: TenantFixture;
 let tenantB: TenantFixture;
 let agentA: Awaited<ReturnType<PostgresAgentRepository['create']>>;
+let agentB: Awaited<ReturnType<PostgresAgentRepository['create']>>;
 let ctxA: AuthContext;
 let ctxB: AuthContext;
 
@@ -60,6 +61,31 @@ async function countEvents(taskId: string): Promise<number> {
     [taskId],
   );
   return Number(result.rows[0]?.count ?? '0');
+}
+
+async function insertRun(
+  tenantId: string,
+  taskId: string,
+  attempt = 1,
+  status = 'created',
+): Promise<string> {
+  const runId = randomUUID();
+
+  await db.pool.query(
+    `INSERT INTO runs (id, tenant_id, task_id, attempt, status)
+     VALUES ($1, $2, $3, $4, $5)`,
+    [runId, tenantId, taskId, attempt, status],
+  );
+
+  return runId;
+}
+
+async function currentRunId(tenantId: string, taskId: string): Promise<string | null> {
+  const result = await db.pool.query<{ current_run_id: string | null }>(
+    'SELECT current_run_id FROM tasks WHERE tenant_id = $1 AND id = $2',
+    [tenantId, taskId],
+  );
+  return result.rows[0]?.current_run_id ?? null;
 }
 
 async function installAcceptedEventFailureTrigger(): Promise<void> {
@@ -138,6 +164,7 @@ beforeAll(async () => {
   ctxB = { tenantId: tenantB.tenantId, principalId: tenantB.principalId, policyVersion: 1 };
 
   agentA = await agents.create(ctxA, { name: 'agent A' });
+  agentB = await agents.create(ctxB, { name: 'agent B' });
 });
 
 afterAll(async () => {
@@ -520,6 +547,68 @@ describe('database-enforced integrity', () => {
         agentA.agentId,
       ]),
     ).rejects.toMatchObject({ code: '23514' });
+  });
+
+  it('accepts tasks.current_run_id only for a run of the same tenant and task', async () => {
+    const created = await tasks.create(ctxA, chatCommand(agentA.agentId, newKey('current-run')));
+    const runId = await insertRun(ctxA.tenantId, created.taskId);
+
+    const updated = await db.pool.query(
+      'UPDATE tasks SET current_run_id = $1, updated_at = now() WHERE tenant_id = $2 AND id = $3',
+      [runId, ctxA.tenantId, created.taskId],
+    );
+    expect(updated.rowCount).toBe(1);
+
+    const view = await tasks.get(ctxA, created.taskId);
+    expect(view?.currentRunId).toBe(runId);
+
+    const constraint = await db.pool.query<{
+      convalidated: boolean;
+      definition: string;
+    }>(
+      `SELECT convalidated, pg_get_constraintdef(oid) AS definition
+         FROM pg_constraint
+        WHERE conrelid = 'tasks'::regclass AND conname = 'tasks_current_run_fk'`,
+    );
+    expect(constraint.rows).toHaveLength(1);
+    expect(constraint.rows[0]?.convalidated).toBe(true);
+    expect(constraint.rows[0]?.definition).toContain('tenant_id, id, current_run_id');
+    expect(constraint.rows[0]?.definition).toContain('runs(tenant_id, task_id, id)');
+  });
+
+  it('rejects a cross-tenant, cross-task or missing current_run_id', async () => {
+    const taskA = await tasks.create(ctxA, chatCommand(agentA.agentId, newKey('current-run-a')));
+    const taskB = await tasks.create(ctxB, chatCommand(agentB.agentId, newKey('current-run-b')));
+    const otherTaskA = await tasks.create(
+      ctxA,
+      chatCommand(agentA.agentId, newKey('current-run-a2')),
+    );
+    const runA = await insertRun(ctxA.tenantId, taskA.taskId);
+
+    const update = (tenantId: string, taskId: string, runId: string) =>
+      db.pool.query('UPDATE tasks SET current_run_id = $1 WHERE tenant_id = $2 AND id = $3', [
+        runId,
+        tenantId,
+        taskId,
+      ]);
+
+    // Tenant B may not point at Tenant A's run.
+    await expect(update(ctxB.tenantId, taskB.taskId, runA)).rejects.toMatchObject({
+      code: '23503',
+    });
+    expect(await currentRunId(ctxB.tenantId, taskB.taskId)).toBeNull();
+
+    // Same tenant, but another task's run is still invalid.
+    await expect(update(ctxA.tenantId, otherTaskA.taskId, runA)).rejects.toMatchObject({
+      code: '23503',
+    });
+    expect(await currentRunId(ctxA.tenantId, otherTaskA.taskId)).toBeNull();
+
+    // A run that does not exist in this tenant is rejected as well.
+    await expect(update(ctxA.tenantId, otherTaskA.taskId, randomUUID())).rejects.toMatchObject({
+      code: '23503',
+    });
+    expect(await currentRunId(ctxA.tenantId, otherTaskA.taskId)).toBeNull();
   });
 
   it('reads events back in sequence order', async () => {

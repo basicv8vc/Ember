@@ -4,6 +4,7 @@
 > 不以接口存在、Mock Repository 或进程内 Map 冒充持久化/并发证据。
 > 本 PR **不**声称 P0B-04～P0B-10 已完成，也不声称 HTTP API、Worker、Sandbox、
 > Lease/Fencing 或合作式取消已实现。
+> 本文件包含 PR #3 P1-1 修复后的 `tasks.current_run_id` 复合外键正反例证据。
 
 ## 1. 执行环境
 
@@ -47,9 +48,9 @@
 | 5   | `pnpm test:unit`                 | **9 个文件 / 249 个测试通过**（P0B-02 的 239 + P0B-03 新增 10）                                                 | PASS |
 | 6   | `pnpm build`                     | `tsc -b tsconfig.build.json` 退出码 0；postgres dist 生成 Repository 导出                                       | PASS |
 | 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                                                          | PASS |
-| 8   | `pnpm db:migrate`（第 1 次）     | `0 applied, 2 already applied`（本地卷此前首次应用 `0002` 用时 132ms）                                          | PASS |
-| 9   | `pnpm db:migrate`（第 2 次）     | `0 applied, 2 already applied`；重复迁移零变更                                                                  | PASS |
-| 10  | `pnpm test:integration`          | **3 个文件 / 30 个测试通过**（真实 PostgreSQL 17）                                                              | PASS |
+| 8   | `pnpm db:migrate`（第 1 次）     | `0 applied, 3 already applied`（本轮首次应用 `0003` 用时 92ms；`0002` 未被修改）                                | PASS |
+| 9   | `pnpm db:migrate`（第 2 次）     | `0 applied, 3 already applied`；重复迁移零变更                                                                  | PASS |
+| 10  | `pnpm test:integration`          | **3 个文件 / 32 个测试通过**（真实 PostgreSQL 17；新增 2 个 `current_run_id` 正反例）                           | PASS |
 | 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
 | 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，创建 Agent/Task 成功                                         | PASS |
 | 13  | 现有 API 回归                    | 构建产物 `127.0.0.1:8798`：`/healthz` 200、`/readyz` 200（DB up）                                               | PASS |
@@ -67,7 +68,7 @@ $ pnpm test:unit
 
  Test Files  9 passed (9)
       Tests  249 passed (249)
-   Duration  358ms
+   Duration  345ms
 ```
 
 P0B-03 新增的单元测试：
@@ -92,24 +93,24 @@ $ pnpm test:integration
  RUN  v5.0.5 /Users/a1-6/Downloads/Ember
 
  Test Files  3 passed (3)
-      Tests  30 passed (30)
-   Duration  644ms
+      Tests  32 passed (32)
+   Duration  625ms
 ```
 
 文件与测试数：
 
-| 文件                                           | 测试数 | 覆盖                                                                |
-| ---------------------------------------------- | ------ | ------------------------------------------------------------------- |
-| `tests/integration/migrations.test.ts`         | 7      | `0001`+`0002` 全新 Schema、重复迁移、改名/改 checksum 拒绝、表集合  |
-| `tests/integration/durable-task-inbox.test.ts` | 17     | B-T06、Tenant/FK/SQL 约束、取消意图、Event 顺序与 payload allowlist |
-| `tests/integration/task-idempotency.test.ts`   | 6      | B-T07（24 并发）、跨租户同 Key、B-T08、UTF-8 上限                   |
+| 文件                                           | 测试数 | 覆盖                                                                      |
+| ---------------------------------------------- | ------ | ------------------------------------------------------------------------- |
+| `tests/integration/migrations.test.ts`         | 7      | `0001`+`0002`+`0003` 全新 Schema、重复迁移、改名/改 checksum 拒绝、表集合 |
+| `tests/integration/durable-task-inbox.test.ts` | 19     | B-T06、Tenant/FK/SQL 约束、`current_run_id` 正反例、取消意图、Event 顺序  |
+| `tests/integration/task-idempotency.test.ts`   | 6      | B-T07（24 并发）、跨租户同 Key、B-T08、UTF-8 上限                         |
 
 ### 3.3 构建产物 ESM 消费
 
 ```text
 $ node --env-file-if-exists=.env.local /tmp/ember-p0b03-esm-smoke.mjs
 {
-  "appliedMigrations": ["0001", "0002"],
+  "appliedMigrations": ["0001", "0002", "0003"],
   "workspaceVersion": 0,
   "receiptStatus": "queued",
   "replayed": false,
@@ -228,12 +229,41 @@ Vitest 中同样执行 24 并发，并断言：
 | Event 读取顺序                                     | `listEvents` 返回 `[1, 2]`，phase `[accepted, progress]` |
 | 取消意图                                           | status 保持 `queued`，`cancel_requested_at` 写入且幂等   |
 
+### 7.1 P1-1 — `tasks.current_run_id` 复合外键正反例
+
+`0003_tasks_current_run_tenant_fk.sql` 增加：
+
+```sql
+ALTER TABLE runs
+  ADD CONSTRAINT runs_tenant_task_id_key UNIQUE (tenant_id, task_id, id);
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_current_run_fk
+  FOREIGN KEY (tenant_id, id, current_run_id)
+  REFERENCES runs (tenant_id, task_id, id)
+  ON DELETE RESTRICT;
+```
+
+真实 PostgreSQL 测试结果：
+
+| 用例                                     | 操作                                                                 | 结果 / 证据                                                                                                                 |
+| ---------------------------------------- | -------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| 正例：同 Tenant、同 Task 的 Run          | 创建 Task → 插入同租户同 Task 的 Run → `UPDATE tasks.current_run_id` | `UPDATE` 1 行；`TaskRepository.get()` 返回同一 `currentRunId`                                                               |
+| 约束目录                                 | 查询 `pg_constraint`                                                 | `tasks_current_run_fk` 存在，`convalidated = true`，定义为 `(tenant_id, id, current_run_id) → runs(tenant_id, task_id, id)` |
+| 反例：Tenant B 指向 Tenant A 的 Run      | `UPDATE Tenant B task.current_run_id = runA.id`                      | PostgreSQL `23503`；Tenant B Task 的 `current_run_id` 仍为 `NULL`                                                           |
+| 反例：同 Tenant 但属于另一个 Task 的 Run | `UPDATE taskA2.current_run_id = runA.id`                             | PostgreSQL `23503`；`current_run_id` 仍为 `NULL`                                                                            |
+| 反例：不存在的 Run ID                    | `UPDATE taskA2.current_run_id = <random uuid>`                       | PostgreSQL `23503`；`current_run_id` 仍为 `NULL`                                                                            |
+
+该约束不影响现有 `create`/重放/冲突事务：新建 Task 的 `current_run_id` 始终为 `NULL`；
+本阶段仍没有任何 Worker/Lease/Fencing 路径写入该字段。
+
 ## 8. Migration / 回归
 
-- 全新临时 Schema 依序应用 `0001` + `0002` 成功，`schema_migrations` 记录 2 行；
-- 重复运行 `0 applied, 2 already applied`；
+- 全新临时 Schema 依序应用 `0001` + `0002` + `0003` 成功，`schema_migrations` 记录 3 行；
+- 重复运行 `0 applied, 3 already applied`；
 - 改名 Migration（文件内容相同）仍被拒绝；编辑 checksum 仍被拒绝；
-- 临时目录测试复制 `0001` + `0002`，不会误删或修改 `public` Schema；
+- 临时目录测试复制 `0001` + `0002` + `0003`，不会误删或修改 `public` Schema；
+- `0001` 与已发布的 `0002` 均未篡改；P1-1 通过新的前向 `0003` 修复；
 - P0B-01/02 的单元测试、构建、Health/Ready 均通过；
 - **未**实现或宣称 B-T09～B-T11（Worker/Lease/Fencing）。
 
@@ -263,15 +293,15 @@ service container、无 secrets、无部署。
 
 ## 11. 与上游/任务书的偏差与未决问题
 
-| 项目                   | 处理                                                                 | 原因 / 归属                    |
-| ---------------------- | -------------------------------------------------------------------- | ------------------------------ |
-| `runs` 表提前建立      | 只建表、约束与索引，不实现 claim/lease/fencing                       | 任务书要求为 P0B-04 预留结构   |
-| Workspace 双向 FK      | 采用 `workspaces` 复合 PK/FK，无 `agents.workspace_id`               | 避免循环 FK，同时保证一对一    |
-| 取消                   | 只写 `cancel_requested_at`，状态保持 `queued`                        | P0B-08 才实现合作式取消        |
-| OQ-1                   | `retryable_failed → cancelled` 仍未加入状态图                        | P0B-04 调度前需 CTO 决策       |
-| 本地 Node 版本         | 验收显式使用 Node 24.22.1，未降低 `engines`                          | 本机默认 23.11.0，不满足要求   |
-| 事件 sequence 严格递增 | 依赖 `UNIQUE (tenant_id, task_id, sequence)` + accepted=1 + 读取排序 | 未来事件写入器需继续遵守该约束 |
-| Migration 单文件       | 仅新增 `0002`，未拆分更多文件                                        | 本阶段最小业务关系             |
+| 项目                   | 处理                                                                  | 原因 / 归属                    |
+| ---------------------- | --------------------------------------------------------------------- | ------------------------------ |
+| `runs` 表提前建立      | 只建表、约束与索引，不实现 claim/lease/fencing                        | 任务书要求为 P0B-04 预留结构   |
+| Workspace 双向 FK      | 采用 `workspaces` 复合 PK/FK，无 `agents.workspace_id`                | 避免循环 FK，同时保证一对一    |
+| 取消                   | 只写 `cancel_requested_at`，状态保持 `queued`                         | P0B-08 才实现合作式取消        |
+| OQ-1                   | `retryable_failed → cancelled` 仍未加入状态图                         | P0B-04 调度前需 CTO 决策       |
+| 本地 Node 版本         | 验收显式使用 Node 24.22.1，未降低 `engines`                           | 本机默认 23.11.0，不满足要求   |
+| 事件 sequence 严格递增 | 依赖 `UNIQUE (tenant_id, task_id, sequence)` + accepted=1 + 读取排序  | 未来事件写入器需继续遵守该约束 |
+| Migration 拆分         | `0002` 业务 Schema，`0003` 增加 `current_run_id` 复合 FK；`0001` 不变 | 已应用 Migration 不可篡改      |
 
 **风险**：
 
@@ -287,5 +317,7 @@ service container、无 secrets、无部署。
 
 P0B-03 的 Durable Task Inbox 已在真实 PostgreSQL 17 中通过原子 Task + `accepted` Event、
 Commit 后 ACK、24 并发同 Key 幂等、跨 Tenant 隔离、B-T08 冲突与 Migration 回归验证。
+PR #3 P1-1 已通过前向 `0003` 增加 `tasks.current_run_id` 的 Tenant + Task 复合外键，并用
+真实 PostgreSQL 正反例覆盖同租户同 Task、跨租户、跨 Task 与不存在 Run。
 所有实测命令见第 3 节；未实现的 Worker/Lease/Fencing、HTTP/API、Sandbox 与完整取消语义
 均明确标注为后续工作。等待 CTO Review。

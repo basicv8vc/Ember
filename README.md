@@ -49,7 +49,7 @@ Ember/
     local/
       compose.yaml        # local PostgreSQL only (loopback-bound)
       initdb/             # creates the integration-test database on first start
-  migrations/             # ordered SQL migrations (0001 metadata, 0002 business schema)
+  migrations/             # ordered SQL migrations (0001 metadata, 0002 business schema, 0003 FK hardening)
   tests/
     unit/                 # no database, no fixed ports
     integration/          # real PostgreSQL, unique throwaway schema per run
@@ -95,6 +95,9 @@ tables, input semantics and open design questions.
 
 - `migrations/0002_durable_task_inbox.sql` adds `tenants`, `principals`, `agents`,
   `workspaces`, `tasks`, `runs` (reserved structure only) and `task_events`.
+- `migrations/0003_tasks_current_run_tenant_fk.sql` adds a tenant- and task-safe composite
+  foreign key for `tasks.current_run_id`; a run from another tenant or another task is
+  rejected by PostgreSQL. No Worker/Lease code writes this pointer yet.
 - `PostgresAgentRepository` creates an agent and its single version-0 workspace in one
   transaction. `PostgresTaskRepository.create()` writes a `queued` task and exactly one
   `accepted` event in the same transaction and returns a receipt only **after commit**.
@@ -234,7 +237,10 @@ The app factory (`apps/api/src/app.ts`) is separate from the listener
 - `0002_durable_task_inbox.sql` is the P0B-03 business schema. It includes tasks, runs
   (structure only), task events, agents/workspaces and tenants/principals; artifact,
   checkpoint, approval, budget and inbound-event tables remain future work.
-- Neither migration is edited after being applied; checksum and filename guards fail loudly.
+- `0003_tasks_current_run_tenant_fk.sql` is a forward hardening migration for PR #3 P1-1:
+  `(tenant_id, id, current_run_id) → runs (tenant_id, task_id, id)` plus
+  `UNIQUE (tenant_id, task_id, id)` and a referencing index.
+- Migrations are never edited after being applied; checksum and filename guards fail loudly.
 
 Integration tests create a schema named `ember_it_<random hex>`, run migrations inside it, and
 drop only that schema afterwards. They never truncate or delete `public` or other schemas.
@@ -243,7 +249,7 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 
 ```bash
 pnpm test:unit        # 9 files, 249 tests (no database)
-pnpm test:integration # 30 tests against real PostgreSQL
+pnpm test:integration # 32 tests against real PostgreSQL
 ```
 
 - Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,
@@ -254,10 +260,11 @@ pnpm test:integration # 30 tests against real PostgreSQL
   separation and validation-error redaction. P0B-03 adds canonical digest/UTF-8 tests and
   SQL-vocabulary alignment checks.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
-  silently passing. They verify connection, `0001` + `0002`, repeat migration, readiness,
-  checksum/rename tamper detection, Durable Ack (including injected event/COMMIT failures),
-  24-request concurrent idempotency, conflicts, tenant-safe FKs, event ordering and the
-  database payload allowlist.
+  silently passing. They verify connection, `0001` + `0002` + `0003`, repeat migration,
+  readiness, checksum/rename tamper detection, Durable Ack (including injected event/COMMIT
+  failures), 24-request concurrent idempotency, conflicts, tenant-safe FKs,
+  `current_run_id` positive/negative cases, event ordering and the database payload
+  allowlist.
 
 Exact P0B-03 results, including the CI run, are recorded in
 [docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md). P0B-01 and P0B-02 acceptance reports

@@ -16,6 +16,8 @@
 
 - 前向 Migration `0002_durable_task_inbox.sql`：`tenants`、`principals`、`agents`、
   `workspaces`、`tasks`、`runs`（仅结构）、`task_events`。
+- 前向 Migration `0003_tasks_current_run_tenant_fk.sql`：为 `tasks.current_run_id` 增加
+  Tenant + Task 安全的复合外键（PR #3 P1-1）。
 - `PostgresAgentRepository`：原子创建 Agent + 唯一初始 Workspace；Tenant-scoped 查找。
 - `PostgresTaskRepository`：`create` / `get` / `listEvents` / `requestCancel`。
 - 规范化 SHA-256 请求摘要与 64 KiB UTF-8 字节上限。
@@ -62,7 +64,8 @@ tests/integration（真实 PostgreSQL）
 
 ## 3. SQL Schema、约束与索引
 
-Migration 文件：`migrations/0002_durable_task_inbox.sql`（`0001` 未修改）。
+Migration 文件：`migrations/0002_durable_task_inbox.sql` 与
+`migrations/0003_tasks_current_run_tenant_fk.sql`（`0001` 未修改）。
 
 ### 3.1 Tenant 与身份
 
@@ -89,19 +92,19 @@ Workspace 的 `(tenant_id, agent_id)` 复合外键指向 `agents (tenant_id, id)
 
 ### 3.3 Tasks
 
-| 列                                                       | 说明                                                                      |
-| -------------------------------------------------------- | ------------------------------------------------------------------------- |
-| `id uuid PK`、`tenant_id`、`agent_id`                    | 服务端生成 `id`；复合 FK `(tenant_id, agent_id) → agents (tenant_id, id)` |
-| `kind`                                                   | CHECK 限定四个 P0-B mock kind                                             |
-| `input jsonb`                                            | 已校验 TaskCommand.input；业务数据（Prompt/文件内容）只存这里             |
-| `digest`                                                 | 64 位小写 hex SHA-256；CHECK 格式                                         |
-| `idempotency_key`                                        | 8–128 字符、header-safe 字符集                                            |
-| `status`                                                 | CHECK 限定 7 个 TaskStatus，默认 `queued`                                 |
-| `attempt_count`、`max_attempts`                          | 非负 / ≥1                                                                 |
-| `current_run_id`、`lease_epoch >= 0`、`lease_expires_at` | 仅为 P0B-04 预留；本阶段不写入/不 lease                                   |
-| `next_run_at`、`deadline_at`                             | `timestamptz`；`next_run_at` 默认 `now()`                                 |
-| `cancel_requested_at`                                    | 仅记录取消意图；不改变状态（P0B-08）                                      |
-| `accepted_at`、`created_at`、`updated_at`                | `timestamptz NOT NULL DEFAULT now()`                                      |
+| 列                                                       | 说明                                                                           |
+| -------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| `id uuid PK`、`tenant_id`、`agent_id`                    | 服务端生成 `id`；复合 FK `(tenant_id, agent_id) → agents (tenant_id, id)`      |
+| `kind`                                                   | CHECK 限定四个 P0-B mock kind                                                  |
+| `input jsonb`                                            | 已校验 TaskCommand.input；业务数据（Prompt/文件内容）只存这里                  |
+| `digest`                                                 | 64 位小写 hex SHA-256；CHECK 格式                                              |
+| `idempotency_key`                                        | 8–128 字符、header-safe 字符集                                                 |
+| `status`                                                 | CHECK 限定 7 个 TaskStatus，默认 `queued`                                      |
+| `attempt_count`、`max_attempts`                          | 非负 / ≥1                                                                      |
+| `current_run_id`、`lease_epoch >= 0`、`lease_expires_at` | 仅为 P0B-04 预留；本阶段不写入/不 lease；`current_run_id` 受 0003 复合 FK 保护 |
+| `next_run_at`、`deadline_at`                             | `timestamptz`；`next_run_at` 默认 `now()`                                      |
+| `cancel_requested_at`                                    | 仅记录取消意图；不改变状态（P0B-08）                                           |
+| `accepted_at`、`created_at`、`updated_at`                | `timestamptz NOT NULL DEFAULT now()`                                           |
 
 关键约束：
 
@@ -111,11 +114,38 @@ Workspace 的 `(tenant_id, agent_id)` 复合外键指向 `agents (tenant_id, id)
   `(tenant_id, agent_id, created_at, id)`、部分索引 `lease_expires_at`。
 - 所有时间列使用 `TIMESTAMPTZ`，不保存本地时区字符串。
 
+#### `current_run_id` 的 Tenant-safe 复合外键（P1-1）
+
+`0003` 增加：
+
+```sql
+ALTER TABLE runs
+  ADD CONSTRAINT runs_tenant_task_id_key UNIQUE (tenant_id, task_id, id);
+
+ALTER TABLE tasks
+  ADD CONSTRAINT tasks_current_run_fk
+  FOREIGN KEY (tenant_id, id, current_run_id)
+  REFERENCES runs (tenant_id, task_id, id)
+  ON DELETE RESTRICT;
+```
+
+`current_run_id` 为 `NULL` 时复合外键不生效（MATCH SIMPLE）；一旦非空，它必须同时满足：
+
+- `tasks.tenant_id` = `runs.tenant_id`：跨 Tenant 的 Run 被拒绝；
+- `tasks.id` = `runs.task_id`：同 Tenant 但属于另一个 Task 的 Run 也被拒绝。
+
+因此不只是 `(tenant_id, current_run_id) → runs(tenant_id, id)` 的租户隔离，还保证
+`current_run_id` 确实是该 Task 的 Run。创建 Task 时 `current_run_id` 始终为 `NULL`，
+先插入 Task、再插入 Run、最后更新指针，所以没有循环插入依赖。删除被引用的 Run 受
+`ON DELETE RESTRICT` 保护；未来 Run 清理必须先清空 Task 指针（P0B-04）。本阶段没有
+claim/lease/fencing，也没有任何写入 `current_run_id` 的业务路径。
+
 ### 3.4 Runs（仅为 P0B-04 预留）
 
 `runs` 包含 `id`、`tenant_id`、`task_id`、`attempt >= 1`、`lease_epoch >= 0`、Run 状态 CHECK、
 `worker_id`、`leased_until`、`started_at`、`finished_at`，以及
-`UNIQUE (tenant_id, id)`、`UNIQUE (tenant_id, task_id, attempt)` 和
+`UNIQUE (tenant_id, id)`、`UNIQUE (tenant_id, task_id, attempt)`、
+`UNIQUE (tenant_id, task_id, id)`（供 `tasks.current_run_id` 复合 FK 使用）和
 `(tenant_id, task_id) → tasks (tenant_id, id)` 复合外键。
 
 本阶段**没有** `claimNext`、`FOR UPDATE SKIP LOCKED`、Heartbeat、Reaper、Fencing 或 Retry
@@ -243,10 +273,11 @@ requestCancel(ctx, taskId): Promise<void>
 
 ## 8. Migration 与后续 Worker 依赖
 
-- 新增单向前向 Migration `0002_durable_task_inbox.sql`；`0001` 内容和位置未变。
+- 新增单向前向 Migration `0002_durable_task_inbox.sql` 与
+  `0003_tasks_current_run_tenant_fk.sql`；`0001` 内容和位置未变，`0002` 不因后续修复被篡改。
 - 沿用 P0B-01 的 filename guard、checksum、advisory lock、每迁移独立事务；重复运行零变更。
-- CI 与本地集成测试均在全新 `ember_it_<hex>` Schema 内按序应用 `0001` + `0002`，重复运行
-  不产生变更；测试只 DROP 自己创建的 Schema。
+- CI 与本地集成测试均在全新 `ember_it_<hex>` Schema 内按序应用 `0001` + `0002` + `0003`，
+  重复运行不产生变更；测试只 DROP 自己创建的 Schema。
 - P0B-04 可以在现有 `tasks` 调度索引、`runs` 表、`lease_epoch` / `lease_expires_at`
   字段上实现 claim/lease/fencing，但届时必须新增向前的 Migration 和真实并发测试；
   本阶段的 Schema 存在不等于 Lease Safety 已完成。

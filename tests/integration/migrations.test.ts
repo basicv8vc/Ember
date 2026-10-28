@@ -64,9 +64,10 @@ describe('PostgreSQL migrations (real database)', () => {
   it('applies migrations from an empty schema and records the version', async () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(2);
-    expect(result.applied.map((migration) => migration.id)).toEqual(['0001', '0002']);
+    expect(result.applied).toHaveLength(3);
+    expect(result.applied.map((migration) => migration.id)).toEqual(['0001', '0002', '0003']);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
+    expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -76,9 +77,8 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(2);
-    expect(versions.rows[0]?.id).toBe('0001');
-    expect(versions.rows[1]?.id).toBe('0002');
+    expect(versions.rows).toHaveLength(3);
+    expect(versions.rows.map((row) => row.id)).toEqual(['0001', '0002', '0003']);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
       expect(row.execution_ms).toBeGreaterThanOrEqual(0);
@@ -117,12 +117,12 @@ describe('PostgreSQL migrations (real database)', () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(2);
+    expect(result.alreadyApplied).toBe(3);
 
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('2');
+    expect(versions.rows[0]?.count).toBe('3');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -139,6 +139,11 @@ describe('PostgreSQL migrations (real database)', () => {
         await readFile(path.join(migrationsDir, '0002_durable_task_inbox.sql'), 'utf8'),
         'utf8',
       );
+      await writeFile(
+        path.join(tempMigrationsDir, '0003_tasks_current_run_tenant_fk.sql'),
+        await readFile(path.join(migrationsDir, '0003_tasks_current_run_tenant_fk.sql'), 'utf8'),
+        'utf8',
+      );
 
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
         /must not be renamed/,
@@ -147,7 +152,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('2');
+      expect(versions.rows[0]?.count).toBe('3');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -178,6 +183,11 @@ describe('PostgreSQL migrations (real database)', () => {
         await readFile(path.join(migrationsDir, '0002_durable_task_inbox.sql'), 'utf8'),
         'utf8',
       );
+      await writeFile(
+        path.join(tempMigrationsDir, '0003_tasks_current_run_tenant_fk.sql'),
+        await readFile(path.join(migrationsDir, '0003_tasks_current_run_tenant_fk.sql'), 'utf8'),
+        'utf8',
+      );
 
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(MigrationError);
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
@@ -187,7 +197,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('2');
+      expect(versions.rows[0]?.count).toBe('3');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

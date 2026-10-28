@@ -29,14 +29,14 @@
 
 ## 2. 交付前仓库状态核验
 
-| 检查                 | 命令 / 结果                                                                                                                                                                          |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| 当前分支             | `feature/p0b-04-durable-worker-lease`（从 `origin/main` @ `01ef997` 创建）                                                                                                           |
-| 远端 main            | 分支创建时 `origin/main` = `01ef99723134339daccf79db43765c68f8b00a7a`；交付期间 CTO 合并 ADR PR #4 后推进到 `5c91a6f0ef361cb97efe7c95ba048016b25ccaad`（仅新增同一 ADR，无代码差异） |
-| 用户未提交参考资料   | 6 个本地 Prompt/RFC Markdown 保持未跟踪，不纳入提交、不修改 `main`                                                                                                                   |
-| P0B-01～03 Migration | `0001`～`0003` 未修改；新增 `0004_lease_fencing_and_retry.sql`                                                                                                                       |
-| ADR                  | ADR-0001 来自 CTO 已批准远端分支，内容未改写；ADR-0002 为本轮新增（OQ-2 有条件批准）                                                                                                 |
-| `main`               | 未修改、未合并、未强推                                                                                                                                                               |
+| 检查                 | 命令 / 结果                                                                                                                                                                                                                 |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 当前分支             | `feature/p0b-04-durable-worker-lease`（从 `origin/main` @ `01ef997` 创建）                                                                                                                                                  |
+| 远端 main            | 分支创建时 `origin/main` = `01ef99723134339daccf79db43765c68f8b00a7a`；Review Round 1 修复提交后合入最新 `origin/main` = `5c91a6f0ef361cb97efe7c95ba048016b25ccaad`（仅 ADR-0001 文档合并，无代码差异），合并提交 `9d16f53` |
+| 用户未提交参考资料   | 6 个本地 Prompt/RFC Markdown 保持未跟踪，不纳入提交、不修改 `main`                                                                                                                                                          |
+| P0B-01～03 Migration | `0001`～`0003` 未修改；新增 `0004_lease_fencing_and_retry.sql`                                                                                                                                                              |
+| ADR                  | ADR-0001 来自 CTO 已批准远端分支，内容未改写；ADR-0002 为本轮新增（OQ-2 有条件批准）                                                                                                                                        |
+| `main`               | 未修改、未合并、未强推                                                                                                                                                                                                      |
 
 ## 3. 验收命令与结果
 
@@ -57,7 +57,7 @@
 | 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
 | 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，Claim/Heartbeat/Finish 成功（见 3.3）                        | PASS |
 | 13  | Worker 进程 smoke                | `reaper-only` 启动、SIGTERM 优雅关闭；`poll` 模式明确拒绝（见 3.4）                                             | PASS |
-| 14  | GitHub Actions                   | run [40630263890](https://github.com/basicv8vc/Ember/actions/runs/40630263890) — success（代码 HEAD `ea9d02d`） | PASS |
+| 14  | GitHub Actions                   | run [40647395247](https://github.com/basicv8vc/Ember/actions/runs/40647395247) — success（代码 HEAD `9d16f53`） | PASS |
 | 15  | Draft PR                         | [#5](https://github.com/basicv8vc/Ember/pull/5)，Draft/Open，base `main`，未合并                                | PASS |
 
 > 本地默认 Node 23.11.0 不满足 `engines >=24 <25`；验收显式使用 Node 24.22.1。
@@ -312,8 +312,12 @@ CTO 结论为 **Changes Requested**。本轮在同一个 Draft PR 分支内逐�
 
 **Migration：** 本轮未新增或修改 Migration；`0001`–`0003` checksum 不变，`0004` 未变。
 
-**Git：** 修复提交后合入最新 `origin/main`（`5c91a6f`，仅 ADR-0001 文档合并），未产生
-代码差异；未强推。
+**Git：** 修复提交（`a689e1b`、`6f7fd01`）后合入最新 `origin/main`（`5c91a6f`，仅
+ADR-0001 文档合并），合并提交 `9d16f53`，无代码差异；未强推。
+
+**测试有效性：** 逐个临时回退修复后，对应测试均按预期失败（P1-1 数据库审计断言、
+P1-2 缺失 Run Lease 断言、P1-3 Heartbeat/Finish 锁后采样断言），恢复修复后全部通过，
+证明这些测试不是恒真断言。
 
 ## 11. GitHub Actions / Draft PR
 
@@ -321,10 +325,10 @@ CTO 结论为 **Changes Requested**。本轮在同一个 Draft PR 分支内逐�
 | -------------------- | ----------------------------------------------------------------------------------------------------------- |
 | 分支                 | `feature/p0b-04-durable-worker-lease`                                                                       |
 | Base SHA             | 分支基线 `01ef997`；当前 PR base ref `5c91a6f`（仅 ADR merge，PR `mergeable: MERGEABLE` / `CLEAN`）         |
-| 代码 HEAD            | `ea9d02d1792102b54b01a7832de9c8c7663021f1`                                                                  |
+| 代码 HEAD            | `9d16f5375e1b3860d1772d2c164d0c04f6dc9708`（含 Review Round 1 修复与 `origin/main` 合并）                   |
 | Draft PR             | [#5](https://github.com/basicv8vc/Ember/pull/5)（`isDraft: true`，`state: OPEN`，base `main`）              |
-| CI 运行（代码 HEAD） | [40630263890](https://github.com/basicv8vc/Ember/actions/runs/40630263890) — success                        |
-| CI 日志核对          | unit `265 passed`；integration `65 passed`；migration 首次 `4 applied`，重复 `0 applied, 4 already applied` |
+| CI 运行（代码 HEAD） | [40647395247](https://github.com/basicv8vc/Ember/actions/runs/40647395247) — success                        |
+| CI 日志核对          | unit `265 passed`；integration `72 passed`；migration 首次 `4 applied`，重复 `0 applied, 4 already applied` |
 | `main` 状态          | 未修改、未合并、未强推                                                                                      |
 | 强制推送 / 自动合并  | 无                                                                                                          |
 | 修改保护规则 / 部署  | 无                                                                                                          |

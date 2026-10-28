@@ -11,6 +11,7 @@
   "dependencies": {
     "@ember/contracts": "workspace:*",
     "@ember/domain": "workspace:*",
+    "@ember/execution": "workspace:*",
     "@ember/postgres": "workspace:*",
     "zod": "4.6.7"
   }

@@ -23,6 +23,7 @@ export {
   LeasedRunSchema,
   MAX_SAFE_LEASE_EPOCH,
   nextLeaseEpoch,
+  parseClaimableKinds,
   parseLeaseEpoch,
   parseLeasedRun,
   parsePersistedTimestamp,
@@ -49,6 +50,7 @@ export {
   type CreateAgentCommand,
 } from './repositories/agent-repository.js';
 export { PostgresTaskRepository } from './repositories/task-repository.js';
+export { PostgresRunExecutionContextReader } from './repositories/run-execution-context-reader.js';
 export {
   prepareTaskCommand,
   TASK_COMMAND_DIGEST_VERSION,

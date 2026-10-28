@@ -1,13 +1,21 @@
 import {
   PostgresLeaseQueue,
+  PostgresRunExecutionContextReader,
   createPool,
   describeDatabaseTarget,
   loadDatabaseConfig,
   systemClock,
 } from '@ember/postgres';
-import { loadWorkerConfig, WorkerConfigError } from './config.js';
+import {
+  DeterministicExecutionRouter,
+  DeterministicExecutor,
+  EXECUTABLE_TASK_KINDS,
+} from '@ember/execution';
+import { loadWorkerConfig } from './config.js';
 import { createWorkerLogger, type WorkerLogger } from './logger.js';
+import { runPollLoop } from './poll-loop.js';
 import { runReaperLoop } from './reaper-loop.js';
+import { createRunHandler } from './run-handler.js';
 
 function registerShutdown(controller: AbortController, logger: WorkerLogger): void {
   let stopping = false;
@@ -31,14 +39,6 @@ function registerShutdown(controller: AbortController, logger: WorkerLogger): vo
 
 async function main(): Promise<void> {
   const config = loadWorkerConfig();
-
-  if (config.mode !== 'reaper-only') {
-    throw new WorkerConfigError(
-      'poll mode requires the P0B-05 execution router and a real RunHandler; ' +
-        'the production worker refuses to claim Tasks without one',
-    );
-  }
-
   const databaseConfig = loadDatabaseConfig();
   const logger = createWorkerLogger({ level: config.logLevel });
   const pool = createPool(databaseConfig, {
@@ -46,22 +46,33 @@ async function main(): Promise<void> {
       logger.warn('database idle connection error');
     },
   });
-  const queue = new PostgresLeaseQueue(pool, { ...config.lease, clock: systemClock });
+
+  // Claim eligibility is derived from the executor's own capability list, so the worker can
+  // never claim a Task kind it has no deterministic branch for.
+  const queue = new PostgresLeaseQueue(pool, {
+    ...config.lease,
+    clock: systemClock,
+    ...(config.mode === 'poll' ? { claimableKinds: EXECUTABLE_TASK_KINDS } : {}),
+  });
   const controller = new AbortController();
 
   registerShutdown(controller, logger);
 
   logger.info('worker starting', {
     mode: config.mode,
+    env: config.env,
+    simulatedExecution: config.simulatedExecution,
     workerId: config.workerId,
     database: describeDatabaseTarget(databaseConfig.connectionString),
     leaseDurationMs: config.lease.leaseDurationMs,
     heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
     reaperIntervalMs: config.intervalMs,
+    concurrency: config.concurrency,
+    ...(config.mode === 'poll' ? { claimableKinds: EXECUTABLE_TASK_KINDS } : {}),
   });
 
   try {
-    await runReaperLoop({
+    const reaper = runReaperLoop({
       queue,
       clock: systemClock,
       intervalMs: config.intervalMs,
@@ -69,6 +80,47 @@ async function main(): Promise<void> {
       logger,
       signal: controller.signal,
     });
+
+    if (config.mode === 'reaper-only') {
+      await reaper;
+      return;
+    }
+
+    const handler = createRunHandler({
+      contextReader: new PostgresRunExecutionContextReader(pool, systemClock),
+      router: new DeterministicExecutionRouter(),
+      executor: new DeterministicExecutor(),
+      clock: systemClock,
+      logger,
+    });
+
+    // Both loops share one stop signal: a shutdown drains the reaper and stops claiming new
+    // Runs, while in-flight simulations observe the abort and discard their results.
+    try {
+      const summary = await Promise.all([
+        reaper,
+        runPollLoop({
+          queue,
+          handler,
+          clock: systemClock,
+          workerId: config.workerId,
+          concurrency: config.concurrency,
+          heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
+          idleIntervalMs: config.intervalMs,
+          errorBackoffMs: config.errorBackoffMs,
+          logger,
+          signal: controller.signal,
+        }),
+      ]).then(([, pollSummary]) => pollSummary);
+
+      logger.info('poll loop stopped', { ...summary, workerId: config.workerId });
+    } catch (error) {
+      // A failing poll loop must never leave the reaper running: abort first, then drain it,
+      // so the pool can be closed exactly once below.
+      controller.abort();
+      await reaper.catch(() => undefined);
+      throw error;
+    }
   } finally {
     await pool.end();
     logger.info('worker stopped', { workerId: config.workerId });

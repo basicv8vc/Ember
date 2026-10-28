@@ -12,6 +12,9 @@ export default defineConfig({
         new URL('./packages/contracts/src/index.ts', import.meta.url),
       ),
       '@ember/domain': fileURLToPath(new URL('./packages/domain/src/index.ts', import.meta.url)),
+      '@ember/execution': fileURLToPath(
+        new URL('./packages/execution/src/index.ts', import.meta.url),
+      ),
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),

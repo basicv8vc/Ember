@@ -7,19 +7,35 @@ export class WorkerConfigError extends Error {
 
 export type WorkerMode = 'reaper-only' | 'poll';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
+export type EmberEnv = 'local' | 'test' | 'ci' | 'production';
+
+/**
+ * Simulated execution opt-in.
+ *
+ * P0B-05 has no ArtifactStore and no durable execution result, so a poll worker can only
+ * produce an in-memory result. Claiming Tasks in that state must therefore be an explicit
+ * local/test decision, never the default and never a production behaviour.
+ */
+export type SimulatedExecutionMode = 'disabled' | 'local-only';
 
 export interface WorkerConfig {
   readonly mode: WorkerMode;
+  readonly env: EmberEnv;
+  readonly simulatedExecution: SimulatedExecutionMode;
   readonly workerId: string;
   readonly intervalMs: number;
   readonly errorBackoffMs: number;
+  readonly concurrency: number;
   readonly logLevel: LogLevel;
   readonly lease: LeaseQueueConfig;
 }
 
 const workerEnvSchema = z.object({
+  EMBER_ENV: z.enum(['local', 'test', 'ci', 'production']).default('local'),
   EMBER_WORKER_MODE: z.enum(['reaper-only', 'poll']).default('reaper-only'),
+  EMBER_WORKER_SIMULATED_EXECUTION: z.enum(['disabled', 'local-only']).default('disabled'),
   EMBER_WORKER_ID: z.string().default('worker-local'),
+  EMBER_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   EMBER_WORKER_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(2_000),
   EMBER_WORKER_ERROR_BACKOFF_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
   EMBER_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
@@ -69,11 +85,35 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     );
   }
 
+  const mode = parsed.data.EMBER_WORKER_MODE;
+  const simulatedExecution = parsed.data.EMBER_WORKER_SIMULATED_EXECUTION;
+
+  // Claiming a Task without a durable execution result would report work as processed that a
+  // restart cannot recover. Both guards are therefore hard failures, not warnings.
+  if (mode === 'poll') {
+    if (simulatedExecution !== 'local-only') {
+      throw new WorkerConfigError(
+        'poll mode requires EMBER_WORKER_SIMULATED_EXECUTION=local-only: P0B-05 has no durable ' +
+          'execution result, so a claimed Task must not be treated as fully processed',
+      );
+    }
+
+    if (parsed.data.EMBER_ENV === 'production') {
+      throw new WorkerConfigError(
+        'simulated execution is refused when EMBER_ENV=production; it stays a local/test ' +
+          'capability until P0B-06 provides durable execution results',
+      );
+    }
+  }
+
   return {
-    mode: parsed.data.EMBER_WORKER_MODE,
+    mode,
+    env: parsed.data.EMBER_ENV,
+    simulatedExecution,
     workerId: workerId.data,
     intervalMs: parsed.data.EMBER_WORKER_INTERVAL_MS,
     errorBackoffMs: parsed.data.EMBER_WORKER_ERROR_BACKOFF_MS,
+    concurrency: parsed.data.EMBER_WORKER_CONCURRENCY,
     logLevel: parsed.data.EMBER_LOG_LEVEL,
     lease,
   };

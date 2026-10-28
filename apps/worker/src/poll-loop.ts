@@ -1,7 +1,7 @@
 import type { LeaseQueue } from '@ember/contracts';
 import { isDomainError, InvalidArgumentError, type DomainErrorCode } from '@ember/domain';
 import type { LeasedRun, RunTerminalStatus } from '@ember/domain';
-import type { Sleeper } from '@ember/execution';
+import { linkAbortSignals, type Sleeper } from '@ember/execution';
 import type { Clock } from '@ember/postgres';
 import { sleep } from './reaper-loop.js';
 import type { WorkerLogger } from './logger.js';
@@ -83,6 +83,12 @@ function raceWithAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<
  *   a newer Run;
  * - an aborted execution (shutdown, lease loss, cancellation) never submits a result, so a
  *   worker cannot fabricate a terminal status from work that was cut short.
+ *
+ * Liveness rules:
+ * - a terminal hand-off aborts the pending heartbeat wait, so the concurrency slot is released
+ *   with the Run instead of after one more `heartbeatIntervalMs`;
+ * - an empty queue is re-polled every `idleIntervalMs` even while other executions are still in
+ *   flight, so a newly arrived Task never waits for an unrelated long-running Run.
  */
 export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSummary> {
   const { queue, handler, clock, workerId, concurrency, heartbeatIntervalMs, idleIntervalMs } =
@@ -115,6 +121,10 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
     let leaseLost = false;
     let completed = false;
 
+    // The heartbeat wait listens to both stops, so `heartbeatStop.abort()` interrupts a
+    // pending wait immediately instead of after `heartbeatIntervalMs`.
+    const heartbeatWait = linkAbortSignals(execution.signal, heartbeatStop.signal);
+
     const onStop = (): void => {
       execution.abort();
     };
@@ -127,7 +137,9 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
 
     const heartbeatLoop = (async (): Promise<void> => {
       while (!execution.signal.aborted && !heartbeatStop.signal.aborted) {
-        await wait(heartbeatIntervalMs, execution.signal);
+        // Wakes on *either* stop: a terminal hand-off (`finish()`) aborts `heartbeatStop`
+        // mid-wait, so a completed Run never holds its concurrency slot for another tick.
+        await wait(heartbeatIntervalMs, heartbeatWait.signal);
 
         if (execution.signal.aborted || heartbeatStop.signal.aborted) {
           return;
@@ -225,6 +237,28 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
       heartbeatStop.abort();
       signal.removeEventListener('abort', onStop);
       await heartbeatLoop;
+      heartbeatWait.dispose();
+    }
+  };
+
+  /**
+   * Wait for the next poll tick: the idle interval, any in-flight completion, or a stop.
+   *
+   * The idle interval is **never** replaced by a full in-flight execution, otherwise a
+   * newly arrived Task would have to wait for an unrelated, possibly long-running Run to
+   * finish even though a concurrency slot is free. The pending timer is cancelled as soon
+   * as an execution completes, so the loop does not keep a stray timer alive.
+   */
+  const waitForNextPoll = async (): Promise<void> => {
+    const idleStop = new AbortController();
+    const idleSignals = linkAbortSignals(signal, idleStop.signal);
+    const idle = wait(idleIntervalMs, idleSignals.signal);
+
+    try {
+      await raceWithAbort(inFlight.size === 0 ? idle : Promise.race([...inFlight, idle]), signal);
+    } finally {
+      idleStop.abort();
+      idleSignals.dispose();
     }
   };
 
@@ -248,12 +282,9 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
     }
 
     if (claimed === null) {
-      if (inFlight.size > 0) {
-        // Do not busy-loop while executions are still in flight.
-        await raceWithAbort(Promise.race(inFlight), signal);
-      } else {
-        await wait(idleIntervalMs, signal);
-      }
+      // Capacity is available, so poll again after at most `idleIntervalMs` even while other
+      // executions are still in flight.
+      await waitForNextPoll();
       continue;
     }
 

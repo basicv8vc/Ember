@@ -169,6 +169,32 @@ describe('P0B05-T03 fencing through the execution context', () => {
 
     await queue.finish(lease!, 'cancelled');
   });
+
+  it('refuses a context whose lease expired while the statement was in flight', async () => {
+    const created = await createQueuedTask(tasks, ctx, agentId, 'fence-round-trip');
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+
+    expect(lease?.taskId).toBe(created.taskId);
+
+    // The worker sampled its clock *before* the round trip and the database still evaluates
+    // the row against its own statement time; a lease that expires while the statement runs
+    // must not yield an execution context.
+    const late = new PostgresRunExecutionContextReader(db.pool, {
+      now: () => new Date(clock.now().getTime() + (QUEUE_OPTIONS.leaseDurationMs ?? 5_000) + 1_000),
+    });
+
+    await expect(late.read(lease!, clock.now())).rejects.toMatchObject({ code: 'STALE_LEASE' });
+
+    // The identical read with an honest clock is accepted, so the rejection is caused by the
+    // hand-off re-validation and not by an unrelated fencing mismatch.
+    await expect(reader.read(lease!, clock.now())).resolves.toMatchObject({
+      taskId: created.taskId,
+      runId: lease!.runId,
+    });
+
+    await queue.finish(lease!, 'cancelled');
+  });
 });
 
 describe('P0B05-T04 failure classification', () => {
@@ -312,7 +338,7 @@ beforeAll(async () => {
     clock,
     claimableKinds: EXECUTABLE_TASK_KINDS,
   });
-  reader = new PostgresRunExecutionContextReader(db.pool);
+  reader = new PostgresRunExecutionContextReader(db.pool, clock);
 });
 
 afterAll(async () => {

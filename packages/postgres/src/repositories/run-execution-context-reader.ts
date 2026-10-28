@@ -2,7 +2,7 @@ import { TASK_INPUT_SCHEMAS, TaskKindSchema } from '@ember/contracts';
 import type { RunExecutionContext, RunExecutionContextReader } from '@ember/contracts';
 import { DomainError, type LeasedRun, type MockTaskInput, type TaskKind } from '@ember/domain';
 import type pg from 'pg';
-import { parseNow } from '../lease-queue/clock.js';
+import { parseNow, systemClock, type Clock } from '../lease-queue/clock.js';
 import { parseLeasedRun, parsePersistedTimestamp } from '../lease-queue/validation.js';
 import { asDomainError, toIsoTimestamp } from './support.js';
 
@@ -26,12 +26,17 @@ interface ExecutionContextRow {
   worker_id: string | null;
   leased_until: Date | string | null;
   policy_version: number;
+  /** Statement time: the instant PostgreSQL evaluated the row. */
+  evaluated_at: Date | string;
 }
 
 /**
  * One statement: PostgreSQL evaluates it under a single snapshot, so the Task, Run and Agent
  * columns are mutually consistent without an explicit transaction. Nothing is locked and no
  * transaction is held while the (possibly slow) mock execution runs.
+ *
+ * `now()` is selected on purpose: lease validity is evaluated against database time *taken
+ * while the statement runs*, never against a client timestamp sampled before the round trip.
  */
 const SELECT_RUN_EXECUTION_CONTEXT_SQL = `
 SELECT t.tenant_id,
@@ -52,7 +57,8 @@ SELECT t.tenant_id,
        r.status                    AS run_status,
        r.worker_id,
        r.leased_until,
-       a.policy_version
+       a.policy_version,
+       now()                       AS evaluated_at
   FROM tasks t
   JOIN runs r
     ON r.tenant_id = t.tenant_id
@@ -114,9 +120,20 @@ function parsePolicyVersion(value: number): number {
  *
  * Cancellation wins over every other rejection (ADR-0001): a committed cancellation intent is
  * reported as `CANCELLED` even when the lease has also expired.
+ *
+ * Time model (P1 hardening):
+ * - the caller-supplied `now` is only a **lower bound** — it was sampled before the round trip
+ *   and may already be stale;
+ * - the statement's own `now()` is the evaluation instant for the persisted expiry and
+ *   deadline, so a lease that had already expired when the row was read is always rejected;
+ * - the context is re-validated against `clock` *after* the statement returned, which closes
+ *   the window in which a lease could expire while the query was in flight.
  */
 export class PostgresRunExecutionContextReader implements RunExecutionContextReader {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly clock: Clock = systemClock,
+  ) {}
 
   async read(lease: LeasedRun, now: Date): Promise<RunExecutionContext> {
     const leased = parseLeasedRun(lease);
@@ -170,17 +187,37 @@ export class PostgresRunExecutionContextReader implements RunExecutionContextRea
         throw new DomainError('STALE_LEASE', 'lease has no persisted expiry');
       }
 
-      if (
-        taskExpiry.getTime() <= sampledAt.getTime() ||
-        runExpiry.getTime() <= sampledAt.getTime()
-      ) {
+      // Database time wins over the pre-query sample: a lease that had already expired when
+      // the statement ran must never be accepted, however early the caller's `now` was.
+      const evaluatedAt = this.evaluationInstant(sampledAt, row.evaluated_at);
+      const deadlineAt = parsePersistedTimestamp(row.deadline_at);
+
+      if (taskExpiry.getTime() <= evaluatedAt || runExpiry.getTime() <= evaluatedAt) {
         throw new DomainError('STALE_LEASE', 'lease has expired');
       }
 
-      const deadlineAt = parsePersistedTimestamp(row.deadline_at);
-
-      if (deadlineAt !== null && deadlineAt.getTime() <= sampledAt.getTime()) {
+      if (deadlineAt !== null && deadlineAt.getTime() <= evaluatedAt) {
         throw new DomainError('DEADLINE_EXCEEDED', 'task deadline elapsed before execution');
+      }
+
+      // Hand-off re-validation: the round trip may itself have outlived the lease.
+      const handoffAt = this.evaluationInstant(
+        parseNow(this.clock.now(), 'clock.now'),
+        row.evaluated_at,
+      );
+
+      if (taskExpiry.getTime() <= handoffAt || runExpiry.getTime() <= handoffAt) {
+        throw new DomainError(
+          'STALE_LEASE',
+          'lease expired while the execution context was being read',
+        );
+      }
+
+      if (deadlineAt !== null && deadlineAt.getTime() <= handoffAt) {
+        throw new DomainError(
+          'DEADLINE_EXCEEDED',
+          'task deadline elapsed while the execution context was being read',
+        );
       }
 
       const kind = toTaskKind(row.kind);
@@ -202,5 +239,19 @@ export class PostgresRunExecutionContextReader implements RunExecutionContextRea
     } catch (error) {
       throw asDomainError(error);
     }
+  }
+
+  /**
+   * Latest instant this read is allowed to consider: the persisted statement time, the
+   * caller's sample, or anything later never loosens a lease decision.
+   */
+  private evaluationInstant(sampledAt: Date, evaluatedAt: Date | string): number {
+    const statementAt = parsePersistedTimestamp(evaluatedAt);
+
+    if (statementAt === null) {
+      throw new DomainError('DB_UNAVAILABLE', 'database did not report the evaluation instant');
+    }
+
+    return Math.max(sampledAt.getTime(), statementAt.getTime());
   }
 }

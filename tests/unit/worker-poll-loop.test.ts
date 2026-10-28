@@ -23,6 +23,8 @@ function leasedRun(index: number): LeasedRun {
 
 interface HarnessOptions {
   readonly runs?: readonly LeasedRun[];
+  /** Runs that become claimable only once the first execution is already in flight. */
+  readonly lateRuns?: readonly LeasedRun[];
   readonly heartbeatResult?: boolean;
   readonly finishResult?: boolean;
   readonly finishThrows?: boolean;
@@ -48,6 +50,8 @@ interface Build {
   readonly heartbeats: string[];
   readonly waits: number[];
   readonly active: { current: number; max: number };
+  /** Run ids whose handler actually started, in order. */
+  readonly entered: string[];
   readonly stop: () => void;
   readonly release: () => void;
 }
@@ -68,10 +72,12 @@ function harness(options: HarnessOptions = {}): Build {
   const heartbeats: string[] = [];
   const waits: number[] = [];
   const active = { current: 0, max: 0 };
+  const entered: string[] = [];
   const pending = [...(options.runs ?? [leasedRun(1)])];
   const stopController = new AbortController();
 
   let release = (): void => undefined;
+  let lateDelivered = false;
   const gate = new Promise<void>((resolve) => {
     release = resolve;
   });
@@ -81,7 +87,17 @@ function harness(options: HarnessOptions = {}): Build {
       if (options.claimThrows === true) {
         return Promise.reject(new Error('claim failed'));
       }
-      return Promise.resolve(pending.shift() ?? null);
+
+      const next = pending.shift() ?? null;
+
+      // The extra Runs arrive only once the queue has already been observed as empty, which is
+      // the only way to prove the loop re-polls instead of parking on in-flight executions.
+      if (next === null && options.lateRuns !== undefined && !lateDelivered) {
+        lateDelivered = true;
+        pending.push(...options.lateRuns);
+      }
+
+      return Promise.resolve(next);
     },
     heartbeat: (run: LeasedRun): Promise<boolean> => {
       heartbeats.push(run.runId);
@@ -97,9 +113,10 @@ function harness(options: HarnessOptions = {}): Build {
   };
 
   const handler = {
-    handle: async (_run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus> => {
+    handle: async (run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus> => {
       active.current += 1;
       active.max = Math.max(active.max, active.current);
+      entered.push(run.runId);
 
       try {
         if (options.block === true) {
@@ -128,6 +145,7 @@ function harness(options: HarnessOptions = {}): Build {
     heartbeats,
     waits,
     active,
+    entered,
     stop: () => stopController.abort(),
     release: () => release(),
   };
@@ -139,6 +157,8 @@ async function run(
   options: {
     readonly concurrency?: number;
     readonly onWait?: (ms: number, times: number) => void;
+    /** Replace the default "resolve immediately" wait (still counted and reported). */
+    readonly sleeper?: (ms: number, signal?: AbortSignal) => Promise<void>;
   } = {},
 ): Promise<Awaited<ReturnType<typeof runPollLoop>>> {
   const logger = createWorkerLogger({
@@ -147,6 +167,12 @@ async function run(
     now: () => new Date(NOW.getTime()),
   });
   let calls = 0;
+
+  const record = (ms: number): void => {
+    calls += 1;
+    build.waits.push(ms);
+    options.onWait?.(ms, calls);
+  };
 
   return runPollLoop({
     queue: build.queue,
@@ -159,11 +185,9 @@ async function run(
     errorBackoffMs: 20,
     logger,
     signal: build.signal,
-    sleep: (ms) => {
-      calls += 1;
-      build.waits.push(ms);
-      options.onWait?.(ms, calls);
-      return Promise.resolve();
+    sleep: (ms, signal) => {
+      record(ms);
+      return options.sleeper === undefined ? Promise.resolve() : options.sleeper(ms, signal);
     },
   });
 }
@@ -194,6 +218,73 @@ describe('poll loop', () => {
 
     expect(build.heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(summary.finished).toBe(1);
+  });
+
+  it('releases the execution slot without waiting for another heartbeat interval', async () => {
+    // A heartbeat wait that only a cancellation can end: if the loop kept waiting for the next
+    // tick after `finish()`, this test would time out instead of completing.
+    const build = harness();
+    let interruptedByAbort = false;
+
+    const summary = await run(build, {
+      sleeper: (ms, signal) => {
+        if (ms !== HEARTBEAT_MS) {
+          return Promise.resolve();
+        }
+
+        return new Promise<void>((resolve) => {
+          const done = (): void => {
+            interruptedByAbort = true;
+            resolve();
+          };
+
+          if (signal?.aborted === true) {
+            done();
+            return;
+          }
+
+          signal?.addEventListener('abort', done, { once: true });
+        });
+      },
+      onWait: (ms) => {
+        if (ms === IDLE_MS) {
+          build.stop();
+        }
+      },
+    });
+
+    expect(summary).toEqual({ claimed: 1, finished: 1, rejectedFinishes: 0, abandoned: 0 });
+    expect(interruptedByAbort).toBe(true);
+    // The Run finished instantly, so no renewal was ever due.
+    expect(build.heartbeats).toEqual([]);
+  });
+
+  it('claims newly arrived work while another execution is still in flight', async () => {
+    const build = harness({ runs: [leasedRun(1)], lateRuns: [leasedRun(2)], block: true });
+    let idlePolls = 0;
+
+    const summary = await run(build, {
+      // One slot stays free after both claims, so the loop must poll the empty queue rather
+      // than park on the in-flight executions.
+      concurrency: 3,
+      onWait: (ms) => {
+        if (ms !== IDLE_MS) {
+          return;
+        }
+        idlePolls += 1;
+        if (idlePolls >= 3) {
+          build.stop();
+        }
+      },
+    });
+
+    // Both Runs started although neither could finish: the second claim happened while the
+    // first execution still occupied its slot, instead of after it completed.
+    expect(build.entered).toEqual([leasedRun(1).runId, leasedRun(2).runId]);
+    expect(summary.claimed).toBe(2);
+    expect(summary.finished).toBe(0);
+    expect(summary.abandoned).toBe(2);
+    expect(build.waits.filter((ms) => ms === IDLE_MS).length).toBeGreaterThan(0);
   });
 
   it('abandons the execution and never finishes when the heartbeat is lost', async () => {

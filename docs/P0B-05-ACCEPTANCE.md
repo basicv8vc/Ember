@@ -51,9 +51,9 @@ $ git status --short
 | 2   | `pnpm typecheck`（`tsc -p tsconfig.json`，含 apps + packages + tests） | ✅ 0 error                                                    |
 | 3   | `pnpm lint`（`eslint .`）                                              | ✅ 0 problem                                                  |
 | 4   | `pnpm format:check`（`prettier --check .`）                            | ✅ All matched files use Prettier code style                  |
-| 5   | `pnpm test:unit`                                                       | ✅ **17 files / 345 tests passed**                            |
+| 5   | `pnpm test:unit`                                                       | ✅ **18 files / 354 tests passed**                            |
 | 6   | `pnpm build`（`tsc -b tsconfig.build.json`）                           | ✅ 0 error                                                    |
-| 7   | `pnpm test:integration`（真实 PostgreSQL）                             | ✅ **8 files / 83 tests passed**                              |
+| 7   | `pnpm test:integration`（真实 PostgreSQL）                             | ✅ **8 files / 84 tests passed**                              |
 | 8   | `pnpm db:migrate` ×2                                                   | ✅ 第二次 `migrations complete: 0 applied, 4 already applied` |
 | 9   | 构建产物 ESM 消费（`node --input-type=module`）                        | ✅ 见 §3.3                                                    |
 | 10  | `/healthz` / `/readyz`（构建产物，端口 8853）                          | ✅ `200` / `200`                                              |
@@ -69,12 +69,13 @@ $ git status --short
  ✓ tests/unit/fake-sandbox.test.ts (15 tests)
  ✓ tests/unit/deterministic-executor.test.ts (15 tests)
  ✓ tests/unit/run-handler.test.ts (11 tests)
- ✓ tests/unit/worker-poll-loop.test.ts (15 tests)
+ ✓ tests/unit/run-execution-context-reader.test.ts (7 tests)   ← Review Round 1 新增
+ ✓ tests/unit/worker-poll-loop.test.ts (17 tests)              ← 含 P1-1 / P1-2 回归
  ✓ tests/unit/{domain-contracts,env,healthz,lease-queue-policy,migrator,
               p0b03-schema-vocabulary,run-state-machine,task-digest,
               task-schemas,task-state-machine,worker-loop}.test.ts（现有回归）
- Test Files  17 passed (17)
-      Tests  345 passed (345)
+ Test Files  18 passed (18)
+      Tests  354 passed (354)
 ```
 
 ### 3.2 集成测试实际输出
@@ -87,9 +88,9 @@ $ git status --short
  ✓ tests/integration/lease-fencing.test.ts        (10 tests)
  ✓ tests/integration/task-idempotency.test.ts      (6 tests)
  ✓ tests/integration/cancellation-retry.test.ts    (9 tests)
- ✓ tests/integration/execution-worker.test.ts      (9 tests)   ← P0B-05 新增
+ ✓ tests/integration/execution-worker.test.ts      (10 tests)  ← P0B-05 新增（含 1 条 P1-3 用例）
  Test Files  8 passed (8)
-      Tests  83 passed (83)
+      Tests  84 passed (84)
 ```
 
 ### 3.3 构建产物 ESM 消费
@@ -219,3 +220,32 @@ P0B-05 的验收条件全部满足：确定性路由与模拟执行已接入**�
 执行结果明确标记为非持久化，`mock.file`/`mock.approval` 不会被无能力 Worker Claim，优雅关闭
 不产生任何假终态，且全部既有 P0B-02/03/04 回归仍然通过。本分支只创建 **Draft PR**，不合并
 `main`。
+
+## 11. CTO Review Round 1 复验（P1-1 / P1-2 / P1-3）
+
+三条 P1 均已在同一分支 `feature/p0b-05-execution-router` 修复，未改动数据库 Migration、
+Event、依赖或契约。
+
+| #    | 修复                                                                                 | 代码                                                                                             | 回归证据                                                                                                                 |
+| ---- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| P1-1 | 心跳等待同时监听 `execution` 与 `heartbeatStop`，`finish()` 后立即释放并发槽位       | `apps/worker/src/poll-loop.ts`                                                                   | 单测「releases the execution slot without waiting for another heartbeat interval」；把信号临时改回旧实现后该用例 5s 超时 |
+| P1-2 | 空队列 + 空闲槽位时按 `idleIntervalMs` 重新 Claim，任一执行完成/stop 提前唤醒        | `apps/worker/src/poll-loop.ts`                                                                   | 单测「claims newly arrived work while another execution is still in flight」；旧实现下该用例挂起                         |
+| P1-3 | Reader 以语句内 `now()` 判定过期/deadline，并在返回后用注入 `Clock` 做 hand-off 复核 | `packages/postgres/src/repositories/run-execution-context-reader.ts`、`apps/worker/src/index.ts` | 单测 `run-execution-context-reader.test.ts`（3 条在旧实现下失败）+ 集成测试 T03 round trip 用例                          |
+
+复验命令（全部在 `/Users/a1-6/Downloads/Ember-p0b05` 执行）：
+
+```text
+$ pnpm typecheck        → 0 error
+$ pnpm lint            → 0 problem
+$ pnpm format:check    → All matched files use Prettier code style
+$ pnpm test:unit       → 18 files / 354 tests passed
+$ pnpm build           → 0 error
+$ pnpm test:integration→ 8 files / 84 tests passed（含新增 T03 round trip 用例）
+```
+
+回归性说明：三条用例先在**旧实现**上运行并确认失败（P1-1 超时、P1-2 挂起、P1-3 三条断言
+失败），再在修复后运行通过，因此不是「跟随实现的断言」。
+
+环境注记：本次复验期间宿主机磁盘一度达到 100%，Docker Desktop 随后失去响应；上表集成测试
+结果取自修复完成后的完整运行（`22:11`，含新增用例）。之后的重跑因 Docker daemon 无响应而
+无法执行，属环境问题，不涉及代码或数据库状态；恢复 Docker 后可用同一命令复现。

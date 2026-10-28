@@ -87,7 +87,7 @@ async function main(): Promise<void> {
     }
 
     const handler = createRunHandler({
-      contextReader: new PostgresRunExecutionContextReader(pool),
+      contextReader: new PostgresRunExecutionContextReader(pool, systemClock),
       router: new DeterministicExecutionRouter(),
       executor: new DeterministicExecutor(),
       clock: systemClock,

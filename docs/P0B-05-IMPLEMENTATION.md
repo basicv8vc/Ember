@@ -178,6 +178,12 @@ Worker 不信任自己内存里的任何字段，也不把 Task 输入当成上�
 - 逐项复核 Claim 返回的 Fencing 字段：`task.status = running`、`current_run_id`、
   `task.lease_epoch`、`run.lease_epoch`、`run.attempt`、`attempt_count`、Task/Run 的
   `lease_expires_at`/`leased_until`；任一不匹配 → `STALE_LEASE`；
+- **时间模型（Review Round 1 · P1-3 修复）**：调用方传入的 `now` 只是**下界**，因为它在
+  往返之前采样；语句内 `now() AS evaluated_at` 取「语句执行时的数据库时间」，过期与
+  deadline 一律以它为准，所以「语句执行时已过期」的 Lease 必然被拒绝；
+- **hand-off 复核**：语句返回后再用注入的 `Clock` 复核一次租约与 deadline，覆盖
+  「查询期间租约过期」的窗口；任何一次复核使用的时间都取
+  `max(调用方 now, 数据库语句时间)`，较晚的时间只会更严格，不会放宽判定；
 - 缺失、跨 tenant、错 task 的引用一律 `NOT_FOUND`（不可区分，避免探测）；
 - **取消优先**（ADR-0001）：`cancel_requested_at IS NOT NULL` 时即使 Lease 也已过期，也返回
   `CANCELLED`；
@@ -203,7 +209,12 @@ claimNext() ──▶ read context ──▶ route ──▶ execute ──▶ f
 - 执行被中止（shutdown / Lease 丢失 / 取消）时**不提交结果**，因此 Worker 无法用被切断的工作
   伪造终态；
 - 并发上限 `concurrency`：达到上限时不再 Claim，只在有执行完成或 stop 时继续；
-- 队列为空且有在飞执行时不空转（等 `Promise.race(inFlight)`），否则按 `idleIntervalMs` 退避；
+- **空队列不阻塞新任务（Review Round 1 · P1-2 修复）**：只要还有空闲槽位，即使存在在飞执行，
+  也最多等 `idleIntervalMs` 就重新 Claim（同时任一执行完成或 stop 会提前唤醒），因此新到达的
+  Task 不必等一个无关的长任务结束；等待用的定时器在完成时被取消，不留悬挂定时器；
+- **执行结束立即释放并发槽位（Review Round 1 · P1-1 修复）**：心跳等待监听
+  `execution`（撤销/关闭）与 `heartbeatStop`（已经交接终态）两个信号，`finish()` 之后
+  `heartbeatStop.abort()` 会立刻打断该等待，槽位不再多占一个 `heartbeatIntervalMs`；
 - Claim 抛错 → 固定 code + `errorBackoffMs` 退避后继续；
 - 优雅关闭：共享一个 stop signal，先停止 Claim，再 `Promise.allSettled` 等在飞执行结束；
   Handler 的 signal 会同步 abort，因此执行能及时退出。
@@ -259,15 +270,16 @@ claimNext() ──▶ read context ──▶ route ──▶ execute ──▶ f
 
 ## 11. 测试映射
 
-| 测试                                         | 覆盖                                                                                                                                               |
-| -------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/unit/execution-router.test.ts`        | P0B05-T01：阈值边界、确定性、reason 闭合集、无内容泄漏、非法 kind/输入/policyVersion、双入口同策略                                                 |
-| `tests/unit/fake-llm.test.ts`                | 确定性、词表闭合、输出上限、无 prompt 回显、延迟/超时/故障注入、非法请求                                                                           |
-| `tests/unit/fake-sandbox.test.ts`            | 生命周期、命令白名单、tenant 隔离、fail-closed 能力、usage 记账、稳定 id                                                                           |
-| `tests/unit/deterministic-executor.test.ts`  | `mock.chat`/`mock.compute` 结果、确定性、deadline、abort、能力清单、故障码                                                                         |
-| `tests/unit/run-handler.test.ts`             | 上下文 → 路由 → 执行链路、`STALE_LEASE`/`NOT_FOUND` 上抛、失败分类、日志不含内容                                                                   |
-| `tests/unit/worker-poll-loop.test.ts`        | P0B05-T02/T03/T06 的循环语义：finish 语义、心跳丢失、并发上限、claim 退避、shutdown、配置守卫                                                      |
-| `tests/integration/execution-worker.test.ts` | 真实 PostgreSQL：P0B05-T02（Claim→执行→Finish）、T03（Fencing）、T04（重试/终态/deadline）、T05（不支持 kind 隔离）、T06（优雅关闭 + Reaper 恢复） |
+| 测试                                              | 覆盖                                                                                                                                                                   |
+| ------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/unit/execution-router.test.ts`             | P0B05-T01：阈值边界、确定性、reason 闭合集、无内容泄漏、非法 kind/输入/policyVersion、双入口同策略                                                                     |
+| `tests/unit/fake-llm.test.ts`                     | 确定性、词表闭合、输出上限、无 prompt 回显、延迟/超时/故障注入、非法请求                                                                                               |
+| `tests/unit/fake-sandbox.test.ts`                 | 生命周期、命令白名单、tenant 隔离、fail-closed 能力、usage 记账、稳定 id                                                                                               |
+| `tests/unit/deterministic-executor.test.ts`       | `mock.chat`/`mock.compute` 结果、确定性、deadline、abort、能力清单、故障码                                                                                             |
+| `tests/unit/run-handler.test.ts`                  | 上下文 → 路由 → 执行链路、`STALE_LEASE`/`NOT_FOUND` 上抛、失败分类、日志不含内容                                                                                       |
+| `tests/unit/worker-poll-loop.test.ts`             | P0B05-T02/T03/T06 的循环语义：finish 语义、心跳丢失、并发上限、claim 退避、shutdown、配置守卫，以及 P1-1（finish 后立即释放槽位）与 P1-2（在飞执行期间仍领取新任务）   |
+| `tests/unit/run-execution-context-reader.test.ts` | P1-3：数据库语句时间优先、round trip 内过期的 hand-off 复核、deadline、取消优先、`NOT_FOUND`、epoch 不匹配、参数化 SQL                                                 |
+| `tests/integration/execution-worker.test.ts`      | 真实 PostgreSQL：P0B05-T02（Claim→执行→Finish）、T03（Fencing + round trip 内过期）、T04（重试/终态/deadline）、T05（不支持 kind 隔离）、T06（优雅关闭 + Reaper 恢复） |
 
 ## 12. 遗留风险与已知偏差
 
@@ -279,3 +291,23 @@ claimNext() ──▶ read context ──▶ route ──▶ execute ──▶ f
   `claimableKinds` 的 Worker 上生效，生产 Worker 必须使用该配置（当前入口已强制）；
 - **单进程并发**：`runPollLoop` 是单进程内并发，没有跨进程协调（由 Lease 保证正确性）；
 - **路由阈值是常量**：没有 Agent 级策略表或动态配置，P0B-07 的策略版本才有真实语义。
+
+## 13. CTO Review Round 1 修复（P1-1 / P1-2 / P1-3）
+
+三项修复都只改 Worker 与 Reader 的行为，不改数据库 Migration、不改 Event、不新增依赖。
+
+| 问题                                 | 修复前                                                                   | 修复后                                                                                                                       | 回归测试                                                                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- |
+| P1-1 执行结束后心跳等待未及时取消    | 心跳 `sleep` 只监听 `execution`，正常完成路径要等满一个心跳周期才返回    | `linkAbortSignals(execution, heartbeatStop)`，`finish()` 后的 `heartbeatStop.abort()` 立即打断等待，`finally` 中 `dispose()` | `worker-poll-loop.test.ts`：`releases the execution slot without waiting for another heartbeat interval`（修复前 5s 超时） |
+| P1-2 有在飞执行时空队列轮询被阻塞    | 空队列 + 在飞执行 → `await Promise.race(inFlight)`，新任务要等旧任务完成 | `waitForNextPoll()`：`min(idleIntervalMs, 任一执行完成, stop)` 提前唤醒，空闲槽位始终按 `idleIntervalMs` 重新 Claim          | `worker-poll-loop.test.ts`：`claims newly arrived work while another execution is still in flight`（修复前挂起）           |
+| P1-3 Reader 用查询前的时间校验 Lease | 只用调用方 `now`（往返前采样）判断过期与 deadline                        | 语句内 `now() AS evaluated_at` 作为判据 + 返回后用注入 `Clock` 做 hand-off 复核，两者取 `max`                                | `run-execution-context-reader.test.ts`（3 条）+ 集成测试 `T03` round trip 用例                                             |
+
+行为边界：
+
+- 修复不引入新的「乐观放行」：所有比较仍以「更晚的时间」为准，只会更容易拒绝；
+- `heartbeatStop` 只打断**等待**，不会打断已经发出的 `heartbeat()` 请求，因此 Fencing
+  语义不变；
+- P1-2 只是把「等一个完成」换成「最多等一个轮询间隔」，代价是空闲期间每
+  `idleIntervalMs` 一次 `Claim` 查询（默认 2s），失败仍按 `errorBackoffMs` 退避；
+- 时间模型仍依赖数据库时间为准（ADR 层面的假设：Worker 与 PostgreSQL 时钟同源），
+  `Clock` 注入只用于同一时间轴上的复核与测试（`ManualClock`）。

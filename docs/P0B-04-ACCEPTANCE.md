@@ -29,14 +29,14 @@
 
 ## 2. 交付前仓库状态核验
 
-| 检查                 | 命令 / 结果                                                                                  |
-| -------------------- | -------------------------------------------------------------------------------------------- |
-| 当前分支             | `feature/p0b-04-durable-worker-lease`（从 `origin/main` @ `01ef997` 创建）                   |
-| 远端 main            | `git fetch origin`；`git rev-parse origin/main` = `01ef99723134339daccf79db43765c68f8b00a7a` |
-| 用户未提交参考资料   | 6 个本地 Prompt/RFC Markdown 保持未跟踪，不纳入提交、不修改 `main`                           |
-| P0B-01～03 Migration | `0001`～`0003` 未修改；新增 `0004_lease_fencing_and_retry.sql`                               |
-| ADR                  | `docs/adr/0001-cancellation-and-retry-coordination.md` 来自 CTO 已批准远端分支，内容未改写   |
-| `main`               | 未修改、未合并、未强推                                                                       |
+| 检查                 | 命令 / 结果                                                                                                                                                                          |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 当前分支             | `feature/p0b-04-durable-worker-lease`（从 `origin/main` @ `01ef997` 创建）                                                                                                           |
+| 远端 main            | 分支创建时 `origin/main` = `01ef99723134339daccf79db43765c68f8b00a7a`；交付期间 CTO 合并 ADR PR #4 后推进到 `5c91a6f0ef361cb97efe7c95ba048016b25ccaad`（仅新增同一 ADR，无代码差异） |
+| 用户未提交参考资料   | 6 个本地 Prompt/RFC Markdown 保持未跟踪，不纳入提交、不修改 `main`                                                                                                                   |
+| P0B-01～03 Migration | `0001`～`0003` 未修改；新增 `0004_lease_fencing_and_retry.sql`                                                                                                                       |
+| ADR                  | `docs/adr/0001-cancellation-and-retry-coordination.md` 来自 CTO 已批准远端分支，内容未改写                                                                                           |
+| `main`               | 未修改、未合并、未强推                                                                                                                                                               |
 
 ## 3. 验收命令与结果
 
@@ -288,7 +288,7 @@ Limit
 | 项目                 | 值                                                                                                          |
 | -------------------- | ----------------------------------------------------------------------------------------------------------- |
 | 分支                 | `feature/p0b-04-durable-worker-lease`                                                                       |
-| Base SHA             | `01ef99723134339daccf79db43765c68f8b00a7a`                                                                  |
+| Base SHA             | 分支基线 `01ef997`；当前 PR base ref `5c91a6f`（仅 ADR merge，PR `mergeable: MERGEABLE` / `CLEAN`）         |
 | 代码 HEAD            | `ea9d02d1792102b54b01a7832de9c8c7663021f1`                                                                  |
 | Draft PR             | [#5](https://github.com/basicv8vc/Ember/pull/5)（`isDraft: true`，`state: OPEN`，base `main`）              |
 | CI 运行（代码 HEAD） | [40630263890](https://github.com/basicv8vc/Ember/actions/runs/40630263890) — success                        |

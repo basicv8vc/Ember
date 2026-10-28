@@ -704,6 +704,20 @@ export class PostgresLeaseQueue implements LeaseQueue {
     at: Date,
     reason: { readonly cancelRequested: boolean; readonly deadlineReached: boolean },
   ): Promise<void> {
+    // ADR-0002 mandatory precondition: a pre-claim convergence is only legal when the
+    // Task has no `created` or `running` Run. If such a Run exists the database is in an
+    // anomalous state (a queued/retryable Task with an active execution); marking the Task
+    // terminal here would strand an unrecoverable active Run. Fail closed: throw before any
+    // write so the surrounding transaction rolls back Task, Run and Event untouched.
+    const activeRun = await client.query<IdRow>(ACTIVE_RUN_SQL, [task.tenant_id, task.id]);
+
+    if ((activeRun.rowCount ?? 0) > 0) {
+      throw new DomainError(
+        'DB_UNAVAILABLE',
+        'task has an active run during pre-claim convergence',
+      );
+    }
+
     const target: TaskStatus = reason.cancelRequested ? 'cancelled' : 'failed';
     const nextStatus = transitionTask(status, target);
 

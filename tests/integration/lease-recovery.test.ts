@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { InvalidArgumentError, isDomainError, type AuthContext } from '@ember/domain';
 import {
@@ -42,6 +43,40 @@ let secondQueue: PostgresLeaseQueue;
 
 async function syncClock(): Promise<void> {
   clock.set(await databaseNow(db.pool));
+}
+
+/**
+ * Simulate the invariant violation ADR-0002 forbids: a `queued`/`retryable_failed` Task
+ * that still has a live Run. The normal API cannot create this, so the test writes it
+ * directly to prove the pre-claim convergence path fails closed.
+ */
+async function insertActiveRun(tenantId: string, taskId: string): Promise<string> {
+  const runId = randomUUID();
+
+  await db.pool.query(
+    `INSERT INTO runs (
+       id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until,
+       started_at, created_at, updated_at
+     )
+     VALUES ($1, $2, $3, 1, 0, 'running', 'anomalous-worker', now() + interval '1 hour',
+             now(), now(), now())`,
+    [runId, tenantId, taskId],
+  );
+
+  return runId;
+}
+
+/**
+ * Remove a Task created only for an invariant-violation test so its anomalous Run cannot
+ * leak into later Reaper/Claim tests in the same schema.
+ */
+async function removeTestTask(tenantId: string, taskId: string): Promise<void> {
+  await db.pool.query('DELETE FROM runs WHERE tenant_id = $1 AND task_id = $2', [tenantId, taskId]);
+  await db.pool.query('DELETE FROM task_events WHERE tenant_id = $1 AND task_id = $2', [
+    tenantId,
+    taskId,
+  ]);
+  await db.pool.query('DELETE FROM tasks WHERE tenant_id = $1 AND id = $2', [tenantId, taskId]);
 }
 
 /**
@@ -450,6 +485,119 @@ describe('B-T10 lease expiry and recovery', () => {
     expect(events[1]?.payload['fromStatus']).toBe('queued');
     expect(events[1]?.payload['toStatus']).toBe('failed');
     expect(events[1]?.payload['errorCode']).toBeUndefined();
+  });
+
+  it('refuses pre-claim convergence when the task still has an active run (claim)', async () => {
+    const created = await createQueuedTask(tasks, ctx, agent.agentId, 'preclaim-active-run-claim');
+
+    try {
+      await syncClock();
+      const runId = await insertActiveRun(ctx.tenantId, created.taskId);
+      await setTaskControls(db.pool, created.taskId, {
+        deadlineAt: new Date(clock.now().getTime() - 1_000),
+      });
+      await parkOtherOpenTasks(db.pool, created.taskId);
+
+      const taskBefore = await readTask(db.observerPool, ctx.tenantId, created.taskId);
+      const runsBefore = await listRuns(db.observerPool, ctx.tenantId, created.taskId);
+      const eventsBefore = await listEventSnapshots(db.observerPool, ctx.tenantId, created.taskId);
+
+      let caught: unknown;
+      try {
+        await queue.claimNext('worker-preclaim-active', clock.now());
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(isDomainError(caught)).toBe(true);
+      expect((caught as { code: string }).code).toBe('DB_UNAVAILABLE');
+
+      // ADR-0002: an active Run blocks the edge and the transaction leaves no trace.
+      expect(await readTask(db.observerPool, ctx.tenantId, created.taskId)).toEqual(taskBefore);
+      expect(await listRuns(db.observerPool, ctx.tenantId, created.taskId)).toEqual(runsBefore);
+      expect(await listEventSnapshots(db.observerPool, ctx.tenantId, created.taskId)).toEqual(
+        eventsBefore,
+      );
+
+      expect(taskBefore.status).toBe('queued');
+      expect(taskBefore.attempt_count).toBe(0);
+      expect(taskBefore.lease_epoch).toBe('0');
+      expect(runsBefore).toHaveLength(1);
+      expect(runsBefore[0]?.id).toBe(runId);
+      expect(runsBefore[0]?.status).toBe('running');
+      expect(eventsBefore.map((event) => event.phase)).toEqual(['accepted']);
+    } finally {
+      await removeTestTask(ctx.tenantId, created.taskId);
+    }
+  });
+
+  it('refuses reaper convergence when an expired task still has an active run', async () => {
+    const valid = await createQueuedTask(tasks, ctx, agent.agentId, 'reaper-open-deadline');
+    const anomalous = await createQueuedTask(tasks, ctx, agent.agentId, 'reaper-active-run');
+
+    try {
+      await syncClock();
+
+      // A legally expired Task is converged first so the assertion proves the whole
+      // transaction (task update + failed event) rolls back when the anomaly is detected.
+      const runId = await insertActiveRun(ctx.tenantId, anomalous.taskId);
+
+      await setTaskControls(db.pool, valid.taskId, {
+        deadlineAt: new Date(clock.now().getTime() - 5_000),
+      });
+      await setTaskControls(db.pool, anomalous.taskId, {
+        deadlineAt: new Date(clock.now().getTime() - 3_000),
+      });
+
+      const validBefore = await readTask(db.observerPool, ctx.tenantId, valid.taskId);
+      const validEventsBefore = await listEventSnapshots(
+        db.observerPool,
+        ctx.tenantId,
+        valid.taskId,
+      );
+      const anomalousBefore = await readTask(db.observerPool, ctx.tenantId, anomalous.taskId);
+      const anomalousRunsBefore = await listRuns(db.observerPool, ctx.tenantId, anomalous.taskId);
+      const anomalousEventsBefore = await listEventSnapshots(
+        db.observerPool,
+        ctx.tenantId,
+        anomalous.taskId,
+      );
+
+      let caught: unknown;
+      try {
+        await queue.reapExpired(clock.now());
+      } catch (error) {
+        caught = error;
+      }
+
+      expect(isDomainError(caught)).toBe(true);
+      expect((caught as { code: string }).code).toBe('DB_UNAVAILABLE');
+
+      expect(await readTask(db.observerPool, ctx.tenantId, valid.taskId)).toEqual(validBefore);
+      expect(await listEventSnapshots(db.observerPool, ctx.tenantId, valid.taskId)).toEqual(
+        validEventsBefore,
+      );
+      expect(validBefore.status).toBe('queued');
+
+      expect(await readTask(db.observerPool, ctx.tenantId, anomalous.taskId)).toEqual(
+        anomalousBefore,
+      );
+      expect(await listRuns(db.observerPool, ctx.tenantId, anomalous.taskId)).toEqual(
+        anomalousRunsBefore,
+      );
+      expect(await listEventSnapshots(db.observerPool, ctx.tenantId, anomalous.taskId)).toEqual(
+        anomalousEventsBefore,
+      );
+
+      expect(anomalousBefore.status).toBe('queued');
+      expect(anomalousRunsBefore).toHaveLength(1);
+      expect(anomalousRunsBefore[0]?.id).toBe(runId);
+      expect(anomalousRunsBefore[0]?.status).toBe('running');
+      expect(anomalousEventsBefore.map((event) => event.phase)).toEqual(['accepted']);
+    } finally {
+      await removeTestTask(ctx.tenantId, valid.taskId);
+      await removeTestTask(ctx.tenantId, anomalous.taskId);
+    }
   });
 
   it('reaps a running task at its deadline even before the lease expires', async () => {

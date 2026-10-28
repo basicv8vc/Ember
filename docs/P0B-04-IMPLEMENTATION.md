@@ -77,26 +77,24 @@ tests/integration          真实 PostgreSQL 17，随机 ember_it_<hex> schema
 `retryable_failed → queued → running` 仍是重试领取的唯一合法路径，禁止直接
 `retryable_failed → running`。
 
-### 3.2 OQ-2 提案：`queued → failed`
+### 3.2 ADR-0002（OQ-2 有条件批准）：`queued → failed`
 
-**这是一个等待 CTO Review 的独立提案，不是 ADR-0001 的一部分。**
+CTO 已原则批准该边，条件记录在
+[ADR-0002](./adr/0002-preclaim-deadline-failure.md)。它只用于**无法领取**的 Task：
 
-问题：Task 在**首次领取前**已经过 `deadline_at`。现有 Task FSM 只有 `queued →
-running|cancelled`，没有 `queued → failed`。若不新增边，只能：
-
-1. 非法地伪造 `queued → running` + 一个不存在的 Run；或
-2. 把到期 Task 永久留在队列，却声称 Deadline 验收通过。
-
-两者都不可接受。因此本 PR **显式**新增 `queued → failed`，仅用于“从未开始的 Task 已过
-Deadline / 不具备可领取预算”的收敛路径，并在实现、测试和本文档中标注为 OQ-2 Proposal。
+- Claim/Reaper 在持有 Task 行锁后确认 Deadline 已过期或执行预算已耗尽；
+- 不存在 `created/running` Run；
+- 若存在已提交的取消意图，取消优先，走 `queued → cancelled`；
+- 不创建 Run、不递增 attempt/epoch、不伪造 `queued → running`；
+- 追加唯一 `failed` Event（Deadline 场景 `errorCode=DEADLINE_EXCEEDED`）；
+- 运行中的失败仍走既有 `running → failed`。
 
 兼容性分析：
 
 - 不改变任何既有边的语义，不新增 `waiting_external`，不放开同状态赋值；
 - `queued → failed` 只能由 Claim 的 Deadline/预算前置检查或 Reaper 的过期扫描触发；
-- 运行中的 Deadline 仍走既有 `running → failed`；
-- 若 CTO 拒绝该边，需要替换为显式 OQ-2 决策；当前实现不能静默改为伪造 Run；
-- 7×7 负向矩阵与正向边清单均已更新并有测试。
+- 7×7 负向矩阵与正向边清单均已更新并有测试；
+- ADR-0001 的取消优先级高于 ADR-0002。
 
 ## 4. Schema、Migration 与索引
 
@@ -159,11 +157,14 @@ ORDER BY next_run_at, created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`。
 `heartbeat(run, now)` 在单个事务中：
 
 1. 按 `tenant_id + task_id` `FOR UPDATE` 锁定 Task；
-2. 校验 Task=`running`、`current_run_id = run.runId`、`cancel_requested_at IS NULL`；
-3. 校验 `Task.lease_epoch == run.leaseEpoch` 且 `lease_expires_at > now`（恰好到期不续租）；
-4. 校验 Deadline 尚未到达；
-5. 锁定 Run，校验 Run=`running`、Run Epoch/Attempt 与 Lease 一致；
-6. 同一事务更新 `runs.leased_until` 与 `tasks.lease_expires_at`，新时间严格向前
+2. 取得 Task 行锁后重新采样注入 Clock，并使用调用方时间与锁后时间的较晚者作为有效
+   `heartbeatAt`；绝不使用等待锁之前的过时时间判断租约仍有效；
+3. 校验 Task=`running`、`current_run_id = run.runId`、`cancel_requested_at IS NULL`；
+4. 校验 `Task.lease_epoch == run.leaseEpoch` 且 `lease_expires_at > heartbeatAt`（恰好到期不续租）；
+5. 校验 Deadline 尚未到达；
+6. 锁定 Run，校验 Run=`running`、Run Epoch/Attempt 与 Lease 一致，且 `leased_until` 非空并
+   未过期；
+7. 同一事务更新 `runs.leased_until` 与 `tasks.lease_expires_at`，新时间严格向前
    （即使测试时钟回拨也不会缩短租约）。
 
 返回值语义：
@@ -179,8 +180,9 @@ ORDER BY next_run_at, created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`。
 
 `finish(run, outcome)` 使用构造时注入的 `Clock`（接口没有 `now` 参数）。事务内：
 
-1. `FOR UPDATE` 锁定 Task；校验 Tenant/Task/current Run/Epoch、Task=`running`、
-   Run=`running`、Attempt 匹配、Task 与 Run 租约均未过期。
+1. `FOR UPDATE` 锁定 Task，**在锁内**采样注入 Clock；校验 Tenant/Task/current Run/Epoch、
+   Task=`running`、Run=`running`、Attempt 匹配、Task 与 Run 租约均未过期。
+   `runs.leased_until` 为 `NULL` 时直接返回 `false`，不写任何状态。
 2. `lease_expired` 是 Reaper 专属结果。业务 Worker 调用
    `finish(..., 'lease_expired')` 会收到固定 `INVALID_ARGUMENT` 拒绝，不写任何状态。
 3. 取消优先：若 `cancel_requested_at` 非空，则 Run/Task 原子终结为 `cancelled`，
@@ -207,7 +209,7 @@ ORDER BY next_run_at, created_at, id LIMIT 1 FOR UPDATE SKIP LOCKED`。
 `reapExpired(now)` 使用配置批量（默认 50）和 `FOR UPDATE SKIP LOCKED`：
 
 1. 先收敛 `queued/retryable_failed` 且 `deadline_at <= now` 的未开始 Task：
-   `queued → failed`（OQ-2 提案）或 `retryable_failed → failed`，Event `failed` +
+   `queued → failed`（ADR-0002）或 `retryable_failed → failed`，Event `failed` +
    `DEADLINE_EXCEEDED`。
 2. 再选择 `status='running'` 且 `lease_expires_at <= now` 或 `deadline_at <= now` 的 Task，
    锁定 Task 及其 `current_run_id` 指向的 Run。
@@ -313,17 +315,64 @@ P0B-03 的历史验收文档未被改写。
 | --------------------------------------------------- | ----------------------------------------------------------- |
 | B-T09 双 Worker / 24 并发 Claim / 事务回滚          | `tests/integration/lease-claim.test.ts`                     |
 | B-T10 Lease 到期 / Crash / Reaper / 重试 / Deadline | `tests/integration/lease-recovery.test.ts`                  |
-| B-T11 Fencing / 迟到结果 / 单次终态                 | `tests/integration/lease-fencing.test.ts`                   |
+| P1-1 重试中间态持久化 / Event 审计 / 原子回滚       | `tests/integration/lease-recovery.test.ts`                  |
+| B-T11 Fencing / 迟到结果 / 单次终态 / 锁等待竞争    | `tests/integration/lease-fencing.test.ts`                   |
 | OQ-1 取消与重试竞争                                 | `tests/integration/cancellation-retry.test.ts`              |
-| 状态机全矩阵（含 ADR-0001/OQ-2）                    | `tests/unit/task-state-machine.test.ts`                     |
+| 状态机全矩阵（含 ADR-0001/ADR-0002）                | `tests/unit/task-state-machine.test.ts`                     |
 | RetryPolicy / Clock / Epoch / WorkerId              | `tests/unit/lease-queue-policy.test.ts`                     |
 | Worker 配置 / 可停止循环 / 安全错误码               | `tests/unit/worker-loop.test.ts`                            |
 | P0B-03 Durable Ack / 幂等 / Tenant FK 回归          | 既有 `durable-task-inbox`、`task-idempotency`、`migrations` |
 
-## 15. 遗留风险
+## 15. Review Round 1 修复
 
-1. **OQ-2 未获正式批准**：`queued → failed` 目前是提案边；若 CTO 拒绝，必须替换为明确
-   决策，不能把到期 Task 永久留在队列。
+### P1-1 重试转换持久化与 Event 审计一致
+
+`PostgresLeaseQueue.createLease()` 在领取 `retryable_failed` Task 时：
+
+1. 通过 Domain FSM 执行 `retryable_failed → queued`；
+2. 用 `PROMOTE_RETRY_SQL` **持久化** `status='queued'`，且 `WHERE ... AND status = $5`
+   要求数据库中的前态确实是 `retryable_failed`；`rowCount !== 1` 立即失败；
+3. 追加 `retry_scheduled` Event（`fromStatus=retryable_failed, toStatus=queued`）；
+4. 再执行 `queued → running`，更新 Run/Task 并追加 `leased`（`fromStatus=queued`）与
+   `started` Event。
+
+所有步骤在同一 Task 行锁事务内；任何一步失败整体回滚，包括第 2 步的中间状态与第 3 步
+的 Event。重试领取不再只在内存中验证中间边，也没有 `retryable_failed → running` 直达边。
+
+真实 PostgreSQL 证据（`tests/integration/lease-recovery.test.ts`）：
+
+- 重试生命周期测试断言完整 Event 序列与每个 payload；
+- `p0b04_task_status_audit` 触发器记录**数据库真实状态变更**，断言
+  `queued → running → retryable_failed → queued → running` 四次行更新；
+- 注入第二次 `leased` Event 失败，断言 Claim 失败后中间 `queued` 状态、Event 与新 Run
+  全部回滚，Task 仍为 `retryable_failed`、`attempt_count=1`、`lease_epoch=1`。
+
+### P1-2 Run Lease Expiry 缺失时拒绝 Finish
+
+`finish()` 现在要求 `runs.leased_until` 非空且 `> finishedAt`；`NULL` 立即返回 `false`，
+不更新 Run/Task、不追加 Event。负向测试 `lease-fencing.test.ts` 先用直接 SQL 清空
+`leased_until`，再断言 Finish 返回 `false`、Task/Run/Event 快照完全不变且 Run 仍为
+`running`。
+
+### P1-3 锁等待期间的 Lease 过期竞争
+
+时间采样位置：
+
+- `heartbeat()`：先取得 Task 行锁与 Run 行锁，再调用 `sampleAfterLock(requestedAt)`；
+  有效判定使用调用方时间与锁后注入 Clock 的**较晚者**。任何在等待锁期间到期的 Lease
+  都不会被续期。
+- `finish()`：不再在拿到 Task 锁之前采样；它在取得 Task 与 Run 两把行锁后调用
+  `sampleAfterLock()`，随后才判断 Task/Run Lease、Deadline 并写入。
+- `renewLease()` 的所有时间相关判断（Task 过期、Deadline、Run `leased_until`）都发生在
+  两把锁之后，不会用过时时间证明租约仍有效。
+
+真实 PostgreSQL 并发测试使用独立连接持有 Task 行锁，`pg_blocking_pids(pid)` 精确等待该
+连接造成的锁等待后推进测试时钟越过到期点，再释放锁；Heartbeat 与 Finish 均返回 `false`，
+持久状态不变。另有正向测试证明：锁等待期间租约仍有效时，Heartbeat 与 Finish 继续成功。
+
+## 16. 遗留风险
+
+1. ADR-0002 已获有条件批准；实现必须持续满足其条件，不能把该边扩大为通用失败捷径。
 2. P0 重试无 Jitter；多 Worker 大规模同时到期时存在惊群风险。
 3. Finish/Reaper 只保证数据库最终状态，不保证外部副作用被撤销或远端执行已物理停止。
 4. 取消的审批传播、Worker 合作式中止与外部 API 留给 P0B-08。

@@ -66,7 +66,7 @@ Ember/
     P0B-03-IMPLEMENTATION.md   # P0B-03 schema, transactions, digest and idempotency design
     P0B-03-ACCEPTANCE.md       # P0B-03 verification evidence and B-T06–B-T08 status
     adr/0001-cancellation-and-retry-coordination.md  # Accepted OQ-1 decision
-    P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and OQ-2 proposal
+    P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and ADR-0002
     P0B-04-ACCEPTANCE.md       # P0B-04 command evidence and B-T09–B-T11 status
   .github/workflows/ci.yml
   .env.example
@@ -145,9 +145,10 @@ See [docs/P0B-03-IMPLEMENTATION.md](docs/P0B-03-IMPLEMENTATION.md) and
   exhausted. Retries always create a **new** Run and **new** epoch.
 - ADR-0001 cancellation is implemented transactionally. Once cancellation commits, no new
   Run may be created. `retryable_failed → cancelled` is now a legal Task edge.
-- **OQ-2 is only a proposal:** `queued → failed` was added to terminalize a Task that is
-  already past its deadline before any claim. It is documented and tested separately and
-  awaits CTO review; it is not part of ADR-0001.
+- **OQ-2 is conditionally accepted in ADR-0002:** `queued → failed` is used only to
+  terminalize a Task that is already past its deadline or has exhausted its execution
+  budget before any claim. It never fabricates a Run and never overrides ADR-0001
+  cancellation priority.
 - `apps/worker` is a minimal, stoppable `reaper-only` process. The production entry refuses
   `poll` mode because P0B-05 has no Execution Router/FakeLLM/FakeSandbox. There is **no fake
   success executor**, no Agent business execution and no automatic Resume yet.
@@ -304,7 +305,7 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 
 ```bash
 pnpm test:unit        # 11 files, 265 tests (no database)
-pnpm test:integration # 65 tests against real PostgreSQL 17
+pnpm test:integration # 72 tests against real PostgreSQL 17
 ```
 
 - Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,
@@ -314,7 +315,7 @@ pnpm test:integration # 65 tests against real PostgreSQL 17
   forged tenant/principal fields, idempotency keys, receipt/event DTOs, public/internal error
   separation and validation-error redaction. P0B-03 adds canonical digest/UTF-8 tests and
   SQL-vocabulary alignment checks. P0B-04 adds retry/clock/epoch/worker-id policy tests,
-  the worker's stop-aware loop tests, and the updated full Task matrix for ADR-0001/OQ-2.
+  the worker's stop-aware loop tests, and the updated full Task matrix for ADR-0001/ADR-0002.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
   silently passing. They verify connection, `0001`–`0004`, repeat migration, readiness,
   checksum/rename tamper detection, Durable Ack (including injected event/COMMIT failures),
@@ -385,7 +386,9 @@ These measures are development hygiene, not a security certification.
   B-T06–B-T08 status, concurrency samples and risks.
 - [docs/adr/0001-cancellation-and-retry-coordination.md](docs/adr/0001-cancellation-and-retry-coordination.md)
   — accepted OQ-1 cancellation/retry coordination decision.
+- [docs/adr/0002-preclaim-deadline-failure.md](docs/adr/0002-preclaim-deadline-failure.md)
+  — conditionally accepted OQ-2 pre-claim deadline/budget failure rule.
 - [docs/P0B-04-IMPLEMENTATION.md](docs/P0B-04-IMPLEMENTATION.md) — P0B-04 lease queue,
-  fencing, transaction ordering, retry policy, OQ-2 proposal and worker boundaries.
+  fencing, transaction ordering, retry policy, ADR-0002 and worker boundaries.
 - [docs/P0B-04-ACCEPTANCE.md](docs/P0B-04-ACCEPTANCE.md) — P0B-04 command evidence,
   B-T09–B-T11 concurrency samples, CI and remaining risks.

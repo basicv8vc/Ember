@@ -35,7 +35,7 @@
 | 远端 main            | 分支创建时 `origin/main` = `01ef99723134339daccf79db43765c68f8b00a7a`；交付期间 CTO 合并 ADR PR #4 后推进到 `5c91a6f0ef361cb97efe7c95ba048016b25ccaad`（仅新增同一 ADR，无代码差异） |
 | 用户未提交参考资料   | 6 个本地 Prompt/RFC Markdown 保持未跟踪，不纳入提交、不修改 `main`                                                                                                                   |
 | P0B-01～03 Migration | `0001`～`0003` 未修改；新增 `0004_lease_fencing_and_retry.sql`                                                                                                                       |
-| ADR                  | `docs/adr/0001-cancellation-and-retry-coordination.md` 来自 CTO 已批准远端分支，内容未改写                                                                                           |
+| ADR                  | ADR-0001 来自 CTO 已批准远端分支，内容未改写；ADR-0002 为本轮新增（OQ-2 有条件批准）                                                                                                 |
 | `main`               | 未修改、未合并、未强推                                                                                                                                                               |
 
 ## 3. 验收命令与结果
@@ -53,7 +53,7 @@
 | 7   | `pnpm dev:db`                    | `ember-local-postgres` Running/Healthy                                                                          | PASS |
 | 8   | `pnpm db:migrate`（0004 首次）   | `applied migration 0004_lease_fencing_and_retry.sql in 42ms`；`1 applied, 3 already applied`                    | PASS |
 | 9   | `pnpm db:migrate`（重复两次）    | `0 applied, 4 already applied`；重复迁移零变更                                                                  | PASS |
-| 10  | `pnpm test:integration`          | **7 个文件 / 65 个测试通过**（真实 PostgreSQL 17；P0B-03 32 个回归 + P0B-04 33 个）                             | PASS |
+| 10  | `pnpm test:integration`          | **7 个文件 / 72 个测试通过**（真实 PostgreSQL 17；P0B-03 32 个回归 + P0B-04 40 个）                             | PASS |
 | 11  | `git diff --check`               | 无 whitespace 错误                                                                                              | PASS |
 | 12  | 构建后 ESM 消费                  | `node` 直接导入 `packages/postgres/dist/index.js`，Claim/Heartbeat/Finish 成功（见 3.3）                        | PASS |
 | 13  | Worker 进程 smoke                | `reaper-only` 启动、SIGTERM 优雅关闭；`poll` 模式明确拒绝（见 3.4）                                             | PASS |
@@ -76,7 +76,7 @@ $ pnpm test:unit
 P0B-04 新增/更新的单元覆盖：
 
 - `tests/unit/task-state-machine.test.ts`：完整 7×7 矩阵；`retryable_failed → cancelled`
-  （ADR-0001）与 `queued → failed`（OQ-2 提案）正向边；其余边、快捷边、同状态赋值继续拒绝。
+  （ADR-0001）与 `queued → failed`（ADR-0002）正向边；其余边、快捷边、同状态赋值继续拒绝。
 - `tests/unit/lease-queue-policy.test.ts`（11 个）：
   - `min(cap, base × 2^(n-1))`、attempt 非法值、attempt/deadline 预算；
   - Lease/Retry/Batch 默认值与非法上下界、Heartbeat 必须严格短于 Lease；
@@ -93,19 +93,19 @@ P0B-04 新增/更新的单元覆盖：
 $ pnpm test:integration
 
  Test Files  7 passed (7)
-      Tests  65 passed (65)
-   Duration  1.73s
+      Tests  72 passed (72)
+   Duration  1.92s
 ```
 
-| 文件                                           | 测试数 | 覆盖                                                                                           |
-| ---------------------------------------------- | ------ | ---------------------------------------------------------------------------------------------- |
-| `tests/integration/lease-claim.test.ts`        | 9      | B-T09：双 Pool、24 并发、16 并行跨 Tenant、Event/COMMIT 回滚、Epoch 安全、活跃 Run 唯一索引    |
-| `tests/integration/lease-recovery.test.ts`     | 9      | B-T10：崩溃、双 Reaper、进程重启、attempt 耗尽、Claim/Finish Deadline、孤儿安全失败、DB 不可达 |
-| `tests/integration/lease-fencing.test.ts`      | 6      | B-T11：旧 Run/Epoch/RunId/跨 Tenant、恰好到期、重复 Finish、Reaper-only outcome、DB 错误       |
-| `tests/integration/cancellation-retry.test.ts` | 9      | OQ-1：queued/retryable/approval/running/终态、Reaper、Cancel vs Claim/Retry、错误脱敏          |
-| `tests/integration/durable-task-inbox.test.ts` | 19     | P0B-03 回归 + ADR-0001 queued cancel                                                           |
-| `tests/integration/task-idempotency.test.ts`   | 6      | P0B-03 24 并发幂等 / B-T08 回归                                                                |
-| `tests/integration/migrations.test.ts`         | 7      | `0001`–`0004` 全新 Schema、重复迁移、改名/checksum 拒绝                                        |
+| 文件                                           | 测试数 | 覆盖                                                                                        |
+| ---------------------------------------------- | ------ | ------------------------------------------------------------------------------------------- |
+| `tests/integration/lease-claim.test.ts`        | 9      | B-T09：双 Pool、24 并发、16 并行跨 Tenant、Event/COMMIT 回滚、Epoch 安全、活跃 Run 唯一索引 |
+| `tests/integration/lease-recovery.test.ts`     | 12     | B-T10 + P1-1：崩溃、双 Reaper、重启、预算耗尽、重试中间态持久化、Event 审计、Claim 原子回滚 |
+| `tests/integration/lease-fencing.test.ts`      | 10     | B-T11 + P1-2/P1-3：Fencing、迟到结果、缺失 Run Lease、锁等待期间过期与仍有效的正向对照      |
+| `tests/integration/cancellation-retry.test.ts` | 9      | OQ-1：queued/retryable/approval/running/终态、Reaper、Cancel vs Claim/Retry、错误脱敏       |
+| `tests/integration/durable-task-inbox.test.ts` | 19     | P0B-03 回归 + ADR-0001 queued cancel                                                        |
+| `tests/integration/task-idempotency.test.ts`   | 6      | P0B-03 24 并发幂等 / B-T08 回归                                                             |
+| `tests/integration/migrations.test.ts`         | 7      | `0001`–`0004` 全新 Schema、重复迁移、改名/checksum 拒绝                                     |
 
 ### 3.3 构建产物 ESM 消费
 
@@ -184,19 +184,22 @@ exit=1
 
 `tests/integration/lease-recovery.test.ts` 实际断言：
 
-| 场景                                    | 实际结果 / SQL 行状态                                                                                                                                                                             |
-| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Claim 后不 Heartbeat/Finish             | 推进时钟到 `lease_expires_at`；Reaper 返回 1；旧 Run=`lease_expired`、`finished_at` 非空、`leased_until=NULL`；Task=`retryable_failed`、`lease_expires_at=NULL`、`next_run_at=reapedAt+baseDelay` |
-| Backoff 未到                            | 同 `next_run_at` 时刻之前 Claim 返回 `null`                                                                                                                                                       |
-| Backoff 到期                            | 同一 Task 领取 **新 Run**：`attempt=2`、`lease_epoch=2`、新 RunId；`runs`=2，旧 Run 仍 `lease_expired`，新 Run=`running`                                                                          |
-| 两个独立 Reaper 同时回收                | 目标 Run 只终结一次；`retry_scheduled` Event 恰好 1 条                                                                                                                                            |
-| 新 Pool / 新 Queue 实例重启             | 仍能回收旧 Lease；Task 进入 `retryable_failed` 或 `failed`，不依赖 Worker 内存                                                                                                                    |
-| `max_attempts=1` 用尽                   | 旧 Run=`lease_expired`；Task=`failed`；Event 末尾 `failed`，无 `retry_scheduled`                                                                                                                  |
-| Claim 前已过 Deadline（OQ-2）           | Claim 返回 `null`；Task=`queued → failed`；`attempt_count=0`；无 Run；Event `failed` + `DEADLINE_EXCEEDED`                                                                                        |
-| running 时 Deadline 到期                | Heartbeat 返回 `false`；Reaper 将 Run=`failed_terminal`、Task=`failed`；Event `failed` + `DEADLINE_EXCEEDED`                                                                                      |
-| Finish `failed_retryable` + 近 Deadline | Task=`failed`（不安排必然超期的 retry）；Run=`failed_retryable`；Event `failed` + `DEADLINE_EXCEEDED`                                                                                             |
-| 孤儿 running Task（无 current Run）     | Reaper 整批回滚并抛固定 `DB_UNAVAILABLE`；Task 仍 `running`，无新 Event                                                                                                                           |
-| 数据库不可达 / 非法时钟                 | 固定 `DB_UNAVAILABLE` / `InvalidArgumentError`；不吞错、不忙等、不返回假结果                                                                                                                      |
+| 场景                                    | 实际结果 / SQL 行状态                                                                                                                                                                                                                                      |
+| --------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Claim 后不 Heartbeat/Finish             | 推进时钟到 `lease_expires_at`；Reaper 返回 1；旧 Run=`lease_expired`、`finished_at` 非空、`leased_until=NULL`；Task=`retryable_failed`、`lease_expires_at=NULL`、`next_run_at=reapedAt+baseDelay`                                                          |
+| Backoff 未到                            | 同 `next_run_at` 时刻之前 Claim 返回 `null`                                                                                                                                                                                                                |
+| Backoff 到期                            | 同一 Task 领取 **新 Run**：`attempt=2`、`lease_epoch=2`、新 RunId；`runs`=2，旧 Run 仍 `lease_expired`，新 Run=`running`                                                                                                                                   |
+| 两个独立 Reaper 同时回收                | 目标 Run 只终结一次；`retry_scheduled` Event 恰好 1 条                                                                                                                                                                                                     |
+| 新 Pool / 新 Queue 实例重启             | 仍能回收旧 Lease；Task 进入 `retryable_failed` 或 `failed`，不依赖 Worker 内存                                                                                                                                                                             |
+| `max_attempts=1` 用尽                   | 旧 Run=`lease_expired`；Task=`failed`；Event 末尾 `failed`，无 `retry_scheduled`                                                                                                                                                                           |
+| Claim 前已过 Deadline（ADR-0002）       | Claim 返回 `null`；Task=`queued → failed`；`attempt_count=0`；无 Run；Event `failed` + `DEADLINE_EXCEEDED`                                                                                                                                                 |
+| Claim 前预算已耗尽（ADR-0002）          | Claim 返回 `null`；Task=`queued → failed`；`attempt_count=max_attempts` 不递增；`lease_epoch=0`；无 Run；Event `failed`，无伪造 errorCode                                                                                                                  |
+| 重试领取的真实数据库转换（P1-1）        | 审计触发器记录 `queued→running`、`running→retryable_failed`、`retryable_failed→queued`、`queued→running` 四次 `tasks` 行更新；Event 序列为 `accepted, leased, started, retry_scheduled, retry_scheduled, leased, started`，`leased` 的 `fromStatus=queued` |
+| 重试领取中途失败回滚（P1-1）            | 注入第二次 `leased` Event 失败后 Claim 抛 `DB_UNAVAILABLE`；Task 仍 `retryable_failed`、`attempt_count=1`、`lease_epoch=1`、`current_run_id` 不变；无新 Run、无 promotion Event、无状态快照变化                                                            |
+| running 时 Deadline 到期                | Heartbeat 返回 `false`；Reaper 将 Run=`failed_terminal`、Task=`failed`；Event `failed` + `DEADLINE_EXCEEDED`                                                                                                                                               |
+| Finish `failed_retryable` + 近 Deadline | Task=`failed`（不安排必然超期的 retry）；Run=`failed_retryable`；Event `failed` + `DEADLINE_EXCEEDED`                                                                                                                                                      |
+| 孤儿 running Task（无 current Run）     | Reaper 整批回滚并抛固定 `DB_UNAVAILABLE`；Task 仍 `running`，无新 Event                                                                                                                                                                                    |
+| 数据库不可达 / 非法时钟                 | 固定 `DB_UNAVAILABLE` / `InvalidArgumentError`；不吞错、不忙等、不返回假结果                                                                                                                                                                               |
 
 ## 6. B-T11 — Fencing 与迟到结果证据
 
@@ -217,6 +220,15 @@ exit=1
 8. **Reaper-only outcome**：Worker 调用 `finish(..., 'lease_expired')` 被
    `InvalidArgumentError` 拒绝，状态不变。
 9. **DB 错误不被伪装成 false**：不可达 Pool 上 `finish` 抛 `DB_UNAVAILABLE`。
+10. **Run Lease Expiry 缺失（P1-2 负向）**：直接 SQL 将 `runs.leased_until` 置 `NULL`；
+    `finish(succeeded)` 返回 `false`；Task/Run/Event 快照完全不变，Run 仍 `running`。
+11. **锁等待期间 Lease 到期（P1-3 Heartbeat）**：调用方以有效租约发起 Heartbeat，独立连接
+    持有 Task 行锁；`pg_blocking_pids` 确认其造成阻塞后推进时钟到期并释放锁；返回 `false`，
+    状态快照不变。
+12. **锁等待期间 Lease 到期（P1-3 Finish）**：同一构造下 `finish(succeeded)` 返回 `false`，
+    不产生 `completed` Event / Task 终态 / `leased_until` 变化。
+13. **正向对照**：锁等待期间租约仍有效时，Heartbeat 返回 `true` 并按锁后时间续租，随后
+    Finish 成功，证明重新采样没有误拒有效租约。
 
 ## 7. OQ-1 — 取消与重试竞争证据
 
@@ -283,7 +295,27 @@ Limit
 证明 Claim 使用 `(status, next_run_at, created_at, id)`，Reaper 使用
 `lease_expires_at` 与 deadline 索引。本阶段不做吞吐承诺。
 
-## 10. GitHub Actions / Draft PR
+## 10. CTO Review Round 1 修复证据
+
+CTO 结论为 **Changes Requested**。本轮在同一个 Draft PR 分支内逐项修复，未强推、未改
+`main`、未合并 PR、未修改 `0001`–`0003` Migration。逐项说明：
+
+| 项       | 结论           | 代码位置                                                                                          | 修复要点                                                                                                                                                                 | 测试证据                                                                                                     |
+| -------- | -------------- | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| **P1-1** | 已修复         | `packages/postgres/src/lease-queue/postgres-lease-queue.ts`：`PROMOTE_RETRY_SQL`、`createLease()` | 生产路径先经 Domain FSM `retryable_failed → queued`，再用状态守卫 SQL 持久化 `queued`，追加 `retry_scheduled` Event，再 `queued → running`；全部同一事务、同一 Task 行锁 | `lease-recovery.test.ts`：审计触发器断言四次真实行更新；完整 Event 序列/payload；注入 Event 失败验证整体回滚 |
+| **P1-2** | 已修复         | 同文件 `finish()`：`runRow.leased_until === null` 分支                                            | `leased_until IS NULL` 立即 `false`，不更新 Run/Task、不追加 Event                                                                                                       | `lease-fencing.test.ts`：Run Lease 缺失负向测试（快照完全不变）                                              |
+| **P1-3** | 已修复         | 同文件 `sampleAfterLock()`、`heartbeat()`、`renewLease()`、`finish()`                             | 仅在取得 Task **与** Run 行锁后采样时钟；Heartbeat 取调用方时间与锁后时间的较晚者；Finish 锁后采样；所有租约/Deadline 判断使用锁后时间                                   | `lease-fencing.test.ts`：Heartbeat/Finish 锁等待期间到期 → `false`；租约仍有效 → `true` 正向对照             |
+| **OQ-2** | 有条件批准落地 | `docs/adr/0002-preclaim-deadline-failure.md`；`packages/domain/src/task-state-machine.ts`         | ADR-0002 明确适用条件（Deadline 已过 / 预算耗尽）、取消优先、唯一 `failed` Event、禁止虚构 Run/直达边；Claim 与 Reaper 均按条件执行                                      | `lease-recovery.test.ts`：Deadline 与预算耗尽两条收敛路径；`cancellation-retry.test.ts` 取消优先级           |
+
+**Domain 状态机未被绕过：** `transitionTask()` 仍是唯一转换入口；`PROMOTE_RETRY_SQL` 的
+`WHERE status = 'retryable_failed'` 只是持久化层对同一前态的二次确认，不构成新边。
+
+**Migration：** 本轮未新增或修改 Migration；`0001`–`0003` checksum 不变，`0004` 未变。
+
+**Git：** 修复提交后合入最新 `origin/main`（`5c91a6f`，仅 ADR-0001 文档合并），未产生
+代码差异；未强推。
+
+## 11. GitHub Actions / Draft PR
 
 | 项目                 | 值                                                                                                          |
 | -------------------- | ----------------------------------------------------------------------------------------------------------- |
@@ -300,7 +332,7 @@ Limit
 CI 工作流未修改：仍为 `permissions: contents: read`、临时 `postgres:17-alpine` service
 container、无 secrets、无付费云、无部署。
 
-## 11. 安全与成本
+## 12. 安全与成本
 
 - 没有使用真实 API Key、OAuth Token、生产数据或付费云服务。
 - 没有调用 LLM、Sandbox Provider 或外部收费 API。
@@ -311,12 +343,12 @@ container、无 secrets、无付费云、无部署。
 - 本地 PostgreSQL 仅绑定 `127.0.0.1:55432`；`.env.local` 被 gitignore。
 - 本阶段唯一成本为本地机器资源。
 
-## 12. 偏差、未决问题与剩余风险
+## 13. 偏差、未决问题与剩余风险
 
 | 项目              | 处理                                                                           | 原因 / 归属                                      |
 | ----------------- | ------------------------------------------------------------------------------ | ------------------------------------------------ |
 | ADR-0001 来源     | 原样引用 CTO 已批准分支 `origin/docs/adr-0001-cancellation-retry-coordination` | 避免复制/改写已批准决策                          |
-| `queued → failed` | 作为 **OQ-2 Proposal** 实现、测试并单独标注，等待 CTO Review                   | 否则无法合法收敛“领取前已过 Deadline”的 Task     |
+| `queued → failed` | ADR-0002 有条件批准：仅 Deadline 已过或预算耗尽时使用；取消优先；不虚构 Run    | 否则无法合法收敛“领取前不可执行”的 Task          |
 | `apps/worker`     | 仅 reaper-only；`poll` 明确拒绝                                                | P0B-05 尚无 Execution Router/FakeLLM/FakeSandbox |
 | 重试无 Jitter     | P0 使用纯指数退避，文档标注未来多 Worker 惊群风险                              | 任务书允许 P0 不引入 Jitter                      |
 | 取消              | 持久化语义已实现；合作式远端中止、审批传播、外部 API 留 P0B-08                 | 本阶段不声称外部副作用可回滚                     |
@@ -326,13 +358,13 @@ container、无 secrets、无付费云、无部署。
 
 **剩余风险：**
 
-1. OQ-2 尚未获 CTO 正式批准；若拒绝，需要替代的 Deadline 收敛方案。
+1. ADR-0002 为有条件批准：实现必须持续满足其条件，不得扩大为通用失败捷径。
 2. 重试无 Jitter，大规模同时到期可能惊群。
 3. 数据库最终状态正确，不保证远端外部副作用被撤销或执行已物理停止。
 4. 本阶段无真实执行、进度、Resume、Artifact/Checkpoint、HTTP/SSE、审批或预算。
 5. 无生产性能/高可用承诺；索引只做简单验证。
 
-## 13. 结论
+## 14. 结论
 
 P0B-04 已在真实 PostgreSQL 17 上验证：
 
@@ -340,7 +372,10 @@ P0B-04 已在真实 PostgreSQL 17 上验证：
 - Lease 到期/进程崩溃后 Reaper 只终结一次旧 Run，并能用新 Run/新 Epoch 恢复；
 - 旧 Run 的 Heartbeat/Finish 因 Tenant/Task/Run/Epoch/过期检查被 Fencing 拒绝；
 - ADR-0001 取消提交后绝不创建新 Run，running 取消由有效 Finish 或 Reaper 收敛；
+- ADR-0002 的 `queued → failed` 仅用于领取前 Deadline/预算不可执行且取消优先；
+- 重试领取的 `retryable_failed → queued → running` 以真实数据库更新与 Event 双重审计；
+- 缺少 Run Lease / 锁等待期间到期的 Finish 与 Heartbeat 均被拒绝且无副作用；
 - P0B-03 Durable Ack、并发幂等、Tenant FK、Event 白名单全部回归通过。
 
 未实现的 Agent 执行、Sandbox、Artifact、HTTP/SSE、完整取消/审批/预算均明确列为后续阶段。
-等待 CTO Review，尤其是 OQ-2 提案。
+等待 CTO Review Round 2。

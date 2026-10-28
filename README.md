@@ -68,7 +68,7 @@ Ember/
     adr/0001-cancellation-and-retry-coordination.md  # Accepted OQ-1 decision
     P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and ADR-0002
     P0B-04-ACCEPTANCE.md       # P0B-04 command evidence and B-T09–B-T11 status
-    architecture/              # approved upstream design inputs (RFC v0.1/v0.2, P0-B spec)
+    architecture/              # design docs: upstream RFCs, P0-B spec, V1 proposals
     prompts/                   # per-task Pi Agent implementation prompts (P0B-01/03/04)
   .github/workflows/ci.yml
   .env.example
@@ -413,3 +413,14 @@ retro-actively rewritten here.
   — P0B-03 durable task inbox prompt.
 - [docs/prompts/Ember_P0B-04_Pi_Agent_Implementation_Prompt.md](docs/prompts/Ember_P0B-04_Pi_Agent_Implementation_Prompt.md)
   — P0B-04 durable worker/lease/fencing prompt.
+
+### V1 design proposals
+
+Forward-looking designs that are **not yet implemented** and require explicit approval before
+any code follows them.
+
+- [docs/architecture/v1-execution-placement.md](docs/architecture/v1-execution-placement.md) —
+  proposed V1 execution placement (cloud vs. authorized Mac), separation of placement from the
+  `fast | standard | heavy` router, Executor Gateway trust boundary, and the open decisions
+  D-01–D-05. Status: Proposed, pending CTO and product-owner sign-off; it changes no P0B-01–05
+  code and introduces no new Task/Run state.

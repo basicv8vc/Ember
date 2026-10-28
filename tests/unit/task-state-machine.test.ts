@@ -18,6 +18,8 @@ import type { TaskStatus } from '@ember/domain';
 const APPROVED_TASK_TRANSITIONS = [
   ['queued', 'running'],
   ['queued', 'cancelled'],
+  // OQ-2 / ADR-0002: deadline or budget already exhausted before the first claim.
+  ['queued', 'failed'],
   ['running', 'completed'],
   ['running', 'waiting_approval'],
   ['running', 'retryable_failed'],
@@ -28,6 +30,8 @@ const APPROVED_TASK_TRANSITIONS = [
   ['waiting_approval', 'cancelled'],
   ['retryable_failed', 'queued'],
   ['retryable_failed', 'failed'],
+  // OQ-1 accepted in ADR-0001.
+  ['retryable_failed', 'cancelled'],
 ] as const satisfies readonly (readonly [TaskStatus, TaskStatus])[];
 
 const approvedKeys = new Set(APPROVED_TASK_TRANSITIONS.map(([from, to]) => `${from}->${to}`));
@@ -77,19 +81,22 @@ describe('Task state machine — legal transitions', () => {
     expect(actualEdges).toEqual([...approvedKeys].sort());
   });
 
-  it('supports the documented approval and retry semantics', () => {
+  it('supports the documented approval, retry and cancellation semantics', () => {
     expect(transitionTask('waiting_approval', 'queued')).toBe('queued');
     expect(transitionTask('waiting_approval', 'failed')).toBe('failed');
     expect(transitionTask('retryable_failed', 'queued')).toBe('queued');
     expect(transitionTask('retryable_failed', 'failed')).toBe('failed');
+    expect(transitionTask('retryable_failed', 'cancelled')).toBe('cancelled');
+    expect(transitionTask('queued', 'failed')).toBe('failed');
     expect(transitionTask('running', 'retryable_failed')).toBe('retryable_failed');
     expect(transitionTask('running', 'cancelled')).toBe('cancelled');
   });
 
-  it('does not add undocumented edges (for example retryable_failed → cancelled)', () => {
-    expect(canTransitionTask('retryable_failed', 'cancelled')).toBe(false);
+  it('does not add undocumented edges beyond ADR-0001 and ADR-0002', () => {
     expect(canTransitionTask('waiting_approval', 'running')).toBe(false);
+    expect(canTransitionTask('waiting_approval', 'retryable_failed')).toBe(false);
     expect(canTransitionTask('created' as TaskStatus, 'running')).toBe(false);
+    expect(canTransitionTask('retryable_failed', 'completed')).toBe(false);
   });
 });
 

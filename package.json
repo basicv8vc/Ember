@@ -12,6 +12,8 @@
   "scripts": {
     "dev": "pnpm --filter @ember/api dev",
     "start": "pnpm --filter @ember/api start",
+    "dev:worker": "pnpm --filter @ember/worker dev",
+    "start:worker": "pnpm --filter @ember/worker start",
     "build": "tsc -b tsconfig.build.json",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",

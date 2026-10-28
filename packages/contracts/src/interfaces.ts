@@ -32,11 +32,17 @@ export interface TaskRepository {
  */
 export interface LeaseQueue {
   claimNext(workerId: string, now: Date): Promise<LeasedRun | null>;
+  /**
+   * Renew a valid lease. `false` means the lease was **not** renewed: it may be stale,
+   * expired, fenced, or the Task may have a committed cancellation intent. It never means
+   * the Task failed by itself.
+   */
   heartbeat(run: LeasedRun, now: Date): Promise<boolean>;
   reapExpired(now: Date): Promise<number>;
   /**
-   * Finish a leased run. Returns `false` when the caller no longer owns the lease (stale
-   * epoch), so a late worker cannot overwrite a newer attempt.
+   * Finish a leased run. Returns `false` when the caller no longer owns a valid current
+   * lease (stale epoch, expired lease, wrong Run/Task/Tenant) **and nothing was written**.
+   * Database failures are raised as fixed `DomainError`s, never reported as `false`.
    */
   finish(run: LeasedRun, outcome: RunTerminalStatus): Promise<boolean>;
 }

@@ -8,12 +8,13 @@ on demand for active work instead of renting one full VM per user. The long-term
 whether 1,000 logical agents can be served with good responsiveness, safe isolation, and sane
 cost while only active tasks consume expensive runtime.
 
-> **Scope of this repository right now:** P0B-01 (repository foundation) and P0B-02
-> (domain models, state machines and contracts) are merged on `main`. P0B-03 adds the
-> PostgreSQL business schema, tenant-scoped repositories and idempotent durable task
-> creation in this Draft PR. There is still no task HTTP API, worker, sandbox provider,
-> execution loop or cancellation implementation. Nothing here proves sandbox isolation,
-> real LLM behaviour, or 1,000-agent production performance. See
+> **Scope of this repository right now:** P0B-01 (repository foundation), P0B-02
+> (domain models, state machines and contracts) and P0B-03 (PostgreSQL durable task inbox)
+> are merged on `main`. P0B-04 adds durable PostgreSQL lease claiming, heartbeat, reaper,
+> fencing and bounded retry in this Draft PR. There is still **no Agent execution**, no
+> task HTTP API, no sandbox provider, no real LLM and no complete cancellation API.
+> A successful lease claim is not a successful Task execution. Nothing here proves sandbox
+> isolation, real LLM behaviour or 1,000-agent production performance. See
 > [P0-B status](#p0-b-status) below.
 
 ## P0-B status
@@ -22,8 +23,8 @@ cost while only active tasks consume expensive runtime.
 | ------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------- |
 | **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Merged on `main`**       |
 | **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Merged on `main`**       |
-| **P0B-03**   | PostgreSQL business schema, tenant-scoped repositories, canonical digest, atomic/idempotent task creation            | **Implemented in this PR** |
-| P0B-04       | Worker claim/lease/fencing/retry                                                                                     | Not started                |
+| **P0B-03**   | PostgreSQL business schema, tenant-scoped repositories, canonical digest, atomic/idempotent task creation            | **Merged on `main`**       |
+| **P0B-04**   | PostgreSQL durable lease queue, heartbeat, reaper, fencing, bounded retry, ADR-0001 cancellation                     | **Implemented in this PR** |
 | P0B-05       | Execution router, deterministic mock LLM, fake sandbox                                                               | Not started                |
 | P0B-06       | Artifact store, workspace CAS, checkpoints                                                                           | Not started                |
 | P0B-07       | Task HTTP API, tenant authZ, event log, SSE                                                                          | Not started                |
@@ -31,9 +32,11 @@ cost while only active tasks consume expensive runtime.
 | P0B-09       | Telemetry, chaos and local load tests                                                                                | Not started                |
 | P0B-10       | Demo commands, results report, final review                                                                          | Not started                |
 
-P0B-03 now persists tasks, agents/workspaces and the first accepted event in PostgreSQL.
-There is intentionally **no task HTTP API, no worker, no lease/fencing implementation, and
-no sandbox** yet. `GET /healthz` returning 200 is not evidence that P0-B works end to end.
+P0B-04 now provides a durable `PostgresLeaseQueue` and a minimal `reaper-only` worker
+process. There is intentionally **no Agent execution, no Execution Router, no sandbox and
+no task HTTP API** yet. `claimNext` returning a lease only means a fenced Run was persisted;
+it does not mean the Task ran or succeeded. `GET /healthz` returning 200 is not evidence
+that P0-B works end to end.
 
 ## Repository layout
 
@@ -41,15 +44,17 @@ no sandbox** yet. `GET /healthz` returning 200 is not evidence that P0-B works e
 Ember/
   apps/
     api/                  # Hono HTTP service (app factory + Node listener)
+    worker/               # Minimal reaper-only process; no Task execution (P0B-05)
   packages/
     domain/               # pure domain types, Task/Run state machines, errors
     contracts/            # Zod input/output schemas, DTOs, cross-module interfaces
-    postgres/             # DB config, pool factory, migration runner, repositories
+    postgres/             # DB config, pool factory, migration runner, repositories, lease queue
   infra/
     local/
       compose.yaml        # local PostgreSQL only (loopback-bound)
       initdb/             # creates the integration-test database on first start
-  migrations/             # ordered SQL migrations (0001 metadata, 0002 business schema, 0003 FK hardening)
+  migrations/             # ordered SQL migrations (0001 metadata, 0002 business schema,
+                          # 0003 FK hardening, 0004 lease/fencing indexes and safety checks)
   tests/
     unit/                 # no database, no fixed ports
     integration/          # real PostgreSQL, unique throwaway schema per run
@@ -60,6 +65,9 @@ Ember/
     P0B-02-ACCEPTANCE.md       # P0B-02 verification evidence and B-T01–B-T04 status
     P0B-03-IMPLEMENTATION.md   # P0B-03 schema, transactions, digest and idempotency design
     P0B-03-ACCEPTANCE.md       # P0B-03 verification evidence and B-T06–B-T08 status
+    adr/0001-cancellation-and-retry-coordination.md  # Accepted OQ-1 decision
+    P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and ADR-0002
+    P0B-04-ACCEPTANCE.md       # P0B-04 command evidence and B-T09–B-T11 status
   .github/workflows/ci.yml
   .env.example
   package.json
@@ -112,12 +120,42 @@ tables, input semantics and open design questions.
 - Tenant-owned rows use explicit `tenant_id` plus composite foreign keys such as
   `(tenant_id, agent_id)` and `(tenant_id, task_id)`, so direct SQL cannot attach another
   tenant's agent or task. Reads return `null`/`NOT_FOUND` without revealing existence.
-- `requestCancel()` only records `cancel_requested_at`; it does **not** transition the task
-  or implement cooperative cancellation (P0B-08, see OQ-1). Worker claim/lease/fencing,
-  retry scheduling, `runs` execution, artifacts, HTTP endpoints and SSE do not exist yet.
+- `requestCancel()` follows ADR-0001 from P0B-04: `queued`, `retryable_failed` and
+  `waiting_approval` become `cancelled` atomically; `running` records intent until the current
+  valid Run or the Reaper converges it. The public cancellation API and cooperative remote
+  abort remain P0B-08.
 
 See [docs/P0B-03-IMPLEMENTATION.md](docs/P0B-03-IMPLEMENTATION.md) and
 [docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md).
+
+## Durable leasing, fencing and retry (P0B-04)
+
+- `migrations/0004_lease_fencing_and_retry.sql` adds safe-`bigint` bounds for
+  `lease_epoch`, a partial unique index guaranteeing at most one `created|running` Run per
+  Task, and deterministic claim/deadline indexes. `0001`–`0003` remain immutable.
+- `PostgresLeaseQueue` implements the existing `LeaseQueue` contract:
+  `claimNext`, `heartbeat`, `reapExpired`, `finish`. Claims use a Task row lock plus
+  `FOR UPDATE SKIP LOCKED`, re-check every predicate under the lock, create a fresh Run and
+  `lease_epoch`, and return only after `COMMIT`.
+- Fencing compares Tenant + Task + current Run + `lease_epoch`. A stale Run cannot renew,
+  finish, overwrite a newer attempt or emit a second terminal event. `finish(false)` means no
+  valid current lease and nothing was written; database errors are fixed `DomainError`s.
+- Lease expiry is recovered by the Reaper: old Run becomes `lease_expired`, the Task becomes
+  `retryable_failed` (bounded exponential backoff) or `failed` when attempts/deadline are
+  exhausted. Retries always create a **new** Run and **new** epoch.
+- ADR-0001 cancellation is implemented transactionally. Once cancellation commits, no new
+  Run may be created. `retryable_failed → cancelled` is now a legal Task edge.
+- **OQ-2 is conditionally accepted in ADR-0002:** `queued → failed` is used only to
+  terminalize a Task that is already past its deadline or has exhausted its execution
+  budget before any claim. It never fabricates a Run and never overrides ADR-0001
+  cancellation priority.
+- `apps/worker` is a minimal, stoppable `reaper-only` process. The production entry refuses
+  `poll` mode because P0B-05 has no Execution Router/FakeLLM/FakeSandbox. There is **no fake
+  success executor**, no Agent business execution and no automatic Resume yet.
+
+See [docs/P0B-04-IMPLEMENTATION.md](docs/P0B-04-IMPLEMENTATION.md),
+[docs/P0B-04-ACCEPTANCE.md](docs/P0B-04-ACCEPTANCE.md) and
+[docs/adr/0001-cancellation-and-retry-coordination.md](docs/adr/0001-cancellation-and-retry-coordination.md).
 
 ## Prerequisites
 
@@ -151,6 +189,9 @@ pnpm db:migrate
 
 # 5. Start the API on http://127.0.0.1:8787
 pnpm dev
+
+# 6. Optional: start the reaper-only worker (does NOT execute Tasks)
+pnpm dev:worker
 ```
 
 Then:
@@ -174,6 +215,8 @@ pnpm start
 | `pnpm install --frozen-lockfile`    | Reproducible install from `pnpm-lock.yaml`                   |
 | `pnpm dev`                          | API with env-file loading and watch mode on `127.0.0.1:8787` |
 | `pnpm start`                        | Run the built API from `apps/api/dist`                       |
+| `pnpm dev:worker`                   | Reaper-only worker (no Task execution; P0B-05 will add it)   |
+| `pnpm start:worker`                 | Run the built reaper-only worker from `apps/worker/dist`     |
 | `pnpm build`                        | `tsc -b` project-reference build (Node ESM output)           |
 | `pnpm typecheck`                    | `tsc --noEmit` over apps, packages, and tests (strict)       |
 | `pnpm lint`                         | ESLint flat config with type-aware TypeScript rules          |
@@ -183,7 +226,9 @@ pnpm start
 | `pnpm dev:db` / `pnpm dev:db:down`  | Start / stop the local PostgreSQL container                  |
 | `pnpm db:migrate`                   | Apply pending migrations (safe to re-run)                    |
 
-`pnpm dev` starts the API only. There is no worker process yet — the worker is P0B-04.
+`pnpm dev` starts the API only. `pnpm dev:worker` is a separate process and only runs the
+lease Reaper. It **does not claim or execute Tasks**: the production entry refuses
+`EMBER_WORKER_MODE=poll` until P0B-05 provides the Execution Router and a real RunHandler.
 
 ## Environment variables
 
@@ -204,6 +249,15 @@ message that names the variable but never echoes credentials.
 | `EMBER_DB_IDLE_TIMEOUT_MS`      | `30000`              | Idle connection timeout                                                                                                                   |
 | `EMBER_DB_STATEMENT_TIMEOUT_MS` | `10000`              | Server-side statement timeout                                                                                                             |
 | `EMBER_MIGRATIONS_DIR`          | `./migrations`       | Optional override used by the migration CLI                                                                                               |
+| `EMBER_WORKER_MODE`             | `reaper-only`        | `reaper-only`; `poll` is refused until P0B-05 has an executor                                                                             |
+| `EMBER_WORKER_ID`               | `worker-local`       | Opaque 1–128 char worker label (not an auth credential)                                                                                   |
+| `EMBER_WORKER_INTERVAL_MS`      | `2000`               | Reaper poll interval (100–60000)                                                                                                          |
+| `EMBER_WORKER_ERROR_BACKOFF_MS` | `1000`               | Bounded failure backoff (100–60000)                                                                                                       |
+| `EMBER_WORKER_LEASE_MS`         | `30000`              | Lease duration (1000–300000)                                                                                                              |
+| `EMBER_WORKER_HEARTBEAT_MS`     | `10000`              | Heartbeat cadence; must be strictly shorter than the lease                                                                                |
+| `EMBER_WORKER_RETRY_BASE_MS`    | `1000`               | First retry delay; doubles up to the cap                                                                                                  |
+| `EMBER_WORKER_RETRY_CAP_MS`     | `30000`              | Maximum retry delay                                                                                                                       |
+| `EMBER_WORKER_REAPER_BATCH`     | `50`                 | Maximum expired Tasks per reaper transaction                                                                                              |
 
 `.env.local` is loaded by the scripts through Node's `--env-file-if-exists`; it is gitignored.
 `.env.example` contains local-only placeholder credentials and no real secrets.
@@ -240,6 +294,8 @@ The app factory (`apps/api/src/app.ts`) is separate from the listener
 - `0003_tasks_current_run_tenant_fk.sql` is a forward hardening migration for PR #3 P1-1:
   `(tenant_id, id, current_run_id) → runs (tenant_id, task_id, id)` plus
   `UNIQUE (tenant_id, task_id, id)` and a referencing index.
+- `0004_lease_fencing_and_retry.sql` adds safe-int `lease_epoch` checks, a partial unique
+  index for at most one `created|running` Run per Task, and claim/deadline indexes.
 - Migrations are never edited after being applied; checksum and filename guards fail loudly.
 
 Integration tests create a schema named `ember_it_<random hex>`, run migrations inside it, and
@@ -248,8 +304,8 @@ drop only that schema afterwards. They never truncate or delete `public` or othe
 ## Testing
 
 ```bash
-pnpm test:unit        # 9 files, 249 tests (no database)
-pnpm test:integration # 32 tests against real PostgreSQL
+pnpm test:unit        # 11 files, 265 tests (no database)
+pnpm test:integration # 74 tests against real PostgreSQL 17
 ```
 
 - Unit tests cover the P0B-01 infrastructure (env validation, strict loopback guard,
@@ -258,18 +314,22 @@ pnpm test:integration # 32 tests against real PostgreSQL
   matrices, terminal-state invariants, stable transition errors, all mock input schemas,
   forged tenant/principal fields, idempotency keys, receipt/event DTOs, public/internal error
   separation and validation-error redaction. P0B-03 adds canonical digest/UTF-8 tests and
-  SQL-vocabulary alignment checks.
+  SQL-vocabulary alignment checks. P0B-04 adds retry/clock/epoch/worker-id policy tests,
+  the worker's stop-aware loop tests, and the updated full Task matrix for ADR-0001/ADR-0002.
 - Integration tests require `TEST_DATABASE_URL`; if it is missing the suite fails instead of
-  silently passing. They verify connection, `0001` + `0002` + `0003`, repeat migration,
-  readiness, checksum/rename tamper detection, Durable Ack (including injected event/COMMIT
-  failures), 24-request concurrent idempotency, conflicts, tenant-safe FKs,
-  `current_run_id` positive/negative cases, event ordering and the database payload
-  allowlist.
+  silently passing. They verify connection, `0001`–`0004`, repeat migration, readiness,
+  checksum/rename tamper detection, Durable Ack (including injected event/COMMIT failures),
+  24-request concurrent idempotency, conflicts, tenant-safe FKs, `current_run_id`
+  positive/negative cases, event ordering and the database payload allowlist. P0B-04 adds
+  real PostgreSQL B-T09 (two independent pools and 24 concurrent claims), B-T10 (lease
+  expiry, crash/restart, reaper races, bounded retry and deadlines), B-T11 (stale
+  epoch/run/tenant fencing and single terminal finish) and OQ-1 cancellation races.
 
-Exact P0B-03 results, including the CI run, are recorded in
-[docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md). P0B-01 and P0B-02 acceptance reports
+Exact P0B-04 results, including the CI run, are recorded in
+[docs/P0B-04-ACCEPTANCE.md](docs/P0B-04-ACCEPTANCE.md). P0B-03 results remain in
+[docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md); P0B-01/P0B-02 acceptance reports
 remain in [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) and
-[docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md); they are not rewritten.
+[docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md). Historical reports are not rewritten.
 
 ## CI
 
@@ -287,9 +347,12 @@ secrets, no cloud account, no deployments, and no automatic merge.
   and `::1` are treated as loopback; malformed addresses such as `127.999.999.999` are not.
 - Listener defaults to loopback; public binding requires an explicit opt-in variable.
 - No real LLM, sandbox provider, cloud deployment, OAuth, payments, or user data.
+- The P0B-04 worker does not claim or execute Tasks; only the Reaper loop runs. There is no
+  fake success path and no arbitrary code execution or host shell.
 - Database credentials come from local env files. Logs and CLI output only contain whitelisted
   connection metadata (host, port, database) — never userinfo, passwords, or query parameters.
-- No arbitrary code execution or host shell exists in this phase.
+- Worker leases are fenced by Tenant + Task + current Run + epoch. A Worker ID is not an
+  authentication credential; external AuthN/AuthZ remains P0B-07.
 - Dependencies are open-source npm packages pinned by `pnpm-lock.yaml`; no paid services.
 
 These measures are development hygiene, not a security certification.
@@ -321,3 +384,11 @@ These measures are development hygiene, not a security certification.
   transactions, canonical digest and idempotency strategy.
 - [docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md) — P0B-03 command evidence,
   B-T06–B-T08 status, concurrency samples and risks.
+- [docs/adr/0001-cancellation-and-retry-coordination.md](docs/adr/0001-cancellation-and-retry-coordination.md)
+  — accepted OQ-1 cancellation/retry coordination decision.
+- [docs/adr/0002-preclaim-deadline-failure.md](docs/adr/0002-preclaim-deadline-failure.md)
+  — conditionally accepted OQ-2 pre-claim deadline/budget failure rule.
+- [docs/P0B-04-IMPLEMENTATION.md](docs/P0B-04-IMPLEMENTATION.md) — P0B-04 lease queue,
+  fencing, transaction ordering, retry policy, ADR-0002 and worker boundaries.
+- [docs/P0B-04-ACCEPTANCE.md](docs/P0B-04-ACCEPTANCE.md) — P0B-04 command evidence,
+  B-T09–B-T11 concurrency samples, CI and remaining risks.

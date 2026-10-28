@@ -9,11 +9,18 @@ import { TASK_TERMINAL_STATUSES, type TaskStatus, type TaskTerminalStatus } from
  *
  * The table intentionally does NOT include:
  * - `waiting_external` (reserved by the RFC, outside P0-B);
- * - cancelling a `retryable_failed` task (not covered by the approved graph; see
- *   `docs/P0B-02-IMPLEMENTATION.md`, open question OQ-1).
+ * - `queued → failed` except for the conditional OQ-2 decision in ADR-0002: a Task that
+ *   is already past its deadline or has no execution budget before any claim cannot be
+ *   claimed and must not be left in the queue forever. This edge is never used to report
+ *   a Run outcome or to fabricate a Run (see
+ *   `docs/adr/0002-preclaim-deadline-failure.md`).
+ *
+ * OQ-1 was accepted in ADR-0001: cancelling a `retryable_failed` Task is legal because a
+ * cancellation intent wins over any not-yet-scheduled retry. The edge is added here; no
+ * same-state assignment becomes legal.
  */
 export const TASK_TRANSITION_TABLE = Object.freeze({
-  queued: Object.freeze(['running', 'cancelled'] as const),
+  queued: Object.freeze(['running', 'cancelled', 'failed'] as const),
   running: Object.freeze([
     'completed',
     'waiting_approval',
@@ -22,7 +29,7 @@ export const TASK_TRANSITION_TABLE = Object.freeze({
     'cancelled',
   ] as const),
   waiting_approval: Object.freeze(['queued', 'failed', 'cancelled'] as const),
-  retryable_failed: Object.freeze(['queued', 'failed'] as const),
+  retryable_failed: Object.freeze(['queued', 'failed', 'cancelled'] as const),
   completed: Object.freeze([] as const),
   failed: Object.freeze([] as const),
   cancelled: Object.freeze([] as const),

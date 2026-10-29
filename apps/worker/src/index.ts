@@ -1,6 +1,7 @@
 import {
   LocalBlobStore,
   PostgresBlobStore,
+  PostgresBudgetLedger,
   PostgresCheckpointStore,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
@@ -77,6 +78,8 @@ async function main(): Promise<void> {
     heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
     reaperIntervalMs: config.intervalMs,
     concurrency: config.concurrency,
+    budgetPolicyId: config.budget.policyId,
+    budgetPolicyVersion: config.budget.policyVersion,
     ...(config.mode === 'poll' ? { claimableKinds } : {}),
   });
 
@@ -121,6 +124,9 @@ async function main(): Promise<void> {
               blobs,
             }),
             workspaces: new PostgresWorkspaceStore(pool),
+            // P0B-08b: every step of the durable path reserves durable budget before it can
+            // produce a side effect. The policy is Worker configuration, not Task input.
+            budget: new PostgresBudgetLedger(pool, { policy: config.budget }),
             clock: systemClock,
             logger,
           });

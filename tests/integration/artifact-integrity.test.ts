@@ -35,16 +35,33 @@ async function ageFile(absolutePath: string, msAgo: number): Promise<void> {
 }
 
 /** Wait until at least `min` statements in this database are queued on an advisory lock. */
-async function waitForAdvisoryLockWaiter(min = 1, timeoutMs = 5_000): Promise<void> {
+/**
+ * Wait until `min` sessions are queued behind the advisory lock of exactly this key.
+ *
+ * The count is scoped to the lock key rather than to "some advisory lock in the database":
+ * integration files share one database and run in parallel, so a waiter belonging to another
+ * suite (a commit fence, a budget decision) would otherwise satisfy the condition early and
+ * destroy the ordering this test depends on.
+ *
+ * A bigint advisory lock is stored as `classid` = high 32 bits and `objid` = low 32 bits, so
+ * the key is hashed the same way PostgreSQL does and then split identically.
+ */
+async function waitForAdvisoryLockWaiter(key: string, min = 1, timeoutMs = 5_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
   while (Date.now() < deadline) {
     const result = await db.pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count
+      `WITH wanted AS (
+         SELECT (((hashtextextended($1, 0) >> 32) & x'FFFFFFFF'::bigint))::oid AS classid,
+                ((hashtextextended($1, 0) & x'FFFFFFFF'::bigint))::oid AS objid
+       )
+       SELECT count(*)::text AS count
          FROM pg_locks
         WHERE locktype = 'advisory'
           AND NOT granted
-          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+          AND (classid, objid) = (SELECT classid, objid FROM wanted)`,
+      [key],
     );
 
     if (Number(result.rows[0]?.count ?? '0') >= min) {
@@ -446,18 +463,17 @@ describe('P0B06 P1-A an upload that loses to the collector', () => {
 
       // Holding the tenant-digest lock queues the collector and the upload behind it, so the
       // collector is guaranteed to be first in line.
+      const lockKey = blobLockKey(seed.tenant.tenantId, digest);
       await blocker.query('BEGIN');
-      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-        blobLockKey(seed.tenant.tenantId, digest),
-      ]);
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
 
       const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
-      await waitForAdvisoryLockWaiter();
+      await waitForAdvisoryLockWaiter(lockKey);
 
       // `put` stages, "installs" (the digest file already exists, so install verifies and
       // returns) and then queues for the same lock, behind the collector.
       const upload = local.artifacts.put(seed.ctx, bytes, 'text/plain');
-      await waitForAdvisoryLockWaiter(2);
+      await waitForAdvisoryLockWaiter(lockKey, 2);
       await blocker.query('COMMIT');
 
       const report = await sweep;

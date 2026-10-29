@@ -34,8 +34,8 @@
 | `pnpm build`                     | 通过（`tsc -b tsconfig.build.json`，含 6 个 project reference）                                                      |
 | `pnpm db:migrate`（第 1 次）     | `5 applied, 0 already applied`（0001–0005）                                                                          |
 | `pnpm db:migrate`（第 2 次）     | `0 applied, 5 already applied`（幂等）                                                                               |
-| `pnpm test:integration`          | **14 files / 143 tests passed**（真实 PG 17 + 临时 blob 根目录）                                                     |
-| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 57 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
+| `pnpm test:integration`          | **14 files / 148 tests passed**（真实 PG 17 + 临时 blob 根目录）                                                     |
+| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 63 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
 | `git diff --check`               | 通过（无空白错误）                                                                                                   |
 
 > Round 2 复跑说明：本机 `pnpm` 的 corepack 缓存丢失（`Cannot find module .../bin/pnpm.cjs`），因此 Round 2 直接调用
@@ -64,12 +64,12 @@ Round 1 与 Round 2 的 CI 结论都来自实际读取的 job 日志，而不是
 | `tests/unit/workspace-manifest.test.ts`        | 11     | 纯规则（无 DB/FS）          |
 | `tests/unit/local-blob-store.test.ts`          | 8      | 真实临时目录，无 DB         |
 | `tests/integration/workspace-cas.test.ts`      | 10     | 真实 PG                     |
-| `tests/integration/artifact-integrity.test.ts` | 14     | 真实 PG + 真实文件          |
+| `tests/integration/artifact-integrity.test.ts` | 18     | 真实 PG + 真实文件          |
 | `tests/integration/checkpoint-resume.test.ts`  | 7      | 真实 PG + 真实 lease/reaper |
-| `tests/integration/result-commit.test.ts`      | 19     | 真实 PG + 事务注错          |
+| `tests/integration/result-commit.test.ts`      | 20     | 真实 PG + 事务注错          |
 | `tests/integration/durable-worker.test.ts`     | 4      | 端到端闭环                  |
 | `tests/integration/duplicate-upload.test.ts`   | 5      | 真实 PG + 真实文件          |
-| 合计新增                                       | **78** |                             |
+| 合计新增                                       | **83** |                             |
 
 ## 3. 故障注入的真实证据
 
@@ -133,3 +133,44 @@ TEST_DATABASE_URL=postgres://ember:...@127.0.0.1:55432/ember_test pnpm test:inte
 因此两者不可能交错：要么发布先提交（收集器随后必然看到引用而保留字节），要么收集器先删除（发布发现字节缺失，
 零写入退出，由重试的 Step 重新产生内容）。隔离窗口只删除「无行 + 超过隔离期」的文件，已发布 Artifact 的字节
 不会被回收。
+
+## 7. Round 2 Review 修复对照（Round 3 证据）
+
+Round 2 复审提出两个新的并发缺陷，都源于「同一个判定与写入之间存在窗口」。修复方式是让两条路径在同一批数据库行上
+相遇，而不是靠时间窗猜测。
+
+| 编号 | Round 2 发现                                                                                                        | 修复（代码位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 回归测试（本地真实 PG 17）                                                                                                                                                                                                                                                         |
+| ---- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-A | `ArtifactStore.put()` 在 `install()` 与摘要 advisory lock 之间没有锁内字节复核，GC 可在此窗口删除文件               | `packages/postgres/src/storage/artifact-store.ts`：`put()` 取得 `lockBlobDigests` 后立刻 `blobs.assertInstalled(tenant, sha256, size)`，缺失 → `DB_UNAVAILABLE`（`installed bytes disappeared before publication`）且**零写入**（事务回滚，无 `blobs`/`artifacts` 行）                                                                                                                                                                                                                                           | `artifact-integrity.test.ts > P1-A`（2）：① 真实 `sweepOrphans` 在阻塞器持锁期间排在上传之前，放开后先删文件，上传零写入退出；② 安装后文件立即消失（确定性形态）同样零写入                                                                                                         |
+| P1-B | `ArtifactStore.delete()` 用普通 `SELECT` 判定 JSONB 引用，写方可在判定与 `DELETE` 之间写入新引用 → 悬挂 Artifact id | 新增 `packages/postgres/src/storage/artifact-references.ts`：引用写方在事务内对每个被引用 Artifact 行取 `FOR SHARE`（`lockArtifactRows` 去重升序）；`delete()` 先 `FOR UPDATE` 再判定。三条持久引用路径全部接入：`commitWorkspaceInTransaction`（`lockArtifactReferences`）、`writeCheckpoint`（`lockCheckpointArtifacts`）、`recordWorkspaceConflictIn`（`lockConflictCandidateArtifacts`）。`RunResultCommitter.lockReferences` 在写引用前一次性锁住「workspace 清单 ∪ checkpoint 引用」并集，消除交叉加锁顺序 | `artifact-integrity.test.ts > P1-B`（2）：未提交的 Workspace version / 未提交的 conflict candidate 都会让 `delete()` 先等待、提交后被 `POLICY_DENIED` 拒绝且 Artifact 仍可读；`result-commit.test.ts > P1-B`（1）：`before_event` 处事务未提交时 `delete()` 不得落地，提交后被拒绝 |
+
+**守卫的有效性验证（逐个临时禁用 → 对应用例失败 → 恢复后通过）：**
+
+| 守卫                                                                                 | 禁用后的可观察结果                                                                        |
+| ------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
+| `put()` 的锁内 `assertInstalled`                                                     | 两条 P1-A 用例都从 `rejects` 变成 `promise resolved`（上传成功写下指向已删除字节的行）    |
+| `commitWorkspaceInTransaction` 的 `lockArtifactReferences`                           | P1-B 的 Workspace version 用例失败（`delete()` 不再等待，version 提交后 Artifact 已消失） |
+| `recordWorkspaceConflictIn` 的 `lockConflictCandidateArtifacts`                      | P1-B 的 conflict candidate 用例失败（同上方向）                                           |
+| `writeCheckpoint` 的 `lockCheckpointArtifacts` + `lockReferences` 的 checkpoint 分支 | P1-B 的 checkpoint 用例失败（`expected true to be false`：`delete()` 没有被阻塞）         |
+
+**死锁风险评估（新增锁的实际顺序）：**
+
+```text
+Task → Run → blob 摘要 advisory lock（升序）→ workspace 行（FOR UPDATE/FOR SHARE）
+     → Artifact 行 FOR SHARE（去重升序）→ 引用行（workspace_versions / step_checkpoints / workspace_conflicts）
+```
+
+- 所有多行获取都经过 `lockArtifactRows`，因此 Artifact 行的获取顺序在任意两个事务之间一致；
+  `delete()` 只锁**单行**且锁内不做任何阻塞式等待（引用判定是普通快照读），因此不存在「删除方等写方、写方等删除方」的环。
+- `RunResultCommitter` 先用 `lockWorkspaceRow` 拿 workspace 行锁，再锁并集，保证与 `commitWorkspaceInTransaction`
+  和 `recordWorkspaceConflictIn`（都是 workspace 行 → Artifact 行）顺序一致；否则「workspace 提交持 X 求 Y」与
+  「checkpoint-only 提交持 Y 求 X」会成环。
+- `recordWorkspaceConflictIn` 显式先取 workspace 行 `FOR SHARE`：冲突表插入本身会通过外键取父行 `FOR KEY SHARE`，
+  先取锁即可把这次隐式获取纳入同一顺序。
+- 合并路径可能引用「另一方刚写入的 Artifact」，这些额外行仍在同一升序通道内获取，且合并期间 workspace 行已被持有，
+  没有事务能在持有这些行时反过来等待该 workspace 行。
+
+**已知限制（刻意保留）：** conflict candidate 路径只加锁、**不要求 Artifact 行存在**。失败方（fenced commit）的候选
+经常引用「自身已回滚事务从未发布」的 Artifact id；这类 id 没有任何行，也不可能有可被删除的对象，若强行要求存在会把
+`WORKSPACE_VERSION_CONFLICT` 错报成 `POLICY_DENIED`（既有 P2-3 用例正是这种场景）。已存在的引用行仍被
+`FOR SHARE` 保护。

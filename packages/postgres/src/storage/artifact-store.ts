@@ -146,6 +146,22 @@ export class PostgresArtifactStore {
         // install and COMMIT.
         await lockBlobDigests(client, context.tenantId, [installed.sha256]);
 
+        // The advisory lock only orders this publish against a *future* sweep: the collector
+        // may already have held it and deleted these bytes while this call was between
+        // `install` and here (an installed file has no `blobs` row yet, so nothing protected
+        // it). Re-asserting presence under the lock makes the two outcomes exclusive — either
+        // the bytes are still on disk and this publish commits, or they are gone and nothing
+        // is written at all.
+        const present = await this.blobs.assertInstalled(
+          context.tenantId,
+          installed.sha256,
+          installed.size,
+        );
+
+        if (!present) {
+          throw new DomainError('DB_UNAVAILABLE', 'installed bytes disappeared before publication');
+        }
+
         await client.query(INSERT_BLOB_SQL, [
           context.tenantId,
           installed.sha256,
@@ -220,6 +236,13 @@ export class PostgresArtifactStore {
    *
    * Full retention policy is a later phase, but deletion must never produce a dangling
    * reference from a Workspace version, a committed checkpoint or a pending conflict.
+   *
+   * This is the second half of the shared row-lock protocol in `artifact-references.ts`: the
+   * Artifact row is locked `FOR UPDATE` *before* references are evaluated, and every writer
+   * that persists a reference holds `FOR SHARE` on that same row until it commits. A writer
+   * therefore either commits first (and this check sees its reference) or waits here and finds
+   * the Artifact gone. Without the lock the check would be a plain `SELECT` and a concurrent
+   * checkpoint/version/conflict could be written into the window between check and delete.
    */
   async delete(ctx: AuthContext, artifactId: Id): Promise<void> {
     const context = parseContext(ctx);
@@ -227,6 +250,8 @@ export class PostgresArtifactStore {
 
     try {
       await withTransaction(this.pool, async (client) => {
+        // Rendezvous point with every reference writer. Held until COMMIT, so no reference row
+        // can become visible between this read and the DELETE below.
         const locked = await client.query<{ sha256: string }>(LOCK_ARTIFACT_SQL, [
           context.tenantId,
           id,

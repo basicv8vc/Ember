@@ -57,6 +57,19 @@ P0B-05 的执行器通过 `apps/worker/src/durable-run-handler.ts` 接入：`moc
     `assertInstalled` 复核字节仍在位；GC 在删除同一摘要的文件前取同一把锁并重新读取 `blobs`/`artifacts`。
     两者因此不可能交错：要么发布提交（GC 之后必然看到引用而保留），要么字节已消失而发布零写入
     （`DB_UNAVAILABLE`，Step 重做）。隔离窗口只删除「无行 + 超过隔离期」的文件。
+    **该复核对两条发布路径都成立**：`RunResultCommitter`（`assertInstalledBytes`）与用户上传
+    `ArtifactStore.put`（`artifact-store.ts`，锁内 `assertInstalled`）。用户上传尤其需要：`put` 先
+    `stage`+`install` 再开事务，安装完成的文件此时既无 `blobs` 行也无 `artifacts` 行，收集器可以合法地在
+    这个窗口里持有同一把锁并删除它。
+11. **Artifact 引用行锁协议**：Workspace Version / Step Checkpoint / Conflict Candidate 的 Artifact 引用
+    存放在 JSONB manifest 内，没有任何外键替它们加锁。因此写引用的一方必须在**写引用行的事务内**对每个被引用
+    Artifact 行取 `FOR SHARE`（`artifact-references.ts` 的 `lockArtifactRows`，id 去重升序）；
+    `ArtifactStore.delete` 在评估引用之前对同一行取 `FOR UPDATE`。`FOR SHARE` 与 `FOR UPDATE` 冲突，于是
+    只有两种结果：写方先提交 → 删除方看到引用并拒绝（`POLICY_DENIED`）；删除方先提交 → 写方的锁内读取找不到
+    行而拒绝，绝不产生悬挂 Artifact id。
+    锁顺序固定为 `Task → Run → blob 摘要 advisory lock → workspace 行 → Artifact 行（升序）→ 引用行`；
+    多行获取统一走 `lockArtifactRows`，因此不会出现反向顺序。`RunResultCommitter` 在写任何引用前先用
+    `lockReferences` 一次性锁住「workspace 清单 ∪ checkpoint 引用」的并集，避免两次独立加锁产生交叉顺序。
 
 ## 4. 生命周期与故障次序
 
@@ -68,9 +81,16 @@ install()              重新校验 digest/size → hard link 到 blobs/<tenant>
 commitStep() 事务       Task 锁 → Run 锁 → clock_timestamp →
   │                     幂等收据复查 → fencing/取消/Deadline →
   │                     blob 摘要 advisory lock → 安装字节在位复核（否则零写入）→
-  │                     artifact 行（savepoint 保护唯一冲突）→ Workspace CAS →
-  │                     Checkpoint → progress 或终态 Event → Receipt → COMMIT
+  │                     artifact 行（savepoint 保护唯一冲突）→
+  │                     workspace 行锁 + Artifact 行 FOR SHARE（清单 ∪ checkpoint 并集，升序）→
+  │                     Workspace CAS → Checkpoint（锁内复核同一批引用）→
+  │                     progress 或终态 Event → Receipt → COMMIT
   └── COMMIT 后失败     模拟 ACK 丢失：重放只读返回原 Receipt
+
+ArtifactStore.put()    stage → install → 事务：摘要 advisory lock → 锁内 assertInstalled
+  │                     （缺失 ⇒ DB_UNAVAILABLE 且零写入）→ blobs 行 → artifacts 行 → COMMIT
+ArtifactStore.delete() 事务：artifacts 行 FOR UPDATE → 引用判定 → DELETE
+  └── 与引用写方互斥      写方持 FOR SHARE 至提交，因此判定结果不会在窗口内失效
 ```
 
 `progress` 提交不会终结 Run（不调用 `finish()`），`result` 提交同时收敛 Task/Run 并写唯一终态 Event。
@@ -107,6 +127,7 @@ packages/domain/src/workspace-manifest.ts                       新增（纯规�
 packages/contracts/src/persistence.ts                           新增（Ports/Types）
 packages/contracts/src/interfaces.ts                            WorkspaceStore 扩展
 packages/postgres/src/storage/*.ts                              新增 6 个 Adapter/服务
+packages/postgres/src/storage/artifact-references.ts            新增（引用行锁协议）
 packages/postgres/src/lease-queue/task-convergence.ts           新增（finish 共用逻辑）
 packages/postgres/src/lease-queue/postgres-lease-queue.ts       改为复用共用收敛逻辑
 apps/worker/src/durable-run-handler.ts                          新增

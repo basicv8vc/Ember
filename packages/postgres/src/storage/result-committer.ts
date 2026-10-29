@@ -31,8 +31,10 @@ import {
 import type { LeaseQueueConfig } from '../lease-queue/config.js';
 import { lockBlobDigests } from './blob-store.js';
 import { parseMediaType } from './local-blob-store.js';
+import { lockArtifactRows, lockCheckpointArtifacts } from './artifact-references.js';
 import {
   commitWorkspaceInTransaction,
+  lockWorkspaceRow,
   recordWorkspaceConflict,
   WorkspaceConflictSignal,
 } from './workspace-store.js';
@@ -577,6 +579,13 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
         await this.fault('before_artifact_insert');
         await this.writeArtifacts(client, scoped, installed);
 
+        // Lock every Artifact this commit is about to reference *before* the reference rows
+        // are written: workspace row first, then all Artifact rows in ascending id order (the
+        // union of the workspace manifest and the checkpoint, so the two sets cannot be the
+        // source of an inconsistent lock order). `delete()` takes `FOR UPDATE` on the same
+        // rows, so it either observes these references or this commit observes the deletion.
+        await this.lockReferences(client, scoped, normalized);
+
         await this.fault('before_workspace_cas');
         const workspace =
           normalized.workspace === null
@@ -794,6 +803,35 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
 
     return now;
   }
+
+  /**
+   * Take the reference row locks for one commit, in the shared order of
+   * `artifact-references.ts`.
+   *
+   * The workspace row is locked first (when this commit advances a Workspace), then every
+   * referenced Artifact row in ascending id order across the union of the workspace manifest
+   * and the checkpoint. Downstream verification re-locks rows it already holds, which is a
+   * no-op, so this up-front pass is what fixes the acquisition order.
+   */
+  private async lockReferences(
+    client: pg.PoolClient,
+    grant: RunGrant,
+    request: NormalizedRequest,
+  ): Promise<void> {
+    if (request.workspace !== null) {
+      await lockWorkspaceRow(client, grant.tenantId, grant.agentId);
+    }
+
+    const ids = [
+      ...(request.workspace?.manifest.files ?? []).map((entry) => entry.artifactId),
+      ...(request.checkpoint?.artifacts ?? []).map((entry) => entry.artifactId),
+    ];
+
+    if (ids.length > 0) {
+      await lockArtifactRows(client, grant.tenantId, ids);
+    }
+  }
+
   /**
    * Prove, under the tenant-digest lock, that the bytes this commit is about to reference are
    * still installed.
@@ -931,26 +969,9 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
       sequence = candidate;
     }
 
-    for (const referenced of checkpoint.artifacts) {
-      const known = await client.query<{ sha256: string; size: string | number }>(
-        SELECT_ARTIFACT_IDENTITY_SQL,
-        [grant.tenantId, referenced.artifactId],
-      );
-      const row = known.rows[0];
-
-      if (row === undefined) {
-        throw new DomainError(
-          'POLICY_DENIED',
-          'checkpoint references an artifact outside this tenant',
-        );
-      }
-
-      if (row.sha256 !== referenced.sha256 || Number(row.size) !== referenced.size) {
-        throw new InvalidArgumentError([
-          { path: `checkpoint.artifacts[${referenced.artifactId}]`, code: 'artifact_mismatch' },
-        ]);
-      }
-    }
+    // Locked, not just read: the checkpoint is a durable reference, so these rows must stay
+    // locked until COMMIT or a concurrent `delete()` could remove one underneath it.
+    await lockCheckpointArtifacts(client, grant.tenantId, checkpoint.artifacts);
 
     const checkpointId = randomUUID();
 

@@ -19,6 +19,13 @@ import {
 import { toInvalidArgumentError } from '@ember/contracts';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from '../repositories/support.js';
+import {
+  assertArtifactReferences,
+  lockArtifactReferences,
+  lockConflictCandidateArtifacts,
+} from './artifact-references.js';
+
+export { assertArtifactReferences };
 
 /**
  * PostgreSQL Workspace store: immutable version history plus real CAS (B06-D2).
@@ -55,12 +62,6 @@ interface ConflictRow {
   conflict_paths: unknown;
   status: string;
   created_at: Date | string;
-}
-
-interface ArtifactReferenceRow {
-  id: string;
-  sha256: string;
-  size: string | number;
 }
 
 const LOCK_WORKSPACE_SQL = `
@@ -104,10 +105,11 @@ UPDATE workspaces
  WHERE tenant_id = $1 AND agent_id = $2 AND version = $4
 `;
 
-const SELECT_ARTIFACT_REFERENCES_SQL = `
-SELECT id, sha256, size
-  FROM artifacts
- WHERE tenant_id = $1 AND id = ANY($2::uuid[])
+const LOCK_CONFLICT_WORKSPACE_SQL = `
+SELECT 1
+  FROM workspaces
+ WHERE tenant_id = $1 AND id = $2
+   FOR SHARE
 `;
 
 const INSERT_CONFLICT_SQL = `
@@ -464,6 +466,13 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
  * Two writers that collide on the same base/candidate pair produce one row because of the
  * `(tenant, workspace, dedupe_key)` unique constraint. Nothing here mutates a workspace
  * version, a Task status or an event stream.
+ *
+ * The candidate manifests stay reference-checked: the workspace row is locked first and every
+ * referenced Artifact row that still exists is locked `FOR SHARE` before the conflict row is
+ * written, so a concurrent `ArtifactStore.delete` either observes this conflict and refuses,
+ * or wins first — in which case the candidate simply cannot reference a deleted row.
+ *
+ * Pass a client (see `recordWorkspaceConflictIn`) to record inside an existing transaction.
  */
 export async function recordWorkspaceConflict(
   pool: pg.Pool,
@@ -478,22 +487,62 @@ export async function recordWorkspaceConflict(
   const digest = digestOf(conflict.candidate);
   const dedupeKey = `${conflict.baseVersion}:${conflict.currentVersion}:${digest.slice(0, 32)}`;
 
-  await withTransaction(pool, async (client) => {
-    await client.query(INSERT_CONFLICT_SQL, [
-      randomUUID(),
-      tenantId,
-      conflict.workspaceId,
-      conflict.baseVersion,
-      conflict.currentVersion,
-      JSON.stringify(conflict.candidate),
-      digest,
-      JSON.stringify(conflict.conflictPaths),
-      dedupeKey,
-      provenance.taskId ?? null,
-      provenance.runId ?? null,
-      provenance.leaseEpoch ?? null,
-    ]);
-  });
+  await withTransaction(pool, (client) =>
+    recordWorkspaceConflictIn(client, tenantId, conflict, provenance, { digest, dedupeKey }),
+  );
+}
+
+/**
+ * Record the conflict inside a transaction the caller owns.
+ *
+ * Exposed so a caller (and the concurrency regression tests) can compose the conflict with
+ * other work and still get the reference locks; `recordWorkspaceConflict` is the ordinary
+ * one-shot wrapper around this.
+ */
+export async function recordWorkspaceConflictIn(
+  client: pg.PoolClient,
+  tenantId: Id,
+  conflict: WorkspaceConflictSignal,
+  provenance: {
+    readonly taskId?: Id | null;
+    readonly runId?: Id | null;
+    readonly leaseEpoch?: number | null;
+  } = {},
+  prepared?: { readonly digest?: string; readonly dedupeKey?: string },
+): Promise<void> {
+  const digest = prepared?.digest ?? digestOf(conflict.candidate);
+  const dedupeKey =
+    prepared?.dedupeKey ??
+    `${conflict.baseVersion}:${conflict.currentVersion}:${digest.slice(0, 32)}`;
+
+  // Lock order: workspace row first, then the Artifact rows. The insert itself takes a
+  // `FOR KEY SHARE` on the parent workspace through its foreign key, so taking the workspace
+  // lock first keeps this transaction in the same order as a Workspace version commit.
+  const workspace = await client.query(LOCK_CONFLICT_WORKSPACE_SQL, [
+    tenantId,
+    conflict.workspaceId,
+  ]);
+
+  if ((workspace.rowCount ?? 0) === 0) {
+    throw new DomainError('NOT_FOUND', 'workspace is not available in this tenant');
+  }
+
+  await lockConflictCandidateArtifacts(client, tenantId, conflict.candidate);
+
+  await client.query(INSERT_CONFLICT_SQL, [
+    randomUUID(),
+    tenantId,
+    conflict.workspaceId,
+    conflict.baseVersion,
+    conflict.currentVersion,
+    JSON.stringify(conflict.candidate),
+    digest,
+    JSON.stringify(conflict.conflictPaths),
+    dedupeKey,
+    provenance.taskId ?? null,
+    provenance.runId ?? null,
+    provenance.leaseEpoch ?? null,
+  ]);
 }
 
 /**
@@ -550,6 +599,39 @@ export interface WorkspaceCommitResult {
 }
 
 const EMPTY_MANIFEST: WorkspaceManifestValue = Object.freeze({ files: Object.freeze([]) });
+
+const LOCK_WORKSPACE_BY_ID_SQL = `
+SELECT version
+  FROM workspaces
+ WHERE tenant_id = $1 AND agent_id = $2
+   FOR UPDATE
+`;
+
+/**
+ * Lock the workspace row of one Agent before any Artifact row is locked.
+ *
+ * The fenced committer takes this lock up front so that its later Artifact `FOR SHARE` locks
+ * are always acquired *after* the workspace row. That fixed order is shared with
+ * `commitWorkspaceInTransaction` and `recordWorkspaceConflictIn`, which is what keeps a
+ * three-way deadlock impossible between a version commit, a conflict record and a delete.
+ */
+export async function lockWorkspaceRow(
+  client: pg.PoolClient,
+  tenantId: Id,
+  agentId: Id,
+): Promise<number> {
+  const locked = await client.query<{ version: number }>(LOCK_WORKSPACE_BY_ID_SQL, [
+    tenantId,
+    agentId,
+  ]);
+  const row = locked.rows[0];
+
+  if (row === undefined) {
+    throw new DomainError('NOT_FOUND', 'workspace is not available in this tenant');
+  }
+
+  return row.version;
+}
 
 /**
  * Commit a workspace version inside an existing transaction.
@@ -633,9 +715,11 @@ export async function commitWorkspaceInTransaction(
     merged = true;
   }
 
-  // Validate references on the final manifest; a merged result may reference artifacts the
-  // other writer introduced, and those must still be tenant-owned with matching digests.
-  await assertArtifactReferences(client, input.tenantId, manifest);
+  // Validate references on the final manifest under a shared row lock; a merged result may
+  // reference artifacts the other writer introduced, and those must still be tenant-owned with
+  // matching digests. Holding `FOR SHARE` until COMMIT is what makes a concurrent
+  // `ArtifactStore.delete` see this version instead of deleting underneath it.
+  await lockArtifactReferences(client, input.tenantId, manifest);
 
   const nextVersion = current + 1;
   await client.query(INSERT_VERSION_SQL, [
@@ -696,44 +780,6 @@ function assertManifestSize(manifest: WorkspaceManifestValue): void {
 
   if (bytes > WORKSPACE_MANIFEST_MAX_BYTES) {
     throw new InvalidArgumentError([{ path: 'manifest', code: 'manifest_too_large' }]);
-  }
-}
-
-/**
- * Prove that every referenced Artifact belongs to this tenant and still has the digest/size
- * the manifest claims. A foreign or missing artifact is rejected, never silently dropped.
- */
-export async function assertArtifactReferences(
-  runner: pg.Pool | pg.PoolClient,
-  tenantId: Id,
-  manifest: WorkspaceManifestValue,
-): Promise<void> {
-  if (manifest.files.length === 0) {
-    return;
-  }
-
-  const ids = [...new Set(manifest.files.map((entry) => entry.artifactId))];
-  const result = await runner.query<ArtifactReferenceRow>(SELECT_ARTIFACT_REFERENCES_SQL, [
-    tenantId,
-    ids,
-  ]);
-  const known = new Map(result.rows.map((row) => [row.id, row]));
-
-  for (const entry of manifest.files) {
-    const row = known.get(entry.artifactId);
-
-    if (row === undefined) {
-      throw new DomainError(
-        'POLICY_DENIED',
-        'workspace manifest references an artifact outside this tenant',
-      );
-    }
-
-    if (row.sha256 !== entry.sha256 || Number(row.size) !== entry.size) {
-      throw new InvalidArgumentError([
-        { path: `manifest.files[${entry.path}].sha256`, code: 'artifact_mismatch' },
-      ]);
-    }
   }
 }
 

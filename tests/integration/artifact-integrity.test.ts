@@ -1,12 +1,17 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { mkdir, symlink, utimes, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import type { BlobStore } from '@ember/contracts';
 import {
   PostgresAgentRepository,
+  PostgresArtifactStore,
+  WorkspaceConflictSignal,
   blobKeyFor,
   blobLockKey,
+  commitWorkspaceInTransaction,
   parseStorageKey,
+  recordWorkspaceConflictIn,
   stagingKeyFor,
 } from '@ember/postgres';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
@@ -27,6 +32,65 @@ async function ageFile(absolutePath: string, msAgo: number): Promise<void> {
   const when = new Date(Date.now() - msAgo);
 
   await utimes(absolutePath, when, when);
+}
+
+/** Wait until at least `min` statements in this database are queued on an advisory lock. */
+async function waitForAdvisoryLockWaiter(min = 1, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await db.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_locks
+        WHERE locktype = 'advisory'
+          AND NOT granted
+          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
+    );
+
+    if (Number(result.rows[0]?.count ?? '0') >= min) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error('timed out waiting for an advisory lock waiter');
+}
+
+/** Wait until `blocker` is the session that keeps another statement waiting. */
+async function waitForRowLockWaiter(blocker: number, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await db.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND $1 = ANY(pg_blocking_pids(pid))`,
+      [blocker],
+    );
+
+    if (Number(result.rows[0]?.count ?? '0') > 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error('timed out waiting for a row lock waiter');
+}
+
+async function backendPid(client: { query: (sql: string) => Promise<unknown> }): Promise<number> {
+  const result = (await client.query('SELECT pg_backend_pid() AS pid')) as {
+    rows: { pid: number }[];
+  };
+  const pid = result.rows[0]?.pid;
+
+  if (pid === undefined) {
+    throw new Error('could not read the backend pid');
+  }
+
+  return pid;
 }
 
 beforeAll(async () => {
@@ -355,5 +419,239 @@ describe('P0B06 P2-2 deletion of a referenced artifact', () => {
     await expect(infra.artifacts.get(seed.ctx, ref.artifactId)).rejects.toMatchObject({
       code: 'NOT_FOUND',
     });
+  });
+});
+
+/**
+ * Round 3 review, P1-A.
+ *
+ * `put()` installs bytes *before* it opens its publishing transaction, so the collector can
+ * legitimately win the digest lock in that window and delete the (still unreferenced) file.
+ * The publish must then write nothing instead of committing rows that point at missing bytes.
+ */
+describe('P0B06 P1-A an upload that loses to the collector', () => {
+  it('writes nothing when a real sweep deletes the bytes before the upload publishes', async () => {
+    const local = await createP06Infra(db);
+    const blocker = await db.pool.connect();
+    const bytes = Buffer.from('upload racing a sweep', 'utf8');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const key = blobKeyFor(seed.tenant.tenantId, digest);
+    const absolute = path.join(local.root.dir, ...key.split('/'));
+
+    try {
+      // The digest file is installed (as `install` leaves it) but nothing references it yet.
+      await mkdir(path.dirname(absolute), { recursive: true });
+      await writeFile(absolute, bytes);
+      await ageFile(absolute, 240_000);
+
+      // Holding the tenant-digest lock queues the collector and the upload behind it, so the
+      // collector is guaranteed to be first in line.
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        blobLockKey(seed.tenant.tenantId, digest),
+      ]);
+
+      const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
+      await waitForAdvisoryLockWaiter();
+
+      // `put` stages, "installs" (the digest file already exists, so install verifies and
+      // returns) and then queues for the same lock, behind the collector.
+      const upload = local.artifacts.put(seed.ctx, bytes, 'text/plain');
+      await waitForAdvisoryLockWaiter(2);
+      await blocker.query('COMMIT');
+
+      const report = await sweep;
+
+      expect(report.removedBlobs).toBe(1);
+      await expect(upload).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+      // Zero writes: no metadata may describe bytes the collector has already removed.
+      const rows = await db.pool.query<{ artifacts: string; blobs: string }>(
+        `SELECT (SELECT count(*)::text FROM artifacts WHERE tenant_id = $1 AND sha256 = $2)
+                  AS artifacts,
+                (SELECT count(*)::text FROM blobs WHERE tenant_id = $1 AND sha256 = $2)
+                  AS blobs`,
+        [seed.tenant.tenantId, digest],
+      );
+
+      expect(rows.rows[0]?.artifacts).toBe('0');
+      expect(rows.rows[0]?.blobs).toBe('0');
+      await expect(local.files.read(seed.tenant.tenantId, key)).rejects.toMatchObject({
+        code: 'NOT_FOUND',
+      });
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      await local.dispose();
+    }
+  });
+
+  it('writes nothing when the installed file is already gone at publication time', async () => {
+    const local = await createP06Infra(db);
+    const bytes = Buffer.from('swept between install and publish', 'utf8');
+
+    try {
+      // Deterministic form of the same race: the collector removed the file while `put` was
+      // between `install` and its publishing transaction.
+      const blobs: BlobStore = {
+        stage: (tenantId, source, mediaType, options) =>
+          local.blobs.stage(tenantId, source, mediaType, options),
+        install: async (tenantId, staged) => {
+          const installed = await local.blobs.install(tenantId, staged);
+
+          await local.files.removeKey(installed.storageKey, 'blobs');
+
+          return installed;
+        },
+        read: (tenantId, storageKey) => local.blobs.read(tenantId, storageKey),
+        verifyContent: (tenantId, sha256, size) =>
+          local.blobs.verifyContent(tenantId, sha256, size),
+        assertInstalled: (tenantId, sha256, size) =>
+          local.blobs.assertInstalled(tenantId, sha256, size),
+        verify: (tenantId, storageKey, expectedSha256, expectedSize) =>
+          local.blobs.verify(tenantId, storageKey, expectedSha256, expectedSize),
+        discard: (tenantId, staged) => local.blobs.discard(tenantId, staged),
+        sweepOrphans: (now, options) => local.blobs.sweepOrphans(now, options),
+      };
+
+      const store = new PostgresArtifactStore(db.pool, blobs);
+
+      await expect(store.put(seed.ctx, bytes, 'text/plain')).rejects.toMatchObject({
+        code: 'DB_UNAVAILABLE',
+      });
+
+      const rows = await db.pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM artifacts
+          WHERE tenant_id = $1 AND sha256 = $2`,
+        [seed.tenant.tenantId, createHash('sha256').update(bytes).digest('hex')],
+      );
+
+      expect(rows.rows[0]?.count).toBe('0');
+    } finally {
+      await local.dispose();
+    }
+  });
+});
+
+/**
+ * Round 3 review, P1-B.
+ *
+ * `delete()` used to evaluate its JSONB reference predicates with a plain `SELECT`, so a
+ * concurrent writer could commit a *new* reference in the window between that check and the
+ * `DELETE`, leaving a dangling Artifact id behind. The fix is a shared row-lock protocol:
+ * writers hold `FOR SHARE` on every referenced Artifact row, `delete()` takes `FOR UPDATE`
+ * before it looks at references.
+ */
+describe('P0B06 P1-B artifact deletion versus a concurrent reference writer', () => {
+  it('waits for an uncommitted Workspace version and then refuses', async () => {
+    const bytes = Buffer.from('version pinned bytes', 'utf8');
+    const ref = await infra.artifacts.put(seed.ctx, bytes, 'text/plain');
+    const base = await infra.workspaces.load(seed.ctx, seed.agentId);
+    const writer = await db.pool.connect();
+
+    try {
+      await writer.query('BEGIN');
+      const committed = await commitWorkspaceInTransaction(writer, {
+        tenantId: seed.tenant.tenantId,
+        agentId: seed.agentId,
+        expectedVersion: base.version,
+        manifest: {
+          files: [
+            ...base.manifest.files,
+            {
+              path: 'pinned-version.bin',
+              artifactId: ref.artifactId,
+              sha256: ref.sha256,
+              size: ref.size,
+            },
+          ],
+        },
+        allowMerge: true,
+      });
+
+      // The version row exists but is uncommitted: the writer holds `FOR SHARE` on the row.
+      const deletion = infra.artifacts.delete(seed.ctx, ref.artifactId);
+      await waitForRowLockWaiter(await backendPid(writer));
+
+      await writer.query('COMMIT');
+      await expect(deletion).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+
+      // The version is durable and its Artifact reference still resolves.
+      await expect(infra.artifacts.get(seed.ctx, ref.artifactId)).resolves.toEqual(bytes);
+      expect(committed.version).toBe(base.version + 1);
+
+      const versions = await db.pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM workspace_versions
+          WHERE tenant_id = $1 AND workspace_id = $2 AND version = $3`,
+        [seed.tenant.tenantId, base.workspaceId, committed.version],
+      );
+
+      expect(versions.rows[0]?.count).toBe('1');
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined);
+      writer.release();
+    }
+  });
+
+  it('waits for an uncommitted conflict candidate and then refuses', async () => {
+    const bytes = Buffer.from('conflict pinned bytes', 'utf8');
+    const ref = await infra.artifacts.put(seed.ctx, bytes, 'text/plain');
+    const base = await infra.workspaces.load(seed.ctx, seed.agentId);
+    const workspaceId = base.workspaceId;
+
+    if (workspaceId === undefined) {
+      throw new Error('expected a materialised workspace');
+    }
+
+    const writer = await db.pool.connect();
+
+    try {
+      await writer.query('BEGIN');
+      await recordWorkspaceConflictIn(
+        writer,
+        seed.tenant.tenantId,
+        new WorkspaceConflictSignal({
+          workspaceId,
+          baseVersion: base.version,
+          currentVersion: Math.max(1, base.version + 1),
+          candidate: {
+            files: [
+              {
+                path: 'pinned-conflict.bin',
+                artifactId: ref.artifactId,
+                sha256: ref.sha256,
+                size: ref.size,
+              },
+            ],
+          },
+          conflictPaths: ['pinned-conflict.bin'],
+        }),
+      );
+
+      const deletion = infra.artifacts.delete(seed.ctx, ref.artifactId);
+      await waitForRowLockWaiter(await backendPid(writer));
+
+      await writer.query('COMMIT');
+      await expect(deletion).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+      await expect(infra.artifacts.get(seed.ctx, ref.artifactId)).resolves.toEqual(bytes);
+
+      // The pending candidate is durable and keeps protecting the Artifact afterwards.
+      const conflicts = await db.pool.query<{ count: string }>(
+        `SELECT count(*)::text AS count
+           FROM workspace_conflicts
+          WHERE tenant_id = $1 AND workspace_id = $2`,
+        [seed.tenant.tenantId, workspaceId],
+      );
+
+      expect(Number(conflicts.rows[0]?.count ?? '0')).toBeGreaterThan(0);
+      await expect(infra.artifacts.delete(seed.ctx, ref.artifactId)).rejects.toMatchObject({
+        code: 'POLICY_DENIED',
+      });
+    } finally {
+      await writer.query('ROLLBACK').catch(() => undefined);
+      writer.release();
+    }
   });
 });

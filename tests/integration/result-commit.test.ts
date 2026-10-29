@@ -734,3 +734,88 @@ describe('P0B06 P1-4 a publish that races the collector', () => {
     expect(Number(blobRows.rows[0]?.count ?? '0')).toBe(0);
   });
 });
+
+/**
+ * Round 3 review, P1-B.
+ *
+ * A Step checkpoint is a durable Artifact reference that no foreign key protects. The commit
+ * must hold `FOR SHARE` on each referenced Artifact row until it commits, so an in-flight
+ * `ArtifactStore.delete` waits and then observes the checkpoint instead of deleting first.
+ */
+describe('P0B06 P1-B a checkpoint that races an artifact delete', () => {
+  it('holds the reference lock until commit, then the delete is refused', async () => {
+    const attempt = await claimTask('checkpoint-delete-race');
+    const published = await infra.artifacts.put(
+      ctx,
+      Buffer.from('checkpoint referenced bytes'),
+      'text/plain',
+    );
+
+    let reachedCheckpoint: (() => void) | undefined;
+    let releaseCommit: (() => void) | undefined;
+    const checkpointWritten = new Promise<void>((resolve) => {
+      reachedCheckpoint = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCommit = resolve;
+    });
+
+    const committer = new PostgresRunResultCommitter(db.pool, {
+      policy: resolveLeaseQueueConfig({ leaseDurationMs: LEASE_MS, heartbeatIntervalMs: 500 }),
+      blobs: infra.blobs,
+      faultInjector: async (point) => {
+        if (point === 'before_event') {
+          // The checkpoint row is written but the transaction is still open.
+          reachedCheckpoint?.();
+          await gate;
+        }
+      },
+    });
+
+    const request: CommitStepRequest = {
+      operationId: `op:checkpoint-race:${randomUUID()}`,
+      mode: 'progress',
+      checkpoint: {
+        stepId: 'checkpoint-delete-race',
+        inputDigest: 'd'.repeat(64),
+        executorVersion: 'executor-test@1',
+        artifacts: [
+          {
+            artifactId: published.artifactId,
+            sha256: published.sha256,
+            size: published.size,
+            mediaType: 'text/plain',
+          },
+        ],
+      },
+    };
+
+    const commit = committer.commitStep(attempt.grant, request);
+
+    await checkpointWritten;
+
+    const deletion = infra.artifacts.delete(ctx, published.artifactId);
+    let settled = false;
+
+    void deletion.then(
+      () => {
+        settled = true;
+      },
+      () => {
+        settled = true;
+      },
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(settled).toBe(false);
+
+    releaseCommit?.();
+    const receipt = await commit;
+
+    expect(receipt.checkpointId).not.toBeNull();
+    await expect(deletion).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+    await expect(infra.artifacts.get(ctx, published.artifactId)).resolves.toEqual(
+      Buffer.from('checkpoint referenced bytes'),
+    );
+  });
+});

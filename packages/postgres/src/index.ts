@@ -79,9 +79,18 @@ export {
 export { PostgresArtifactStore } from './storage/artifact-store.js';
 export {
   assertArtifactReferences,
+  lockArtifactReferences,
+  lockArtifactRows,
+  lockCheckpointArtifacts,
+  lockConflictCandidateArtifacts,
+  type ArtifactIdentity,
+} from './storage/artifact-references.js';
+export {
   commitWorkspaceInTransaction,
+  lockWorkspaceRow,
   PostgresWorkspaceStore,
   recordWorkspaceConflict,
+  recordWorkspaceConflictIn,
   WorkspaceConflictSignal,
   workspaceManifestDigest,
   type WorkspaceCommitInput,

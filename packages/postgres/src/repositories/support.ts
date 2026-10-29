@@ -14,7 +14,21 @@ export function asDomainError(error: unknown): DomainError {
   }
 
   const message = error instanceof Error ? error.message : String(error);
-  return new DomainError('DB_UNAVAILABLE', `database operation failed: ${message}`);
+  // Driver diagnostics stay internal: never serialised, but they make an operator-visible
+  // log line actionable (code/constraint/table without any row content).
+  const details = error as { code?: unknown; constraint?: unknown; table?: unknown };
+  const suffix = [
+    typeof details.code === 'string' ? `code=${details.code}` : null,
+    typeof details.constraint === 'string' ? `constraint=${details.constraint}` : null,
+    typeof details.table === 'string' ? `table=${details.table}` : null,
+  ]
+    .filter((part): part is string => part !== null)
+    .join(' ');
+
+  return new DomainError(
+    'DB_UNAVAILABLE',
+    `database operation failed: ${message}${suffix === '' ? '' : ` (${suffix})`}`,
+  );
 }
 
 export async function withTransaction<T>(

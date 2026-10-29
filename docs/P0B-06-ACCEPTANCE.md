@@ -38,6 +38,17 @@
 | ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 54 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
 | `git diff --check`               | 通过（无空白错误）                                                                                                   |
 
+### CI 证据（GitHub Actions `CI`，Node 24 LTS + `postgres:17-alpine`）
+
+| 项目         | 值                                                                                                                                                                        |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PR           | https://github.com/basicv8vc/Ember/pull/11（Draft，base `main`）                                                                                                          |
+| 分支         | `feature/p0b-06-artifact-workspace-checkpoint`                                                                                                                            |
+| 首次通过 run | https://github.com/basicv8vc/Ember/actions/runs/40812981890（HEAD `6767372`）                                                                                             |
+| CI 日志实测  | Unit `20 files / 373 tests passed`；Integration `13 files / 121 tests passed`；`5 applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!` |
+
+CI 结论来自实际读取的 job 日志，而不是绿色图标推断。
+
 ### 新增测试分布
 
 | 文件                                           | 用例数 | 类型                        |

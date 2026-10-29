@@ -9,9 +9,12 @@ import {
   type RequestIdGenerator,
 } from './http/app-context.js';
 import {
+  INTERNAL_ERROR_CODE,
   respondNotFound,
   respondWithDomainError,
   toInternalErrorResponse,
+  UnexpectedNonErrorFault,
+  unexpectedErrorCategory,
 } from './http/error-mapping.js';
 import type { Logger } from './logger.js';
 import { notConfiguredReadiness, type ReadinessCheck } from './readiness.js';
@@ -59,6 +62,21 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const authenticator = deps.authenticator ?? createDevTokenAuthenticator([]);
   const taskStore = deps.taskStore ?? unconfiguredTaskStore();
   const tenantAuth = requireTenantAuth({ authenticator, logger });
+
+  /**
+   * Error boundary, registered first so it encloses every other middleware and handler
+   * (Review Round 1, P2). Hono's composer only routes `Error` instances to `onError`; a thrown
+   * non-`Error` would otherwise escape this app entirely and be answered by the Node adapter
+   * with an empty 500 and no log line. Normalising it here keeps every unknown fault on the
+   * sanitised 500 body and the redacted log path below.
+   */
+  app.use('*', async (_c, next) => {
+    try {
+      await next();
+    } catch (error) {
+      throw error instanceof Error ? error : new UnexpectedNonErrorFault();
+    }
+  });
 
   app.use('*', requestIdMiddleware(deps.requestIdGenerator));
 
@@ -112,10 +130,17 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
       return respondWithDomainError(c, error);
     }
 
-    // Never leak stack traces, SQL, or filesystem paths to clients.
+    // An unexpected fault is reported as a generic 500 and logged with a *closed* set of
+    // fields only: the correlation id, the route, the fixed internal code and a category
+    // derived from `instanceof`. `error.message`, `error.name`, `error.stack` and
+    // `String(error)` are deliberately never read: a driver error can carry a connection
+    // string or SQL text, and a thrown non-`Error` can carry a request body or a token.
+    // `c.req.path` is the URL pathname only (Hono parses the query string off), so a
+    // credential smuggled into `?…` never reaches this line.
     logger?.error('unhandled error', {
       ...route,
-      error: error instanceof Error ? error.message : String(error),
+      code: INTERNAL_ERROR_CODE,
+      category: unexpectedErrorCategory(error),
     });
     return c.json(toInternalErrorResponse(requestId), 500);
   });

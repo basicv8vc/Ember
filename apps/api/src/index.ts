@@ -10,6 +10,7 @@ import { createApp, SERVICE_NAME } from './app.js';
 import { createDevTokenAuthenticator } from './auth/bearer-authenticator.js';
 import { loadDevAuthConfig } from './auth/dev-auth-config.js';
 import { isLoopbackHost, loadApiConfig } from './env.js';
+import { unexpectedErrorCategory } from './http/error-mapping.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
 
@@ -44,7 +45,9 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
       logger.info('shutdown complete');
     } catch (error) {
       clearTimeout(forceExit);
-      logger.error('shutdown failed', { error: (error as Error).message });
+      // Same rule as the request path: a shutdown fault is logged by category only, because a
+      // pool/server error message can carry a connection string or a socket address.
+      logger.error('shutdown failed', { category: unexpectedErrorCategory(error) });
       process.exitCode = 1;
     }
   };
@@ -72,7 +75,8 @@ function main(): void {
 
   const pool = createPool(databaseConfig, {
     onIdleError: (error) => {
-      logger.warn('database idle connection error', { error: error.message });
+      // Category only: an idle-connection fault can include the endpoint it tried to reach.
+      logger.warn('database idle connection error', { category: unexpectedErrorCategory(error) });
     },
   });
 
@@ -111,6 +115,10 @@ function main(): void {
 try {
   main();
 } catch (error) {
+  // Startup failures are operator-facing and happen before any request is served, so the
+  // detail is kept: the only errors reachable here are config-validation errors, which name
+  // environment variables and never interpolate a credential value. Request-path faults take
+  // the redacted route in `app.onError` instead.
   process.stderr.write(
     `api failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
   );

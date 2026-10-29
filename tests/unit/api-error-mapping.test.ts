@@ -10,6 +10,8 @@ import {
   INTERNAL_ERROR_MESSAGE,
   statusForDomainError,
   toInternalErrorResponse,
+  UNEXPECTED_ERROR_CATEGORIES,
+  unexpectedErrorCategory,
 } from '../../apps/api/src/http/error-mapping.js';
 import type { Logger } from '../../apps/api/src/logger.js';
 import type { TaskStore } from '../../apps/api/src/tasks/task-store.js';
@@ -162,6 +164,113 @@ describe('app error handler', () => {
     expect(response.status).toBe(404);
     await expect(response.json()).resolves.toEqual({
       error: { code: 'NOT_FOUND', message: publicMessage('NOT_FOUND'), request_id: REQUEST_ID },
+    });
+  });
+});
+
+/**
+ * Review Round 1 (P2): an unexpected fault used to be logged as `error.message`. A driver error
+ * carries SQL text and a DSN, and a thrown string carries whatever the fault happened to hold, so
+ * the log now records a category derived from `instanceof` plus the fixed internal code. These are
+ * the negative tests for that promise: a credential in the fault must reach neither the log nor
+ * the response body.
+ */
+
+const SECRET_DSN = 'postgres://ember:sup3r-s3cret@10.0.0.7:5432/ember';
+const SECRET_TOKEN = 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJsZWFrIn0.c2lnbmF0dXJl';
+const SECRETS = [SECRET_DSN, 'sup3r-s3cret', 'eyJhbGciOiJIUzI1NiJ9', '10.0.0.7'] as const;
+
+function expectNoSecret(value: string, label: string): void {
+  for (const secret of SECRETS) {
+    expect(value, `${label} must not contain ${secret}`).not.toContain(secret);
+  }
+}
+
+describe('unexpected fault logging', () => {
+  it('classifies the fault with `instanceof` only', () => {
+    expect(UNEXPECTED_ERROR_CATEGORIES).toEqual([
+      'type_error',
+      'range_error',
+      'syntax_error',
+      'error',
+      'non_error',
+    ]);
+    expect(unexpectedErrorCategory(new TypeError('x'))).toBe('type_error');
+    expect(unexpectedErrorCategory(new RangeError('x'))).toBe('range_error');
+    expect(unexpectedErrorCategory(new SyntaxError('x'))).toBe('syntax_error');
+    expect(unexpectedErrorCategory(new Error('x'))).toBe('error');
+    expect(unexpectedErrorCategory('postgres://…')).toBe('non_error');
+    expect(unexpectedErrorCategory(undefined)).toBe('non_error');
+    expect(unexpectedErrorCategory({ message: SECRET_DSN })).toBe('non_error');
+  });
+
+  it('never logs the fault message, even when it carries credentials', async () => {
+    const error = vi.fn();
+    const logger: Logger = { ...silentLogger(), error };
+
+    const response = await buildApp(
+      failingStore(new Error(`connect failed using ${SECRET_DSN} with ${SECRET_TOKEN}`)),
+      logger,
+    ).request(`/v1/tasks/${TENANT_ID}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+
+    expect(response.status).toBe(500);
+    expectNoSecret(await response.text(), 'response body');
+
+    expect(error).toHaveBeenCalledTimes(1);
+    const call = error.mock.calls[0] as [string, Record<string, unknown>] | undefined;
+    expect(call?.[0]).toBe('unhandled error');
+    // The logged context is a closed shape: no message, name, stack or arbitrary extra field.
+    expect(call?.[1]).toEqual({
+      requestId: REQUEST_ID,
+      method: 'GET',
+      path: `/v1/tasks/${TENANT_ID}`,
+      code: INTERNAL_ERROR_CODE,
+      category: 'error',
+    });
+    expectNoSecret(JSON.stringify(error.mock.calls), 'log line');
+  });
+
+  it('does not echo a crafted error name or a custom error subclass', async () => {
+    class LeakyError extends Error {}
+
+    const error = vi.fn();
+    const thrown = new LeakyError(`leaked ${SECRET_DSN}`);
+    thrown.name = `LeakyError ${SECRET_TOKEN}`;
+
+    const response = await buildApp(failingStore(thrown), {
+      ...silentLogger(),
+      error,
+    }).request(`/v1/tasks/${TENANT_ID}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+
+    expect(response.status).toBe(500);
+    expectNoSecret(await response.text(), 'response body');
+
+    const logged = JSON.stringify(error.mock.calls);
+    expectNoSecret(logged, 'log line');
+    expect(logged).not.toContain('LeakyError');
+  });
+
+  it('handles a thrown non-Error value without stringifying it', async () => {
+    const error = vi.fn();
+    // Rejecting with a non-`Error` is the point of this test: it is what a misbehaving adapter or
+    // callback can throw, and Hono's composer only routes `Error` instances to `onError`. The app
+    // normalises it, so it must still reach the sanitised body and the redacted log.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    const rejecting = (): Promise<never> => Promise.reject(SECRET_TOKEN);
+
+    const response = await buildApp(
+      { create: rejecting, get: rejecting, listEvents: rejecting },
+      { ...silentLogger(), error },
+    ).request(`/v1/tasks/${TENANT_ID}`, { headers: { authorization: `Bearer ${TOKEN}` } });
+
+    expect(response.status).toBe(500);
+    expectNoSecret(await response.text(), 'response body');
+
+    const logged = JSON.stringify(error.mock.calls);
+    expectNoSecret(logged, 'log line');
+    expect(error.mock.calls[0]?.[1]).toMatchObject({
+      code: INTERNAL_ERROR_CODE,
+      category: 'non_error',
     });
   });
 });

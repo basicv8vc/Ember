@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { TASK_INPUT_LIMITS } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
 import { describe, expect, it } from 'vitest';
 
@@ -53,6 +54,23 @@ const CHAT_BODY = {
   kind: 'mock.chat',
   input: { prompt: 'summarise the incident' },
 };
+
+/** `mock.compute` body: the only kind whose text field can approach the byte cap. */
+function computeBody(text: string): Record<string, unknown> {
+  return { agent_id: AGENT_ID, kind: 'mock.compute', input: { operation: 'sha256', text } };
+}
+
+/**
+ * A `mock.compute` body of exactly `targetBytes` UTF-8 bytes: 3-byte characters for the bulk of
+ * the text, single-byte padding for the remainder, so the byte boundary is hit exactly.
+ */
+function computeBodyOfBytes(targetBytes: number): string {
+  const remaining = targetBytes - Buffer.byteLength(JSON.stringify(computeBody('')), 'utf8');
+  const multibyte = Math.floor(remaining / 3);
+  const padding = remaining - multibyte * 3;
+
+  return JSON.stringify(computeBody(`${'漢'.repeat(multibyte)}${'a'.repeat(padding)}`));
+}
 
 async function post(
   app: App,
@@ -229,5 +247,69 @@ describe('POST /v1/tasks rejection paths', () => {
     const text = await response.text();
     expect(text).toContain('DB_UNAVAILABLE');
     expect(text).not.toContain('ECONNREFUSED');
+  });
+});
+
+/**
+ * Review Round 1 (P2): the 64 KiB byte cap and the `@ember/contracts` character limits bound
+ * different quantities, and only one of them can be the outer limit. These tests pin the
+ * documented arithmetic in `tasks/constants.ts` so the two cannot drift apart silently, and they
+ * prove the cap is measured in UTF-8 bytes rather than in characters.
+ */
+describe('body cap vs. schema character limits', () => {
+  /**
+   * HTTP-layer boundary only: the in-memory store does not apply the persistence-side canonical
+   * command cap (`TASK_COMMAND_MAX_BYTES`, also 64 KiB, measured on a slightly larger JSON form),
+   * so the end-to-end boundary is a few bytes lower and is asserted against real PostgreSQL in
+   * `tests/integration/http-task-api.test.ts`.
+   */
+  it('accepts a body at exactly the HTTP cap and rejects the next byte', async () => {
+    const atCap = computeBodyOfBytes(MAX_TASK_BODY_BYTES);
+    expect(Buffer.byteLength(atCap, 'utf8')).toBe(MAX_TASK_BODY_BYTES);
+
+    const accepted = harness();
+    expect((await post(accepted.app, { raw: atCap })).status).toBe(202);
+    expect(accepted.api.creates).toHaveLength(1);
+
+    const rejected = harness();
+    const overCap = computeBodyOfBytes(MAX_TASK_BODY_BYTES + 1);
+    expect(Buffer.byteLength(overCap, 'utf8')).toBe(MAX_TASK_BODY_BYTES + 1);
+    expect((await post(rejected.app, { raw: overCap })).status).toBe(400);
+    expect(rejected.api.creates).toEqual([]);
+  });
+
+  it('rejects a 64 000-character multibyte field but accepts the same length in ASCII', async () => {
+    const maxChars = TASK_INPUT_LIMITS.computeTextMaxChars;
+    const multibyte = '漢'.repeat(maxChars);
+
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBe(maxChars * 3);
+    expect(Buffer.byteLength(multibyte, 'utf8')).toBeGreaterThan(MAX_TASK_BODY_BYTES);
+
+    const rejected = harness();
+    const response = await post(rejected.app, { raw: JSON.stringify(computeBody(multibyte)) });
+
+    expect(response.status).toBe(400);
+    await expect(response.json()).resolves.toMatchObject({ error: { code: 'INVALID_ARGUMENT' } });
+    expect(rejected.api.creates).toEqual([]);
+
+    // The same character count in ASCII fits under the cap: that is the compatibility statement
+    // between the two budgets, and it is why the byte cap is not raised.
+    const asciiBody = JSON.stringify(computeBody('x'.repeat(maxChars)));
+    expect(Buffer.byteLength(asciiBody, 'utf8')).toBeLessThan(MAX_TASK_BODY_BYTES);
+
+    const accepted = harness();
+    expect((await post(accepted.app, { raw: asciiBody })).status).toBe(202);
+    expect(accepted.api.creates).toHaveLength(1);
+  });
+
+  it('confines multibyte text far below the character limit', () => {
+    // ⌊65 536 / 3⌋ characters of 3-byte text exceed the cap even before the JSON envelope.
+    const widest = Math.floor(MAX_TASK_BODY_BYTES / 3);
+    const widestBody = JSON.stringify(computeBody('漢'.repeat(widest)));
+
+    expect(Buffer.byteLength(widestBody, 'utf8')).toBeGreaterThan(MAX_TASK_BODY_BYTES);
+    expect(widest).toBeLessThan(TASK_INPUT_LIMITS.computeTextMaxChars);
+    // 4-byte (astral) text can contribute at most this many characters.
+    expect(Math.floor(MAX_TASK_BODY_BYTES / 4)).toBe(16_384);
   });
 });

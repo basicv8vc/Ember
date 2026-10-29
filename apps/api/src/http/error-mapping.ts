@@ -77,6 +77,72 @@ export function toInternalErrorResponse(requestId: string | undefined): Internal
   return requestId === undefined ? { error } : { error: { ...error, request_id: requestId } };
 }
 
+/**
+ * Closed set of log-safe categories for an unexpected fault (Review Round 1, P2).
+ *
+ * The category is derived **only** from `instanceof` checks against built-ins and is therefore
+ * always one of these literals. A fault whose `name` or `message` contains a connection string,
+ * a bearer token, SQL text or a fragment of the request body cannot inject any of it into a log
+ * line, because neither value is ever copied to the log.
+ */
+export const UNEXPECTED_ERROR_CATEGORIES = [
+  'type_error',
+  'range_error',
+  'syntax_error',
+  'error',
+  'non_error',
+] as const;
+
+export type UnexpectedErrorCategory = (typeof UNEXPECTED_ERROR_CATEGORIES)[number];
+
+/**
+ * Marker for a thrown value that is not an `Error` (Review Round 1, P2).
+ *
+ * Hono's composer only routes `Error` instances to `onError`
+ * (`if (err instanceof Error && onError)`), so anything else escapes the app's error handling:
+ * `@hono/node-server` then answers with its own empty 500 and no log line, while the app's
+ * sanitised body and redacted log never run. `createApp` normalises such a value into this marker
+ * before the composer sees it, so every unknown fault takes exactly one path. The constructor
+ * takes no message on purpose — the thrown value is never inspected.
+ */
+export class UnexpectedNonErrorFault extends Error {
+  constructor() {
+    super('a non-Error value was thrown');
+    this.name = 'UnexpectedNonErrorFault';
+  }
+}
+
+/**
+ * Classify a thrown value for logging without reading any of its content.
+ *
+ * Subclasses are checked before `Error`; a thrown non-`Error` (a string, an object, a rejected
+ * promise value) becomes `non_error` rather than being stringified, so `String(error)` can never
+ * put attacker-controlled text into a log line.
+ */
+export function unexpectedErrorCategory(error: unknown): UnexpectedErrorCategory {
+  if (error instanceof UnexpectedNonErrorFault) {
+    return 'non_error';
+  }
+
+  if (error instanceof TypeError) {
+    return 'type_error';
+  }
+
+  if (error instanceof RangeError) {
+    return 'range_error';
+  }
+
+  if (error instanceof SyntaxError) {
+    return 'syntax_error';
+  }
+
+  if (error instanceof Error) {
+    return 'error';
+  }
+
+  return 'non_error';
+}
+
 export function statusForDomainError(code: DomainErrorCode): ContentfulStatusCode {
   return HTTP_STATUS_BY_DOMAIN_ERROR[code];
 }

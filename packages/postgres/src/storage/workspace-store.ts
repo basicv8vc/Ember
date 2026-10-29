@@ -22,6 +22,7 @@ import { asDomainError, toIsoTimestamp, withTransaction } from '../repositories/
 import {
   assertArtifactReferences,
   lockArtifactReferences,
+  lockArtifactRows,
   lockConflictCandidateArtifacts,
 } from './artifact-references.js';
 
@@ -588,6 +589,17 @@ export interface WorkspaceCommitInput {
   readonly leaseEpoch?: number | null;
   /** User path merges stale-but-safe candidates; the fenced Run path may opt out. */
   readonly allowMerge?: boolean;
+  /**
+   * Artifact ids the caller already locked inside this transaction, ascending, through
+   * `lockWorkspaceArtifactScope`.
+   *
+   * Supplying it turns the declared lock order into a checked invariant: an auto-merged
+   * manifest that references an Artifact outside this set would be locked *after* higher ids
+   * and could invert the global order against another writer, so it is rejected instead. The
+   * fenced committer always supplies it; the plain user path locks its single final set and
+   * leaves it undefined.
+   */
+  readonly prelockedArtifactIds?: ReadonlySet<string>;
 }
 
 export interface WorkspaceCommitResult {
@@ -601,7 +613,7 @@ export interface WorkspaceCommitResult {
 const EMPTY_MANIFEST: WorkspaceManifestValue = Object.freeze({ files: Object.freeze([]) });
 
 const LOCK_WORKSPACE_BY_ID_SQL = `
-SELECT version
+SELECT id AS workspace_id, version
   FROM workspaces
  WHERE tenant_id = $1 AND agent_id = $2
    FOR UPDATE
@@ -620,17 +632,76 @@ export async function lockWorkspaceRow(
   tenantId: Id,
   agentId: Id,
 ): Promise<number> {
-  const locked = await client.query<{ version: number }>(LOCK_WORKSPACE_BY_ID_SQL, [
-    tenantId,
-    agentId,
-  ]);
+  const workspace = await lockWorkspace(client, tenantId, agentId);
+
+  return workspace.version;
+}
+
+async function lockWorkspace(
+  client: pg.PoolClient,
+  tenantId: Id,
+  agentId: Id,
+): Promise<WorkspaceRow> {
+  const locked = await client.query<WorkspaceRow>(LOCK_WORKSPACE_BY_ID_SQL, [tenantId, agentId]);
   const row = locked.rows[0];
 
   if (row === undefined) {
     throw new DomainError('NOT_FOUND', 'workspace is not available in this tenant');
   }
 
-  return row.version;
+  return row;
+}
+
+export interface WorkspaceArtifactLockScope {
+  /** Workspace version at the moment the scope was taken; stable until COMMIT. */
+  readonly version: number;
+  /** Every Artifact id this commit can reference, de-duplicated and ascending. */
+  readonly artifactIds: readonly string[];
+}
+
+/**
+ * Lock every Artifact a Workspace commit *can* end up referencing, not just the ones the
+ * request names.
+ *
+ * `commitWorkspaceInTransaction` auto-merges a non-conflicting candidate onto the current
+ * version, and the merged manifest keeps the current version's entries. Those extra Artifacts
+ * are locked *after* the request's Artifacts if the caller pre-locks only the request, which
+ * inverts the global ascending order (the caller would hold a high id while waiting for a low
+ * one). Reading the current manifest here — after the workspace row lock, so it cannot move —
+ * and locking the union in one ascending pass keeps the rendezvous with `ArtifactStore.delete`
+ * inside a single ordered batch.
+ */
+export async function lockWorkspaceArtifactScope(
+  client: pg.PoolClient,
+  input: {
+    readonly tenantId: Id;
+    readonly agentId: Id;
+    /** Artifact ids the request names (workspace candidate, checkpoint, ...). */
+    readonly extraArtifactIds: readonly string[];
+  },
+): Promise<WorkspaceArtifactLockScope> {
+  const workspace = await lockWorkspace(client, input.tenantId, input.agentId);
+  // `workspaces.version` is the current version and this row is locked, so the merge path in
+  // `commitWorkspaceInTransaction` will read exactly this manifest as its `current`.
+  const current = await readVersionIn(
+    client,
+    input.tenantId,
+    workspace.workspace_id,
+    workspace.version,
+  );
+
+  const artifactIds = [
+    ...new Set([
+      ...(current?.files ?? []).map((entry) => entry.artifactId),
+      ...input.extraArtifactIds,
+    ]),
+  ].sort();
+
+  if (artifactIds.length > 0) {
+    await lockArtifactRows(client, input.tenantId, artifactIds);
+  }
+
+  return Object.freeze({ version: workspace.version, artifactIds: Object.freeze(artifactIds) });
 }
 
 /**
@@ -715,10 +786,20 @@ export async function commitWorkspaceInTransaction(
     merged = true;
   }
 
+  // A merged manifest keeps the current version's entries, so it can reference Artifacts the
+  // request never mentioned. If the caller pre-locked a scope, those must already be inside it:
+  // locking an id here, after higher ids are held, would invert the global ascending order
+  // against another writer (the P2 lock-order review finding). Merging can only add entries
+  // from `current ∪ candidate`, both of which `lockWorkspaceArtifactScope` covers, so this
+  // check is a canary for a future merge change rather than a reachable rejection.
+  assertInsideReferenceScope(manifest, input.prelockedArtifactIds);
+
   // Validate references on the final manifest under a shared row lock; a merged result may
   // reference artifacts the other writer introduced, and those must still be tenant-owned with
   // matching digests. Holding `FOR SHARE` until COMMIT is what makes a concurrent
-  // `ArtifactStore.delete` see this version instead of deleting underneath it.
+  // `ArtifactStore.delete` see this version instead of deleting underneath it. Rows the caller
+  // already locked are re-locked by the same transaction, which is a no-op and cannot reorder
+  // anything.
   await lockArtifactReferences(client, input.tenantId, manifest);
 
   const nextVersion = current + 1;
@@ -780,6 +861,31 @@ function assertManifestSize(manifest: WorkspaceManifestValue): void {
 
   if (bytes > WORKSPACE_MANIFEST_MAX_BYTES) {
     throw new InvalidArgumentError([{ path: 'manifest', code: 'manifest_too_large' }]);
+  }
+}
+
+/**
+ * Fail closed when a final manifest falls outside the scope the caller already locked.
+ *
+ * This is the invariant behind the ascending Artifact lock order, not an input validation: the
+ * caller either covered the merge inputs or the whole protocol assumption is void, and
+ * reporting a database-level inconsistency is better than taking a lock in the wrong position.
+ */
+function assertInsideReferenceScope(
+  manifest: WorkspaceManifestValue,
+  prelocked: ReadonlySet<string> | undefined,
+): void {
+  if (prelocked === undefined) {
+    return;
+  }
+
+  const outside = manifest.files.filter((entry) => !prelocked.has(entry.artifactId));
+
+  if (outside.length > 0) {
+    throw new DomainError(
+      'DB_UNAVAILABLE',
+      'workspace manifest references an artifact outside the locked scope',
+    );
   }
 }
 

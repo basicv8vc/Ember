@@ -87,12 +87,14 @@ export {
 } from './storage/artifact-references.js';
 export {
   commitWorkspaceInTransaction,
+  lockWorkspaceArtifactScope,
   lockWorkspaceRow,
   PostgresWorkspaceStore,
   recordWorkspaceConflict,
   recordWorkspaceConflictIn,
   WorkspaceConflictSignal,
   workspaceManifestDigest,
+  type WorkspaceArtifactLockScope,
   type WorkspaceCommitInput,
   type WorkspaceCommitResult,
 } from './storage/workspace-store.js';

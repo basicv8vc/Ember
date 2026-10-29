@@ -1,6 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { BlobStore, CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
+import type {
+  ArtifactRef,
+  BlobStore,
+  CommitStepRequest,
+  RunExecutionContext,
+  RunGrant,
+} from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
 import {
   PostgresAgentRepository,
@@ -59,8 +65,8 @@ async function syncClock(): Promise<void> {
 }
 
 /** Create a Task and claim it through the real lease queue. */
-async function claimTask(label: string): Promise<Attempt> {
-  await createQueuedTask(tasks, ctx, agentId, label);
+async function claimTask(label: string, agent = agentId): Promise<Attempt> {
+  await createQueuedTask(tasks, ctx, agent, label);
   await syncClock();
   const lease = await queue.claimNext(WORKER_ID, clock.now());
 
@@ -93,6 +99,64 @@ async function resultRequest(
     mode: 'result',
     artifacts: [{ artifactId, staged }],
   };
+}
+
+/**
+ * Publish an Artifact whose id sorts *below* `threshold` and is already committed.
+ *
+ * Artifact ids are random UUIDs, so a caller that needs a deterministic ascending pair cannot
+ * plan one; publishing until a lower id appears is bounded and keeps the lock-order assertion
+ * below free of sleeps. The Artifact must be committed: a row inserted by the committing
+ * transaction itself is invisible to every other session, so a probe could never observe a
+ * lock on it.
+ */
+async function publishArtifactBelow(threshold: string): Promise<ArtifactRef> {
+  for (let attempt = 0; attempt < 64; attempt += 1) {
+    const artifact = await infra.artifacts.put(ctx, Buffer.from(`lower ${attempt}`), 'text/plain');
+
+    if (artifact.artifactId < threshold) {
+      return artifact;
+    }
+  }
+
+  throw new Error('could not publish an artifact with a lower id');
+}
+
+/** One Workspace manifest entry pointing at an already durable Artifact. */
+function manifestEntry(
+  path: string,
+  artifact: ArtifactRef,
+): { path: string; artifactId: string; sha256: string; size: number } {
+  return { path, artifactId: artifact.artifactId, sha256: artifact.sha256, size: artifact.size };
+}
+
+/**
+ * `true` when no other session holds a row lock on this Artifact.
+ *
+ * A `FOR UPDATE NOWAIT` is granted only if no `FOR SHARE`/`FOR UPDATE` holder exists, which is
+ * exactly what a lock-order assertion needs to observe a *held* Artifact lock.
+ */
+async function probeArtifactLock(artifactId: string): Promise<boolean> {
+  const probe = await db.pool.connect();
+
+  try {
+    await probe.query('BEGIN');
+    await probe.query(
+      'SELECT 1 FROM artifacts WHERE tenant_id = $1 AND id = $2 FOR UPDATE NOWAIT',
+      [tenant.tenantId, artifactId],
+    );
+
+    return true;
+  } catch (error) {
+    if (typeof error === 'object' && error !== null && 'code' in error && error.code === '55P03') {
+      return false;
+    }
+
+    throw error;
+  } finally {
+    await probe.query('ROLLBACK').catch(() => undefined);
+    probe.release();
+  }
 }
 
 /**
@@ -522,6 +586,276 @@ describe('P0B06 fencing and concurrency around the commit', () => {
 
     expect(conflicts.length).toBeGreaterThanOrEqual(1);
     expect(conflicts[0]?.conflictPaths).toContain('existing.txt');
+  });
+});
+
+describe('P0B06 P2-A reference lock scope covers an auto-merged manifest', () => {
+  it('pre-locks an artifact the merge pulls in instead of locking it after the request set', async () => {
+    // Both ids must be durable before the commit runs: a row inserted by the commit itself is
+    // invisible to every other session, so probing it could never observe a held lock.
+    const requested = await infra.artifacts.put(ctx, Buffer.from('requested entry'), 'text/plain');
+    // The Artifact only the merge contributes sorts *below* the requested one, which is the
+    // arrangement that inverts the ascending order if it is locked after the request's set.
+    const mergedIn = await publishArtifactBelow(requested.artifactId);
+    // A dedicated agent keeps the version arithmetic of this case independent of the shared one.
+    const mergeAgent = (await agents.create(ctx, { name: 'p0b06 merge scope agent' })).agentId;
+    const base = await infra.workspaces.load(ctx, mergeAgent);
+
+    await infra.workspaces.commit(ctx, mergeAgent, base.version, {
+      files: [manifestEntry('merged.txt', mergedIn)],
+    });
+
+    const attempt = await claimTask('commit-merge-lock-order', mergeAgent);
+    const blocker = await db.pool.connect();
+
+    try {
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT 1 FROM artifacts WHERE tenant_id = $1 AND id = $2 FOR UPDATE', [
+        tenant.tenantId,
+        mergedIn.artifactId,
+      ]);
+
+      const committed = infra.committer.commitStep(attempt.grant, {
+        operationId: `op:merge-lock:${randomUUID()}`,
+        mode: 'result',
+        workspace: {
+          // Stale on purpose: the workspace already reached the `merged.txt` version, so this
+          // candidate is auto-merged and the final manifest references both artifacts.
+          expectedVersion: 0,
+          manifest: {
+            files: [manifestEntry('requested.txt', requested)],
+          },
+        },
+      });
+
+      // The commit is now waiting for the merged-in id, the lowest id of the final manifest.
+      await waitForTaskLockWaiter(db.pool, blocker);
+
+      // While it waits it must hold nothing above it: pre-locking only the request would leave
+      // `requested` locked here, which inverts the ascending order against any other writer.
+      // (`mergedIn` is held by the blocker, so probing it would say nothing about the commit.)
+      await expect(probeArtifactLock(requested.artifactId)).resolves.toBe(true);
+
+      await blocker.query('COMMIT');
+
+      const receipt = await committed;
+
+      expect(receipt.replayed).toBe(false);
+      expect(receipt.workspaceVersion).toBe(2);
+
+      const snapshot = await infra.workspaces.load(ctx, mergeAgent);
+
+      expect(snapshot.version).toBe(2);
+      expect(snapshot.manifest.files.map((entry) => entry.path).sort()).toEqual([
+        'merged.txt',
+        'requested.txt',
+      ]);
+
+      // The lock is released with the commit, so the Artifact stayed usable throughout.
+      await expect(probeArtifactLock(requested.artifactId)).resolves.toBe(true);
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+    }
+  });
+
+  it('merges a shared artifact into two workspaces while a delete of it is refused', async () => {
+    // Both workspaces start empty, so each merge lands on version 2 deterministically.
+    const firstAgent = (await agents.create(ctx, { name: 'p0b06 shared artifact agent a' }))
+      .agentId;
+    const secondAgent = (await agents.create(ctx, { name: 'p0b06 shared artifact agent b' }))
+      .agentId;
+    const shared = await infra.artifacts.put(ctx, Buffer.from('shared bytes'), 'text/plain');
+
+    for (const agent of [firstAgent, secondAgent]) {
+      await infra.workspaces.commit(ctx, agent, 0, {
+        files: [manifestEntry('shared.txt', shared)],
+      });
+    }
+
+    const first = await claimTask('merge-shared-first', firstAgent);
+    const second = await claimTask('merge-shared-second', secondAgent);
+    const firstStaged = await infra.blobs.stage(
+      tenant.tenantId,
+      Buffer.from('first branch entry'),
+      'text/plain',
+    );
+    const secondStaged = await infra.blobs.stage(
+      tenant.tenantId,
+      Buffer.from('second branch entry'),
+      'text/plain',
+    );
+
+    // Both workspaces reference the same Artifact row and both merge onto it, so the scope lock
+    // and the deleter's `FOR UPDATE` meet on the same rows from three sessions. The expectation
+    // is attached before the commits start so a fast rejection is never unhandled.
+    const deletion = expect(infra.artifacts.delete(ctx, shared.artifactId)).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+    });
+    const [firstReceipt, secondReceipt] = await Promise.all([
+      infra.committer.commitStep(first.grant, {
+        operationId: `op:merge-shared:${randomUUID()}`,
+        mode: 'result',
+        artifacts: [{ artifactId: firstStaged.stagedId, staged: firstStaged }],
+        workspace: {
+          expectedVersion: 0,
+          manifest: {
+            files: [
+              {
+                path: 'first.txt',
+                artifactId: firstStaged.stagedId,
+                sha256: firstStaged.sha256,
+                size: firstStaged.size,
+              },
+            ],
+          },
+        },
+      }),
+      infra.committer.commitStep(second.grant, {
+        operationId: `op:merge-shared:${randomUUID()}`,
+        mode: 'result',
+        artifacts: [{ artifactId: secondStaged.stagedId, staged: secondStaged }],
+        workspace: {
+          expectedVersion: 0,
+          manifest: {
+            files: [
+              {
+                path: 'second.txt',
+                artifactId: secondStaged.stagedId,
+                sha256: secondStaged.sha256,
+                size: secondStaged.size,
+              },
+            ],
+          },
+        },
+      }),
+    ]);
+
+    await deletion;
+    expect(firstReceipt.workspaceVersion).toBe(2);
+    expect(secondReceipt.workspaceVersion).toBe(2);
+
+    for (const [agent, ownPath] of [
+      [firstAgent, 'first.txt'],
+      [secondAgent, 'second.txt'],
+    ] as const) {
+      const snapshot = await infra.workspaces.load(ctx, agent);
+
+      expect(snapshot.version).toBe(2);
+      expect(snapshot.manifest.files.map((entry) => entry.path).sort()).toEqual(
+        ['shared.txt', ownPath].sort(),
+      );
+    }
+  });
+
+  it('merges two workspaces that each introduce the artifact the other one head-references', async () => {
+    // The mirror image of the previous case: A's head references `firstShared` and its candidate
+    // references `secondShared`, while B's head references `secondShared` and its candidate
+    // references `firstShared`. Both transactions therefore hold one shared row and need the
+    // other one during the merge. Writers only take `FOR SHARE`, which is mutually compatible,
+    // so this cannot deadlock by itself — what it proves is that the scope lock turns both
+    // commits into one ascending pass and both merges keep the other writer's head entry.
+    const firstAgent = (await agents.create(ctx, { name: 'p0b06 lock order agent a' })).agentId;
+    const secondAgent = (await agents.create(ctx, { name: 'p0b06 lock order agent b' })).agentId;
+    const firstShared = await infra.artifacts.put(ctx, Buffer.from('first shared'), 'text/plain');
+    const secondShared = await infra.artifacts.put(ctx, Buffer.from('second shared'), 'text/plain');
+    const firstOwn = await infra.artifacts.put(ctx, Buffer.from('first own'), 'text/plain');
+    const secondOwn = await infra.artifacts.put(ctx, Buffer.from('second own'), 'text/plain');
+    const sides = [
+      { agent: firstAgent, own: firstOwn, shared: firstShared },
+      { agent: secondAgent, own: secondOwn, shared: secondShared },
+    ];
+
+    // Version 1 is the merge base; version 2 adds the head entry a merge keeps.
+    for (const side of sides) {
+      const own = manifestEntry('own.txt', side.own);
+      const start = await infra.workspaces.load(ctx, side.agent);
+
+      await infra.workspaces.commit(ctx, side.agent, start.version, { files: [own] });
+      await infra.workspaces.commit(ctx, side.agent, start.version + 1, {
+        files: [own, manifestEntry('head.txt', side.shared)],
+      });
+    }
+
+    const firstAttempt = await claimTask('merge-order-first', firstAgent);
+    const secondAttempt = await claimTask('merge-order-second', secondAgent);
+
+    let arrivals = 0;
+    let bothPaused: (() => void) | undefined;
+    let releaseCommits: (() => void) | undefined;
+    const paused = new Promise<void>((resolve) => {
+      bothPaused = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      releaseCommits = resolve;
+    });
+
+    const committer = committerWithFault(async (point) => {
+      if (point !== 'before_workspace_cas') {
+        return;
+      }
+
+      arrivals += 1;
+
+      // Both transactions are past their reference locks here, so the merges overlap.
+      if (arrivals >= 2) {
+        bothPaused?.();
+      }
+
+      await gate;
+    });
+
+    const firstCommit = committer.commitStep(firstAttempt.grant, {
+      operationId: `op:merge-order-a:${randomUUID()}`,
+      mode: 'progress',
+      workspace: {
+        // One version behind, so both commits merge onto their own version 2.
+        expectedVersion: 1,
+        manifest: {
+          files: [manifestEntry('own.txt', firstOwn), manifestEntry('new.txt', secondShared)],
+        },
+      },
+    });
+    const secondCommit = committer.commitStep(secondAttempt.grant, {
+      operationId: `op:merge-order-b:${randomUUID()}`,
+      mode: 'progress',
+      workspace: {
+        expectedVersion: 1,
+        manifest: {
+          files: [manifestEntry('own.txt', secondOwn), manifestEntry('new.txt', firstShared)],
+        },
+      },
+    });
+
+    // Release once both are paused (deterministic overlap), with a bounded fallback so a commit
+    // that stalls before its fault point cannot hang the case.
+    await Promise.race([paused, new Promise((resolve) => setTimeout(resolve, 500))]);
+    releaseCommits?.();
+
+    const [firstOutcome, secondOutcome] = await Promise.allSettled([firstCommit, secondCommit]);
+
+    // Surface the underlying error rather than a vague assertion if either commit is aborted.
+    if (firstOutcome.status === 'rejected') {
+      throw firstOutcome.reason;
+    }
+    if (secondOutcome.status === 'rejected') {
+      throw secondOutcome.reason;
+    }
+
+    expect(firstOutcome.value.workspaceVersion).toBe(3);
+    expect(secondOutcome.value.workspaceVersion).toBe(3);
+
+    for (const agent of [firstAgent, secondAgent]) {
+      const snapshot = await infra.workspaces.load(ctx, agent);
+
+      // Each merge kept the other writer's head entry and added its own candidate entry.
+      expect(snapshot.version).toBe(3);
+      expect(snapshot.manifest.files.map((entry) => entry.path).sort()).toEqual([
+        'head.txt',
+        'new.txt',
+        'own.txt',
+      ]);
+    }
   });
 });
 

@@ -29,6 +29,13 @@ import type pg from 'pg';
  * → artifact rows (ascending id) → reference row. Every multi-row acquisition goes through
  * `lockArtifactRows`, which sorts its ids, so no two transactions can take the same Artifact
  * rows in opposite order.
+ *
+ * "Every referenced Artifact" means the *final* set, not the requested one.
+ * `commitWorkspaceInTransaction` may auto-merge a candidate onto the current version and the
+ * merged manifest keeps the current entries, so the fenced committer pre-locks
+ * `lockWorkspaceArtifactScope` (current version ∪ candidate ∪ checkpoint) in one ascending pass
+ * and then asserts the merged manifest stayed inside that scope. Locking a merged-in id after
+ * higher ids are held would invert the order and void the argument above.
  */
 
 export interface ArtifactIdentity {

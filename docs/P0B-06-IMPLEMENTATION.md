@@ -68,8 +68,13 @@ P0B-05 的执行器通过 `apps/worker/src/durable-run-handler.ts` 接入：`moc
     只有两种结果：写方先提交 → 删除方看到引用并拒绝（`POLICY_DENIED`）；删除方先提交 → 写方的锁内读取找不到
     行而拒绝，绝不产生悬挂 Artifact id。
     锁顺序固定为 `Task → Run → blob 摘要 advisory lock → workspace 行 → Artifact 行（升序）→ 引用行`；
-    多行获取统一走 `lockArtifactRows`，因此不会出现反向顺序。`RunResultCommitter` 在写任何引用前先用
-    `lockReferences` 一次性锁住「workspace 清单 ∪ checkpoint 引用」的并集，避免两次独立加锁产生交叉顺序。
+    多行获取统一走 `lockArtifactRows`，因此不会出现反向顺序。`RunResultCommitter` 在写任何引用前用
+    `lockWorkspaceArtifactScope` 一次性锁住**最终清单可能出现的全部 Artifact**：当前 workspace 版本的清单 ∪
+    请求清单 ∪ checkpoint 引用（合并结果 ⊆ 当前版本 ∪ 候选，因此这是超集），再按同一升序通道下发。
+    只预锁「请求清单 ∪ checkpoint」是不够的：`commitWorkspaceInTransaction` 的自动合并会把当前版本里的
+    Artifact 合并进最终清单，那些行会在更高的 id 已被持有之后才被加锁，正好把升序协议反转。
+    合并完成后 `commitWorkspaceInTransaction` 再用 `assertInsideReferenceScope` 复核最终清单没有落在预锁集合之外，
+    任何一次合并规则的改动都会立刻失败，而不是悄悄退化成乱序加锁（`DB_UNAVAILABLE`）。
 
 ## 4. 生命周期与故障次序
 
@@ -82,8 +87,8 @@ commitStep() 事务       Task 锁 → Run 锁 → clock_timestamp →
   │                     幂等收据复查 → fencing/取消/Deadline →
   │                     blob 摘要 advisory lock → 安装字节在位复核（否则零写入）→
   │                     artifact 行（savepoint 保护唯一冲突）→
-  │                     workspace 行锁 + Artifact 行 FOR SHARE（清单 ∪ checkpoint 并集，升序）→
-  │                     Workspace CAS → Checkpoint（锁内复核同一批引用）→
+  │                     workspace 行锁 + Artifact 行 FOR SHARE（当前版本 ∪ 清单 ∪ checkpoint，升序）→
+  │                     Workspace CAS（自动合并后复核清单未越出预锁集合）→ Checkpoint（锁内复核同一批引用）→
   │                     progress 或终态 Event → Receipt → COMMIT
   └── COMMIT 后失败     模拟 ACK 丢失：重放只读返回原 Receipt
 

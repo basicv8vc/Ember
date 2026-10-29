@@ -34,7 +34,7 @@ import { parseMediaType } from './local-blob-store.js';
 import { lockArtifactRows, lockCheckpointArtifacts } from './artifact-references.js';
 import {
   commitWorkspaceInTransaction,
-  lockWorkspaceRow,
+  lockWorkspaceArtifactScope,
   recordWorkspaceConflict,
   WorkspaceConflictSignal,
 } from './workspace-store.js';
@@ -579,12 +579,13 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
         await this.fault('before_artifact_insert');
         await this.writeArtifacts(client, scoped, installed);
 
-        // Lock every Artifact this commit is about to reference *before* the reference rows
-        // are written: workspace row first, then all Artifact rows in ascending id order (the
-        // union of the workspace manifest and the checkpoint, so the two sets cannot be the
-        // source of an inconsistent lock order). `delete()` takes `FOR UPDATE` on the same
-        // rows, so it either observes these references or this commit observes the deletion.
-        await this.lockReferences(client, scoped, normalized);
+        // Lock every Artifact this commit can reference *before* the reference rows are
+        // written: workspace row first, then all Artifact rows in ascending id order across the
+        // union of the candidate manifest, the checkpoint and the current workspace version
+        // (which a merge can pull into the final manifest), so none of those sets can be the
+        // source of an inconsistent lock order. `delete()` takes `FOR UPDATE` on the same rows,
+        // so it either observes these references or this commit observes the deletion.
+        const referenceScope = await this.lockReferences(client, scoped, normalized);
 
         await this.fault('before_workspace_cas');
         const workspace =
@@ -597,6 +598,7 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
                 manifest: normalized.workspace.manifest,
                 createdByRunId: scoped.runId,
                 leaseEpoch: scoped.leaseEpoch,
+                prelockedArtifactIds: referenceScope,
               });
 
         await this.fault('before_checkpoint_insert');
@@ -809,27 +811,40 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
    * `artifact-references.ts`.
    *
    * The workspace row is locked first (when this commit advances a Workspace), then every
-   * referenced Artifact row in ascending id order across the union of the workspace manifest
-   * and the checkpoint. Downstream verification re-locks rows it already holds, which is a
-   * no-op, so this up-front pass is what fixes the acquisition order.
+   * Artifact row this commit can end up referencing is locked in a single ascending pass: the
+   * workspace candidate, the checkpoint, *and* the current version's manifest, because
+   * `commitWorkspaceInTransaction` may auto-merge the candidate onto the current version and
+   * the merged manifest keeps the current entries. Pre-locking only the request would leave
+   * those merged-in Artifacts to be locked later, after higher ids are already held — an
+   * inversion of the global order rather than a no-op re-lock.
+   *
+   * Returns the scope that was locked, so the commit can assert its final manifest stayed
+   * inside it.
    */
   private async lockReferences(
     client: pg.PoolClient,
     grant: RunGrant,
     request: NormalizedRequest,
-  ): Promise<void> {
-    if (request.workspace !== null) {
-      await lockWorkspaceRow(client, grant.tenantId, grant.agentId);
+  ): Promise<ReadonlySet<string> | undefined> {
+    const checkpointIds = (request.checkpoint?.artifacts ?? []).map((entry) => entry.artifactId);
+
+    if (request.workspace === null) {
+      // No merge is possible without a Workspace candidate, so the checkpoint set is complete.
+      await lockArtifactRows(client, grant.tenantId, checkpointIds);
+
+      return undefined;
     }
 
-    const ids = [
-      ...(request.workspace?.manifest.files ?? []).map((entry) => entry.artifactId),
-      ...(request.checkpoint?.artifacts ?? []).map((entry) => entry.artifactId),
-    ];
+    const scope = await lockWorkspaceArtifactScope(client, {
+      tenantId: grant.tenantId,
+      agentId: grant.agentId,
+      extraArtifactIds: [
+        ...request.workspace.manifest.files.map((entry) => entry.artifactId),
+        ...checkpointIds,
+      ],
+    });
 
-    if (ids.length > 0) {
-      await lockArtifactRows(client, grant.tenantId, ids);
-    }
+    return new Set(scope.artifactIds);
   }
 
   /**

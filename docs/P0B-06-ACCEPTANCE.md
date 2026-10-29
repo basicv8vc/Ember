@@ -34,8 +34,8 @@
 | `pnpm build`                     | 通过（`tsc -b tsconfig.build.json`，含 6 个 project reference）                                                      |
 | `pnpm db:migrate`（第 1 次）     | `5 applied, 0 already applied`（0001–0005）                                                                          |
 | `pnpm db:migrate`（第 2 次）     | `0 applied, 5 already applied`（幂等）                                                                               |
-| `pnpm test:integration`          | **14 files / 148 tests passed**（真实 PG 17 + 临时 blob 根目录）                                                     |
-| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 63 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
+| `pnpm test:integration`          | **14 files / 151 tests passed**（真实 PG 17 + 临时 blob 根目录）                                                     |
+| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 64 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
 | `git diff --check`               | 通过（无空白错误）                                                                                                   |
 
 > Round 2 / Round 3 复跑说明：本机 `pnpm` 的 corepack 缓存丢失（`Cannot find module .../bin/pnpm.cjs`），因此本地复跑直接调用
@@ -70,10 +70,10 @@ Round 1 / Round 2 / Round 3 的 CI 结论都来自实际读取的 job 日志，�
 | `tests/integration/workspace-cas.test.ts`      | 10     | 真实 PG                     |
 | `tests/integration/artifact-integrity.test.ts` | 18     | 真实 PG + 真实文件          |
 | `tests/integration/checkpoint-resume.test.ts`  | 7      | 真实 PG + 真实 lease/reaper |
-| `tests/integration/result-commit.test.ts`      | 20     | 真实 PG + 事务注错          |
+| `tests/integration/result-commit.test.ts`      | 23     | 真实 PG + 事务注错          |
 | `tests/integration/durable-worker.test.ts`     | 4      | 端到端闭环                  |
 | `tests/integration/duplicate-upload.test.ts`   | 5      | 真实 PG + 真实文件          |
-| 合计新增                                       | **83** |                             |
+| 合计新增                                       | **86** |                             |
 
 ## 3. 故障注入的真实证据
 
@@ -143,10 +143,10 @@ TEST_DATABASE_URL=postgres://ember:...@127.0.0.1:55432/ember_test pnpm test:inte
 Round 2 复审提出两个新的并发缺陷，都源于「同一个判定与写入之间存在窗口」。修复方式是让两条路径在同一批数据库行上
 相遇，而不是靠时间窗猜测。
 
-| 编号 | Round 2 发现                                                                                                        | 修复（代码位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 | 回归测试（本地真实 PG 17）                                                                                                                                                                                                                                                         |
-| ---- | ------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| P1-A | `ArtifactStore.put()` 在 `install()` 与摘要 advisory lock 之间没有锁内字节复核，GC 可在此窗口删除文件               | `packages/postgres/src/storage/artifact-store.ts`：`put()` 取得 `lockBlobDigests` 后立刻 `blobs.assertInstalled(tenant, sha256, size)`，缺失 → `DB_UNAVAILABLE`（`installed bytes disappeared before publication`）且**零写入**（事务回滚，无 `blobs`/`artifacts` 行）                                                                                                                                                                                                                                           | `artifact-integrity.test.ts > P1-A`（2）：① 真实 `sweepOrphans` 在阻塞器持锁期间排在上传之前，放开后先删文件，上传零写入退出；② 安装后文件立即消失（确定性形态）同样零写入                                                                                                         |
-| P1-B | `ArtifactStore.delete()` 用普通 `SELECT` 判定 JSONB 引用，写方可在判定与 `DELETE` 之间写入新引用 → 悬挂 Artifact id | 新增 `packages/postgres/src/storage/artifact-references.ts`：引用写方在事务内对每个被引用 Artifact 行取 `FOR SHARE`（`lockArtifactRows` 去重升序）；`delete()` 先 `FOR UPDATE` 再判定。三条持久引用路径全部接入：`commitWorkspaceInTransaction`（`lockArtifactReferences`）、`writeCheckpoint`（`lockCheckpointArtifacts`）、`recordWorkspaceConflictIn`（`lockConflictCandidateArtifacts`）。`RunResultCommitter.lockReferences` 在写引用前一次性锁住「workspace 清单 ∪ checkpoint 引用」并集，消除交叉加锁顺序 | `artifact-integrity.test.ts > P1-B`（2）：未提交的 Workspace version / 未提交的 conflict candidate 都会让 `delete()` 先等待、提交后被 `POLICY_DENIED` 拒绝且 Artifact 仍可读；`result-commit.test.ts > P1-B`（1）：`before_event` 处事务未提交时 `delete()` 不得落地，提交后被拒绝 |
+| 编号 | Round 2 发现                                                                                                        | 修复（代码位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 回归测试（本地真实 PG 17）                                                                                                                                                                                                                                                         |
+| ---- | ------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P1-A | `ArtifactStore.put()` 在 `install()` 与摘要 advisory lock 之间没有锁内字节复核，GC 可在此窗口删除文件               | `packages/postgres/src/storage/artifact-store.ts`：`put()` 取得 `lockBlobDigests` 后立刻 `blobs.assertInstalled(tenant, sha256, size)`，缺失 → `DB_UNAVAILABLE`（`installed bytes disappeared before publication`）且**零写入**（事务回滚，无 `blobs`/`artifacts` 行）                                                                                                                                                                                                                                                                                               | `artifact-integrity.test.ts > P1-A`（2）：① 真实 `sweepOrphans` 在阻塞器持锁期间排在上传之前，放开后先删文件，上传零写入退出；② 安装后文件立即消失（确定性形态）同样零写入                                                                                                         |
+| P1-B | `ArtifactStore.delete()` 用普通 `SELECT` 判定 JSONB 引用，写方可在判定与 `DELETE` 之间写入新引用 → 悬挂 Artifact id | 新增 `packages/postgres/src/storage/artifact-references.ts`：引用写方在事务内对每个被引用 Artifact 行取 `FOR SHARE`（`lockArtifactRows` 去重升序）；`delete()` 先 `FOR UPDATE` 再判定。三条持久引用路径全部接入：`commitWorkspaceInTransaction`（`lockArtifactReferences`）、`writeCheckpoint`（`lockCheckpointArtifacts`）、`recordWorkspaceConflictIn`（`lockConflictCandidateArtifacts`）。`RunResultCommitter.lockReferences` 在写引用前一次性锁住预锁集合（范围见 §8：Round 3 复审后已从「workspace 清单 ∪ checkpoint」扩大到「当前版本 ∪ 清单 ∪ checkpoint」） | `artifact-integrity.test.ts > P1-B`（2）：未提交的 Workspace version / 未提交的 conflict candidate 都会让 `delete()` 先等待、提交后被 `POLICY_DENIED` 拒绝且 Artifact 仍可读；`result-commit.test.ts > P1-B`（1）：`before_event` 处事务未提交时 `delete()` 不得落地，提交后被拒绝 |
 
 **守卫的有效性验证（逐个临时禁用 → 对应用例失败 → 恢复后通过）：**
 
@@ -171,10 +171,38 @@ Task → Run → blob 摘要 advisory lock（升序）→ workspace 行（FOR UP
   「checkpoint-only 提交持 Y 求 X」会成环。
 - `recordWorkspaceConflictIn` 显式先取 workspace 行 `FOR SHARE`：冲突表插入本身会通过外键取父行 `FOR KEY SHARE`，
   先取锁即可把这次隐式获取纳入同一顺序。
-- 合并路径可能引用「另一方刚写入的 Artifact」，这些额外行仍在同一升序通道内获取，且合并期间 workspace 行已被持有，
-  没有事务能在持有这些行时反过来等待该 workspace 行。
+- 合并路径可能引用「另一方刚写入的 Artifact」：这些额外行现在**就在预锁通道内**（`lockWorkspaceArtifactScope`
+  把当前版本清单并入预锁集合），细节与守卫见 §8；合并期间 workspace 行已被持有，没有事务能在持有这些行时反过来
+  等待该 workspace 行。
 
 **已知限制（刻意保留）：** conflict candidate 路径只加锁、**不要求 Artifact 行存在**。失败方（fenced commit）的候选
 经常引用「自身已回滚事务从未发布」的 Artifact id；这类 id 没有任何行，也不可能有可被删除的对象，若强行要求存在会把
 `WORKSPACE_VERSION_CONFLICT` 错报成 `POLICY_DENIED`（既有 P2-3 用例正是这种场景）。已存在的引用行仍被
 `FOR SHARE` 保护。
+
+## 8. Round 3 Review P2：自动合并把 Artifact 引入最终清单，预锁范围不完整
+
+Round 3 复审指出：`lockReferences()` 预锁的是「请求清单 ∪ checkpoint」，但 `commitWorkspaceInTransaction` 的
+自动合并会把**当前 Workspace 版本**里的 Artifact 带进最终清单，这些行由后续 `lockArtifactReferences` 再次加锁。
+若它们的 id 小于已持有的 id，全局升序协议就被反转（持高位 id 等低位 id），协议声明与实现不一致。
+
+| 编号 | 发现                                                                                               | 修复（代码位置）                                                                                                                                                                                                                                                                                                                                                                                                                                                                  | 回归测试（本地真实 PG 17）                                                                                                                                                                                                                                                                                                                                                         |
+| ---- | -------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P2   | 预锁只覆盖「请求清单 ∪ checkpoint」，自动合并引入的 Artifact 会在高位 id 之后才加锁 → 升序协议失效 | `workspace-store.ts` 新增 `lockWorkspaceArtifactScope`：先锁 workspace 行，再在同一事务内读取**当前版本**清单，与「请求清单 ∪ checkpoint」合并去重排序后**一次性**下发（合并结果 ⊆ 当前版本 ∪ 候选，所以这是超集）。`commitWorkspaceInTransaction` 新增 `prelockedArtifactIds`，合并后用 `assertInsideReferenceScope` 复核最终清单未越界（越界 → `DB_UNAVAILABLE`，把将来的合并规则改动变成硬失败而不是静默乱序）。`RunResultCommitter.lockReferences` 改用该入口并把锁集传给 CAS | `result-commit.test.ts > P2-A`（3）：① 阻塞器以 `FOR UPDATE` 持有被合并进来的低位 Artifact，提交方必须**先**等它、此时探测高位 Artifact 的 `FOR UPDATE NOWAIT` 仍被授予（修复前该探测失败，见下表）；② 两个 Workspace 共享同一 Artifact 且都做自动合并时，`delete()` 被拒绝、两边都提交到 v2；③ 镜像用例：两个 Workspace 各自引入对方 head 引用的 Artifact，两个合并都保留对方条目 |
+
+**守卫的有效性验证（就地禁用 `current` 版本清单的并入 + 同时关掉 canary → 用例失败 → 恢复后通过）：**
+
+| 守卫                                                           | 禁用后的可观察结果                                                                                                |
+| -------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `lockWorkspaceArtifactScope` 并入当前版本清单                  | `P2-A` 的第 ① 个用例失败：`expected false to be true` —— 提交方在等低位 Artifact 时已经持有了高位 Artifact        |
+| `commitWorkspaceInTransaction` 的 `assertInsideReferenceScope` | 与上一行同时禁用才复现乱序；单独禁用时用例仍通过（预锁已覆盖），这条守卫是防止合并规则将来变化时静默退化的 canary |
+
+**关于「死锁」的准确表述（复审问题的边界）：** 回归测试里能确定性复现的是**加锁顺序反转**，触发反转后必须有一个
+**会等待的 `FOR UPDATE` 持锁者**才会真正成环。两个 committer 之间不会死锁：它们对同一批 Artifact 行都取 `FOR SHARE`，
+而 `FOR SHARE` 之间互不冲突（`P2-A` 的第 ③ 个镜像用例在禁用守卫时同样通过，正好证明这一点）。因此：
+
+- 现状可达的等待路径是「写方持高位 `FOR SHARE` 等低位行（被 `delete()` 的 `FOR UPDATE` 或任何持锁事务挡住）」——
+  这一次序反转会让一个本可继续的写方卡在更高 id 上，并且在 `delete()` 变得更复杂（例如将来把删除并入更大的事务、
+  或在持锁后再取第二行）时直接升级为 40P01。
+- 修复后所有首次加锁仍在同一升序通道内完成，`delete()` 依旧只锁单行、锁内无阻塞等待，因此环依然不成立；
+  `assertInsideReferenceScope` 让「预锁范围不完整」这件事无法再悄悄发生。

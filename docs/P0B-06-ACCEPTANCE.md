@@ -56,6 +56,9 @@
 | Round 3 run      | https://github.com/basicv8vc/Ember/actions/runs/40831840106（HEAD `99589c6`，success）                                                                                                                                                      |
 | Round 3 日志     | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 148 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
 | Round 3 文档提交 | https://github.com/basicv8vc/Ember/actions/runs/40832153371（HEAD `8bad6c1`，success）：`git diff --stat 99589c6..8bad6c1 -- . ':!docs'` 为空，同一日志行全部复现                                                                           |
+| Round 3 P2 run   | https://github.com/basicv8vc/Ember/actions/runs/40837789751（HEAD `30dca02`，success）：合并锁范围修复 + 守卫矩阵文档                                                                                                                       |
+| Round 3 P2 日志  | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 151 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
+| Round 3 P2 注记  | 同一提交序列的首轮 run `40837711568`（HEAD `f00181b`）被同组更高优先级请求取消（`ci-refs/pull/11/merge`），因此以 `30dca02` 的 run 为准                                                                                                     |
 
 Round 1 / Round 2 / Round 3 的 CI 结论都来自实际读取的 job 日志，而不是绿色图标推断。Round 3 run 也证明 `0005` 在全新
 数据库上从零应用成功（`0005_p0b06_artifacts_workspace_checkpoint.sql in 58ms`），因此迁移文件的改动不依赖

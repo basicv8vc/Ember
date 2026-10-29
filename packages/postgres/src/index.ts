@@ -69,7 +69,10 @@ export {
   type LocalBlobStoreOptions,
 } from './storage/local-blob-store.js';
 export {
+  BLOB_LOCK_NAMESPACE,
   DEFAULT_BLOB_GC_QUARANTINE_MS,
+  blobLockKey,
+  lockBlobDigests,
   PostgresBlobStore,
   type PostgresBlobStoreOptions,
 } from './storage/blob-store.js';

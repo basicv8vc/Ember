@@ -309,3 +309,48 @@ describe('P0B06 B-T12 workspace CAS', () => {
     await expect(workspaces.load(stranger, other.agentId)).resolves.toMatchObject({ version: 0 });
   });
 });
+
+describe('P0B06 P2-3 conflict persistence is not silently swallowed', () => {
+  it('reports the storage failure when the conflict candidate cannot be saved', async () => {
+    const first = await infra.artifacts.put(seed.ctx, Buffer.from('p2-3 winner'), 'text/plain');
+    const second = await infra.artifacts.put(seed.ctx, Buffer.from('p2-3 loser'), 'text/plain');
+    const base = await workspaces.load(seed.ctx, seed.agentId);
+    const candidateFor = (artifactId: string, sha256: string, size: number): WorkspaceManifest => ({
+      files: [...base.manifest.files, { path: 'p2-3.txt', artifactId, sha256, size }],
+    });
+
+    await workspaces.commit(
+      seed.ctx,
+      seed.agentId,
+      base.version,
+      candidateFor(first.artifactId, first.sha256, first.size),
+    );
+
+    // The disposable test schema blocks the conflict insert, so persisting the candidate must
+    // fail loudly instead of returning "conflict" as if the decision were recorded.
+    await db.pool.query(
+      'ALTER TABLE workspace_conflicts ADD CONSTRAINT p0b06_block_conflict CHECK (false) NOT VALID',
+    );
+
+    try {
+      await expect(
+        workspaces.commit(
+          seed.ctx,
+          seed.agentId,
+          base.version,
+          candidateFor(second.artifactId, second.sha256, second.size),
+        ),
+      ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+    } finally {
+      await db.pool.query('ALTER TABLE workspace_conflicts DROP CONSTRAINT p0b06_block_conflict');
+    }
+
+    // Nothing was written: the losing candidate did not become a workspace version.
+    const snapshot = await workspaces.load(seed.ctx, seed.agentId);
+
+    expect(snapshot.version).toBe(base.version + 1);
+    expect(snapshot.manifest.files.find((entry) => entry.path === 'p2-3.txt')?.artifactId).toBe(
+      first.artifactId,
+    );
+  });
+});

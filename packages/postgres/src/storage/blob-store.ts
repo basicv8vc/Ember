@@ -8,7 +8,7 @@ import type {
 } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import type pg from 'pg';
-import { asDomainError } from '../repositories/support.js';
+import { asDomainError, withTransaction } from '../repositories/support.js';
 import { parseTenantId } from './local-blob-store.js';
 import type { LocalBlobStore } from './local-blob-store.js';
 
@@ -34,34 +34,42 @@ INSERT INTO staged_blobs (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'pending')
 `;
 
-const MARK_PUBLISHED_SQL = `
+const MARK_SETTLED_SQL = `
 UPDATE staged_blobs
-   SET state = 'published', settled_at = clock_timestamp()
- WHERE tenant_id = $1 AND storage_key = $2 AND state = 'pending'
+   SET state = $3, settled_at = clock_timestamp()
+ WHERE tenant_id = $1 AND id = $2 AND state = 'pending'
 `;
 
-const STAGED_PENDING_SQL = `
-SELECT storage_key
+/** Every staging row that shares one physical key, with the state that protects it. */
+const STAGED_ROWS_SQL = `
+SELECT id, state, created_at
   FROM staged_blobs
- WHERE state = 'pending' AND created_at <= $1
+ WHERE tenant_id = $1 AND storage_key = $2
 `;
 
-const STAGED_KEYS_SQL = `
-SELECT storage_key
-  FROM staged_blobs
- WHERE storage_key = ANY($1::text[])
-`;
-
-const INSTALLED_KEYS_SQL = `
-SELECT storage_key
-  FROM blobs
- WHERE storage_key = ANY($1::text[])
-`;
-
-const DELETE_STAGED_SQL = `
+const DELETE_STAGED_BY_ID_SQL = `
 DELETE FROM staged_blobs
- WHERE state = 'pending' AND storage_key = ANY($1::text[])
+ WHERE tenant_id = $1 AND id = ANY($2::uuid[]) AND state = 'pending'
 `;
+
+const BLOB_ROW_SQL = `
+SELECT 1 FROM blobs WHERE tenant_id = $1 AND sha256 = $2
+`;
+
+const ARTIFACT_REFERENCE_SQL = `
+SELECT 1 FROM artifacts WHERE tenant_id = $1 AND sha256 = $2 LIMIT 1
+`;
+
+/**
+ * Cross-process coordination key for one tenant digest.
+ *
+ * Publishers take this lock for the whole publishing transaction and the collector takes it
+ * before deciding to remove bytes, so "scanned as unreferenced" can never turn into
+ * "deleted after a concurrent publish".
+ */
+export const BLOB_LOCK_NAMESPACE = 'ember.blob';
+
+const ADVISORY_LOCK_SQL = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`;
 
 export interface PostgresBlobStoreOptions {
   /** Minimum quarantine before anything unreferenced may be collected (default 1 hour). */
@@ -130,10 +138,10 @@ export class PostgresBlobStore implements BlobStore {
   async install(tenantId: Id, staged: StagedBlobRef): Promise<InstalledBlobRef> {
     const installed = await this.files.install(tenantId, staged);
 
-    // The staged row is only private bookkeeping; marking it published is not what makes
-    // bytes readable. A failure here leaves an orphan staging row for the collector.
+    // Only this upload attempt is settled. Other attempts for the same digest keep their own
+    // pending row, which is what makes repeated uploads of identical bytes safe.
     await this.pool
-      .query(MARK_PUBLISHED_SQL, [parseTenantId(tenantId), staged.storageKey])
+      .query(MARK_SETTLED_SQL, [parseTenantId(tenantId), staged.stagedId, 'published'])
       .catch(() => undefined);
 
     return Object.freeze({
@@ -152,6 +160,10 @@ export class PostgresBlobStore implements BlobStore {
     return this.files.verifyContent(tenantId, sha256, size);
   }
 
+  async assertInstalled(tenantId: Id, sha256: string, size: number): Promise<boolean> {
+    return this.files.assertInstalled(tenantId, sha256, size);
+  }
+
   async verify(
     tenantId: Id,
     storageKey: string,
@@ -162,15 +174,10 @@ export class PostgresBlobStore implements BlobStore {
   }
 
   async discard(tenantId: Id, staged: StagedBlobRef): Promise<void> {
-    await this.files.discard(tenantId, staged);
     await this.pool
-      .query(
-        `UPDATE staged_blobs
-            SET state = 'abandoned', settled_at = clock_timestamp()
-          WHERE tenant_id = $1 AND storage_key = $2 AND state = 'pending'`,
-        [parseTenantId(tenantId), staged.storageKey],
-      )
+      .query(MARK_SETTLED_SQL, [parseTenantId(tenantId), staged.stagedId, 'abandoned'])
       .catch(() => undefined);
+    await this.files.discard(tenantId, staged);
   }
 
   /**
@@ -203,16 +210,6 @@ export class PostgresBlobStore implements BlobStore {
         this.files.listKeys('blobs'),
       ]);
 
-      const [pendingRows, stagedRows, installedRows] = await Promise.all([
-        this.pool.query<{ storage_key: string }>(STAGED_PENDING_SQL, [cutoff]),
-        this.pool.query<{ storage_key: string }>(STAGED_KEYS_SQL, [[...stagingKeys]]),
-        this.pool.query<{ storage_key: string }>(INSTALLED_KEYS_SQL, [[...installedKeys]]),
-      ]);
-
-      const knownStaging = new Set(stagedRows.rows.map((row) => row.storage_key));
-      const pendingStaging = new Set(pendingRows.rows.map((row) => row.storage_key));
-      const knownInstalled = new Set(installedRows.rows.map((row) => row.storage_key));
-
       let removedStaged = 0;
       let removedBlobs = 0;
       let retained = 0;
@@ -224,33 +221,21 @@ export class PostgresBlobStore implements BlobStore {
           continue;
         }
 
-        const orphan = !knownStaging.has(key);
-        const quarantinedPending = pendingStaging.has(key);
-
-        if ((!orphan && !quarantinedPending) || age < retentionMs) {
+        if (age < retentionMs) {
           retained += 1;
           continue;
         }
 
-        if (!dryRun) {
-          await this.files.removeKey(key, 'staging');
+        const collected = await this.collectStagingKey(key, cutoff, dryRun);
 
-          if (quarantinedPending) {
-            await this.pool.query(DELETE_STAGED_SQL, [[key]]);
-          }
+        if (collected) {
+          removedStaged += 1;
+        } else {
+          retained += 1;
         }
-
-        removedStaged += 1;
       }
 
       for (const key of installedKeys) {
-        if (knownInstalled.has(key)) {
-          // Published metadata exists; retention is decided by the artifact/workspace/
-          // checkpoint references, not by this collector.
-          retained += 1;
-          continue;
-        }
-
         const age = await this.files.ageMs(key, 'blobs', now);
 
         if (age === null || age < retentionMs) {
@@ -258,11 +243,13 @@ export class PostgresBlobStore implements BlobStore {
           continue;
         }
 
-        if (!dryRun) {
-          await this.files.removeKey(key, 'blobs');
-        }
+        const collected = await this.collectInstalledKey(key, dryRun);
 
-        removedBlobs += 1;
+        if (collected) {
+          removedBlobs += 1;
+        } else {
+          retained += 1;
+        }
       }
 
       return Object.freeze({
@@ -275,4 +262,110 @@ export class PostgresBlobStore implements BlobStore {
       throw asDomainError(error);
     }
   }
+
+  /**
+   * Collect one staging file, or retain it.
+   *
+   * The decision is taken in a transaction that first takes the tenant-digest advisory lock
+   * shared with every publisher, and then re-reads the staging rows. A row that is already
+   * settled (published/abandoned) or younger than the quarantine protects the bytes, no
+   * matter what the earlier directory scan observed.
+   */
+  private async collectStagingKey(key: string, cutoff: Date, dryRun: boolean): Promise<boolean> {
+    const { tenantId, sha256 } = splitStorageKey(key);
+    const collected = await withTransaction(this.pool, async (client) => {
+      await client.query(ADVISORY_LOCK_SQL, [blobLockKey(tenantId, sha256)]);
+
+      const rows = await client.query<{ id: string; state: string; created_at: Date | string }>(
+        STAGED_ROWS_SQL,
+        [tenantId, key],
+      );
+      const protectedRow = rows.rows.some(
+        (row) => row.state !== 'pending' || toDate(row.created_at).getTime() > cutoff.getTime(),
+      );
+
+      if (protectedRow) {
+        return false;
+      }
+
+      if (!dryRun) {
+        await this.files.removeKey(key, 'staging');
+
+        if (rows.rows.length > 0) {
+          await client.query(DELETE_STAGED_BY_ID_SQL, [tenantId, rows.rows.map((row) => row.id)]);
+        }
+      }
+
+      return true;
+    });
+
+    return collected;
+  }
+
+  /**
+   * Collect one installed file that no database row references.
+   *
+   * Under the same advisery lock, a `blobs` row or any artifact row for the digest retains the
+   * bytes. That is what keeps a publish that committed after the scan from losing its file.
+   */
+  private async collectInstalledKey(key: string, dryRun: boolean): Promise<boolean> {
+    const { tenantId, sha256 } = splitStorageKey(key);
+
+    return await withTransaction(this.pool, async (client) => {
+      await client.query(ADVISORY_LOCK_SQL, [blobLockKey(tenantId, sha256)]);
+
+      const blobRow = await client.query(BLOB_ROW_SQL, [tenantId, sha256]);
+
+      if ((blobRow.rowCount ?? 0) > 0) {
+        return false;
+      }
+
+      const referenced = await client.query(ARTIFACT_REFERENCE_SQL, [tenantId, sha256]);
+
+      if ((referenced.rowCount ?? 0) > 0) {
+        return false;
+      }
+
+      if (!dryRun) {
+        await this.files.removeKey(key, 'blobs');
+      }
+
+      return true;
+    });
+  }
+}
+
+/** Advisory-lock key for one tenant digest; publishers and the collector must agree. */
+export function blobLockKey(tenantId: Id, sha256: string): string {
+  return `${BLOB_LOCK_NAMESPACE}:${parseTenantId(tenantId)}:${sha256}`;
+}
+
+/**
+ * Take the tenant-digest advisory lock inside the caller's transaction.
+ *
+ * A publishing transaction holds it until COMMIT, so the collector either observes the
+ * publisher's committed rows or waits for them.
+ */
+export async function lockBlobDigests(
+  client: pg.PoolClient,
+  tenantId: Id,
+  sha256Values: readonly string[],
+): Promise<void> {
+  for (const sha256 of [...new Set(sha256Values)].sort()) {
+    await client.query(ADVISORY_LOCK_SQL, [blobLockKey(tenantId, sha256)]);
+  }
+}
+
+function splitStorageKey(key: string): { tenantId: string; sha256: string } {
+  const [, tenantId, sha256] = key.split('/');
+
+  if (tenantId === undefined || sha256 === undefined) {
+    throw new DomainError('INVALID_ARGUMENT', 'storage key is not well formed');
+  }
+
+  return { tenantId, sha256 };
+}
+
+function toDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
 }

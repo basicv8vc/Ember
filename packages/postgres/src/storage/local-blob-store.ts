@@ -436,6 +436,35 @@ export class LocalBlobStore {
     return this.verify(tenantId, blobKeyFor(tenantId, sha256), sha256, size);
   }
 
+  /**
+   * Cheap presence check for installed bytes: exists, regular file, expected size.
+   *
+   * Content was already established by `install`; this only answers "are those exact bytes
+   * still here". A caller holding the tenant-digest lock uses it to prove that a collector,
+   * which takes the same lock before deleting, has not removed the file it is about to
+   * reference.
+   */
+  async assertInstalled(tenantId: Id, sha256: string, size: number): Promise<boolean> {
+    const tenant = parseTenantId(tenantId);
+    const absolute = await this.resolveKey(blobKeyFor(tenant, parseDigest(sha256)), 'blobs');
+    const existing = await lstat(absolute).catch((error: unknown) => {
+      if (isMissing(error)) {
+        return null;
+      }
+      throw error;
+    });
+
+    if (existing === null) {
+      return false;
+    }
+
+    if (existing.isSymbolicLink()) {
+      throw new DomainError('POLICY_DENIED', 'blob path must not be a symbolic link');
+    }
+
+    return existing.isFile() && existing.size === size;
+  }
+
   async discard(tenantId: Id, staged: StagedBlobRef): Promise<void> {
     const tenant = parseTenantId(tenantId);
 

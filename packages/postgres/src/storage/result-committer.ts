@@ -29,6 +29,7 @@ import {
   type TaskRow,
 } from '../lease-queue/task-convergence.js';
 import type { LeaseQueueConfig } from '../lease-queue/config.js';
+import { lockBlobDigests } from './blob-store.js';
 import { parseMediaType } from './local-blob-store.js';
 import {
   commitWorkspaceInTransaction,
@@ -74,6 +75,16 @@ export interface PostgresRunResultCommitterOptions {
 
 interface GrantTaskRow extends TaskRow {
   agent_id: string;
+}
+
+interface ExistingCheckpointRow {
+  id: string;
+  step_sequence: number;
+  executor_version: string;
+  cursor: unknown;
+  workspace_version: number | null;
+  artifacts: unknown;
+  external_effects: unknown;
 }
 
 interface ReceiptRow {
@@ -139,7 +150,8 @@ VALUES ($1, $2, $3, $4, 'run', $5, $6, $7, $8)
 `;
 
 const SELECT_CHECKPOINT_BY_STEP_SQL = `
-SELECT id, step_sequence
+SELECT id, step_sequence, executor_version, cursor, workspace_version, artifacts,
+       external_effects
   FROM step_checkpoints
  WHERE tenant_id = $1 AND task_id = $2 AND step_id = $3 AND input_digest = $4
 `;
@@ -162,6 +174,7 @@ const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const STEP_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 const EXECUTOR_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,63}$/;
+const WORKER_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const MAX_ARTIFACTS_PER_COMMIT = 16;
 
 /** P0B-06 checkpoint schema version; a reader must match it to resume. */
@@ -230,6 +243,13 @@ function parseGrant(grant: RunGrant): RunGrant {
 
   if (!Number.isSafeInteger(grant.leaseEpoch) || grant.leaseEpoch < 0) {
     invalid('grant.leaseEpoch', 'invalid_epoch');
+  }
+
+  if (
+    grant.workerId !== null &&
+    (typeof grant.workerId !== 'string' || !WORKER_ID_PATTERN.test(grant.workerId))
+  ) {
+    invalid('grant.workerId', 'invalid_worker');
   }
 
   return grant;
@@ -352,9 +372,11 @@ function normalizeRequest(request: CommitStepRequest): NormalizedRequest {
         ? null
         : {
             stepId: checkpoint.stepId,
+            stepSequence: checkpoint.stepSequence,
             inputDigest: checkpoint.inputDigest,
             executorVersion: checkpoint.executorVersion,
             cursor: checkpoint.cursor,
+            workspaceVersion: checkpoint.workspaceVersion,
             artifacts: checkpoint.artifacts,
             externalEffects: checkpoint.externalEffects,
           },
@@ -537,6 +559,21 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
 
         assertLive({ grant: scoped, task, run, now });
 
+        // Coordinate with blob GC: the collector takes the same tenant-digest advisory lock
+        // before deleting bytes, so a publish can never lose a file it has just installed.
+        await lockBlobDigests(
+          client,
+          scoped.tenantId,
+          installed.map((entry) => entry.staged.sha256),
+        );
+
+        // The SQL lock orders this publish against the collector's delete, but `install` runs
+        // before this transaction and shortcuts when the digest file already exists, so an old
+        // orphan could have been swept in between. Re-establishing presence under the lock
+        // makes the two outcomes exclusive: either the bytes are still here and this publish
+        // commits, or they are gone and nothing is written.
+        await this.assertInstalledBytes(scoped, installed);
+
         await this.fault('before_artifact_insert');
         await this.writeArtifacts(client, scoped, installed);
 
@@ -637,11 +674,13 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
       if (error instanceof WorkspaceConflictSignal) {
         // Conflict candidates are preserved by a separate idempotent transaction; the result
         // commit itself is rolled back in full and no Task state is reported as completed.
+        // If the candidate cannot be preserved, the caller must not be told "conflict" as if
+        // the decision were safely recorded: the storage failure is the honest answer.
         await recordWorkspaceConflict(this.pool, scoped.tenantId, error, {
           taskId: scoped.taskId,
           runId: scoped.runId,
           leaseEpoch: scoped.leaseEpoch,
-        }).catch(() => undefined);
+        });
       }
 
       throw asDomainError(error);
@@ -755,6 +794,30 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
 
     return now;
   }
+  /**
+   * Prove, under the tenant-digest lock, that the bytes this commit is about to reference are
+   * still installed.
+   *
+   * A missing file aborts with zero writes, so no artifact/checkpoint row can ever point at
+   * bytes the collector removed. `install` verified content, so presence plus size is enough
+   * here and no second full hash is paid while holding row locks.
+   */
+  private async assertInstalledBytes(
+    grant: RunGrant,
+    artifacts: readonly NormalizedArtifact[],
+  ): Promise<void> {
+    for (const artifact of artifacts) {
+      const present = await this.options.blobs.assertInstalled(
+        grant.tenantId,
+        artifact.staged.sha256,
+        artifact.staged.size,
+      );
+
+      if (!present) {
+        throw new DomainError('DB_UNAVAILABLE', 'installed bytes disappeared before publication');
+      }
+    }
+  }
 
   private async writeArtifacts(
     client: pg.PoolClient,
@@ -830,17 +893,26 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
 
     // A step is identified by (stepId, inputDigest): replaying the same deterministic step
     // returns the already committed id instead of writing a second checkpoint.
-    const existing = await client.query<{ id: string }>(SELECT_CHECKPOINT_BY_STEP_SQL, [
+    const existing = await client.query<ExistingCheckpointRow>(SELECT_CHECKPOINT_BY_STEP_SQL, [
       grant.tenantId,
       grant.taskId,
       checkpoint.stepId,
       checkpoint.inputDigest,
     ]);
+    const existingRow = existing.rows[0];
 
-    const existingId = existing.rows[0]?.id;
+    if (existingRow !== undefined) {
+      // A stable step identity is only reusable when the *whole* committed result matches.
+      // Same id + same input digest but different artifacts, cursor, workspace dependency or
+      // side-effect record means the caller is trying to rewrite history under one name.
+      if (!sameCheckpointSemantics(existingRow, checkpoint, committedWorkspaceVersion)) {
+        throw new DomainError(
+          'IDEMPOTENCY_CONFLICT',
+          'step identity was already committed with a different result',
+        );
+      }
 
-    if (existingId !== undefined) {
-      return existingId;
+      return existingRow.id;
     }
 
     let sequence = checkpoint.stepSequence;
@@ -912,7 +984,7 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
  */
 export function assertLive(input: {
   readonly grant: RunGrant;
-  readonly task: TaskRow;
+  readonly task: GrantTaskRow;
   readonly run: RunRow;
   readonly now: Date;
 }): void {
@@ -920,6 +992,18 @@ export function assertLive(input: {
 
   if (task.status !== 'running' || task.current_run_id !== grant.runId) {
     throw new DomainError('STALE_LEASE', 'task is not owned by this run');
+  }
+
+  // The Agent decides which Workspace the result lands in, so a grant for another Agent in
+  // the same tenant must never be able to write. This is a server-derived equality check, not
+  // a client-supplied field.
+  if (task.agent_id !== grant.agentId) {
+    throw new DomainError('STALE_LEASE', 'grant agent does not own this task');
+  }
+
+  // Worker ownership: the grant must name the worker recorded on the Run itself.
+  if (grant.workerId !== run.worker_id) {
+    throw new DomainError('STALE_LEASE', 'grant worker does not own this run');
   }
 
   if (parseLeaseEpoch(task.lease_epoch) !== grant.leaseEpoch) {
@@ -962,3 +1046,125 @@ export function assertLive(input: {
 }
 
 export type { RunTerminalStatus };
+
+/**
+ * Canonical comparison of a stored checkpoint with the request that wants to reuse its id.
+ *
+ * Ordering is normalised so a caller that lists artifacts or effects in another order is not
+ * rejected for a cosmetic difference, while any real divergence is.
+ *
+ * `stepSequence` is allocated by the transaction when the request omits it, so an omitted
+ * value asserts nothing and always matches. A caller that names a sequence is asserting the
+ * step's position in the committed history, and a different position must be refused instead
+ * of silently returning a checkpoint from elsewhere in that history.
+ */
+function sameCheckpointSemantics(
+  row: ExistingCheckpointRow,
+  checkpoint: NonNullable<NormalizedRequest['checkpoint']>,
+  committedWorkspaceVersion: number | null,
+): boolean {
+  const stored = {
+    stepSequence: row.step_sequence,
+    executorVersion: row.executor_version,
+    cursor: stableJson(toCursorValue(row.cursor)),
+    workspaceVersion: row.workspace_version ?? committedWorkspaceVersion,
+    artifacts: canonicalArtifactsRow(row.artifacts),
+    externalEffects: canonicalEffectsRow(row.external_effects),
+  };
+  const requested = {
+    stepSequence: checkpoint.stepSequence ?? row.step_sequence,
+    executorVersion: checkpoint.executorVersion,
+    cursor: stableJson(checkpoint.cursor),
+    workspaceVersion: checkpoint.workspaceVersion ?? committedWorkspaceVersion,
+    artifacts: canonicalCheckpointArtifacts(checkpoint.artifacts),
+    externalEffects: canonicalCheckpointEffects(checkpoint.externalEffects),
+  };
+
+  return stableJson(stored) === stableJson(requested);
+}
+
+function toCursorValue(value: unknown): Record<string, string | number | boolean> {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return {};
+  }
+
+  const cursor: Record<string, string | number | boolean> = {};
+
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof entry === 'string' || typeof entry === 'boolean') {
+      cursor[key] = entry;
+    } else if (typeof entry === 'number' && Number.isFinite(entry)) {
+      cursor[key] = entry;
+    }
+  }
+
+  return cursor;
+}
+
+function canonicalCheckpointArtifacts(
+  artifacts: readonly CheckpointArtifactRef[],
+): readonly string[] {
+  return [...artifacts]
+    .map((entry) =>
+      stableJson({
+        artifactId: entry.artifactId,
+        sha256: entry.sha256,
+        size: entry.size,
+        mediaType: entry.mediaType,
+        path: entry.path ?? null,
+      }),
+    )
+    .sort();
+}
+
+function canonicalCheckpointEffects(effects: readonly ExternalEffectRecord[]): readonly string[] {
+  return [...effects]
+    .map((entry) =>
+      stableJson({
+        key: entry.key,
+        status: entry.status,
+        receiptDigest: entry.receiptDigest ?? null,
+      }),
+    )
+    .sort();
+}
+
+function canonicalArtifactsRow(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(
+      (entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null,
+    )
+    .map((entry) =>
+      stableJson({
+        artifactId: entry['artifactId'] ?? null,
+        sha256: entry['sha256'] ?? null,
+        size: entry['size'] ?? null,
+        mediaType: entry['mediaType'] ?? null,
+        path: entry['path'] ?? null,
+      }),
+    )
+    .sort();
+}
+
+function canonicalEffectsRow(value: unknown): readonly string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .filter(
+      (entry): entry is Record<string, unknown> => typeof entry === 'object' && entry !== null,
+    )
+    .map((entry) =>
+      stableJson({
+        key: entry['key'] ?? null,
+        status: entry['status'] ?? null,
+        receiptDigest: entry['receiptDigest'] ?? null,
+      }),
+    )
+    .sort();
+}

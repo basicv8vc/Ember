@@ -5,6 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   PostgresAgentRepository,
   blobKeyFor,
+  blobLockKey,
   parseStorageKey,
   stagingKeyFor,
 } from '@ember/postgres';
@@ -237,6 +238,122 @@ describe('P0B06 B-T14 orphan staging', () => {
   it('refuses a non-positive quarantine window', async () => {
     await expect(infra.blobs.sweepOrphans(new Date(), { retentionMs: 0 })).rejects.toMatchObject({
       code: 'INVALID_ARGUMENT',
+    });
+  });
+});
+
+describe('P0B06 P1-4 garbage collection versus a concurrent publish', () => {
+  it('retains bytes published while the collector is deciding', async () => {
+    const local = await createP06Infra(db);
+    const publisher = await db.pool.connect();
+
+    try {
+      // An installed file that the collector would otherwise treat as an orphan.
+      const digest = 'f'.repeat(64);
+      const key = blobKeyFor(seed.tenant.tenantId, digest);
+      const absolute = path.join(local.root.dir, ...key.split('/'));
+
+      await mkdir(path.dirname(absolute), { recursive: true });
+      await writeFile(absolute, 'published during gc');
+      await ageFile(absolute, 240_000);
+
+      // A publisher holds the tenant-digest lock and records the metadata but has not
+      // committed yet, so a naive scan already saw "no row".
+      await publisher.query('BEGIN');
+      await publisher.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
+        blobLockKey(seed.tenant.tenantId, digest),
+      ]);
+      await publisher.query(
+        `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)
+         VALUES ($1, $2, $3, 'text/plain', $4)`,
+        [seed.tenant.tenantId, digest, Buffer.byteLength('published during gc'), key],
+      );
+
+      const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
+      let settled = false;
+
+      void sweep.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+
+      // The collector must wait for the publisher instead of deleting under it.
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      expect(settled).toBe(false);
+
+      await publisher.query('COMMIT');
+
+      const report = await sweep;
+
+      expect(report.removedBlobs).toBe(0);
+      await expect(local.files.read(seed.tenant.tenantId, key)).resolves.toBeDefined();
+    } finally {
+      await publisher.query('ROLLBACK').catch(() => undefined);
+      publisher.release();
+      await local.dispose();
+    }
+  });
+
+  it('still collects an unreferenced file once no publisher holds the lock', async () => {
+    const local = await createP06Infra(db);
+
+    try {
+      const digest = 'e'.repeat(64);
+      const key = blobKeyFor(seed.tenant.tenantId, digest);
+      const absolute = path.join(local.root.dir, ...key.split('/'));
+
+      await mkdir(path.dirname(absolute), { recursive: true });
+      await writeFile(absolute, 'nobody references this');
+      await ageFile(absolute, 240_000);
+
+      const report = await local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
+
+      expect(report.removedBlobs).toBe(1);
+    } finally {
+      await local.dispose();
+    }
+  });
+});
+
+describe('P0B06 P2-2 deletion of a referenced artifact', () => {
+  it('refuses to delete an artifact a workspace version still references', async () => {
+    const ref = await infra.artifacts.put(
+      seed.ctx,
+      Buffer.from('workspace referenced'),
+      'text/plain',
+    );
+    const base = await infra.workspaces.load(seed.ctx, seed.agentId);
+
+    await infra.workspaces.commit(seed.ctx, seed.agentId, base.version, {
+      files: [
+        ...base.manifest.files,
+        {
+          path: 'keep.txt',
+          artifactId: ref.artifactId,
+          sha256: ref.sha256,
+          size: ref.size,
+        },
+      ],
+    });
+
+    await expect(infra.artifacts.delete(seed.ctx, ref.artifactId)).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+    });
+    await expect(infra.artifacts.get(seed.ctx, ref.artifactId)).resolves.toEqual(
+      Buffer.from('workspace referenced'),
+    );
+  });
+
+  it('deletes an artifact that nothing references', async () => {
+    const ref = await infra.artifacts.put(seed.ctx, Buffer.from('unreferenced'), 'text/plain');
+
+    await expect(infra.artifacts.delete(seed.ctx, ref.artifactId)).resolves.toBeUndefined();
+    await expect(infra.artifacts.get(seed.ctx, ref.artifactId)).rejects.toMatchObject({
+      code: 'NOT_FOUND',
     });
   });
 });

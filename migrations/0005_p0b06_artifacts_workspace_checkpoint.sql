@@ -57,13 +57,19 @@ CREATE TABLE staged_blobs (
   created_at  timestamptz NOT NULL DEFAULT now(),
   settled_at  timestamptz,
   UNIQUE (tenant_id, id),
-  UNIQUE (tenant_id, storage_key),
+  -- Deliberately NOT unique on (tenant_id, storage_key): the same bytes may be uploaded
+  -- repeatedly by the same tenant (another Task, another attempt) and each upload keeps its
+  -- own attempt identity. The physical staging file is content-addressed and shared.
   CHECK (state = 'pending' OR settled_at IS NOT NULL)
 );
 
 CREATE INDEX staged_blobs_pending_idx
   ON staged_blobs (created_at, id)
   WHERE state = 'pending';
+
+-- GC and publish both resolve a staging file through its key, so the lookup needs an index
+-- even though duplicates are legal.
+CREATE INDEX staged_blobs_storage_key_idx ON staged_blobs (tenant_id, storage_key);
 
 -- ---------------------------------------------------------------------------
 -- Artifacts

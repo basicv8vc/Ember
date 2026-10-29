@@ -122,5 +122,6 @@ export function grantOfContext(context: RunExecutionContext): RunGrant {
     agentId: context.agentId,
     attempt: context.attempt,
     leaseEpoch: context.leaseEpoch,
+    workerId: context.workerId,
   });
 }

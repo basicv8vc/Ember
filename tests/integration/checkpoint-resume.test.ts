@@ -47,7 +47,7 @@ interface Attempt {
 }
 
 async function syncClock(): Promise<void> {
-  clock.set(await databaseNow(db.pool));
+  clock.set(new Date((await databaseNow(db.pool)).getTime() + 1));
 }
 
 async function claim(label: string): Promise<Attempt> {
@@ -79,7 +79,7 @@ async function crash(attempt: Attempt): Promise<void> {
     [tenant.tenantId, attempt.lease.taskId],
   );
 
-  clock.set(await databaseNow(db.pool));
+  clock.set(new Date((await databaseNow(db.pool)).getTime() + 1));
   await queue.reapExpired(clock.now());
   clock.advance(1_000);
 }
@@ -289,9 +289,98 @@ describe('P0B06 B-T17 checkpoint crash and resume', () => {
         agentId: otherAgentId,
         attempt: 1,
         leaseEpoch: 1,
+        workerId: WORKER_ID,
       }),
     ).resolves.toBeNull();
 
     await expect(infra.checkpoints.get(attempt.grant, randomUUID())).resolves.toBeNull();
+  });
+});
+
+describe('P0B06 step identity and artifact retention', () => {
+  it('refuses to reuse a step identity for a different result', async () => {
+    const attempt = await claim('step-identity');
+    const produced = await produceRequest(attempt, 'step-identity');
+
+    await infra.committer.commitStep(attempt.grant, produced);
+
+    const other = await infra.blobs.stage(
+      tenant.tenantId,
+      Buffer.from('a different result for the same step'),
+      'text/plain',
+    );
+
+    // Same step id and same input digest, but different artifacts, cursor and effects.
+    await expect(
+      infra.committer.commitStep(attempt.grant, {
+        operationId: 'step:produce:different-result',
+        mode: 'progress',
+        artifacts: [{ artifactId: other.stagedId, staged: other }],
+        checkpoint: {
+          stepId: 'produce',
+          inputDigest: 'a'.repeat(64),
+          executorVersion: EXECUTOR,
+          cursor: { phase: 'something-else' },
+          artifacts: [
+            {
+              artifactId: other.stagedId,
+              sha256: other.sha256,
+              size: other.size,
+              mediaType: other.mediaType,
+              path: 'other.txt',
+            },
+          ],
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    expect(await checkpointCount(attempt.lease.taskId)).toBe(1);
+  });
+
+  it('refuses to reuse a step identity at a different position in the history', async () => {
+    const attempt = await claim('step-sequence');
+    const produced = await produceRequest(attempt, 'step-sequence');
+    const first = await infra.committer.commitStep(attempt.grant, produced);
+    const checkpoint = produced.checkpoint;
+
+    expect(first.checkpointId).not.toBeNull();
+    expect(checkpoint).toBeDefined();
+
+    // Same step, same content, but the caller asserts a position the committed step does not
+    // occupy. Reusing the id would silently answer for a different point in the history.
+    await expect(
+      infra.committer.commitStep(attempt.grant, {
+        ...produced,
+        operationId: `${produced.operationId}:wrong-sequence`,
+        checkpoint: { ...checkpoint!, stepSequence: 7 },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    expect(await checkpointCount(attempt.lease.taskId)).toBe(1);
+
+    // An explicit sequence that matches the committed one is still an idempotent reuse.
+    const reused = await infra.committer.commitStep(attempt.grant, {
+      ...produced,
+      operationId: `${produced.operationId}:same-sequence`,
+      checkpoint: { ...checkpoint!, stepSequence: 1 },
+    });
+
+    expect(reused.checkpointId).toBe(first.checkpointId);
+    expect(await checkpointCount(attempt.lease.taskId)).toBe(1);
+  });
+
+  it('refuses to delete an artifact a committed checkpoint still references', async () => {
+    const attempt = await claim('delete-referenced');
+    const produced = await produceRequest(attempt, 'delete-referenced');
+    const artifactId = produced.artifacts?.[0]?.artifactId;
+
+    expect(artifactId).toBeDefined();
+
+    await infra.committer.commitStep(attempt.grant, produced);
+
+    await expect(infra.artifacts.delete(ctx, artifactId!)).rejects.toMatchObject({
+      code: 'POLICY_DENIED',
+    });
+    await expect(infra.artifacts.get(ctx, artifactId!)).resolves.toBeDefined();
   });
 });

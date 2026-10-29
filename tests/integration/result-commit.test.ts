@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
-import type { CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
+import type { BlobStore, CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
 import {
   PostgresAgentRepository,
@@ -52,7 +52,10 @@ interface Attempt {
 }
 
 async function syncClock(): Promise<void> {
-  clock.set(await databaseNow(db.pool));
+  // `now()` has microsecond precision; a JS Date truncates to milliseconds, so reusing the
+  // sample verbatim can be earlier than the row's next_run_at within the same millisecond.
+  // The +1ms models the round trip and keeps the claim predicate deterministic.
+  clock.set(new Date((await databaseNow(db.pool)).getTime() + 1));
 }
 
 /** Create a Task and claim it through the real lease queue. */
@@ -519,5 +522,215 @@ describe('P0B06 fencing and concurrency around the commit', () => {
 
     expect(conflicts.length).toBeGreaterThanOrEqual(1);
     expect(conflicts[0]?.conflictPaths).toContain('existing.txt');
+  });
+});
+
+describe('P0B06 grant binding (P1-3)', () => {
+  it('rejects a grant bound to another agent of the same tenant with zero writes', async () => {
+    const attempt = await claimTask('grant-wrong-agent');
+    const otherAgent = await agents.create(ctx, { name: 'p0b06 second agent' });
+    const forged = { ...attempt.grant, agentId: otherAgent.agentId };
+    const versionsBefore = await workspaceVersions(agentId);
+
+    await expect(
+      infra.committer.commitStep(forged, await resultRequest('forged agent')),
+    ).rejects.toMatchObject({ code: 'STALE_LEASE' });
+
+    const task = await readTask(db.pool, tenant.tenantId, attempt.lease.taskId);
+
+    expect(task.status).toBe('running');
+    expect(await artifactRows(attempt.lease.taskId)).toBe(0);
+    expect(await workspaceVersions(agentId)).toBe(versionsBefore);
+    expect(await workspaceVersions(otherAgent.agentId)).toBe(0);
+  });
+
+  it('rejects a grant that names a worker which does not own the run', async () => {
+    const attempt = await claimTask('grant-wrong-worker');
+
+    for (const workerId of ['worker-someone-else', null]) {
+      await expect(
+        infra.committer.commitStep(
+          { ...attempt.grant, workerId },
+          await resultRequest(`forged worker ${String(workerId)}`),
+        ),
+      ).rejects.toMatchObject({ code: 'STALE_LEASE' });
+    }
+
+    expect(await artifactRows(attempt.lease.taskId)).toBe(0);
+    expect((await counters(attempt.lease.taskId))['completed'] ?? 0).toBe(0);
+  });
+
+  it('accepts the grant derived from the persisted run', async () => {
+    const attempt = await claimTask('grant-valid');
+    const receipt = await infra.committer.commitStep(
+      attempt.grant,
+      await resultRequest('valid grant'),
+    );
+
+    expect(receipt.replayed).toBe(false);
+    expect((await readTask(db.pool, tenant.tenantId, attempt.lease.taskId)).status).toBe(
+      'completed',
+    );
+  });
+});
+
+describe('P0B06 idempotency digest completeness (P2-1)', () => {
+  it('treats a different checkpoint dependency as a conflicting command', async () => {
+    const attempt = await claimTask('digest-dependency');
+    const staged = await infra.blobs.stage(
+      tenant.tenantId,
+      Buffer.from('digest dependency'),
+      'text/plain',
+    );
+    const base: CommitStepRequest = {
+      operationId: 'step:digest:dependency',
+      mode: 'progress',
+      artifacts: [{ artifactId: staged.stagedId, staged }],
+      checkpoint: {
+        stepId: 'produce',
+        stepSequence: 1,
+        inputDigest: 'a'.repeat(64),
+        executorVersion: 'deterministic-executor@1',
+        workspaceVersion: 0,
+        artifacts: [],
+      },
+    };
+
+    await infra.committer.commitStep(attempt.grant, base);
+
+    // Same operation id and same artifacts, but a different workspace dependency and cursor:
+    // this is not the same request and must not be replayed as if it were.
+    await expect(
+      infra.committer.commitStep(attempt.grant, {
+        ...base,
+        checkpoint: { ...base.checkpoint!, workspaceVersion: 7 },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    await expect(
+      infra.committer.commitStep(attempt.grant, {
+        ...base,
+        checkpoint: { ...base.checkpoint!, stepSequence: 2 },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+});
+
+describe('P0B06 P2-3 conflict candidate persistence in the committer', () => {
+  it('does not report a conflict when the candidate could not be stored', async () => {
+    const base = await infra.workspaces.load(ctx, agentId);
+    const artifact = await infra.artifacts.put(ctx, Buffer.from('p2-3 base'), 'text/plain');
+
+    await infra.workspaces.commit(ctx, agentId, base.version, {
+      files: [
+        {
+          path: 'existing.txt',
+          artifactId: artifact.artifactId,
+          sha256: artifact.sha256,
+          size: artifact.size,
+        },
+      ],
+    });
+
+    const attempt = await claimTask('commit-conflict-persist');
+    const staged = await infra.blobs.stage(
+      tenant.tenantId,
+      Buffer.from('p2-3 candidate'),
+      'text/plain',
+    );
+    const request: CommitStepRequest = {
+      operationId: `op:cas-persist:${randomUUID()}`,
+      mode: 'result',
+      artifacts: [{ artifactId: staged.stagedId, staged }],
+      workspace: {
+        expectedVersion: base.version,
+        manifest: {
+          files: [
+            {
+              path: 'existing.txt',
+              artifactId: staged.stagedId,
+              sha256: staged.sha256,
+              size: staged.size,
+            },
+          ],
+        },
+      },
+    };
+
+    await db.pool.query(
+      'ALTER TABLE workspace_conflicts ADD CONSTRAINT p0b06_block_conflict_commit CHECK (false) NOT VALID',
+    );
+
+    try {
+      await expect(infra.committer.commitStep(attempt.grant, request)).rejects.toMatchObject({
+        code: 'DB_UNAVAILABLE',
+      });
+    } finally {
+      await db.pool.query(
+        'ALTER TABLE workspace_conflicts DROP CONSTRAINT p0b06_block_conflict_commit',
+      );
+    }
+
+    // The result commit is still fully rolled back.
+    expect((await readTask(db.pool, tenant.tenantId, attempt.lease.taskId)).status).toBe('running');
+    expect(await artifactRows(attempt.lease.taskId)).toBe(0);
+    expect((await counters(attempt.lease.taskId))['completed'] ?? 0).toBe(0);
+  });
+});
+
+/**
+ * Blob store whose installed file disappears right after `install`, i.e. the collector won the
+ * race while the publisher was still between install and its publishing transaction.
+ */
+function blobsLosingToGc(): BlobStore {
+  return {
+    stage: (tenantId, source, mediaType, options) =>
+      infra.blobs.stage(tenantId, source, mediaType, options),
+    install: async (tenantId, staged) => {
+      const installed = await infra.blobs.install(tenantId, staged);
+
+      await infra.files.removeKey(installed.storageKey, 'blobs');
+
+      return installed;
+    },
+    read: (tenantId, storageKey) => infra.blobs.read(tenantId, storageKey),
+    verifyContent: (tenantId, sha256, size) => infra.blobs.verifyContent(tenantId, sha256, size),
+    assertInstalled: (tenantId, sha256, size) =>
+      infra.blobs.assertInstalled(tenantId, sha256, size),
+    verify: (tenantId, storageKey, expectedSha256, expectedSize) =>
+      infra.blobs.verify(tenantId, storageKey, expectedSha256, expectedSize),
+    discard: (tenantId, staged) => infra.blobs.discard(tenantId, staged),
+    sweepOrphans: (now, options) => infra.blobs.sweepOrphans(now, options),
+  };
+}
+
+describe('P0B06 P1-4 a publish that races the collector', () => {
+  it('writes nothing when the installed bytes are gone at publication time', async () => {
+    const attempt = await claimTask('gc-race');
+    const request = await resultRequest('swept between install and commit');
+    const [artifact] = request.artifacts ?? [];
+
+    expect(artifact).toBeDefined();
+
+    const committer = new PostgresRunResultCommitter(db.pool, {
+      policy: resolveLeaseQueueConfig({ leaseDurationMs: LEASE_MS, heartbeatIntervalMs: 500 }),
+      blobs: blobsLosingToGc(),
+    });
+
+    await expect(committer.commitStep(attempt.grant, request)).rejects.toMatchObject({
+      code: 'DB_UNAVAILABLE',
+    });
+
+    // No row may point at bytes that no longer exist, and the Task keeps running so the step
+    // is redone instead of the Run being lost.
+    expect(await artifactRows(attempt.lease.taskId)).toBe(0);
+    expect((await readTask(db.pool, tenant.tenantId, attempt.lease.taskId)).status).toBe('running');
+
+    const blobRows = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM blobs WHERE tenant_id = $1 AND sha256 = $2',
+      [tenant.tenantId, artifact!.staged.sha256],
+    );
+
+    expect(Number(blobRows.rows[0]?.count ?? '0')).toBe(0);
   });
 });

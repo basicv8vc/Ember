@@ -30,6 +30,14 @@ export interface RunGrant {
   readonly agentId: Id;
   readonly attempt: number;
   readonly leaseEpoch: number;
+  /**
+   * Worker identity recorded on the Run when the lease was issued (`runs.worker_id`).
+   *
+   * It is derived server-side from the persisted Run, never supplied by a client, and the
+   * committer rejects a grant whose worker does not own the Run. `null` is accepted only for
+   * a historical Run that has no recorded worker.
+   */
+  readonly workerId: string | null;
 }
 
 /** Bytes can arrive as one buffer or as a bounded stream; neither is unbounded in memory. */
@@ -90,6 +98,15 @@ export interface BlobStore {
   read(tenantId: Id, storageKey: string): Promise<Uint8Array>;
   /** Re-hash installed bytes and compare with the expected digest/size. */
   verifyContent(tenantId: Id, sha256: string, size: number): Promise<boolean>;
+  /**
+   * Cheap re-establishment that installed bytes are still present: existence, a regular file
+   * and the expected size, without re-hashing (`install` already verified content).
+   *
+   * This exists for the publishing transaction. It runs after the tenant-digest lock is taken,
+   * so a publish that can still see its bytes under the lock can never be undone by a later
+   * sweep: the collector deletes only unreferenced files and takes the same lock first.
+   */
+  assertInstalled(tenantId: Id, sha256: string, size: number): Promise<boolean>;
   verify(
     tenantId: Id,
     storageKey: string,

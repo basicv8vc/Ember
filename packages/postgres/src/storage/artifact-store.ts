@@ -1,9 +1,10 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { AuthContextSchema, IdSchema, toInvalidArgumentError } from '@ember/contracts';
 import type { ArtifactLookup, ArtifactMetadata, ArtifactRef, BlobStore } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from '../repositories/support.js';
+import { lockBlobDigests } from './blob-store.js';
 import { parseMediaType, parseTenantId } from './local-blob-store.js';
 
 /**
@@ -52,6 +53,44 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 const DELETE_ARTIFACT_SQL = `
 DELETE FROM artifacts
  WHERE tenant_id = $1 AND id = $2
+`;
+
+const LOCK_ARTIFACT_SQL = `
+SELECT sha256
+  FROM artifacts
+ WHERE tenant_id = $1 AND id = $2
+ FOR UPDATE
+`;
+
+/**
+ * Reference guard for deletion.
+ *
+ * Historical Workspace versions, committed checkpoints and pending conflict candidates all
+ * keep their Artifact references; removing the metadata underneath them would create dangling
+ * references, so a referenced Artifact cannot be deleted in this phase.
+ */
+const ARTIFACT_REFERENCES_SQL = `
+SELECT
+  EXISTS (
+    SELECT 1
+      FROM workspace_versions v
+      JOIN workspaces w ON w.tenant_id = v.tenant_id AND w.id = v.workspace_id
+     WHERE v.tenant_id = $1 AND w.tenant_id = $1
+       AND v.manifest -> 'files' @> jsonb_build_array(jsonb_build_object('artifactId', $2::text))
+  ) AS in_workspace_version,
+  EXISTS (
+    SELECT 1
+      FROM step_checkpoints c
+     WHERE c.tenant_id = $1
+       AND c.artifacts @> jsonb_build_array(jsonb_build_object('artifactId', $2::text))
+  ) AS in_checkpoint,
+  EXISTS (
+    SELECT 1
+      FROM workspace_conflicts k
+     WHERE k.tenant_id = $1
+       AND k.candidate_manifest -> 'files'
+           @> jsonb_build_array(jsonb_build_object('artifactId', $2::text))
+  ) AS in_conflict
 `;
 
 function parseContext(ctx: AuthContext): AuthContext {
@@ -103,6 +142,10 @@ export class PostgresArtifactStore {
 
     try {
       return await withTransaction(this.pool, async (client) => {
+        // Same tenant-digest lock the collector takes, so these bytes cannot be swept between
+        // install and COMMIT.
+        await lockBlobDigests(client, context.tenantId, [installed.sha256]);
+
         await client.query(INSERT_BLOB_SQL, [
           context.tenantId,
           installed.sha256,
@@ -144,14 +187,12 @@ export class PostgresArtifactStore {
     }
 
     const bytes = await this.blobs.read(ctx.tenantId, lookup.storageKey);
-    const intact = await this.blobs.verify(
-      ctx.tenantId,
-      lookup.storageKey,
-      lookup.metadata.sha256,
-      lookup.metadata.size,
-    );
 
-    if (!intact) {
+    // Verify the *same* buffer that is returned. A second read could observe different bytes
+    // on disk than the ones handed to the caller.
+    const digest = createHash('sha256').update(bytes).digest('hex');
+
+    if (digest !== lookup.metadata.sha256 || bytes.byteLength !== lookup.metadata.size) {
       // Never hand a client bytes whose digest no longer matches the published metadata.
       throw new DomainError('DB_UNAVAILABLE', 'artifact bytes failed integrity verification');
     }
@@ -174,16 +215,50 @@ export class PostgresArtifactStore {
     return this.blobs.verify(ctx.tenantId, lookup.storageKey, expectedSha256, expectedSize);
   }
 
+  /**
+   * Remove a tenant-owned Artifact, unless a durable reference still needs it.
+   *
+   * Full retention policy is a later phase, but deletion must never produce a dangling
+   * reference from a Workspace version, a committed checkpoint or a pending conflict.
+   */
   async delete(ctx: AuthContext, artifactId: Id): Promise<void> {
     const context = parseContext(ctx);
     const id = parseId(artifactId, 'artifactId');
 
     try {
-      const result = await this.pool.query(DELETE_ARTIFACT_SQL, [context.tenantId, id]);
+      await withTransaction(this.pool, async (client) => {
+        const locked = await client.query<{ sha256: string }>(LOCK_ARTIFACT_SQL, [
+          context.tenantId,
+          id,
+        ]);
 
-      if (result.rowCount !== 1) {
-        throw new DomainError('NOT_FOUND', 'artifact is not available in this tenant');
-      }
+        if (locked.rows[0] === undefined) {
+          throw new DomainError('NOT_FOUND', 'artifact is not available in this tenant');
+        }
+
+        const references = await client.query<{
+          in_workspace_version: boolean;
+          in_checkpoint: boolean;
+          in_conflict: boolean;
+        }>(ARTIFACT_REFERENCES_SQL, [context.tenantId, id]);
+        const row = references.rows[0];
+
+        if (
+          row !== undefined &&
+          (row.in_workspace_version || row.in_checkpoint || row.in_conflict)
+        ) {
+          throw new DomainError(
+            'POLICY_DENIED',
+            'artifact is still referenced by a workspace version, checkpoint or conflict',
+          );
+        }
+
+        const deleted = await client.query(DELETE_ARTIFACT_SQL, [context.tenantId, id]);
+
+        if (deleted.rowCount !== 1) {
+          throw new DomainError('NOT_FOUND', 'artifact is not available in this tenant');
+        }
+      });
     } catch (error) {
       throw asDomainError(error);
     }

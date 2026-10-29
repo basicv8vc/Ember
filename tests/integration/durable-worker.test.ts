@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import type {
   CommitReceipt,
@@ -75,7 +76,7 @@ function handlerWith(committer: RunResultCommitter) {
 }
 
 async function syncClock(): Promise<void> {
-  clock.set(await databaseNow(db.pool));
+  clock.set(new Date((await databaseNow(db.pool)).getTime() + 1));
 }
 
 beforeAll(async () => {
@@ -214,11 +215,182 @@ describe('P0B06 durable executor closure', () => {
         agentId,
         attempt: second!.attempt,
         leaseEpoch: second!.leaseEpoch,
+        workerId: WORKER_ID,
       },
       { executorVersion: CHECKPOINT_EXECUTOR_VERSION },
     );
 
     expect(latest?.stepId).toBe('publish');
     expect(latest?.runId).toBe(second!.runId);
+  });
+});
+
+describe('P0B06 incompatible checkpoint must not re-execute the step', () => {
+  async function seedCheckpoint(input: {
+    readonly taskId: string;
+    readonly lease: {
+      readonly runId: string;
+      readonly attempt: number;
+      readonly leaseEpoch: number;
+    };
+    readonly executorVersion: string;
+    readonly inputDigest: string;
+    readonly stepId?: string;
+    readonly stepSequence?: number;
+  }): Promise<void> {
+    await db.pool.query(
+      `INSERT INTO step_checkpoints (
+         id, tenant_id, task_id, run_id, attempt, lease_epoch, schema_version, step_id,
+         step_sequence, input_digest, executor_version, cursor, workspace_version, artifacts,
+         external_effects
+       ) VALUES ($1, $2, $3, $4, $5, $6, 1, $9, $10, $7, $8, '{}'::jsonb, NULL,
+                 '[]'::jsonb, '[]'::jsonb)`,
+      [
+        randomUUID(),
+        tenant.tenantId,
+        input.taskId,
+        input.lease.runId,
+        input.lease.attempt,
+        input.lease.leaseEpoch,
+        input.inputDigest,
+        input.executorVersion,
+        input.stepId ?? 'produce',
+        input.stepSequence ?? 1,
+      ],
+    );
+  }
+
+  it('stops the Run when a committed checkpoint is from an incompatible executor', async () => {
+    const receipt = await tasks.create(
+      ctx,
+      chatCommand(agentId, 'p0b06-durable-incompatible', 'incompatible checkpoint prompt'),
+    );
+    const taskId = receipt.taskId;
+
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+
+    expect(lease?.taskId).toBe(taskId);
+
+    const workspaceBefore = await infra.workspaces.load(ctx, agentId);
+
+    await seedCheckpoint({
+      taskId,
+      lease: lease!,
+      executorVersion: 'legacy-executor@0',
+      inputDigest: 'a'.repeat(64),
+    });
+
+    const completion = await handlerWith(infra.committer).handle(
+      lease!,
+      AbortSignal.timeout(10_000),
+    );
+
+    // Safely stopped, not silently re-executed.
+    expect(completion).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+
+    const artifacts = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM artifacts WHERE tenant_id = $1 AND task_id = $2',
+      [tenant.tenantId, taskId],
+    );
+    const checkpoints = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM step_checkpoints WHERE tenant_id = $1 AND task_id = $2',
+      [tenant.tenantId, taskId],
+    );
+
+    expect(artifacts.rows[0]?.count).toBe('0');
+    expect(checkpoints.rows[0]?.count).toBe('1');
+    await expect(infra.workspaces.load(ctx, agentId)).resolves.toMatchObject({
+      version: workspaceBefore.version,
+    });
+  });
+
+  it('stops the Run when the committed step is unreadable but another step is not', async () => {
+    const receipt = await tasks.create(
+      ctx,
+      chatCommand(agentId, 'p0b06-durable-mixed', 'mixed checkpoint prompt'),
+    );
+    const taskId = receipt.taskId;
+
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+
+    expect(lease?.taskId).toBe(taskId);
+
+    const workspaceBefore = await infra.workspaces.load(ctx, agentId);
+
+    // A readable step from another position plus an unreadable copy of the step this build
+    // would run: the readable one must not make the unreadable one look unexecuted.
+    await seedCheckpoint({
+      taskId,
+      lease: lease!,
+      executorVersion: CHECKPOINT_EXECUTOR_VERSION,
+      inputDigest: 'c'.repeat(64),
+      stepId: 'publish',
+      stepSequence: 2,
+    });
+    await seedCheckpoint({
+      taskId,
+      lease: lease!,
+      executorVersion: 'legacy-executor@0',
+      inputDigest: 'd'.repeat(64),
+      stepSequence: 1,
+    });
+
+    const completion = await handlerWith(infra.committer).handle(
+      lease!,
+      AbortSignal.timeout(10_000),
+    );
+
+    expect(completion).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+
+    const artifacts = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM artifacts WHERE tenant_id = $1 AND task_id = $2',
+      [tenant.tenantId, taskId],
+    );
+    const checkpoints = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM step_checkpoints WHERE tenant_id = $1 AND task_id = $2',
+      [tenant.tenantId, taskId],
+    );
+
+    expect(artifacts.rows[0]?.count).toBe('0');
+    expect(checkpoints.rows[0]?.count).toBe('2');
+    await expect(infra.workspaces.load(ctx, agentId)).resolves.toMatchObject({
+      version: workspaceBefore.version,
+    });
+  });
+
+  it('stops the Run when a committed step belongs to different input', async () => {
+    const receipt = await tasks.create(
+      ctx,
+      chatCommand(agentId, 'p0b06-durable-input-mismatch', 'mismatched input prompt'),
+    );
+    const taskId = receipt.taskId;
+
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+
+    expect(lease?.taskId).toBe(taskId);
+
+    await seedCheckpoint({
+      taskId,
+      lease: lease!,
+      executorVersion: CHECKPOINT_EXECUTOR_VERSION,
+      inputDigest: 'b'.repeat(64),
+    });
+
+    const completion = await handlerWith(infra.committer).handle(
+      lease!,
+      AbortSignal.timeout(10_000),
+    );
+
+    expect(completion).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+
+    const artifacts = await db.pool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM artifacts WHERE tenant_id = $1 AND task_id = $2',
+      [tenant.tenantId, taskId],
+    );
+
+    expect(artifacts.rows[0]?.count).toBe('0');
   });
 });

@@ -104,6 +104,8 @@ function grantOf(context: RunExecutionContext): RunGrant {
     agentId: context.agentId,
     attempt: context.attempt,
     leaseEpoch: context.leaseEpoch,
+    // Worker ownership comes from the persisted Run, not from a caller-chosen label.
+    workerId: context.workerId,
   });
 }
 
@@ -261,19 +263,45 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
       }
 
       try {
-        // Recovery input is read-only and filtered by schema/executor compatibility. An
-        // incompatible checkpoint stops here instead of being guessed at.
-        const committed = await checkpoints.list(grant, {
-          schemaVersion: CHECKPOINT_SCHEMA_VERSION,
-          executorVersion: CHECKPOINT_EXECUTOR_VERSION,
-        });
-        const produced = committed.find((entry) => entry.stepId === PRODUCE_STEP);
+        // Recovery input is read-only. "No checkpoint" and "a checkpoint this build cannot
+        // read" are different states: the second must stop the Run, never silently re-execute
+        // work that may already have had side effects.
+        const committed = await checkpoints.list(grant);
+        const readable = (entry: (typeof committed)[number]): boolean =>
+          entry.schemaVersion === CHECKPOINT_SCHEMA_VERSION &&
+          entry.executorVersion === CHECKPOINT_EXECUTOR_VERSION;
+        const compatible = committed.filter(readable);
+
+        // A step this build cannot read must stop the Run even when another committed step is
+        // readable: the unreadable one may already have had side effects, and treating "not in
+        // the compatible list" as "not done" would re-execute it.
+        if (committed.some((entry) => entry.stepId === PRODUCE_STEP && !readable(entry))) {
+          throw new DomainError(
+            'POLICY_DENIED',
+            'the committed step is incompatible with this executor build',
+          );
+        }
+
+        if (committed.length > 0 && compatible.length === 0) {
+          throw new DomainError(
+            'POLICY_DENIED',
+            'a committed checkpoint is incompatible with this executor build',
+          );
+        }
+
+        const produced = compatible.find((entry) => entry.stepId === PRODUCE_STEP);
         const resumeArtifact = produced?.artifacts[0];
 
-        const reuse =
-          produced !== undefined &&
-          resumeArtifact !== undefined &&
-          produced.inputDigest === inputDigest;
+        if (produced !== undefined && produced.inputDigest !== inputDigest) {
+          // The step was committed for different deterministic input: re-running it would
+          // duplicate a side effect, so the safe answer is to stop.
+          throw new DomainError(
+            'POLICY_DENIED',
+            'the committed step belongs to a different execution input',
+          );
+        }
+
+        const reuse = produced !== undefined && resumeArtifact !== undefined;
 
         if (reuse && resumeArtifact !== undefined && produced !== undefined) {
           const intact = await blobs.verifyContent(

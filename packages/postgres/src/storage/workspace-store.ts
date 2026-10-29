@@ -430,8 +430,9 @@ export class PostgresWorkspaceStore implements WorkspaceStore {
 
       if (conflict !== null) {
         // The candidate is preserved outside the rolled-back transaction so a later review can
-        // see both sides. This is not a Task state and never marks anything completed.
-        await recordWorkspaceConflict(this.pool, context.tenantId, conflict).catch(() => undefined);
+        // see both sides. This is not a Task state and never marks anything completed, and a
+        // failure to persist it must surface instead of pretending the conflict was recorded.
+        await recordWorkspaceConflict(this.pool, context.tenantId, conflict);
       }
 
       throw asDomainError(error);

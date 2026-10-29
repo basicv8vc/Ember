@@ -1,6 +1,6 @@
 # P0B-08a — 确定性 Mock 预算守卫
 
-> 状态：仅创建 **Draft PR**，未合并 `main`。
+> 状态：P0B-08a 交付件，代码随 PR #12 评审（Ready for Review）；是否已合并以 PR 为准，本文件不跟踪合并状态。
 > 范围：`packages/execution/src/budget-guard.ts`（纯策略 + 纯本地账本）与其单元测试。
 
 ## 1. 目标与边界
@@ -99,9 +99,11 @@ snapshotFromLedger(state, tenantUsage)           → BudgetSnapshot（下一步�
   防止无界增长。
 - `parseLedgerState` 每次入口都从操作日志**重新推导** `reserved` / `consumed`，并拒绝与记录值
   不一致的状态（`budget_ledger_invariant`），因此被篡改的值不会被继续使用。
-- `runCarryOver` 是唯一无法从日志推导的字段（它描述本值之外的历史日分段）：仍按严格 usage 校验
-  （三个非负安全整数、拒绝多余字段），且只能由 `rollBudgetLedgerToUtcDay` 产生，因此伪造它只会抬高
-  Run 计数（失败关闭），无法降低。
+- `runCarryOver` 是唯一无法从日志推导的字段（它描述本值之外的历史日分段）：按严格 usage 校验
+  （三个非负安全整数、拒绝多余字段）。**它不提供任何安全保证**：`createBudgetLedger` 允许调用方
+  显式传入该值，而本模块无法校验它是否真的来自历史记录，因此它既可能被伪造得偏大（只会抬高
+  Run 计数），也可能被错传为 0（会静默重置 Run 累计预算）。来源可信性由持久化层负责，
+  见 §6.1 第 2 条。
 
 ## 5. 跨 UTC 日语义（Run 累计预算不会被日期重置）
 

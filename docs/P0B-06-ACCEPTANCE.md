@@ -3,7 +3,7 @@
 - **执行环境：**macOS（darwin 25.6.0, arm64）、Node 23.11.0 运行时、pnpm 12.15.0、PostgreSQL 17.11（本地实例，端口 55433）
 - **数据库：**本机临时集群（`initdb` 于 `/tmp/ember-pgdata`），`ember` 与 `ember_test` 两个库；集成测试只创建/删除自己的 `ember_it_*` schema
 - **文件系统：**每个测试用自己的 `mkdtemp('ember-blobs-')` 根目录，测试结束只删除该目录
-- **HEAD：**见 PR 描述（提交后补 URL 与 SHA）
+- **代码 HEAD：**`6767372`（PR #11；其后仅文档提交）
 - **说明：**本次使用本地安装的 PostgreSQL 17 而非 Docker Compose（开发机 Docker daemon 不可用、磁盘余量不足）；测试矩阵与 CI 中 `postgres:17-alpine` 服务等价，均为真实 PostgreSQL
 
 ## 1. 逐项验收表

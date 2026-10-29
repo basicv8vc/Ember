@@ -26,6 +26,29 @@ export interface TestDatabaseOptions {
 }
 
 /**
+ * Session-scoped view of one open connection.
+ *
+ * `pg.PoolClient` declares overloaded `query` signatures (including a callback form), so a
+ * client type cannot be derived from `Pool.connect`; a structural interface accepts the real
+ * client instead.
+ */
+export interface LockSession {
+  query<R extends Record<string, unknown>>(sql: string): Promise<{ readonly rows: readonly R[] }>;
+}
+
+/** Backend pid of one session, so a lock assertion can name the exact backend it expects. */
+export async function backendPid(client: LockSession): Promise<number> {
+  const result = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const pid = result.rows[0]?.pid;
+
+  if (pid === undefined) {
+    throw new Error('could not read the backend pid');
+  }
+
+  return pid;
+}
+
+/**
  * Create a throwaway schema, run every repository migration in it, and return pools that
  * are scoped to that schema. Only this run's schema is ever dropped.
  */

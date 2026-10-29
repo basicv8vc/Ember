@@ -4,8 +4,8 @@
 
 | 文档 | 当前状态 | 用途 |
 | --- | --- | --- |
-| [V1 Architecture Baseline](./v1-architecture-baseline.md) | **Proposed — CTO Review required** | V1 产品拓扑、数据权威、可替换基础设施、Artifact/Workspace/Checkpoint、恢复边界和 P0B-06 开工门槛。 |
-| [V1 Execution Placement](./v1-execution-placement.md) | Proposed | 简单的 Mac/Cloud 位置调度策略；未来跨 **Run** 的 Checkpoint 恢复需要专题修订。 |
+| [V1 Architecture Baseline](./v1-architecture-baseline.md) | **Proposed — CTO Review required** | V1 产品拓扑、数据权威、可替换基础设施、Artifact/Workspace/Checkpoint、Mac Coding Harness Adapter、恢复边界和 P0B-06 开工门槛。 |
+| [V1 Execution Placement](./v1-execution-placement.md) | Proposed | 简单的 Mac/Cloud 位置调度策略；区分当前固定执行目标与未来需要专项 ADR 的跨 **Run** 恢复。 |
 | [Architecture RFC v0.2](./Personal_Agent_Platform_Architecture_RFC_v0.2.md) | 历史 Draft | UX / 安全 / 成本假设与候选技术研究，不能当作已实现范围。 |
 | [Architecture RFC v0.1](./Personal_Agent_Platform_Architecture_RFC_v0.1.md) | 历史 Draft | 早期 Always-on Agent、按需 Sandbox 架构探索。 |
 | [P0-B Minimum Vertical Slice Task Spec](./Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md) | 历史任务书 | 原定本地验证目标；通过情况以对应 Acceptance 文档为准。 |
@@ -27,7 +27,8 @@
 2. Baseline `12`：六项必须先决定的 B06-D1～B06-D6。
 3. [Execution Placement](./v1-execution-placement.md) 中关于设备权限、离线和重试的规则，以及待修订的跨 Run 恢复区别。
 4. ADR-0001/0002，`packages/domain`、`packages/contracts`、`packages/postgres`、`packages/execution` 当前实现。
-5. [P0B-05 实现记录](../P0B-05-IMPLEMENTATION.md)与[验收证据](../P0B-05-ACCEPTANCE.md)。
+5. Mac Harness Discovery/Adapters 属于独立 V1 专项工程，**不纳入 P0B-06**；不可把本机第三方 Session 当作可移植 Checkpoint。
+6. [P0B-05 实现记录](../P0B-05-IMPLEMENTATION.md)与[验收证据](../P0B-05-ACCEPTANCE.md)。
 
 P0B 各阶段的 Implementation/Acceptance 文件仍在 `docs/` 目录；Coding Agent 的工程 Prompt 在 [`docs/prompts/`](../prompts/)。
 

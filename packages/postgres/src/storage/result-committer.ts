@@ -331,7 +331,7 @@ function normalizeRequest(request: CommitStepRequest): NormalizedRequest {
         });
 
   const checkpoint =
-    request.checkpoint === undefined ? null : normalizeCheckpoint(request.checkpoint, artifacts);
+    request.checkpoint === undefined ? null : normalizeCheckpoint(request.checkpoint);
 
   const digestSource = {
     operationId: request.operationId,
@@ -380,7 +380,6 @@ function parseVersion(value: unknown): number {
 
 function normalizeCheckpoint(
   checkpoint: NonNullable<CommitStepRequest['checkpoint']>,
-  artifacts: readonly NormalizedArtifact[],
 ): NormalizedRequest['checkpoint'] {
   if (typeof checkpoint.stepId !== 'string' || !STEP_ID_PATTERN.test(checkpoint.stepId)) {
     invalid('checkpoint.stepId', 'invalid_step_id');
@@ -429,8 +428,6 @@ function normalizeCheckpoint(
 
     ids.add(entry.artifactId);
   }
-
-  void artifacts;
 
   return Object.freeze({
     stepId: checkpoint.stepId,

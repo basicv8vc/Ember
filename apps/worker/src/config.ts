@@ -22,6 +22,12 @@ export interface WorkerConfig {
   readonly mode: WorkerMode;
   readonly env: EmberEnv;
   readonly simulatedExecution: SimulatedExecutionMode;
+  /**
+   * Absolute path of the controlled blob root. When set, poll mode uses the durable
+   * `RunResultCommitter` (artifacts + checkpoint + atomic terminal commit); when absent it
+   * can only run the in-memory P0B-05 simulation.
+   */
+  readonly blobRoot: string | null;
   readonly workerId: string;
   readonly intervalMs: number;
   readonly errorBackoffMs: number;
@@ -44,6 +50,7 @@ const workerEnvSchema = z.object({
   EMBER_WORKER_RETRY_BASE_MS: z.coerce.number().int().min(100).max(60_000).default(1_000),
   EMBER_WORKER_RETRY_CAP_MS: z.coerce.number().int().min(100).max(300_000).default(30_000),
   EMBER_WORKER_REAPER_BATCH: z.coerce.number().int().min(1).max(100).default(50),
+  EMBER_WORKER_BLOB_ROOT: z.string().min(1).optional(),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -93,8 +100,8 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   if (mode === 'poll') {
     if (simulatedExecution !== 'local-only') {
       throw new WorkerConfigError(
-        'poll mode requires EMBER_WORKER_SIMULATED_EXECUTION=local-only: P0B-05 has no durable ' +
-          'execution result, so a claimed Task must not be treated as fully processed',
+        'poll mode requires EMBER_WORKER_SIMULATED_EXECUTION=local-only: a claimed Task must ' +
+          'not be treated as fully processed without an explicit simulated-execution opt-in',
       );
     }
 
@@ -110,6 +117,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     mode,
     env: parsed.data.EMBER_ENV,
     simulatedExecution,
+    blobRoot: parsed.data.EMBER_WORKER_BLOB_ROOT ?? null,
     workerId: workerId.data,
     intervalMs: parsed.data.EMBER_WORKER_INTERVAL_MS,
     errorBackoffMs: parsed.data.EMBER_WORKER_ERROR_BACKOFF_MS,

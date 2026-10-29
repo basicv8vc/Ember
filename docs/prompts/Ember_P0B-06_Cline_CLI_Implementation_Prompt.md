@@ -34,7 +34,7 @@
 
 **Checkpoint**：有 `schemaVersion`、来源 tenant/task/run/epoch、stable Step/operation IDs、执行器/输入兼容性、逻辑游标、已发布 Artifact、Workspace 版本、外部副作用核验状态。仅提交完毕的 CP 可恢复；新 Run 获取新 epoch 写权，旧 CP 仅作只读恢复输入。不得存储宿主机路径、密钥或 Harness 私有会话作为可移植恢复事实。
 
-**原子结果提交**：同一事务在取得必要的 Task/Run/Workspace 行锁后按权威时钟重新校验有效 lease、取消/Deadline、当前 Run 与 epoch、输入版本和 CAS。所有 DB metadata/Checkpoint/Event/FSM 更新要么整体提交，要么整体回滚。不可先独立 `WorkspaceStore.commit()` 后调用 `LeaseQueue.finish()` 造成部分成功。已有 `LeaseQueue.finish()` 的回归语义必须保留；如需改造共用事务逻辑，避免双终态 Event。重复 commit operation ID 且内容相同应稳定返回原结果，不同内容稳定冲突；旧 epoch 全部无写入副作用。
+**原子结果提交**：同一事务在取得必要的 Task/Run/Workspace 行锁后用锁后权威时钟（例如 PG `clock_timestamp()`，**不能使用事务开始时的 `now()` 冒充锁后时间**）重新校验有效 lease、取消/Deadline、当前 Run 与 epoch、输入版本和 CAS。所有 DB metadata/Checkpoint/Event/FSM 更新要么整体提交，要么整体回滚。不可先独立 `WorkspaceStore.commit()` 后调用 `LeaseQueue.finish()` 造成部分成功。已有 `LeaseQueue.finish()` 的回归语义必须保留；如需改造共用事务逻辑，避免双终态 Event。重复 commit operation ID 且内容相同应稳定返回原结果，不同内容稳定冲突；旧 epoch 全部无写入副作用。若 Commit 已成功但 ACK 丢失，过期 caller 只可在可信验证后**只读获取原 receipt**，不得再次写入。CAS 失败的结果提交事务完整回滚；如需留存冲突候选，另以独立、幂等、非终态事务固定双方数据并禁止 GC 清除待决冲突。
 
 **状态/事件**：只走 Domain FSM，终态不可重写；`TaskEventPayload` 必须保持安全 allowlist（不可写入 Prompt、文件正文、绝对路径、令牌）。变更事件 schema 必须同时校对 Domain、Zod 和 SQL allowlist。冲突不能假装任务已经 completed，且不得擅自添加未批准的新状态机边。
 

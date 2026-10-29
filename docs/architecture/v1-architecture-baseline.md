@@ -1,11 +1,11 @@
-# Ember V1 — Architecture Baseline（正式架构基线草案）
+# Ember V1 — Architecture Baseline（V1 正式架构基线）
 
-> **状态：Proposed / 待 CTO Architecture Review；尚未批准，不代表代码已实现**  
-> **版本：v0.2 · 2026-10-29（新增 Mac Harness 集成目标，仍为 Proposed）**  
+> **状态：Accepted — 已通过 CTO Architecture Review，并随 PR #8 合并到 `main`（不代表代码已实现）**  
+> **版本：v1.0 · 2026-10-29（PR #8 内容不变，仅由 Proposed 更新为 Accepted）**  
 > **Owner：Ember Product / CTO / Architecture**  
-> **基线：`main` @ `b5b400fe35edc3dc34bacb19269cfa043d21878d`（P0B-01～05 已合并）**  
+> **代码基线：`main` @ `b5b400fe35edc3dc34bacb19269cfa043d21878d`（P0B-01～05 已合并）；本文件 Accepted 版本：`main` @ `70751aba0c9d70ecb1685d4d4656e6eca95fa97c`（PR #8 合并点）**  
 > **适用范围：V1 iOS + macOS App、云端 Control Plane、Mac/Cloud Execution、数据持久化与同步**  
-> **下一门槛：在 P0B-06 工程 Prompt 下发前完成本文件和关键 ADR 的审查**
+> **下一门槛：P0B-06 工程 Prompt 下发前仍须先冻结第 12 节的 B06-D1～D6 契约**
 
 ## 0. 本文件解决什么问题
 
@@ -18,17 +18,17 @@ Ember 是 Personal Agent Platform，不是一人一台长期运行的 VM。一�
 - **拟议工程契约（Proposed implementation）**：为达成目标推荐的设计，仍需 CTO 审查和专项 ADR。
 - **未实现 / 延后（Deferred）**：不允许 Coding Agent 把设计文档当作功能测试通过的证据。
 
-**文档权威规则：**适用范围内已经 Accepted 的 `docs/adr/` 决策优先约束其具体事项；本 Baseline **被 Accepted 后**约束跨模块的整体架构；已合并代码和测试决定“现在实现了什么”；已审查专题设计细化 Baseline；历史 RFC/任务书仅记录设计背景。冲突必须显式报告，不得静默选择较方便的版本。旧 RFC v0.2 中的 `ADR-001` 等内部编号不是 `docs/adr/0001-*` 的同一编号体系。
+**文档权威规则：**适用范围内已经 Accepted 的 `docs/adr/` 决策优先约束其具体事项；本 Baseline 已为 **Accepted**（PR #8，2026-10-29）并约束跨模块的整体架构；已合并代码和测试决定“现在实现了什么”；已审查专题设计细化 Baseline；历史 RFC/任务书仅记录设计背景。冲突必须显式报告，不得静默选择较方便的版本。旧 RFC v0.2 中的 `ADR-001` 等内部编号不是 `docs/adr/0001-*` 的同一编号体系。
 
 ## 1. 产品边界与参与者
 
-| 参与者 | V1 应负责 | 禁止默认承担 |
-| --- | --- | --- |
-| **iOS App** | 与 Agent 交互、下发/取消任务、追踪进度与文件、审批、通知、授权同步。 | 任意常驻后台执行、直接访问权威数据库。 |
-| **macOS App** | 与 iOS 相同的交互能力，加上经过授权的本地 Executor；发现用户安装的 Coding Harness（如 Codex、Claude Code、Pi）并在用户授权后委托其执行编程任务。 | 成为云端共享状态唯一来源；持有云端数据库管理员凭据；安装即默认执行或自动获得全盘权限。 |
-| **Cloud Control Plane** | 永久在线可访问的任务入口、认证授权、Agent/Task/Run/Event 权威状态、调度、持久化、设备管理、结果提交、通知。 | 每个 Agent 必须永久占用一台 VM、一个进程或一个模型会话。 |
-| **Cloud Executor / Sandbox** | 按需获得受限能力、执行获授权任务、上传受检验输出。 | 长期 Agent 身份、永久 Workspace 根目录、无限制数据与密钥访问。 |
-| **共享持久化层** | 加密保存长期记忆、共享 Workspace、已授权同步文件、Artifact、Checkpoint、任务历史。 | 默默同步 Mac 私人文件，或把 Sandbox 临时磁盘当权威副本。 |
+| 参与者                       | V1 应负责                                                                                                                                        | 禁止默认承担                                                                           |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------- |
+| **iOS App**                  | 与 Agent 交互、下发/取消任务、追踪进度与文件、审批、通知、授权同步。                                                                             | 任意常驻后台执行、直接访问权威数据库。                                                 |
+| **macOS App**                | 与 iOS 相同的交互能力，加上经过授权的本地 Executor；发现用户安装的 Coding Harness（如 Codex、Claude Code、Pi）并在用户授权后委托其执行编程任务。 | 成为云端共享状态唯一来源；持有云端数据库管理员凭据；安装即默认执行或自动获得全盘权限。 |
+| **Cloud Control Plane**      | 永久在线可访问的任务入口、认证授权、Agent/Task/Run/Event 权威状态、调度、持久化、设备管理、结果提交、通知。                                      | 每个 Agent 必须永久占用一台 VM、一个进程或一个模型会话。                               |
+| **Cloud Executor / Sandbox** | 按需获得受限能力、执行获授权任务、上传受检验输出。                                                                                               | 长期 Agent 身份、永久 Workspace 根目录、无限制数据与密钥访问。                         |
+| **共享持久化层**             | 加密保存长期记忆、共享 Workspace、已授权同步文件、Artifact、Checkpoint、任务历史。                                                               | 默默同步 Mac 私人文件，或把 Sandbox 临时磁盘当权威副本。                               |
 
 **交互入口与执行位置互相独立。** iPhone 下发的任务可以交给已授权 Mac；Mac 上发起的任务同样可以在云端执行。客户端关闭不取消已持久化接受的任务。Mac 关机后 Control Plane 仍可接收消息，但依赖其私人能力的任务必须等待、显式失败或请求用户操作。
 
@@ -72,10 +72,10 @@ Infrastructure Adapters (PostgreSQL, local Blob, later object store / other DB)
 
 沿用 [`v1-execution-placement.md`](./v1-execution-placement.md) 中的两个独立概念：
 
-| 决策 | 取值 | 作用 |
-| --- | --- | --- |
-| **Execution Placement** | 用户偏好 `auto \| cloud \| mac`，解析为云端或指定 Mac | **在哪里**执行 |
-| **Execution Router** | `fast \| standard \| heavy` | **以什么执行等级/资源路径**执行 |
+| 决策                    | 取值                                                  | 作用                            |
+| ----------------------- | ----------------------------------------------------- | ------------------------------- |
+| **Execution Placement** | 用户偏好 `auto \| cloud \| mac`，解析为云端或指定 Mac | **在哪里**执行                  |
+| **Execution Router**    | `fast \| standard \| heavy`                           | **以什么执行等级/资源路径**执行 |
 
 V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI 自由猜测：
 
@@ -118,15 +118,15 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 
 ## 5. 持久数据所有权、加密、同步
 
-| 数据类别 | 权威持有与生命周期 | V1 默认权限 |
-| --- | --- | --- |
-| **Agent 长期记忆** | 加密云端权威存储；带来源和变更历史，检索索引是可重建派生物。 | 只授予有权用户与具体执行所需的受限读取。 |
-| **共享 Workspace** | 云端权威、带版本的逻辑 Manifest；历史版本供合并、Checkpoint 引用与审计。 | 已认证设备和 Executor 通过受限 API 访问。 |
-| **用户主动保存的 Artifact** | Tenant 拥有的持久逻辑对象；即便未挂到 Workspace 也可以单独存在。 | 依用户文件库权限与保留策略授权读取/删除。 |
-| **Task 执行期间生成的暂存 Blob** | 私有、不可直接被当成已发布 Artifact；只有验证和提交后才可见。 | 运行时受限，失败后需可审计清理。 |
-| **Mac 私人文件 / App 状态 / 凭据** | 默认仅保留在 Mac，**不自动上传、索引、备份到云端**。 | 用户明确同步授权前，云端无权读取。 |
-| **iOS / macOS 缓存与离线编辑** | 本地可重建投影，编辑携带共同基线；不得覆盖云端权威版本。 | 同步时通过服务端验证与 CAS。 |
-| **Sandbox 临时盘** | 可随 Runtime 销毁。 | 不能成为唯一持久恢复来源。 |
+| 数据类别                           | 权威持有与生命周期                                                       | V1 默认权限                               |
+| ---------------------------------- | ------------------------------------------------------------------------ | ----------------------------------------- |
+| **Agent 长期记忆**                 | 加密云端权威存储；带来源和变更历史，检索索引是可重建派生物。             | 只授予有权用户与具体执行所需的受限读取。  |
+| **共享 Workspace**                 | 云端权威、带版本的逻辑 Manifest；历史版本供合并、Checkpoint 引用与审计。 | 已认证设备和 Executor 通过受限 API 访问。 |
+| **用户主动保存的 Artifact**        | Tenant 拥有的持久逻辑对象；即便未挂到 Workspace 也可以单独存在。         | 依用户文件库权限与保留策略授权读取/删除。 |
+| **Task 执行期间生成的暂存 Blob**   | 私有、不可直接被当成已发布 Artifact；只有验证和提交后才可见。            | 运行时受限，失败后需可审计清理。          |
+| **Mac 私人文件 / App 状态 / 凭据** | 默认仅保留在 Mac，**不自动上传、索引、备份到云端**。                     | 用户明确同步授权前，云端无权读取。        |
+| **iOS / macOS 缓存与离线编辑**     | 本地可重建投影，编辑携带共同基线；不得覆盖云端权威版本。                 | 同步时通过服务端验证与 CAS。              |
+| **Sandbox 临时盘**                 | 可随 Runtime 销毁。                                                      | 不能成为唯一持久恢复来源。                |
 
 共享云端数据需加密存储与加密传输。V1 采用**服务端受控密钥**的授权访问模型：Cloud Executor 可在用户明确授权和任务允许的数据范围内解密处理；这不是零知识或端到端加密承诺。生产版本上线前需另行审查密钥托管/轮换/撤销、数据保留与删除、审计、设备丢失恢复和备份。
 
@@ -136,16 +136,16 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 
 产品核心通过**能力接口**而不是 SQL 客户端接口访问数据库；`@ember/domain` 不依赖 PG、对象存储、文件系统或云服务商。V1 不为了“可替换”提前维护多套生产级数据库：
 
-| 能力端口 | 当前 / V1 方向 | 必须保留的正确性 |
-| --- | --- | --- |
-| `TaskRepository`、`LeaseQueue`、可信 Run Context Reader | 已有 PostgreSQL Adapter | 幂等、Tenant 隔离、单赢家 Claim、Lease/Fencing、事务提交。 |
-| `WorkspaceStore` | P0B-06 PG 元数据 + 版本化 Manifest | CAS、历史版本、跨 Tenant 引用校验。 |
-| `BlobStore` / `ArtifactService`（拟拆分） | 本地文件 Adapter；未来可接对象存储 | 授权、大小/Hash 校验、不可变内容、暂存/发布隔离。 |
-| `CheckpointStore` | 持久元数据和已提交 Artifact 引用 | Tenant/Run 归属、版本兼容、Fencing。 |
-| `RunResultCommitter`（拟议） | 一次权威 PG 事务 | 校验当前 Run/epoch/Deadline + Workspace CAS；原子发布 Artifact 引用、Workspace、Checkpoint、Event、Run 终态。 |
-| `MemoryRepository` / `MemorySearch`（未来） | 云端事务存储；可替换检索索引 | 来源与授权不可丢，检索索引可重建。 |
-| Mac 本地缓存 | SQLite / 本地文件（未来） | 不是云端调度数据库的等价替代。 |
-| `CodingHarnessRegistry` / `CodingHarnessAdapter`（未来） | Mac 本地独立适配器，ACP / Codex App Server / Claude Agent SDK / Pi RPC | 探测与授权分离、会话独立于 Run、权限请求、取消、Fencing 和输出 CAS。 |
+| 能力端口                                                 | 当前 / V1 方向                                                         | 必须保留的正确性                                                                                              |
+| -------------------------------------------------------- | ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `TaskRepository`、`LeaseQueue`、可信 Run Context Reader  | 已有 PostgreSQL Adapter                                                | 幂等、Tenant 隔离、单赢家 Claim、Lease/Fencing、事务提交。                                                    |
+| `WorkspaceStore`                                         | P0B-06 PG 元数据 + 版本化 Manifest                                     | CAS、历史版本、跨 Tenant 引用校验。                                                                           |
+| `BlobStore` / `ArtifactService`（拟拆分）                | 本地文件 Adapter；未来可接对象存储                                     | 授权、大小/Hash 校验、不可变内容、暂存/发布隔离。                                                             |
+| `CheckpointStore`                                        | 持久元数据和已提交 Artifact 引用                                       | Tenant/Run 归属、版本兼容、Fencing。                                                                          |
+| `RunResultCommitter`（拟议）                             | 一次权威 PG 事务                                                       | 校验当前 Run/epoch/Deadline + Workspace CAS；原子发布 Artifact 引用、Workspace、Checkpoint、Event、Run 终态。 |
+| `MemoryRepository` / `MemorySearch`（未来）              | 云端事务存储；可替换检索索引                                           | 来源与授权不可丢，检索索引可重建。                                                                            |
+| Mac 本地缓存                                             | SQLite / 本地文件（未来）                                              | 不是云端调度数据库的等价替代。                                                                                |
+| `CodingHarnessRegistry` / `CodingHarnessAdapter`（未来） | Mac 本地独立适配器，ACP / Codex App Server / Claude Agent SDK / Pi RPC | 探测与授权分离、会话独立于 Run、权限请求、取消、Fencing 和输出 CAS。                                          |
 
 当前 `ArtifactStore` 的签名需要已验证用户 `AuthContext`，而远端 Executor 应使用经过验证的**受限 Run 授权**。P0B-06 需要设计相应的独立端口或应用服务；**禁止**伪造用户 `principalId`。
 
@@ -169,12 +169,12 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 
 共同基线是安全合并的前提。任何共享编辑应包含经授权的 `workspaceId`、`baseVersion`、变更集合、actor/Run 来源和稳定 operation ID。提交时在服务端以实际云端版本验证；CAS 成功后版本单调递增。遇到并发提交时只允许有界的重新读取/合并/再次 CAS；不能降级为 last-write-wins。
 
-| 竞争编辑 | 处理 |
-| --- | --- |
-| 云端版本没有变化 | 直接 CAS 提交。 |
-| 两端修改不同的独立逻辑路径 | 允许确定性、安全的自动合并后再 CAS。 |
-| 同一小型文本文件的非重叠修改 | 仅在该格式明确允许、三方文本合并和语法/权限校验通过后才可自动应用；语法通过不保证业务语义正确。 |
-| 同一区域修改、删除 vs 修改、重命名冲突、二进制、敏感配置或权限变更 | **不覆盖**；保留两侧不可变版本、生成持久冲突记录，由用户决定。 |
+| 竞争编辑                                                           | 处理                                                                                            |
+| ------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| 云端版本没有变化                                                   | 直接 CAS 提交。                                                                                 |
+| 两端修改不同的独立逻辑路径                                         | 允许确定性、安全的自动合并后再 CAS。                                                            |
+| 同一小型文本文件的非重叠修改                                       | 仅在该格式明确允许、三方文本合并和语法/权限校验通过后才可自动应用；语法通过不保证业务语义正确。 |
+| 同一区域修改、删除 vs 修改、重命名冲突、二进制、敏感配置或权限变更 | **不覆盖**；保留两侧不可变版本、生成持久冲突记录，由用户决定。                                  |
 
 用户可在 iPhone 简单选择“保留 Mac / 保留云端 / 两个都保留 / 稍后处理”，在 Mac 查看差异和手动合并。未来 Agent 可以提出合并建议，但有争议的内容未经用户批准不得自动应用。冲突必须保留两侧内容和来源，不能因为一次错误合并导致数据消失。
 
@@ -208,12 +208,12 @@ Checkpoint 应版本化地记录：
 
 ## 9. 四种长期数据不能混为一谈
 
-| 数据类别 | 核心生命周期 | 未来扩展 |
-| --- | --- | --- |
-| **Long-term Memory** | 有来源、有权限、可修正/删除的长期知识；云端权威。 | 向量/全文检索属于可重建派生索引，具体记忆写入与合并政策另行审查。 |
-| **Workspace** | 可变逻辑文件清单，以 Manifest 版本和 CAS 管理；保留共同基线。 | 更细粒度自动合并、协作与冲突 UI。 |
-| **Artifact** | 已验证不可变内容和授权元数据；可以单独保存或被多版本 Workspace 引用。 | File/Object Storage Adapter、保留期、GC、加密。 |
-| **Checkpoint** | Task/Run/Step 已确认的逻辑执行快照与依赖引用。 | 跨 Executor 恢复、兼容性升级、工作流重放。 |
+| 数据类别             | 核心生命周期                                                          | 未来扩展                                                          |
+| -------------------- | --------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| **Long-term Memory** | 有来源、有权限、可修正/删除的长期知识；云端权威。                     | 向量/全文检索属于可重建派生索引，具体记忆写入与合并政策另行审查。 |
+| **Workspace**        | 可变逻辑文件清单，以 Manifest 版本和 CAS 管理；保留共同基线。         | 更细粒度自动合并、协作与冲突 UI。                                 |
+| **Artifact**         | 已验证不可变内容和授权元数据；可以单独保存或被多版本 Workspace 引用。 | File/Object Storage Adapter、保留期、GC、加密。                   |
+| **Checkpoint**       | Task/Run/Step 已确认的逻辑执行快照与依赖引用。                        | 跨 Executor 恢复、兼容性升级、工作流重放。                        |
 
 LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移植 Checkpoint。Agent 私人记忆的提取、自动写入、来源可信度、遗忘和用户控制，属于下一轮专题决策，P0B-06 不应该假装已实现 MemoryOS。
 
@@ -230,22 +230,22 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 9. **Harness is not a sandbox：**本机第三方 Coding Agent 运行时可拥有较广的 OS 权限；仅发现/启动成功不等于已获得用户授权或具有强隔离。授权请求不得自动全允，工具输出/外部代码视为不可信输入。
 10. **Provider independence：**不得把 Codex/Claude/Pi 的可执行路径、私有 Session 格式、配置文件或账户令牌作为 Ember Task、Workspace、Checkpoint 的持久身份。
 
-## 11. 实现进度和 Roadmap（截至本草案）
+## 11. 实现进度和 Roadmap（截至 Baseline 接受时）
 
-| 工作包 | 现有实现 | 尚未实现 / 不能声称通过 |
-| --- | --- | --- |
-| **P0B-01** | Node 24 / strict TypeScript、Hono、PG17 本地、Migration、CI、基础日志和探针。 | 生产控制面 HA。 |
-| **P0B-02** | 纯领域 FSM、领域错误、Zod 合同、抽象的 Repository/Provider 接口。 | 完整 HTTP AuthZ 与长期记忆服务。 |
-| **P0B-03** | Tenant-safe Agent/Task/Run 基础表、幂等创建与事件原子性。 | Artifact/Checkpoint 实际持久化。 |
-| **P0B-04** | Lease/Heartbeat/Reaper/Fencing/Retry/Cancel；ADR-0001/0002。 | 远端 Executor Gateway、跨设备恢复。 |
-| **P0B-05** | 确定性 Execution Router、FakeLLM、FakeSandbox、受限 Worker Poll。 | 真实模型、持久输出、云 Sandbox、Mac Executor。 |
-| **P0B-06** | **尚未开始**。 | Artifact Store、Workspace CAS/历史、Checkpoint、原子结果提交。 |
-| **P0B-07** | 尚未开始。 | Task HTTP API、Tenant AuthZ、SSE/reconnect。 |
-| **P0B-08** | 尚未开始。 | 完整协作式取消、审批、预算与副作用策略。 |
-| **P0B-09** | 尚未开始。 | Telemetry、Chaos、Load 与真实恢复证据。 |
-| **P0B-10** | 尚未开始。 | 本地垂直闭环 Demo、最终验收。 |
-| **V1 App/Cloud 扩展阶段** | 架构目标已讨论。 | iOS/macOS App、设备身份、Gateway、真实云 Executor、授权同步与跨 Run 恢复。 |
-| **V1 Mac Harness Integration（独立阶段）** | 已形成产品决策，尚无实现。 | 安全安装发现、用户授权、ACP/Native Adapter、Run-Session 生命周期、审计、CAS 产物接入和版本兼容矩阵。 |
+| 工作包                                     | 现有实现                                                                      | 尚未实现 / 不能声称通过                                                                              |
+| ------------------------------------------ | ----------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **P0B-01**                                 | Node 24 / strict TypeScript、Hono、PG17 本地、Migration、CI、基础日志和探针。 | 生产控制面 HA。                                                                                      |
+| **P0B-02**                                 | 纯领域 FSM、领域错误、Zod 合同、抽象的 Repository/Provider 接口。             | 完整 HTTP AuthZ 与长期记忆服务。                                                                     |
+| **P0B-03**                                 | Tenant-safe Agent/Task/Run 基础表、幂等创建与事件原子性。                     | Artifact/Checkpoint 实际持久化。                                                                     |
+| **P0B-04**                                 | Lease/Heartbeat/Reaper/Fencing/Retry/Cancel；ADR-0001/0002。                  | 远端 Executor Gateway、跨设备恢复。                                                                  |
+| **P0B-05**                                 | 确定性 Execution Router、FakeLLM、FakeSandbox、受限 Worker Poll。             | 真实模型、持久输出、云 Sandbox、Mac Executor。                                                       |
+| **P0B-06**                                 | **尚未开始**。                                                                | Artifact Store、Workspace CAS/历史、Checkpoint、原子结果提交。                                       |
+| **P0B-07**                                 | 尚未开始。                                                                    | Task HTTP API、Tenant AuthZ、SSE/reconnect。                                                         |
+| **P0B-08**                                 | 尚未开始。                                                                    | 完整协作式取消、审批、预算与副作用策略。                                                             |
+| **P0B-09**                                 | 尚未开始。                                                                    | Telemetry、Chaos、Load 与真实恢复证据。                                                              |
+| **P0B-10**                                 | 尚未开始。                                                                    | 本地垂直闭环 Demo、最终验收。                                                                        |
+| **V1 App/Cloud 扩展阶段**                  | 架构目标已讨论。                                                              | iOS/macOS App、设备身份、Gateway、真实云 Executor、授权同步与跨 Run 恢复。                           |
+| **V1 Mac Harness Integration（独立阶段）** | 已形成产品决策，尚无实现。                                                    | 安全安装发现、用户授权、ACP/Native Adapter、Run-Session 生命周期、审计、CAS 产物接入和版本兼容矩阵。 |
 
 本表是“已合并能力与未来目标”的区分，而非商业发布进度。P0B-05 的 `poll` 为显式开启的非生产本地模拟（`EMBER_WORKER_SIMULATED_EXECUTION=local-only`）；当前没有真实持久化 Artifact。根目录 README 中关于 P0B-04/P0B-05 的历史状态有过时表述，后续文档维护应同步修正。
 
@@ -253,27 +253,27 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 
 **在 Cline CLI 工程 Prompt 下发之前，CTO 至少需明确以下 B06 决策：**
 
-| 编号 | 需要冻结的契约 | 验收或阻断条件 |
-| --- | --- | --- |
-| **B06-D1** | 用户保存 Artifact 与任务 staging Blob 的生命周期、权限、数据保留、Hash、GC。 | 上传成功但数据库失败不可伪造用户文件；GC 不删仍被历史/用户保留引用的 Blob。 |
-| **B06-D2** | Manifest 的逻辑 ID、版本历史、CAS、共同祖先、自动合并范围和冲突记录。 | 两个独立写者不会覆盖；冲突数据完整保留，不能静默 last-write-wins。 |
-| **B06-D3** | `RunResultCommitter` 或等价原子服务；Run 授权与用户 `AuthContext` 的分离。 | 结果提交、Workspace CAS、Checkpoint、Event 和终态必须在事务边界内保持一致；旧 Epoch 全拒绝。 |
-| **B06-D4** | Checkpoint Schema、兼容版本、最小状态、发布时机、同环境恢复和副作用幂等。 | Crash 后从最近已提交逻辑 Step 恢复；不宣称 VM 内存迁移。 |
-| **B06-D5** | 存储 Ports/Adapter 的能力测试、路径及跨 Tenant 访问防护。 | 真实 PG 并发、故障注入、丢 ACK、CAS、Fencing、staging 清理正反例。 |
-| **B06-D6** | Execution Placement 中关于未来**跨 Run**恢复和“运行中迁移”的表述一致性。 | 不允许与已发布 Placement 策略形成隐性冲突；P0B-06 不自动实现改派。 |
+| 编号       | 需要冻结的契约                                                               | 验收或阻断条件                                                                               |
+| ---------- | ---------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| **B06-D1** | 用户保存 Artifact 与任务 staging Blob 的生命周期、权限、数据保留、Hash、GC。 | 上传成功但数据库失败不可伪造用户文件；GC 不删仍被历史/用户保留引用的 Blob。                  |
+| **B06-D2** | Manifest 的逻辑 ID、版本历史、CAS、共同祖先、自动合并范围和冲突记录。        | 两个独立写者不会覆盖；冲突数据完整保留，不能静默 last-write-wins。                           |
+| **B06-D3** | `RunResultCommitter` 或等价原子服务；Run 授权与用户 `AuthContext` 的分离。   | 结果提交、Workspace CAS、Checkpoint、Event 和终态必须在事务边界内保持一致；旧 Epoch 全拒绝。 |
+| **B06-D4** | Checkpoint Schema、兼容版本、最小状态、发布时机、同环境恢复和副作用幂等。    | Crash 后从最近已提交逻辑 Step 恢复；不宣称 VM 内存迁移。                                     |
+| **B06-D5** | 存储 Ports/Adapter 的能力测试、路径及跨 Tenant 访问防护。                    | 真实 PG 并发、故障注入、丢 ACK、CAS、Fencing、staging 清理正反例。                           |
+| **B06-D6** | Execution Placement 中关于未来**跨 Run**恢复和“运行中迁移”的表述一致性。     | 不允许与已发布 Placement 策略形成隐性冲突；P0B-06 不自动实现改派。                           |
 
 ### 12.1 CTO Architecture Review — P0B-06 契约冻结建议（2026-10-29）
 
-以下是审查现有 `@ember/contracts`、领域 FSM、0002/0003 Migration 和 P0-B Task Spec 后的**保守实施决议**。在本 PR 合并前仍属 Proposed；实现 Agent 不得自行更改这些边界：
+以下是审查现有 `@ember/contracts`、领域 FSM、0002/0003 Migration 和 P0-B Task Spec 后的**保守实施决议**。已随 PR #8 合并并按本文件 Accepted 状态生效；实现 Agent 不得自行更改这些边界：
 
-| Gate | P0B-06 采用的最小可验证设计 | 明确延后 |
-| --- | --- | --- |
-| **B06-D1** | 分离不可变 `Blob`、仅任务可见的 `StagedBlob` 与正式授权 `Artifact`；上传的 bytes/size/SHA 校验完成也**不自动发布**。用户主动保存或被历史 Workspace/Checkpoint 引用的内容不得随意 GC。孤儿 staging 仅在可证明无引用且过可配置隔离窗口后清理。 | 真实云对象存储、生产 KMS/轮换、复杂存储配额与商业计费。 |
-| **B06-D2** | `Workspace` 按 `tenantId + workspaceId` 隔离；Manifest 条目采用经规范化且唯一的逻辑相对路径，禁止穿越/符号链接逃逸；版本历史不可变；提交以 `expectedVersion` CAS。V1 最小自动合并仅在双方使用**已知共同基线**、修改路径完全不交叉且操作不含删除/重命名/权限/敏感元数据时尝试；其余保留两份候选产物和冲突元数据供用户决策，不修改权威版本。 | 通用文本三方合并、CRDT、AI 自动修改冲突、交互式冲突 UI（可在后续阶段接入）。 |
-| **B06-D3** | 拆分用户 `AuthContext` 与由服务端验证的 scoped Run 执行授权；既有 `ArtifactStore.put(AuthContext)` / `WorkspaceStore.commit(AuthContext)` 不得由 Worker 伪造 principal 调用。单一可信 `RunResultCommitter` 在**一个 PG 事务**中锁定并核验 tenant/task/currentRun/epoch/attempt/有效 lease/Deadline/cancel，执行 Artifact 元数据发布、Workspace CAS、Checkpoint 引用、唯一终态 Event、合法 FSM 与 Run 终态。此前 staging 的 Blob 写不属于 PG ACID；必须有失败回收与重复 Commit 幂等键。不得先写 Workspace 后单独调用旧 `LeaseQueue.finish()`。 | 分布式 2PC、跨云对象存储 ACID、直接对外暴露 Executor DB 凭据。 |
-| **B06-D4** | 版本化、最小、可序列化的**逻辑 Step Checkpoint**：来源 Tenant/Task/Run/epoch、step/cursor、输入与执行器兼容版本、Workspace 版本、已提交 Artifact、外部操作标识及副作用核验状态。Step 发布和引用一致性必须在有权 Run 的单次事务中核验；每次恢复只读最近已提交且兼容的 Checkpoint，新 Run/epoch 获得自己的写权。ACK 丢失需幂等重放；未确认的外部副作用不得自动重复。 | 任意 Harness 私有 Session、OS/VM/Browser 内存热迁移及跨 Mac/Cloud 真正远程恢复。 |
-| **B06-D5** | V1 真实权威 Adapter 保持 PostgreSQL + 本地受控 Blob 文件存储，但领域和应用层只依赖能力 Port，禁止 SQL/宿主机路径泄入持久身份。必须在真实 PG 独立连接/故障注入下证实 CAS 单赢家、跨 Tenant/越界路径拒绝、坏 Hash/缺 Blob、旧 Epoch 零写、Event 失败整笔回滚、DB Commit 后丢 ACK 幂等重放及孤儿 staging 不可读。 | 第二个生产数据库 Adapter、云存储性能/SLA 推断。 |
-| **B06-D6** | 本 PR 同步修订 `v1-execution-placement.md`：**单次 Run 不能热迁移**；未来仅允许新 Run 在授权和兼容性复核后从已提交逻辑 Checkpoint 条件恢复。P0B-06 不实现自动改派。 | 设备身份/Gateway、跨设备能力探测和自动位置切换策略。 |
+| Gate       | P0B-06 采用的最小可验证设计                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   | 明确延后                                                                         |
+| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| **B06-D1** | 分离不可变 `Blob`、仅任务可见的 `StagedBlob` 与正式授权 `Artifact`；上传的 bytes/size/SHA 校验完成也**不自动发布**。用户主动保存或被历史 Workspace/Checkpoint 引用的内容不得随意 GC。孤儿 staging 仅在可证明无引用且过可配置隔离窗口后清理。                                                                                                                                                                                                                                                                                                  | 真实云对象存储、生产 KMS/轮换、复杂存储配额与商业计费。                          |
+| **B06-D2** | `Workspace` 按 `tenantId + workspaceId` 隔离；Manifest 条目采用经规范化且唯一的逻辑相对路径，禁止穿越/符号链接逃逸；版本历史不可变；提交以 `expectedVersion` CAS。V1 最小自动合并仅在双方使用**已知共同基线**、修改路径完全不交叉且操作不含删除/重命名/权限/敏感元数据时尝试；其余保留两份候选产物和冲突元数据供用户决策，不修改权威版本。                                                                                                                                                                                                    | 通用文本三方合并、CRDT、AI 自动修改冲突、交互式冲突 UI（可在后续阶段接入）。     |
+| **B06-D3** | 拆分用户 `AuthContext` 与由服务端验证的 scoped Run 执行授权；既有 `ArtifactStore.put(AuthContext)` / `WorkspaceStore.commit(AuthContext)` 不得由 Worker 伪造 principal 调用。单一可信 `RunResultCommitter` 在**一个 PG 事务**中锁定并核验 tenant/task/currentRun/epoch/attempt/有效 lease/Deadline/cancel，执行 Artifact 元数据发布、Workspace CAS、Checkpoint 引用、唯一终态 Event、合法 FSM 与 Run 终态。此前 staging 的 Blob 写不属于 PG ACID；必须有失败回收与重复 Commit 幂等键。不得先写 Workspace 后单独调用旧 `LeaseQueue.finish()`。 | 分布式 2PC、跨云对象存储 ACID、直接对外暴露 Executor DB 凭据。                   |
+| **B06-D4** | 版本化、最小、可序列化的**逻辑 Step Checkpoint**：来源 Tenant/Task/Run/epoch、step/cursor、输入与执行器兼容版本、Workspace 版本、已提交 Artifact、外部操作标识及副作用核验状态。Step 发布和引用一致性必须在有权 Run 的单次事务中核验；每次恢复只读最近已提交且兼容的 Checkpoint，新 Run/epoch 获得自己的写权。ACK 丢失需幂等重放；未确认的外部副作用不得自动重复。                                                                                                                                                                            | 任意 Harness 私有 Session、OS/VM/Browser 内存热迁移及跨 Mac/Cloud 真正远程恢复。 |
+| **B06-D5** | V1 真实权威 Adapter 保持 PostgreSQL + 本地受控 Blob 文件存储，但领域和应用层只依赖能力 Port，禁止 SQL/宿主机路径泄入持久身份。必须在真实 PG 独立连接/故障注入下证实 CAS 单赢家、跨 Tenant/越界路径拒绝、坏 Hash/缺 Blob、旧 Epoch 零写、Event 失败整笔回滚、DB Commit 后丢 ACK 幂等重放及孤儿 staging 不可读。                                                                                                                                                                                                                                | 第二个生产数据库 Adapter、云存储性能/SLA 推断。                                  |
+| **B06-D6** | 本 Baseline（PR #8）同步修订 `v1-execution-placement.md`：**单次 Run 不能热迁移**；未来仅允许新 Run 在授权和兼容性复核后从已提交逻辑 Checkpoint 条件恢复。P0B-06 不实现自动改派。                                                                                                                                                                                                                                                                                                                                                             | 设备身份/Gateway、跨设备能力探测和自动位置切换策略。                             |
 
 **实现细节保护线：**
 
@@ -290,18 +290,20 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 
 ### 后续实施顺序
 
-1. **P0B-ARCH（当前）：**评审此 Baseline、既有 Placement 与关键 B06 ADR；批准后才发布 P0B-06 Prompt。
+1. **P0B-ARCH（已完成）：**本 Baseline、既有 Placement 与关键 B06 决策已通过 CTO Architecture Review 并随 PR #8 合并；P0B-06 Prompt 仍须在 B06-D1～D6 契约冻结后发布。
 2. **P0B-06：**真实本地 Blob + PG 元数据、Workspace CAS、逻辑 Checkpoint、Fenced Commit、恢复及安全负向测试。
 3. **P0B-07～10：**按原 P0-B 任务书完成 API/AuthZ/SSE、审批/预算、故障与负载、Demo/证据。
 4. **V1 专项工程：**iOS/macOS、设备身份和 Executor Gateway、真实云执行与授权数据同步、符合策略的跨 Run Checkpoint 恢复；Mac Harness Discovery/Adapters 作为独立里程碑，需独立设计和真机/云端验收。
 
 ## 13. 文档索引与变更管理
 
-- [V1 Execution Placement](./v1-execution-placement.md)：当前 Proposed 位置调度专题设计；跨 Run 恢复需明确后续修订。
+- [V1 Execution Placement](./v1-execution-placement.md)：位置调度专题设计，**仍为 Proposed**（其专项决策 D-01～D-07 尚未批准）；跨 Run 恢复需明确后续修订。
 - [Architecture RFC v0.2](./Personal_Agent_Platform_Architecture_RFC_v0.2.md) / [RFC v0.1](./Personal_Agent_Platform_Architecture_RFC_v0.1.md)：历史方案、背景及候选技术。
 - [P0-B Minimum Vertical Slice Task Spec](./Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md)：工程目标，不等于已通过验收。
 - [ADR-0001](../adr/0001-cancellation-and-retry-coordination.md)、[ADR-0002](../adr/0002-preclaim-deadline-failure.md)：已有正式决策。
 - [Domain types](../../packages/domain/src/types.ts)、[Task FSM](../../packages/domain/src/task-state-machine.ts)、[Contracts](../../packages/contracts/src/interfaces.ts)：当前真实代码的语义接口。
 - [P0B-05 Implementation](../P0B-05-IMPLEMENTATION.md) / [Acceptance](../P0B-05-ACCEPTANCE.md)：最新已合并阶段实现与证据。
 
-**接受流程：**先在 Draft PR 中以 Proposed 状态审查，明确冲突、风险与开放问题；经 CTO 同意后才标记 Accepted。后续改动必须记录原因、替代方案及受影响模块；新 ADR 应指明修订或覆盖哪一节。**不得直接改 main、不得把架构文本当作已经完成的功能，也不得在架构评审之前开始 P0B-06。**
+**接受记录：**本文件在 Draft PR #8 中按 Proposed 状态接受 CTO Architecture Review，审查范围包括冲突、风险与开放问题；随后由 CTO 接受并合并到 `main`（PR #8，merge commit `70751ab`，2026-10-29）。状态自此为 **Accepted**，第 12 节的 B06-D1～D6 决议一并生效；同目录的 `v1-execution-placement.md` 及其 D-01～D-07 专项决策**仍为 Proposed**，需另行批准。
+
+**变更管理：**后续改动必须记录原因、替代方案及受影响模块；新 ADR 应指明修订或覆盖哪一节。**不得直接改 main、不得把架构文本当作已经完成的功能，也不得在 B06-D1～D6 冻结之前开始 P0B-06。**

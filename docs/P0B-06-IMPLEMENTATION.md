@@ -53,6 +53,10 @@ P0B-05 的执行器通过 `apps/worker/src/durable-run-handler.ts` 接入：`moc
    `planFinishConvergence` / `applyFinishConvergence`，保证每个 Run 恰好一条终态 Event，没有双终态路径。
 9. **事件白名单不变**：未新增 `TaskEventPayload` 字段，Domain / Zod / SQL allowlist 三者一致；
    Prompt、文件正文、绝对路径、令牌不会进入事件。
+10. **发布与 GC 互斥**：发布事务在写任何元数据前先取 `(tenant, sha256)` 的 advisory lock，并在锁内用
+    `assertInstalled` 复核字节仍在位；GC 在删除同一摘要的文件前取同一把锁并重新读取 `blobs`/`artifacts`。
+    两者因此不可能交错：要么发布提交（GC 之后必然看到引用而保留），要么字节已消失而发布零写入
+    （`DB_UNAVAILABLE`，Step 重做）。隔离窗口只删除「无行 + 超过隔离期」的文件。
 
 ## 4. 生命周期与故障次序
 
@@ -63,6 +67,7 @@ install()              重新校验 digest/size → hard link 到 blobs/<tenant>
   │                     DB 失败 ⇒ 安装文件无 blobs 行（不可见，GC 才可回收）
 commitStep() 事务       Task 锁 → Run 锁 → clock_timestamp →
   │                     幂等收据复查 → fencing/取消/Deadline →
+  │                     blob 摘要 advisory lock → 安装字节在位复核（否则零写入）→
   │                     artifact 行（savepoint 保护唯一冲突）→ Workspace CAS →
   │                     Checkpoint → progress 或终态 Event → Receipt → COMMIT
   └── COMMIT 后失败     模拟 ACK 丢失：重放只读返回原 Receipt
@@ -108,7 +113,7 @@ apps/worker/src/durable-run-handler.ts                          新增
 apps/worker/src/{run-handler,poll-loop,config,index}.ts         handler 结果类型 / 接线
 tests/unit/{workspace-manifest,local-blob-store}.test.ts        新增
 tests/integration/{workspace-cas,artifact-integrity,checkpoint-resume,
-                   result-commit,durable-worker}.test.ts        新增
+                   result-commit,durable-worker,duplicate-upload}.test.ts  新增
 tests/integration/support/p0b06.ts                              新增测试夹具
 docs/P0B-06-IMPLEMENTATION.md, docs/P0B-06-ACCEPTANCE.md        新增
 ```

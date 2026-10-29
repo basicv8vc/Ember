@@ -1,7 +1,7 @@
 # Ember V1 — 执行调度设计（Execution Placement）
 
-> 状态：**Proposed / 待 CTO 与产品负责人确认**  
-> 版本：v0.2 · 2026-10-29（与 V1 Architecture Baseline 待合并草案对齐）  
+> 状态：**Proposed / 待 CTO 与产品负责人确认（专项决策 D-01～D-07 未批准）**  
+> 版本：v0.2 · 2026-10-29（与已接受（Accepted，PR #8）的 V1 Architecture Baseline 对齐；本文自身仍为 Proposed）  
 > 适用范围：Ember V1（iOS + macOS 同期发布）  
 > 仓库路径：`docs/architecture/v1-execution-placement.md`  
 > 本文定义目标架构与决策边界，**不表示相应代码已经实现**。
@@ -106,19 +106,19 @@ V1 不以智能模型推断执行位置。所有拒绝都要有固定规则码�
 
 ## 7. 与现有代码的衔接和实施顺序
 
-| 现有组件                             | V1 处理方式                                                     |
-| ------------------------------------ | --------------------------------------------------------------- |
-| Task / Run / Event FSM               | 继续沿用，不在本设计中新增状态                                  |
-| P0B-04 LeaseQueue / Fencing / Reaper | 服务端继续作为调度和权威状态内核                                |
-| P0B-05 `ExecutionRouter`             | 保留 `fast/standard/heavy`，不承担位置选择                      |
-| P0B-05 `claimableKinds`              | 继续作为能力限制；未来增加执行位置/设备过滤，不能只靠 task kind |
-| P0B-06 Artifact/Workspace/Checkpoint | 必须存储逻辑引用，不能把本机绝对路径当成跨设备身份              |
-| P0B-07 HTTP/AuthZ                    | 为远程设备控制协议设计安全的身份、授权与访问边界                |
-| 后续 macOS Executor                  | 引入设备身份、在线状态、受限 Executor API、受控本机资源访问     |
-| V1 Coding Harness Integration         | Mac 上只读发现已安装 Codex / Claude Code / Pi 等 Harness，经用户授权后通过 ACP/原生 Adapter 委托任务；保留 Ember Task/Run 权威。非 P0B-06 范围。 |
-| 后续 Cloud Executor                  | 通过相同的权威任务语义按需执行，运行时可销毁                    |
+| 现有组件                             | V1 处理方式                                                                                                                                      |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Task / Run / Event FSM               | 继续沿用，不在本设计中新增状态                                                                                                                   |
+| P0B-04 LeaseQueue / Fencing / Reaper | 服务端继续作为调度和权威状态内核                                                                                                                 |
+| P0B-05 `ExecutionRouter`             | 保留 `fast/standard/heavy`，不承担位置选择                                                                                                       |
+| P0B-05 `claimableKinds`              | 继续作为能力限制；未来增加执行位置/设备过滤，不能只靠 task kind                                                                                  |
+| P0B-06 Artifact/Workspace/Checkpoint | 必须存储逻辑引用，不能把本机绝对路径当成跨设备身份                                                                                               |
+| P0B-07 HTTP/AuthZ                    | 为远程设备控制协议设计安全的身份、授权与访问边界                                                                                                 |
+| 后续 macOS Executor                  | 引入设备身份、在线状态、受限 Executor API、受控本机资源访问                                                                                      |
+| V1 Coding Harness Integration        | Mac 上只读发现已安装 Codex / Claude Code / Pi 等 Harness，经用户授权后通过 ACP/原生 Adapter 委托任务；保留 Ember Task/Run 权威。非 P0B-06 范围。 |
+| 后续 Cloud Executor                  | 通过相同的权威任务语义按需执行，运行时可销毁                                                                                                     |
 
-**当前无需修改 P0B-01～05 代码，也无需立即实现完整 Placement。** 在 P0B-ARCH 评审中先批准上述边界，P0B-06 只落实与持久化相关的不变量；设备通信及实际位置调度在后续专项实施。
+**当前无需修改 P0B-01～05 代码，也无需立即实现完整 Placement。** Baseline 边界已在 P0B-ARCH 评审中批准（PR #8）；P0B-06 只落实与持久化相关的不变量，设备通信及实际位置调度仍待本文专项批准后在后续实施。
 
 ## 8. 将来实施时的最低验收场景
 

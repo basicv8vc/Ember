@@ -9,6 +9,8 @@
     "build": "tsc -b tsconfig.build.json"
   },
   "dependencies": {
+    "@ember/contracts": "workspace:*",
+    "@ember/domain": "workspace:*",
     "@ember/postgres": "workspace:*",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",

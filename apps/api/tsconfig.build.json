@@ -6,6 +6,10 @@
     "outDir": "./dist",
     "tsBuildInfoFile": "./dist/.tsbuildinfo"
   },
-  "references": [{ "path": "../../packages/postgres/tsconfig.build.json" }],
+  "references": [
+    { "path": "../../packages/domain/tsconfig.build.json" },
+    { "path": "../../packages/contracts/tsconfig.build.json" },
+    { "path": "../../packages/postgres/tsconfig.build.json" }
+  ],
   "include": ["src/**/*.ts"]
 }

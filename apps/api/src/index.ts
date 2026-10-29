@@ -1,7 +1,14 @@
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
-import { createPool, describeDatabaseTarget, loadDatabaseConfig } from '@ember/postgres';
+import {
+  PostgresTaskRepository,
+  createPool,
+  describeDatabaseTarget,
+  loadDatabaseConfig,
+} from '@ember/postgres';
 import { createApp, SERVICE_NAME } from './app.js';
+import { createDevTokenAuthenticator } from './auth/bearer-authenticator.js';
+import { loadDevAuthConfig } from './auth/dev-auth-config.js';
 import { isLoopbackHost, loadApiConfig } from './env.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
@@ -49,7 +56,19 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
 function main(): void {
   const apiConfig = loadApiConfig();
   const databaseConfig = loadDatabaseConfig();
+  const devAuth = loadDevAuthConfig();
   const logger = createLogger({ level: apiConfig.logLevel });
+
+  if (devAuth.tenants.length === 0) {
+    // Fail closed, but loudly: the process still starts so the cause is a log line rather
+    // than a crash loop, and every `/v1` request is rejected with 401.
+    logger.warn('no dev tenant credentials configured; every /v1 request will be rejected', {
+      hint: 'set EMBER_DEV_AUTH_TENANT_A_TOKEN/_TENANT_ID/_PRINCIPAL_ID (optionally slot B)',
+    });
+  } else {
+    // Count only: token values and ids never reach a log line.
+    logger.info('dev tenant credentials loaded', { tenants: devAuth.tenants.length });
+  }
 
   const pool = createPool(databaseConfig, {
     onIdleError: (error) => {
@@ -60,6 +79,9 @@ function main(): void {
   const app = createApp({
     readiness: createDatabaseReadiness(pool),
     serviceVersion: SERVICE_VERSION,
+    logger,
+    authenticator: createDevTokenAuthenticator(devAuth.tenants),
+    taskStore: new PostgresTaskRepository(pool),
   });
 
   if (!isLoopbackHost(apiConfig.host)) {

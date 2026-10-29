@@ -152,13 +152,19 @@ describe('GET /readyz (readiness)', () => {
 });
 
 describe('unknown routes', () => {
-  it('returns a JSON 404 without internal details', async () => {
+  it('returns a JSON 404 in the shared error vocabulary without internal details', async () => {
     const app = createApp({ readiness: readyCheck });
-    const response = await app.request('/v1/tasks');
+    const response = await app.request('/v1/unknown');
 
     expect(response.status).toBe(404);
-    await expect(response.json()).resolves.toEqual({
-      error: { code: 'not_found', message: 'Route not found' },
-    });
+    const body = (await response.json()) as {
+      error: { code: string; message: string; request_id: string };
+    };
+    // One error format for the whole app: an unknown route is a `NOT_FOUND` like any other,
+    // and the body never describes the route table or the runtime.
+    expect(body.error.code).toBe('NOT_FOUND');
+    expect(body.error.message).toBe('Resource not found');
+    expect(body.error.request_id).toBe(response.headers.get('x-request-id'));
+    expect(response.headers.get('x-request-id')).toMatch(/^[0-9a-f-]{36}$/);
   });
 });

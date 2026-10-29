@@ -141,13 +141,18 @@ export interface WorkspaceManifest {
 
 export interface WorkspaceSnapshot {
   readonly agentId: Id;
+  readonly workspaceId?: Id;
   readonly version: number;
   readonly manifest: WorkspaceManifest;
 }
 
 /**
  * Workspace metadata store with optimistic concurrency.
- * A stale `expectedVersion` must fail with `WORKSPACE_VERSION_CONFLICT` (P0B-06).
+ *
+ * `commit` keeps its original P0B-03 signature: a stale `expectedVersion` fails with
+ * `WORKSPACE_VERSION_CONFLICT`, and a legal non-overlapping change may be merged
+ * deterministically. The richer read/history/conflict methods below are P0B-06 additions and
+ * never change that failure contract.
  */
 export interface WorkspaceStore {
   load(ctx: AuthContext, agentId: Id): Promise<WorkspaceSnapshot>;
@@ -157,6 +162,33 @@ export interface WorkspaceStore {
     expectedVersion: number,
     nextManifest: WorkspaceManifest,
   ): Promise<{ version: number }>;
+  /** Read one immutable historical version. Version 0 is the empty workspace. */
+  loadVersion(ctx: AuthContext, agentId: Id, version: number): Promise<WorkspaceSnapshot>;
+  /** Newest-first immutable version history, bounded by `limit`. */
+  history(ctx: AuthContext, agentId: Id, limit?: number): Promise<readonly WorkspaceVersionInfo[]>;
+  /** Pending conflicts that still hold both candidate manifests. */
+  conflicts(ctx: AuthContext, agentId: Id): Promise<readonly WorkspaceConflictView[]>;
+}
+
+export interface WorkspaceVersionInfo {
+  readonly agentId: Id;
+  readonly version: number;
+  readonly parentVersion: number;
+  readonly digest: string;
+  readonly createdAt: string;
+  readonly createdByRunId: Id | null;
+}
+
+export interface WorkspaceConflictView {
+  readonly conflictId: Id;
+  readonly agentId: Id;
+  readonly baseVersion: number;
+  /** Workspace version the losing candidate was based on; never mutated by the conflict. */
+  readonly currentVersion: number;
+  readonly candidate: WorkspaceManifest;
+  readonly conflictPaths: readonly string[];
+  readonly status: 'pending' | 'resolved';
+  readonly createdAt: string;
 }
 
 /**

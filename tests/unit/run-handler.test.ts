@@ -1,8 +1,16 @@
 import { describe, expect, it } from 'vitest';
 import type { RouteDecision, RunExecutionContext } from '@ember/contracts';
 import type { SimulatedExecutionResult } from '@ember/execution';
-import { DomainError, type Id, type LeasedRun, type RunTerminalStatus } from '@ember/domain';
-import { createRunHandler } from '../../apps/worker/src/run-handler.js';
+import { DomainError, type Id, type LeasedRun } from '@ember/domain';
+import { createRunHandler, type RunHandlerCompletion } from '../../apps/worker/src/run-handler.js';
+
+/** Reduce a handler completion to the legacy terminal-status view used by these tests. */
+async function outcomeOf(completion: Promise<RunHandlerCompletion>): Promise<string> {
+  const value = await completion;
+
+  return value.type === 'finish' ? value.outcome : 'committed';
+}
+
 import { createWorkerLogger } from '../../apps/worker/src/logger.js';
 
 const TENANT = '11111111-1111-4111-8111-111111111111' as Id;
@@ -78,7 +86,7 @@ function handler(options: {
   readonly decide?: () => Promise<RouteDecision>;
   readonly execute?: (signal: AbortSignal) => Promise<SimulatedExecutionResult>;
 }): {
-  readonly handle: (run: LeasedRun, signal: AbortSignal) => Promise<RunTerminalStatus>;
+  readonly handle: (run: LeasedRun, signal: AbortSignal) => Promise<RunHandlerCompletion>;
   readonly lines: string[];
   readonly routerCalls: unknown[];
   readonly signals: AbortSignal[];
@@ -108,7 +116,7 @@ function handler(options: {
   });
 
   return {
-    handle: (run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus> =>
+    handle: (run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion> =>
       runHandler.handle(run, signal),
     lines,
     routerCalls,
@@ -120,7 +128,9 @@ describe('run handler', () => {
   it('executes a claimed Run and reports success without writing state itself', async () => {
     const harness = handler({});
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe('succeeded');
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+      'succeeded',
+    );
     expect(harness.signals).toHaveLength(1);
     expect(harness.routerCalls).toEqual([
       { policyVersion: 9, kind: 'mock.chat', input: { prompt: 'PROMPT-SENTINEL' } },
@@ -163,7 +173,7 @@ describe('run handler', () => {
       read: () => Promise.reject(new DomainError('DB_UNAVAILABLE', 'pool exhausted')),
     });
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe(
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
       'failed_retryable',
     );
   });
@@ -173,7 +183,7 @@ describe('run handler', () => {
       read: () => Promise.reject(new DomainError('INVALID_ARGUMENT', 'bad payload')),
     });
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe(
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
       'failed_terminal',
     );
   });
@@ -183,7 +193,7 @@ describe('run handler', () => {
       decide: () => Promise.reject(new DomainError('POLICY_DENIED', 'route denied')),
     });
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe(
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
       'failed_terminal',
     );
     expect(harness.signals).toHaveLength(0);
@@ -194,7 +204,9 @@ describe('run handler', () => {
       execute: () => Promise.reject(new DomainError('CANCELLED', 'cancelled by caller')),
     });
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe('cancelled');
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+      'cancelled',
+    );
   });
 
   it('classifies execution failures by their stable domain code', async () => {
@@ -212,7 +224,7 @@ describe('run handler', () => {
         execute: () => Promise.reject(new DomainError(testCase.code, 'simulated failure')),
       });
 
-      await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe(
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
         testCase.expected,
       );
     }
@@ -221,7 +233,7 @@ describe('run handler', () => {
   it('treats an unexpected programming error as a bounded retry, never success', async () => {
     const harness = handler({ execute: () => Promise.reject(new TypeError('boom')) });
 
-    await expect(harness.handle(LEASE, new AbortController().signal)).resolves.toBe(
+    await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
       'failed_retryable',
     );
     expect(harness.lines.join('\n')).toContain('UNEXPECTED');

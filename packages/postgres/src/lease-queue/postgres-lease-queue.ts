@@ -8,8 +8,6 @@ import {
   type LeasedRun,
   type RunStatus,
   type RunTerminalStatus,
-  type TaskEventPayload,
-  type TaskEventPhase,
   type TaskKind,
   type TaskStatus,
 } from '@ember/domain';
@@ -17,6 +15,15 @@ import type pg from 'pg';
 import { appendTaskEvent } from '../repositories/event-store.js';
 import { asDomainError, withTransaction } from '../repositories/support.js';
 import { systemClock, parseNow, type Clock } from './clock.js';
+import {
+  applyFinishConvergence,
+  FINISH_RUN_SQL,
+  FINISH_TASK_SQL,
+  planFinishConvergence,
+  type FinishConvergence,
+  type RunRow,
+  type TaskRow,
+} from './task-convergence.js';
 import {
   resolveLeaseQueueConfig,
   type LeaseQueueConfig,
@@ -32,33 +39,6 @@ import {
   parseRunTerminalStatus,
   parseWorkerId,
 } from './validation.js';
-
-interface TaskRow {
-  id: string;
-  tenant_id: string;
-  status: string;
-  attempt_count: number;
-  max_attempts: number;
-  lease_epoch: string;
-  current_run_id: string | null;
-  next_run_at: Date | string;
-  lease_expires_at: Date | string | null;
-  deadline_at: Date | string | null;
-  cancel_requested_at: Date | string | null;
-}
-
-interface RunRow {
-  id: string;
-  tenant_id: string;
-  task_id: string;
-  attempt: number;
-  lease_epoch: string;
-  status: string;
-  worker_id: string | null;
-  leased_until: Date | string | null;
-  started_at: Date | string | null;
-  finished_at: Date | string | null;
-}
 
 interface IdRow {
   id: string;
@@ -149,24 +129,6 @@ UPDATE tasks
  WHERE tenant_id = $3 AND id = $4
 `;
 
-const FINISH_RUN_SQL = `
-UPDATE runs
-   SET status = $1,
-       finished_at = $2,
-       leased_until = NULL,
-       updated_at = $2
- WHERE tenant_id = $3 AND task_id = $4 AND id = $5
-`;
-
-const FINISH_TASK_SQL = `
-UPDATE tasks
-   SET status = $1,
-       lease_expires_at = NULL,
-       next_run_at = $2,
-       updated_at = $3
- WHERE tenant_id = $4 AND id = $5
-`;
-
 const CONVERGE_OPEN_TASK_SQL = `
 UPDATE tasks
    SET status = $1, lease_expires_at = NULL, updated_at = $2
@@ -213,15 +175,6 @@ export interface PostgresLeaseQueueOptions extends LeaseQueueConfigOverrides {
    * cannot block an eligible Task that is due later in the queue.
    */
   readonly claimableKinds?: readonly TaskKind[];
-}
-
-interface FinishConvergence {
-  readonly taskStatus: TaskStatus;
-  readonly runStatus: RunTerminalStatus;
-  readonly phase: TaskEventPhase;
-  readonly errorCode?: TaskEventPayload['errorCode'];
-  readonly nextRunAt?: Date;
-  readonly cancelRequested?: boolean;
 }
 
 function toDate(value: Date | string): Date {
@@ -433,16 +386,17 @@ export class PostgresLeaseQueue implements LeaseQueue {
         const deadlineAt = parsePersistedTimestamp(task.deadline_at);
         const cancelRequested = task.cancel_requested_at !== null;
 
-        const convergence = this.finishConvergence({
+        const convergence = planFinishConvergence({
           outcome: validatedOutcome,
           task,
           runRow,
           finishedAt,
           deadlineAt,
           cancelRequested,
+          policy: this.config,
         });
 
-        await this.applyFinish(client, task, runRow, convergence, finishedAt);
+        await applyFinishConvergence(client, { task, runRow, convergence, finishedAt });
 
         return true;
       });
@@ -766,122 +720,6 @@ export class PostgresLeaseQueue implements LeaseQueue {
         ...(reason.deadlineReached && !reason.cancelRequested
           ? { errorCode: 'DEADLINE_EXCEEDED' as const }
           : {}),
-      },
-    });
-  }
-
-  private finishConvergence(input: {
-    readonly outcome: RunTerminalStatus;
-    readonly task: TaskRow;
-    readonly runRow: RunRow;
-    readonly finishedAt: Date;
-    readonly deadlineAt: Date | null;
-    readonly cancelRequested: boolean;
-  }): FinishConvergence {
-    if (input.cancelRequested || input.outcome === 'cancelled') {
-      return {
-        taskStatus: 'cancelled',
-        runStatus: 'cancelled',
-        phase: 'cancelled',
-        cancelRequested: input.cancelRequested,
-      };
-    }
-
-    if (input.deadlineAt !== null && input.deadlineAt.getTime() <= input.finishedAt.getTime()) {
-      return {
-        taskStatus: 'failed',
-        runStatus: 'failed_terminal',
-        phase: 'failed',
-        errorCode: 'DEADLINE_EXCEEDED',
-      };
-    }
-
-    switch (input.outcome) {
-      case 'succeeded':
-        return { taskStatus: 'completed', runStatus: 'succeeded', phase: 'completed' };
-      case 'failed_terminal':
-        return { taskStatus: 'failed', runStatus: 'failed_terminal', phase: 'failed' };
-      case 'failed_retryable': {
-        const plan = planRetry({
-          policy: this.config,
-          now: input.finishedAt,
-          attempt: input.runRow.attempt,
-          maxAttempts: input.task.max_attempts,
-          deadlineAt: input.deadlineAt,
-        });
-
-        return plan.retry
-          ? {
-              taskStatus: 'retryable_failed',
-              runStatus: 'failed_retryable',
-              phase: 'retry_scheduled',
-              nextRunAt: plan.nextRunAt,
-            }
-          : {
-              taskStatus: 'failed',
-              runStatus: 'failed_retryable',
-              phase: 'failed',
-              errorCode: plan.reason === 'deadline_reached' ? 'DEADLINE_EXCEEDED' : undefined,
-            };
-      }
-      case 'lease_expired':
-        // Rejected before the transaction starts.
-        throw new InvalidArgumentError([{ path: 'outcome', code: 'lease_expired_is_reaper_only' }]);
-    }
-  }
-
-  private async applyFinish(
-    client: pg.PoolClient,
-    task: TaskRow,
-    runRow: RunRow,
-    convergence: FinishConvergence,
-    finishedAt: Date,
-  ): Promise<void> {
-    const currentTaskStatus = toTaskStatus(task.status);
-    const currentRunStatus = toRunStatus(runRow.status);
-
-    const nextTaskStatus = transitionTask(currentTaskStatus, convergence.taskStatus);
-    transitionRun(currentRunStatus, convergence.runStatus);
-
-    const runUpdate = await client.query(FINISH_RUN_SQL, [
-      convergence.runStatus,
-      finishedAt,
-      task.tenant_id,
-      task.id,
-      runRow.id,
-    ]);
-
-    if (runUpdate.rowCount !== 1) {
-      throw new DomainError('DB_UNAVAILABLE', 'finish could not update the current run');
-    }
-
-    const taskUpdate = await client.query(FINISH_TASK_SQL, [
-      nextTaskStatus,
-      convergence.nextRunAt ?? toDate(task.next_run_at),
-      finishedAt,
-      task.tenant_id,
-      task.id,
-    ]);
-
-    if (taskUpdate.rowCount !== 1) {
-      throw new DomainError('DB_UNAVAILABLE', 'finish could not update the task');
-    }
-
-    await appendTaskEvent(client, {
-      tenantId: task.tenant_id,
-      taskId: task.id,
-      phase: convergence.phase,
-      occurredAt: finishedAt,
-      payload: {
-        runId: runRow.id,
-        attempt: runRow.attempt,
-        fromStatus: currentTaskStatus,
-        toStatus: nextTaskStatus,
-        runStatus: convergence.runStatus,
-        ...(convergence.errorCode === undefined ? {} : { errorCode: convergence.errorCode }),
-        ...(convergence.cancelRequested === undefined
-          ? {}
-          : { cancelRequested: convergence.cancelRequested }),
       },
     });
   }

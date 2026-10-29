@@ -1,4 +1,5 @@
 import type {
+  CommitReceipt,
   RouteDecision,
   RunExecutionContext,
   RunExecutionContextReader,
@@ -13,14 +14,20 @@ import type { ExecutionClock, ExecutionRouterForRun, SimulatedExecutor } from '@
 import type { WorkerLogger } from './logger.js';
 
 /**
- * P0B-05 execution seam.
+ * What a handler did with a Run.
  *
- * A handler returns the *Run* outcome only. It never writes Task/Run state itself: the poll
- * loop owns `LeaseQueue.finish()`, so every terminal transition still goes through P0B-04's
- * fenced transaction.
+ * - `finish` keeps the P0B-05 contract: the poll loop owns `LeaseQueue.finish()`.
+ * - `committed` means a durable result already terminalized the Run inside the atomic
+ *   `RunResultCommitter` transaction (P0B-06), so the loop must **not** call `finish()` again:
+ *   doing so would attempt a second terminal transition and could only produce a rejected,
+ *   misleading finish.
  */
+export type RunHandlerCompletion =
+  | { readonly type: 'finish'; readonly outcome: RunTerminalStatus }
+  | { readonly type: 'committed'; readonly receipt: CommitReceipt };
+
 export interface RunHandler {
-  handle(run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus>;
+  handle(run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion>;
 }
 
 export interface RunHandlerDependencies {
@@ -84,7 +91,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
   const { contextReader, router, executor, clock, logger } = deps;
 
   return {
-    async handle(run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus> {
+    async handle(run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion> {
       const startedAtHr = performance.now();
       const base = {
         taskId: run.taskId,
@@ -110,7 +117,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
           outcome,
           durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
         });
-        return outcome;
+        return { type: 'finish', outcome } as const;
       }
 
       let route: RouteDecision;
@@ -130,7 +137,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
           outcome,
           durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
         });
-        return outcome;
+        return { type: 'finish', outcome } as const;
       }
 
       try {
@@ -147,7 +154,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
           durable: false,
         });
 
-        return 'succeeded';
+        return { type: 'finish', outcome: 'succeeded' } as const;
       } catch (error) {
         const outcome = classifyFailure(error);
         logger.warn('simulated execution failed', {
@@ -158,7 +165,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
           outcome,
           durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
         });
-        return outcome;
+        return { type: 'finish', outcome } as const;
       }
     },
   };

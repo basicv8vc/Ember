@@ -14,7 +14,11 @@ import {
   PostgresTaskRepository,
   type LeaseQueueConfigOverrides,
 } from '@ember/postgres';
-import { createRunHandler, type RunHandler } from '../../apps/worker/src/run-handler.js';
+import {
+  createRunHandler,
+  type RunHandler,
+  type RunHandlerCompletion,
+} from '../../apps/worker/src/run-handler.js';
 import { runPollLoop, type PollLoopSummary } from '../../apps/worker/src/poll-loop.js';
 import { createWorkerLogger } from '../../apps/worker/src/logger.js';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
@@ -356,7 +360,7 @@ describe('P0B05-T06 graceful shutdown', () => {
     });
 
     const blocking: RunHandler = {
-      handle: async (_run, signal): Promise<'succeeded'> => {
+      handle: async (_run, signal): Promise<RunHandlerCompletion> => {
         started();
         await new Promise<void>((resolve) => {
           if (signal.aborted) {
@@ -365,7 +369,7 @@ describe('P0B05-T06 graceful shutdown', () => {
           }
           signal.addEventListener('abort', () => resolve(), { once: true });
         });
-        return 'succeeded';
+        return { type: 'finish', outcome: 'succeeded' } as const;
       },
     };
 

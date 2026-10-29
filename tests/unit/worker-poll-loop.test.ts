@@ -3,6 +3,7 @@ import type { LeasedRun, RunTerminalStatus } from '@ember/domain';
 import { loadWorkerConfig, WorkerConfigError } from '../../apps/worker/src/config.js';
 import { createWorkerLogger } from '../../apps/worker/src/logger.js';
 import { runPollLoop } from '../../apps/worker/src/poll-loop.js';
+import type { RunHandlerCompletion } from '../../apps/worker/src/run-handler.js';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const NOW = new Date('2026-10-28T00:00:00.000Z');
@@ -42,7 +43,7 @@ interface Build {
     finish: (run: LeasedRun, outcome: RunTerminalStatus) => Promise<boolean>;
   };
   readonly handler: {
-    handle: (run: LeasedRun, signal: AbortSignal) => Promise<RunTerminalStatus>;
+    handle: (run: LeasedRun, signal: AbortSignal) => Promise<RunHandlerCompletion>;
   };
   readonly signal: AbortSignal;
   readonly lines: string[];
@@ -113,7 +114,7 @@ function harness(options: HarnessOptions = {}): Build {
   };
 
   const handler = {
-    handle: async (run: LeasedRun, signal: AbortSignal): Promise<RunTerminalStatus> => {
+    handle: async (run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion> => {
       active.current += 1;
       active.max = Math.max(active.max, active.current);
       entered.push(run.runId);
@@ -129,7 +130,7 @@ function harness(options: HarnessOptions = {}): Build {
           throw options.handlerError;
         }
 
-        return options.outcome ?? 'succeeded';
+        return { type: 'finish', outcome: options.outcome ?? 'succeeded' } as const;
       } finally {
         active.current -= 1;
       }
@@ -198,7 +199,13 @@ describe('poll loop', () => {
 
     const summary = await run(build, { onWait: (ms) => ms === IDLE_MS && build.stop() });
 
-    expect(summary).toEqual({ claimed: 1, finished: 1, rejectedFinishes: 0, abandoned: 0 });
+    expect(summary).toEqual({
+      claimed: 1,
+      finished: 1,
+      rejectedFinishes: 0,
+      abandoned: 0,
+      committed: 0,
+    });
     expect(build.finishes).toEqual([{ runId: leasedRun(1).runId, outcome: 'succeeded' }]);
   });
 
@@ -253,7 +260,13 @@ describe('poll loop', () => {
       },
     });
 
-    expect(summary).toEqual({ claimed: 1, finished: 1, rejectedFinishes: 0, abandoned: 0 });
+    expect(summary).toEqual({
+      claimed: 1,
+      finished: 1,
+      rejectedFinishes: 0,
+      abandoned: 0,
+      committed: 0,
+    });
     expect(interruptedByAbort).toBe(true);
     // The Run finished instantly, so no renewal was ever due.
     expect(build.heartbeats).toEqual([]);

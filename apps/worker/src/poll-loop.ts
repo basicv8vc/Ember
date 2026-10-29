@@ -1,11 +1,11 @@
 import type { LeaseQueue } from '@ember/contracts';
 import { isDomainError, InvalidArgumentError, type DomainErrorCode } from '@ember/domain';
-import type { LeasedRun, RunTerminalStatus } from '@ember/domain';
+import type { LeasedRun } from '@ember/domain';
 import { linkAbortSignals, type Sleeper } from '@ember/execution';
 import type { Clock } from '@ember/postgres';
 import { sleep } from './reaper-loop.js';
 import type { WorkerLogger } from './logger.js';
-import type { RunHandler } from './run-handler.js';
+import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
 
 export interface PollLoopOptions {
   /** Only the three fenced operations the loop is allowed to use. */
@@ -33,6 +33,8 @@ export interface PollLoopSummary {
   readonly rejectedFinishes: number;
   /** Executions stopped by shutdown, lease loss, cancellation or a stale context. */
   readonly abandoned: number;
+  /** Runs whose durable result was committed atomically (no separate finish call). */
+  readonly committed: number;
 }
 
 function codeOf(error: unknown): DomainErrorCode | 'UNEXPECTED' {
@@ -105,7 +107,7 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
   }
 
   const inFlight = new Set<Promise<void>>();
-  const counters = { claimed: 0, finished: 0, rejectedFinishes: 0, abandoned: 0 };
+  const counters = { claimed: 0, finished: 0, rejectedFinishes: 0, abandoned: 0, committed: 0 };
 
   const executeOne = async (run: LeasedRun): Promise<void> => {
     const startedAtHr = performance.now();
@@ -174,10 +176,10 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
         return;
       }
 
-      let outcome: RunTerminalStatus;
+      let completion: RunHandlerCompletion;
 
       try {
-        outcome = await handler.handle(run, execution.signal);
+        completion = await handler.handle(run, execution.signal);
       } catch (error) {
         // A stale/foreign context means nothing may be submitted; anything else is a
         // programming fault and must not fabricate a terminal state either.
@@ -189,6 +191,21 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
         counters.abandoned += 1;
         return;
       }
+
+      if (completion.type === 'committed') {
+        // The atomic committer already terminalized this Run inside its own transaction.
+        // Calling `finish()` here would be a second terminal write, so it is skipped.
+        completed = true;
+        counters.committed += 1;
+        logger.info('run result committed atomically', {
+          ...base,
+          workspaceVersion: completion.receipt.workspaceVersion,
+          durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
+        });
+        return;
+      }
+
+      const outcome = completion.outcome;
 
       if (execution.signal.aborted || leaseLost) {
         logger.warn('execution aborted; result discarded', {

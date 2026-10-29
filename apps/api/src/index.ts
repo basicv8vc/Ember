@@ -1,8 +1,16 @@
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
-import { createPool, describeDatabaseTarget, loadDatabaseConfig } from '@ember/postgres';
+import {
+  PostgresTaskRepository,
+  createPool,
+  describeDatabaseTarget,
+  loadDatabaseConfig,
+} from '@ember/postgres';
 import { createApp, SERVICE_NAME } from './app.js';
+import { createDevTokenAuthenticator } from './auth/bearer-authenticator.js';
+import { loadDevAuthConfig } from './auth/dev-auth-config.js';
 import { isLoopbackHost, loadApiConfig } from './env.js';
+import { unexpectedErrorCategory } from './http/error-mapping.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
 
@@ -37,7 +45,9 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
       logger.info('shutdown complete');
     } catch (error) {
       clearTimeout(forceExit);
-      logger.error('shutdown failed', { error: (error as Error).message });
+      // Same rule as the request path: a shutdown fault is logged by category only, because a
+      // pool/server error message can carry a connection string or a socket address.
+      logger.error('shutdown failed', { category: unexpectedErrorCategory(error) });
       process.exitCode = 1;
     }
   };
@@ -49,17 +59,33 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
 function main(): void {
   const apiConfig = loadApiConfig();
   const databaseConfig = loadDatabaseConfig();
+  const devAuth = loadDevAuthConfig();
   const logger = createLogger({ level: apiConfig.logLevel });
+
+  if (devAuth.tenants.length === 0) {
+    // Fail closed, but loudly: the process still starts so the cause is a log line rather
+    // than a crash loop, and every `/v1` request is rejected with 401.
+    logger.warn('no dev tenant credentials configured; every /v1 request will be rejected', {
+      hint: 'set EMBER_DEV_AUTH_TENANT_A_TOKEN/_TENANT_ID/_PRINCIPAL_ID (optionally slot B)',
+    });
+  } else {
+    // Count only: token values and ids never reach a log line.
+    logger.info('dev tenant credentials loaded', { tenants: devAuth.tenants.length });
+  }
 
   const pool = createPool(databaseConfig, {
     onIdleError: (error) => {
-      logger.warn('database idle connection error', { error: error.message });
+      // Category only: an idle-connection fault can include the endpoint it tried to reach.
+      logger.warn('database idle connection error', { category: unexpectedErrorCategory(error) });
     },
   });
 
   const app = createApp({
     readiness: createDatabaseReadiness(pool),
     serviceVersion: SERVICE_VERSION,
+    logger,
+    authenticator: createDevTokenAuthenticator(devAuth.tenants),
+    taskStore: new PostgresTaskRepository(pool),
   });
 
   if (!isLoopbackHost(apiConfig.host)) {
@@ -89,6 +115,10 @@ function main(): void {
 try {
   main();
 } catch (error) {
+  // Startup failures are operator-facing and happen before any request is served, so the
+  // detail is kept: the only errors reachable here are config-validation errors, which name
+  // environment variables and never interpolate a credential value. Request-path faults take
+  // the redacted route in `app.onError` instead.
   process.stderr.write(
     `api failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
   );

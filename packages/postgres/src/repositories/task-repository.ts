@@ -92,6 +92,53 @@ SELECT task_id, sequence, phase, occurred_at, trace_id, payload
  ORDER BY sequence ASC
 `;
 
+/**
+ * Exclusive-cursor page. `$3` is the last sequence the caller already has, so a polling
+ * client can never see the same event twice and never skips one.
+ */
+const LIST_EVENT_PAGE_SQL = `
+SELECT task_id, sequence, phase, occurred_at, trace_id, payload
+  FROM task_events
+ WHERE tenant_id = $1 AND task_id = $2 AND sequence > $3
+ ORDER BY sequence ASC
+ LIMIT $4
+`;
+
+/** Hard ceiling for one event read; the HTTP layer asks for less (P0B-07a). */
+const MAX_EVENT_PAGE_SIZE = 1_000;
+
+/** Default page size when a caller asks for a page without a limit. */
+const DEFAULT_EVENT_PAGE_SIZE = 100;
+
+/**
+ * Optional paging for `listEvents`.
+ *
+ * Both bounds are optional so existing callers (worker/tests) keep the unpaged behaviour.
+ * `after` is exclusive.
+ */
+export interface ListEventOptions {
+  readonly after?: number;
+  readonly limit?: number;
+}
+
+function parseListEventOptions(options: ListEventOptions): {
+  readonly after: number;
+  readonly limit: number;
+} {
+  const after = options.after ?? 0;
+  const limit = options.limit ?? DEFAULT_EVENT_PAGE_SIZE;
+
+  if (!Number.isSafeInteger(after) || after < 0) {
+    throw new DomainError('INVALID_ARGUMENT', 'event cursor must be a non-negative integer');
+  }
+
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EVENT_PAGE_SIZE) {
+    throw new DomainError('INVALID_ARGUMENT', 'event page limit is out of range');
+  }
+
+  return { after, limit };
+}
+
 const LOCK_TASK_FOR_CANCEL_SQL = `
 SELECT ${TASK_COLUMNS}
   FROM tasks
@@ -214,20 +261,37 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
   }
 
   /**
-   * Read durable events for one visible task in sequence order.
+   * Read durable events for one visible task in ascending sequence order.
    *
-   * This is a repository read used to prove B-T06; it is not the future SSE/polling API.
-   * A missing or foreign task yields an empty list.
+   * This is a repository read used to prove B-T06 and to serve
+   * `GET /v1/tasks/:taskId/events` (P0B-07a). A missing or foreign task yields an empty
+   * list, so callers that must distinguish 404 from an empty page check visibility first.
+   *
+   * @param options optional page bounds. `after` is **exclusive** (`sequence > after`), which
+   * makes repeated polling idempotent; `limit` is bounded to keep one read finite.
    */
-  async listEvents(ctx: AuthContext, taskId: Id): Promise<readonly TaskEvent[]> {
+  async listEvents(
+    ctx: AuthContext,
+    taskId: Id,
+    options?: ListEventOptions,
+  ): Promise<readonly TaskEvent[]> {
     const validatedContext = parseContext(ctx);
     const validatedTaskId = parseTaskId(taskId);
+    const page = options === undefined ? undefined : parseListEventOptions(options);
 
     try {
-      const result = await this.pool.query<TaskEventRow>(LIST_EVENTS_SQL, [
-        validatedContext.tenantId,
-        validatedTaskId,
-      ]);
+      const result =
+        page === undefined
+          ? await this.pool.query<TaskEventRow>(LIST_EVENTS_SQL, [
+              validatedContext.tenantId,
+              validatedTaskId,
+            ])
+          : await this.pool.query<TaskEventRow>(LIST_EVENT_PAGE_SQL, [
+              validatedContext.tenantId,
+              validatedTaskId,
+              page.after,
+              page.limit,
+            ]);
 
       return result.rows.map((row) => {
         const parsed = TaskEventSchema.safeParse({

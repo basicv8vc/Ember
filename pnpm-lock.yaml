@@ -205,6 +205,12 @@ importers:
 
   apps/api:
     dependencies:
+      '@ember/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@ember/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
       '@ember/postgres':
         specifier: workspace:*
         version: link:../../packages/postgres

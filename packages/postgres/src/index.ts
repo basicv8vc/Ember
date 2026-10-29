@@ -49,7 +49,7 @@ export {
   type AgentView,
   type CreateAgentCommand,
 } from './repositories/agent-repository.js';
-export { PostgresTaskRepository } from './repositories/task-repository.js';
+export { PostgresTaskRepository, type ListEventOptions } from './repositories/task-repository.js';
 export { PostgresRunExecutionContextReader } from './repositories/run-execution-context-reader.js';
 export {
   applyFinishConvergence,

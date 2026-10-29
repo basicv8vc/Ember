@@ -19,8 +19,14 @@ import { z } from 'zod';
 import { toInvalidArgumentError } from './validation.js';
 
 /**
- * Character bounds. HTTP body-size limits (64 KiB) are enforced by the future gateway;
- * these schemas bound individual fields before anything reaches persistence.
+ * Character bounds.
+ *
+ * The HTTP 64 KiB body cap is enforced on the request stream by `apps/api`
+ * (`MAX_TASK_BODY_BYTES`). A byte cap and a character budget are not interchangeable: single-byte
+ * text can reach the 64 000-character limits under the cap, while the same text in 3-byte UTF-8
+ * is rejected as too large long before the schema runs. See that constant for the arithmetic, and
+ * `apps/api/src/tasks/routes.ts` for the order of the checks. These schemas therefore keep
+ * bounding every field individually before anything reaches persistence.
  */
 export const TASK_INPUT_LIMITS = Object.freeze({
   chatPromptMaxChars: 8_000,

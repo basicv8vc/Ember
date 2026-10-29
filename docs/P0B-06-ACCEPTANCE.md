@@ -38,9 +38,10 @@
 | ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 63 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
 | `git diff --check`               | 通过（无空白错误）                                                                                                   |
 
-> Round 2 复跑说明：本机 `pnpm` 的 corepack 缓存丢失（`Cannot find module .../bin/pnpm.cjs`），因此 Round 2 直接调用
+> Round 2 / Round 3 复跑说明：本机 `pnpm` 的 corepack 缓存丢失（`Cannot find module .../bin/pnpm.cjs`），因此本地复跑直接调用
 > 脚本等价的本地二进制（`./node_modules/.bin/vitest run --config vitest.unit.config.ts` 等）。上表脚本本体未变，
-> CI 侧仍用 `pnpm`。
+> CI 侧仍用 `pnpm`。Round 3 的本地集成测试跑在 Homebrew PostgreSQL 17（`127.0.0.1:5432`，本机 Docker daemon
+> 当时无响应），CI 侧仍跑 `postgres:17-alpine` 容器；两侧都是真实 PostgreSQL 17，用例完全相同。
 
 ### CI 证据（GitHub Actions `CI`，Node 24 LTS + `postgres:17-alpine`）
 
@@ -52,9 +53,11 @@
 | Round 2 run  | https://github.com/basicv8vc/Ember/actions/runs/40827483054（HEAD `5484a2c`，success）                                                                                                                                                      |
 | CI 日志实测  | Unit `20 files / 373 tests passed`；Integration `13 files / 121 tests passed`；`5 applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`                                                                   |
 | Round 2 日志 | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 143 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
+| Round 3 run  | https://github.com/basicv8vc/Ember/actions/runs/40831840106（HEAD `99589c6`，success）                                                                                                                                                      |
+| Round 3 日志 | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 148 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
 
-Round 1 与 Round 2 的 CI 结论都来自实际读取的 job 日志，而不是绿色图标推断。Round 2 run 也证明 `0005` 在全新
-数据库上从零应用成功（`0005_p0b06_artifacts_workspace_checkpoint.sql in 57ms`），因此迁移文件的改动不依赖
+Round 1 / Round 2 / Round 3 的 CI 结论都来自实际读取的 job 日志，而不是绿色图标推断。Round 3 run 也证明 `0005` 在全新
+数据库上从零应用成功（`0005_p0b06_artifacts_workspace_checkpoint.sql in 58ms`），因此迁移文件的改动不依赖
 本地残留状态。
 
 ### 新增测试分布

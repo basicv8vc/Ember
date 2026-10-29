@@ -26,6 +26,59 @@ export interface TestDatabaseOptions {
 }
 
 /**
+ * Session-scoped view of one open connection.
+ *
+ * `pg.PoolClient` declares overloaded `query` signatures (including a callback form), so a
+ * client type cannot be derived from `Pool.connect`; a structural interface accepts the real
+ * client instead.
+ */
+export interface LockSession {
+  query<R extends Record<string, unknown>>(sql: string): Promise<{ readonly rows: readonly R[] }>;
+}
+
+/** Backend pid of one session, so a lock assertion can name the exact backend it expects. */
+export async function backendPid(client: LockSession): Promise<number> {
+  const result = await client.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const pid = result.rows[0]?.pid;
+
+  if (pid === undefined) {
+    throw new Error('could not read the backend pid');
+  }
+
+  return pid;
+}
+
+/** How long `close()` waits for checked-out clients before reporting them as leaked. */
+const CLOSE_TIMEOUT_MS = 10_000;
+
+/**
+ * Close one pool, reporting a leaked client instead of hanging on it.
+ *
+ * `pool.end()` never settles while a client is still checked out, so a test that forgets to
+ * release one turns the whole file into a silent hang and hides the assertion that failed first.
+ * Failing with the connection counts instead keeps that original failure readable.
+ */
+async function endPool(pool: TestPool, name: string): Promise<void> {
+  const ended = pool.end().then(() => 'ended' as const);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timedOut = new Promise<'timeout'>((resolve) => {
+    timer = setTimeout(() => resolve('timeout'), CLOSE_TIMEOUT_MS);
+  });
+
+  try {
+    if ((await Promise.race([ended, timedOut])) === 'timeout') {
+      throw new Error(
+        `${name} did not close within ${CLOSE_TIMEOUT_MS}ms: ` +
+          `${pool.totalCount - pool.idleCount} connection(s) still checked out, ` +
+          `${pool.waitingCount} query(ies) queued - a test leaked a pooled client`,
+      );
+    }
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
  * Create a throwaway schema, run every repository migration in it, and return pools that
  * are scoped to that schema. Only this run's schema is ever dropped.
  */
@@ -66,9 +119,11 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
       observerPool: scopedObserver,
       adminPool,
       close: async () => {
-        await scopedPool.end();
-        await scopedObserver.end();
-        await adminPool.end();
+        // Throws (rather than hanging) if a test left a client checked out; the pools after it
+        // then stay open on purpose, because this run is already failing loudly.
+        await endPool(scopedPool, 'test pool');
+        await endPool(scopedObserver, 'observer pool');
+        await endPool(adminPool, 'admin pool');
 
         if (!schemaPattern.test(schema)) {
           throw new Error('refusing to drop an unverified test schema');

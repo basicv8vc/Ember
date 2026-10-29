@@ -14,7 +14,12 @@ import {
   recordWorkspaceConflictIn,
   stagingKeyFor,
 } from '@ember/postgres';
-import { createTestDatabase, type TestDatabase } from './support/database.js';
+import { createTestDatabase, backendPid, type TestDatabase } from './support/database.js';
+import {
+  observeAdvisoryLock,
+  resolveAdvisoryLockIdentity,
+  waitForAdvisoryLockQueueEntry,
+} from './support/advisory-locks.js';
 import { createP06Infra, seedTenantAgent, type P06Infra, type Seed } from './support/p0b06.js';
 
 /**
@@ -32,29 +37,6 @@ async function ageFile(absolutePath: string, msAgo: number): Promise<void> {
   const when = new Date(Date.now() - msAgo);
 
   await utimes(absolutePath, when, when);
-}
-
-/** Wait until at least `min` statements in this database are queued on an advisory lock. */
-async function waitForAdvisoryLockWaiter(min = 1, timeoutMs = 5_000): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-
-  while (Date.now() < deadline) {
-    const result = await db.pool.query<{ count: string }>(
-      `SELECT count(*)::text AS count
-         FROM pg_locks
-        WHERE locktype = 'advisory'
-          AND NOT granted
-          AND database = (SELECT oid FROM pg_database WHERE datname = current_database())`,
-    );
-
-    if (Number(result.rows[0]?.count ?? '0') >= min) {
-      return;
-    }
-
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-
-  throw new Error('timed out waiting for an advisory lock waiter');
 }
 
 /** Wait until `blocker` is the session that keeps another statement waiting. */
@@ -78,19 +60,6 @@ async function waitForRowLockWaiter(blocker: number, timeoutMs = 5_000): Promise
   }
 
   throw new Error('timed out waiting for a row lock waiter');
-}
-
-async function backendPid(client: { query: (sql: string) => Promise<unknown> }): Promise<number> {
-  const result = (await client.query('SELECT pg_backend_pid() AS pid')) as {
-    rows: { pid: number }[];
-  };
-  const pid = result.rows[0]?.pid;
-
-  if (pid === undefined) {
-    throw new Error('could not read the backend pid');
-  }
-
-  return pid;
 }
 
 beforeAll(async () => {
@@ -423,6 +392,19 @@ describe('P0B06 P2-2 deletion of a referenced artifact', () => {
 });
 
 /**
+ * Keep a promise that is awaited later from surfacing as an unhandled rejection.
+ *
+ * Both tests below create the collector and the upload *before* the `pg_locks` barrier. If the
+ * barrier fails, the test unwinds while those operations are still pending, and their rejection
+ * would hide the barrier's message behind an unhandled-rejection warning.
+ */
+function guardRejection<T>(promise: Promise<T>): Promise<T> {
+  void promise.catch(() => undefined);
+
+  return promise;
+}
+
+/**
  * Round 3 review, P1-A.
  *
  * `put()` installs bytes *before* it opens its publishing transaction, so the collector can
@@ -444,20 +426,40 @@ describe('P0B06 P1-A an upload that loses to the collector', () => {
       await writeFile(absolute, bytes);
       await ageFile(absolute, 240_000);
 
-      // Holding the tenant-digest lock queues the collector and the upload behind it, so the
-      // collector is guaranteed to be first in line.
-      await blocker.query('BEGIN');
-      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [
-        blobLockKey(seed.tenant.tenantId, digest),
-      ]);
+      // Holding the tenant-digest lock stalls the collector and the upload alike. The barrier
+      // below waits on that exact lock identity in `pg_locks`, so an unrelated advisory lock
+      // waiter elsewhere in this shared test database can never satisfy it.
+      const lockKey = blobLockKey(seed.tenant.tenantId, digest);
+      const blockerPid = await backendPid(blocker);
 
-      const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
-      await waitForAdvisoryLockWaiter();
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+
+      // Precondition: that exact lock is held by this session and nothing is queued on it yet,
+      // so the collector observed below is necessarily the first arrival.
+      const held = await observeAdvisoryLock(
+        db.pool,
+        await resolveAdvisoryLockIdentity(db.pool, lockKey),
+      );
+
+      expect(held).toEqual([{ pid: blockerPid, granted: true, blockedBy: [] }]);
+
+      const sweep = guardRejection(local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 }));
+      const collector = await waitForAdvisoryLockQueueEntry(db.pool, { lockKey, blockerPid });
 
       // `put` stages, "installs" (the digest file already exists, so install verifies and
       // returns) and then queues for the same lock, behind the collector.
-      const upload = local.artifacts.put(seed.ctx, bytes, 'text/plain');
-      await waitForAdvisoryLockWaiter(2);
+      const upload = guardRejection(local.artifacts.put(seed.ctx, bytes, 'text/plain'));
+      const publisher = await waitForAdvisoryLockQueueEntry(db.pool, {
+        lockKey,
+        blockerPid,
+        aheadOf: [collector.pid],
+      });
+
+      // The collector reached the lock first, so the upload is queued behind it and loses.
+      expect(publisher.pid).not.toBe(collector.pid);
+      expect(publisher.blockedBy).toEqual(expect.arrayContaining([blockerPid, collector.pid]));
+
       await blocker.query('COMMIT');
 
       const report = await sweep;
@@ -479,6 +481,55 @@ describe('P0B06 P1-A an upload that loses to the collector', () => {
       await expect(local.files.read(seed.tenant.tenantId, key)).rejects.toMatchObject({
         code: 'NOT_FOUND',
       });
+    } finally {
+      await blocker.query('ROLLBACK').catch(() => undefined);
+      blocker.release();
+      await local.dispose();
+    }
+  });
+  it('publishes and keeps the bytes when the upload reaches the lock before the collector', async () => {
+    const local = await createP06Infra(db);
+    const blocker = await db.pool.connect();
+    const bytes = Buffer.from('upload beating the sweep', 'utf8');
+    const digest = createHash('sha256').update(bytes).digest('hex');
+    const key = blobKeyFor(seed.tenant.tenantId, digest);
+    const absolute = path.join(local.root.dir, ...key.split('/'));
+
+    try {
+      // The same install-then-publish window, with the arrival order reversed: this is the
+      // legitimate schedule and must not be reported as the P1-A race.
+      await mkdir(path.dirname(absolute), { recursive: true });
+      await writeFile(absolute, bytes);
+      await ageFile(absolute, 240_000);
+
+      const lockKey = blobLockKey(seed.tenant.tenantId, digest);
+      const blockerPid = await backendPid(blocker);
+
+      await blocker.query('BEGIN');
+      await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+
+      const upload = guardRejection(local.artifacts.put(seed.ctx, bytes, 'text/plain'));
+      const publisher = await waitForAdvisoryLockQueueEntry(db.pool, { lockKey, blockerPid });
+
+      const sweep = guardRejection(local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 }));
+      const collector = await waitForAdvisoryLockQueueEntry(db.pool, {
+        lockKey,
+        blockerPid,
+        aheadOf: [publisher.pid],
+      });
+
+      expect(collector.pid).not.toBe(publisher.pid);
+      expect(collector.blockedBy).toEqual(expect.arrayContaining([blockerPid, publisher.pid]));
+
+      await blocker.query('COMMIT');
+
+      // The publisher committed first, so the collector must see the metadata and keep the file.
+      const ref = await upload;
+      const report = await sweep;
+
+      expect(report.removedBlobs).toBe(0);
+      await expect(local.files.read(seed.tenant.tenantId, key)).resolves.toBeDefined();
+      await expect(local.artifacts.get(seed.ctx, ref.artifactId)).resolves.toEqual(bytes);
     } finally {
       await blocker.query('ROLLBACK').catch(() => undefined);
       blocker.release();

@@ -45,16 +45,17 @@
 
 ### CI 证据（GitHub Actions `CI`，Node 24 LTS + `postgres:17-alpine`）
 
-| 项目         | 值                                                                                                                                                                                                                                          |
-| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| PR           | https://github.com/basicv8vc/Ember/pull/11（Draft，base `main`）                                                                                                                                                                            |
-| 分支         | `feature/p0b-06-artifact-workspace-checkpoint`                                                                                                                                                                                              |
-| 首次通过 run | https://github.com/basicv8vc/Ember/actions/runs/40812981890（HEAD `6767372`，Round 1）                                                                                                                                                      |
-| Round 2 run  | https://github.com/basicv8vc/Ember/actions/runs/40827483054（HEAD `5484a2c`，success）                                                                                                                                                      |
-| CI 日志实测  | Unit `20 files / 373 tests passed`；Integration `13 files / 121 tests passed`；`5 applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`                                                                   |
-| Round 2 日志 | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 143 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
-| Round 3 run  | https://github.com/basicv8vc/Ember/actions/runs/40831840106（HEAD `99589c6`，success）                                                                                                                                                      |
-| Round 3 日志 | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 148 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
+| 项目             | 值                                                                                                                                                                                                                                          |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| PR               | https://github.com/basicv8vc/Ember/pull/11（Draft，base `main`）                                                                                                                                                                            |
+| 分支             | `feature/p0b-06-artifact-workspace-checkpoint`                                                                                                                                                                                              |
+| 首次通过 run     | https://github.com/basicv8vc/Ember/actions/runs/40812981890（HEAD `6767372`，Round 1）                                                                                                                                                      |
+| Round 2 run      | https://github.com/basicv8vc/Ember/actions/runs/40827483054（HEAD `5484a2c`，success）                                                                                                                                                      |
+| CI 日志实测      | Unit `20 files / 373 tests passed`；Integration `13 files / 121 tests passed`；`5 applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`                                                                   |
+| Round 2 日志     | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 143 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
+| Round 3 run      | https://github.com/basicv8vc/Ember/actions/runs/40831840106（HEAD `99589c6`，success）                                                                                                                                                      |
+| Round 3 日志     | Unit `Test Files 20 passed` / `Tests 373 passed`；Integration `Test Files 14 passed` / `Tests 148 passed`；`5 applied, 0 already applied` → `0 applied, 5 already applied`；`All matched files use Prettier code style!`；`eslint .` 无输出 |
+| Round 3 文档提交 | https://github.com/basicv8vc/Ember/actions/runs/40832153371（HEAD `8bad6c1`，success）：`git diff --stat 99589c6..8bad6c1 -- . ':!docs'` 为空，同一日志行全部复现                                                                           |
 
 Round 1 / Round 2 / Round 3 的 CI 结论都来自实际读取的 job 日志，而不是绿色图标推断。Round 3 run 也证明 `0005` 在全新
 数据库上从零应用成功（`0005_p0b06_artifacts_workspace_checkpoint.sql in 58ms`），因此迁移文件的改动不依赖

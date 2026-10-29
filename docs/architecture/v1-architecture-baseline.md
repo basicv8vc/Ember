@@ -278,10 +278,11 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 **实现细节保护线：**
 
 1. 当前 `TaskEventPayload` 只有安全 allowlist 元数据；新 Artifact/Checkpoint 流程不把自由文本、私人路径、Prompt 或 secrets 加入 Event。需要扩展 event 类型时须先审查 Domain、Zod、SQL 三方一致性。
-2. `RunResultCommitter` 必须明确处理“同提交操作 ID + 同内容重放”“同 ID + 不同内容冲突”“旧 Run 重放”的可观察结果；数据库提交后才返回用户可见的成功 ACK。
-3. 用户冲突裁决属于后续 API/UI；P0B-06 至少能持久保留冲突候选并拒绝覆盖，不能把用户待决冲突伪装成 `completed` 或自行增加不在 FSM 中的状态。
+2. `RunResultCommitter` 必须明确处理“同提交操作 ID + 同内容重放”“同 ID + 不同内容冲突”“旧 Run 重放”的可观察结果；数据库提交后才返回用户可见的成功 ACK。**已成功提交但 ACK 丢失**的同一操作可在受限身份校验后只读查询既有 receipt；这不授予过期 epoch 任何新的写入权。
+3. 用户冲突裁决属于后续 API/UI；CAS 失败的**结果提交事务**必须整体回滚、不得产出终态成功。保留冲突候选与记录应通过独立、幂等、受限的非终态事务完成，固定引用双方不可变 Blob，并确保 GC 不清除未解决的候选；不能把用户待决冲突伪装成 `completed` 或自行增加不在 FSM 中的状态。
 4. 已合并的 `0001`–`0004` 只读不修改；新增前向 Migration 负责 P0B-06 元数据、唯一键、复合 Tenant-safe FK、约束/索引与复测。
-5. 目标是有测试可证明的**最小纵向闭环**，不是让 P0B-06 提前实现 Mac Harness、iOS/macOS、OAuth/设备网关、生产加密、完整审批或智能冲突合并。
+5. 有效 lease/Deadline 的时间判断须在取得必要锁后采样真实权威时间（如 PG `clock_timestamp()`；不能把事务开始时的 `now()` 当成等待锁后的时刻），避免锁等待穿越租约过期边界。
+6. 目标是有测试可证明的**最小纵向闭环**，不是让 P0B-06 提前实现 Mac Harness、iOS/macOS、OAuth/设备网关、生产加密、完整审批或智能冲突合并。
 
 未定设计可以先拆为小 ADR，别为了凑齐“通用架构”一次性添加不存在的 Repository/Provider 实现。技术组件未来可替换，但**数据库正确性与产品隐私不变量不可降级**。
 

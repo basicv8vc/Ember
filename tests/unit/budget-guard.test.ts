@@ -8,7 +8,9 @@ import {
   evaluateBudget,
   releaseBudgetReservation,
   reserveBudget,
+  rollBudgetLedgerToUtcDay,
   snapshotFromLedger,
+  tenantDayUnitsFromLedger,
   toBudgetDeniedError,
   toUtcDayKey,
   type BudgetAmount,
@@ -16,6 +18,7 @@ import {
   type BudgetLedgerState,
   type BudgetPolicy,
   type BudgetSnapshot,
+  type BudgetTenantUsage,
   type BudgetUsage,
 } from '@ember/execution';
 
@@ -413,6 +416,22 @@ describe('toUtcDayKey', () => {
 
 const LEDGER = createBudgetLedger({ tenantId: TENANT_A, runId: RUN_A, utcDay: DAY });
 
+const DAY_2 = '2026-03-02';
+const DAY_3 = '2026-03-03';
+
+/**
+ * Usage the snapshot must attribute to *other* Runs of the Tenant.
+ *
+ * `snapshotFromLedger` adds this Run's own contribution (committed units plus outstanding
+ * reserved units) itself, so these numbers must exclude this Run entirely.
+ */
+function tenantUsage(
+  tenantDayUnitsFromOtherRuns = 0,
+  heldSlotsFromOtherRuns = 0,
+): BudgetTenantUsage {
+  return { tenantDayUnitsFromOtherRuns, heldSlotsFromOtherRuns };
+}
+
 function reservedLedger(operationId = 'step-1'): BudgetLedgerState {
   return reserveBudget(LEDGER, { operationId, amount: STEP_AMOUNT });
 }
@@ -425,11 +444,13 @@ describe('budget ledger reservation', () => {
       utcDay: DAY,
       reserved: { steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 },
       consumed: { steps: 0, units: 0, elapsedMs: 0 },
+      runCarryOver: { steps: 0, units: 0, elapsedMs: 0 },
       reservations: [],
       settlements: [],
     });
     expect(Object.isFrozen(LEDGER)).toBe(true);
     expect(Object.isFrozen(LEDGER.reservations)).toBe(true);
+    expect(Object.isFrozen(LEDGER.runCarryOver)).toBe(true);
   });
 
   it('adds an outstanding reservation without touching consumed usage', () => {
@@ -442,14 +463,16 @@ describe('budget ledger reservation', () => {
   });
 
   it('exposes outstanding reservations through the next-step snapshot', () => {
-    expect(snapshotFromLedger(reservedLedger(), 500)).toEqual({
+    // 500 units belong to other Runs; the Runner's own 20 reserved units are added here, so a
+    // pending reservation can never be invisible to the Tenant-day cap.
+    expect(snapshotFromLedger(reservedLedger(), tenantUsage(500))).toEqual({
       tenantId: TENANT_A,
       runId: RUN_A,
       utcDay: DAY,
       runSteps: 2,
       runUnits: 20,
       runElapsedMs: 200,
-      tenantDailyUnits: 500,
+      tenantDailyUnits: 520,
       concurrentSlots: 1,
     });
 
@@ -462,7 +485,7 @@ describe('budget ledger reservation', () => {
           operationId: 'step-3',
           amount: { steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 1 },
         }),
-        500,
+        tenantUsage(500),
       ),
       COST,
     );
@@ -539,14 +562,15 @@ describe('budget ledger settlement', () => {
     // part is recorded, and 1 step / 15 units / 100 ms / 1 slot are released.
     expect(settled.reserved).toEqual({ steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 });
     expect(settled.settlements).toEqual([{ operationId: 'step-1', consumed: CONSUMED }]);
-    expect(snapshotFromLedger(settled, 500)).toEqual({
+    // 500 units charged to other Runs + this Run's 5 committed units, once and only once.
+    expect(snapshotFromLedger(settled, tenantUsage(500))).toEqual({
       tenantId: TENANT_A,
       runId: RUN_A,
       utcDay: DAY,
       runSteps: CONSUMED.steps,
       runUnits: CONSUMED.units,
       runElapsedMs: CONSUMED.elapsedMs,
-      tenantDailyUnits: 500,
+      tenantDailyUnits: 505,
       concurrentSlots: 0,
     });
   });
@@ -556,7 +580,7 @@ describe('budget ledger settlement', () => {
 
     expect(released.reserved).toEqual({ steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 });
     expect(released.consumed).toEqual({ steps: 0, units: 0, elapsedMs: 0 });
-    expect(snapshotFromLedger(released, 500)).toEqual({
+    expect(snapshotFromLedger(released, tenantUsage(500))).toEqual({
       tenantId: TENANT_A,
       runId: RUN_A,
       utcDay: DAY,
@@ -667,12 +691,21 @@ describe('budget ledger invariants', () => {
   it('rejects invalid ledger shapes and scopes', () => {
     expectInvalidArgument(() => releaseBudgetReservation(LEDGER, ' '), 'invalid_operation_id');
     expectInvalidArgument(
-      () => snapshotFromLedger({ ...LEDGER, utcDay: '2026-13-01' }, 0),
+      () => snapshotFromLedger({ ...LEDGER, utcDay: '2026-13-01' }, tenantUsage()),
       'invalid_utc_day',
     );
-    expectInvalidArgument(() => snapshotFromLedger(LEDGER, -1), 'invalid_budget_amount');
     expectInvalidArgument(
-      () => createBudgetLedger({ tenantId: 'tenant-a', runId: RUN_A, utcDay: DAY }),
+      () => snapshotFromLedger(LEDGER, tenantUsage(-1)),
+      'invalid_budget_amount',
+    );
+    expectInvalidArgument(
+      () =>
+        createBudgetLedger({
+          tenantId: 'tenant-a',
+          runId: RUN_A,
+          utcDay: DAY,
+          runCarryOver: { steps: 0, units: 0, elapsedMs: 0 },
+        }),
       'invalid_id',
     );
     expectInvalidArgument(
@@ -683,5 +716,338 @@ describe('budget ledger invariants', () => {
         }),
       'unknown_field',
     );
+  });
+});
+
+describe('tenant-day accounting', () => {
+  /** Every per-Run dimension is wide open, so only the Tenant-day cap can deny. */
+  const TENANT_ONLY_POLICY: BudgetPolicy = {
+    ...POLICY,
+    maxRunSteps: 1_000,
+    maxRunUnits: 1_000_000,
+    maxRunElapsedMs: 1_000_000,
+    maxTenantDailyUnits: 10,
+    maxConcurrentSlots: 16,
+  };
+
+  const SIX_UNITS: BudgetAmount = { steps: 0, units: 6, elapsedMs: 0, concurrencySlots: 0 };
+
+  it('counts an outstanding reservation against the Tenant-day cap', () => {
+    const pending = reserveBudget(LEDGER, { operationId: 'step-1', amount: SIX_UNITS });
+    const snapshot = snapshotFromLedger(pending, tenantUsage());
+
+    expect(snapshot.tenantDailyUnits).toBe(6);
+    expect(snapshot.runUnits).toBe(6);
+
+    // Two reservations of 6 units cannot both fit under a cap of 10. If the pending
+    // reservation were invisible, this second one would be allowed and the Tenant would spend
+    // 12 of its 10 units.
+    const second = evaluateBudget(TENANT_ONLY_POLICY, snapshot, SIX_UNITS);
+
+    expect(second.allowed).toBe(false);
+    expect(second.allowed ? undefined : second.dimension).toBe('tenant_daily_units');
+    expect(second.allowed ? undefined : second.limit).toBe(10);
+    expect(second.allowed ? undefined : second.used).toBe(6);
+    expect(second.allowed ? undefined : second.proposed).toBe(6);
+    expect(second.allowed ? undefined : second.violations[0]?.projected).toBe(12);
+  });
+
+  it('keeps the reservation charged until it is settled or released', () => {
+    const pending = reserveBudget(LEDGER, { operationId: 'step-1', amount: SIX_UNITS });
+
+    // Allowed: 6 pending + 4 proposed lands exactly on the inclusive cap of 10.
+    expect(
+      evaluateBudget(TENANT_ONLY_POLICY, snapshotFromLedger(pending, tenantUsage()), {
+        ...SIX_UNITS,
+        units: 4,
+      }).allowed,
+    ).toBe(true);
+
+    // Releasing an unspent reservation returns the allowance, because nothing was consumed.
+    const released = releaseBudgetReservation(pending, 'step-1');
+    const releasedSnapshot = snapshotFromLedger(released, tenantUsage());
+
+    expect(releasedSnapshot.tenantDailyUnits).toBe(0);
+    expect(evaluateBudget(TENANT_ONLY_POLICY, releasedSnapshot, SIX_UNITS).allowed).toBe(true);
+
+    // Settling charges only the consumed part; the released remainder is not charged.
+    const settled = consumeBudgetReservation(pending, {
+      operationId: 'step-1',
+      consumed: { steps: 0, units: 2, elapsedMs: 0 },
+    });
+
+    expect(snapshotFromLedger(settled, tenantUsage()).tenantDailyUnits).toBe(2);
+  });
+
+  it('adds this Run to the external Tenant total exactly once', () => {
+    const settled = consumeBudgetReservation(reservedLedger(), {
+      operationId: 'step-1',
+      consumed: { steps: 1, units: 5, elapsedMs: 100 },
+    });
+    const withPending = reserveBudget(settled, { operationId: 'step-2', amount: STEP_AMOUNT });
+
+    // 5 committed units + 20 still pending: the value the adapter charges to this Run.
+    expect(tenantDayUnitsFromLedger(withPending)).toBe(25);
+    expect(snapshotFromLedger(withPending, tenantUsage(100, 3))).toEqual({
+      tenantId: TENANT_A,
+      runId: RUN_A,
+      utcDay: DAY,
+      runSteps: 3,
+      runUnits: 25,
+      runElapsedMs: 300,
+      tenantDailyUnits: 125, // 100 charged to other Runs + 5 committed + 20 pending
+      concurrentSlots: 4, // 3 held by other Runs + 1 pending here
+    });
+  });
+
+  it("reports this Run's own Tenant-day contribution", () => {
+    expect(tenantDayUnitsFromLedger(LEDGER)).toBe(0);
+    expect(tenantDayUnitsFromLedger(reservedLedger())).toBe(20);
+    expect(tenantDayUnitsFromLedger(releaseBudgetReservation(reservedLedger(), 'step-1'))).toBe(0);
+  });
+
+  it('rejects an ambiguous or invalid external usage', () => {
+    // A bare number cannot express "excluding this Run", so it fails closed.
+    expectInvalidArgument(
+      () => snapshotFromLedger(LEDGER, 500 as unknown as BudgetTenantUsage),
+      'invalid_object',
+    );
+    expectInvalidArgument(
+      () =>
+        snapshotFromLedger(LEDGER, {
+          tenantDayUnitsFromOtherRuns: 5,
+          heldSlotsFromOtherRuns: 0,
+          tenantDailyUnits: 5,
+        } as unknown as BudgetTenantUsage),
+      'unknown_field',
+    );
+    expectInvalidArgument(
+      () =>
+        snapshotFromLedger(LEDGER, {
+          tenantDayUnitsFromOtherRuns: 5,
+        } as unknown as BudgetTenantUsage),
+      'invalid_budget_amount',
+    );
+    expectInvalidArgument(
+      () => snapshotFromLedger(LEDGER, tenantUsage(0, -1)),
+      'invalid_budget_amount',
+    );
+    expectInvalidArgument(
+      () => snapshotFromLedger(reservedLedger(), tenantUsage(Number.MAX_SAFE_INTEGER)),
+      'budget_amount_overflow',
+    );
+    expectInvalidArgument(
+      () =>
+        tenantDayUnitsFromLedger({
+          ...LEDGER,
+          consumed: { steps: 0, units: Number.MAX_SAFE_INTEGER, elapsedMs: 0 },
+        }),
+      'budget_ledger_invariant',
+    );
+  });
+});
+
+describe('cross-day Run accounting', () => {
+  const DAY_ONE_AMOUNT: BudgetAmount = { steps: 3, units: 30, elapsedMs: 300, concurrencySlots: 1 };
+
+  function consumedOnDayOne(): BudgetLedgerState {
+    return consumeBudgetReservation(
+      reserveBudget(LEDGER, { operationId: 'day1-step', amount: DAY_ONE_AMOUNT }),
+      { operationId: 'day1-step', consumed: { steps: 3, units: 30, elapsedMs: 300 } },
+    );
+  }
+
+  it('carries the Run totals across the boundary instead of resetting them', () => {
+    const day2 = rollBudgetLedgerToUtcDay(consumedOnDayOne(), DAY_2);
+
+    expect(day2.utcDay).toBe(DAY_2);
+    expect(day2.consumed).toEqual({ steps: 0, units: 0, elapsedMs: 0 });
+    expect(day2.reserved).toEqual({ steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 });
+    expect(day2.runCarryOver).toEqual({ steps: 3, units: 30, elapsedMs: 300 });
+    expect(day2.reservations).toEqual([]);
+    expect(day2.settlements).toEqual([]);
+
+    // The Run counters continue across midnight; only the Tenant-day counter restarts.
+    expect(snapshotFromLedger(day2, tenantUsage())).toEqual({
+      tenantId: TENANT_A,
+      runId: RUN_A,
+      utcDay: DAY_2,
+      runSteps: 3,
+      runUnits: 30,
+      runElapsedMs: 300,
+      tenantDailyUnits: 0,
+      concurrentSlots: 0,
+    });
+  });
+
+  it('keeps the accumulated Run budget enforceable on the next day', () => {
+    const day2 = reserveBudget(rollBudgetLedgerToUtcDay(consumedOnDayOne(), DAY_2), {
+      operationId: 'day2-step',
+      amount: { steps: 2, units: 0, elapsedMs: 0, concurrencySlots: 0 },
+    });
+    const snapshot = snapshotFromLedger(day2, tenantUsage());
+
+    expect(snapshot.runSteps).toBe(5); // 3 consumed yesterday + 2 outstanding today
+
+    const policy: BudgetPolicy = { ...POLICY, maxRunSteps: 5 };
+    const free: BudgetAmount = { steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 };
+
+    // Exactly at the limit is still allowed...
+    expect(evaluateBudget(policy, snapshot, free).allowed).toBe(true);
+
+    // ...and one more step is denied, exactly as it would have been before midnight.
+    const denied = evaluateBudget(policy, snapshot, { ...free, steps: 1 });
+
+    expect(denied.allowed).toBe(false);
+    expect(denied.allowed ? undefined : denied.dimension).toBe('run_steps');
+    expect(denied.allowed ? undefined : denied.used).toBe(5);
+  });
+
+  it('accumulates the carry-over over several day-parts', () => {
+    const day2 = consumeBudgetReservation(
+      reserveBudget(rollBudgetLedgerToUtcDay(consumedOnDayOne(), DAY_2), {
+        operationId: 'day2-step',
+        amount: { steps: 1, units: 4, elapsedMs: 4, concurrencySlots: 0 },
+      }),
+      { operationId: 'day2-step', consumed: { steps: 1, units: 4, elapsedMs: 4 } },
+    );
+    const day3 = rollBudgetLedgerToUtcDay(day2, DAY_3);
+
+    expect(day3.runCarryOver).toEqual({ steps: 4, units: 34, elapsedMs: 304 });
+    expect(snapshotFromLedger(day3, tenantUsage()).runSteps).toBe(4);
+  });
+
+  it('rejects a rollover that is not strictly forward', () => {
+    expectInvalidArgument(
+      () => rollBudgetLedgerToUtcDay(LEDGER, DAY),
+      'budget_day_rollover_not_forward',
+    );
+    expectInvalidArgument(
+      () => rollBudgetLedgerToUtcDay(LEDGER, '2026-02-28'),
+      'budget_day_rollover_not_forward',
+    );
+    expectInvalidArgument(() => rollBudgetLedgerToUtcDay(LEDGER, '2026-02-30'), 'invalid_utc_day');
+  });
+
+  it('refuses to roll over while a reservation is outstanding', () => {
+    expectInvalidArgument(
+      () => rollBudgetLedgerToUtcDay(reservedLedger(), DAY_2),
+      'budget_day_rollover_with_outstanding_reservation',
+    );
+
+    // Settling or releasing first clears the way.
+    const released = releaseBudgetReservation(reservedLedger(), 'step-1');
+
+    expect(rollBudgetLedgerToUtcDay(released, DAY_2).utcDay).toBe(DAY_2);
+  });
+
+  it('accepts an explicit carry-over when rebuilding a later day-part', () => {
+    const rebuilt = createBudgetLedger({
+      tenantId: TENANT_A,
+      runId: RUN_A,
+      utcDay: DAY_2,
+      runCarryOver: { steps: 3, units: 30, elapsedMs: 300 },
+    });
+
+    expect(rebuilt.runCarryOver).toEqual({ steps: 3, units: 30, elapsedMs: 300 });
+    expect(snapshotFromLedger(rebuilt, tenantUsage()).runSteps).toBe(3);
+    // Yesterday's units are Run usage, not today's Tenant usage: no double counting.
+    expect(snapshotFromLedger(rebuilt, tenantUsage()).tenantDailyUnits).toBe(0);
+
+    expectInvalidArgument(
+      () =>
+        createBudgetLedger({
+          tenantId: TENANT_A,
+          runId: RUN_A,
+          utcDay: DAY_2,
+          runCarryOver: { steps: -1, units: 0, elapsedMs: 0 },
+        }),
+      'invalid_budget_amount',
+    );
+    expectInvalidArgument(
+      () =>
+        createBudgetLedger({
+          tenantId: TENANT_A,
+          runId: RUN_A,
+          utcDay: DAY_2,
+          runCarryOver: { steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 },
+        } as unknown as Parameters<typeof createBudgetLedger>[0]),
+      'unknown_field',
+    );
+  });
+
+  it('rejects a malformed carry-over instead of trusting it', () => {
+    expectInvalidArgument(
+      () =>
+        snapshotFromLedger(
+          { ...LEDGER, runCarryOver: { steps: 0, units: 1.5, elapsedMs: 0 } },
+          tenantUsage(),
+        ),
+      'invalid_budget_amount',
+    );
+    expectInvalidArgument(
+      () =>
+        rollBudgetLedgerToUtcDay(
+          {
+            ...consumedOnDayOne(),
+            runCarryOver: { steps: Number.MAX_SAFE_INTEGER, units: 0, elapsedMs: 0 },
+          },
+          DAY_2,
+        ),
+      'budget_amount_overflow',
+    );
+  });
+});
+
+describe('zero-slot policy', () => {
+  const NO_SLOT_POLICY: BudgetPolicy = { ...POLICY, maxConcurrentSlots: 0 };
+  const NO_SLOT_COST: BudgetAmount = { steps: 0, units: 0, elapsedMs: 0, concurrencySlots: 0 };
+
+  it('allows a workload that holds no slot', () => {
+    const decision = evaluateBudget(
+      NO_SLOT_POLICY,
+      {
+        ...SNAPSHOT,
+        concurrentSlots: 0,
+      },
+      NO_SLOT_COST,
+    );
+
+    expect(decision.allowed).toBe(true);
+    expect(decision.allowed ? decision.projected.concurrentSlots : undefined).toBe(0);
+  });
+
+  it('denies the smallest workload that holds a slot', () => {
+    const decision = evaluateBudget(
+      NO_SLOT_POLICY,
+      { ...SNAPSHOT, concurrentSlots: 0 },
+      { ...NO_SLOT_COST, concurrencySlots: 1 },
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed ? undefined : decision.dimension).toBe('concurrency_slots');
+    expect(decision.allowed ? undefined : decision.limit).toBe(0);
+    expect(decision.allowed ? undefined : decision.used).toBe(0);
+    expect(decision.allowed ? undefined : decision.proposed).toBe(1);
+  });
+
+  it('denies a zero-slot workload while another Run holds a slot', () => {
+    const decision = evaluateBudget(
+      NO_SLOT_POLICY,
+      { ...SNAPSHOT, concurrentSlots: 1 },
+      NO_SLOT_COST,
+    );
+
+    expect(decision.allowed).toBe(false);
+    expect(decision.allowed ? undefined : decision.dimension).toBe('concurrency_slots');
+    expect(decision.allowed ? undefined : decision.violations).toHaveLength(1);
+  });
+
+  it('allows a zero-slot step end to end through the ledger', () => {
+    const state = reserveBudget(LEDGER, { operationId: 'no-slot', amount: NO_SLOT_COST });
+    const snapshot = snapshotFromLedger(state, tenantUsage());
+
+    expect(snapshot.concurrentSlots).toBe(0);
+    expect(evaluateBudget(NO_SLOT_POLICY, snapshot, NO_SLOT_COST).allowed).toBe(true);
   });
 });

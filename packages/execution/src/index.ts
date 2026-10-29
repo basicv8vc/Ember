@@ -8,7 +8,9 @@ export {
   evaluateBudget,
   releaseBudgetReservation,
   reserveBudget,
+  rollBudgetLedgerToUtcDay,
   snapshotFromLedger,
+  tenantDayUnitsFromLedger,
   toBudgetDeniedError,
   toUtcDayKey,
   type BudgetAllowDecision,
@@ -23,6 +25,7 @@ export {
   type BudgetReservation,
   type BudgetSettlement,
   type BudgetSnapshot,
+  type BudgetTenantUsage,
   type BudgetUsage,
   type BudgetViolation,
 } from './budget-guard.js';

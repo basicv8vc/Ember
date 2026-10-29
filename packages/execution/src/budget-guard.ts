@@ -12,8 +12,11 @@ import { parseExecutionNow } from './clock.js';
  * - `evaluateBudget(policy, snapshot, proposedCost)` compares a trusted policy against a
  *   trusted usage snapshot and a simulated cost, and returns a frozen Allow/Deny decision;
  * - `createBudgetLedger` / `reserveBudget` / `consumeBudgetReservation` /
- *   `releaseBudgetReservation` express Reservation → Consumption → Release as pure state
- *   transitions on a value, so the semantics are testable without a database.
+ *   `releaseBudgetReservation` / `rollBudgetLedgerToUtcDay` express Reservation → Consumption →
+ *   Release → day rollover as pure state transitions on a value, so the semantics are testable
+ *   without a database;
+ * - `snapshotFromLedger` / `tenantDayUnitsFromLedger` turn that value into the next trusted
+ *   snapshot plus this Run's own Tenant-day contribution.
  *
  * Everything is denominated in **simulated units**. No currency, invoice, provider quota or
  * real billing exists here, and the wording of every export avoids implying otherwise.
@@ -34,6 +37,20 @@ import { parseExecutionNow } from './clock.js';
  * no socket, touches no filesystem and imports nothing from `@ember/postgres`, the LLM
  * fixture, the sandbox fixture or the Task/Run state machines. Inputs are only read; every
  * value this module returns is deep-frozen.
+ *
+ * ## Accounting scopes (tenant-day vs. run)
+ *
+ * Two counters have different lifetimes, so they are never derived from one another:
+ *
+ * - **Run counters** (`runSteps` / `runUnits` / `runElapsedMs`) accumulate over the whole Run
+ *   and therefore *survive* a UTC day change. `BudgetLedgerState.runCarryOver` holds the
+ *   usage committed in earlier day-parts of the same Run, and
+ *   `rollBudgetLedgerToUtcDay` is the only way to start a new day-part.
+ * - **Tenant-day units** reset with the explicit `utcDay` key. The Tenant total is
+ *   `units charged to other Runs today + this Run's committed units + this Run's outstanding
+ *   reserved units`. `snapshotFromLedger(state, { tenantDayUnitsFromOtherRuns,
+ *   heldSlotsFromOtherRuns })` takes the *other* Runs' part as an explicit input, so the split
+ *   is stated once and cannot be counted twice or forgotten.
  *
  * ## Deliberate boundaries (P0B-08a scope)
  *
@@ -89,8 +106,10 @@ export const BUDGET_GUARD_LIMITS = Object.freeze({
  * Every limit is a non-negative safe integer in simulated units and is inclusive: a
  * projection that lands *exactly* on the limit is allowed, one unit above is denied.
  *
- * `maxConcurrentSlots: 0` therefore means "this Tenant/execution domain may not run any
- * simulated step at all" — a valid, explicit, fail-closed configuration, not a missing value.
+ * `maxConcurrentSlots: 0` therefore means "no simulated step of this Tenant may hold a
+ * concurrency slot": a valid, explicit, fail-closed configuration rather than a missing value.
+ * It admits exactly one kind of workload — a cost whose `concurrencySlots` is `0`, projected
+ * onto a snapshot whose gauge is `0` — and denies any cost that holds a slot.
  */
 export interface BudgetPolicy {
   /** Stable identifier of the trusted policy revision used for this decision. */
@@ -117,10 +136,17 @@ export interface BudgetPolicy {
  * day boundary and passes `utcDay` as an explicit `YYYY-MM-DD` key, so a day rollover is an
  * input change rather than hidden behaviour.
  *
- * `runSteps` / `runUnits` / `runElapsedMs` are already-committed per-Run consumption;
- * `tenantDailyUnits` is already-committed Tenant-day consumption (it may include the Run
- * usage above, and this module does not try to reconcile the two); `concurrentSlots` is the
- * number of simulated slots currently held, i.e. a gauge rather than a counter.
+ * `runSteps` / `runUnits` / `runElapsedMs` are the **whole Run's** committed consumption,
+ * including usage from earlier UTC days of the same Run; they are never reset by a day
+ * change (see `rollBudgetLedgerToUtcDay`).
+ *
+ * `tenantDailyUnits` is the **whole Tenant's** simulated units for one explicit UTC day,
+ * including this Run. It must therefore include this Run's own contribution exactly once —
+ * committed units plus outstanding reservations — and the adapter is responsible for adding
+ * the units charged to *other* Runs. `snapshotFromLedger` implements that split explicitly.
+ *
+ * `concurrentSlots` is a **gauge**, not a counter: every simulated slot currently held in the
+ * Tenant / execution domain, including other Runs and this Run's outstanding reservations.
  */
 export interface BudgetSnapshot {
   /** Trusted Tenant scope. Never taken from a Task payload. */
@@ -393,8 +419,12 @@ export interface BudgetSettlement {
  *   that has not been settled yet;
  * - `consumed` is irreversible actual usage: it only ever grows and is never reduced by a
  *   release or a cancellation;
+ * - `runCarryOver` is what this Run already consumed on **earlier UTC days**. It is not part
+ *   of `consumed` (which belongs to the current day at the tenant level) but it *does* count
+ *   towards the Run counters, so a Run never gets a fresh per-Run budget at midnight;
  * - `reservations` / `settlements` are the operation log that makes settlement idempotent per
- *   `operationId` and lets validation re-derive both totals.
+ *   `operationId` and lets validation re-derive both totals. The log is scoped to the current
+ *   day-part: `rollBudgetLedgerToUtcDay` archives it into `runCarryOver`.
  *
  * It provides **no** cross-process guarantee: two Workers can each hold a copy and each
  * believe the same slots are free. Persisting equivalent rules atomically is P0B-08b.
@@ -405,6 +435,7 @@ export interface BudgetLedgerState {
   readonly utcDay: string;
   readonly reserved: BudgetAmount;
   readonly consumed: BudgetUsage;
+  readonly runCarryOver: BudgetUsage;
   readonly reservations: readonly BudgetReservation[];
   readonly settlements: readonly BudgetSettlement[];
 }
@@ -414,13 +445,29 @@ export interface BudgetLedgerScope {
   readonly tenantId: Id;
   readonly runId: Id;
   readonly utcDay: string;
+  /**
+   * Usage this Run already committed on earlier UTC days.
+   *
+   * Omit it on the first day of a Run. A later day-part of an existing Run must pass the
+   * value the adapter persisted (whatever `rollBudgetLedgerToUtcDay` returned as
+   * `runCarryOver`), otherwise the Run counters would silently restart at zero.
+   */
+  readonly runCarryOver?: BudgetUsage;
 }
 
 const ZERO_USAGE: BudgetUsage = Object.freeze({ steps: 0, units: 0, elapsedMs: 0 });
 
 const ZERO_AMOUNT: BudgetAmount = Object.freeze({ ...ZERO_USAGE, concurrencySlots: 0 });
 
-/** Empty ledger: nothing reserved, nothing consumed. */
+/**
+ * Empty ledger for one `(tenantId, runId, utcDay)` scope: nothing reserved, nothing consumed.
+ *
+ * `runCarryOver` defaults to zero (first day-part of the Run) and may be supplied explicitly
+ * when the adapter rebuilds a later day-part.
+ *
+ * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for invalid identity, day key, carry-over
+ * or an unknown field.
+ */
 export function createBudgetLedger(scope: BudgetLedgerScope): BudgetLedgerState {
   const source = asRecord(scope, 'ledger');
   rejectUnknownKeys(source, LEDGER_SCOPE_KEYS, 'ledger');
@@ -431,6 +478,10 @@ export function createBudgetLedger(scope: BudgetLedgerScope): BudgetLedgerState 
     utcDay: parseUtcDayKey(source['utcDay'], 'ledger.utcDay'),
     reserved: ZERO_AMOUNT,
     consumed: ZERO_USAGE,
+    runCarryOver:
+      source['runCarryOver'] === undefined
+        ? ZERO_USAGE
+        : parseUsage(source['runCarryOver'], 'ledger.runCarryOver'),
     reservations: Object.freeze([]),
     settlements: Object.freeze([]),
   });
@@ -494,6 +545,7 @@ export function reserveBudget(
       ),
     }),
     consumed: current.consumed,
+    runCarryOver: current.runCarryOver,
     reservations: Object.freeze([...current.reservations, parsed]),
     settlements: current.settlements,
   });
@@ -575,6 +627,7 @@ export function consumeBudgetReservation(
         'ledger.consumed.elapsedMs',
       ),
     }),
+    runCarryOver: current.runCarryOver,
     reservations: current.reservations,
     settlements: Object.freeze([
       ...current.settlements,
@@ -611,35 +664,168 @@ export function releaseBudgetReservation(
 }
 
 /**
+ * Start a new UTC day-part of the same Run without resetting the Run counters.
+ *
+ * A Run outlives calendar days, but a Tenant-day counter does not. This transition makes that
+ * explicit and pure:
+ *
+ * - `consumed` moves into `runCarryOver` (`carryOver + consumed`), so the Run's cumulative
+ *   steps / units / elapsed time survive the boundary;
+ * - `consumed`, `reserved` and the day-scoped operation log are reset, because the new day
+ *   starts with a fresh Tenant-day allowance and no inherited reservations;
+ * - `nextUtcDay` must be strictly later than the current day. Going backwards or staying on
+ *   the same key is rejected: both would double count Tenant-day usage.
+ *
+ * The rollover refuses to run while a reservation is **outstanding**
+ * (`budget_day_rollover_with_outstanding_reservation`): a reservation is a promise anchored to
+ * one explicit day, so it must be settled or released before the boundary. A reservation that
+ * was already settled is part of a closed day-part and does not block the rollover. This keeps
+ * Tenant-day accounting exact and avoids "reserved yesterday, consumed today" ambiguity.
+ *
+ * After a rollover, `operationId` uniqueness applies to the new day-part. An adapter must not
+ * replay an id from a completed day-part — step ids, the intended input, are already unique
+ * per Run.
+ *
+ * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for an invalid state, a non-forward day
+ * key, or an outstanding reservation.
+ */
+export function rollBudgetLedgerToUtcDay(
+  state: BudgetLedgerState,
+  nextUtcDay: string,
+): BudgetLedgerState {
+  const current = parseLedgerState(state);
+  const next = parseUtcDayKey(nextUtcDay, 'nextUtcDay');
+
+  if (next <= current.utcDay) {
+    return fail('nextUtcDay', 'budget_day_rollover_not_forward');
+  }
+
+  const settledOperationIds = new Set(
+    current.settlements.map((settlement) => settlement.operationId),
+  );
+
+  if (
+    current.reservations.some((reservation) => !settledOperationIds.has(reservation.operationId))
+  ) {
+    return fail('ledger.reservations', 'budget_day_rollover_with_outstanding_reservation');
+  }
+
+  return Object.freeze({
+    tenantId: current.tenantId,
+    runId: current.runId,
+    utcDay: next,
+    reserved: ZERO_AMOUNT,
+    consumed: ZERO_USAGE,
+    runCarryOver: Object.freeze({
+      steps: addAmounts(current.runCarryOver.steps, current.consumed.steps, 'runCarryOver.steps'),
+      units: addAmounts(current.runCarryOver.units, current.consumed.units, 'runCarryOver.units'),
+      elapsedMs: addAmounts(
+        current.runCarryOver.elapsedMs,
+        current.consumed.elapsedMs,
+        'runCarryOver.elapsedMs',
+      ),
+    }),
+    reservations: Object.freeze([]),
+    settlements: Object.freeze([]),
+  });
+}
+
+/**
+ * This Run's own contribution to the Tenant-day unit counter: committed units **plus**
+ * outstanding reserved units.
+ *
+ * Use it when the adapter aggregates Tenant-day usage across Runs: charge exactly this value
+ * to this Run, and never re-add `consumed.units` or `reserved.units` elsewhere. The mirror
+ * value for the concurrency gauge is `state.reserved.concurrencySlots`.
+ *
+ * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for an invalid state or an unsafe sum.
+ */
+export function tenantDayUnitsFromLedger(state: BudgetLedgerState): number {
+  const current = parseLedgerState(state);
+
+  return addAmounts(current.consumed.units, current.reserved.units, 'ledger.tenantDayUnits');
+}
+
+/**
+ * Usage the snapshot must attribute to *other* Runs of the same Tenant.
+ *
+ * Both fields must exclude this Run entirely: this Run's committed units and outstanding
+ * reservations are added by {@link snapshotFromLedger}. Supplying the Tenant-wide total here
+ * would count this Run twice; supplying nothing would forget its pending reservations.
+ */
+export interface BudgetTenantUsage {
+  /** Simulated units charged to other Runs of this Tenant on the same `utcDay`. */
+  readonly tenantDayUnitsFromOtherRuns: number;
+  /** Simulated concurrency slots currently held by other Runs of this Tenant. */
+  readonly heldSlotsFromOtherRuns: number;
+}
+
+/**
  * Build the trusted snapshot for the *next* step from an outstanding ledger.
  *
- * Per-Run counters report `consumed + reserved`, so an outstanding reservation cannot be
- * spent twice by two evaluations. The concurrency gauge is the outstanding slot count.
- * `tenantDailyUnits` must come from the future authoritative Tenant-day store; this module
- * never aggregates across Runs.
+ * The two scopes are computed separately and never inferred from each other:
  *
- * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for an invalid state or a `tenantDailyUnits`
- * that is not a non-negative safe integer.
+ * ```text
+ * runSteps         = runCarryOver.steps + consumed.steps + reserved.steps
+ * runUnits         = runCarryOver.units + consumed.units + reserved.units
+ * runElapsedMs     = runCarryOver.elapsedMs + consumed.elapsedMs + reserved.elapsedMs
+ * tenantDailyUnits = tenantDayUnitsFromOtherRuns + consumed.units + reserved.units
+ * concurrentSlots  = heldSlotsFromOtherRuns + reserved.concurrencySlots
+ * ```
+ *
+ * So a day change never resets the Run counters, and pending reservations are visible to the
+ * Tenant-day cap exactly once (a reservation therefore cannot be oversubscribed by the same
+ * or another step of this Run).
+ *
+ * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for an invalid state or external usage,
+ * or an unsafe sum.
  */
 export function snapshotFromLedger(
   state: BudgetLedgerState,
-  tenantDailyUnits: number,
+  tenantUsage: BudgetTenantUsage,
 ): BudgetSnapshot {
   const current = parseLedgerState(state);
+  const source = asRecord(tenantUsage, 'tenantUsage');
+  rejectUnknownKeys(source, TENANT_USAGE_KEYS, 'tenantUsage');
+
+  const unitsFromOtherRuns = requireAmount(
+    source['tenantDayUnitsFromOtherRuns'],
+    'tenantUsage.tenantDayUnitsFromOtherRuns',
+  );
+  const slotsFromOtherRuns = requireAmount(
+    source['heldSlotsFromOtherRuns'],
+    'tenantUsage.heldSlotsFromOtherRuns',
+  );
 
   return Object.freeze({
     tenantId: current.tenantId,
     runId: current.runId,
     utcDay: current.utcDay,
-    runSteps: addAmounts(current.consumed.steps, current.reserved.steps, 'runSteps'),
-    runUnits: addAmounts(current.consumed.units, current.reserved.units, 'runUnits'),
+    runSteps: addAmounts(
+      addAmounts(current.runCarryOver.steps, current.consumed.steps, 'runSteps'),
+      current.reserved.steps,
+      'runSteps',
+    ),
+    runUnits: addAmounts(
+      addAmounts(current.runCarryOver.units, current.consumed.units, 'runUnits'),
+      current.reserved.units,
+      'runUnits',
+    ),
     runElapsedMs: addAmounts(
-      current.consumed.elapsedMs,
+      addAmounts(current.runCarryOver.elapsedMs, current.consumed.elapsedMs, 'runElapsedMs'),
       current.reserved.elapsedMs,
       'runElapsedMs',
     ),
-    tenantDailyUnits: requireAmount(tenantDailyUnits, 'tenantDailyUnits'),
-    concurrentSlots: current.reserved.concurrencySlots,
+    tenantDailyUnits: addAmounts(
+      addAmounts(unitsFromOtherRuns, current.consumed.units, 'tenantDailyUnits'),
+      current.reserved.units,
+      'tenantDailyUnits',
+    ),
+    concurrentSlots: addAmounts(
+      slotsFromOtherRuns,
+      current.reserved.concurrencySlots,
+      'concurrentSlots',
+    ),
   });
 }
 
@@ -699,6 +885,7 @@ const LEDGER_KEYS = [
   'utcDay',
   'reserved',
   'consumed',
+  'runCarryOver',
   'reservations',
   'settlements',
 ] as const satisfies readonly (keyof BudgetLedgerState)[];
@@ -707,7 +894,13 @@ const LEDGER_SCOPE_KEYS = [
   'tenantId',
   'runId',
   'utcDay',
+  'runCarryOver',
 ] as const satisfies readonly (keyof BudgetLedgerScope)[];
+
+const TENANT_USAGE_KEYS = [
+  'tenantDayUnitsFromOtherRuns',
+  'heldSlotsFromOtherRuns',
+] as const satisfies readonly (keyof BudgetTenantUsage)[];
 
 const UTC_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -943,6 +1136,12 @@ function parseEntryList<T>(
  * disagree with its own log — a hand-edited fixture, a partially applied write from the
  * future adapter — is rejected instead of being trusted for the next decision.
  *
+ * `runCarryOver` is the one field that cannot be re-derived: it describes earlier day-parts
+ * whose log is not part of this value. It is still validated as a strict usage value (three
+ * non-negative safe integers, no extra keys), and `rollBudgetLedgerToUtcDay` is the only
+ * producer, so a forged carry-over can only raise a Run's counters (fail closed), never lower
+ * them.
+ *
  * @throws {InvalidArgumentError} `INVALID_ARGUMENT` for any structural or invariant failure.
  */
 function parseLedgerState(value: unknown): BudgetLedgerState {
@@ -954,6 +1153,7 @@ function parseLedgerState(value: unknown): BudgetLedgerState {
   const utcDay = parseUtcDayKey(source['utcDay'], 'ledger.utcDay');
   const reserved = parseBudgetAmount(source['reserved'], 'ledger.reserved');
   const consumed = parseUsage(source['consumed'], 'ledger.consumed');
+  const runCarryOver = parseUsage(source['runCarryOver'], 'ledger.runCarryOver');
   const reservations = parseEntryList(
     source['reservations'],
     'ledger.reservations',
@@ -1036,6 +1236,7 @@ function parseLedgerState(value: unknown): BudgetLedgerState {
     utcDay,
     reserved,
     consumed,
+    runCarryOver,
     reservations,
     settlements,
   });

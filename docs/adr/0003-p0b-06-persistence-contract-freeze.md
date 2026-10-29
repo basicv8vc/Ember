@@ -1,6 +1,6 @@
 # ADR-0003 — P0B-06 持久结果与恢复工程契约冻结
 
-- **状态：CTO Frozen / 待本 ADR 合并 main 后生效**
+- **状态：CTO 已批准的工程契约；仅当本文件位于 main 时正式 Frozen（合并前不生效）**
 - **决策日期：2026-10-29**
 - **Owner：Ember Architecture / CTO**
 - **决策范围：B06-D1～D6；P0B-06 本地纵向闭环**

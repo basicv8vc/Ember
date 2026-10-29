@@ -35,7 +35,7 @@
 | `pnpm db:migrate`（第 1 次）     | `5 applied, 0 already applied`（0001–0005）                                                                          |
 | `pnpm db:migrate`（第 2 次）     | `0 applied, 5 already applied`（幂等）                                                                               |
 | `pnpm test:integration`          | **14 files / 143 tests passed**（真实 PG 17 + 临时 blob 根目录）                                                     |
-| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 54 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
+| ESM consumption smoke            | `import('./packages/postgres/dist/index.js')` → 57 exports，`PostgresRunResultCommitter` 为函数；`domain` 32 exports |
 | `git diff --check`               | 通过（无空白错误）                                                                                                   |
 
 > Round 2 复跑说明：本机 `pnpm` 的 corepack 缓存丢失（`Cannot find module .../bin/pnpm.cjs`），因此 Round 2 直接调用

@@ -15,6 +15,7 @@
 1. 对具体事项，优先遵守 `docs/adr/` 中明确标记 **Accepted** 的决策：
    - [ADR-0001：Cancellation and Retry](../adr/0001-cancellation-and-retry-coordination.md)
    - [ADR-0002：Pre-claim Deadline Failure](../adr/0002-preclaim-deadline-failure.md)
+   - [ADR-0003：P0B-06 Engineering Contract Freeze](../adr/0003-p0b-06-persistence-contract-freeze.md)（合并到 `main` 后生效）
 2. [V1 Architecture Baseline](./v1-architecture-baseline.md) 已经 CTO Architecture Review 接受（PR #8，2026-10-29 合并到 `main`），作为整体系统不变量生效。
 3. [Execution Placement](./v1-execution-placement.md) 仍为待评审专题设计（专项决策 D-01～D-07 未批准）；如与新 Baseline 冲突，记录差异并显式修订。
 4. RFC、旧任务书保留作为决策背景，不覆盖已经合并的代码事实或已批准 ADR。
@@ -24,12 +25,12 @@
 ## P0B-06 开始实施前请阅读
 
 1. Baseline `4–8`：Task/Run Fencing、数据所有权、可替换持久化、Workspace CAS 与 Checkpoint。
-2. Baseline `12`：六项必须先决定的 B06-D1～B06-D6。
+2. Baseline `12`：已批准的 B06-D1～D6 架构边界；[ADR-0003](../adr/0003-p0b-06-persistence-contract-freeze.md) 冻结具体工程行为契约。
 3. [Execution Placement](./v1-execution-placement.md) 中关于设备权限、离线和重试的规则，以及待修订的跨 Run 恢复区别。
 4. ADR-0001/0002，`packages/domain`、`packages/contracts`、`packages/postgres`、`packages/execution` 当前实现。
 5. Mac Harness Discovery/Adapters 属于独立 V1 专项工程，**不纳入 P0B-06**；不可把本机第三方 Session 当作可移植 Checkpoint。
 6. [P0B-05 实现记录](../P0B-05-IMPLEMENTATION.md)与[验收证据](../P0B-05-ACCEPTANCE.md)。
 
-P0B 各阶段的 Implementation/Acceptance 文件仍在 `docs/` 目录；Coding Agent 的工程 Prompt 在 [`docs/prompts/`](../prompts/)；下一阶段的 [P0B-06 Cline CLI Prompt](../prompts/Ember_P0B-06_Cline_CLI_Implementation_Prompt.md) 所依赖的 Architecture Baseline 已接受并合并（PR #8），但**仍须先冻结 Baseline 第 12 节的 B06-D1～D6 契约**后才可执行。
+P0B 各阶段的 Implementation/Acceptance 文件仍在 `docs/` 目录；Coding Agent 的工程 Prompt 在 [`docs/prompts/`](../prompts/)；下一阶段的 [P0B-06 Cline CLI Prompt](../prompts/Ember_P0B-06_Cline_CLI_Implementation_Prompt.md) 所依赖的 Architecture Baseline 已接受并合并（PR #8），但**仍须先使 ADR-0003 经审查合并到 `main`，完成 B06-D1～D6 工程契约冻结**后才可执行。
 
-**实施规则：**Architecture Baseline 已接受（PR #8），但在 B06-D1～D6 契约冻结前仍不要下发 P0B-06 编码任务；文档草案不代表生产功能存在。
+**实施规则：**Architecture Baseline 已接受（PR #8），但在 ADR-0003 合并生效之前仍不要下发 P0B-06 编码任务；文档草案不代表生产功能存在。

@@ -262,6 +262,27 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 | **B06-D5** | 存储 Ports/Adapter 的能力测试、路径及跨 Tenant 访问防护。 | 真实 PG 并发、故障注入、丢 ACK、CAS、Fencing、staging 清理正反例。 |
 | **B06-D6** | Execution Placement 中关于未来**跨 Run**恢复和“运行中迁移”的表述一致性。 | 不允许与已发布 Placement 策略形成隐性冲突；P0B-06 不自动实现改派。 |
 
+### 12.1 CTO Architecture Review — P0B-06 契约冻结建议（2026-10-29）
+
+以下是审查现有 `@ember/contracts`、领域 FSM、0002/0003 Migration 和 P0-B Task Spec 后的**保守实施决议**。在本 PR 合并前仍属 Proposed；实现 Agent 不得自行更改这些边界：
+
+| Gate | P0B-06 采用的最小可验证设计 | 明确延后 |
+| --- | --- | --- |
+| **B06-D1** | 分离不可变 `Blob`、仅任务可见的 `StagedBlob` 与正式授权 `Artifact`；上传的 bytes/size/SHA 校验完成也**不自动发布**。用户主动保存或被历史 Workspace/Checkpoint 引用的内容不得随意 GC。孤儿 staging 仅在可证明无引用且过可配置隔离窗口后清理。 | 真实云对象存储、生产 KMS/轮换、复杂存储配额与商业计费。 |
+| **B06-D2** | `Workspace` 按 `tenantId + workspaceId` 隔离；Manifest 条目采用经规范化且唯一的逻辑相对路径，禁止穿越/符号链接逃逸；版本历史不可变；提交以 `expectedVersion` CAS。V1 最小自动合并仅在双方使用**已知共同基线**、修改路径完全不交叉且操作不含删除/重命名/权限/敏感元数据时尝试；其余保留两份候选产物和冲突元数据供用户决策，不修改权威版本。 | 通用文本三方合并、CRDT、AI 自动修改冲突、交互式冲突 UI（可在后续阶段接入）。 |
+| **B06-D3** | 拆分用户 `AuthContext` 与由服务端验证的 scoped Run 执行授权；既有 `ArtifactStore.put(AuthContext)` / `WorkspaceStore.commit(AuthContext)` 不得由 Worker 伪造 principal 调用。单一可信 `RunResultCommitter` 在**一个 PG 事务**中锁定并核验 tenant/task/currentRun/epoch/attempt/有效 lease/Deadline/cancel，执行 Artifact 元数据发布、Workspace CAS、Checkpoint 引用、唯一终态 Event、合法 FSM 与 Run 终态。此前 staging 的 Blob 写不属于 PG ACID；必须有失败回收与重复 Commit 幂等键。不得先写 Workspace 后单独调用旧 `LeaseQueue.finish()`。 | 分布式 2PC、跨云对象存储 ACID、直接对外暴露 Executor DB 凭据。 |
+| **B06-D4** | 版本化、最小、可序列化的**逻辑 Step Checkpoint**：来源 Tenant/Task/Run/epoch、step/cursor、输入与执行器兼容版本、Workspace 版本、已提交 Artifact、外部操作标识及副作用核验状态。Step 发布和引用一致性必须在有权 Run 的单次事务中核验；每次恢复只读最近已提交且兼容的 Checkpoint，新 Run/epoch 获得自己的写权。ACK 丢失需幂等重放；未确认的外部副作用不得自动重复。 | 任意 Harness 私有 Session、OS/VM/Browser 内存热迁移及跨 Mac/Cloud 真正远程恢复。 |
+| **B06-D5** | V1 真实权威 Adapter 保持 PostgreSQL + 本地受控 Blob 文件存储，但领域和应用层只依赖能力 Port，禁止 SQL/宿主机路径泄入持久身份。必须在真实 PG 独立连接/故障注入下证实 CAS 单赢家、跨 Tenant/越界路径拒绝、坏 Hash/缺 Blob、旧 Epoch 零写、Event 失败整笔回滚、DB Commit 后丢 ACK 幂等重放及孤儿 staging 不可读。 | 第二个生产数据库 Adapter、云存储性能/SLA 推断。 |
+| **B06-D6** | 本 PR 同步修订 `v1-execution-placement.md`：**单次 Run 不能热迁移**；未来仅允许新 Run 在授权和兼容性复核后从已提交逻辑 Checkpoint 条件恢复。P0B-06 不实现自动改派。 | 设备身份/Gateway、跨设备能力探测和自动位置切换策略。 |
+
+**实现细节保护线：**
+
+1. 当前 `TaskEventPayload` 只有安全 allowlist 元数据；新 Artifact/Checkpoint 流程不把自由文本、私人路径、Prompt 或 secrets 加入 Event。需要扩展 event 类型时须先审查 Domain、Zod、SQL 三方一致性。
+2. `RunResultCommitter` 必须明确处理“同提交操作 ID + 同内容重放”“同 ID + 不同内容冲突”“旧 Run 重放”的可观察结果；数据库提交后才返回用户可见的成功 ACK。
+3. 用户冲突裁决属于后续 API/UI；P0B-06 至少能持久保留冲突候选并拒绝覆盖，不能把用户待决冲突伪装成 `completed` 或自行增加不在 FSM 中的状态。
+4. 已合并的 `0001`–`0004` 只读不修改；新增前向 Migration 负责 P0B-06 元数据、唯一键、复合 Tenant-safe FK、约束/索引与复测。
+5. 目标是有测试可证明的**最小纵向闭环**，不是让 P0B-06 提前实现 Mac Harness、iOS/macOS、OAuth/设备网关、生产加密、完整审批或智能冲突合并。
+
 未定设计可以先拆为小 ADR，别为了凑齐“通用架构”一次性添加不存在的 Repository/Provider 实现。技术组件未来可替换，但**数据库正确性与产品隐私不变量不可降级**。
 
 **V1 Harness 专项决策不阻塞 P0B-06：**后续 Mac 集成开始前，须另行评审 Harness 身份/授权、ACP 与 Native Adapter 兼容矩阵、工作目录隔离、审批/取消、SDK/CLI 凭据边界、执行审计和结果提交协议。不得将“支持第三方 Harness”转嫁为 P0B-06 的编码任务。

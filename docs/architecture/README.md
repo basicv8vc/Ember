@@ -30,6 +30,6 @@
 5. Mac Harness Discovery/Adapters 属于独立 V1 专项工程，**不纳入 P0B-06**；不可把本机第三方 Session 当作可移植 Checkpoint。
 6. [P0B-05 实现记录](../P0B-05-IMPLEMENTATION.md)与[验收证据](../P0B-05-ACCEPTANCE.md)。
 
-P0B 各阶段的 Implementation/Acceptance 文件仍在 `docs/` 目录；Coding Agent 的工程 Prompt 在 [`docs/prompts/`](../prompts/)。
+P0B 各阶段的 Implementation/Acceptance 文件仍在 `docs/` 目录；Coding Agent 的工程 Prompt 在 [`docs/prompts/`](../prompts/)；下一阶段的 [P0B-06 Cline CLI Prompt](../prompts/Ember_P0B-06_Cline_CLI_Implementation_Prompt.md) **仅可在本 Architecture PR 正式审核并合并后执行**。
 
 **实施规则：**在架构评审通过前不要下发 P0B-06 编码任务；文档草案不代表生产功能存在。

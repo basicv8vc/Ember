@@ -1,7 +1,7 @@
 # Ember V1 — Architecture Baseline（正式架构基线草案）
 
 > **状态：Proposed / 待 CTO Architecture Review；尚未批准，不代表代码已实现**  
-> **版本：v0.1 · 2026-10-29**  
+> **版本：v0.2 · 2026-10-29（新增 Mac Harness 集成目标，仍为 Proposed）**  
 > **Owner：Ember Product / CTO / Architecture**  
 > **基线：`main` @ `b5b400fe35edc3dc34bacb19269cfa043d21878d`（P0B-01～05 已合并）**  
 > **适用范围：V1 iOS + macOS App、云端 Control Plane、Mac/Cloud Execution、数据持久化与同步**  
@@ -25,7 +25,7 @@ Ember 是 Personal Agent Platform，不是一人一台长期运行的 VM。一�
 | 参与者 | V1 应负责 | 禁止默认承担 |
 | --- | --- | --- |
 | **iOS App** | 与 Agent 交互、下发/取消任务、追踪进度与文件、审批、通知、授权同步。 | 任意常驻后台执行、直接访问权威数据库。 |
-| **macOS App** | 与 iOS 相同的交互能力，加上经过授权的本地 Executor，使用明确授权的本机工具、App 和私人文件。 | 成为云端共享状态唯一来源；持有云端数据库管理员凭据。 |
+| **macOS App** | 与 iOS 相同的交互能力，加上经过授权的本地 Executor；发现用户安装的 Coding Harness（如 Codex、Claude Code、Pi）并在用户授权后委托其执行编程任务。 | 成为云端共享状态唯一来源；持有云端数据库管理员凭据；安装即默认执行或自动获得全盘权限。 |
 | **Cloud Control Plane** | 永久在线可访问的任务入口、认证授权、Agent/Task/Run/Event 权威状态、调度、持久化、设备管理、结果提交、通知。 | 每个 Agent 必须永久占用一台 VM、一个进程或一个模型会话。 |
 | **Cloud Executor / Sandbox** | 按需获得受限能力、执行获授权任务、上传受检验输出。 | 长期 Agent 身份、永久 Workspace 根目录、无限制数据与密钥访问。 |
 | **共享持久化层** | 加密保存长期记忆、共享 Workspace、已授权同步文件、Artifact、Checkpoint、任务历史。 | 默默同步 Mac 私人文件，或把 Sandbox 临时磁盘当权威副本。 |
@@ -87,6 +87,21 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 
 **变更提示：**当前 Placement v0.1 将“跨设备迁移”整体列为非目标，且重试默认保持执行位置。后续产品讨论批准了**具备资格的 Task 在新的 Run 中从逻辑 Checkpoint 恢复到另一设备**这一目标。两者并不等于“运行中的进程热迁移”，但文档措辞必须在正式实现前修订；**P0B-06 不准擅自加入自动改派逻辑**，该能力需要后续 Placement/权限/设备协议 ADR。
 
+### 3.1 macOS 本地 Coding Harness 集成（V1 产品决策，工程待实现）
+
+**目标：**用户可从 iOS 或 macOS 与同一个 Ember Personal Agent 交互，在需要访问 Mac 本地授权代码仓库时，由 Mac Local Executor 委托用户已安装且**单独授权**的 Codex、Claude Code、Pi 等 Coding Harness 执行；提交任务的设备不决定执行设备。Coding Harness 是可替换的**受托执行能力**，不是 Task/Run/Lease、租户身份、长期 Workspace 或 Checkpoint 的权威来源。
+
+- **发现：**Mac App 以只读、元数据优先、受限目录扫描列出受支持的 Harness 候选、版本/可用性和能力。优先参考 AgentTower 的安装发现、安全路径检查与显式数据目录授权。发现成功 **≠** 已授权运行；不存在的、不可信或不可安全定位的可执行文件不可自动启动。发现阶段不得悄然运行候选二进制、安装插件、改写各 Harness 配置或读取凭据。
+- **授权：**用户须显式启用某 Harness，并为每个任务限定项目根目录、读写、命令、网络、持续时间、成本及高风险行为的审批规则；允许撤销和审计。Mac 私人文件默认留本机，除非用户明确授权同步，否则不得随会话、日志、Artifact 或 Checkpoint 上传。已有 CLI 登录态不构成无限授权；不复制、提取或转发 Harness 凭据。
+- **统一业务适配器：**在 Mac Execution Plane 内定义 provider-neutral `CodingHarnessRegistry` / `CodingHarnessAdapter`（拟议接口），覆盖 `discover/probe/capabilities/start/observe/approve-or-deny/cancel/dispose`，把不同协议转为 Ember 的执行进度、权限待决、完成、错误与取消语义。优先支持经实际能力协商的 **ACP**，并为 Codex App Server、Claude Code Agent SDK/程序化 CLI、Pi RPC 保留独立 Native Adapter。**ACP、MCP、Ember 内部 Task 契约不是一回事**；协议选择须由真实版本与能力探测决定，不因 Provider 名称直接推断。
+- **任务与会话分离：**一个 Ember Task 可有多个受 Fencing 约束的 Run；每个 Run 可创建一个或多个 Harness Session，但 Session ID 仅是适配器内部引用。只有可信且仍有效的 Run/epoch 能向权威提交结果；日志、Stream、Harness 的“完成”回执不等于 Workspace/Artifact/Task 已提交。断线、取消、Deadline 和租约失效必须终止或隔离旧会话；迟到输出不得写入权威数据。
+- **结果发布：**Harness 在获授权的隔离工作目录或可控 worktree 内产生变更；差异与产物须经过范围、内容及授权验证，按 Workspace `expectedVersion` 进行 CAS，冲突时保留双方内容并让用户决策。Mac 私人仓库不因需要云端 Task 状态而自动上传源代码或敏感 Prompt。
+- **恢复边界：**不同 Harness 的内部推理上下文/私有会话格式不保证互通。Mac 断电后，只有**已提交的 Ember 逻辑 Checkpoint**和授权可访问的输入、产物可用于新 Run 的条件恢复；不能承诺跨供应商、跨设备恢复内部进程。外部副作用需幂等凭据、核验或再次审批。
+- **安全隔离：**安装在用户 Mac 的 Coding Harness 可能拥有普通用户级 Shell、文件及网络能力，不能把它当成安全 Sandbox。适配器不得将模型生成文本直接插入 Shell 命令行；子进程以确定的二进制路径、argv、受控环境和工作目录启动，限制权限/资源并清理进程组。ACP 权限回调必须按 Ember 政策逐项审批，**不得沿用 AgentChat 早期实现中的自动批准行为**。
+- **V1 验收：**先实现安全安装发现与用户启用；随后以至少一个经验证的 Harness 完成端到端编程任务，包括进度流、审批拒绝、取消、超时、旧 Epoch 迟到输出拒绝、私有路径越权拒绝与 CAS 冲突；最终形成 Codex/Claude/Pi 的独立 Adapter 兼容矩阵和版本化测试。未经验证的集成只能展示“检测到但不可委托”，不能宣称支持。
+
+**工程阶段边界：**本决策纳入 V1 目标，但 Harness Discovery/Adapters、设备身份、Executor Gateway、真实 Mac App 均**不属于 P0B-06**。P0B-06 只提供支撑 Harness 产物的可替换 Artifact/Workspace/Checkpoint/原子提交契约；后续独立工作包实施本机集成。云端 Executor 不依赖 Mac 本机安装的 Harness，且不得由云端绕开本机授权直接调用。
+
 ## 4. Task / Run / Lease / 事务不变量
 
 现有 P0B-01～05 已提供关键内核：纯领域状态机、Zod 契约、持久任务 Inbox、幂等创建、Tenant-safe FK、Lease/Heartbeat/Reaper/Fencing/Retry/Cancel、确定性 Fake execution。继续遵守已批准的：
@@ -130,6 +145,7 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 | `RunResultCommitter`（拟议） | 一次权威 PG 事务 | 校验当前 Run/epoch/Deadline + Workspace CAS；原子发布 Artifact 引用、Workspace、Checkpoint、Event、Run 终态。 |
 | `MemoryRepository` / `MemorySearch`（未来） | 云端事务存储；可替换检索索引 | 来源与授权不可丢，检索索引可重建。 |
 | Mac 本地缓存 | SQLite / 本地文件（未来） | 不是云端调度数据库的等价替代。 |
+| `CodingHarnessRegistry` / `CodingHarnessAdapter`（未来） | Mac 本地独立适配器，ACP / Codex App Server / Claude Agent SDK / Pi RPC | 探测与授权分离、会话独立于 Run、权限请求、取消、Fencing 和输出 CAS。 |
 
 当前 `ArtifactStore` 的签名需要已验证用户 `AuthContext`，而远端 Executor 应使用经过验证的**受限 Run 授权**。P0B-06 需要设计相应的独立端口或应用服务；**禁止**伪造用户 `principalId`。
 
@@ -168,7 +184,7 @@ V1 位置决策采用可解释、可审计的简单规则，而非运行时 AI �
 
 **产品目标：**当 Mac 中断时，已提交的逻辑步骤不必从头执行；在任务能力、同步数据、权限、用户策略和目标 Executor 兼容的前提下，未来允许**新的 Run**从已确认的 Checkpoint 在云端继续。
 
-可恢复的是**逻辑状态**，不是正在运行的 shell、浏览器 Session、VM 内存、模型 Token 流或任意进程指令地址。未提交的当前步骤可能需要重做，必须防止外部副作用重复执行。
+可恢复的是**逻辑状态**，不是正在运行的 shell、浏览器 Session、Coding Harness 内部 Session、VM 内存、模型 Token 流或任意进程指令地址。Codex/Claude Code/Pi 的内部上下文不可假定能彼此重载；未提交的当前步骤可能需要重做，必须防止外部副作用重复执行。
 
 Checkpoint 应版本化地记录：
 
@@ -211,6 +227,8 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 6. **Recoverable：**损坏 Blob、悬空引用、CAS 失败、断网、丢 ACK、重复重试、GC 与权限撤销都需可检测、可审计、能安全回退。
 7. **Cost/safety bounds：**资源、文件大小、Lease/Deadline、重试和计费上限必须有硬限制；真实 LLM 与付费云接入前另设安全及成本 Go/No-Go。
 8. **Evidence over claims：**FakeLLM/FakeSandbox、模拟 1,000 Agent 和本地 CI 不证明真实隔离、多地区性能、云稳定性或商业可行性。
+9. **Harness is not a sandbox：**本机第三方 Coding Agent 运行时可拥有较广的 OS 权限；仅发现/启动成功不等于已获得用户授权或具有强隔离。授权请求不得自动全允，工具输出/外部代码视为不可信输入。
+10. **Provider independence：**不得把 Codex/Claude/Pi 的可执行路径、私有 Session 格式、配置文件或账户令牌作为 Ember Task、Workspace、Checkpoint 的持久身份。
 
 ## 11. 实现进度和 Roadmap（截至本草案）
 
@@ -227,6 +245,7 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 | **P0B-09** | 尚未开始。 | Telemetry、Chaos、Load 与真实恢复证据。 |
 | **P0B-10** | 尚未开始。 | 本地垂直闭环 Demo、最终验收。 |
 | **V1 App/Cloud 扩展阶段** | 架构目标已讨论。 | iOS/macOS App、设备身份、Gateway、真实云 Executor、授权同步与跨 Run 恢复。 |
+| **V1 Mac Harness Integration（独立阶段）** | 已形成产品决策，尚无实现。 | 安全安装发现、用户授权、ACP/Native Adapter、Run-Session 生命周期、审计、CAS 产物接入和版本兼容矩阵。 |
 
 本表是“已合并能力与未来目标”的区分，而非商业发布进度。P0B-05 的 `poll` 为显式开启的非生产本地模拟（`EMBER_WORKER_SIMULATED_EXECUTION=local-only`）；当前没有真实持久化 Artifact。根目录 README 中关于 P0B-04/P0B-05 的历史状态有过时表述，后续文档维护应同步修正。
 
@@ -245,12 +264,14 @@ LLM 的上下文窗口不等于长期记忆；Sandbox snapshot 不等于可移�
 
 未定设计可以先拆为小 ADR，别为了凑齐“通用架构”一次性添加不存在的 Repository/Provider 实现。技术组件未来可替换，但**数据库正确性与产品隐私不变量不可降级**。
 
+**V1 Harness 专项决策不阻塞 P0B-06：**后续 Mac 集成开始前，须另行评审 Harness 身份/授权、ACP 与 Native Adapter 兼容矩阵、工作目录隔离、审批/取消、SDK/CLI 凭据边界、执行审计和结果提交协议。不得将“支持第三方 Harness”转嫁为 P0B-06 的编码任务。
+
 ### 后续实施顺序
 
 1. **P0B-ARCH（当前）：**评审此 Baseline、既有 Placement 与关键 B06 ADR；批准后才发布 P0B-06 Prompt。
 2. **P0B-06：**真实本地 Blob + PG 元数据、Workspace CAS、逻辑 Checkpoint、Fenced Commit、恢复及安全负向测试。
 3. **P0B-07～10：**按原 P0-B 任务书完成 API/AuthZ/SSE、审批/预算、故障与负载、Demo/证据。
-4. **V1 专项工程：**iOS/macOS、设备身份和 Executor Gateway、真实云执行与授权数据同步、符合策略的跨 Run Checkpoint 恢复；需独立设计和真机/云端验收。
+4. **V1 专项工程：**iOS/macOS、设备身份和 Executor Gateway、真实云执行与授权数据同步、符合策略的跨 Run Checkpoint 恢复；Mac Harness Discovery/Adapters 作为独立里程碑，需独立设计和真机/云端验收。
 
 ## 13. 文档索引与变更管理
 

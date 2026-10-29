@@ -392,6 +392,19 @@ describe('P0B06 P2-2 deletion of a referenced artifact', () => {
 });
 
 /**
+ * Keep a promise that is awaited later from surfacing as an unhandled rejection.
+ *
+ * Both tests below create the collector and the upload *before* the `pg_locks` barrier. If the
+ * barrier fails, the test unwinds while those operations are still pending, and their rejection
+ * would hide the barrier's message behind an unhandled-rejection warning.
+ */
+function guardRejection<T>(promise: Promise<T>): Promise<T> {
+  void promise.catch(() => undefined);
+
+  return promise;
+}
+
+/**
  * Round 3 review, P1-A.
  *
  * `put()` installs bytes *before* it opens its publishing transaction, so the collector can
@@ -431,12 +444,12 @@ describe('P0B06 P1-A an upload that loses to the collector', () => {
 
       expect(held).toEqual([{ pid: blockerPid, granted: true, blockedBy: [] }]);
 
-      const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
+      const sweep = guardRejection(local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 }));
       const collector = await waitForAdvisoryLockQueueEntry(db.pool, { lockKey, blockerPid });
 
       // `put` stages, "installs" (the digest file already exists, so install verifies and
       // returns) and then queues for the same lock, behind the collector.
-      const upload = local.artifacts.put(seed.ctx, bytes, 'text/plain');
+      const upload = guardRejection(local.artifacts.put(seed.ctx, bytes, 'text/plain'));
       const publisher = await waitForAdvisoryLockQueueEntry(db.pool, {
         lockKey,
         blockerPid,
@@ -495,10 +508,10 @@ describe('P0B06 P1-A an upload that loses to the collector', () => {
       await blocker.query('BEGIN');
       await blocker.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
 
-      const upload = local.artifacts.put(seed.ctx, bytes, 'text/plain');
+      const upload = guardRejection(local.artifacts.put(seed.ctx, bytes, 'text/plain'));
       const publisher = await waitForAdvisoryLockQueueEntry(db.pool, { lockKey, blockerPid });
 
-      const sweep = local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 });
+      const sweep = guardRejection(local.blobs.sweepOrphans(new Date(), { retentionMs: 60_000 }));
       const collector = await waitForAdvisoryLockQueueEntry(db.pool, {
         lockKey,
         blockerPid,

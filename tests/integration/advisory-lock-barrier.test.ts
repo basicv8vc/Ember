@@ -39,46 +39,143 @@ interface HeldLock {
   release(): Promise<void>;
 }
 
+type PoolClient = {
+  query(sql: string, values?: unknown[]): Promise<unknown>;
+  /** `true` destroys the connection instead of returning it to the pool. */
+  release(destroy?: boolean): void;
+};
+
+/** How long a cancelled statement may take to settle before its connection is destroyed. */
+const CANCEL_GRACE_MS = 1_000;
+
+/** `true` when `promise` settles within `ms`. */
+async function settlesWithin(promise: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), ms);
+  });
+
+  try {
+    return await Promise.race([
+      promise.then(
+        () => true,
+        () => true,
+      ),
+      expired,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** Roll back and hand a client back exactly once, so a repeated release stays harmless. */
+function releaseOnce(client: PoolClient): () => Promise<void> {
+  let released = false;
+
+  return async () => {
+    if (released) {
+      return;
+    }
+    released = true;
+
+    await client.query('ROLLBACK').catch(() => undefined);
+    client.release();
+  };
+}
+
+/**
+ * Give back a client whose statement may still be waiting on a server lock.
+ *
+ * Awaiting that statement would hang the very failure this path exists to report, so the backend
+ * is cancelled from another connection first. If the cancellation does not land, the connection
+ * is destroyed rather than handed back busy. Either way the pool gets its slot back, so a fixture
+ * that fails cannot make `db.close()` in `afterAll()` wait for an abandoned session.
+ */
+async function cancelWaitingAndRelease(
+  client: PoolClient,
+  release: () => Promise<void>,
+  pid: number,
+  waiting: Promise<unknown>,
+): Promise<void> {
+  await db.pool.query('SELECT pg_cancel_backend($1)', [pid]).catch(() => undefined);
+
+  if (await settlesWithin(waiting, CANCEL_GRACE_MS)) {
+    await release();
+
+    return;
+  }
+
+  client.release(true);
+}
+
 /** Begin a transaction that holds `lockKey` until `release()`. */
 async function holdLock(lockKey: string): Promise<HeldLock> {
   const client = await db.pool.connect();
-  const pid = await backendPid(client);
+  const release = releaseOnce(client);
 
-  await client.query('BEGIN');
-  await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+  try {
+    const pid = await backendPid(client);
 
-  return {
-    pid,
-    release: async () => {
-      await client.query('ROLLBACK').catch(() => undefined);
-      client.release();
-    },
-  };
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]);
+
+    return { pid, release };
+  } catch (error) {
+    // The connection is checked out of the pool already: return it before reporting the failure.
+    await release();
+    throw error;
+  }
 }
 
 /**
  * Begin a transaction whose advisory lock request is queued behind `holderPid`.
  *
- * Returns only once the statement is genuinely waiting on `holderPid` for `lockKey`. The
- * holder must be released before this session is released, so the queued statement can
- * complete instead of being cut off on a busy connection.
+ * Returns only once the statement is genuinely waiting on `holderPid` for `lockKey`. The holder
+ * must be released before this session is released, so the queued statement can complete instead
+ * of being cut off on a busy connection. If the barrier never sees the expected queue entry, the
+ * waiting statement is cancelled and the connection is still handed back, so a barrier timeout
+ * reports itself instead of wedging the pool.
  */
-async function queueLock(lockKey: string, holderPid: number): Promise<HeldLock> {
+async function queueLock(
+  lockKey: string,
+  holderPid: number,
+  barrierTimeoutMs?: number,
+): Promise<HeldLock> {
   const client = await db.pool.connect();
-  const pid = await backendPid(client);
-  const granted = client
+  const release = releaseOnce(client);
+  let pid: number;
+
+  try {
+    pid = await backendPid(client);
+  } catch (error) {
+    await release();
+    throw error;
+  }
+
+  const waiting = client
     .query('BEGIN')
     .then(() => client.query('SELECT pg_advisory_xact_lock(hashtextextended($1, 0))', [lockKey]))
+    // Settled either way: the grant itself is never asserted on, only the queue position.
     .catch(() => undefined);
 
-  await waitForAdvisoryLockQueueEntry(db.pool, { lockKey, blockerPid: holderPid });
+  try {
+    await waitForAdvisoryLockQueueEntry(db.pool, {
+      lockKey,
+      blockerPid: holderPid,
+      timeoutMs: barrierTimeoutMs,
+    });
+  } catch (error) {
+    await cancelWaitingAndRelease(client, release, pid, waiting);
+    throw error;
+  }
 
   return {
     pid,
     release: async () => {
-      await granted;
-      await client.query('ROLLBACK').catch(() => undefined);
-      client.release();
+      // The holder is released first, so the queued statement finishes before its connection
+      // goes back; `release()` itself is idempotent.
+      await waiting;
+      await release();
     },
   };
 }
@@ -269,5 +366,113 @@ describe('P0B06-T1 exact-target queue barrier', () => {
         }),
       ).rejects.toThrow(/timed out/);
     });
+  });
+});
+
+interface PoolCounts {
+  readonly total: number;
+  readonly idle: number;
+  readonly waiting: number;
+}
+
+function poolCounts(): PoolCounts {
+  return {
+    total: db.pool.totalCount,
+    idle: db.pool.idleCount,
+    waiting: db.pool.waitingCount,
+  };
+}
+
+/** Wait until the pool is back to `expected`, which proves no connection stayed checked out. */
+async function waitForPoolCounts(expected: PoolCounts, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const current = poolCounts();
+
+    if (current.total === expected.total && current.idle === expected.idle) {
+      expect(current.waiting).toBe(0);
+
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(
+    `pool did not return to ${JSON.stringify(expected)}; saw ${JSON.stringify(poolCounts())}`,
+  );
+}
+
+/**
+ * Wait until `pid` is not waiting on any lock, i.e. its cancelled statement really ended.
+ *
+ * Only the wait condition is asserted, never `state`/`xact_start`: the returned connection may be
+ * recycled into this very polling query, which would then look busy or "in transaction" forever.
+ */
+async function waitForNoLockWait(pid: number, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+
+  while (Date.now() < deadline) {
+    const result = await db.pool.query<{ count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE pid = $1
+          AND wait_event_type = 'Lock'`,
+      [pid],
+    );
+
+    if (Number(result.rows[0]?.count ?? '0') === 0) {
+      return;
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error(`backend ${pid} is still waiting on a lock`);
+}
+
+describe('P0B06-T1 lock fixture cleanup', () => {
+  it('returns the connection to the pool when the queue barrier times out', async () => {
+    const targetKey = blobLockKey(tenantId, digestFor('cleanup-timeout'));
+    const holder = await holdLock(targetKey);
+
+    try {
+      const before = poolCounts();
+      // No backend can have pid 0, so this barrier can only time out - while the session below
+      // really is queued and blocked. That is exactly the failing path that must not leak.
+      const attempt = queueLock(targetKey, 0, 250);
+      const queued = await waitForAdvisoryLockQueueEntry(db.pool, {
+        lockKey: targetKey,
+        blockerPid: holder.pid,
+      });
+
+      expect(queued.pid).not.toBe(holder.pid);
+      await expect(attempt).rejects.toThrow(/timed out/);
+
+      // The failed fixture cancelled its statement and handed the connection back, so the pool
+      // is where it was before the attempt and `db.close()` has nothing to wait for.
+      await waitForPoolCounts(before);
+      expect(poolCounts().waiting).toBe(0);
+      await waitForNoLockWait(queued.pid);
+
+      // Nothing is left queued on the target lock either.
+      await expect(
+        observeAdvisoryLock(db.pool, await resolveAdvisoryLockIdentity(db.pool, targetKey)),
+      ).resolves.toEqual([{ pid: holder.pid, granted: true, blockedBy: [] }]);
+    } finally {
+      await holder.release();
+    }
+  });
+
+  it('releases a lock session more than once without error', async () => {
+    const targetKey = blobLockKey(tenantId, digestFor('cleanup-double-release'));
+    const holder = await holdLock(targetKey);
+
+    await holder.release();
+    // The `HeldLock.release()` contract says it is safe to call twice; a second `client.release()`
+    // would throw, so this pins the flag inside `releaseOnce()`.
+    await expect(holder.release()).resolves.toBeUndefined();
+    expect(poolCounts().waiting).toBe(0);
   });
 });

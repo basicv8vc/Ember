@@ -68,6 +68,7 @@ Ember/
     adr/0001-cancellation-and-retry-coordination.md  # Accepted OQ-1 decision
     P0B-04-IMPLEMENTATION.md   # P0B-04 lease/fencing/retry transactions and ADR-0002
     P0B-04-ACCEPTANCE.md       # P0B-04 command evidence and B-T09–B-T11 status
+    P0B-08A-BUDGET-GUARD.md    # P0B-08a deterministic mock budget guard semantics
     architecture/              # design docs: upstream RFCs, P0-B spec, V1 proposals
     prompts/                   # per-task Pi Agent implementation prompts (P0B-01/03/04)
   .github/workflows/ci.yml

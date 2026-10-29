@@ -1,13 +1,13 @@
 # Ember P0B-06 — Artifact Store / Workspace CAS / Checkpoint / Fenced Result Commit
 
-> **状态：Engineering Prompt · Ready only after Architecture PR #8 has been reviewed and merged into `main`**  
+> **状态：Engineering Prompt · Ready only after Architecture PR #8/#9 and frozen ADR-0003 are merged into `main`**  
 > **执行工具：Cline CLI（执行 Agent）；CTO 负责审核，不自动合并**  
 > **范围：本地 P0-B 验证；不采购云服务，不使用真实 LLM/外部密钥**  
-> **前置基线：**`docs/architecture/v1-architecture-baseline.md`（尤其 §4～8、§12.1）、`docs/architecture/v1-execution-placement.md`、ADR-0001/0002，已合并 P0B-01～05 源码与测试。
+> **前置基线：**`docs/architecture/v1-architecture-baseline.md`（尤其 §4～8、§12.1）、`docs/architecture/v1-execution-placement.md`、ADR-0001/0002、[ADR-0003 工程契约冻结](../adr/0003-p0b-06-persistence-contract-freeze.md)，已合并 P0B-01～05 源码与测试。
 
 ## 0. 强制 Preflight（未满足则停止并报告，不猜测）
 
-1. 核对当前 `main` 是否包含 PR #8 的 Architecture Baseline、P0B-06 CTO 决策冻结和 Execution Placement 修订。若未合并，**停止编码**，报告当前 SHA、PR 状态，不在旧设计上抢跑。
+1. 核对当前 `main` 是否包含 PR #8/#9 的 Accepted Architecture Baseline、Execution Placement 修订，以及已合并生效的 [ADR-0003](../adr/0003-p0b-06-persistence-contract-freeze.md)（B06-D1～D6 工程契约冻结）。缺任意一项则**停止编码**，报告当前 SHA、PR/ADR 状态，不在旧设计上抢跑。
 2. 读取本仓库 `AGENTS.md`、代码/迁移/脚本与规范，核对已完成 P0B-05 的基线；先汇报代码事实、待复用端口、现有 `LeaseQueue.finish()` 和 `ArtifactStore` / `WorkspaceStore` 的语义差距。
 3. 检查工作目录和 Git 状态；保留用户未提交/未跟踪的任何文件。创建独立 `feature/p0b-06-artifact-workspace-checkpoint` 分支（必要时新 worktree）；不得在 `main` 直接开发。不得重写或强推已有分支。
 4. 列出你认为必须新增或变更的接口、Migration、表、事务和测试；遇到与 Accepted ADR/FSM 冲突时**先停下提问**。不要把架构草案误称为已实现代码。
@@ -69,4 +69,4 @@
 - 保持 iOS/macOS、Mac Coding Harness Discovery/Adapter、ACP、真实云 Sandbox、生产密钥与跨设备自动迁移**明确不在本 PR**。不要为了支持这些需求私自扩展 P0B-06。
 - 交付结果格式：分支/Base/HEAD/PR/CI、关键设计决议、变更文件、逐项验收表（命令 + 测试计数）、真实 DB/文件故障证据、未完成/待 CTO Review 问题。
 
-**STOP 条件：**Architecture PR #8 尚未合并；发现与 Accepted ADR 相冲突的新状态边；无法保证 Runner 原子提交与 Workspace CAS；需要生产云/费用/真实账号或访问未授权私人数据；关键数据库/文件权限无法验证。遇到这些条件及时报告并等待 CTO，不可靠放宽安全约束绕过。
+**STOP 条件：**Architecture PR #8/#9 或 ADR-0003 尚未合并到 `main`；发现与 Accepted ADR 相冲突的新状态边；无法保证 Runner 原子提交与 Workspace CAS；需要生产云/费用/真实账号或访问未授权私人数据；关键数据库/文件权限无法验证。遇到这些条件及时报告并等待 CTO，不可靠放宽安全约束绕过。

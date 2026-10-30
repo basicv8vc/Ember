@@ -317,7 +317,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
         const receipt = (await postResp.json()) as { task_id: Id };
         taskId = receipt.task_id;
       } catch (err) {
-        currentHttpInFlight--;
+        currentHttpInFlight = Math.max(0, currentHttpInFlight - 1);
         durableAckAtHr = performance.now();
         durableAckLatencyMs = durableAckAtHr - requestSentAtHr;
         return {

@@ -54,7 +54,7 @@ Every execution trace captures contextual fields conforming to OpenTelemetry sem
 | `tenant_hash`  | `string`         | SHA-256 hash of `tenant_id` truncated to 16 hex chars | Strictly matches `/^[0-9a-f]{16}$/`                           |
 | `task_id`      | `UUID`           | Durable task identifier                               | Valid UUID                                                    |
 | `run_id`       | `UUID`           | Active execution run identifier                       | Valid UUID                                                    |
-| `path`         | `enum`           | Execution route path                                  | `'fast'` \| `'standard'` \| `'heavy'`                                 |
+| `path`         | `enum`           | Execution route path                                  | `'fast'` \| `'standard'` \| `'heavy'`                         |
 | `route_reason` | `string`         | Routing decision explanation                          | Non-empty string (e.g. `'mock.compute:standard'`)             |
 | `provider`     | `literal`        | LLM / Sandbox provider                                | Strictly `"fake"` in P0-B                                     |
 | `attempt`      | `integer`        | Lease/execution attempt counter                       | `>= 1`                                                        |

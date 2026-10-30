@@ -1427,7 +1427,7 @@ describe('P0B-08c / P0B-08d: Cancellation of waiting_approval Tasks & Approval C
     }
 
     expect(approvePromise1).toBeDefined();
-    const [cancelRes1, approveRes1] = await Promise.all([cancelPromise1, approvePromise1!]);
+    const [cancelRes1, approveRes1] = await Promise.all([cancelPromise1, approvePromise1]);
     expect(cancelRes1.status).toBe(200);
     expect(cancelRes1.body.status).toBe('cancelled');
     expect(approveRes1.status).toBe(409);
@@ -1458,7 +1458,7 @@ describe('P0B-08c / P0B-08d: Cancellation of waiting_approval Tasks & Approval C
     }
 
     expect(cancelPromise2).toBeDefined();
-    const [approveRes2, cancelRes2] = await Promise.all([approvePromise2, cancelPromise2!]);
+    const [approveRes2, cancelRes2] = await Promise.all([approvePromise2, cancelPromise2]);
     expect(approveRes2.status).toBe(200);
     expect(approveRes2.body).toMatchObject({
       approval_id: approval2.approvalId,

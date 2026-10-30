@@ -6,6 +6,7 @@ import {
   JsonLineSpanExporter,
   LocalTracer,
   SpanRecordSchema,
+  type SpanRecord,
 } from '@ember/telemetry';
 
 describe('telemetry local tracer and spans', () => {
@@ -128,5 +129,117 @@ describe('telemetry local tracer and spans', () => {
     const parsed = JSON.parse(lines[0]!) as { type: string; name: string };
     expect(parsed.type).toBe('otel_span');
     expect(parsed.name).toBe('test.span');
+  });
+
+  describe('privacy and redaction negative tests (P1)', () => {
+    it('redacts sensitive credentials from recordException and status description in serialized output', () => {
+      const lines: string[] = [];
+      const exporter = new JsonLineSpanExporter((line) => lines.push(line));
+      const tracer = new LocalTracer([exporter]);
+
+      const span = tracer.startSpan('worker.secure_execution');
+      const sensitiveError = new Error(
+        'Connection to postgres://admin:super_secret_db_pass@127.0.0.1:5432 failed with Bearer secret_bearer_token_xyz999',
+      );
+      span.recordException(sensitiveError);
+      span.end();
+
+      expect(lines).toHaveLength(1);
+      const rawSerializedLine = lines[0]!;
+
+      // NEGATIVE TESTS: Ensure zero leakage of sensitive credentials anywhere in serialized JSON
+      expect(rawSerializedLine).not.toContain('super_secret_db_pass');
+      expect(rawSerializedLine).not.toContain('secret_bearer_token_xyz999');
+
+      // Verify status description and event are sanitized
+      const parsed = JSON.parse(rawSerializedLine) as { type: string } & SpanRecord;
+      expect(parsed.type).toBe('otel_span');
+      expect(parsed.status.code).toBe('ERROR');
+      expect(parsed.status.description).toContain('[REDACTED]');
+      expect(parsed.status.description).toContain('postgres://admin:[REDACTED]@127.0.0.1:5432');
+      expect(parsed.events[0]?.attributes?.['exception.message']).toContain('[REDACTED]');
+
+      // Strict schema validation passes on the span record
+      expect(() => SpanRecordSchema.parse(span.toRecord())).not.toThrow();
+    });
+
+    it('redacts sensitive credentials directly passed to setStatus description', () => {
+      const lines: string[] = [];
+      const exporter = new JsonLineSpanExporter((line) => lines.push(line));
+      const tracer = new LocalTracer([exporter]);
+
+      const span = tracer.startSpan('gateway.auth_check');
+      span.setStatus('ERROR', 'Access denied with token Bearer unredacted_auth_token_456');
+      span.end();
+
+      const rawSerializedLine = lines[0]!;
+      expect(rawSerializedLine).not.toContain('unredacted_auth_token_456');
+      expect(rawSerializedLine).toContain('Bearer [REDACTED]');
+
+      const parsed = JSON.parse(rawSerializedLine) as { type: string } & SpanRecord;
+      expect(parsed.type).toBe('otel_span');
+      expect(parsed.status.description).toBe('Access denied with token Bearer [REDACTED]');
+      expect(() => SpanRecordSchema.parse(span.toRecord())).not.toThrow();
+    });
+
+    it('prevents single setAttribute from bypassing tenantId hashing and prohibits raw tenant UUID', () => {
+      const lines: string[] = [];
+      const exporter = new JsonLineSpanExporter((line) => lines.push(line));
+      const tracer = new LocalTracer([exporter]);
+
+      const rawTenantId = '7ac16c27-3932-4752-96ea-45b78fbe296e';
+      const span = tracer.startSpan('task.run');
+
+      // Attempt direct single-attribute bypass
+      span.setAttribute('tenantId', rawTenantId);
+      span.setAttribute('tenant_id', rawTenantId);
+      span.setAttribute('password', 'raw_password_secret_123');
+      span.setAttribute('prompt', 'Sensitive user instructions to LLM');
+      span.end();
+
+      expect(lines).toHaveLength(1);
+      const rawSerializedLine = lines[0]!;
+
+      // NEGATIVE TESTS: Raw tenant UUID must NEVER be present anywhere in the output
+      expect(rawSerializedLine).not.toContain(rawTenantId);
+      expect(rawSerializedLine).not.toContain('raw_password_secret_123');
+      expect(rawSerializedLine).not.toContain('Sensitive user instructions to LLM');
+
+      const parsed = JSON.parse(rawSerializedLine) as { type: string } & SpanRecord;
+      expect(parsed.type).toBe('otel_span');
+      // Key 'tenantId' and 'tenant_id' must NOT exist
+      expect(parsed.attributes).not.toHaveProperty('tenantId');
+      expect(parsed.attributes).not.toHaveProperty('tenant_id');
+
+      // Key 'tenant_hash' must be present with safe 16-hex hash
+      expect(parsed.attributes['tenant_hash']).toMatch(/^[a-f0-9]{16}$/);
+      expect(parsed.attributes['password']).toBe('[REDACTED]');
+      expect(parsed.attributes['prompt']).toBe('[REDACTED_PROMPT]');
+
+      // SpanRecordSchema passes with strict refinement forbidding raw tenantId
+      expect(() => SpanRecordSchema.parse(span.toRecord())).not.toThrow();
+    });
+
+    it('rejects SpanRecord containing raw tenantId at schema validation time', () => {
+      const invalidSpan = {
+        name: 'test',
+        trace_id: '0123456789abcdef0123456789abcdef',
+        span_id: '0123456789abcdef',
+        parent_span_id: null,
+        kind: 'INTERNAL',
+        start_time: new Date().toISOString(),
+        end_time: new Date().toISOString(),
+        duration_ms: 10,
+        status: { code: 'OK' },
+        attributes: {
+          tenantId: '7ac16c27-3932-4752-96ea-45b78fbe296e',
+        },
+        events: [],
+      };
+
+      expect(() => SpanRecordSchema.parse(invalidSpan)).toThrow(
+        /Raw tenantId \/ tenant_id must never appear/,
+      );
+    });
   });
 });

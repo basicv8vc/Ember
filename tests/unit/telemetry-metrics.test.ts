@@ -124,6 +124,8 @@ describe('telemetry metrics and quantile aggregation', () => {
 
       expect(report.metric_name).toBe('queue_wait_ms');
       expect(report.sample_count).toBe(13);
+      expect(report.observed_count).toBe(13);
+      expect(report.missing_count).toBe(0);
       expect(report.success_count).toBe(10);
       expect(report.failed_count).toBe(2); // MOCK_TOOL_FAILED + EXECUTION_TIMEOUT
       expect(report.timeout_count).toBe(1); // EXECUTION_TIMEOUT
@@ -134,6 +136,41 @@ describe('telemetry metrics and quantile aggregation', () => {
       expect(report.p99_ms).toBeGreaterThanOrEqual(report.p95_ms!);
       expect(report.min_ms).toBe(10);
       expect(report.max_ms).toBe(200);
+
+      expect(() => PercentileReportSchema.parse(report)).not.toThrow();
+    });
+
+    it('differentiates total sample_count from observed_count when durations are missing', () => {
+      const aggregator = new MetricsAggregator();
+
+      // 7 runs with fake sandbox duration
+      for (let i = 1; i <= 7; i++) {
+        aggregator.recordRun(
+          mockTrace({
+            fake_sandbox_ready_ms: i * 10,
+          }),
+        );
+      }
+
+      // 3 fast-path runs without sandbox (fake_sandbox_ready_ms is null)
+      for (let i = 1; i <= 3; i++) {
+        aggregator.recordRun(
+          mockTrace({
+            path: 'fast',
+            fake_sandbox_ready_ms: null,
+          }),
+        );
+      }
+
+      const report = aggregator.getReport('fake_sandbox_ready_ms');
+
+      // 10 total runs, but only 7 observed measurements
+      expect(report.sample_count).toBe(10);
+      expect(report.observed_count).toBe(7);
+      expect(report.missing_count).toBe(3);
+      expect(report.p50_ms).toBe(40);
+      expect(report.min_ms).toBe(10);
+      expect(report.max_ms).toBe(70);
 
       expect(() => PercentileReportSchema.parse(report)).not.toThrow();
     });

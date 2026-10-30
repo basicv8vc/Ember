@@ -83,6 +83,7 @@ describe('B-T30 Telemetry & Observability (PostgreSQL Integration)', () => {
     collector
       .recordStage('request_received', requestReceived)
       .recordStage('durable_ack', durableAck)
+      .recordStage('runnable', durableAck)
       .recordStage('lease_acquired', claimTime)
       .recordStage('task_terminal', new Date())
       .setOutcome({
@@ -173,6 +174,7 @@ describe('B-T30 Telemetry & Observability (PostgreSQL Integration)', () => {
       collector
         .recordStage('request_received', '2026-10-30T10:00:00.000Z')
         .recordStage('durable_ack', new Date(Date.parse('2026-10-30T10:00:00.000Z') + i * 10))
+        .recordStage('runnable', new Date(Date.parse('2026-10-30T10:00:00.000Z') + i * 15))
         .recordStage('lease_acquired', new Date(Date.parse('2026-10-30T10:00:00.000Z') + i * 50))
         .recordStage('sandbox_create', new Date(Date.parse('2026-10-30T10:00:00.000Z') + i * 55))
         .recordStage('sandbox_ready', new Date(Date.parse('2026-10-30T10:00:00.000Z') + i * 75))
@@ -197,6 +199,7 @@ describe('B-T30 Telemetry & Observability (PostgreSQL Integration)', () => {
     timeoutCollector
       .recordStage('request_received', '2026-10-30T10:00:00.000Z')
       .recordStage('durable_ack', '2026-10-30T10:00:00.050Z')
+      .recordStage('runnable', '2026-10-30T10:00:00.060Z')
       .recordStage('lease_acquired', '2026-10-30T10:00:00.200Z')
       .recordStage('task_terminal', '2026-10-30T10:00:01.000Z')
       .setOutcome({
@@ -207,6 +210,8 @@ describe('B-T30 Telemetry & Observability (PostgreSQL Integration)', () => {
     const reports = aggregator.getAllReports();
 
     expect(reports.queue_wait_ms.sample_count).toBe(6);
+    expect(reports.queue_wait_ms.observed_count).toBe(6);
+    expect(reports.queue_wait_ms.missing_count).toBe(0);
     expect(reports.queue_wait_ms.success_count).toBe(5);
     expect(reports.queue_wait_ms.failed_count).toBe(1);
     expect(reports.queue_wait_ms.timeout_count).toBe(1);

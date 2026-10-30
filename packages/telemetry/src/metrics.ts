@@ -64,6 +64,8 @@ export function buildPercentileReport(
   const report: PercentileReport = {
     metric_name: metricName,
     sample_count: counts.sampleCount,
+    observed_count: sorted.length,
+    missing_count: Math.max(0, counts.sampleCount - sorted.length),
     success_count: counts.successCount,
     failed_count: counts.failedCount,
     timeout_count: counts.timeoutCount,

@@ -158,6 +158,8 @@ export interface SpanRecord {
 export interface PercentileReport {
   readonly metric_name: string;
   readonly sample_count: number;
+  readonly observed_count: number;
+  readonly missing_count: number;
   readonly success_count: number;
   readonly failed_count: number;
   readonly timeout_count: number;

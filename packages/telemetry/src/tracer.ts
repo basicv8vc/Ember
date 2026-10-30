@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { sanitizeContext, sanitizeValue } from './privacy.js';
+import { createTenantHash, redactSecrets, sanitizeContext, sanitizeValue } from './privacy.js';
 import { SpanRecordSchema } from './schemas.js';
 import type {
   SpanAttributes,
@@ -50,7 +50,9 @@ export class LocalSpan {
 
   constructor(name: string, options: SpanOptions = {}, onEnd?: (span: SpanRecord) => void) {
     this.name = name;
-    this.traceId = options.traceId ?? generateTraceId();
+    this.traceId = options.traceId
+      ? options.traceId.replace(/-/g, '').toLowerCase()
+      : generateTraceId();
     this.spanId = generateSpanId();
     this.parentSpanId = options.parentSpanId ?? null;
     this.kind = options.kind ?? 'INTERNAL';
@@ -70,15 +72,26 @@ export class LocalSpan {
     if (this.ended) {
       return this;
     }
-    const sanitized = sanitizeValue(value, key);
+
+    let effectiveKey = key;
+    let sanitized: unknown;
+
+    if (key === 'tenantId' || key === 'tenant_id') {
+      effectiveKey = 'tenant_hash';
+      const tenantStr = typeof value === 'string' ? value : JSON.stringify(value);
+      sanitized = createTenantHash(tenantStr);
+    } else {
+      sanitized = sanitizeValue(value, key);
+    }
+
     if (
       typeof sanitized === 'string' ||
       typeof sanitized === 'number' ||
       typeof sanitized === 'boolean'
     ) {
-      this.attributes[key] = sanitized;
+      this.attributes[effectiveKey] = sanitized;
     } else if (Array.isArray(sanitized)) {
-      this.attributes[key] = sanitized.map((item) => String(item));
+      this.attributes[effectiveKey] = sanitized.map((item) => String(item));
     }
     return this;
   }
@@ -87,8 +100,7 @@ export class LocalSpan {
     if (this.ended) {
       return this;
     }
-    const sanitized = sanitizeContext(attributes);
-    for (const [key, value] of Object.entries(sanitized)) {
+    for (const [key, value] of Object.entries(attributes)) {
       this.setAttribute(key, value);
     }
     return this;
@@ -100,7 +112,7 @@ export class LocalSpan {
     }
     const sanitizedAttrs = attributes ? (sanitizeContext(attributes) as SpanAttributes) : undefined;
     this.events.push({
-      name,
+      name: redactSecrets(name),
       time: (time ?? new Date()).toISOString(),
       attributes: sanitizedAttrs,
     });
@@ -111,15 +123,17 @@ export class LocalSpan {
     if (this.ended) {
       return this;
     }
-    this.status = { code, description };
+    const sanitizedDescription = description !== undefined ? redactSecrets(description) : undefined;
+    this.status = { code, description: sanitizedDescription };
     return this;
   }
 
   recordException(error: unknown): this {
-    const message = error instanceof Error ? error.message : String(error);
+    const rawMessage = error instanceof Error ? error.message : String(error);
+    const message = redactSecrets(rawMessage);
     const code =
       typeof error === 'object' && error !== null && 'code' in error
-        ? String(error.code)
+        ? redactSecrets(String(error.code))
         : undefined;
 
     this.setStatus('ERROR', code ?? message);
@@ -127,6 +141,9 @@ export class LocalSpan {
       'exception.type': error instanceof Error ? error.name : 'UnknownError',
       'exception.message': message,
       ...(code ? { 'exception.code': code } : {}),
+      ...(error instanceof Error && error.stack
+        ? { 'exception.stacktrace': redactSecrets(error.stack) }
+        : {}),
     });
     return this;
   }
@@ -153,6 +170,12 @@ export class LocalSpan {
     const end = this.endTime ?? new Date();
     const durationMs = Math.max(0, end.getTime() - this.startTime.getTime());
 
+    const finalStatus: SpanStatus = {
+      code: this.status.code,
+      description:
+        this.status.description !== undefined ? redactSecrets(this.status.description) : undefined,
+    };
+
     const candidate: SpanRecord = {
       name: this.name,
       trace_id: this.traceId,
@@ -162,7 +185,7 @@ export class LocalSpan {
       start_time: this.startTime.toISOString(),
       end_time: end.toISOString(),
       duration_ms: durationMs,
-      status: this.status,
+      status: finalStatus,
       attributes: { ...this.attributes },
       events: [...this.events],
     };

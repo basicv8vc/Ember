@@ -24,11 +24,12 @@ describe('telemetry privacy and redaction', () => {
 
   it('redacts Bearer tokens and dev tokens from log strings', () => {
     const raw =
-      'Request auth failed for Bearer dev_token_secret_value_12345678 and token_abcdefghij123';
+      'Request auth failed for Bearer dev_token_secret_value_12345678 and token_abcdefghij123 and dev-auth-alice-token';
     const scrubbed = redactSecrets(raw);
 
     expect(scrubbed).not.toContain('dev_token_secret_value_12345678');
     expect(scrubbed).not.toContain('token_abcdefghij123');
+    expect(scrubbed).not.toContain('dev-auth-alice-token');
     expect(scrubbed).toContain('Bearer [REDACTED]');
     expect(scrubbed).toContain('[REDACTED_DEV_TOKEN]');
   });
@@ -87,6 +88,17 @@ describe('telemetry privacy and redaction', () => {
 
     const nested = input.nestedData as Record<string, unknown>;
     expect(nested.apiKey).toBe('[REDACTED]');
+  });
+
+  it('hashes tenantId and tenant_id even when sanitized as a standalone value with keyHint', () => {
+    const rawUuid = '00000000-0000-0000-0000-000000000001';
+    const hash1 = sanitizeValue(rawUuid, 'tenantId');
+    const hash2 = sanitizeValue(rawUuid, 'tenant_id');
+
+    expect(hash1).toBe(createTenantHash(rawUuid));
+    expect(hash2).toBe(createTenantHash(rawUuid));
+    expect(hash1).not.toBe(rawUuid);
+    expect(hash1).toMatch(/^[a-f0-9]{16}$/);
   });
 
   it('handles null, undefined, arrays and primitive values cleanly', () => {

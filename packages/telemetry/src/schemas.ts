@@ -24,6 +24,14 @@ const nonNegativeInteger = z.number().int().nonnegative();
 const nonNegativeIntegerOrNull = nonNegativeInteger.nullable();
 const isoDateTimeOrNull = IsoDateTimeSchema.nullable();
 
+export const TelemetryTraceIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{32}$/, 'Trace ID must be a 32-character lowercase hexadecimal string');
+
+export const TelemetrySpanIdSchema = z
+  .string()
+  .regex(/^[0-9a-f]{16}$/, 'Span ID must be a 16-character lowercase hexadecimal string');
+
 export const RunStageTimestampsSchema: z.ZodType<RunStageTimestamps> = z.strictObject({
   request_received: isoDateTimeOrNull,
   durable_ack: isoDateTimeOrNull,
@@ -48,7 +56,7 @@ export const RunStageDurationsSchema: z.ZodType<RunStageDurations> = z.strictObj
  * Guarantees provider=fake, cost_source=simulated, actual_vendor_cost_usd=null.
  */
 export const RunTraceRecordSchema: z.ZodType<RunTraceRecord> = z.strictObject({
-  trace_id: z.string().min(16).max(64),
+  trace_id: TelemetryTraceIdSchema,
   tenant_hash: z.string().length(16),
   task_id: IdSchema,
   run_id: IdSchema,
@@ -92,7 +100,7 @@ export const RunTraceRecordSchema: z.ZodType<RunTraceRecord> = z.strictObject({
  */
 export const SimulatedUsageRecordSchema: z.ZodType<SimulatedUsageRecord> = z.strictObject({
   usage_id: IdSchema,
-  trace_id: z.string().min(16).max(64),
+  trace_id: TelemetryTraceIdSchema,
   tenant_hash: z.string().length(16),
   task_id: IdSchema,
   run_id: IdSchema,
@@ -127,7 +135,12 @@ const SpanAttributeValueSchema = z.union([
   z.array(z.boolean()),
 ]);
 
-export const SpanAttributesSchema = z.record(z.string(), SpanAttributeValueSchema);
+export const SpanAttributesSchema = z
+  .record(z.string(), SpanAttributeValueSchema)
+  .refine(
+    (attrs) => !('tenantId' in attrs) && !('tenant_id' in attrs),
+    'Raw tenantId / tenant_id must never appear in Span attributes; use tenant_hash instead',
+  );
 
 export const SpanEventSchema = z.strictObject({
   name: z.string().min(1).max(128),
@@ -137,9 +150,9 @@ export const SpanEventSchema = z.strictObject({
 
 export const SpanRecordSchema: z.ZodType<SpanRecord> = z.strictObject({
   name: z.string().min(1).max(128),
-  trace_id: z.string().min(16).max(64),
-  span_id: z.string().length(16),
-  parent_span_id: z.string().length(16).nullable(),
+  trace_id: TelemetryTraceIdSchema,
+  span_id: TelemetrySpanIdSchema,
+  parent_span_id: TelemetrySpanIdSchema.nullable(),
   kind: SpanKindSchema,
   start_time: IsoDateTimeSchema,
   end_time: IsoDateTimeSchema,
@@ -152,6 +165,8 @@ export const SpanRecordSchema: z.ZodType<SpanRecord> = z.strictObject({
 export const PercentileReportSchema: z.ZodType<PercentileReport> = z.strictObject({
   metric_name: z.string().min(1).max(64),
   sample_count: nonNegativeInteger,
+  observed_count: nonNegativeInteger,
+  missing_count: nonNegativeInteger,
   success_count: nonNegativeInteger,
   failed_count: nonNegativeInteger,
   timeout_count: nonNegativeInteger,

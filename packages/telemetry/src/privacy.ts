@@ -10,7 +10,8 @@ const SENSITIVE_KEY_PATTERN =
   /token|secret|password|credential|authorization|auth_token|prompt|private_key|api_?key/i;
 
 const BEARER_PATTERN = /\bBearer\s+[A-Za-z0-9\-._~+/]+=*/gi;
-const DEV_TOKEN_PATTERN = /\b(?:dev_token|test_token|token)_[a-zA-Z0-9_-]{8,}\b/gi;
+const DEV_TOKEN_PATTERN =
+  /\b(?:dev[_-]auth[_-]|dev[_-]token|test[_-]token|token_)[a-zA-Z0-9_-]{4,}\b/gi;
 const URL_CREDENTIAL_PATTERN = /([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)([^:@\s]+):([^@\s]+)@/g;
 const PRIVATE_KEY_PATTERN =
   /-----BEGIN[A-Z0-9_ -]*PRIVATE KEY-----[\s\S]*?-----END[A-Z0-9_ -]*PRIVATE KEY-----/gi;
@@ -61,10 +62,26 @@ export function sanitizeValue(value: unknown, keyHint?: string): unknown {
     return value;
   }
 
+  // If keyHint indicates a tenant ID, hash it immediately to prevent raw tenant UUID leakage
+  if (keyHint === 'tenantId' || keyHint === 'tenant_id') {
+    const tenantStr = typeof value === 'string' ? value : JSON.stringify(value);
+    return createTenantHash(tenantStr);
+  }
+
+  // If keyHint indicates raw prompt or content, use specialized placeholders
+  if (keyHint === 'prompt') {
+    return REDACTED_PROMPT_PLACEHOLDER;
+  }
+  if (keyHint === 'content') {
+    return REDACTED_CONTENT_PLACEHOLDER;
+  }
+
+  // If keyHint matches sensitive keys (password, token, secret, credential, etc.), redact
+  if (keyHint && SENSITIVE_KEY_PATTERN.test(keyHint)) {
+    return REDACTED_PLACEHOLDER;
+  }
+
   if (typeof value === 'string') {
-    if (keyHint && SENSITIVE_KEY_PATTERN.test(keyHint)) {
-      return REDACTED_PLACEHOLDER;
-    }
     return redactSecrets(value);
   }
 
@@ -81,22 +98,21 @@ export function sanitizeValue(value: unknown, keyHint?: string): unknown {
     const sanitized: Record<string, unknown> = {};
 
     for (const [key, val] of Object.entries(record)) {
-      // Scrub specific known task input fields
-      if (key === 'prompt' && typeof val === 'string') {
-        sanitized[key] = REDACTED_PROMPT_PLACEHOLDER;
-        continue;
-      }
-      if (key === 'content' && typeof val === 'string') {
-        sanitized[key] = REDACTED_CONTENT_PLACEHOLDER;
+      // Convert raw tenant_id / tenantId into safe tenant_hash
+      if (key === 'tenantId' || key === 'tenant_id') {
+        const tenantStr = typeof val === 'string' ? val : JSON.stringify(val);
+        sanitized['tenant_hash'] = createTenantHash(tenantStr);
         continue;
       }
 
-      // Convert raw tenant_id / tenantId into safe tenant_hash
-      if (key === 'tenantId' || key === 'tenant_id') {
-        if (typeof val === 'string') {
-          sanitized['tenant_hash'] = createTenantHash(val);
-          continue;
-        }
+      // Scrub specific known task input fields
+      if (key === 'prompt') {
+        sanitized[key] = REDACTED_PROMPT_PLACEHOLDER;
+        continue;
+      }
+      if (key === 'content') {
+        sanitized[key] = REDACTED_CONTENT_PLACEHOLDER;
+        continue;
       }
 
       if (SENSITIVE_KEY_PATTERN.test(key)) {

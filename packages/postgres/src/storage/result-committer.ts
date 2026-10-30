@@ -75,7 +75,7 @@ export interface PostgresRunResultCommitterOptions {
   readonly faultInjector?: CommitFaultInjector;
 }
 
-interface GrantTaskRow extends TaskRow {
+export interface GrantTaskRow extends TaskRow {
   agent_id: string;
 }
 
@@ -769,41 +769,16 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
     return Object.freeze(installed);
   }
 
-  private async lockTask(client: pg.PoolClient, grant: RunGrant): Promise<GrantTaskRow> {
-    const result = await client.query<GrantTaskRow>(LOCK_TASK_SQL, [grant.tenantId, grant.taskId]);
-    const task = result.rows[0];
-
-    if (task === undefined) {
-      throw new DomainError('STALE_LEASE', 'task is not owned by this run');
-    }
-
-    return task;
+  private lockTask(client: pg.PoolClient, grant: RunGrant): Promise<GrantTaskRow> {
+    return lockGrantTaskRows(client, grant);
   }
 
-  private async lockRun(client: pg.PoolClient, grant: RunGrant): Promise<RunRow> {
-    const result = await client.query<RunRow>(LOCK_RUN_SQL, [
-      grant.tenantId,
-      grant.taskId,
-      grant.runId,
-    ]);
-    const run = result.rows[0];
-
-    if (run === undefined) {
-      throw new DomainError('STALE_LEASE', 'run is not owned by this lease');
-    }
-
-    return run;
+  private lockRun(client: pg.PoolClient, grant: RunGrant): Promise<RunRow> {
+    return lockGrantRunRow(client, grant);
   }
 
-  private async postLockInstant(client: pg.PoolClient): Promise<Date> {
-    const result = await client.query<{ now: Date | string }>(CLOCK_SQL);
-    const now = parsePersistedTimestamp(result.rows[0]?.now ?? null);
-
-    if (now === null) {
-      throw new DomainError('DB_UNAVAILABLE', 'database did not report a post-lock clock');
-    }
-
-    return now;
+  private postLockInstant(client: pg.PoolClient): Promise<Date> {
+    return postLockInstant(client);
   }
 
   /**
@@ -1082,6 +1057,86 @@ export function assertLive(input: {
 }
 
 export type { RunTerminalStatus };
+
+/**
+ * Task row lock. The shared order for every fenced Worker write is
+ * **tasks → runs → reference rows**, and the Task row is always first so a commit and a
+ * budget decision can never deadlock against each other.
+ */
+export async function lockGrantTaskRows(
+  client: pg.PoolClient,
+  grant: RunGrant,
+): Promise<GrantTaskRow> {
+  const result = await client.query<GrantTaskRow>(LOCK_TASK_SQL, [grant.tenantId, grant.taskId]);
+  const task = result.rows[0];
+
+  if (task === undefined) {
+    throw new DomainError('STALE_LEASE', 'task is not owned by this run');
+  }
+
+  return task;
+}
+
+/** Run row lock, always taken after the Task row. */
+export async function lockGrantRunRow(client: pg.PoolClient, grant: RunGrant): Promise<RunRow> {
+  const result = await client.query<RunRow>(LOCK_RUN_SQL, [
+    grant.tenantId,
+    grant.taskId,
+    grant.runId,
+  ]);
+  const run = result.rows[0];
+
+  if (run === undefined) {
+    throw new DomainError('STALE_LEASE', 'run is not owned by this lease');
+  }
+
+  return run;
+}
+
+/** Authoritative post-lock instant. `now()` would be the transaction start time. */
+export async function postLockInstant(client: pg.PoolClient): Promise<Date> {
+  const result = await client.query<{ now: Date | string }>(CLOCK_SQL);
+  const now = parsePersistedTimestamp(result.rows[0]?.now ?? null);
+
+  if (now === null) {
+    throw new DomainError('DB_UNAVAILABLE', 'database did not report a post-lock clock');
+  }
+
+  return now;
+}
+
+/**
+ * Fence one durable Worker write and report the authoritative instant plus the lease boundary.
+ *
+ * This is the exact sequence a result commit performs (`tasks → runs → clock_timestamp() →
+ * liveness re-check`), exported so the P0B-08b budget ledger cannot drift into a second,
+ * weaker fence: a reservation is taken only while the attempt provably still owns the Run.
+ *
+ * `expiresAt` is the earlier of the Task and Run lease expiry, i.e. the instant the
+ * reservation stops being protectable and may be swept.
+ */
+export async function lockAndAssertLive(
+  client: pg.PoolClient,
+  grant: RunGrant,
+): Promise<{ readonly now: Date; readonly expiresAt: Date }> {
+  const task = await lockGrantTaskRows(client, grant);
+  const run = await lockGrantRunRow(client, grant);
+  const now = await postLockInstant(client);
+
+  assertLive({ grant, task, run, now });
+
+  const taskExpiry = parsePersistedTimestamp(task.lease_expires_at);
+  const runExpiry = parsePersistedTimestamp(run.leased_until);
+
+  if (taskExpiry === null || runExpiry === null) {
+    throw new DomainError('STALE_LEASE', 'lease has no persisted expiry');
+  }
+
+  return Object.freeze({
+    now,
+    expiresAt: new Date(Math.min(taskExpiry.getTime(), runExpiry.getTime())),
+  });
+}
 
 /**
  * Canonical comparison of a stored checkpoint with the request that wants to reuse its id.

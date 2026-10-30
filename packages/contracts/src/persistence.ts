@@ -282,3 +282,142 @@ export interface CommitOutcome {
   readonly status: RunTerminalStatus;
   readonly receipt: CommitReceipt;
 }
+
+/**
+ * P0B-08b persistent budget port (B08b-D1).
+ *
+ * P0B-08a decided *whether* an operation may run, using an immutable in-process ledger. This
+ * port is the durable authority that decision has to be taken against: a single PostgreSQL
+ * transaction serializes "read usage → decide → reserve", so two Workers sharing a Tenant can
+ * no longer both see spare quota.
+ *
+ * The adapter is the source of truth for three things the pure rules layer cannot provide:
+ *
+ * 1. **Idempotency across days and attempts.** `(tenantId, runId, operationId)` is the
+ *    charge identity, not `(tenantId, runId, utcDay, operationId)`, so replaying yesterday's
+ *    operation today is a replay rather than a second charge (P0B-08a §6.1 rule 1).
+ * 2. **Trusted carry-over.** Run-scoped usage is aggregated from the committed operation
+ *    rows, so a caller can never declare its own `runCarryOver` and reset the Run budget
+ *    (P0B-08a §6.1 rule 2). The port therefore has no carry-over input at all.
+ * 3. **Crash safety.** A reservation whose lease died is charged in full (`expired`), never
+ *    refunded, so killing a Worker is not a way to escape accounting.
+ *
+ * Every method takes a `RunGrant`: budget writes are Worker-side, tenant-owned and fenced by
+ * the same lease/epoch/cancellation re-validation as a result commit. No method accepts a
+ * `principalId` or a Tenant from a request body.
+ */
+
+/**
+ * One reservation's or settlement's amount, per dimension.
+ *
+ * `units` counts against both the per-Run cap and the Tenant-day cap; `concurrencySlots` is
+ * the number of Workers the operation holds while it runs. All values are non-negative safe
+ * integers — a fraction, a `NaN`, a negative number or a value above
+ * `Number.MAX_SAFE_INTEGER` is rejected with `INVALID_ARGUMENT`, never rounded.
+ */
+export interface BudgetReservationAmount {
+  readonly steps: number;
+  readonly units: number;
+  readonly elapsedMs: number;
+  readonly concurrencySlots: number;
+}
+
+export const BUDGET_OPERATION_STATES = ['reserved', 'settled', 'released', 'expired'] as const;
+
+/**
+ * Terminal and live states of one budget operation.
+ *
+ * - `reserved`: quota is held and counts against every limit until it is settled or swept;
+ * - `settled`: charged at the consumed amount, which is never larger than the reservation;
+ * - `released`: the operation provably never ran, so no quota was charged at all;
+ * - `expired`: the lease that held the reservation died, so the reservation is charged at the
+ *   full reserved amount instead of being refunded.
+ */
+export type BudgetOperationState = (typeof BUDGET_OPERATION_STATES)[number];
+
+/** Durable view of one budget operation: its reservation and its terminal settlement. */
+export interface BudgetOperation {
+  readonly tenantId: Id;
+  readonly taskId: Id;
+  readonly runId: Id;
+  readonly operationId: string;
+  readonly leaseEpoch: number;
+  readonly state: BudgetOperationState;
+  readonly reserved: BudgetReservationAmount;
+  readonly consumed: BudgetReservationAmount;
+  /** UTC day the quota was taken from (`YYYY-MM-DD`); a later settlement never re-dates it. */
+  readonly utcDay: string;
+  readonly expiresAt: string;
+  readonly settledAt: string | null;
+  /** `true` only for a read-only replay of an operation this port already recorded. */
+  readonly replayed: boolean;
+}
+
+/**
+ * Usage the next decision is taken against.
+ *
+ * `runSteps` / `runUnits` / `runElapsedMs` cover **every** UTC day of the Run plus its live
+ * reservations, which is the trusted replacement for `runCarryOver`.
+ * `tenantDailyUnits` covers the current UTC day of *all* Runs of the Tenant, including this
+ * Run's own live reservations exactly once. `concurrentSlots` is a gauge: live reservations
+ * of other Runs plus this Run's live reservations.
+ */
+export interface BudgetLedgerSnapshot {
+  readonly tenantId: Id;
+  readonly runId: Id;
+  readonly utcDay: string;
+  readonly policyVersion: number;
+  readonly runSteps: number;
+  readonly runUnits: number;
+  readonly runElapsedMs: number;
+  readonly tenantDailyUnits: number;
+  readonly concurrentSlots: number;
+}
+
+export interface BudgetReserveRequest {
+  /**
+   * Stable operation identity, unique inside the Run and **independent of the UTC day** — for
+   * example `produce:3` or `publish:3`. Reusing an id is a replay, never a second charge.
+   */
+  readonly operationId: string;
+  /** Amount held until the operation settles. Also the cap a settlement may charge. */
+  readonly cost: BudgetReservationAmount;
+}
+
+export interface BudgetSettleRequest {
+  readonly operationId: string;
+  /**
+   * Amount actually consumed. It may be smaller than the reservation and may never be
+   * larger; the difference is returned to every limit. A settlement never re-dates the
+   * charge to the current UTC day.
+   */
+  readonly consumed: BudgetReservationAmount;
+}
+
+export interface BudgetReleaseRequest {
+  readonly operationId: string;
+}
+
+/**
+ * Transactional budget authority for the durable Worker path.
+ *
+ * `reserve` is the only method that may deny: it holds a Tenant-scoped serialization point
+ * for the whole "aggregate usage → evaluate the policy → insert the reservation" sequence and
+ * throws `BUDGET_EXCEEDED` **before** any operation has run, leaving no row behind. It also
+ * re-validates the grant inside that transaction, so a stale epoch, a cancelled Task, an
+ * expired lease or an elapsed deadline throws `STALE_LEASE` / `CANCELLED` /
+ * `DEADLINE_EXCEEDED` instead of charging quota to an attempt that may not act.
+ *
+ * `settle` and `release` are idempotent per `(tenantId, runId, operationId)`: repeating the
+ * same call returns the recorded state with `replayed: true`, a different settlement amount is
+ * refused with `INVALID_ARGUMENT` (`budget_settlement_conflict`), and a settlement can never
+ * be turned into a release or vice versa. Neither takes the Tenant serialization point, so
+ * bookkeeping after an operation can never be blocked behind another Run's decision.
+ */
+export interface BudgetLedger {
+  /** Current usage of the Run and Tenant day, including live reservations. */
+  snapshot(grant: RunGrant): Promise<BudgetLedgerSnapshot>;
+  reserve(grant: RunGrant, request: BudgetReserveRequest): Promise<BudgetOperation>;
+  settle(grant: RunGrant, request: BudgetSettleRequest): Promise<BudgetOperation>;
+  release(grant: RunGrant, request: BudgetReleaseRequest): Promise<BudgetOperation>;
+}

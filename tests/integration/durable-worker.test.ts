@@ -7,9 +7,14 @@ import type {
   RunResultCommitter,
 } from '@ember/contracts';
 import type { AuthContext } from '@ember/domain';
-import { DeterministicExecutionRouter, DeterministicExecutor } from '@ember/execution';
+import {
+  DeterministicExecutionRouter,
+  DeterministicExecutor,
+  type BudgetPolicy,
+} from '@ember/execution';
 import {
   PostgresAgentRepository,
+  PostgresBudgetLedger,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
   PostgresTaskRepository,
@@ -47,6 +52,20 @@ let infra: P06Infra;
 
 const logger = createWorkerLogger({ level: 'error', sink: () => undefined });
 
+/**
+ * This suite proves durability, not limits, so it runs the real durable ledger with headroom.
+ * The budget behaviour itself is covered by `persistent-budget.test.ts`.
+ */
+const PERMISSIVE_BUDGET: BudgetPolicy = Object.freeze({
+  policyId: 'p0b06-durability-permissive',
+  policyVersion: 1,
+  maxRunSteps: 1_000,
+  maxRunUnits: 1_000_000,
+  maxRunElapsedMs: 10_000_000,
+  maxTenantDailyUnits: 1_000_000,
+  maxConcurrentSlots: 64,
+});
+
 /** Committer wrapper that fails at the publish step: a crash *after* the produce step. */
 function crashingCommitter(inner: RunResultCommitter): RunResultCommitter {
   return {
@@ -70,6 +89,7 @@ function handlerWith(committer: RunResultCommitter) {
     checkpoints: infra.checkpoints,
     committer,
     workspaces: infra.workspaces,
+    budget: new PostgresBudgetLedger(db.pool, { policy: PERMISSIVE_BUDGET }),
     clock,
     logger,
   });

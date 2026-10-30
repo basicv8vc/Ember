@@ -20,6 +20,7 @@
   "dependencies": {
     "@ember/contracts": "workspace:*",
     "@ember/domain": "workspace:*",
+    "@ember/execution": "workspace:*",
     "pg": "8.23.1",
     "zod": "4.6.7"
   },

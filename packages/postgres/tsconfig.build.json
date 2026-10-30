@@ -8,7 +8,8 @@
   },
   "references": [
     { "path": "../domain/tsconfig.build.json" },
-    { "path": "../contracts/tsconfig.build.json" }
+    { "path": "../contracts/tsconfig.build.json" },
+    { "path": "../execution/tsconfig.build.json" }
   ],
   "include": ["src/**/*.ts"]
 }

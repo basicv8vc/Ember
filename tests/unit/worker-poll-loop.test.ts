@@ -451,3 +451,61 @@ describe('poll worker configuration guards', () => {
     expect(() => loadWorkerConfig({ EMBER_WORKER_CONCURRENCY: '1.5' })).toThrow(WorkerConfigError);
   });
 });
+
+describe('P0B-08b budget policy configuration', () => {
+  it('defaults to the reviewed simulated policy', () => {
+    const { budget } = loadWorkerConfig({});
+
+    expect(budget).toEqual({
+      policyId: 'p0b08b-simulated-v1',
+      policyVersion: 1,
+      maxRunSteps: 8,
+      maxRunUnits: 100,
+      maxRunElapsedMs: 120_000,
+      maxTenantDailyUnits: 5_000,
+      maxConcurrentSlots: 8,
+    });
+    // The ledger receives a frozen value, so a later caller cannot widen a shipped limit.
+    expect(Object.isFrozen(budget)).toBe(true);
+  });
+
+  it('accepts explicit limits, including a zero that fails closed', () => {
+    const { budget } = loadWorkerConfig({
+      EMBER_WORKER_BUDGET_POLICY_ID: 'tenant-a-policy',
+      EMBER_WORKER_BUDGET_POLICY_VERSION: '7',
+      EMBER_WORKER_BUDGET_MAX_RUN_STEPS: '0',
+      EMBER_WORKER_BUDGET_MAX_RUN_UNITS: '0',
+      EMBER_WORKER_BUDGET_MAX_RUN_ELAPSED_MS: '0',
+      EMBER_WORKER_BUDGET_MAX_TENANT_DAILY_UNITS: '0',
+      EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS: '0',
+    });
+
+    expect(budget).toEqual({
+      policyId: 'tenant-a-policy',
+      policyVersion: 7,
+      maxRunSteps: 0,
+      maxRunUnits: 0,
+      maxRunElapsedMs: 0,
+      maxTenantDailyUnits: 0,
+      maxConcurrentSlots: 0,
+    });
+  });
+
+  it('rejects limits that could not be enforced exactly', () => {
+    for (const value of ['-1', '1.5', 'many']) {
+      expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_MAX_RUN_UNITS: value })).toThrow(
+        WorkerConfigError,
+      );
+    }
+
+    expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_POLICY_VERSION: '-1' })).toThrow(
+      WorkerConfigError,
+    );
+    expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_POLICY_ID: '' })).toThrow(
+      WorkerConfigError,
+    );
+    expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_POLICY_ID: 'x'.repeat(129) })).toThrow(
+      WorkerConfigError,
+    );
+  });
+});

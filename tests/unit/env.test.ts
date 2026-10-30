@@ -22,6 +22,7 @@ describe('loadApiConfig', () => {
       port: 8787,
       logLevel: 'info',
       allowNonLoopbackBind: false,
+      blobRoot: null,
     });
   });
 
@@ -37,6 +38,15 @@ describe('loadApiConfig', () => {
     expect(config.port).toBe(9999);
     expect(config.env).toBe('test');
     expect(config.logLevel).toBe('debug');
+  });
+
+  it('accepts only an absolute API blob root', () => {
+    expect(loadApiConfig({ EMBER_API_BLOB_ROOT: '/var/lib/ember/blobs' }).blobRoot).toBe(
+      '/var/lib/ember/blobs',
+    );
+    expect(() => loadApiConfig({ EMBER_API_BLOB_ROOT: 'relative/blobs' })).toThrow(
+      /EMBER_API_BLOB_ROOT must be an absolute path/,
+    );
   });
 
   it('rejects an invalid port', () => {

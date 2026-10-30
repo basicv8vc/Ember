@@ -101,25 +101,18 @@ async function resultRequest(
   };
 }
 
-/**
- * Publish an Artifact whose id sorts *below* `threshold` and is already committed.
- *
- * Artifact ids are random UUIDs, so a caller that needs a deterministic ascending pair cannot
- * plan one; publishing until a lower id appears is bounded and keeps the lock-order assertion
- * below free of sleeps. The Artifact must be committed: a row inserted by the committing
- * transaction itself is invisible to every other session, so a probe could never observe a
- * lock on it.
- */
-async function publishArtifactBelow(threshold: string): Promise<ArtifactRef> {
-  for (let attempt = 0; attempt < 64; attempt += 1) {
-    const artifact = await infra.artifacts.put(ctx, Buffer.from(`lower ${attempt}`), 'text/plain');
+/** Give a committed Artifact a caller-selected id for deterministic lock-order fixtures. */
+async function rekeyArtifact(artifact: ArtifactRef, artifactId: string): Promise<ArtifactRef> {
+  const result = await db.pool.query(
+    'UPDATE artifacts SET id = $3 WHERE tenant_id = $1 AND id = $2',
+    [tenant.tenantId, artifact.artifactId, artifactId],
+  );
 
-    if (artifact.artifactId < threshold) {
-      return artifact;
-    }
+  if (result.rowCount !== 1) {
+    throw new Error('could not assign the deterministic artifact id');
   }
 
-  throw new Error('could not publish an artifact with a lower id');
+  return Object.freeze({ ...artifact, artifactId });
 }
 
 /** One Workspace manifest entry pointing at an already durable Artifact. */
@@ -593,10 +586,17 @@ describe('P0B06 P2-A reference lock scope covers an auto-merged manifest', () =>
   it('pre-locks an artifact the merge pulls in instead of locking it after the request set', async () => {
     // Both ids must be durable before the commit runs: a row inserted by the commit itself is
     // invisible to every other session, so probing it could never observe a held lock.
-    const requested = await infra.artifacts.put(ctx, Buffer.from('requested entry'), 'text/plain');
-    // The Artifact only the merge contributes sorts *below* the requested one, which is the
-    // arrangement that inverts the ascending order if it is locked after the request's set.
-    const mergedIn = await publishArtifactBelow(requested.artifactId);
+    // Both rows are committed before the test and receive deterministic ids. The Artifact
+    // only the merge contributes sorts below the requested one, which inverts ascending lock
+    // order if it is locked after the request's set.
+    const requested = await rekeyArtifact(
+      await infra.artifacts.put(ctx, Buffer.from('requested entry'), 'text/plain'),
+      'ffffffff-ffff-4fff-bfff-ffffffffffff',
+    );
+    const mergedIn = await rekeyArtifact(
+      await infra.artifacts.put(ctx, Buffer.from('merge-added entry'), 'text/plain'),
+      '00000000-0000-4000-8000-000000000001',
+    );
     // A dedicated agent keeps the version arithmetic of this case independent of the shared one.
     const mergeAgent = (await agents.create(ctx, { name: 'p0b06 merge scope agent' })).agentId;
     const base = await infra.workspaces.load(ctx, mergeAgent);

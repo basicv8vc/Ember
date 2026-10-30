@@ -5,6 +5,7 @@ import type { Id, TaskKind } from '@ember/domain';
 
 import { createBenchmarkHarness, type BenchmarkHarness } from './harness.js';
 import { calculateDistribution, DeterministicPrng, parseTaskMix } from './metrics.js';
+import { resolveBenchmarkGitSha, sanitizeReportConfig } from './evidence.js';
 import { generateMarkdownReport } from './report.js';
 import { collectMachineSpecs, TelemetryCollector } from './telemetry.js';
 import type {
@@ -128,6 +129,8 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
   log(`  - Isolated Schema: ${config.isolatedSchema}`);
 
   const prng = new DeterministicPrng(config.seed);
+  let currentHttpInFlight = 0;
+  let peakHttpInFlight = 0;
   const telemetry = new TelemetryCollector({
     targetWorkerConcurrency: config.workerConcurrency,
   });
@@ -149,6 +152,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
         keepDb: config.keepDb,
         telemetry,
       });
+      telemetry.attachPool(harness.adminPool);
       apiUrl = harness.apiUrl;
       token = harness.token;
       tenantId = harness.tenantId;
@@ -265,6 +269,8 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
       let httpStatus = 0;
 
       try {
+        currentHttpInFlight++;
+        peakHttpInFlight = Math.max(peakHttpInFlight, currentHttpInFlight);
         const postResp = await fetch(`${apiUrl}/v1/tasks`, {
           method: 'POST',
           headers: {
@@ -280,6 +286,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
         });
 
         durableAckAtHr = performance.now();
+        currentHttpInFlight--;
         durableAckLatencyMs = durableAckAtHr - requestSentAtHr;
         httpStatus = postResp.status;
 
@@ -310,6 +317,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
         const receipt = (await postResp.json()) as { task_id: Id };
         taskId = receipt.task_id;
       } catch (err) {
+        currentHttpInFlight--;
         durableAckAtHr = performance.now();
         durableAckLatencyMs = durableAckAtHr - requestSentAtHr;
         return {
@@ -578,7 +586,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
     };
 
     telemetry.stop();
-    const telemetrySummary = telemetry.getSummary();
+    const telemetrySummary = { ...telemetry.getSummary(), peakHttpInFlight };
 
     // =========================================================================
     // Phase 6: Target Assessment (Task Spec §12 B-T28, B-T29)
@@ -610,7 +618,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
 
     const result: BenchmarkResult = {
       scenarioId: 'ember-p0b-09c-local-load',
-      gitSha: process.env.GITHUB_SHA || 'local-head',
+      gitSha: resolveBenchmarkGitSha(),
       timestamp: new Date().toISOString(),
       config,
       machine,

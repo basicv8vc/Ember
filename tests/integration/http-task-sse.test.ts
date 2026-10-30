@@ -586,6 +586,8 @@ describe('GET /v1/tasks/:taskId/stream with PostgreSQL', () => {
       expect(readResult).not.toBe('unexpected-frame');
       const exit = await withTimeout(exited, 4_000, 'API process exit on SIGTERM');
       expect(exit).toEqual({ code: 0, signal: null });
+      expect(stdout).toContain('"message":"HTTP server closed"');
+      expect(stdout).toContain('"message":"database pool closed"');
       expect(stdout).toContain('"message":"shutdown complete"');
     } catch (error) {
       const reason = error instanceof Error ? error.message : 'unknown SIGTERM test failure';

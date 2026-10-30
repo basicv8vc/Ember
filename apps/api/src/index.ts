@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
 import {
@@ -40,10 +41,18 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
     forceExit.unref();
 
     try {
-      await new Promise<void>((resolve, reject) => {
+      const httpServer = server as HttpServer;
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
+      // Explicitly release keep-alive sockets left idle after their responses finish. Calling
+      // this after close() avoids a race with newly accepted connections and leaves active
+      // requests to drain normally.
+      httpServer.closeIdleConnections();
+      await serverClosed;
+      logger.info('HTTP server closed');
       await pool.end();
+      logger.info('database pool closed');
       clearTimeout(forceExit);
       logger.info('shutdown complete');
     } catch (error) {

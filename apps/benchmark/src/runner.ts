@@ -620,7 +620,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
       scenarioId: 'ember-p0b-09c-local-load',
       gitSha: resolveBenchmarkGitSha(),
       timestamp: new Date().toISOString(),
-      config,
+      config: sanitizeReportConfig(config),
       machine,
       agentProvisioning: agentProvisioningMetrics,
       reconciliation,

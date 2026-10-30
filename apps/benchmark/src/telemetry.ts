@@ -175,6 +175,7 @@ export class TelemetryCollector {
       peakPostgresActiveConnections: this.peakPostgresActive,
       peakPostgresTotalConnections: this.peakPostgresTotal,
       postgresSampleCount: this.postgresSampleCount,
+      peakHttpInFlight: 0,
       targetWorkerConcurrency: this.targetWorkerConcurrency,
       peakInFlightRuns: this.peakInFlightRuns,
       peakLiveSandboxes: this.peakLiveSandboxes,

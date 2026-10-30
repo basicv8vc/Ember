@@ -1,4 +1,10 @@
-import type { AuthContext, Id, RunTerminalStatus, WorkspaceManifestValue } from '@ember/domain';
+import type {
+  AuthContext,
+  Id,
+  RunTerminalStatus,
+  TaskEventPayload,
+  WorkspaceManifestValue,
+} from '@ember/domain';
 
 /**
  * P0B-06 persistence ports (B06-D1, D3, D4, D5).
@@ -227,6 +233,13 @@ export interface CommitCheckpointRequest {
   readonly externalEffects?: readonly ExternalEffectRecord[];
 }
 
+export interface CommitApprovalRequest {
+  readonly approvalId?: Id;
+  readonly actionDigest: string;
+  readonly expiresAt: string;
+  readonly eventPayload?: TaskEventPayload;
+}
+
 export const COMMIT_STEP_MODES = ['progress', 'result'] as const;
 
 /**
@@ -243,6 +256,12 @@ export interface CommitStepRequest {
   readonly artifacts?: readonly CommitArtifactRequest[];
   readonly workspace?: CommitWorkspaceRequest;
   readonly checkpoint?: CommitCheckpointRequest;
+  /**
+   * When present on a `progress` step, atomically records a `pending` Approval row,
+   * transitions the current Run `running → succeeded` (releasing its lease), transitions
+   * the Task `running → waiting_approval`, and emits the `waiting_approval` event.
+   */
+  readonly approval?: CommitApprovalRequest;
 }
 
 export interface CommitReceipt {

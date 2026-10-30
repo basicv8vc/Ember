@@ -1,5 +1,6 @@
 import {
   LocalBlobStore,
+  PostgresApprovalRepository,
   PostgresBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
@@ -124,6 +125,7 @@ async function main(): Promise<void> {
               blobs,
             }),
             workspaces: new PostgresWorkspaceStore(pool),
+            approvals: new PostgresApprovalRepository(pool, { clock: systemClock }),
             // P0B-08b: every step of the durable path reserves durable budget before it can
             // produce a side effect. The policy is Worker configuration, not Task input.
             budget: new PostgresBudgetLedger(pool, { policy: config.budget }),

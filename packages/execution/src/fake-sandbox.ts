@@ -475,6 +475,17 @@ export class FakeSandboxProvider implements SandboxProvider {
     );
   }
 
+  /** Number of non-destroyed sandboxes currently tracked by this provider instance. */
+  liveSandboxCount(): number {
+    return this.liveCount();
+  }
+
+  /** Current lifecycle state of a sandbox in this provider, or `null` if unknown. */
+  sandboxState(sandboxId: Id): FakeSandboxState | null {
+    const record = this.sandboxes.get(sandboxId);
+    return record === undefined ? null : record.state;
+  }
+
   private liveCount(): number {
     let count = 0;
 

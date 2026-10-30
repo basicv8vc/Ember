@@ -20,14 +20,19 @@ import {
   type TaskKind,
   type WorkspaceManifestValue,
 } from '@ember/domain';
-import type { ExecutionClock, ExecutionRouterForRun, SimulatedExecutor } from '@ember/execution';
-import type { PostgresWorkspaceStore } from '@ember/postgres';
+import {
+  computeApprovalActionDigest,
+  type ExecutionClock,
+  type ExecutionRouterForRun,
+  type SimulatedExecutor,
+} from '@ember/execution';
+import type { PostgresApprovalRepository, PostgresWorkspaceStore } from '@ember/postgres';
 import { stepCost, stepOperationId } from './budget-plan.js';
 import type { WorkerLogger } from './logger.js';
 import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
 
 /**
- * P0B-06 durable execution handler.
+ * P0B-06 / P0B-08d durable execution handler.
  *
  * This is the vertical closure P0B-05 could not provide: one simulated step publishes an
  * Artifact plus a Step checkpoint, a second fenced commit adds it to the Workspace and
@@ -37,13 +42,27 @@ import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
  * P0B-08b adds transactional budget enforcement to that path: every step takes a durable
  * reservation **before** it can produce a side effect, and records its consumption after.
  *
+ * P0B-08d adds the persistent mock approval gate (`mock.approval`): the `produce` step runs
+ * in a transient FakeSandbox (stopped and destroyed before returning), commits the pre-approval
+ * Artifact, Checkpoint and `pending` Approval row, releases the Run lease and parks the Task
+ * in `waiting_approval`. Once approved via HTTP, a new Run resumes from the committed
+ * checkpoint and publishes the result without re-running or re-charging `produce`.
+ *
  * Deliberately absent: real shell, real LLM, network sandbox, device distribution.
  */
 
-/** Kinds this handler can durably execute. `mock.approval` stays out (P0B-08). */
-export const DURABLE_TASK_KINDS = ['mock.chat', 'mock.compute', 'mock.file'] as const;
+/** Kinds this handler can durably execute. */
+export const DURABLE_TASK_KINDS = [
+  'mock.chat',
+  'mock.compute',
+  'mock.file',
+  'mock.approval',
+] as const;
 
 export type DurableTaskKind = (typeof DURABLE_TASK_KINDS)[number];
+
+/** Default approval TTL when not overridden on the handler (5 minutes). */
+export const DEFAULT_APPROVAL_TTL_MS = 300_000;
 
 /** Bumped when the checkpoint layout or step semantics change, so resume can refuse. */
 export const CHECKPOINT_EXECUTOR_VERSION = 'deterministic-executor@1';
@@ -61,6 +80,12 @@ export interface DurableRunHandlerDependencies {
   readonly committer: RunResultCommitter;
   readonly workspaces: Pick<PostgresWorkspaceStore, 'loadForRun'>;
   /**
+   * Mandatory when kind is `mock.approval`. If absent at runtime when executing or resuming
+   * `mock.approval`, the run handler immediately fails closed with `POLICY_DENIED`.
+   */
+  readonly approvals?: Pick<PostgresApprovalRepository, 'listForGrant'>;
+  readonly approvalTtlMs?: number;
+  /**
    * Durable budget authority (B08b-D1). It is required, not optional: a Worker that could
    * silently skip the reservation would make the whole limit advisory.
    */
@@ -73,6 +98,8 @@ interface ProducedBytes {
   readonly bytes: Uint8Array;
   readonly mediaType: string;
   readonly workspacePath: string;
+  readonly actionDigest?: string;
+  readonly sandboxId?: string | null;
 }
 
 function sha256Hex(value: string | Uint8Array): string {
@@ -188,12 +215,26 @@ function produceBytes(
         workspacePath: normalizeWorkspacePath(input.fileKey),
       };
     }
+    case 'mock.approval': {
+      const input = context.input as {
+        readonly action: string;
+        readonly reason: string;
+      };
+      const actionDigest = produced.text ?? computeApprovalActionDigest(input);
+
+      return {
+        bytes: Buffer.from(`${actionDigest}\n`, 'utf8'),
+        mediaType: 'text/plain',
+        workspacePath: `approval/${context.taskId}.sha256`,
+        actionDigest,
+      };
+    }
     default:
       throw new DomainError('POLICY_DENIED', 'task kind has no durable executor branch');
   }
 }
 
-/** `mock.file` needs no simulated provider; chat/compute reuse the P0B-05 executor. */
+/** `mock.file` needs no simulated provider; chat/compute/approval run through the executor. */
 async function executeStep(
   context: RunExecutionContext,
   route: RouteDecision,
@@ -204,14 +245,38 @@ async function executeStep(
     return produceBytes(context, route, {});
   }
 
+  if (context.kind === 'mock.approval') {
+    if (executor.executeApproval === undefined) {
+      throw new DomainError(
+        'POLICY_DENIED',
+        'mock.approval requires an executor with executeApproval',
+      );
+    }
+
+    const result = await executor.executeApproval(context, route, signal);
+    const output = result.output as { readonly actionDigest?: string };
+    const bytes = produceBytes(
+      context,
+      route,
+      typeof output.actionDigest === 'string' ? { text: output.actionDigest } : {},
+    );
+    return { ...bytes, sandboxId: result.sandboxId };
+  }
+
   const result = await executor.execute(context, route, signal);
   const output = result.output as { readonly text?: string; readonly sha256?: string };
 
   if (context.kind === 'mock.compute' && typeof output.sha256 === 'string') {
-    return produceBytes(context, route, { text: output.sha256 });
+    return {
+      ...produceBytes(context, route, { text: output.sha256 }),
+      sandboxId: result.sandboxId,
+    };
   }
 
-  return produceBytes(context, route, typeof output.text === 'string' ? { text: output.text } : {});
+  return {
+    ...produceBytes(context, route, typeof output.text === 'string' ? { text: output.text } : {}),
+    sandboxId: result.sandboxId,
+  };
 }
 
 /**
@@ -356,6 +421,10 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
       }
 
       try {
+        if (context.kind === 'mock.approval' && deps.approvals === undefined) {
+          throw new DomainError('POLICY_DENIED', 'mock.approval requires an approval repository');
+        }
+
         // Recovery input is read-only. "No checkpoint" and "a checkpoint this build cannot
         // read" are different states: the second must stop the Run, never silently re-execute
         // work that may already have had side effects.
@@ -410,6 +479,63 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
             );
           }
 
+          if (context.kind === 'mock.approval') {
+            if (deps.approvals === undefined) {
+              throw new DomainError(
+                'POLICY_DENIED',
+                'mock.approval requires an approval repository',
+              );
+            }
+
+            const input = context.input as { readonly action: string; readonly reason: string };
+            const actionDigest =
+              typeof produced.cursor['actionDigest'] === 'string'
+                ? produced.cursor['actionDigest']
+                : computeApprovalActionDigest(input);
+
+            const approvals = await deps.approvals.listForGrant(grant);
+            const approval = approvals.find((entry) => entry.actionDigest === actionDigest);
+
+            if (approval === undefined) {
+              if (approvals.length > 0) {
+                throw new DomainError(
+                  'POLICY_DENIED',
+                  'checkpoint action digest does not match any approval record',
+                );
+              }
+
+              const approvalTtlMs = deps.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+              const expiresAt = new Date(clock.now().getTime() + approvalTtlMs).toISOString();
+              const pauseReceipt = await committer.commitStep(grant, {
+                operationId: `step:await_approval:${inputDigest.slice(0, 16)}`,
+                mode: 'progress',
+                approval: {
+                  actionDigest,
+                  expiresAt,
+                  eventPayload: {
+                    taskKind: 'mock.approval',
+                    route: route.path,
+                    policyVersion: context.policyVersion,
+                    simulated: true,
+                  },
+                },
+              });
+              logger.info('durable execution waiting for approval', {
+                ...base,
+                taskKind: context.kind,
+                route: route.path,
+              });
+              return { type: 'committed', receipt: pauseReceipt };
+            }
+
+            if (approval.status !== 'approved') {
+              throw new DomainError(
+                'POLICY_DENIED',
+                `mock.approval cannot resume while approval status is ${approval.status}`,
+              );
+            }
+          }
+
           logger.info('durable step already committed; resuming', {
             ...base,
             stepId: PRODUCE_STEP,
@@ -433,6 +559,8 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           );
         }
 
+        const approvalTtlMs = deps.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+
         const budgetedProduce = await runBudgetedStep({
           budget: deps.budget,
           grant,
@@ -451,6 +579,27 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
               producedBytes.mediaType,
             );
 
+            const approvalRequest =
+              context.kind === 'mock.approval'
+                ? {
+                    actionDigest:
+                      producedBytes.actionDigest ??
+                      computeApprovalActionDigest(
+                        context.input as { readonly action: string; readonly reason: string },
+                      ),
+                    expiresAt: new Date(clock.now().getTime() + approvalTtlMs).toISOString(),
+                    eventPayload: {
+                      taskKind: 'mock.approval' as const,
+                      route: route.path,
+                      policyVersion: context.policyVersion,
+                      ...(producedBytes.sandboxId === null || producedBytes.sandboxId === undefined
+                        ? {}
+                        : { sandboxId: producedBytes.sandboxId }),
+                      simulated: true,
+                    },
+                  }
+                : undefined;
+
             const producedReceipt = await committer.commitStep(grant, {
               operationId: `step:${PRODUCE_STEP}:${inputDigest.slice(0, 16)}`,
               mode: 'progress',
@@ -459,6 +608,9 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
                 stepId: PRODUCE_STEP,
                 inputDigest,
                 executorVersion: CHECKPOINT_EXECUTOR_VERSION,
+                ...(approvalRequest === undefined
+                  ? {}
+                  : { cursor: { actionDigest: approvalRequest.actionDigest } }),
                 artifacts: [
                   {
                     artifactId: staged.stagedId,
@@ -469,11 +621,24 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
                   },
                 ],
               },
+              ...(approvalRequest === undefined ? {} : { approval: approvalRequest }),
             });
 
             return { producedBytes, staged, producedReceipt };
           },
         });
+
+        if (context.kind === 'mock.approval') {
+          logger.info('durable execution waiting for approval', {
+            ...base,
+            taskKind: context.kind,
+            route: route.path,
+            durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
+            simulated: true,
+            durable: true,
+          });
+          return { type: 'committed', receipt: budgetedProduce.producedReceipt };
+        }
 
         return await publishResult(
           deps,

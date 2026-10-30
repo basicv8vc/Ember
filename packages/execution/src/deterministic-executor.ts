@@ -12,7 +12,7 @@ import {
 } from './clock.js';
 import { FakeLlm, type FakeLlmUsage } from './fake-llm.js';
 import { FAKE_SANDBOX_IMAGE_DIGEST, FakeSandboxProvider } from './fake-sandbox.js';
-import { assertSupportedComputeOperation } from './mock-compute.js';
+import { assertSupportedComputeOperation, computeSha256 } from './mock-compute.js';
 import { parseTaskInput, parseTaskKind } from './validation.js';
 
 /**
@@ -44,7 +44,30 @@ export interface SimulatedDigestOutput {
   readonly usage: SandboxUsageRecord;
 }
 
-export type SimulatedExecutionOutput = SimulatedTextOutput | SimulatedDigestOutput;
+export interface SimulatedApprovalOutput {
+  readonly type: 'approval';
+  readonly action: string;
+  readonly reason: string;
+  readonly actionDigest: string;
+  readonly usage: SandboxUsageRecord;
+}
+
+export type SimulatedExecutionOutput =
+  SimulatedTextOutput | SimulatedDigestOutput | SimulatedApprovalOutput;
+
+export function canonicalApprovalActionPayload(input: {
+  readonly action: string;
+  readonly reason?: string | undefined;
+}): string {
+  return JSON.stringify({ action: input.action, reason: input.reason ?? '' });
+}
+
+export function computeApprovalActionDigest(input: {
+  readonly action: string;
+  readonly reason?: string | undefined;
+}): string {
+  return computeSha256(canonicalApprovalActionPayload(input)).value;
+}
 
 /**
  * Outcome of one simulated execution.
@@ -74,6 +97,11 @@ export interface SimulatedExecutor {
     route: RouteDecision,
     signal: AbortSignal,
   ): Promise<SimulatedExecutionResult>;
+  executeApproval?(
+    ctx: RunExecutionContext,
+    route: RouteDecision,
+    signal: AbortSignal,
+  ): Promise<SimulatedExecutionResult>;
 }
 
 export interface DeterministicExecutorOptions {
@@ -88,6 +116,8 @@ export interface DeterministicExecutorOptions {
   readonly sandboxReadyDeadlineMs?: number;
   /** Simulated exec timeout passed to `SandboxProvider.exec`. */
   readonly sandboxExecTimeoutMs?: number;
+  /** Optional observer invoked when a FakeSandboxProvider is created for a Run. */
+  readonly onSandboxProvider?: (provider: FakeSandboxProvider) => void;
 }
 
 const SANDBOX_SPEC_BY_ROUTE: Readonly<
@@ -117,6 +147,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
   private readonly sandboxExecDurationMs: number;
   private readonly sandboxReadyDeadlineMs: number;
   private readonly sandboxExecTimeoutMs: number;
+  private readonly onSandboxProvider: ((provider: FakeSandboxProvider) => void) | undefined;
 
   constructor(options: DeterministicExecutorOptions = {}) {
     this.clock = options.clock ?? systemExecutionClock;
@@ -138,6 +169,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
       'sandboxExecTimeoutMs',
       60_000,
     );
+    this.onSandboxProvider = options.onSandboxProvider;
   }
 
   async execute(
@@ -215,6 +247,70 @@ export class DeterministicExecutor implements SimulatedExecutor {
     }
   }
 
+  /**
+   * Execute the pre-approval preparation step for `mock.approval` inside a transient
+   * `FakeSandboxProvider` session (`create → waitReady → exec → readOutput → usage → stop → destroy`).
+   *
+   * This is separate from {@link execute} so the non-durable P0B-05 handler continues to
+   * refuse `mock.approval` without an `ApprovalRepository`, while the P0B-08d durable worker
+   * exercises the full sandbox lifecycle and guarantees the sandbox is destroyed before
+   * entering `waiting_approval`.
+   */
+  async executeApproval(
+    ctx: RunExecutionContext,
+    route: RouteDecision,
+    signal: AbortSignal,
+  ): Promise<SimulatedExecutionResult> {
+    const kind = parseTaskKind(ctx.kind);
+
+    if (kind !== 'mock.approval') {
+      throw new DomainError('POLICY_DENIED', 'executeApproval only accepts mock.approval tasks');
+    }
+
+    const input = parseTaskInput(kind, ctx.input) as Extract<
+      ReturnType<typeof parseTaskInput>,
+      { action: string }
+    >;
+
+    if (ctx.deadlineAt !== null) {
+      const deadline = new Date(ctx.deadlineAt);
+      const now = parseExecutionNow(this.clock.now(), 'clock.now()');
+
+      if (!Number.isFinite(deadline.getTime())) {
+        throw new DomainError('DB_UNAVAILABLE', 'persisted task deadline is not a valid instant');
+      }
+
+      if (deadline.getTime() <= now.getTime()) {
+        throw new DomainError('DEADLINE_EXCEEDED', 'task deadline elapsed before execution');
+      }
+    }
+
+    throwIfAborted(signal);
+
+    const startedAt = parseExecutionNow(this.clock.now(), 'clock.now()');
+    const startedAtHr = performance.now();
+
+    try {
+      const reason = input.reason ?? '';
+      const payload = canonicalApprovalActionPayload({
+        action: input.action,
+        reason,
+      });
+      const sandbox = await this.runInSandbox(ctx, route, 'sha256', payload, signal);
+
+      return this.result(ctx, route, startedAt, startedAtHr, sandbox.sandboxId, {
+        type: 'approval',
+        action: input.action,
+        reason,
+        actionDigest: sandbox.digest,
+        usage: sandbox.usage,
+      });
+    } catch (error) {
+      throwIfAborted(signal);
+      throw error;
+    }
+  }
+
   private result(
     ctx: RunExecutionContext,
     route: RouteDecision,
@@ -260,6 +356,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
       signal,
       execDurationMs: this.sandboxExecDurationMs,
     });
+    this.onSandboxProvider?.(provider);
 
     const { sandboxId } = await provider.create({
       tenantId: ctx.tenantId,

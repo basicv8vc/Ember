@@ -162,6 +162,25 @@ UPDATE tasks
  WHERE tenant_id = $4 AND id = $5
 `;
 
+const EXPIRE_PENDING_APPROVALS_ON_CANCEL_SQL = `
+UPDATE approvals
+   SET status = 'expired',
+       decided_at = $3,
+       updated_at = $3
+ WHERE tenant_id = $1 AND task_id = $2 AND status = 'pending'
+`;
+
+const SWEEP_RESERVED_BUDGET_ON_CANCEL_SQL = `
+UPDATE budget_operations
+   SET state = 'expired',
+       consumed_steps = reserved_steps,
+       consumed_units = reserved_units,
+       consumed_elapsed_ms = reserved_elapsed_ms,
+       consumed_slots = reserved_slots,
+       settled_at = $3
+ WHERE tenant_id = $1 AND task_id = $2 AND state = 'reserved'
+`;
+
 const MAX_IDEMPOTENT_INSERT_ATTEMPTS = 3;
 
 function parseContext(ctx: AuthContext): AuthContext {
@@ -378,6 +397,19 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
 
         if (updated.rowCount !== 1) {
           throw new DomainError('DB_UNAVAILABLE', 'could not apply cancellation to the task');
+        }
+
+        if (status === 'waiting_approval') {
+          await client.query(EXPIRE_PENDING_APPROVALS_ON_CANCEL_SQL, [
+            validatedContext.tenantId,
+            validatedTaskId,
+            now,
+          ]);
+          await client.query(SWEEP_RESERVED_BUDGET_ON_CANCEL_SQL, [
+            validatedContext.tenantId,
+            validatedTaskId,
+            now,
+          ]);
         }
 
         await appendTaskEvent(client, {

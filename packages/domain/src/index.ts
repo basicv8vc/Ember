@@ -1,3 +1,4 @@
+export * from './approval-state-machine.js';
 export * from './errors.js';
 export * from './run-state-machine.js';
 export * from './task-state-machine.js';

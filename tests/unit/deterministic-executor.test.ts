@@ -4,11 +4,12 @@ import { isDomainError } from '@ember/domain';
 import {
   DeterministicExecutor,
   FakeLlm,
+  computeApprovalActionDigest,
   computeSha256,
   EXECUTABLE_TASK_KINDS,
   isExecutableTaskKind,
 } from '@ember/execution';
-import type { DeterministicExecutorOptions } from '@ember/execution';
+import type { DeterministicExecutorOptions, FakeSandboxProvider } from '@ember/execution';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const TASK = '22222222-2222-4222-8222-222222222222';
@@ -307,5 +308,39 @@ describe('DeterministicExecutor: unsupported kinds and failure paths', () => {
     const run = new DeterministicExecutor({ clock: clock(), llm });
 
     expectCode(await attempt(() => run.execute(context(), FAST, controller.signal)), 'CANCELLED');
+  });
+
+  it('executes mock.approval preparation in FakeSandbox and destroys the sandbox before returning', async () => {
+    let observedProvider: FakeSandboxProvider | undefined;
+    const { executor: run } = executor({
+      onSandboxProvider: (provider) => {
+        observedProvider = provider;
+      },
+    });
+
+    const result = await run.executeApproval(
+      context({
+        kind: 'mock.approval',
+        input: { action: 'deploy:staging', reason: 'smoke test' },
+      }),
+      FAST,
+      new AbortController().signal,
+    );
+
+    expect(result.sandboxId).toMatch(/^[0-9a-f-]{36}$/i);
+    expect(observedProvider).toBeDefined();
+    expect(observedProvider?.liveSandboxCount()).toBe(0);
+    if (result.sandboxId !== null) {
+      expect(observedProvider?.sandboxState(result.sandboxId)).toBe('destroyed');
+    }
+    expect(result.output).toMatchObject({
+      type: 'approval',
+      action: 'deploy:staging',
+      reason: 'smoke test',
+      actionDigest: computeApprovalActionDigest({
+        action: 'deploy:staging',
+        reason: 'smoke test',
+      }),
+    });
   });
 });

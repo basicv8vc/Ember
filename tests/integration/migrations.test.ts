@@ -64,7 +64,7 @@ describe('PostgreSQL migrations (real database)', () => {
   it('applies migrations from an empty schema and records the version', async () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(6);
+    expect(result.applied).toHaveLength(7);
     expect(result.applied.map((migration) => migration.id)).toEqual([
       '0001',
       '0002',
@@ -72,12 +72,14 @@ describe('PostgreSQL migrations (real database)', () => {
       '0004',
       '0005',
       '0006',
+      '0007',
     ]);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
     expect(result.applied[3]?.name).toBe('0004_lease_fencing_and_retry.sql');
     expect(result.applied[4]?.name).toBe('0005_p0b06_artifacts_workspace_checkpoint.sql');
     expect(result.applied[5]?.name).toBe('0006_p0b08b_persistent_budget.sql');
+    expect(result.applied[6]?.name).toBe('0007_p0b08d_persistent_mock_approval.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -87,7 +89,7 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(6);
+    expect(versions.rows).toHaveLength(7);
     expect(versions.rows.map((row) => row.id)).toEqual([
       '0001',
       '0002',
@@ -95,6 +97,7 @@ describe('PostgreSQL migrations (real database)', () => {
       '0004',
       '0005',
       '0006',
+      '0007',
     ]);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
@@ -118,6 +121,7 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(tables.rows.map((row) => row.table_name)).toEqual(
       expect.arrayContaining([
         'agents',
+        'approvals',
         'platform_metadata',
         'principals',
         'runs',
@@ -134,12 +138,12 @@ describe('PostgreSQL migrations (real database)', () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(6);
+    expect(result.alreadyApplied).toBe(7);
 
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('6');
+    expect(versions.rows[0]?.count).toBe('7');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -179,6 +183,14 @@ describe('PostgreSQL migrations (real database)', () => {
         await readFile(path.join(migrationsDir, '0006_p0b08b_persistent_budget.sql'), 'utf8'),
         'utf8',
       );
+      await writeFile(
+        path.join(tempMigrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
+        await readFile(
+          path.join(migrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
+          'utf8',
+        ),
+        'utf8',
+      );
 
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
         /must not be renamed/,
@@ -187,7 +199,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('6');
+      expect(versions.rows[0]?.count).toBe('7');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -241,6 +253,14 @@ describe('PostgreSQL migrations (real database)', () => {
         await readFile(path.join(migrationsDir, '0006_p0b08b_persistent_budget.sql'), 'utf8'),
         'utf8',
       );
+      await writeFile(
+        path.join(tempMigrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
+        await readFile(
+          path.join(migrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
+          'utf8',
+        ),
+        'utf8',
+      );
 
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(MigrationError);
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
@@ -250,7 +270,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('6');
+      expect(versions.rows[0]?.count).toBe('7');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

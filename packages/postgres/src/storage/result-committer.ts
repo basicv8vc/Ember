@@ -14,8 +14,12 @@ import {
   DomainError,
   InvalidArgumentError,
   normalizeWorkspaceManifest,
+  transitionRun,
+  transitionTask,
+  type RunStatus,
   type RunTerminalStatus,
   type TaskEventPayload,
+  type TaskStatus,
   type WorkspaceManifestValue,
 } from '@ember/domain';
 import type pg from 'pg';
@@ -172,6 +176,38 @@ INSERT INTO step_checkpoints (
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14::jsonb, $15::jsonb)
 `;
 
+const SELECT_APPROVAL_BY_ACTION_SQL = `
+SELECT id, status
+  FROM approvals
+ WHERE tenant_id = $1 AND task_id = $2 AND action_digest = $3
+ FOR UPDATE
+`;
+
+const INSERT_APPROVAL_SQL = `
+INSERT INTO approvals (
+  id, tenant_id, task_id, run_id, lease_epoch, action_digest, status,
+  expires_at, decided_at, created_at, updated_at
+)
+VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7, NULL, $8, $8)
+`;
+
+const PAUSE_RUN_FOR_APPROVAL_SQL = `
+UPDATE runs
+   SET status = 'succeeded',
+       finished_at = GREATEST($4, started_at),
+       leased_until = NULL,
+       updated_at = $4
+ WHERE tenant_id = $1 AND task_id = $2 AND id = $3
+`;
+
+const PAUSE_TASK_FOR_APPROVAL_SQL = `
+UPDATE tasks
+   SET status = 'waiting_approval',
+       lease_expires_at = NULL,
+       updated_at = $3
+ WHERE tenant_id = $1 AND id = $2
+`;
+
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const STEP_ID_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -212,6 +248,12 @@ interface NormalizedRequest {
     readonly workspaceVersion: number | null;
     readonly artifacts: readonly CheckpointArtifactRef[];
     readonly externalEffects: readonly ExternalEffectRecord[];
+  } | null;
+  readonly approval: {
+    readonly approvalId: string | null;
+    readonly actionDigest: string;
+    readonly expiresAt: Date;
+    readonly eventPayload: TaskEventPayload;
   } | null;
   readonly requestDigest: string;
 }
@@ -355,6 +397,12 @@ function normalizeRequest(request: CommitStepRequest): NormalizedRequest {
   const checkpoint =
     request.checkpoint === undefined ? null : normalizeCheckpoint(request.checkpoint);
 
+  if (request.approval !== undefined && request.mode !== 'progress') {
+    invalid('approval', 'only_allowed_in_progress_mode');
+  }
+
+  const approval = request.approval === undefined ? null : normalizeApproval(request.approval);
+
   const digestSource = {
     operationId: request.operationId,
     mode: request.mode,
@@ -382,6 +430,15 @@ function normalizeRequest(request: CommitStepRequest): NormalizedRequest {
             artifacts: checkpoint.artifacts,
             externalEffects: checkpoint.externalEffects,
           },
+    ...(approval === null
+      ? {}
+      : {
+          approval: {
+            approvalId: approval.approvalId,
+            actionDigest: approval.actionDigest,
+            expiresAt: approval.expiresAt.toISOString(),
+          },
+        }),
   };
 
   return Object.freeze({
@@ -390,6 +447,7 @@ function normalizeRequest(request: CommitStepRequest): NormalizedRequest {
     artifacts: Object.freeze(artifacts),
     workspace,
     checkpoint,
+    approval,
     requestDigest: digestOf(digestSource),
   });
 }
@@ -462,6 +520,43 @@ function normalizeCheckpoint(
     workspaceVersion: checkpoint.workspaceVersion ?? null,
     artifacts: Object.freeze([...referenced]),
     externalEffects: Object.freeze([...(checkpoint.externalEffects ?? [])]),
+  });
+}
+
+function normalizeApproval(
+  approval: NonNullable<CommitStepRequest['approval']>,
+): NonNullable<NormalizedRequest['approval']> {
+  if (typeof approval !== 'object' || approval === null) {
+    invalid('approval', 'not_an_object');
+  }
+
+  let approvalId: string | null = null;
+  if (approval.approvalId !== undefined) {
+    const parsed = IdSchema.safeParse(approval.approvalId);
+    if (!parsed.success) {
+      invalid('approval.approvalId', 'invalid_id');
+    }
+    approvalId = parsed.data;
+  }
+
+  if (typeof approval.actionDigest !== 'string' || !SHA256_PATTERN.test(approval.actionDigest)) {
+    invalid('approval.actionDigest', 'invalid_digest');
+  }
+
+  if (typeof approval.expiresAt !== 'string' || approval.expiresAt.length === 0) {
+    invalid('approval.expiresAt', 'invalid_timestamp');
+  }
+
+  const expiresAt = new Date(approval.expiresAt);
+  if (Number.isNaN(expiresAt.getTime())) {
+    invalid('approval.expiresAt', 'invalid_timestamp');
+  }
+
+  return Object.freeze({
+    approvalId,
+    actionDigest: approval.actionDigest,
+    expiresAt,
+    eventPayload: Object.freeze({ ...(approval.eventPayload ?? {}) }),
   });
 }
 
@@ -615,14 +710,33 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
         };
 
         if (normalized.mode === 'progress') {
-          // A progress step is not terminal: no Task/Run convergence and no terminal event.
-          await appendTaskEvent(client, {
-            tenantId: scoped.tenantId,
-            taskId: scoped.taskId,
-            phase: 'progress',
-            occurredAt: now,
-            payload: { runId: scoped.runId, attempt: task.attempt_count, ...payloadExtra },
-          });
+          if (normalized.approval !== null) {
+            await this.writeApprovalPause(client, scoped, task, run, normalized.approval, now);
+            await appendTaskEvent(client, {
+              tenantId: scoped.tenantId,
+              taskId: scoped.taskId,
+              phase: 'waiting_approval',
+              occurredAt: now,
+              payload: {
+                ...normalized.approval.eventPayload,
+                runId: scoped.runId,
+                attempt: task.attempt_count,
+                fromStatus: 'running',
+                toStatus: 'waiting_approval',
+                runStatus: 'succeeded',
+                ...payloadExtra,
+              },
+            });
+          } else {
+            // A progress step is not terminal: no Task/Run convergence and no terminal event.
+            await appendTaskEvent(client, {
+              tenantId: scoped.tenantId,
+              taskId: scoped.taskId,
+              phase: 'progress',
+              occurredAt: now,
+              payload: { runId: scoped.runId, attempt: task.attempt_count, ...payloadExtra },
+            });
+          }
         } else {
           const convergence = planFinishConvergence({
             outcome: 'succeeded',
@@ -984,6 +1098,62 @@ export class PostgresRunResultCommitter implements RunResultCommitter {
     ]);
 
     return checkpointId;
+  }
+
+  private async writeApprovalPause(
+    client: pg.PoolClient,
+    grant: RunGrant,
+    task: GrantTaskRow,
+    run: RunRow,
+    approval: NonNullable<NormalizedRequest['approval']>,
+    now: Date,
+  ): Promise<string> {
+    if (approval.expiresAt.getTime() <= now.getTime()) {
+      invalid('approval.expiresAt', 'expires_at_must_be_in_future');
+    }
+
+    const existing = await client.query<{ id: string; status: string }>(
+      SELECT_APPROVAL_BY_ACTION_SQL,
+      [grant.tenantId, grant.taskId, approval.actionDigest],
+    );
+    const existingRow = existing.rows[0];
+
+    let approvalId: string;
+
+    if (existingRow !== undefined) {
+      if (existingRow.status !== 'pending') {
+        throw new DomainError(
+          'IDEMPOTENCY_CONFLICT',
+          'approval for this task action was already decided',
+        );
+      }
+      approvalId = existingRow.id;
+    } else {
+      approvalId = approval.approvalId ?? randomUUID();
+      await client.query(INSERT_APPROVAL_SQL, [
+        approvalId,
+        grant.tenantId,
+        grant.taskId,
+        grant.runId,
+        grant.leaseEpoch,
+        approval.actionDigest,
+        approval.expiresAt,
+        now,
+      ]);
+    }
+
+    transitionRun(run.status as RunStatus, 'succeeded');
+    transitionTask(task.status as TaskStatus, 'waiting_approval');
+
+    await client.query(PAUSE_RUN_FOR_APPROVAL_SQL, [
+      grant.tenantId,
+      grant.taskId,
+      grant.runId,
+      now,
+    ]);
+    await client.query(PAUSE_TASK_FOR_APPROVAL_SQL, [grant.tenantId, grant.taskId, now]);
+
+    return approvalId;
   }
 }
 

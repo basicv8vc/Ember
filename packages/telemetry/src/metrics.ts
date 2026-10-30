@@ -12,14 +12,14 @@ import type {
  * Uses linear interpolation (R7 method) and rounds to nearest millisecond integer.
  */
 export function calculatePercentile(values: readonly number[], percentile: number): number | null {
+  if (!Number.isFinite(percentile) || percentile < 0 || percentile > 100) {
+    throw new DomainError('INVALID_ARGUMENT', 'percentile must be a finite number in [0, 100]');
+  }
+  if (values.some((value) => !Number.isFinite(value) || value < 0)) {
+    throw new DomainError('INVALID_ARGUMENT', 'latency samples must be finite and non-negative');
+  }
   if (values.length === 0) {
     return null;
-  }
-  if (percentile < 0 || percentile > 100) {
-    throw new DomainError(
-      'INVALID_ARGUMENT',
-      `percentile must be between 0 and 100, got ${percentile}`,
-    );
   }
   if (values.length === 1) {
     return values[0]!;

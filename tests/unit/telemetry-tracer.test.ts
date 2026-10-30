@@ -60,7 +60,8 @@ describe('telemetry local tracer and spans', () => {
 
     const record = exporter.getFinishedSpans()[0]!;
     expect(record.status.code).toBe('ERROR');
-    expect(record.status.description).toBe('simulated sandbox failure');
+    expect(record.status.description).toBe('UNEXPECTED');
+    expect(record.events[0]?.attributes?.['exception.message']).toBe('[REDACTED]');
     expect(record.events[0]?.name).toBe('exception');
   });
 
@@ -155,12 +156,32 @@ describe('telemetry local tracer and spans', () => {
       const parsed = JSON.parse(rawSerializedLine) as { type: string } & SpanRecord;
       expect(parsed.type).toBe('otel_span');
       expect(parsed.status.code).toBe('ERROR');
-      expect(parsed.status.description).toContain('[REDACTED]');
-      expect(parsed.status.description).toContain('postgres://admin:[REDACTED]@127.0.0.1:5432');
-      expect(parsed.events[0]?.attributes?.['exception.message']).toContain('[REDACTED]');
+      expect(parsed.status.description).toBe('UNEXPECTED');
+      expect(parsed.events[0]?.attributes?.['exception.code']).toBe('UNEXPECTED');
+      expect(parsed.events[0]?.attributes?.['exception.message']).toBe('[REDACTED]');
 
       // Strict schema validation passes on the span record
       expect(() => SpanRecordSchema.parse(span.toRecord())).not.toThrow();
+    });
+
+    it('never exports raw task input from an arbitrary Error message or stack', () => {
+      const lines: string[] = [];
+      const tracer = new LocalTracer([new JsonLineSpanExporter((line) => lines.push(line))]);
+      const privatePrompt = 'user draft: My confidential product launch is on Thursday';
+      const error = new Error(`worker failed while handling ${privatePrompt}`);
+      error.stack = `Error: ${privatePrompt}\\n  at processPrompt`;
+
+      const span = tracer.startSpan('worker.execute');
+      span.recordException(error);
+      span.end();
+
+      expect(lines).toHaveLength(1);
+      expect(lines[0]).not.toContain(privatePrompt);
+      expect(lines[0]).not.toContain('processPrompt');
+      const parsed = JSON.parse(lines[0]!) as { type: string } & SpanRecord;
+      expect(parsed.status.description).toBe('UNEXPECTED');
+      expect(parsed.events[0]?.attributes?.['exception.message']).toBe('[REDACTED]');
+      expect(parsed.events[0]?.attributes?.['exception.stacktrace']).toBeUndefined();
     });
 
     it('redacts sensitive credentials directly passed to setStatus description', () => {

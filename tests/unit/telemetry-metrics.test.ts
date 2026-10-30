@@ -61,6 +61,14 @@ describe('telemetry metrics and quantile aggregation', () => {
       expect(calculatePercentile([42], 99)).toBe(42);
     });
 
+    it('rejects invalid percentile bounds and non-finite or negative latency samples', () => {
+      expect(() => calculatePercentile([], 101)).toThrow();
+      expect(() => calculatePercentile([1], -1)).toThrow();
+      expect(() => calculatePercentile([], Number.NaN)).toThrow();
+      expect(() => calculatePercentile([Number.POSITIVE_INFINITY], 50)).toThrow();
+      expect(() => calculatePercentile([-1, 20], 50)).toThrow();
+    });
+
     it('computes exact P50/P95/P99 for evenly distributed samples', () => {
       // 101 samples: 0, 1, 2, ..., 100
       const samples = Array.from({ length: 101 }, (_, i) => i);

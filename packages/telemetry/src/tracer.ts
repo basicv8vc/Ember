@@ -1,5 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import { createTenantHash, redactSecrets, sanitizeContext, sanitizeValue } from './privacy.js';
+import { isDomainError } from '@ember/domain';
+import {
+  createTenantHash,
+  REDACTED_PLACEHOLDER,
+  redactSecrets,
+  sanitizeContext,
+  sanitizeValue,
+} from './privacy.js';
 import { SpanRecordSchema } from './schemas.js';
 import type {
   SpanAttributes,
@@ -129,21 +136,19 @@ export class LocalSpan {
   }
 
   recordException(error: unknown): this {
-    const rawMessage = error instanceof Error ? error.message : String(error);
-    const message = redactSecrets(rawMessage);
-    const code =
-      typeof error === 'object' && error !== null && 'code' in error
-        ? redactSecrets(String(error.code))
-        : undefined;
-
-    this.setStatus('ERROR', code ?? message);
+    // Error messages and stacks may contain arbitrary user prompts, SQL, file content or
+    // credentials. Pattern-based redaction cannot prove they are safe, so only emit a
+    // closed error code and category. Never call String(error) on an untrusted throw value.
+    const code = isDomainError(error) ? error.code : 'UNEXPECTED';
+    this.setStatus('ERROR', code);
     this.addEvent('exception', {
-      'exception.type': error instanceof Error ? error.name : 'UnknownError',
-      'exception.message': message,
-      ...(code ? { 'exception.code': code } : {}),
-      ...(error instanceof Error && error.stack
-        ? { 'exception.stacktrace': redactSecrets(error.stack) }
-        : {}),
+      'exception.type': isDomainError(error)
+        ? 'DomainError'
+        : error instanceof Error
+          ? 'Error'
+          : 'UnknownError',
+      'exception.code': code,
+      'exception.message': REDACTED_PLACEHOLDER,
     });
     return this;
   }

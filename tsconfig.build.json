@@ -5,6 +5,7 @@
     { "path": "./packages/contracts/tsconfig.build.json" },
     { "path": "./packages/execution/tsconfig.build.json" },
     { "path": "./packages/postgres/tsconfig.build.json" },
+    { "path": "./packages/telemetry/tsconfig.build.json" },
     { "path": "./apps/api/tsconfig.build.json" },
     { "path": "./apps/worker/tsconfig.build.json" }
   ]

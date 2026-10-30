@@ -1,3 +1,4 @@
+import type { Server as HttpServer } from 'node:http';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
 import {
@@ -16,6 +17,7 @@ import { isLoopbackHost, loadApiConfig } from './env.js';
 import { unexpectedErrorCategory } from './http/error-mapping.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
+import { shutdownTaskEventStreams } from './tasks/event-stream.js';
 
 const SERVICE_VERSION = '0.0.0';
 
@@ -32,6 +34,8 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
     }
     shuttingDown = true;
     logger.info('shutting down', { signal });
+    // Abort SSE poll loops before server.close() waits for their long-lived responses.
+    shutdownTaskEventStreams();
 
     const forceExit = setTimeout(() => {
       logger.error('graceful shutdown timed out');
@@ -40,10 +44,17 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
     forceExit.unref();
 
     try {
-      await new Promise<void>((resolve, reject) => {
+      const httpServer = server as HttpServer;
+      const serverClosed = new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
+      // SSE loops were aborted above. Close the remaining accepted sockets after close()
+      // stops new connections, so a stuck keep-alive response cannot hold pool shutdown open.
+      httpServer.closeAllConnections();
+      await serverClosed;
+      logger.info('HTTP server closed');
       await pool.end();
+      logger.info('database pool closed');
       clearTimeout(forceExit);
       logger.info('shutdown complete');
     } catch (error) {

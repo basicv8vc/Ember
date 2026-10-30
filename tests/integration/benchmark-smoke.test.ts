@@ -81,7 +81,8 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       const reportPath = readdirSync(tempOutDir).find((name) => name.endsWith('.json'));
       expect(reportPath).toBeDefined();
       const savedReport = readFileSync(path.join(tempOutDir, reportPath!), 'utf8');
-      expect(JSON.parse(savedReport).config.databaseUrl).toBe('[REDACTED]');
+      const saved = JSON.parse(savedReport) as { config: { databaseUrl: string } };
+      expect(saved.config.databaseUrl).toBe('[REDACTED]');
     } finally {
       try {
         rmSync(tempOutDir, { recursive: true, force: true });

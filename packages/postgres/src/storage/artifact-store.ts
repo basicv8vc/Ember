@@ -1,7 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
-import { AuthContextSchema, IdSchema, toInvalidArgumentError } from '@ember/contracts';
+import {
+  AuthContextSchema,
+  IdSchema,
+  MAX_BLOB_BYTES,
+  toInvalidArgumentError,
+} from '@ember/contracts';
 import type { ArtifactLookup, ArtifactMetadata, ArtifactRef, BlobStore } from '@ember/contracts';
-import { DomainError, type AuthContext, type Id } from '@ember/domain';
+import { DomainError, isDomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from '../repositories/support.js';
 import { lockBlobDigests } from './blob-store.js';
@@ -15,7 +20,7 @@ import { parseMediaType, parseTenantId } from './local-blob-store.js';
  * `blobs` + `artifacts` rows together. A database failure leaves no visible Artifact.
  */
 
-interface ArtifactRow {
+interface ArtifactMetadataRow {
   id: string;
   tenant_id: string;
   task_id: string | null;
@@ -26,6 +31,9 @@ interface ArtifactRow {
   media_type: string;
   retention: string;
   created_at: Date | string;
+}
+
+interface ArtifactRow extends ArtifactMetadataRow {
   storage_key: string;
 }
 
@@ -35,6 +43,15 @@ SELECT a.id, a.tenant_id, a.task_id, a.run_id, a.created_by, a.sha256, a.size,
   FROM artifacts a
   JOIN blobs b ON b.tenant_id = a.tenant_id AND b.sha256 = a.sha256
  WHERE a.tenant_id = $1 AND a.id = $2
+`;
+
+const LIST_TASK_ARTIFACTS_SQL = `
+SELECT a.id, a.tenant_id, a.task_id, a.run_id, a.created_by, a.sha256, a.size,
+       a.media_type, a.retention, a.created_at
+  FROM artifacts a
+  JOIN blobs b ON b.tenant_id = a.tenant_id AND b.sha256 = a.sha256
+ WHERE a.tenant_id = $1 AND a.task_id = $2
+ ORDER BY a.created_at ASC, a.id ASC
 `;
 
 const INSERT_BLOB_SQL = `
@@ -113,7 +130,7 @@ function parseId(value: Id, field: string): Id {
   return parsed.data;
 }
 
-function toMetadata(row: ArtifactRow): ArtifactMetadata {
+function toMetadata(row: ArtifactMetadataRow): ArtifactMetadata {
   return Object.freeze({
     artifactId: row.id,
     sha256: row.sha256,
@@ -196,13 +213,53 @@ export class PostgresArtifactStore {
   }
 
   async get(ctx: AuthContext, artifactId: Id): Promise<Uint8Array> {
-    const lookup = await this.find(ctx, artifactId);
+    const context = parseContext(ctx);
+    const lookup = await this.find(context, artifactId);
 
     if (lookup === null) {
       throw new DomainError('NOT_FOUND', 'artifact is not available in this tenant');
     }
 
-    const bytes = await this.blobs.read(ctx.tenantId, lookup.storageKey);
+    if (
+      !Number.isSafeInteger(lookup.metadata.size) ||
+      lookup.metadata.size < 0 ||
+      lookup.metadata.size > MAX_BLOB_BYTES
+    ) {
+      throw new DomainError('DB_UNAVAILABLE', 'artifact size is outside the supported limit');
+    }
+
+    try {
+      // Hash and size are checked before allocating the response buffer. This keeps reads
+      // within the same hard limit as writes, even if persisted metadata was corrupted.
+      const valid = await this.blobs.verify(
+        context.tenantId,
+        lookup.storageKey,
+        lookup.metadata.sha256,
+        lookup.metadata.size,
+      );
+
+      if (!valid) {
+        throw new DomainError('DB_UNAVAILABLE', 'artifact bytes failed integrity verification');
+      }
+    } catch (error) {
+      if (isDomainError(error) && error.code === 'NOT_FOUND') {
+        throw new DomainError('DB_UNAVAILABLE', 'artifact bytes are missing');
+      }
+
+      throw error;
+    }
+
+    let bytes: Uint8Array;
+
+    try {
+      bytes = await this.blobs.read(context.tenantId, lookup.storageKey);
+    } catch (error) {
+      if (isDomainError(error) && error.code === 'NOT_FOUND') {
+        throw new DomainError('DB_UNAVAILABLE', 'artifact bytes are missing');
+      }
+
+      throw error;
+    }
 
     // Verify the *same* buffer that is returned. A second read could observe different bytes
     // on disk than the ones handed to the caller.
@@ -305,6 +362,23 @@ export class PostgresArtifactStore {
       return row === undefined
         ? null
         : Object.freeze({ metadata: toMetadata(row), storageKey: row.storage_key });
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
+  /** List only published Artifact metadata for one Task in the caller's tenant. */
+  async listForTask(ctx: AuthContext, taskId: Id): Promise<readonly ArtifactMetadata[]> {
+    const context = parseContext(ctx);
+    const id = parseId(taskId, 'taskId');
+
+    try {
+      const result = await this.pool.query<ArtifactMetadataRow>(LIST_TASK_ARTIFACTS_SQL, [
+        context.tenantId,
+        id,
+      ]);
+
+      return Object.freeze(result.rows.map(toMetadata));
     } catch (error) {
       throw asDomainError(error);
     }

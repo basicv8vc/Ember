@@ -2,6 +2,9 @@ import { isDomainError } from '@ember/domain';
 import { Hono } from 'hono';
 import { requireTenantAuth } from './auth/auth-middleware.js';
 import { createDevTokenAuthenticator, type DevAuthenticator } from './auth/bearer-authenticator.js';
+import type { ArtifactHttpStore } from './artifacts/artifact-store.js';
+import { unconfiguredArtifactHttpStore } from './artifacts/artifact-store.js';
+import { createArtifactRoutes } from './artifacts/routes.js';
 import {
   requestIdMiddleware,
   requestIdOf,
@@ -40,6 +43,8 @@ export interface AppDependencies {
   readonly authenticator?: DevAuthenticator;
   /** Task persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
   readonly taskStore?: TaskStore;
+  /** Artifact persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
+  readonly artifactStore?: ArtifactHttpStore;
 }
 
 /**
@@ -48,9 +53,9 @@ export interface AppDependencies {
  *
  * Cross-cutting order matters and is fixed here:
  * 1. request id (every response, including errors, carries it);
- * 2. tenant authentication for `/v1/tasks` and everything below it — `/healthz` and
- *    `/readyz` stay unauthenticated because an orchestrator has no tenant credential;
- * 3. task routes;
+ * 2. tenant authentication for `/v1/tasks` and `/v1/artifacts` — `/healthz` and `/readyz`
+ *    stay unauthenticated because an orchestrator has no tenant credential;
+ * 3. task and Artifact routes;
  * 4. one error mapper for the whole app.
  */
 export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
@@ -61,6 +66,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const logger = deps.logger;
   const authenticator = deps.authenticator ?? createDevTokenAuthenticator([]);
   const taskStore = deps.taskStore ?? unconfiguredTaskStore();
+  const artifactStore = deps.artifactStore ?? unconfiguredArtifactHttpStore();
   const tenantAuth = requireTenantAuth({ authenticator, logger });
 
   /**
@@ -109,12 +115,15 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
     );
   });
 
-  // Both registrations are needed: `use(path)` matches the collection endpoint exactly,
-  // while `use(path + '/*')` matches `/…/:id` and below. Registering only the wildcard
-  // would leave `POST /v1/tasks` unauthenticated.
+  // Both registrations are needed for each base path: `use(path)` matches the collection
+  // endpoint exactly, while `use(path + '/*')` matches parameterised routes below it.
+  // Registering only the wildcard would leave `POST /v1/tasks` unauthenticated.
   app.use(TASKS_PATH, tenantAuth);
   app.use(`${TASKS_PATH}/*`, tenantAuth);
+  app.use('/v1/artifacts', tenantAuth);
+  app.use('/v1/artifacts/*', tenantAuth);
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
+  app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a
   // client never has to understand a second error format.

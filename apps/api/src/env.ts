@@ -1,4 +1,5 @@
 import { isIP } from 'node:net';
+import { isAbsolute } from 'node:path';
 import { z } from 'zod';
 
 export class ApiConfigError extends Error {
@@ -14,6 +15,8 @@ export interface ApiConfig {
   readonly port: number;
   readonly logLevel: LogLevel;
   readonly allowNonLoopbackBind: boolean;
+  /** Shared controlled blob root; null keeps Artifact reads fail-closed and unavailable. */
+  readonly blobRoot: string | null;
 }
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost']);
@@ -29,6 +32,7 @@ const apiEnvSchema = z.object({
     .default(8787),
   EMBER_LOG_LEVEL: z.enum(['debug', 'info', 'warn', 'error']).default('info'),
   EMBER_ALLOW_NON_LOOPBACK_BIND: z.enum(['true', 'false']).default('false'),
+  EMBER_API_BLOB_ROOT: z.string().trim().min(1).optional(),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -119,6 +123,12 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     throw new ApiConfigError('EMBER_HOST must not be empty');
   }
 
+  const blobRoot = parsed.data.EMBER_API_BLOB_ROOT ?? null;
+
+  if (blobRoot !== null && !isAbsolute(blobRoot)) {
+    throw new ApiConfigError('EMBER_API_BLOB_ROOT must be an absolute path');
+  }
+
   if (!isLoopbackHost(host) && !allowNonLoopbackBind) {
     throw new ApiConfigError(
       `Refusing to bind non-loopback host "${host}" without EMBER_ALLOW_NON_LOOPBACK_BIND=true`,
@@ -131,5 +141,6 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     port: values.EMBER_PORT,
     logLevel: values.EMBER_LOG_LEVEL,
     allowNonLoopbackBind,
+    blobRoot,
   };
 }

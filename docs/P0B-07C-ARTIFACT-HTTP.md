@@ -47,14 +47,20 @@ accept or derive file paths from request parameters.
 Automated coverage is in `tests/unit/api-artifact-http.test.ts` and
 `tests/integration/http-artifact-api.test.ts`. The integration suite uses a real PostgreSQL
 schema plus `LocalBlobStore` to verify committed visibility, tenant isolation, byte/hash
-integrity, response headers, and fail-closed corruption handling. Repository-wide validation
-results are recorded in the pull request description.
+integrity, response headers, and fail-closed corruption handling. Each case creates its own
+Tenant A Task so committed Artifacts in one case cannot affect another; public 404 checks
+compare stable error fields and verify that request ids are present per response. Repository-wide
+validation results are recorded in the pull request description.
 
 ## Known limits
 
 - Upload, deletion, sharing links, and public CDN delivery are out of scope.
 - Downloads are buffered in memory up to the existing 32 MiB BlobStore limit. A streamed
   integrity check runs before the response buffer is allocated, then the exact returned buffer
-  is checked again to cover a file change between reads.
+  is checked again. `LocalBlobStore.read()` still uses `readFile()`, so a filesystem mutation
+  between preflight verification and the read could allocate beyond the limit before the final
+  check; a bounded streaming read is follow-up hardening.
+- Task Artifact metadata is currently returned in one unpaged query. Add pagination or a
+  configured result cap before tasks can accumulate large Artifact collections.
 - The API and worker must share access to the configured local blob root; remote object storage
   is not introduced by this phase.

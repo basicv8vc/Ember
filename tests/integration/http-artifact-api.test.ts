@@ -16,8 +16,8 @@ let infra: P06Infra;
 let tasks: PostgresTaskRepository;
 let tenantA: TenantFixture;
 let tenantB: TenantFixture;
-let taskA: string;
 let taskB: string;
+let agentAId: string;
 let tokenA: string;
 let tokenB: string;
 let app: ReturnType<typeof createApp>;
@@ -114,7 +114,7 @@ beforeAll(async () => {
   const ctxB = { tenantId: tenantB.tenantId, principalId: tenantB.principalId, policyVersion: 1 };
   const agentA = await agents.create(ctxA, { name: 'artifact HTTP agent A' });
   const agentB = await agents.create(ctxB, { name: 'artifact HTTP agent B' });
-  taskA = await createTask(tenantA, agentA.agentId);
+  agentAId = agentA.agentId;
   taskB = await createTask(tenantB, agentB.agentId);
   tokenA = `token-${randomUUID()}`;
   tokenB = `token-${randomUUID()}`;
@@ -145,11 +145,12 @@ afterAll(async () => {
 
 describe('Artifact HTTP API with PostgreSQL and LocalBlobStore', () => {
   it('lists committed Task Artifacts and downloads the exact verified bytes', async () => {
+    const taskId = await createTask(tenantA, agentAId);
     const artifact = await installBytes(tenantA, `committed-${randomUUID()}`, 'text/plain');
-    await commitArtifact(tenantA, taskA, artifact);
+    await commitArtifact(tenantA, taskId, artifact);
 
-    const first = await send(`/v1/tasks/${taskA}/artifacts`);
-    const second = await send(`/v1/tasks/${taskA}/artifacts`);
+    const first = await send(`/v1/tasks/${taskId}/artifacts`);
+    const second = await send(`/v1/tasks/${taskId}/artifacts`);
     expect(first.status).toBe(200);
     const body = (await first.json()) as {
       task_id: string;
@@ -164,7 +165,7 @@ describe('Artifact HTTP API with PostgreSQL and LocalBlobStore', () => {
     };
     expect(await second.json()).toEqual(body);
     expect(body).toMatchObject({
-      task_id: taskA,
+      task_id: taskId,
       artifacts: [
         {
           artifact_id: artifact.artifactId,
@@ -190,21 +191,35 @@ describe('Artifact HTTP API with PostgreSQL and LocalBlobStore', () => {
   });
 
   it('hides foreign Task and Artifact records and unknown ids with 404', async () => {
+    const taskId = await createTask(tenantA, agentAId);
     const artifact = await installBytes(tenantA, `foreign-${randomUUID()}`);
-    await commitArtifact(tenantA, taskA, artifact);
+    await commitArtifact(tenantA, taskId, artifact);
 
-    const foreignTask = await send(`/v1/tasks/${taskA}/artifacts`, tokenB);
+    const foreignTask = await send(`/v1/tasks/${taskId}/artifacts`, tokenB);
     const foreignArtifact = await send(`/v1/artifacts/${artifact.artifactId}`, tokenB);
     const missingArtifact = await send(`/v1/artifacts/${randomUUID()}`);
 
     expect(foreignTask.status).toBe(404);
     expect(foreignArtifact.status).toBe(404);
     expect(missingArtifact.status).toBe(404);
-    await expect(missingArtifact.json()).resolves.toEqual(await foreignArtifact.json());
+    const [foreignBody, missingBody] = await Promise.all([
+      foreignArtifact.json() as Promise<{
+        error: { code: string; message: string; request_id?: string };
+      }>,
+      missingArtifact.json() as Promise<{
+        error: { code: string; message: string; request_id?: string };
+      }>,
+    ]);
+    expect(missingBody.error.code).toBe(foreignBody.error.code);
+    expect(missingBody.error.message).toBe(foreignBody.error.message);
+    expect(typeof foreignBody.error.request_id).toBe('string');
+    expect(typeof missingBody.error.request_id).toBe('string');
+    expect(missingBody.error.request_id).not.toBe(foreignBody.error.request_id);
     expect((await send(`/v1/tasks/${taskB}/artifacts`, tokenB)).status).toBe(200);
   });
 
   it('does not expose staged, orphaned, or uncommitted blobs as Task Artifacts', async () => {
+    const taskId = await createTask(tenantA, agentAId);
     const staged = await infra.blobs.stage(
       tenantA.tenantId,
       Buffer.from(`staged-${randomUUID()}`),
@@ -234,16 +249,16 @@ describe('Artifact HTTP API with PostgreSQL and LocalBlobStore', () => {
         [
           pending.artifactId,
           tenantA.tenantId,
-          taskA,
+          taskId,
           pending.sha256,
           pending.bytes.byteLength,
           pending.mediaType,
         ],
       );
 
-      const response = await send(`/v1/tasks/${taskA}/artifacts`);
+      const response = await send(`/v1/tasks/${taskId}/artifacts`);
       expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({ task_id: taskA, artifacts: [] });
+      await expect(response.json()).resolves.toEqual({ task_id: taskId, artifacts: [] });
       expect((await send(`/v1/artifacts/${pending.artifactId}`)).status).toBe(404);
     } finally {
       await client.query('ROLLBACK').catch(() => undefined);
@@ -253,13 +268,14 @@ describe('Artifact HTTP API with PostgreSQL and LocalBlobStore', () => {
     expect((await send(`/v1/artifacts/${staged.stagedId}`)).status).toBe(404);
     expect((await send(`/v1/artifacts/${orphan.artifactId}`)).status).toBe(404);
     await expect(
-      send(`/v1/tasks/${taskA}/artifacts`).then((response) => response.json()),
-    ).resolves.toEqual({ task_id: taskA, artifacts: [] });
+      send(`/v1/tasks/${taskId}/artifacts`).then((response) => response.json()),
+    ).resolves.toEqual({ task_id: taskId, artifacts: [] });
   });
 
   it('fails closed on corrupted stored bytes without returning them or internal details', async () => {
+    const taskId = await createTask(tenantA, agentAId);
     const artifact = await installBytes(tenantA, `corrupt-${randomUUID()}`);
-    await commitArtifact(tenantA, taskA, artifact);
+    await commitArtifact(tenantA, taskId, artifact);
     const absolutePath = await infra.files.resolveKey(artifact.storageKey, 'blobs');
     await writeFile(absolutePath, Buffer.from('corrupted bytes'));
 

@@ -1,9 +1,23 @@
-import type { AuthContext, Id, TaskCommand, TaskEvent, TaskReceipt, TaskView } from '@ember/domain';
+import {
+  DomainError,
+  isTerminalTaskStatus,
+  transitionTask,
+  type AuthContext,
+  type Id,
+  type TaskCommand,
+  type TaskEvent,
+  type TaskReceipt,
+  type TaskView,
+} from '@ember/domain';
 
-import type { ListEventsOptions, TaskStore } from '../../../apps/api/src/tasks/task-store.js';
+import type {
+  ListEventsOptions,
+  TaskCancelResult,
+  TaskStore,
+} from '../../../apps/api/src/tasks/task-store.js';
 
 /**
- * In-memory `TaskStore` for the P0B-07a route tests.
+ * In-memory `TaskStore` for the P0B-07a / P0B-08c route tests.
  *
  * It records every call *with* the `AuthContext` it received, so a test can prove that the
  * tenant comes from the verified credential and that a rejected request never reached
@@ -58,6 +72,7 @@ export interface FakeTaskApi {
   readonly creates: TaskCommand[];
   readonly createContexts: AuthContext[];
   readonly gets: { readonly context: AuthContext; readonly taskId: Id }[];
+  readonly cancels: { readonly context: AuthContext; readonly taskId: Id }[];
   readonly eventReads: RecordedEventRead[];
   /** Make `view` visible to `tenantId` and nobody else. */
   addTask(tenantId: string, view: TaskView): void;
@@ -72,10 +87,12 @@ function scope(tenantId: string, taskId: Id): string {
 
 export function createFakeTaskApi(): FakeTaskApi {
   const tasks = new Map<string, TaskView>();
+  const cancelRequestedAtByScope = new Map<string, string>();
   const events = new Map<string, readonly TaskEvent[]>();
   const creates: TaskCommand[] = [];
   const createContexts: AuthContext[] = [];
   const gets: { context: AuthContext; taskId: Id }[] = [];
+  const cancels: { context: AuthContext; taskId: Id }[] = [];
   const eventReads: RecordedEventRead[] = [];
   let receipt = buildReceipt();
   let failure: Error | undefined;
@@ -84,6 +101,7 @@ export function createFakeTaskApi(): FakeTaskApi {
     creates,
     createContexts,
     gets,
+    cancels,
     eventReads,
     addTask: (tenantId, view) => {
       tasks.set(scope(tenantId, view.taskId), view);
@@ -125,6 +143,68 @@ export function createFakeTaskApi(): FakeTaskApi {
         const limit = options?.limit ?? all.length;
 
         return Promise.resolve(all.filter((event) => event.sequence > after).slice(0, limit));
+      },
+      cancel: (context, taskId): Promise<TaskCancelResult> => {
+        cancels.push({ context, taskId });
+
+        if (failure !== undefined) {
+          return Promise.reject(failure);
+        }
+
+        const key = scope(context.tenantId, taskId);
+        const existing = tasks.get(key);
+
+        if (existing === undefined) {
+          return Promise.reject(new DomainError('NOT_FOUND', 'task is not visible in this tenant'));
+        }
+
+        const priorCancelRequestedAt = cancelRequestedAtByScope.get(key) ?? null;
+
+        if (isTerminalTaskStatus(existing.status)) {
+          return Promise.resolve({
+            taskId: existing.taskId,
+            status: existing.status,
+            cancelRequested: priorCancelRequestedAt !== null || existing.status === 'cancelled',
+            cancelRequestedAt:
+              priorCancelRequestedAt ??
+              (existing.status === 'cancelled' ? existing.updatedAt : null),
+            terminal: true,
+            updatedAt: existing.updatedAt,
+          });
+        }
+
+        const cancelRequestedAt = priorCancelRequestedAt ?? FIXED_TIME;
+        cancelRequestedAtByScope.set(key, cancelRequestedAt);
+
+        if (existing.status === 'running') {
+          const updatedView: TaskView = { ...existing, updatedAt: cancelRequestedAt };
+          tasks.set(key, updatedView);
+          return Promise.resolve({
+            taskId: existing.taskId,
+            status: 'running',
+            cancelRequested: true,
+            cancelRequestedAt,
+            terminal: false,
+            updatedAt: updatedView.updatedAt,
+          });
+        }
+
+        const nextStatus = transitionTask(existing.status, 'cancelled');
+        const updatedView: TaskView = {
+          ...existing,
+          status: nextStatus,
+          updatedAt: cancelRequestedAt,
+        };
+        tasks.set(key, updatedView);
+
+        return Promise.resolve({
+          taskId: existing.taskId,
+          status: nextStatus,
+          cancelRequested: true,
+          cancelRequestedAt,
+          terminal: true,
+          updatedAt: updatedView.updatedAt,
+        });
       },
     },
   };

@@ -121,6 +121,23 @@ export interface ListEventOptions {
   readonly limit?: number;
 }
 
+/**
+ * Authoritative post-transaction snapshot returned by `PostgresTaskRepository.cancel()`.
+ *
+ * - `terminal: true` means the Task is already in a terminal state (`cancelled`, `completed`,
+ *   or `failed`), so the HTTP API responds `200 OK`.
+ * - `terminal: false` means the Task is `running` with `cancel_requested_at` durably recorded,
+ *   so the HTTP API responds `202 Accepted` while the active Worker or Reaper converges it.
+ */
+export interface TaskCancelOutcome {
+  readonly taskId: Id;
+  readonly status: TaskStatus;
+  readonly cancelRequested: boolean;
+  readonly cancelRequestedAt: string | null;
+  readonly terminal: boolean;
+  readonly updatedAt: string;
+}
+
 function parseListEventOptions(options: ListEventOptions): {
   readonly after: number;
   readonly limit: number;
@@ -151,6 +168,7 @@ UPDATE tasks
    SET cancel_requested_at = COALESCE(cancel_requested_at, $1),
        updated_at = CASE WHEN cancel_requested_at IS NULL THEN $1 ELSE updated_at END
  WHERE tenant_id = $2 AND id = $3 AND status = 'running'
+RETURNING ${TASK_COLUMNS}
 `;
 
 const CANCEL_OPEN_TASK_SQL = `
@@ -160,6 +178,7 @@ UPDATE tasks
        lease_expires_at = NULL,
        updated_at = $3
  WHERE tenant_id = $4 AND id = $5
+RETURNING ${TASK_COLUMNS}
 `;
 
 const EXPIRE_PENDING_APPROVALS_ON_CANCEL_SQL = `
@@ -224,6 +243,21 @@ function toTaskView(row: TaskRow): TaskView {
     updatedAt: toIsoTimestamp(row.updated_at),
     deadlineAt: row.deadline_at === null ? null : toIsoTimestamp(row.deadline_at),
   };
+}
+
+function toTaskCancelOutcome(row: TaskRow): TaskCancelOutcome {
+  const status = row.status as TaskStatus;
+  const cancelRequestedAt =
+    row.cancel_requested_at === null ? null : toIsoTimestamp(row.cancel_requested_at);
+
+  return Object.freeze({
+    taskId: row.id,
+    status,
+    cancelRequested: cancelRequestedAt !== null || status === 'cancelled',
+    cancelRequestedAt,
+    terminal: isTerminalTaskStatus(status),
+    updatedAt: toIsoTimestamp(row.updated_at),
+  });
 }
 
 /**
@@ -334,24 +368,23 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
   }
 
   /**
-   * Apply the ADR-0001 cancellation policy in one Task-locked transaction.
+   * Apply the ADR-0001 cancellation policy in one Task-locked transaction and return the
+   * authoritative post-transaction Task state.
    *
    * - `queued`, `retryable_failed` and `waiting_approval` become `cancelled` immediately,
-   *   with one terminal event and no new Run.
+   *   with one terminal event and no new Run (`terminal: true`).
    * - `running` only records the first cancellation intent; the current valid Run or the
-   *   Reaper converges the Task later.
-   * - terminal Tasks are an idempotent no-op: status, timestamps and events are untouched.
+   *   Reaper converges the Task later (`terminal: false`).
+   * - terminal Tasks are an idempotent no-op: status, timestamps and events are untouched
+   *   (`terminal: true`).
    * - repeated cancellation preserves the first `cancel_requested_at`.
-   *
-   * External cooperative aborting, approval propagation and the public HTTP endpoint remain
-   * P0B-08 concerns. Cancellation cannot roll back external side effects.
    */
-  async requestCancel(ctx: AuthContext, taskId: Id): Promise<void> {
+  async cancel(ctx: AuthContext, taskId: Id): Promise<TaskCancelOutcome> {
     const validatedContext = parseContext(ctx);
     const validatedTaskId = parseTaskId(taskId);
 
     try {
-      await withTransaction(this.pool, async (client) => {
+      return await withTransaction(this.pool, async (client) => {
         const locked = await client.query<TaskRow>(LOCK_TASK_FOR_CANCEL_SQL, [
           validatedContext.tenantId,
           validatedTaskId,
@@ -365,7 +398,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
         const status = task.status as TaskStatus;
 
         if (isTerminalTaskStatus(status)) {
-          return;
+          return toTaskCancelOutcome(task);
         }
 
         const nowResult = await client.query<{ now: Date }>('SELECT now() AS now');
@@ -378,24 +411,31 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
         if (status === 'running') {
           // Keep `running`; the currently leased Run or the Reaper resolves it. This is a
           // monotonic write-once intent, so a repeat does not change timestamps or events.
-          await client.query(RECORD_RUNNING_CANCEL_SQL, [
+          const runningResult = await client.query<TaskRow>(RECORD_RUNNING_CANCEL_SQL, [
             now,
             validatedContext.tenantId,
             validatedTaskId,
           ]);
-          return;
+          const runningRow = runningResult.rows[0];
+
+          if (runningRow === undefined) {
+            throw new DomainError('DB_UNAVAILABLE', 'could not record cancellation intent');
+          }
+
+          return toTaskCancelOutcome(runningRow);
         }
 
         const nextStatus = transitionTask(status, 'cancelled');
-        const updated = await client.query(CANCEL_OPEN_TASK_SQL, [
+        const updated = await client.query<TaskRow>(CANCEL_OPEN_TASK_SQL, [
           nextStatus,
           now,
           now,
           validatedContext.tenantId,
           validatedTaskId,
         ]);
+        const cancelledRow = updated.rows[0];
 
-        if (updated.rowCount !== 1) {
+        if (updated.rowCount !== 1 || cancelledRow === undefined) {
           throw new DomainError('DB_UNAVAILABLE', 'could not apply cancellation to the task');
         }
 
@@ -423,10 +463,17 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
             cancelRequested: true,
           },
         });
+
+        return toTaskCancelOutcome(cancelledRow);
       });
     } catch (error) {
       throw asDomainError(error);
     }
+  }
+
+  /** Record a cancellation request; satisfies the frozen `@ember/contracts` `TaskRepository`. */
+  async requestCancel(ctx: AuthContext, taskId: Id): Promise<void> {
+    await this.cancel(ctx, taskId);
   }
 
   private async insertOrReplay(

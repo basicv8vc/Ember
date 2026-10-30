@@ -42,6 +42,11 @@ import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
  * P0B-08b adds transactional budget enforcement to that path: every step takes a durable
  * reservation **before** it can produce a side effect, and records its consumption after.
  *
+ * P0B-08c adds cooperative cancellation checks at every step boundary (before reservation,
+ * after reservation before execution starts, between steps, and on abort): a committed
+ * `cancel_requested_at` stops subsequent steps without erasing already-committed side effects
+ * or refunding already-started work.
+ *
  * P0B-08d adds the persistent mock approval gate (`mock.approval`): the `produce` step runs
  * in a transient FakeSandbox (stopped and destroyed before returning), commits the pre-approval
  * Artifact, Checkpoint and `pending` Approval row, releases the Run lease and parks the Task
@@ -241,6 +246,10 @@ async function executeStep(
   executor: SimulatedExecutor,
   signal: AbortSignal,
 ): Promise<ProducedBytes> {
+  if (signal.aborted) {
+    throw new DomainError('CANCELLED', 'step execution was aborted before start');
+  }
+
   if (context.kind === 'mock.file') {
     return produceBytes(context, route, {});
   }
@@ -280,19 +289,21 @@ async function executeStep(
 }
 
 /**
- * Run one durable step under a transactional budget reservation (B08b-D2).
+ * Run one durable step under a transactional budget reservation (B08b-D2 / B08c).
  *
  * The order is the whole point:
  *
  * ```text
- * reserve (may deny, writes nothing on denial) → execute → settle(replayed ? release)
+ * reserve (may deny, writes nothing on denial)
+ *   → pre-execute cancellation check (releases reservation with 0 consumed if cancelled)
+ *   → execute
+ *   → settle(replayed ? release)
  * ```
  *
  * so a refusal happens before the simulated model/sandbox call, before bytes are staged and
- * before anything is published. Settlement bookkeeping never fails the Run: the step's durable
- * effect is already committed by then, and a reservation that is left live is charged in full
- * when its lease expires, which is the safe direction. Failing the Run instead would trade a
- * bookkeeping error for a duplicate execution.
+ * before anything is published. A cancellation detected after reservation but before `execute`
+ * starts releases the reservation without charge; once `execute` has started, any abort or
+ * failure settles the full reservation rather than refunding work that already ran.
  */
 async function runBudgetedStep<T>(input: {
   readonly budget: BudgetLedger;
@@ -302,19 +313,33 @@ async function runBudgetedStep<T>(input: {
   readonly operationId: string;
   readonly cost: BudgetReservationAmount;
   readonly signal?: AbortSignal;
+  readonly assertLive?: () => Promise<void>;
   /** `true` when the step turned out to be a pure replay, so nothing was actually produced. */
   readonly wasReplay?: (value: T) => boolean;
   readonly execute: () => Promise<T>;
 }): Promise<T> {
   const { budget, grant, operationId, cost } = input;
 
+  const isAborted = (): boolean => input.signal?.aborted === true;
+
+  if (isAborted()) {
+    await input.assertLive?.();
+    throw new DomainError('CANCELLED', 'task cancellation was requested before the step started');
+  }
+
   // A denial throws `BUDGET_EXCEEDED` here, before any side effect exists to compensate.
   await budget.reserve(grant, { operationId, cost });
 
-  if (input.signal?.aborted === true) {
+  try {
+    if (isAborted()) {
+      await input.assertLive?.();
+      throw new DomainError('CANCELLED', 'task cancellation was requested before the step started');
+    }
+    await input.assertLive?.();
+  } catch (preExecuteError) {
     // Nothing started, so nothing is charged: hand the held quota back and stop the Run.
     await closeReservation(input, 'release', () => budget.release(grant, { operationId }));
-    throw new DomainError('CANCELLED', 'task cancellation was requested before the step started');
+    throw preExecuteError;
   }
 
   let value: T;
@@ -323,7 +348,7 @@ async function runBudgetedStep<T>(input: {
     value = await input.execute();
   } catch (error) {
     // The step may already have had an effect, so the reservation is charged in full rather
-    // than refunded: a failure is not a way to get quota back.
+    // than refunded: a failure or mid-step cancellation is not a way to get quota back.
     await closeReservation(input, 'settle', () =>
       budget.settle(grant, { operationId, consumed: cost }),
     );
@@ -378,6 +403,14 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
         attempt: run.attempt,
         leaseEpoch: run.leaseEpoch,
       } as const;
+
+      const assertStepLive = async (): Promise<void> => {
+        if (signal.aborted) {
+          await contextReader.read(run, clock.now());
+          throw new DomainError('CANCELLED', 'task execution was aborted');
+        }
+        await contextReader.read(run, clock.now());
+      };
 
       let context: RunExecutionContext;
 
@@ -536,6 +569,8 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
             }
           }
 
+          await assertStepLive();
+
           logger.info('durable step already committed; resuming', {
             ...base,
             stepId: PRODUCE_STEP,
@@ -556,6 +591,8 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
             resumeArtifact.path ?? `chat/${context.taskId}.txt`,
             route,
             startedAtHr,
+            signal,
+            assertStepLive,
           );
         }
 
@@ -569,15 +606,28 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           operationId: stepOperationId(PRODUCE_STEP, inputDigest, grant.leaseEpoch),
           cost: stepCost(PRODUCE_STEP),
           signal,
+          assertLive: assertStepLive,
           // Execute, stage and commit inside the reservation: the charge covers the whole
           // step, so nothing is published unless the quota was taken first.
           execute: async () => {
             const producedBytes = await executeStep(context, route, executor, signal);
+            if (signal.aborted) {
+              throw new DomainError(
+                'CANCELLED',
+                'step execution was aborted before staging artifact bytes',
+              );
+            }
             const staged = await blobs.stage(
               context.tenantId,
               producedBytes.bytes,
               producedBytes.mediaType,
             );
+            if (signal.aborted) {
+              throw new DomainError(
+                'CANCELLED',
+                'step execution was aborted before committing step progress',
+              );
+            }
 
             const approvalRequest =
               context.kind === 'mock.approval'
@@ -640,6 +690,11 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           return { type: 'committed', receipt: budgetedProduce.producedReceipt };
         }
 
+        // Safe step boundary between `produce` and `publish`: if cancellation was requested
+        // while `produce` was running or committing, stop here without starting `publish` and
+        // without deleting the already-committed `produce` Artifact or Checkpoint.
+        await assertStepLive();
+
         return await publishResult(
           deps,
           context,
@@ -655,20 +710,35 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           budgetedProduce.producedBytes.workspacePath,
           route,
           startedAtHr,
+          signal,
+          assertStepLive,
         );
       } catch (error) {
-        if (isDomainError(error) && error.code === 'STALE_LEASE') {
-          // Ownership moved on: the loop must not call finish() either.
-          throw error;
+        let effectiveError: unknown = error;
+
+        if (signal.aborted && isDomainError(error) && error.code === 'CANCELLED') {
+          try {
+            await contextReader.read(run, clock.now());
+          } catch (readError) {
+            effectiveError = readError;
+          }
         }
 
-        const outcome = classifyFailure(error);
+        if (
+          isDomainError(effectiveError) &&
+          (effectiveError.code === 'STALE_LEASE' || effectiveError.code === 'NOT_FOUND')
+        ) {
+          // Ownership moved on: the loop must not call finish() either.
+          throw effectiveError;
+        }
+
+        const outcome = classifyFailure(effectiveError);
         logger.warn('durable execution failed', {
           ...base,
           taskKind: context.kind,
-          code: codeOf(error),
+          code: codeOf(effectiveError),
           outcome,
-          diagnostic: isDomainError(error) ? error.diagnostic : 'unexpected',
+          diagnostic: isDomainError(effectiveError) ? effectiveError.diagnostic : 'unexpected',
           durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
         });
         return finish(outcome);
@@ -693,6 +763,8 @@ async function publishResult(
   workspacePath: string,
   route: RouteDecision,
   startedAtHr: number,
+  signal: AbortSignal,
+  assertStepLive: () => Promise<void>,
 ): Promise<RunHandlerCompletion> {
   const { workspaces, committer, logger } = deps;
   const workspace = await workspaces.loadForRun(context.tenantId, context.agentId);
@@ -713,6 +785,8 @@ async function publishResult(
     log: { taskId: grant.taskId, runId: grant.runId, attempt: grant.attempt, stepId: PUBLISH_STEP },
     operationId: stepOperationId(PUBLISH_STEP, inputDigest, grant.leaseEpoch),
     cost: stepCost(PUBLISH_STEP),
+    signal,
+    assertLive: assertStepLive,
     // A replayed terminal commit wrote nothing, so it must not be charged: the earlier
     // attempt already produced (and paid for) that result.
     wasReplay: (value) => value.replayed,

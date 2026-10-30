@@ -209,6 +209,28 @@ describe('run handler', () => {
     );
   });
 
+  it('re-throws STALE_LEASE when an aborted execution lost its lease in the database', async () => {
+    let reads = 0;
+    const controller = new AbortController();
+    const harness = handler({
+      read: () => {
+        reads += 1;
+        if (reads === 1) {
+          return Promise.resolve(context());
+        }
+        return Promise.reject(new DomainError('STALE_LEASE', 'lease expired before abort'));
+      },
+      execute: () => {
+        controller.abort();
+        return Promise.reject(new DomainError('CANCELLED', 'aborted by lost heartbeat'));
+      },
+    });
+
+    await expect(harness.handle(LEASE, controller.signal)).rejects.toMatchObject({
+      code: 'STALE_LEASE',
+    });
+  });
+
   it('classifies execution failures by their stable domain code', async () => {
     const cases = [
       { code: 'EXECUTION_TIMEOUT', expected: 'failed_retryable' },

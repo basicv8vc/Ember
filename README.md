@@ -226,6 +226,7 @@ pnpm start
 | `pnpm format:check` / `pnpm format` | Prettier check / write                                       |
 | `pnpm test:unit`                    | Unit + in-process HTTP tests, no database needed             |
 | `pnpm test:integration`             | Real PostgreSQL migration tests (`TEST_DATABASE_URL`)        |
+| `pnpm bench:local`                  | Local load benchmark (1,000 agents, 100 concurrency)         |
 | `pnpm dev:db` / `pnpm dev:db:down`  | Start / stop the local PostgreSQL container                  |
 | `pnpm db:migrate`                   | Apply pending migrations (safe to re-run)                    |
 
@@ -333,6 +334,22 @@ Exact P0B-04 results, including the CI run, are recorded in
 [docs/P0B-03-ACCEPTANCE.md](docs/P0B-03-ACCEPTANCE.md); P0B-01/P0B-02 acceptance reports
 remain in [docs/P0B-ACCEPTANCE.md](docs/P0B-ACCEPTANCE.md) and
 [docs/P0B-02-ACCEPTANCE.md](docs/P0B-02-ACCEPTANCE.md). Historical reports are not rewritten.
+
+## Local Load Benchmark (P0B-09C)
+
+P0B-09C provides an isolated, reproducible local load benchmark (`pnpm bench:local`) satisfying Task Spec §10–12 requirements B-T28 and B-T29:
+
+- **1,000 Persistent Logical Agents (B-T28)**: Provisions 1,000 DB agents and version-0 workspaces in PostgreSQL without allocating resident OS processes, VM containers, or Fake Sandboxes.
+- **100 Concurrency HTTP Closed Loop (B-T29)**: Executes full HTTP task lifecycle at up to 100 concurrency with 100% success rate, full P50/P90/P95/P99 latency distribution, and zero unexplained task loss.
+- **Durable Ack Latency Goal**: P95 observed at **182.86ms** (P50 = 5.10ms), satisfying the $\le 1{,}000\,\text{ms}$ goal.
+- **Safety Guards**: Heavy load benchmarks require explicit local enablement (`--enable-local-load` or `EMBER_BENCH_ENABLE_LOCAL_LOAD=true`) and run in a transient PostgreSQL schema (`ember_bench_<hex>`). A bounded benchmark smoke test runs in standard CI.
+
+```bash
+# Run local 1,000-agent, 100-concurrency benchmark
+pnpm bench:local --agents 1000 --concurrency 100 --warmup 50 --total-requests 1000 --seed 42 --enable-local-load
+```
+
+Full details and empirical execution results are documented in [docs/P0B-09C-BENCHMARK.md](docs/P0B-09C-BENCHMARK.md).
 
 ## CI
 

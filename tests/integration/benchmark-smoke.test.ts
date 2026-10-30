@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { describe, expect, it } from 'vitest';
@@ -65,6 +65,11 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       expect(result.telemetry.costAccounting.actualVendorCostUsd).toBeNull();
       expect(result.telemetry.peakRssMb).toBeGreaterThan(0);
       expect(result.telemetry.idleLiveSandboxes).toBe(0);
+      expect(result.telemetry.postgresSampleCount).toBeGreaterThan(0);
+      expect(result.telemetry.peakPostgresTotalConnections).toBeGreaterThan(0);
+      expect(result.telemetry.peakHttpInFlight).toBeGreaterThan(0);
+      expect(result.telemetry.peakHttpInFlight).toBeLessThanOrEqual(3);
+      expect(result.config.databaseUrl).toBe('[REDACTED]');
 
       // 6. Verify target assessment
       expect(result.targetAssessment.zeroResidentSandboxesMet).toBe(true);
@@ -73,6 +78,11 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       // 7. Verify output artifacts written to disk
       const files = existsSync(tempOutDir);
       expect(files).toBe(true);
+      const reportPath = readdirSync(tempOutDir).find((name) => name.endsWith('.json'));
+      expect(reportPath).toBeDefined();
+      const savedReport = readFileSync(path.join(tempOutDir, reportPath!), 'utf8');
+      const saved = JSON.parse(savedReport) as { config: { databaseUrl: string } };
+      expect(saved.config.databaseUrl).toBe('[REDACTED]');
     } finally {
       try {
         rmSync(tempOutDir, { recursive: true, force: true });

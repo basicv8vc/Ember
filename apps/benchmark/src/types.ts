@@ -197,6 +197,10 @@ export interface SystemTelemetry {
   readonly peakHeapTotalMb: number;
   readonly peakPostgresActiveConnections: number;
   readonly peakPostgresTotalConnections: number;
+  /** Number of successfully collected PostgreSQL connection samples. */
+  readonly postgresSampleCount: number;
+  /** Peak active task-POST HTTP requests, tracked separately from worker slots. */
+  readonly peakHttpInFlight: number;
   readonly targetWorkerConcurrency: number;
   readonly peakInFlightRuns: number;
   readonly peakLiveSandboxes: number;

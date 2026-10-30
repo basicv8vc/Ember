@@ -19,7 +19,8 @@ export interface TelemetryCollectorOptions {
  * and tracks worker concurrency and FakeSandbox live instances.
  */
 export class TelemetryCollector {
-  private readonly pool?: QueryablePool;
+  private pool?: QueryablePool;
+  private postgresSampleCount = 0;
   private readonly sampleIntervalMs: number;
   private readonly targetWorkerConcurrency: number;
 
@@ -49,6 +50,11 @@ export class TelemetryCollector {
     this.targetWorkerConcurrency = options.targetWorkerConcurrency ?? 100;
   }
 
+  /** Attach the local PostgreSQL admin pool after the harness starts. */
+  attachPool(pool: QueryablePool): void {
+    this.pool = pool;
+  }
+
   /**
    * Start the periodic telemetry sampler.
    */
@@ -56,6 +62,7 @@ export class TelemetryCollector {
     this.startTimeHr = performance.now();
     this.startCpuUsage = process.cpuUsage();
     this.sampleProcessMemory();
+    void this.sample();
 
     this.timer = setInterval(() => {
       void this.sample();
@@ -129,6 +136,7 @@ export class TelemetryCollector {
         `);
         const row = res.rows[0];
         if (row) {
+          this.postgresSampleCount++;
           const active = parseInt(row.active, 10) || 0;
           const total = parseInt(row.total, 10) || 0;
           if (active > this.peakPostgresActive) {
@@ -166,6 +174,8 @@ export class TelemetryCollector {
       peakHeapTotalMb: Number((this.peakHeapTotalBytes / (1024 * 1024)).toFixed(1)),
       peakPostgresActiveConnections: this.peakPostgresActive,
       peakPostgresTotalConnections: this.peakPostgresTotal,
+      postgresSampleCount: this.postgresSampleCount,
+      peakHttpInFlight: 0,
       targetWorkerConcurrency: this.targetWorkerConcurrency,
       peakInFlightRuns: this.peakInFlightRuns,
       peakLiveSandboxes: this.peakLiveSandboxes,

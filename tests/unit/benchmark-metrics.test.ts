@@ -5,6 +5,7 @@ import {
   parseTaskMix,
 } from '../../apps/benchmark/src/metrics.js';
 import { generateMarkdownReport } from '../../apps/benchmark/src/report.js';
+import { sanitizeReportConfig } from '../../apps/benchmark/src/evidence.js';
 import { runBenchmark } from '../../apps/benchmark/src/runner.js';
 import type { BenchmarkResult } from '../../apps/benchmark/src/types.js';
 
@@ -171,6 +172,8 @@ describe('Benchmark Metrics & Math (Unit)', () => {
         peakHeapTotalMb: 95,
         peakPostgresActiveConnections: 18,
         peakPostgresTotalConnections: 45,
+        postgresSampleCount: 10,
+        peakHttpInFlight: 20,
         targetWorkerConcurrency: 100,
         peakInFlightRuns: 28,
         peakLiveSandboxes: 8,
@@ -197,6 +200,33 @@ describe('Benchmark Metrics & Math (Unit)', () => {
     expect(md).toContain('B-T29: 100 Concurrency (Local)');
     expect(md).toContain('cost_source: simulated');
     expect(md).toContain('Durable Ack Performance Target Met');
+    expect(md).toContain('Measured Peak In-Flight Task POSTs');
+    expect(md).toContain('samples: 10');
+  });
+
+  it('redacts database credentials and external endpoints in serialized benchmark config', () => {
+    const raw = {
+      agents: 6,
+      concurrency: 3,
+      taskMix: { fast: 0.7, standard: 0.3 },
+      warmup: 0,
+      totalRequests: 6,
+      durationMs: null,
+      seed: 42,
+      outDir: 'benchmark-results',
+      databaseUrl: 'postgres://user:supersecret@localhost:5432/private?token=hidden',
+      apiUrl: 'https://token@private.internal/tasks?api_key=private',
+      isolatedSchema: true,
+      keepDb: false,
+      enableLocalLoad: false,
+      workerConcurrency: 3,
+    };
+    const safe = sanitizeReportConfig(raw);
+    expect(JSON.stringify(safe)).not.toContain('supersecret');
+    expect(JSON.stringify(safe)).not.toContain('private.internal');
+    expect(safe.databaseUrl).toBe('[REDACTED]');
+    expect(safe.apiUrl).toBe('[REDACTED]');
+    expect(raw.databaseUrl).toContain('supersecret');
   });
 
   it('runner rejects invalid benchmark counts before allocating resources', async () => {

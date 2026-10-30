@@ -585,9 +585,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
     // =========================================================================
     const durableAckP95ObservedMs = latencyMetrics.durableAck.p95Ms;
     const durableAckTargetMet =
-      totalAcked === totalSubmitted &&
-      totalAcked > 0 &&
-      durableAckP95ObservedMs <= 1_000;
+      totalAcked === totalSubmitted && totalAcked > 0 && durableAckP95ObservedMs <= 1_000;
     let bottleneckAnalysis: string | undefined;
 
     if (!durableAckTargetMet) {

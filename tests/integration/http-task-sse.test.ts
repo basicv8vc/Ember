@@ -199,6 +199,10 @@ async function createApiDatabaseLogin(): Promise<{
       `ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} SET search_path TO ${quotedSchema}`,
     );
   } catch (error) {
+    await db.adminPool
+      .query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`)
+      .catch(() => undefined);
+    await db.adminPool.query(`DROP OWNED BY ${quotedRole}`).catch(() => undefined);
     await db.adminPool.query(`DROP ROLE ${quotedRole}`).catch(() => undefined);
     throw error;
   }
@@ -577,15 +581,15 @@ describe('GET /v1/tasks/:taskId/stream with PostgreSQL', () => {
         () => 'socket-closed',
       );
       child.kill('SIGTERM');
-      const [readResult, exit] = await withTimeout(
-        Promise.all([pendingRead, exited]),
-        4_000,
-        'production SIGTERM shutdown',
-      );
+      const readResult = await withTimeout(pendingRead, 4_000, 'SSE socket close on SIGTERM');
 
       expect(readResult).not.toBe('unexpected-frame');
+      const exit = await withTimeout(exited, 4_000, 'API process exit on SIGTERM');
       expect(exit).toEqual({ code: 0, signal: null });
       expect(stdout).toContain('"message":"shutdown complete"');
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : 'unknown SIGTERM test failure';
+      throw new Error(`${reason}; API stdout: ${stdout}; API stderr: ${stderr}`);
     } finally {
       if (child.exitCode === null && child.signalCode === null) {
         child.kill('SIGKILL');

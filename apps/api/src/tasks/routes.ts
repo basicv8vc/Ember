@@ -27,20 +27,27 @@ import {
   type TaskEventStreamOptions,
   type TaskEventStreamRegistry,
 } from './event-stream.js';
-import { toTaskDetailDto, type TaskDetailDto, type TaskEventPageDto } from './dto.js';
+import {
+  toTaskCancelDto,
+  toTaskDetailDto,
+  type TaskCancelDto,
+  type TaskDetailDto,
+  type TaskEventPageDto,
+} from './dto.js';
 import type { TaskStore } from './task-store.js';
 
 /**
- * `/v1/tasks` — the P0B-07 HTTP task API.
+ * `/v1/tasks` — the P0B-07 / P0B-08c HTTP task API.
  *
  * Endpoints (all tenant-scoped, all authenticated by the `/v1` middleware):
  *
- * | method | path                        | success                   |
- * | ------ | --------------------------- | ------------------------- |
- * | POST   | `/v1/tasks`                 | 202 created, 200 replayed |
- * | GET    | `/v1/tasks/:taskId`         | 200 task detail           |
- * | GET    | `/v1/tasks/:taskId/events`  | 200 event page            |
- * | GET    | `/v1/tasks/:taskId/stream`  | 200 text/event-stream     |
+ * | method | path                        | success                                     |
+ * | ------ | --------------------------- | ------------------------------------------- |
+ * | POST   | `/v1/tasks`                 | 202 created, 200 replayed                   |
+ * | GET    | `/v1/tasks/:taskId`         | 200 task detail                             |
+ * | GET    | `/v1/tasks/:taskId/events`  | 200 event page                              |
+ * | GET    | `/v1/tasks/:taskId/stream`  | 200 text/event-stream                       |
+ * | POST   | `/v1/tasks/:taskId/cancel`  | 200 terminal, 202 cancellation in progress  |
  *
  * Rules enforced here, in this order:
  * 1. authentication happens in middleware, before any handler code runs;
@@ -178,6 +185,28 @@ export function createTaskRoutes(deps: TaskRouteDependencies): Hono<AppBindings>
 
     const dto: TaskDetailDto = toTaskDetailDto(view);
     return c.json(dto, 200);
+  });
+
+  routes.post('/:taskId/cancel', async (c) => {
+    const taskId = parseTaskId(c);
+
+    if (taskId instanceof Response) {
+      return taskId;
+    }
+
+    if (deps.store.cancel === undefined) {
+      throw new DomainError(
+        'DB_UNAVAILABLE',
+        'task cancellation is not configured for this process',
+      );
+    }
+
+    const result = await deps.store.cancel(c.get('auth'), taskId);
+    const dto: TaskCancelDto = toTaskCancelDto(result);
+
+    // 200 OK when the Task is already in a terminal state (`cancelled`, `completed`, `failed`);
+    // 202 Accepted when the Task is still `running` and cooperative cancellation is pending.
+    return c.json(dto, result.terminal ? 200 : 202);
   });
 
   routes.get('/:taskId/events', async (c) => {

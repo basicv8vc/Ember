@@ -18,16 +18,23 @@ export interface ChaosPrng {
 }
 
 export function resolveChaosSeed(explicitSeed?: number): number {
-  if (explicitSeed !== undefined && Number.isSafeInteger(explicitSeed)) {
+  if (explicitSeed !== undefined) {
+    if (!Number.isSafeInteger(explicitSeed)) {
+      throw new Error('Chaos seed must be a safe integer');
+    }
     return explicitSeed;
   }
 
   const envSeed = process.env.CHAOS_SEED;
   if (envSeed !== undefined && envSeed.length > 0) {
-    const parsed = parseInt(envSeed, 10);
-    if (Number.isSafeInteger(parsed)) {
-      return parsed;
+    if (!/^-?\d+$/.test(envSeed.trim())) {
+      throw new Error('CHAOS_SEED must contain only an integer');
     }
+    const parsed = Number(envSeed);
+    if (!Number.isSafeInteger(parsed)) {
+      throw new Error('CHAOS_SEED must be a safe integer');
+    }
+    return parsed;
   }
 
   // Default seed: 20261030 for reproducibility unless explicitly overridden.

@@ -119,6 +119,8 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
     if (context.task.result?.state === 'fail') {
       dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
     }
+    // Keep diagnostic traces scoped to the failing test only.
+    globalFaultRecorder.clear();
   });
 
   const PERMISSIVE_BUDGET: BudgetPolicy = Object.freeze({

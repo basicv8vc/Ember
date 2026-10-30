@@ -101,6 +101,8 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
     if (context.task.result?.state === 'fail') {
       dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
     }
+    // Keep diagnostic traces scoped to the failing test only.
+    globalFaultRecorder.clear();
   });
 
   interface ClaimedTask {

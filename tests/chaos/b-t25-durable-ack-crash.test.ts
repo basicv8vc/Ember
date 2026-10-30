@@ -65,6 +65,8 @@ describe('B-T25: Durable Ack Crash & Idempotency Chaos Verification', () => {
     if (context.task.result?.state === 'fail') {
       dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
     }
+    // Keep diagnostic traces scoped to the failing test only.
+    globalFaultRecorder.clear();
   });
 
   function makeCommand(idempotencyKey: string, prompt = 'chaos-task'): TaskCommand {

@@ -82,7 +82,7 @@ GitHub Actions run [#40987136715](https://github.com/basicv8vc/Ember/actions/run
 
 The first run of the new production SIGTERM test exposed an HTTP server close that remained pending after the SSE response ended. Shutdown now closes remaining HTTP connections after stopping new accepts and aborting SSE loops; this CI run verifies the API process exits successfully after both HTTP server and pool closure. This CI evidence supplements the original PR-head run above and does not indicate CTO approval or merge readiness.
 
-### CI verification after integrating latest main
+### CI verification after integrating PR #15, before PR #17
 
 GitHub Actions run [#40997680451](https://github.com/basicv8vc/Ember/actions/runs/40997680451) passed on Node 24 and PostgreSQL 17 for integrated source commit `c7a3d11328dd28314b5165c6d1236f575b9415d3`, based on latest `main` commit `34c7fb8206c6d2c88bfe04f79669d6dfed2c8592` (PR #15). This run validates the combined Artifact HTTP and SSE routes; a documentation-only commit follows it and receives its own final-head CI run.
 
@@ -93,3 +93,16 @@ GitHub Actions run [#40997680451](https://github.com/basicv8vc/Ember/actions/run
 | SSE PostgreSQL / Node HTTP integration        | PASS — 6 tests, including client socket disconnect and production `SIGTERM`        |
 | PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
 | Lint / format / typecheck / build             | PASS                                                                               |
+
+### CI verification after integrating PR #17
+
+GitHub Actions run [#40999035115](https://github.com/basicv8vc/Ember/actions/runs/40999035115) passed on Node 24 and PostgreSQL 17 for integrated source commit `cc80e27269509c3e7c7b6d97cfcca72346d11f3d`, based on latest `main` commit `7e7316597ead9ce613f1c97d054a85acd76c35a0` (PRs #15 and #17). This validates Artifact HTTP, persistent budget enforcement, and SSE together; a documentation-only commit follows it and receives its own final-head CI run.
+
+| CI check                                      | Result                                                                         |
+| --------------------------------------------- | ------------------------------------------------------------------------------ |
+| Unit tests                                    | PASS — 32 files / 566 tests                                                    |
+| PostgreSQL integration tests                  | PASS — 19 files / 199 tests                                                    |
+| Persistent budget integration                 | PASS — 19 tests                                                                |
+| SSE PostgreSQL / Node HTTP integration        | PASS — 6 tests, including client socket disconnect and production `SIGTERM`    |
+| PostgreSQL migrations, first and repeated run | PASS — 6 applied on first run, including migration `0006`; 0 applied on re-run |
+| Lint / format / typecheck / build             | PASS                                                                           |

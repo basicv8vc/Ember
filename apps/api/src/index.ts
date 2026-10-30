@@ -13,6 +13,7 @@ import { isLoopbackHost, loadApiConfig } from './env.js';
 import { unexpectedErrorCategory } from './http/error-mapping.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
+import { shutdownTaskEventStreams } from './tasks/event-stream.js';
 
 const SERVICE_VERSION = '0.0.0';
 
@@ -29,6 +30,8 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
     }
     shuttingDown = true;
     logger.info('shutting down', { signal });
+    // Abort SSE poll loops before server.close() waits for their long-lived responses.
+    shutdownTaskEventStreams();
 
     const forceExit = setTimeout(() => {
       logger.error('graceful shutdown timed out');

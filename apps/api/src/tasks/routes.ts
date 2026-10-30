@@ -4,7 +4,6 @@ import {
   IdSchema,
   toCreateTaskBody,
   toTaskCommand,
-  toTaskEventDto,
   toTaskReceiptDto,
   type TaskEventDto,
 } from '@ember/contracts';
@@ -19,11 +18,20 @@ import {
   MAX_TASK_BODY_BYTES,
   TASKS_PATH,
 } from './constants.js';
+import {
+  encodeSseFrame,
+  mapTaskEventPage,
+  resolveTaskEventStreamOptions,
+  streamTaskEvents,
+  taskEventStreamRegistry,
+  type TaskEventStreamOptions,
+  type TaskEventStreamRegistry,
+} from './event-stream.js';
 import { toTaskDetailDto, type TaskDetailDto, type TaskEventPageDto } from './dto.js';
 import type { TaskStore } from './task-store.js';
 
 /**
- * `/v1/tasks` — the P0B-07a HTTP task API.
+ * `/v1/tasks` — the P0B-07 HTTP task API.
  *
  * Endpoints (all tenant-scoped, all authenticated by the `/v1` middleware):
  *
@@ -32,6 +40,7 @@ import type { TaskStore } from './task-store.js';
  * | POST   | `/v1/tasks`                 | 202 created, 200 replayed |
  * | GET    | `/v1/tasks/:taskId`         | 200 task detail           |
  * | GET    | `/v1/tasks/:taskId/events`  | 200 event page            |
+ * | GET    | `/v1/tasks/:taskId/stream`  | 200 text/event-stream     |
  *
  * Rules enforced here, in this order:
  * 1. authentication happens in middleware, before any handler code runs;
@@ -97,16 +106,20 @@ function parseTaskId(c: AppContext): Id | Response {
 
 export interface TaskRouteDependencies {
   readonly store: TaskStore;
+  readonly streamOptions?: TaskEventStreamOptions;
+  readonly streamRegistry?: TaskEventStreamRegistry;
 }
 
 /**
- * Build the three task routes.
+ * Build the task routes.
  *
  * Dependencies are injected (rather than imported as module singletons) so the same
  * handlers run against PostgreSQL in production and against a fake in unit tests.
  */
 export function createTaskRoutes(deps: TaskRouteDependencies): Hono<AppBindings> {
   const routes = new Hono<AppBindings>();
+  const streamOptions = resolveTaskEventStreamOptions(deps.streamOptions);
+  const streamRegistry = deps.streamRegistry ?? taskEventStreamRegistry;
 
   routes.post('/', async (c) => {
     const auth = c.get('auth');
@@ -195,19 +208,167 @@ export function createTaskRoutes(deps: TaskRouteDependencies): Hono<AppBindings>
       limit: MAX_EVENTS_PER_PAGE,
     });
 
-    let mapped: TaskEventDto[];
-
-    try {
-      mapped = events.map((event) => toTaskEventDto(event));
-    } catch {
-      // A persisted event that fails the closed redaction contract is a storage fault, not
-      // a client mistake: report 503 rather than blaming the request with 400.
-      throw new DomainError('DB_UNAVAILABLE', 'persisted task event failed its contract');
-    }
+    const mapped: TaskEventDto[] = [...mapTaskEventPage(events, taskId, cursor.after)];
 
     const page: TaskEventPageDto = { task_id: taskId, events: mapped };
     return c.json(page, 200);
   });
 
+  routes.get('/:taskId/stream', async (c) => {
+    const taskId = parseTaskId(c);
+
+    if (taskId instanceof Response) {
+      return taskId;
+    }
+
+    const url = new URL(c.req.url);
+    const cursor = parseStreamCursor(
+      url.searchParams.getAll('after'),
+      c.req.header('Last-Event-ID'),
+    );
+
+    if (!cursor.ok) {
+      return respondInvalidArgument(c, 'stream cursor must be a matching non-negative integer');
+    }
+
+    const auth = c.get('auth');
+    const view = await deps.store.get(auth, taskId);
+
+    if (view === null) {
+      return respondNotFound(c, 'task is not visible in this tenant');
+    }
+
+    // Prime one durable page before returning streaming headers. Authentication, tenant
+    // authorization, and initial EventStore failures therefore remain ordinary HTTP errors.
+    const initialEvents = await deps.store.listEvents(auth, taskId, {
+      after: cursor.after,
+      limit: MAX_EVENTS_PER_PAGE,
+    });
+    mapTaskEventPage(initialEvents, taskId, cursor.after);
+
+    const controller = new AbortController();
+    const unregister = streamRegistry.register(controller);
+
+    if (unregister === null) {
+      throw new DomainError('DB_UNAVAILABLE', 'task event streams are shutting down');
+    }
+
+    const requestSignal = c.req.raw.signal;
+    const abortForRequest = (): void => controller.abort();
+
+    if (requestSignal.aborted) {
+      controller.abort();
+    } else {
+      requestSignal.addEventListener('abort', abortForRequest, { once: true });
+    }
+
+    let cleaned = false;
+    let readableController: ReadableStreamDefaultController<Uint8Array> | undefined;
+    let readableClosed = false;
+    const cleanup = (): void => {
+      if (cleaned) {
+        return;
+      }
+      cleaned = true;
+      requestSignal.removeEventListener('abort', abortForRequest);
+      controller.signal.removeEventListener('abort', closeForAbort);
+      unregister();
+    };
+    const closeForAbort = (): void => {
+      controller.abort();
+      if (readableController !== undefined && !readableClosed) {
+        readableClosed = true;
+        try {
+          readableController.close();
+        } catch {
+          // A canceled transport may already have closed its ReadableStream controller.
+        }
+      }
+      cleanup();
+    };
+
+    controller.signal.addEventListener('abort', closeForAbort, { once: true });
+
+    const iterator = streamTaskEvents({
+      store: deps.store,
+      auth,
+      taskId,
+      after: cursor.after,
+      initialStatus: view.status,
+      initialEvents,
+      signal: controller.signal,
+      options: streamOptions,
+    })[Symbol.asyncIterator]();
+
+    const body = new ReadableStream<Uint8Array>({
+      start(streamController) {
+        readableController = streamController;
+      },
+      async pull(streamController) {
+        try {
+          const next = await iterator.next();
+
+          if (readableClosed) {
+            return;
+          }
+
+          if (next.done) {
+            readableClosed = true;
+            cleanup();
+            streamController.close();
+          } else {
+            streamController.enqueue(encodeSseFrame(next.value));
+          }
+        } catch {
+          // Once headers are sent, a storage fault is a transport close. Reconnect uses the
+          // last persisted event ID; no driver error text is exposed as a stream chunk.
+          cleanup();
+          if (!readableClosed) {
+            readableClosed = true;
+            streamController.close();
+          }
+        }
+      },
+      cancel() {
+        controller.abort();
+        cleanup();
+        // Do not hold up the transport's cancel() on a database query already in flight.
+        void iterator.return?.(undefined).catch(() => undefined);
+      },
+    });
+
+    return new Response(body, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no',
+      },
+    });
+  });
+
   return routes;
+}
+
+export function parseStreamCursor(
+  afterValues: readonly string[],
+  lastEventId: string | undefined,
+): CursorResult {
+  if (afterValues.length > 1) {
+    return { ok: false };
+  }
+
+  const queryCursor = parseAfterCursor(afterValues[0]);
+  const headerCursor = lastEventId === undefined ? undefined : parseAfterCursor(lastEventId);
+
+  if (!queryCursor.ok || (headerCursor !== undefined && !headerCursor.ok)) {
+    return { ok: false };
+  }
+
+  if (headerCursor?.ok && afterValues.length === 1 && queryCursor.after !== headerCursor.after) {
+    return { ok: false };
+  }
+
+  return { ok: true, after: headerCursor?.ok ? headerCursor.after : queryCursor.after };
 }

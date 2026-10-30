@@ -10,11 +10,15 @@ import { databaseNow } from '../../integration/support/leases.js';
 
 /**
  * Abruptly terminate the PostgreSQL backend servicing a client.
- * Simulates a sudden process death or kernel panic killing the worker connection mid-transaction.
+ * Scoped safely to current_database() and never terminates the current backend.
  */
 export async function terminateBackendPid(adminPool: TestPool, pid: number): Promise<boolean> {
   const result = await adminPool.query<{ terminated: boolean }>(
-    'SELECT pg_terminate_backend($1) AS terminated',
+    `SELECT pg_terminate_backend(pid) AS terminated
+       FROM pg_stat_activity
+      WHERE datname = current_database()
+        AND pid = $1
+        AND pid <> pg_backend_pid()`,
     [pid],
   );
   return result.rows[0]?.terminated ?? false;

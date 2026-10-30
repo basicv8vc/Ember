@@ -2,14 +2,21 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
+import {
+  DeterministicExecutionRouter,
+  DeterministicExecutor,
+  type BudgetPolicy,
+  type SimulatedExecutor,
+} from '@ember/execution';
 import {
   LocalBlobStore,
   PostgresAgentRepository,
   PostgresArtifactStore,
   PostgresBlobStore,
+  PostgresBudgetLedger,
   PostgresCheckpointStore,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
@@ -20,6 +27,8 @@ import {
   type CommitFaultInjector,
   type CommitFaultPoint,
 } from '@ember/postgres';
+import { createDurableRunHandler } from '../../apps/worker/src/durable-run-handler.js';
+import { createWorkerLogger } from '../../apps/worker/src/logger.js';
 import { createTestDatabase, type TestDatabase } from '../integration/support/database.js';
 import { createTenantFixture, type TenantFixture } from '../integration/support/fixtures.js';
 import {
@@ -30,7 +39,12 @@ import {
   readTask,
 } from '../integration/support/leases.js';
 import { grantOfContext } from '../integration/support/p0b06.js';
-import { createChaosPrng, globalFaultRecorder, simulateWorkerCrash } from './harness/index.js';
+import {
+  createChaosPrng,
+  dumpFailureDiagnostics,
+  globalFaultRecorder,
+  simulateWorkerCrash,
+} from './harness/index.js';
 
 /**
  * B-T26: Chaos Testing — Artifact/Checkpoint 关键边界崩溃注入与原子性恢复验证
@@ -99,6 +113,22 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
       await rm(blobRootDir, { recursive: true, force: true });
     }
     await db?.close();
+  });
+
+  afterEach((context) => {
+    if (context.task.result?.state === 'fail') {
+      dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
+    }
+  });
+
+  const PERMISSIVE_BUDGET: BudgetPolicy = Object.freeze({
+    policyId: 'p0b06-durability-permissive',
+    policyVersion: 1,
+    maxRunSteps: 1_000,
+    maxRunUnits: 1_000_000,
+    maxRunElapsedMs: 10_000_000,
+    maxTenantDailyUnits: 1_000_000,
+    maxConcurrentSlots: 64,
   });
 
   interface ClaimedTask {
@@ -403,6 +433,143 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
         tenant.tenantId,
         attempt1.lease.taskId,
       );
+      const completedEvents = events.filter((e) => e.phase === 'completed');
+      expect(completedEvents).toHaveLength(1);
+    });
+
+    it('end-to-end Worker recovery: DurableRunHandler resumes from committed checkpoint and never re-runs produce step', async () => {
+      const testAgent = await agents.create(ctx, { name: `e2e-worker-recovery-${randomUUID()}` });
+      const created = await createQueuedTask(tasks, ctx, testAgent.agentId, 'worker-resume-test');
+      await parkOtherOpenTasks(db.pool, created.taskId);
+
+      // 跟踪 produce 步骤的实际调用次数
+      let produceExecutionCount = 0;
+      const baseExecutor = new DeterministicExecutor({ sandboxExecDurationMs: 1 });
+      const spiedExecutor: SimulatedExecutor = {
+        execute: async (execContext, route, signal) => {
+          produceExecutionCount++;
+          return await baseExecutor.execute(execContext, route, signal);
+        },
+      };
+
+      // 初始执行器：在 produce 步骤提交 Checkpoint 之后、进入 publish 提交前模拟崩溃
+      let produceCommitted = false;
+      let crashOnPublishCommit = true;
+      const faultInjector: CommitFaultInjector = (point) => {
+        if (point === 'after_commit' && !produceCommitted) {
+          produceCommitted = true;
+          return;
+        }
+        // 在 produce 步骤落库后、publish 步骤尝试 CAS Workspace 之前注入崩溃
+        if (crashOnPublishCommit && produceCommitted && point === 'before_workspace_cas') {
+          globalFaultRecorder.record({
+            testName: 'B-T26',
+            faultType: 'CRASH_BEFORE_PUBLISH_STEP',
+            point,
+            taskId: created.taskId,
+            details: { produceExecutionCount },
+            seed: prng.seed,
+          });
+          throw new Error('SIMULATED_WORKER_CRASH_BEFORE_PUBLISH_COMMIT');
+        }
+      };
+
+      const committerWithFault = createCommitter(faultInjector);
+      const workerLogger = createWorkerLogger({ level: 'error', sink: () => undefined });
+      const budgetLedger = new PostgresBudgetLedger(db.pool, { policy: PERMISSIVE_BUDGET });
+
+      const handler1 = createDurableRunHandler({
+        contextReader: reader,
+        router: new DeterministicExecutionRouter(),
+        executor: spiedExecutor,
+        blobs,
+        checkpoints,
+        workspaces,
+        committer: committerWithFault,
+        budget: budgetLedger,
+        clock: { now: () => new Date() },
+        logger: workerLogger,
+      });
+
+      // 1. Worker 1 领取并开始执行
+      const now1 = await databaseNow(db.pool);
+      const lease1 = await queue.claimNext('worker-e2e-crash', now1);
+      expect(lease1).not.toBeNull();
+      expect(lease1?.taskId).toBe(created.taskId);
+
+      // 第一次运行：执行 produce 步骤并落库 Checkpoint，随后在 publish 处触发注入崩溃
+      const abort1 = new AbortController();
+      const completion1 = await handler1.handle(lease1!, abort1.signal);
+      expect(completion1.type).toBe('finish');
+      if (completion1.type === 'finish') {
+        expect(completion1.outcome).toBe('failed_retryable');
+      }
+
+      // 验证 produce 步骤已成功执行过一次
+      expect(produceExecutionCount).toBe(1);
+
+      // 验证 produce Checkpoint 已成功落库且 Task 状态保持 running
+      const context1 = await reader.read(lease1!, now1);
+      const grant1 = grantOfContext(context1);
+      const step1Checkpoint = await checkpoints.loadLatest(grant1, {
+        schemaVersion: 1,
+        executorVersion: EXECUTOR_VERSION,
+      });
+      expect(step1Checkpoint).not.toBeNull();
+      expect(step1Checkpoint?.stepId).toBe('produce');
+
+      // 2. 模拟 Worker 1 进程崩溃、租约超时并由 Reaper 触发收敛
+      await simulateWorkerCrash(db.pool, queue, tenant.tenantId, lease1!);
+
+      // 3. 重启 Worker：解除崩溃注入，恢复正常执行能力
+      crashOnPublishCommit = false;
+      const normalCommitter = createCommitter();
+      const handler2 = createDurableRunHandler({
+        contextReader: reader,
+        router: new DeterministicExecutionRouter(),
+        executor: spiedExecutor,
+        blobs,
+        checkpoints,
+        workspaces,
+        committer: normalCommitter,
+        budget: budgetLedger,
+        clock: { now: () => new Date() },
+        logger: workerLogger,
+      });
+
+      // 4. 重启后的 Worker 2 领取任务（新的 Run 与递增的 Lease Epoch）
+      await parkOtherOpenTasks(db.pool, created.taskId);
+      await db.pool.query(
+        "UPDATE tasks SET next_run_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+        [created.taskId],
+      );
+
+      const now2 = await databaseNow(db.pool);
+      const lease2 = await queue.claimNext('worker-e2e-recovered', now2);
+      expect(lease2).not.toBeNull();
+      expect(lease2?.taskId).toBe(created.taskId);
+      expect(lease2?.runId).not.toBe(lease1?.runId);
+      expect(lease2?.leaseEpoch).toBeGreaterThan(lease1!.leaseEpoch);
+
+      // 5. Worker 2 执行 handle：此时必须自动检测到已有的 produce Checkpoint 并重用，直接执行 publish
+      const abort2 = new AbortController();
+      const completion2 = await handler2.handle(lease2!, abort2.signal);
+      expect(completion2.type).toBe('committed');
+
+      // 核心断言：produce 步骤的实际调用次数依然为 1！证明 Worker 恢复后完全没有重做已确认步骤
+      expect(produceExecutionCount).toBe(1);
+
+      // 终态验证：Task 成功完成，Workspace 版本推进至 1，终态事件唯一
+      const finalTask = await readTask(db.observerPool, tenant.tenantId, created.taskId);
+      expect(finalTask.status).toBe('completed');
+
+      const finalWs = await workspaces.loadForRun(tenant.tenantId, testAgent.agentId);
+      expect(finalWs.version).toBe(1);
+
+      const totalCheckpoints = await countCheckpoints(created.taskId);
+      expect(totalCheckpoints).toBe(2); // 1 个 produce，1 个 publish
+
+      const events = await listEventSnapshots(db.observerPool, tenant.tenantId, created.taskId);
       const completedEvents = events.filter((e) => e.phase === 'completed');
       expect(completedEvents).toHaveLength(1);
     });

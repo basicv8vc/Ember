@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { isDomainError, type AuthContext, type DomainError, type TaskCommand } from '@ember/domain';
 import {
   PostgresAgentRepository,
@@ -12,6 +12,7 @@ import { parkOtherOpenTasks, readTask } from '../integration/support/leases.js';
 import {
   createBarrier,
   createChaosPrng,
+  dumpFailureDiagnostics,
   globalFaultRecorder,
   terminateBackendPid,
   withTimeout,
@@ -58,6 +59,12 @@ describe('B-T25: Durable Ack Crash & Idempotency Chaos Verification', () => {
 
   afterAll(async () => {
     await db?.close();
+  });
+
+  afterEach((context) => {
+    if (context.task.result?.state === 'fail') {
+      dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
+    }
   });
 
   function makeCommand(idempotencyKey: string, prompt = 'chaos-task'): TaskCommand {
@@ -156,79 +163,95 @@ describe('B-T25: Durable Ack Crash & Idempotency Chaos Verification', () => {
       const key = `b-t25-conn-kill-${randomUUID()}`;
       const command = makeCommand(key, 'conn-kill test');
 
-      // 通过带有同步屏障的触发器，在插入 tasks 之后但提交之前挂起连接，随后后台强杀连接
+      // P1 修复：生成隔离的动态咨询锁 ID，防止跨会话/多 Worktree 冲突
+      const advisoryLockId = prng.nextInt(100_000_000, 2_000_000_000);
+      const funcName = `b_t25_hold_${prng.nextInt(1000, 9999)}`;
+      const triggerName = `${funcName}_trg`;
 
-      await db.pool.query(`
-        CREATE OR REPLACE FUNCTION b_t25_hold_in_tx()
-        RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-          PERFORM pg_advisory_xact_lock(987654321);
-          RETURN NEW;
-        END;
-        $$;
-        CREATE TRIGGER b_t25_hold_in_tx_trg
-          AFTER INSERT ON tasks
-          FOR EACH ROW EXECUTE FUNCTION b_t25_hold_in_tx();
-      `);
-
-      // 获取排他咨询锁以阻塞触发器
       const lockClient = await db.pool.connect();
-      await lockClient.query('BEGIN');
-      await lockClient.query('SELECT pg_advisory_xact_lock(987654321)');
+      try {
+        const blockerPidRow = await lockClient.query<{ pid: number }>(
+          'SELECT pg_backend_pid() AS pid',
+        );
+        const blockerPid = blockerPidRow.rows[0]?.pid;
+        if (!blockerPid) {
+          throw new Error('failed to obtain blocker client PID');
+        }
 
-      // 发起创建（将在获取咨询锁处阻塞）
-      const createPromise = tasks.create(ctx, command);
+        await lockClient.query('BEGIN');
+        await lockClient.query('SELECT pg_advisory_xact_lock($1)', [advisoryLockId]);
 
-      // 从 adminPool 查找被阻塞的 backend pid
-      let blockedPid: number | undefined;
-      await withTimeout(
-        (async () => {
-          while (blockedPid === undefined) {
-            const res = await db.adminPool.query<{ pid: number }>(`
-              SELECT pid FROM pg_stat_activity
-               WHERE wait_event = 'advisory'
-                 AND state = 'active'
-                 AND query LIKE '%INSERT INTO tasks%'
-                 AND pid <> pg_backend_pid()
-            `);
-            if (res.rows.length > 0 && res.rows[0]?.pid !== undefined) {
-              blockedPid = res.rows[0].pid;
+        await db.pool.query(`
+          CREATE OR REPLACE FUNCTION ${funcName}()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            PERFORM pg_advisory_xact_lock(${advisoryLockId});
+            RETURN NEW;
+          END;
+          $$;
+          CREATE TRIGGER ${triggerName}
+            AFTER INSERT ON tasks
+            FOR EACH ROW EXECUTE FUNCTION ${funcName}();
+        `);
+
+        // 发起创建（将在获取咨询锁处阻塞）
+        const createPromise = tasks.create(ctx, command);
+
+        // 从 adminPool 精准定位由当前 blockerPid 阻塞的连接（严格限定数据库与等待关系）
+        let blockedPid: number | undefined;
+        await withTimeout(
+          (async () => {
+            while (blockedPid === undefined) {
+              const res = await db.adminPool.query<{ pid: number }>(
+                `SELECT pid FROM pg_stat_activity
+                  WHERE datname = current_database()
+                    AND $1 = ANY(pg_blocking_pids(pid))
+                    AND state = 'active'
+                    AND pid <> pg_backend_pid()
+                    AND pid <> $1`,
+                [blockerPid],
+              );
+              if (res.rows.length > 0 && res.rows[0]?.pid !== undefined) {
+                blockedPid = res.rows[0].pid;
+              }
             }
-          }
-        })(),
-        5_000,
-        'waiting for task insert to block on advisory lock',
-      );
+          })(),
+          5_000,
+          'waiting for task insert to block on isolated advisory lock',
+        );
 
-      expect(blockedPid).toBeDefined();
+        expect(blockedPid).toBeDefined();
 
-      globalFaultRecorder.record({
-        testName: 'B-T25',
-        faultType: 'CONNECTION_KILL_BEFORE_ACK',
-        point: 'in_tx_before_commit',
-        targetId: key,
-        details: { blockedPid },
-        seed: prng.seed,
-      });
+        globalFaultRecorder.record({
+          testName: 'B-T25',
+          faultType: 'CONNECTION_KILL_BEFORE_ACK',
+          point: 'in_tx_before_commit',
+          targetId: key,
+          details: { blockedPid, blockerPid, advisoryLockId },
+          seed: prng.seed,
+        });
 
-      // 强杀被阻塞的 backend
-      const killed = await terminateBackendPid(db.adminPool, blockedPid!);
-      expect(killed).toBe(true);
+        // 强杀被阻断的专属 backend
+        const killed = await terminateBackendPid(db.adminPool, blockedPid!);
+        expect(killed).toBe(true);
 
-      // 释放排他锁并归还连接
-      await lockClient.query('ROLLBACK');
-      lockClient.release();
-
-      // 创建调用必须由于连接被杀而失败
-      await expect(createPromise).rejects.toMatchObject({
-        code: 'DB_UNAVAILABLE',
-      });
-
-      // 清理触发器
-      await db.pool.query(`
-        DROP TRIGGER IF EXISTS b_t25_hold_in_tx_trg ON tasks;
-        DROP FUNCTION IF EXISTS b_t25_hold_in_tx();
-      `);
+        // 创建调用必须由于连接被强杀而失败
+        await expect(createPromise).rejects.toMatchObject({
+          code: 'DB_UNAVAILABLE',
+        });
+      } finally {
+        // 异常、超时与正常路径严格保证资源清理与锁释放
+        await lockClient.query('ROLLBACK').catch(() => {});
+        lockClient.release();
+        await db.pool
+          .query(
+            `
+            DROP TRIGGER IF EXISTS ${triggerName} ON tasks;
+            DROP FUNCTION IF EXISTS ${funcName}();
+          `,
+          )
+          .catch(() => {});
+      }
 
       // 验证未产生任何脏数据
       expect(await countTasksByKey(key)).toBe(0);

@@ -8,6 +8,8 @@ export interface FaultRecord {
   readonly faultType: string;
   readonly point: string;
   readonly targetId?: string;
+  readonly taskId?: string;
+  readonly runId?: string;
   readonly details?: Record<string, unknown>;
   readonly seed?: number;
 }
@@ -20,6 +22,8 @@ export class ChaosFaultRecorder {
     faultType: string;
     point: string;
     targetId?: string;
+    taskId?: string;
+    runId?: string;
     details?: Record<string, unknown>;
     seed?: number;
   }): void {
@@ -46,10 +50,12 @@ export class ChaosFaultRecorder {
     const lines = ['=== Chaos Fault Injection Log ==='];
     for (const r of this.records) {
       const target = r.targetId ? ` [target: ${r.targetId}]` : '';
+      const task = r.taskId ? ` [task: ${r.taskId}]` : '';
+      const run = r.runId ? ` [run: ${r.runId}]` : '';
       const seed = r.seed !== undefined ? ` [seed: ${r.seed}]` : '';
       const details = r.details ? ` ${JSON.stringify(r.details)}` : '';
       lines.push(
-        `[${r.timestamp}] ${r.testName}: ${r.faultType} at "${r.point}"${target}${seed}${details}`,
+        `[${r.timestamp}] ${r.testName}: ${r.faultType} at "${r.point}"${target}${task}${run}${seed}${details}`,
       );
     }
     lines.push('=================================');
@@ -58,3 +64,30 @@ export class ChaosFaultRecorder {
 }
 
 export const globalFaultRecorder = new ChaosFaultRecorder();
+
+export function dumpFailureDiagnostics(testName: string, seed: number, error?: unknown): void {
+  const summary = globalFaultRecorder.formatSummary();
+  let errorStr = '';
+  if (error !== undefined) {
+    if (error instanceof Error) {
+      errorStr = error.stack ?? error.message;
+    } else if (typeof error === 'string') {
+      errorStr = error;
+    } else {
+      try {
+        errorStr = JSON.stringify(error);
+      } catch {
+        errorStr = '[Unserializable Error]';
+      }
+    }
+  }
+
+  console.error(
+    `\n❌ [Chaos Failure Diagnostics]\n` +
+      `Test: ${testName}\n` +
+      `PRNG Seed: ${seed} (reproduce via: CHAOS_SEED=${seed})\n` +
+      (errorStr ? `Error: ${errorStr}\n` : '') +
+      summary +
+      '\n',
+  );
+}

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
 import {
@@ -32,6 +32,7 @@ import { grantOfContext } from '../integration/support/p0b06.js';
 import {
   createBarrier,
   createChaosPrng,
+  dumpFailureDiagnostics,
   globalFaultRecorder,
   simulateWorkerCrash,
 } from './harness/index.js';
@@ -94,6 +95,12 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
       await rm(blobRootDir, { recursive: true, force: true });
     }
     await db?.close();
+  });
+
+  afterEach((context) => {
+    if (context.task.result?.state === 'fail') {
+      dumpFailureDiagnostics(context.task.name, prng.seed, context.task.result.errors?.[0]);
+    }
   });
 
   interface ClaimedTask {

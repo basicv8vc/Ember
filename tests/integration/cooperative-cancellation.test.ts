@@ -180,6 +180,50 @@ async function holdTaskRowLock(
   };
 }
 
+/**
+ * Wait until exactly this Task-row lock has accumulated at least two distinct
+ * request waiters. PostgreSQL may report a second waiter as blocked by the first
+ * (a soft blocker) instead of the original lock holder, so walk the blocker chain.
+ * This proves both HTTP requests were in flight before releasing the barrier.
+ */
+async function waitForTwoTaskLockWaiters(
+  pool: TestPool,
+  blocker: LockSession,
+  timeoutMs = 5_000,
+): Promise<void> {
+  const pidResult = await blocker.query<{ pid: number }>('SELECT pg_backend_pid() AS pid');
+  const blockerPid = pidResult.rows[0]?.pid;
+  if (blockerPid === undefined) {
+    throw new Error('could not read the Task lock holder backend pid');
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const result = await pool.query<{ count: string }>(
+      `WITH RECURSIVE waiters(pid) AS (
+         SELECT a.pid
+           FROM pg_stat_activity AS a
+          WHERE a.datname = current_database()
+            AND $1 = ANY(pg_blocking_pids(a.pid))
+         UNION
+         SELECT a.pid
+           FROM pg_stat_activity AS a
+           JOIN waiters AS w ON w.pid = ANY(pg_blocking_pids(a.pid))
+          WHERE a.datname = current_database()
+       )
+       SELECT count(*)::text AS count FROM waiters`,
+      [blockerPid],
+    );
+    if (Number(result.rows[0]?.count ?? '0') >= 2) {
+      return;
+    }
+    // Poll PostgreSQL's actual lock graph; elapsed time never decides the winner.
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+
+  throw new Error('timed out waiting for both Task row lock contenders');
+}
+
 interface ParsedSseEvent {
   readonly id: string;
   readonly event: string;
@@ -1372,15 +1416,18 @@ describe('P0B-08c / P0B-08d: Cancellation of waiting_approval Tasks & Approval C
 
     const lock1 = await holdTaskRowLock(db.pool, tenantA.tenantId, task1);
     const cancelPromise1 = postCancel(task1);
-    await waitForTaskLockWaiter(db.pool, lock1.blocker);
+    let approvePromise1: ReturnType<typeof postDecision> | undefined;
+    try {
+      await waitForTaskLockWaiter(db.pool, lock1.blocker);
+      // Queue Approve behind Cancel and verify BOTH requests are blocked before release.
+      approvePromise1 = postDecision(approval1.approvalId, 'approve');
+      await waitForTwoTaskLockWaiters(db.pool, lock1.blocker);
+    } finally {
+      await lock1.release();
+    }
 
-    // Concurrently post approve decision (will also queue behind lock1)
-    const approvePromise1 = postDecision(approval1.approvalId, 'approve');
-
-    // Release blocker lock: Cancel acquires the lock first
-    await lock1.release();
-
-    const [cancelRes1, approveRes1] = await Promise.all([cancelPromise1, approvePromise1]);
+    expect(approvePromise1).toBeDefined();
+    const [cancelRes1, approveRes1] = await Promise.all([cancelPromise1, approvePromise1!]);
     expect(cancelRes1.status).toBe(200);
     expect(cancelRes1.body.status).toBe('cancelled');
     expect(approveRes1.status).toBe(409);
@@ -1398,13 +1445,20 @@ describe('P0B-08c / P0B-08d: Cancellation of waiting_approval Tasks & Approval C
     );
 
     const lock2 = await holdTaskRowLock(db.pool, tenantA.tenantId, task2);
-    // Queue approve behind lock2
     const approvePromise2 = postDecision(approval2.approvalId, 'approve');
-    await waitForTaskLockWaiter(db.pool, lock2.blocker);
+    let cancelPromise2: ReturnType<typeof postCancel> | undefined;
+    try {
+      // Approve joins the lock queue first.
+      await waitForTaskLockWaiter(db.pool, lock2.blocker);
+      // Cancel must also be queued BEFORE the row lock is released: a true race.
+      cancelPromise2 = postCancel(task2);
+      await waitForTwoTaskLockWaiters(db.pool, lock2.blocker);
+    } finally {
+      await lock2.release();
+    }
 
-    // Release blocker lock so Approve acquires the Task row lock first
-    await lock2.release();
-    const approveRes2 = await approvePromise2;
+    expect(cancelPromise2).toBeDefined();
+    const [approveRes2, cancelRes2] = await Promise.all([approvePromise2, cancelPromise2!]);
     expect(approveRes2.status).toBe(200);
     expect(approveRes2.body).toMatchObject({
       approval_id: approval2.approvalId,
@@ -1413,8 +1467,7 @@ describe('P0B-08c / P0B-08d: Cancellation of waiting_approval Tasks & Approval C
     });
     expect((await approvals.get(ctxA, approval2.approvalId))?.status).toBe('approved');
 
-    // Subsequent Cancel observes Task as queued and cancels it to cancelled (200 OK, terminal=true)
-    const cancelRes2 = await postCancel(task2);
+    // Already in flight before lock release, Cancel observes the queued state and cancels it.
     expect(cancelRes2.status).toBe(200);
     expect(cancelRes2.body.status).toBe('cancelled');
     expect(cancelRes2.body.terminal).toBe(true);

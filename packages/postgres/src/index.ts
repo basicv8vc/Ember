@@ -53,7 +53,11 @@ export {
   PostgresApprovalRepository,
   type PostgresApprovalRepositoryOptions,
 } from './repositories/approval-repository.js';
-export { PostgresTaskRepository, type ListEventOptions } from './repositories/task-repository.js';
+export {
+  PostgresTaskRepository,
+  type ListEventOptions,
+  type TaskCancelOutcome,
+} from './repositories/task-repository.js';
 export { PostgresRunExecutionContextReader } from './repositories/run-execution-context-reader.js';
 export {
   applyFinishConvergence,

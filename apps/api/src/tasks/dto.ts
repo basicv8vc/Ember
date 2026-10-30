@@ -9,19 +9,22 @@ import {
 
 import type { Id, TaskKind, TaskStatus, TaskView } from '@ember/domain';
 import { z } from 'zod';
+import type { TaskCancelResult } from './task-store.js';
 
 /**
- * Wire DTOs for `GET /v1/tasks/:taskId` and `GET /v1/tasks/:taskId/events` (P0B-07a).
+ * Wire DTOs for `GET /v1/tasks/:taskId`, `GET /v1/tasks/:taskId/events`, and
+ * `POST /v1/tasks/:taskId/cancel` (P0B-07a / P0B-08c).
  *
  * P0B-02 froze the receipt, event and error DTOs in `@ember/contracts`. It did not define a
- * task-detail DTO, so this module adds one at the HTTP edge using the *same* field schemas,
- * rather than introducing a parallel vocabulary. Promotion into `@ember/contracts` is a
- * mechanical move once a second client consumes it; it is deliberately not done here,
- * because changing a frozen shared package is a contract change that needs review.
+ * task-detail or task-cancel DTO, so this module adds them at the HTTP edge using the *same*
+ * field schemas, rather than introducing a parallel vocabulary. Promotion into
+ * `@ember/contracts` is a mechanical move once a second client consumes it; it is
+ * deliberately not done here, because changing a frozen shared package is a contract change
+ * that needs review.
  *
  * Deliberate omissions (each one would leak either internals or another tenant's data):
- * `tenant_id`, `principal_id`, `idempotency_key`, `digest`, `input`, and columns the domain
- * does not expose. A caller already knows its own tenant from its credential.
+ * `tenant_id`, `principal_id`, `idempotency_key`, `digest`, `input`, `worker_id`, and columns
+ * the domain does not expose. A caller already knows its own tenant from its credential.
  */
 
 /** Task detail as returned by `GET /v1/tasks/:taskId`. */
@@ -61,6 +64,45 @@ export function toTaskDetailDto(view: TaskView): TaskDetailDto {
     created_at: view.createdAt,
     updated_at: view.updatedAt,
     deadline_at: view.deadlineAt,
+  };
+}
+
+/**
+ * Cancellation response returned by `POST /v1/tasks/:taskId/cancel`.
+ *
+ * - `terminal: true` (paired with HTTP `200 OK`) means the Task is already in an immutable
+ *   terminal state (`cancelled`, `completed`, or `failed`).
+ * - `terminal: false` (paired with HTTP `202 Accepted`) means the Task is `running` with
+ *   `cancel_requested_at` durably persisted while cooperative Worker / Reaper convergence is
+ *   still in progress.
+ */
+export interface TaskCancelDto {
+  readonly task_id: Id;
+  readonly status: TaskStatus;
+  readonly cancel_requested: boolean;
+  readonly cancel_requested_at: string | null;
+  readonly terminal: boolean;
+  readonly updated_at: string;
+}
+
+export const TaskCancelDtoSchema: z.ZodType<TaskCancelDto> = z.strictObject({
+  task_id: IdSchema,
+  status: TaskStatusSchema,
+  cancel_requested: z.boolean(),
+  cancel_requested_at: IsoDateTimeSchema.nullable(),
+  terminal: z.boolean(),
+  updated_at: IsoDateTimeSchema,
+});
+
+/** Explicit internal → wire conversion for task cancellation results. */
+export function toTaskCancelDto(result: TaskCancelResult): TaskCancelDto {
+  return {
+    task_id: result.taskId,
+    status: result.status,
+    cancel_requested: result.cancelRequested,
+    cancel_requested_at: result.cancelRequestedAt,
+    terminal: result.terminal,
+    updated_at: result.updatedAt,
   };
 }
 

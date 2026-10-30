@@ -82,3 +82,6 @@ jobs:
 
       - name: Integration tests (real PostgreSQL)
         run: pnpm test:integration
+
+      - name: Chaos tests (real PostgreSQL)
+        run: pnpm test:chaos

@@ -20,9 +20,10 @@
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "pnpm run test:unit && pnpm run test:integration",
+    "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:chaos",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
+    "test:chaos": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.chaos.config.ts",
     "dev:db": "docker compose -f infra/local/compose.yaml up -d --wait",
     "dev:db:down": "docker compose -f infra/local/compose.yaml down",
     "db:migrate": "node --env-file-if-exists=.env.local --import tsx packages/postgres/src/cli/migrate.ts"

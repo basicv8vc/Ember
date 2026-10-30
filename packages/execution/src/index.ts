@@ -60,11 +60,14 @@ export {
   type MockComputeResult,
 } from './mock-compute.js';
 export {
+  canonicalApprovalActionPayload,
+  computeApprovalActionDigest,
   DeterministicExecutor,
   EXECUTABLE_TASK_KINDS,
   isExecutableTaskKind,
   type DeterministicExecutorOptions,
   type ExecutableTaskKind,
+  type SimulatedApprovalOutput,
   type SimulatedDigestOutput,
   type SimulatedExecutionOutput,
   type SimulatedExecutionResult,

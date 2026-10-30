@@ -166,7 +166,7 @@ export function isDomainError(value: unknown): value is DomainError {
   return value instanceof DomainError;
 }
 
-export type StateMachineEntity = 'task' | 'run';
+export type StateMachineEntity = 'task' | 'run' | 'approval';
 
 /** Raised by the pure state machines for every transition not present in the approved graph. */
 export class InvalidStateTransitionError extends DomainError {

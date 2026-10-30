@@ -1,4 +1,7 @@
 import type {
+  ApprovalDecision,
+  ApprovalDecisionReceipt,
+  ApprovalView,
   AuthContext,
   ExecutionPath,
   Id,
@@ -24,6 +27,25 @@ export interface TaskRepository {
   get(ctx: AuthContext, taskId: Id): Promise<TaskView | null>;
   /** Record a cancellation request; cooperative cancellation completes later. */
   requestCancel(ctx: AuthContext, taskId: Id): Promise<void>;
+}
+
+/**
+ * Tenant-scoped approval persistence boundary (P0B-08d).
+ *
+ * Every method takes a verified `AuthContext` and scopes reads/writes to `ctx.tenantId`.
+ */
+export interface ApprovalRepository {
+  /** Return `null` when the approval does not exist *or* belongs to another tenant. */
+  get(ctx: AuthContext, approvalId: Id): Promise<ApprovalView | null>;
+  /** List approvals belonging to a tenant-owned task in creation order. */
+  listByTask(ctx: AuthContext, taskId: Id): Promise<readonly ApprovalView[]>;
+  /** Record an `approve` or `deny` decision atomically with Task state convergence. */
+  decide(
+    ctx: AuthContext,
+    approvalId: Id,
+    decision: ApprovalDecision,
+    now?: Date,
+  ): Promise<ApprovalDecisionReceipt>;
 }
 
 /**

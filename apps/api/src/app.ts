@@ -1,5 +1,8 @@
 import { isDomainError } from '@ember/domain';
 import { Hono } from 'hono';
+import type { ApprovalHttpStore } from './approvals/approval-store.js';
+import { unconfiguredApprovalHttpStore } from './approvals/approval-store.js';
+import { APPROVALS_PATH, createApprovalRoutes } from './approvals/routes.js';
 import { requireTenantAuth } from './auth/auth-middleware.js';
 import { createDevTokenAuthenticator, type DevAuthenticator } from './auth/bearer-authenticator.js';
 import type { ArtifactHttpStore } from './artifacts/artifact-store.js';
@@ -45,6 +48,8 @@ export interface AppDependencies {
   readonly taskStore?: TaskStore;
   /** Artifact persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
   readonly artifactStore?: ArtifactHttpStore;
+  /** Approval persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
+  readonly approvalStore?: ApprovalHttpStore;
 }
 
 /**
@@ -67,6 +72,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const authenticator = deps.authenticator ?? createDevTokenAuthenticator([]);
   const taskStore = deps.taskStore ?? unconfiguredTaskStore();
   const artifactStore = deps.artifactStore ?? unconfiguredArtifactHttpStore();
+  const approvalStore = deps.approvalStore ?? unconfiguredApprovalHttpStore();
   const tenantAuth = requireTenantAuth({ authenticator, logger });
 
   /**
@@ -122,8 +128,11 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   app.use(`${TASKS_PATH}/*`, tenantAuth);
   app.use('/v1/artifacts', tenantAuth);
   app.use('/v1/artifacts/*', tenantAuth);
+  app.use(APPROVALS_PATH, tenantAuth);
+  app.use(`${APPROVALS_PATH}/*`, tenantAuth);
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
+  app.route(APPROVALS_PATH, createApprovalRoutes({ approvals: approvalStore }));
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a
   // client never has to understand a second error format.

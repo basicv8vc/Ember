@@ -176,6 +176,49 @@ export const RUN_TERMINAL_STATUSES = [
 
 export type RunTerminalStatus = (typeof RUN_TERMINAL_STATUSES)[number];
 
+export const APPROVAL_STATUSES = Object.freeze([
+  'pending',
+  'approved',
+  'denied',
+  'expired',
+] as const);
+
+export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
+
+export const APPROVAL_TERMINAL_STATUSES = Object.freeze([
+  'approved',
+  'denied',
+  'expired',
+] as const satisfies readonly ApprovalStatus[]);
+
+export type ApprovalTerminalStatus = (typeof APPROVAL_TERMINAL_STATUSES)[number];
+
+export const APPROVAL_DECISIONS = Object.freeze(['approve', 'deny'] as const);
+
+export type ApprovalDecision = (typeof APPROVAL_DECISIONS)[number];
+
+export interface ApprovalView {
+  readonly approvalId: Id;
+  readonly taskId: Id;
+  readonly runId: Id;
+  readonly leaseEpoch: number;
+  readonly actionDigest: string;
+  readonly status: ApprovalStatus;
+  readonly expiresAt: string;
+  readonly decidedAt: string | null;
+  readonly createdAt: string;
+  readonly updatedAt: string;
+}
+
+export interface ApprovalDecisionReceipt {
+  readonly approvalId: Id;
+  readonly taskId: Id;
+  readonly status: 'approved' | 'denied';
+  readonly taskStatus: TaskStatus;
+  readonly decidedAt: string;
+  readonly replayed: boolean;
+}
+
 /**
  * Run lifecycle. `failed_retryable` is terminal for *that run*; the task itself may return
  * to `queued` and receive a new run.

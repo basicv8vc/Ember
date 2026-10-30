@@ -57,3 +57,15 @@ export function computeCommand(agentId: string, idempotencyKey: string): TaskCom
     input: { operation: 'sha256', text: 'durable inbox' },
   };
 }
+
+export function approvalCommand(
+  agentId: string,
+  idempotencyKey: string,
+  action = 'deploy:production',
+  reason = 'routine release',
+  deadlineAt?: string,
+): TaskCommand {
+  return deadlineAt === undefined
+    ? { agentId, idempotencyKey, kind: 'mock.approval', input: { action, reason } }
+    : { agentId, idempotencyKey, kind: 'mock.approval', input: { action, reason }, deadlineAt };
+}

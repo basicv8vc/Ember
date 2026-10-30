@@ -167,6 +167,53 @@ SELECT ${TASK_COLUMNS}
  FOR UPDATE SKIP LOCKED
 `;
 
+const EXPIRED_WAITING_APPROVAL_TASKS_SQL = `
+SELECT ${TASK_COLUMNS}
+  FROM tasks
+ WHERE status = 'waiting_approval'
+   AND (
+     cancel_requested_at IS NOT NULL
+     OR (deadline_at IS NOT NULL AND deadline_at <= $1)
+     OR EXISTS (
+       SELECT 1
+         FROM approvals a
+        WHERE a.tenant_id = tasks.tenant_id
+          AND a.task_id = tasks.id
+          AND a.status = 'pending'
+          AND a.expires_at <= $1
+     )
+   )
+ ORDER BY updated_at ASC, id ASC
+ LIMIT $2
+ FOR UPDATE SKIP LOCKED
+`;
+
+const LOCK_PENDING_APPROVALS_SQL = `
+SELECT id, expires_at
+  FROM approvals
+ WHERE tenant_id = $1 AND task_id = $2 AND status = 'pending'
+ FOR UPDATE
+`;
+
+const EXPIRE_PENDING_APPROVALS_SQL = `
+UPDATE approvals
+   SET status = 'expired',
+       decided_at = $3,
+       updated_at = $3
+ WHERE tenant_id = $1 AND task_id = $2 AND status = 'pending'
+`;
+
+const SWEEP_WAITING_TASK_BUDGET_SQL = `
+UPDATE budget_operations
+   SET state = 'expired',
+       consumed_steps = reserved_steps,
+       consumed_units = reserved_units,
+       consumed_elapsed_ms = reserved_elapsed_ms,
+       consumed_slots = reserved_slots,
+       settled_at = $3
+ WHERE tenant_id = $1 AND task_id = $2 AND state = 'reserved'
+`;
+
 /** Bound a single claim transaction's attempt to skip expired candidates. */
 const MAX_CLAIM_SKIPS = 16;
 
@@ -444,6 +491,21 @@ export class PostgresLeaseQueue implements LeaseQueue {
 
         for (const task of expiredRunning.rows) {
           await this.reapRunningTask(client, task, reapedAt);
+          reaped += 1;
+        }
+
+        const remainingForWaiting = this.config.reaperBatchSize - reaped;
+        if (remainingForWaiting <= 0) {
+          return reaped;
+        }
+
+        const expiredWaiting = await client.query<TaskRow>(EXPIRED_WAITING_APPROVAL_TASKS_SQL, [
+          reapedAt,
+          remainingForWaiting,
+        ]);
+
+        for (const task of expiredWaiting.rows) {
+          await this.reapWaitingApprovalTask(client, task, reapedAt);
           reaped += 1;
         }
 
@@ -874,6 +936,62 @@ export class PostgresLeaseQueue implements LeaseQueue {
         ...(convergence.cancelRequested === undefined
           ? {}
           : { cancelRequested: convergence.cancelRequested }),
+      },
+    });
+  }
+
+  private async reapWaitingApprovalTask(
+    client: pg.PoolClient,
+    task: TaskRow,
+    reapedAt: Date,
+  ): Promise<void> {
+    const activeRun = await client.query<IdRow>(ACTIVE_RUN_SQL, [task.tenant_id, task.id]);
+
+    if ((activeRun.rowCount ?? 0) > 0) {
+      throw new DomainError(
+        'DB_UNAVAILABLE',
+        'waiting_approval task has an active run during reaper convergence',
+      );
+    }
+
+    await client.query(LOCK_PENDING_APPROVALS_SQL, [task.tenant_id, task.id]);
+    await client.query(EXPIRE_PENDING_APPROVALS_SQL, [task.tenant_id, task.id, reapedAt]);
+    await client.query(SWEEP_WAITING_TASK_BUDGET_SQL, [task.tenant_id, task.id, reapedAt]);
+
+    const deadlineAt = parsePersistedTimestamp(task.deadline_at);
+    const cancelRequested = task.cancel_requested_at !== null;
+    const deadlineReached = deadlineAt !== null && deadlineAt.getTime() <= reapedAt.getTime();
+
+    const target: TaskStatus = cancelRequested ? 'cancelled' : 'failed';
+    const nextStatus = transitionTask(toTaskStatus(task.status), target);
+
+    const update = await client.query(CONVERGE_OPEN_TASK_SQL, [
+      nextStatus,
+      reapedAt,
+      task.tenant_id,
+      task.id,
+    ]);
+
+    if (update.rowCount !== 1) {
+      throw new DomainError('DB_UNAVAILABLE', 'reaper could not converge waiting_approval task');
+    }
+
+    await appendTaskEvent(client, {
+      tenantId: task.tenant_id,
+      taskId: task.id,
+      phase: target === 'cancelled' ? 'cancelled' : 'failed',
+      occurredAt: reapedAt,
+      payload: {
+        fromStatus: 'waiting_approval',
+        toStatus: nextStatus,
+        ...(cancelRequested ? { cancelRequested: true } : {}),
+        ...(cancelRequested
+          ? {}
+          : {
+              errorCode: deadlineReached
+                ? ('DEADLINE_EXCEEDED' as const)
+                : ('EXECUTION_TIMEOUT' as const),
+            }),
       },
     });
   }

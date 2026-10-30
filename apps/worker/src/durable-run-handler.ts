@@ -79,6 +79,10 @@ export interface DurableRunHandlerDependencies {
   readonly checkpoints: CheckpointStore;
   readonly committer: RunResultCommitter;
   readonly workspaces: Pick<PostgresWorkspaceStore, 'loadForRun'>;
+  /**
+   * Mandatory when kind is `mock.approval`. If absent at runtime when executing or resuming
+   * `mock.approval`, the run handler immediately fails closed with `POLICY_DENIED`.
+   */
   readonly approvals?: Pick<PostgresApprovalRepository, 'listForGrant'>;
   readonly approvalTtlMs?: number;
   /**
@@ -242,18 +246,21 @@ async function executeStep(
   }
 
   if (context.kind === 'mock.approval') {
-    if (executor.executeApproval !== undefined) {
-      const result = await executor.executeApproval(context, route, signal);
-      const output = result.output as { readonly actionDigest?: string };
-      const bytes = produceBytes(
-        context,
-        route,
-        typeof output.actionDigest === 'string' ? { text: output.actionDigest } : {},
+    if (executor.executeApproval === undefined) {
+      throw new DomainError(
+        'POLICY_DENIED',
+        'mock.approval requires an executor with executeApproval',
       );
-      return { ...bytes, sandboxId: result.sandboxId };
     }
 
-    return produceBytes(context, route, {});
+    const result = await executor.executeApproval(context, route, signal);
+    const output = result.output as { readonly actionDigest?: string };
+    const bytes = produceBytes(
+      context,
+      route,
+      typeof output.actionDigest === 'string' ? { text: output.actionDigest } : {},
+    );
+    return { ...bytes, sandboxId: result.sandboxId };
   }
 
   const result = await executor.execute(context, route, signal);
@@ -414,6 +421,10 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
       }
 
       try {
+        if (context.kind === 'mock.approval' && deps.approvals === undefined) {
+          throw new DomainError('POLICY_DENIED', 'mock.approval requires an approval repository');
+        }
+
         // Recovery input is read-only. "No checkpoint" and "a checkpoint this build cannot
         // read" are different states: the second must stop the Run, never silently re-execute
         // work that may already have had side effects.
@@ -469,49 +480,59 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           }
 
           if (context.kind === 'mock.approval') {
+            if (deps.approvals === undefined) {
+              throw new DomainError(
+                'POLICY_DENIED',
+                'mock.approval requires an approval repository',
+              );
+            }
+
             const input = context.input as { readonly action: string; readonly reason: string };
             const actionDigest =
               typeof produced.cursor['actionDigest'] === 'string'
                 ? produced.cursor['actionDigest']
                 : computeApprovalActionDigest(input);
 
-            if (deps.approvals !== undefined) {
-              const approvals = await deps.approvals.listForGrant(grant);
-              const approval =
-                approvals.find((entry) => entry.actionDigest === actionDigest) ??
-                approvals[approvals.length - 1];
+            const approvals = await deps.approvals.listForGrant(grant);
+            const approval = approvals.find((entry) => entry.actionDigest === actionDigest);
 
-              if (approval === undefined) {
-                const approvalTtlMs = deps.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
-                const expiresAt = new Date(clock.now().getTime() + approvalTtlMs).toISOString();
-                const pauseReceipt = await committer.commitStep(grant, {
-                  operationId: `step:await_approval:${inputDigest.slice(0, 16)}`,
-                  mode: 'progress',
-                  approval: {
-                    actionDigest,
-                    expiresAt,
-                    eventPayload: {
-                      taskKind: 'mock.approval',
-                      route: route.path,
-                      policyVersion: context.policyVersion,
-                      simulated: true,
-                    },
-                  },
-                });
-                logger.info('durable execution waiting for approval', {
-                  ...base,
-                  taskKind: context.kind,
-                  route: route.path,
-                });
-                return { type: 'committed', receipt: pauseReceipt };
-              }
-
-              if (approval.status !== 'approved') {
+            if (approval === undefined) {
+              if (approvals.length > 0) {
                 throw new DomainError(
                   'POLICY_DENIED',
-                  `mock.approval cannot resume while approval status is ${approval.status}`,
+                  'checkpoint action digest does not match any approval record',
                 );
               }
+
+              const approvalTtlMs = deps.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+              const expiresAt = new Date(clock.now().getTime() + approvalTtlMs).toISOString();
+              const pauseReceipt = await committer.commitStep(grant, {
+                operationId: `step:await_approval:${inputDigest.slice(0, 16)}`,
+                mode: 'progress',
+                approval: {
+                  actionDigest,
+                  expiresAt,
+                  eventPayload: {
+                    taskKind: 'mock.approval',
+                    route: route.path,
+                    policyVersion: context.policyVersion,
+                    simulated: true,
+                  },
+                },
+              });
+              logger.info('durable execution waiting for approval', {
+                ...base,
+                taskKind: context.kind,
+                route: route.path,
+              });
+              return { type: 'committed', receipt: pauseReceipt };
+            }
+
+            if (approval.status !== 'approved') {
+              throw new DomainError(
+                'POLICY_DENIED',
+                `mock.approval cannot resume while approval status is ${approval.status}`,
+              );
             }
           }
 

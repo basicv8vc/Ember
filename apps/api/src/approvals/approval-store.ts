@@ -1,7 +1,7 @@
 import type { ApprovalRepository } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
 
-export type ApprovalHttpStore = Pick<ApprovalRepository, 'get' | 'decide'>;
+export type ApprovalHttpStore = Pick<ApprovalRepository, 'get' | 'decide' | 'listByTask'>;
 
 export function unconfiguredApprovalHttpStore(): ApprovalHttpStore {
   const unavailable = (): Promise<never> =>
@@ -10,5 +10,6 @@ export function unconfiguredApprovalHttpStore(): ApprovalHttpStore {
   return {
     get: unavailable,
     decide: unavailable,
+    listByTask: unavailable,
   };
 }

@@ -16,7 +16,7 @@ import { describe, expect, it } from 'vitest';
 import { createApp } from '../../apps/api/src/app.js';
 import type { ApprovalHttpStore } from '../../apps/api/src/approvals/approval-store.js';
 import { createDevTokenAuthenticator } from '../../apps/api/src/auth/bearer-authenticator.js';
-import { createFakeTaskApi, FIXED_TIME } from './support/task-api-fakes.js';
+import { createFakeTaskApi, FIXED_TIME, buildTaskView } from './support/task-api-fakes.js';
 
 const TENANT_A = randomUUID();
 const TENANT_B = randomUUID();
@@ -68,6 +68,27 @@ function createFakeApprovalStore() {
   };
 
   const store: ApprovalHttpStore = {
+    listByTask(ctx: AuthContext, taskId: Id): Promise<readonly ApprovalView[]> {
+      const result: ApprovalView[] = [];
+      for (const row of rows.values()) {
+        if (row.tenantId === ctx.tenantId && row.taskId === taskId) {
+          result.push({
+            approvalId: row.approvalId,
+            taskId: row.taskId,
+            runId: row.runId,
+            leaseEpoch: row.leaseEpoch,
+            actionDigest: row.actionDigest,
+            status: row.status,
+            expiresAt: row.expiresAt,
+            decidedAt: row.decidedAt,
+            createdAt: row.createdAt,
+            updatedAt: row.updatedAt,
+          });
+        }
+      }
+      return Promise.resolve(Object.freeze(result));
+    },
+
     get(ctx: AuthContext, approvalId: Id): Promise<ApprovalView | null> {
       const row = rows.get(approvalId);
       if (row === undefined || row.tenantId !== ctx.tenantId) {
@@ -151,6 +172,7 @@ function createFakeApprovalStore() {
 
 function createHarness() {
   const tasks = createFakeTaskApi();
+  tasks.addTask(TENANT_A, buildTaskView({ taskId: TASK_ID }));
   const approvals = createFakeApprovalStore();
   approvals.seed();
 
@@ -164,7 +186,7 @@ function createHarness() {
     approvalStore: approvals.store,
   });
 
-  return { app, approvals };
+  return { app, approvals, tasks };
 }
 
 describe('Approval HTTP API (/v1/approvals)', () => {
@@ -407,6 +429,93 @@ describe('Approval HTTP API (/v1/approvals)', () => {
     expect(resCancelled.status).toBe(409);
     await expect(resCancelled.json()).resolves.toMatchObject({
       error: { code: 'INVALID_STATE_TRANSITION', request_id: REQUEST_ID },
+    });
+  });
+
+  describe('Task Approvals Discovery (/v1/tasks/:taskId/approvals)', () => {
+    it('rejects unauthenticated or invalid bearer tokens with 401 UNAUTHENTICATED', async () => {
+      const { app } = createHarness();
+
+      const missing = await app.request(`/v1/tasks/${TASK_ID}/approvals`);
+      expect(missing.status).toBe(401);
+      await expect(missing.json()).resolves.toMatchObject({
+        error: { code: 'UNAUTHENTICATED', request_id: REQUEST_ID },
+      });
+
+      const invalid = await app.request(`/v1/tasks/${TASK_ID}/approvals`, {
+        headers: { authorization: 'Bearer invalid-token' },
+      });
+      expect(invalid.status).toBe(401);
+      await expect(invalid.json()).resolves.toMatchObject({
+        error: { code: 'UNAUTHENTICATED', request_id: REQUEST_ID },
+      });
+    });
+
+    it('rejects malformed taskId with 400 INVALID_ARGUMENT', async () => {
+      const { app } = createHarness();
+
+      const response = await app.request('/v1/tasks/not-a-uuid/approvals', {
+        headers: { authorization: `Bearer ${TOKEN_A}` },
+      });
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: { code: 'INVALID_ARGUMENT', request_id: REQUEST_ID },
+      });
+    });
+
+    it('returns 404 NOT_FOUND when task does not exist or belongs to another tenant', async () => {
+      const { app } = createHarness();
+
+      const notFound = await app.request(`/v1/tasks/${randomUUID()}/approvals`, {
+        headers: { authorization: `Bearer ${TOKEN_A}` },
+      });
+      expect(notFound.status).toBe(404);
+      await expect(notFound.json()).resolves.toMatchObject({
+        error: { code: 'NOT_FOUND', request_id: REQUEST_ID },
+      });
+
+      // Tenant B cannot see Tenant A's task approvals
+      const crossTenant = await app.request(`/v1/tasks/${TASK_ID}/approvals`, {
+        headers: { authorization: `Bearer ${TOKEN_B}` },
+      });
+      expect(crossTenant.status).toBe(404);
+      await expect(crossTenant.json()).resolves.toMatchObject({
+        error: { code: 'NOT_FOUND', request_id: REQUEST_ID },
+      });
+    });
+
+    it('returns empty approvals list when task exists but has no approvals', async () => {
+      const { app, tasks } = createHarness();
+      const emptyTaskId = randomUUID();
+      tasks.addTask(TENANT_A, buildTaskView({ taskId: emptyTaskId }));
+
+      const response = await app.request(`/v1/tasks/${emptyTaskId}/approvals`, {
+        headers: { authorization: `Bearer ${TOKEN_A}` },
+      });
+      expect(response.status).toBe(200);
+      await expect(response.json()).resolves.toEqual({
+        task_id: emptyTaskId,
+        approvals: [],
+      });
+    });
+
+    it('returns list of approvals for a tenant-visible task with approvals', async () => {
+      const { app } = createHarness();
+
+      const response = await app.request(`/v1/tasks/${TASK_ID}/approvals`, {
+        headers: { authorization: `Bearer ${TOKEN_A}` },
+      });
+      expect(response.status).toBe(200);
+      const body = (await response.json()) as { task_id: string; approvals: readonly unknown[] };
+      expect(body.task_id).toBe(TASK_ID);
+      expect(body.approvals).toHaveLength(1);
+      expect(body.approvals[0]).toMatchObject({
+        approval_id: APPROVAL_ID,
+        task_id: TASK_ID,
+        run_id: RUN_ID,
+        lease_epoch: 1,
+        status: 'pending',
+      });
     });
   });
 });

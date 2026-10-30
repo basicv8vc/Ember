@@ -142,7 +142,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   app.route(AGENTS_PATH, createAgentRoutes({ store: agentStore }));
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
-  app.route(APPROVALS_PATH, createApprovalRoutes({ approvals: approvalStore }));
+  app.route('/v1', createApprovalRoutes({ approvals: approvalStore, tasks: taskStore }));
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a
   // client never has to understand a second error format.

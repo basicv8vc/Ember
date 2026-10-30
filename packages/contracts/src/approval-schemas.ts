@@ -126,3 +126,33 @@ export function toApprovalDecisionReceiptDto(
 
   return Object.freeze(result.data);
 }
+
+export const TaskApprovalsDtoSchema = z
+  .object({
+    task_id: IdSchema,
+    approvals: z.array(ApprovalViewDtoSchema),
+  })
+  .strict();
+
+export interface TaskApprovalsDto {
+  readonly task_id: Id;
+  readonly approvals: readonly ApprovalViewDto[];
+}
+
+export function toTaskApprovalsDto(taskId: Id, views: readonly ApprovalView[]): TaskApprovalsDto {
+  const candidate = {
+    task_id: taskId,
+    approvals: views.map(toApprovalViewDto),
+  };
+
+  const result = TaskApprovalsDtoSchema.safeParse(candidate);
+
+  if (!result.success) {
+    throw toInvalidArgumentError(result.error);
+  }
+
+  return Object.freeze({
+    task_id: result.data.task_id,
+    approvals: Object.freeze(result.data.approvals),
+  });
+}

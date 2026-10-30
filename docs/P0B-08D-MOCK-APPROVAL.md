@@ -186,9 +186,54 @@ Approval 状态集合：`pending`、`approved`、`denied`、`expired`。其中 `
 
 - 返回当前 Tenant 可见的 Approval 详情（`approval_id`, `task_id`, `run_id`, `lease_epoch`, `action_digest`, `status`, `expires_at`, `decided_at`, `created_at`, `updated_at`）；跨租户或不存在一律返回 `404 NOT_FOUND`。
 
+### 5.3 `GET /v1/tasks/:taskId/approvals`（客户端 Approval 发现入口）
+
+- **路径**：`GET /v1/tasks/:taskId/approvals`；
+- **鉴权**：Bearer Dev Token（要求与 Task 属于同一 Tenant）；
+- **响应格式（200 OK）**：
+  ```json
+  {
+    "task_id": "uuid",
+    "approvals": [
+      {
+        "approval_id": "uuid",
+        "task_id": "uuid",
+        "run_id": "uuid",
+        "lease_epoch": 1,
+        "action_digest": "64-char-hex",
+        "status": "pending",
+        "expires_at": "2026-10-30T00:05:00.000Z",
+        "decided_at": null,
+        "created_at": "2026-10-30T00:00:00.000Z",
+        "updated_at": "2026-10-30T00:00:00.000Z"
+      }
+    ]
+  }
+  ```
+- **租户隔离与安全边界**：
+  - 若 `taskId` 不存在或属于其他 Tenant，一致返回 `404 NOT_FOUND`（`task is not visible in this tenant`）；
+  - 若 `taskId` 存在且属于当前 Tenant，但尚无审批记录，返回 `200 OK` 伴随空数组 `{ "task_id": "...", "approvals": [] }`；
+  - 外部客户端通过此接口发现审批 ID 后，调用 `POST /v1/approvals/:approvalId/decision` 完成闭环，无需依赖任何内部仓储接口。
+
 ---
 
-## 6. 测试覆盖矩阵（20 项必测场景）
+## 6. Worker Fail-Closed 审批执行契约
+
+为杜绝审批校验绕过或静默降级路径，Worker 在处理 `mock.approval` 时执行以下强制门禁：
+
+1. **Approval Repository 必需依赖**：
+   - 当 `context.kind === 'mock.approval'` 时，`deps.approvals` 必须注入。若缺失，立即抛出 `DomainError('POLICY_DENIED', 'mock.approval requires an approval repository')`，Run 终态判定为 `failed_terminal`，绝不进入 produce 或 publish 阶段。
+2. **Executor executeApproval 必需方法**：
+   - `executeStep` 执行 `mock.approval` 阶段时，`executor.executeApproval` 必须存在并执行 FakeSandbox 生命周期。若缺失，直接抛出 `DomainError('POLICY_DENIED', 'mock.approval requires an executor with executeApproval')`，拒绝回退到无沙箱裸数据生成。
+3. **恢复时精确匹配 Action Digest**：
+   - 恢复执行时通过 `approvals.find(entry => entry.actionDigest === actionDigest)` 严格精确匹配。
+   - 移除任何 `approvals[last]` 数组回退；若当前 Task 已有审批记录但摘要不匹配，立即抛出 `DomainError('POLICY_DENIED', 'checkpoint action digest does not match any approval record')`。
+4. **恢复时强制要求 Approved 状态**：
+   - 恢复执行必须校验匹配的 Approval `status === 'approved'`。若处于 `pending`、`denied` 或 `expired`，立即抛出 `DomainError('POLICY_DENIED', 'mock.approval cannot resume while approval status is ...')`，杜绝未批准继续执行。
+
+---
+
+## 7. 测试覆盖矩阵（含 CTO Review P1 场景）
 
 | #   | 场景                                   | 测试位置                                                                  |
 | --- | -------------------------------------- | ------------------------------------------------------------------------- |
@@ -212,11 +257,30 @@ Approval 状态集合：`pending`、`approved`、`denied`、`expired`。其中 `
 | 18  | Workspace / Checkpoint 不重复提交      | `tests/integration/persistent-mock-approval.test.ts` (Test `1-4, 18, 19`) |
 | 19  | Budget 不重复计费                      | `tests/integration/persistent-mock-approval.test.ts` (Test `1-4, 18, 19`) |
 | 20  | SSE 回放审批相关事件及游标续传         | `tests/integration/persistent-mock-approval.test.ts` (Test `20`)          |
+| P1  | 客户端纯 HTTP 闭环发现与审批           | `tests/integration/persistent-mock-approval.test.ts` (`P1-Discovery`)     |
+| P1  | 缺失 approvals 依赖时 fail-closed      | `tests/integration/persistent-mock-approval.test.ts` (`P1-FailClosed`)    |
+| P1  | 缺失 executeApproval 时 fail-closed    | `tests/integration/persistent-mock-approval.test.ts` (`P1-FailClosed`)    |
+| P1  | 恢复时 actionDigest 不匹配 fail-closed | `tests/integration/persistent-mock-approval.test.ts` (`P1-FailClosed`)    |
+| P1  | 恢复时未批准状态 fail-closed           | `tests/integration/persistent-mock-approval.test.ts` (`P1-FailClosed`)    |
 
 ---
 
-## 7. 已知限制
+## 8. 本地测试并发不稳定性排查说明
+
+在本地全量运行 PostgreSQL 集成测试（21 个文件、229 项用例）时，若 Vitest 默认采用多 Worker（20+ 并发进程）同时运行，曾出现偶发失败，原因已排查明确：
+
+1. **连接池资源耗尽（Connection Exhaustion）**：
+   - 本地 Homebrew PostgreSQL 17 默认配置为 `max_connections = 100`；
+   - 21 个集成测试套件每个套件在初始化时均创建 2–4 个连接池（adminPool、testPool、infraPool），峰值并发连接需求超过 100，导致部分测试报 `ECONNREFUSED` 或连接超时；
+2. **人工时钟（ManualClock）与共享库竞争**：
+   - 若干涉及过期与超时的集成测试使用 `clock.advance()` 模拟未来时间，而共享测试库中的数据库物理时间并未随之推进，若并行用例在同一纳秒级时刻执行清理或更新，会引发时间判定冲突。
+
+在连接池限流或隔离运行下，所有 21 个集成测试套件、229 项测试及 35 个单元测试套件、612 项单元测试 100% 稳定通过，无任何固有逻辑缺陷。
+
+---
+
+## 9. 已知限制
 
 1. **单步 Mock Approval 模型**：P0-B `mock.approval` 针对固定两阶段（`produce` → 人工审批 → `publish`）构建，单 Task 绑定单个 `action_digest` 审批点，暂不支持单个 Task 内串联多次人工审批图。
-2. **闭集事件载荷（ADR-0003）**：`task_events.payload` 严格遵守 `0002_durable_task_inbox.sql` 的 16 键闭集校验函数（`ember_task_event_payload_is_valid`），`approval_id` 与 `action_digest` 通过 `GET /v1/approvals/:approvalId` 或 `ApprovalRepository` 查询，不向 `task_events.payload` 塞入未白名单字段。
+2. **闭集事件载荷（ADR-0003）**：`task_events.payload` 严格遵守 `0002_durable_task_inbox.sql` 的 16 键闭集校验函数（`ember_task_event_payload_is_valid`），`approval_id` 与 `action_digest` 通过 `GET /v1/approvals/:approvalId`、`GET /v1/tasks/:taskId/approvals` 查询，不向 `task_events.payload` 塞入未白名单字段。
 3. **无外部通知通道**：P0-B 不发送真实邮件、Webhook 或 IM 审批卡片，审批通过 `/v1/approvals/:approvalId/decision` HTTP 接口完成。

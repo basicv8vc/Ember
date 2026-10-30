@@ -1021,4 +1021,242 @@ describe('P0B-08d Persistent Mock Approval — worker crash/recovery, fencing & 
 
     expect(resumedPhases).toEqual(['approval_granted', 'leased', 'started', 'completed']);
   });
+
+  it('P1-Discovery: completes full Task creation, pause, discovery via GET /v1/tasks/:taskId/approvals, and approval purely via HTTP', async () => {
+    // 1. Create task purely via HTTP
+    const createRes = await app.request('/v1/tasks', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN_A}`,
+        'idempotency-key': `p0b08d-pure-http-${randomUUID()}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        agent_id: agentIdA,
+        kind: 'mock.approval',
+        input: {
+          action: 'deploy:pure-http',
+          reason: 'testing pure http discovery and decision loop',
+        },
+      }),
+    });
+    expect(createRes.status).toBe(202);
+    const { task_id: taskId } = (await createRes.json()) as { task_id: string };
+
+    // Initially, no approvals exist yet
+    const initialApprovalsRes = await app.request(`/v1/tasks/${taskId}/approvals`, {
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+    });
+    expect(initialApprovalsRes.status).toBe(200);
+    await expect(initialApprovalsRes.json()).resolves.toEqual({
+      task_id: taskId,
+      approvals: [],
+    });
+
+    // 2. Worker executes produce step and enters waiting_approval
+    await syncClock();
+    const lease1 = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease1?.taskId).toBe(taskId);
+    const handler = buildHandler();
+    const outcome1 = await handler(lease1!, new AbortController().signal);
+    expect(outcome1.type).toBe('committed');
+
+    // 3. Client checks task status via HTTP
+    const getTaskRes = await app.request(`/v1/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+    });
+    expect(getTaskRes.status).toBe(200);
+    const taskBody = (await getTaskRes.json()) as { status: string };
+    expect(taskBody.status).toBe('waiting_approval');
+
+    // 4. Client discovers approval ID via GET /v1/tasks/:taskId/approvals
+    const discoveryRes = await app.request(`/v1/tasks/${taskId}/approvals`, {
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+    });
+    expect(discoveryRes.status).toBe(200);
+    const discoveryBody = (await discoveryRes.json()) as {
+      task_id: string;
+      approvals: Array<{ approval_id: string; status: string; action_digest: string }>;
+    };
+    expect(discoveryBody.task_id).toBe(taskId);
+    expect(discoveryBody.approvals).toHaveLength(1);
+    const discovered = discoveryBody.approvals[0]!;
+    expect(discovered.status).toBe('pending');
+    expect(discovered.approval_id).toBeDefined();
+
+    // Tenant B cannot discover approvals for Tenant A's task
+    const crossTenantRes = await app.request(`/v1/tasks/${taskId}/approvals`, {
+      headers: { authorization: `Bearer ${TOKEN_B}` },
+    });
+    expect(crossTenantRes.status).toBe(404);
+
+    // 5. Client approves via HTTP POST /v1/approvals/:approvalId/decision
+    const decisionRes = await app.request(`/v1/approvals/${discovered.approval_id}/decision`, {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN_A}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ decision: 'approve' }),
+    });
+    expect(decisionRes.status).toBe(200);
+    const decisionBody = (await decisionRes.json()) as {
+      approval_id: string;
+      status: string;
+      task_status: string;
+    };
+    expect(decisionBody.approval_id).toBe(discovered.approval_id);
+    expect(decisionBody.status).toBe('approved');
+    expect(decisionBody.task_status).toBe('queued');
+
+    // 6. Worker resumes execution from checkpoint and completes
+    await syncClock();
+    const lease2 = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease2?.taskId).toBe(taskId);
+    expect(lease2?.leaseEpoch).toBe(2);
+    const outcome2 = await handler(lease2!, new AbortController().signal);
+    expect(outcome2.type).toBe('committed');
+
+    // 7. Verify task reached succeeded and approval status is approved via HTTP
+    const finalTaskRes = await app.request(`/v1/tasks/${taskId}`, {
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+    });
+    expect(finalTaskRes.status).toBe(200);
+    const finalTaskBody = (await finalTaskRes.json()) as { status: string };
+    expect(finalTaskBody.status).toBe('completed');
+
+    const finalApprovalsRes = await app.request(`/v1/tasks/${taskId}/approvals`, {
+      headers: { authorization: `Bearer ${TOKEN_A}` },
+    });
+    expect(finalApprovalsRes.status).toBe(200);
+    const finalApprovalsBody = (await finalApprovalsRes.json()) as {
+      approvals: Array<{ status: string; decided_at: string | null }>;
+    };
+    expect(finalApprovalsBody.approvals[0]?.status).toBe('approved');
+    expect(finalApprovalsBody.approvals[0]?.decided_at).not.toBeNull();
+  });
+
+  it('P1-FailClosed: fails closed when approvals dependency is missing from worker on mock.approval', async () => {
+    const receipt = await tasks.create(
+      ctxA,
+      approvalCommand(
+        agentIdA,
+        `p0b08d-no-deps-${randomUUID()}`,
+        'deploy:no-deps',
+        'missing approval dependency',
+      ),
+    );
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease?.taskId).toBe(receipt.taskId);
+
+    // Build handler explicitly without approvals dependency
+    const handlerNoApprovals = buildHandler({ approvals: undefined });
+    const outcome = await handlerNoApprovals(lease!, new AbortController().signal);
+    expect(outcome).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+    if (outcome.type === 'finish') {
+      await queue.finish(lease!, outcome.outcome);
+    }
+
+    const taskRow = await readTask(db.pool, tenantA.tenantId, receipt.taskId);
+    expect(taskRow.status).toBe('failed');
+
+    // Verify task never created approval or published to workspace
+    const taskApprovals = await approvals.listByTask(ctxA, receipt.taskId);
+    expect(taskApprovals).toHaveLength(0);
+  });
+
+  it('P1-FailClosed: fails closed when executor lacks executeApproval for mock.approval', async () => {
+    const receipt = await tasks.create(
+      ctxA,
+      approvalCommand(
+        agentIdA,
+        `p0b08d-no-exec-${randomUUID()}`,
+        'deploy:no-exec',
+        'missing executeApproval method',
+      ),
+    );
+    await syncClock();
+    const lease = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease?.taskId).toBe(receipt.taskId);
+
+    // Build executor without executeApproval
+    const baseExecutor = new DeterministicExecutor();
+    const handlerNoExecuteApproval = buildHandler({
+      executor: {
+        execute: (c, r, s) => baseExecutor.execute(c, r, s),
+      },
+    });
+    const outcome = await handlerNoExecuteApproval(lease!, new AbortController().signal);
+    expect(outcome).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+    if (outcome.type === 'finish') {
+      await queue.finish(lease!, outcome.outcome);
+    }
+
+    const taskRow = await readTask(db.pool, tenantA.tenantId, receipt.taskId);
+    expect(taskRow.status).toBe('failed');
+  });
+
+  it('P1-FailClosed: fails closed on resume when checkpoint action digest does not match any approval record', async () => {
+    const { taskId, approval } = await createAndPauseForApproval('mismatched-digest');
+
+    // Delete the original approval record and insert one with a mismatched action_digest
+    await db.pool.query('DELETE FROM approvals WHERE id = $1', [approval.approvalId]);
+    const fakeDigest = '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+    await db.pool.query(
+      `INSERT INTO approvals (
+        id, tenant_id, task_id, run_id, lease_epoch, action_digest, status, expires_at, decided_at, created_at, updated_at
+      ) VALUES ($1, $2, $3, $4, $5, $6, 'approved', now() + interval '5 minutes', now(), now(), now())`,
+      [
+        approval.approvalId,
+        tenantA.tenantId,
+        taskId,
+        approval.runId,
+        approval.leaseEpoch,
+        fakeDigest,
+      ],
+    );
+
+    // Put task back into queued for resume
+    await db.pool.query(`UPDATE tasks SET status = 'queued', next_run_at = now() WHERE id = $1`, [
+      taskId,
+    ]);
+
+    await syncClock();
+    const lease2 = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease2?.taskId).toBe(taskId);
+
+    const handler = buildHandler();
+    const outcome = await handler(lease2!, new AbortController().signal);
+    expect(outcome).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+    if (outcome.type === 'finish') {
+      await queue.finish(lease2!, outcome.outcome);
+    }
+
+    const taskRow = await readTask(db.pool, tenantA.tenantId, taskId);
+    expect(taskRow.status).toBe('failed');
+  });
+
+  it('P1-FailClosed: fails closed on resume when approval is not in approved status (e.g. pending or denied)', async () => {
+    const { taskId } = await createAndPauseForApproval('non-approved-resume');
+
+    // Force task status to queued while approval is still pending
+    await db.pool.query(`UPDATE tasks SET status = 'queued', next_run_at = now() WHERE id = $1`, [
+      taskId,
+    ]);
+
+    await syncClock();
+    const lease2 = await queue.claimNext(WORKER_ID, clock.now());
+    expect(lease2?.taskId).toBe(taskId);
+
+    const handler = buildHandler();
+    const outcome = await handler(lease2!, new AbortController().signal);
+    expect(outcome).toEqual({ type: 'finish', outcome: 'failed_terminal' });
+    if (outcome.type === 'finish') {
+      await queue.finish(lease2!, outcome.outcome);
+    }
+
+    const taskRow = await readTask(db.pool, tenantA.tenantId, taskId);
+    expect(taskRow.status).toBe('failed');
+  });
 });

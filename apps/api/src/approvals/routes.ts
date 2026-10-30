@@ -3,6 +3,7 @@ import {
   parseApprovalDecisionRequestDto,
   toApprovalDecisionReceiptDto,
   toApprovalViewDto,
+  toTaskApprovalsDto,
 } from '@ember/contracts';
 import type { Id } from '@ember/domain';
 import { Hono } from 'hono';
@@ -10,6 +11,7 @@ import type { AppBindings, AppContext } from '../http/app-context.js';
 import { readJsonBody, type BodyRejectionReason } from '../http/bounded-body.js';
 import { respondInvalidArgument, respondNotFound } from '../http/error-mapping.js';
 import { MAX_TASK_BODY_BYTES } from '../tasks/constants.js';
+import type { TaskStore } from '../tasks/task-store.js';
 import type { ApprovalHttpStore } from './approval-store.js';
 
 export const APPROVALS_PATH = '/v1/approvals';
@@ -25,23 +27,46 @@ const BODY_REJECTION_MESSAGES: Readonly<Record<BodyRejectionReason, string>> = O
 
 export interface ApprovalRouteDependencies {
   readonly approvals: ApprovalHttpStore;
+  readonly tasks: TaskStore;
 }
 
-function parseApprovalId(c: AppContext): Id | Response {
-  const parsed = IdSchema.safeParse(c.req.param('approvalId'));
+function parseRouteId(c: AppContext, parameter: string): Id | Response {
+  const parsed = IdSchema.safeParse(c.req.param(parameter));
 
   if (!parsed.success) {
-    return respondInvalidArgument(c, 'approvalId must be a UUID');
+    return respondInvalidArgument(c, `${parameter} must be a UUID`);
   }
 
   return parsed.data;
 }
 
-/** Build the tenant-authenticated Approval routes (`/v1/approvals`). */
+function parseApprovalId(c: AppContext): Id | Response {
+  return parseRouteId(c, 'approvalId');
+}
+
+/** Build the tenant-authenticated Approval routes. Mounted under `/v1`. */
 export function createApprovalRoutes(deps: ApprovalRouteDependencies): Hono<AppBindings> {
   const routes = new Hono<AppBindings>();
 
-  routes.get('/:approvalId', async (c) => {
+  routes.get('/tasks/:taskId/approvals', async (c) => {
+    const taskId = parseRouteId(c, 'taskId');
+
+    if (taskId instanceof Response) {
+      return taskId;
+    }
+
+    const auth = c.get('auth');
+    const task = await deps.tasks.get(auth, taskId);
+
+    if (task === null) {
+      return respondNotFound(c, 'task is not visible in this tenant');
+    }
+
+    const approvals = await deps.approvals.listByTask(auth, taskId);
+    return c.json(toTaskApprovalsDto(taskId, approvals), 200);
+  });
+
+  routes.get('/approvals/:approvalId', async (c) => {
     const approvalId = parseApprovalId(c);
 
     if (approvalId instanceof Response) {
@@ -58,7 +83,7 @@ export function createApprovalRoutes(deps: ApprovalRouteDependencies): Hono<AppB
     return c.json(toApprovalViewDto(approval), 200);
   });
 
-  routes.post('/:approvalId/decision', async (c) => {
+  routes.post('/approvals/:approvalId/decision', async (c) => {
     const approvalId = parseApprovalId(c);
 
     if (approvalId instanceof Response) {

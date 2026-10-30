@@ -40,6 +40,12 @@ const LEASE_MS = 5_000;
 
 const PRODUCE = stepCost('produce');
 const PUBLISH = stepCost('publish');
+const PARTIAL_PRODUCE = Object.freeze({
+  steps: 0,
+  units: 1,
+  elapsedMs: 10,
+  concurrencySlots: 0,
+});
 
 /** No artificial limits: used when a case is about accounting rather than refusal. */
 const PERMISSIVE: BudgetPolicy = Object.freeze({
@@ -580,11 +586,95 @@ describe('P0B-08b crash and retry accounting', () => {
     // Re-reporting the dead attempt's consumption neither charges nor refunds a second time.
     const lateSettle = await ledger.settle(first.grant, {
       operationId: produceId,
-      consumed: PRODUCE,
+      consumed: PARTIAL_PRODUCE,
     });
 
     expect(lateSettle).toMatchObject({ state: 'expired', consumed: PRODUCE });
     expect((await ledger.snapshot(first.grant)).runUnits).toBe(5);
+  });
+});
+
+describe('P0B-08b expiry wins over a late terminal request', () => {
+  it('charges the full reservation when a partial settlement arrives before cleanup', async () => {
+    const attempt = await claim('budget-expired-unswept-settle');
+    const ledger = ledgerWith();
+    const operationId = 'step:produce:late-settle:1';
+
+    await ledger.reserve(attempt.grant, { operationId, cost: PRODUCE });
+    await expireReservation(attempt.grant.runId);
+
+    // No later reserve has swept this row. The database-time transition still sees expiry and
+    // refuses to reduce the charge based on an old Worker report.
+    const settled = await ledger.settle(attempt.grant, {
+      operationId,
+      consumed: PARTIAL_PRODUCE,
+    });
+
+    expect(settled).toMatchObject({ state: 'expired', consumed: PRODUCE });
+    expect((await operations(attempt.grant.runId))[0]).toMatchObject({
+      state: 'expired',
+      reserved_units: String(PRODUCE.units),
+      consumed_units: String(PRODUCE.units),
+    });
+    expect(await ledger.snapshot(attempt.grant)).toMatchObject({
+      runUnits: PRODUCE.units,
+      concurrentSlots: 0,
+    });
+  });
+
+  it('charges the full reservation when release arrives after expiry but before cleanup', async () => {
+    const attempt = await claim('budget-expired-unswept-release');
+    const ledger = ledgerWith();
+    const operationId = 'step:produce:late-release:1';
+
+    await ledger.reserve(attempt.grant, { operationId, cost: PRODUCE });
+    await expireReservation(attempt.grant.runId);
+
+    const released = await ledger.release(attempt.grant, { operationId });
+
+    expect(released).toMatchObject({ state: 'expired', consumed: PRODUCE });
+    await expect(ledger.release(attempt.grant, { operationId })).resolves.toMatchObject({
+      state: 'expired',
+      consumed: PRODUCE,
+      replayed: true,
+    });
+    expect((await operations(attempt.grant.runId))[0]).toMatchObject({
+      state: 'expired',
+      reserved_units: String(PRODUCE.units),
+      consumed_units: String(PRODUCE.units),
+    });
+  });
+
+  it('converges to the same full charge when late settlement races a reserve sweep', async () => {
+    const oldAttempt = await claim('budget-expiry-race-old-worker');
+    const ledger = ledgerWith();
+    const oldOperationId = 'step:produce:expiry-race:old';
+
+    await ledger.reserve(oldAttempt.grant, { operationId: oldOperationId, cost: PRODUCE });
+    await expireReservation(oldAttempt.grant.runId);
+
+    // A new Run in the same Tenant triggers cleanup while the old Worker reports a smaller
+    // actual amount. Both transactions contend on the old operation row in PostgreSQL.
+    const newAttempt = await claim('budget-expiry-race-new-worker');
+    const [lateSettle, newReservation] = await Promise.all([
+      ledger.settle(oldAttempt.grant, {
+        operationId: oldOperationId,
+        consumed: PARTIAL_PRODUCE,
+      }),
+      ledger.reserve(newAttempt.grant, {
+        operationId: 'step:publish:expiry-race:new',
+        cost: PUBLISH,
+      }),
+    ]);
+
+    expect(lateSettle).toMatchObject({ state: 'expired', consumed: PRODUCE });
+    expect(newReservation.state).toBe('reserved');
+    expect((await operations(oldAttempt.grant.runId))[0]).toMatchObject({
+      state: 'expired',
+      reserved_units: String(PRODUCE.units),
+      consumed_units: String(PRODUCE.units),
+    });
+    expect(await ledger.snapshot(oldAttempt.grant)).toMatchObject({ runUnits: PRODUCE.units });
   });
 });
 

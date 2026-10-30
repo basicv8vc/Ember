@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { MAX_BUDGET_POLICY_VERSION } from '@ember/execution';
 import type { LeasedRun, RunTerminalStatus } from '@ember/domain';
 import { loadWorkerConfig, WorkerConfigError } from '../../apps/worker/src/config.js';
 import { createWorkerLogger } from '../../apps/worker/src/logger.js';
@@ -489,6 +490,12 @@ describe('P0B-08b budget policy configuration', () => {
       maxTenantDailyUnits: 0,
       maxConcurrentSlots: 0,
     });
+
+    expect(
+      loadWorkerConfig({
+        EMBER_WORKER_BUDGET_POLICY_VERSION: String(MAX_BUDGET_POLICY_VERSION),
+      }).budget.policyVersion,
+    ).toBe(MAX_BUDGET_POLICY_VERSION);
   });
 
   it('rejects limits that could not be enforced exactly', () => {
@@ -501,6 +508,11 @@ describe('P0B-08b budget policy configuration', () => {
     expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_POLICY_VERSION: '-1' })).toThrow(
       WorkerConfigError,
     );
+    expect(() =>
+      loadWorkerConfig({
+        EMBER_WORKER_BUDGET_POLICY_VERSION: String(MAX_BUDGET_POLICY_VERSION + 1),
+      }),
+    ).toThrow(WorkerConfigError);
     expect(() => loadWorkerConfig({ EMBER_WORKER_BUDGET_POLICY_ID: '' })).toThrow(
       WorkerConfigError,
     );

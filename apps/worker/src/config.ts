@@ -1,5 +1,5 @@
 import { WorkerIdSchema, resolveLeaseQueueConfig, type LeaseQueueConfig } from '@ember/postgres';
-import type { BudgetPolicy } from '@ember/execution';
+import { MAX_BUDGET_POLICY_VERSION, type BudgetPolicy } from '@ember/execution';
 import { z } from 'zod';
 
 export class WorkerConfigError extends Error {
@@ -67,7 +67,7 @@ const workerEnvSchema = z.object({
     .number()
     .int()
     .min(0)
-    .max(Number.MAX_SAFE_INTEGER)
+    .max(MAX_BUDGET_POLICY_VERSION)
     .default(1),
   EMBER_WORKER_BUDGET_MAX_RUN_STEPS: z.coerce
     .number()

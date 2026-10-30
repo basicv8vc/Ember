@@ -41,8 +41,10 @@ import { lockAndAssertLive, postLockInstant } from './result-committer.js';
  * reserve: Tenant advisory lock → tasks row → runs row → clock_timestamp()
  *            → lease/cancel/deadline re-check → budget rows → sweep → resolve replay
  *            → aggregate usage → evaluateBudget → INSERT reservation
- * settle:  row lock on one operation → consumed <= reserved → UPDATE state='settled'
- * release: row lock on one operation → UPDATE state='released'
+ * settle:  row lock on one operation → database-time terminal decision
+ *            → settled(actual) if live, expired(full) if past the lease boundary
+ * release: row lock on one operation → database-time terminal decision
+ *            → released(0) if live, expired(full) if past the lease boundary
  * ```
  *
  * The shared row order after the budget lock is Task → Run, which matches the result committer.
@@ -144,21 +146,70 @@ SELECT ${OPERATION_COLUMNS}
 `;
 
 const SETTLE_OPERATION_SQL = `
-UPDATE budget_operations
-   SET state = 'settled',
-       consumed_steps = $4,
-       consumed_units = $5,
-       consumed_elapsed_ms = $6,
-       consumed_slots = $7,
-       settled_at = clock_timestamp()
- WHERE tenant_id = $1 AND run_id = $2 AND operation_id = $3 AND state = 'reserved'
+WITH decision_clock AS MATERIALIZED (
+  SELECT clock_timestamp() AS decision_at
+)
+UPDATE budget_operations AS operation
+   SET state = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN 'expired'
+         ELSE 'settled'
+       END,
+       consumed_steps = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_steps
+         ELSE $4
+       END,
+       consumed_units = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_units
+         ELSE $5
+       END,
+       consumed_elapsed_ms = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_elapsed_ms
+         ELSE $6
+       END,
+       consumed_slots = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_slots
+         ELSE $7
+       END,
+       settled_at = decision.decision_at
+  FROM decision_clock AS decision
+ WHERE operation.tenant_id = $1
+   AND operation.run_id = $2
+   AND operation.operation_id = $3
+   AND operation.state = 'reserved'
 RETURNING ${OPERATION_COLUMNS}
 `;
 
 const RELEASE_OPERATION_SQL = `
-UPDATE budget_operations
-   SET state = 'released', settled_at = clock_timestamp()
- WHERE tenant_id = $1 AND run_id = $2 AND operation_id = $3 AND state = 'reserved'
+WITH decision_clock AS MATERIALIZED (
+  SELECT clock_timestamp() AS decision_at
+)
+UPDATE budget_operations AS operation
+   SET state = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN 'expired'
+         ELSE 'released'
+       END,
+       consumed_steps = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_steps
+         ELSE 0
+       END,
+       consumed_units = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_units
+         ELSE 0
+       END,
+       consumed_elapsed_ms = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_elapsed_ms
+         ELSE 0
+       END,
+       consumed_slots = CASE
+         WHEN operation.expires_at <= decision.decision_at THEN operation.reserved_slots
+         ELSE 0
+       END,
+       settled_at = decision.decision_at
+  FROM decision_clock AS decision
+ WHERE operation.tenant_id = $1
+   AND operation.run_id = $2
+   AND operation.operation_id = $3
+   AND operation.state = 'reserved'
 RETURNING ${OPERATION_COLUMNS}
 `;
 
@@ -555,12 +606,14 @@ export class PostgresBudgetLedger implements BudgetLedger {
   }
 
   /**
-   * Record what an operation actually consumed.
+   * Record what an operation actually consumed while its reservation is live.
    *
-   * There is deliberately no fence re-validation here: the operation already ran, so a lease
-   * that expired mid-step must still be able to record its consumption instead of losing it to
-   * a sweep. The row's own lease epoch is the fence, and a settlement can only shrink the
-   * reservation it belongs to.
+   * There is deliberately no Task/Run lock or Tenant advisory lock here: the row's lease epoch
+   * fences the caller, and the operation-row lock serializes settlement against the expiry
+   * sweep. The terminal SQL captures one authoritative database instant after acquiring that
+   * row lock. At/after `expires_at`, it charges the full reservation as `expired`; before it,
+   * it records the reported amount. Either ordering with a pending sweep therefore yields the
+   * same full expired charge.
    */
   async settle(grant: RunGrant, request: BudgetSettleRequest): Promise<BudgetOperation> {
     const scope = budgetScope(grant);
@@ -582,8 +635,8 @@ export class PostgresBudgetLedger implements BudgetLedger {
       }
 
       if (current.state === 'expired') {
-        // Already charged in full by the sweep. Re-reporting the recorded amount is the only
-        // safe answer: charging again would double count, refunding would reward a crash.
+        // Already charged in full by a prior settle, release, or sweep. Re-reporting the
+        // recorded amount is the only safe answer: do not double count or refund a dead lease.
         return current;
       }
 
@@ -623,11 +676,11 @@ export class PostgresBudgetLedger implements BudgetLedger {
   }
 
   /**
-   * Prove that a reserved operation never ran and hand the quota back.
+   * Prove that a live reserved operation never ran and hand the quota back.
    *
-   * Releasing a settled or expired operation is refused rather than ignored: it would either
-   * erase consumption that happened or refund a lease that died, and both are directions this
-   * design explicitly refuses to take.
+   * Releasing a settled operation is refused rather than ignored: it would erase consumption
+   * that happened. An unswept reservation whose expiry has passed is atomically marked
+   * `expired` and charged in full instead of being released.
    */
   async release(grant: RunGrant, request: BudgetReleaseRequest): Promise<BudgetOperation> {
     const scope = budgetScope(grant);
@@ -640,7 +693,11 @@ export class PostgresBudgetLedger implements BudgetLedger {
         return current;
       }
 
-      if (current.state === 'settled' || current.state === 'expired') {
+      if (current.state === 'expired') {
+        return current;
+      }
+
+      if (current.state === 'settled') {
         throw new DomainError(
           'INVALID_ARGUMENT',
           `budget_operation_already_charged: operation=${operationId} state=${current.state}`,

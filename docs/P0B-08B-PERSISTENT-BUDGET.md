@@ -73,8 +73,9 @@ reserve:  pg_advisory_xact_lock('ember.budget', tenant)
           → 聚合 Run / 租户当日 / 并发 gauge
           → evaluateBudget（P0B-08a 纯函数）
           → INSERT 新预留
-settle:   行锁一行预留 → consumed <= reserved → UPDATE state='settled'
-release:  行锁一行预留 → UPDATE state='released'
+settle:   行锁一行预留 → consumed <= reserved → 单条 SQL 以 clock_timestamp() 作终态判定：
+          未到期按实际值结算，到期全额标记 expired
+release:  行锁一行预留 → 同一条 SQL 以 clock_timestamp() 作终态判定：未到期标记 released，到期全额标记 expired
 ```
 
 关键顺序性质：
@@ -84,8 +85,15 @@ release:  行锁一行预留 → UPDATE state='released'
 - **无新增死锁环**：Reserve 在现有 Task → Run 行锁之前加 Tenant advisory lock；heartbeat
   与 result commit 都不反向获取该 advisory lock，settle/release 只持有一条预算行锁；
 - **`settle` / `release` 不取 advisory lock**：已经执行完的操作绝不排在别的 Run 的决策后面；
-- **无 fence 复检的结算**：跳过结算会让已发生的消费凭空消失，因此 `settle` 以「行自身的
-  lease epoch」为栅栏——只有同一代次能结算，且只能收缩。
+- **到期边界与并发清扫**：`settle` / `release` 先锁操作行，再由单条 SQL 捕获一次
+  `clock_timestamp()` 并作终态决定。决定时尚未到 `expires_at`，`settle` 记录实际消费、
+  `release` 归零；已到期则两者都全额记为 `expired`。同 Tenant 的 `reserve` 清扫与迟到
+  Worker 共用同一行锁，故清扫和结算无论谁先完成，已到期操作都收敛为同一全额费用。
+  只有行所属的 `lease_epoch` 能发起尚未终结操作的转换。
+
+终态的时间判据是预算行锁取得后的数据库判定时刻，不是 Worker 发起请求或调用 API 的
+时刻。边界使用 `expires_at <= decision_at`：恰好到期也按全额 `expired` 处理。这有意优先
+避免把已死亡租约的预留退回额度；即使迟到 Worker 报告了更低消费，也不改变该规则。
 
 ## 4. 可信价目表与幂等键
 
@@ -145,7 +153,8 @@ handle(run, signal)
 | 结算重复提交（金额相同）                | 返回已记录状态，`replayed: true`                                            |
 | 结算金额与已记录不同                    | `INVALID_ARGUMENT` / `budget_settlement_conflict`                           |
 | 结算/释放已 `released` 的操作           | `INVALID_ARGUMENT` / `budget_operation_released`                            |
-| 结算/释放已 `expired` 的操作            | 返回当前行（已全额计费，既不重复计费也不退款）                              |
+| 到期但尚未清扫时 `settle` / `release`   | 操作行锁后由数据库时间判定；原子转为 `expired` 并全额计费                   |
+| 重复 `settle` / `release` 已 `expired`  | 返回当前全额计费行；既不重复计费也不退款                                    |
 | 结算/释放已 `settled` 的操作            | 返回当前行；`release` 则 `budget_operation_already_charged`                 |
 | 用另一代次结算同一行                    | `STALE_LEASE`                                                               |
 | 跨 UTC 日重放同一 operation id          | 行本身仍在（终态）→ `budget_operation_already_terminal`，不会变成新一天的账 |
@@ -156,17 +165,21 @@ handle(run, signal)
 ## 7. 配置（Worker 可信配置，不是 Task 字段）
 
 `apps/worker/src/config.ts` 读取以下环境变量；`0` 合法且显式失败关闭，负数、小数、非数值、
-空 `policyId` 与超出安全整数的值一律让 Worker 拒绝启动（`WorkerConfigError`）：
+空 `policyId` 与超出各自数据库安全范围的值一律让 Worker 拒绝启动（`WorkerConfigError`）：
 
 | 变量                                         | 默认值                | 含义                           |
 | -------------------------------------------- | --------------------- | ------------------------------ |
 | `EMBER_WORKER_BUDGET_POLICY_ID`              | `p0b08b-simulated-v1` | 策略标识（审计用，1–128 字符） |
-| `EMBER_WORKER_BUDGET_POLICY_VERSION`         | `1`                   | 策略版本（非负安全整数）       |
+| `EMBER_WORKER_BUDGET_POLICY_VERSION`         | `1`                   | 策略版本（`0..2147483647`）    |
 | `EMBER_WORKER_BUDGET_MAX_RUN_STEPS`          | `8`                   | 单 Run 步骤上限                |
 | `EMBER_WORKER_BUDGET_MAX_RUN_UNITS`          | `100`                 | 单 Run 单位上限                |
 | `EMBER_WORKER_BUDGET_MAX_RUN_ELAPSED_MS`     | `120000`              | 单 Run 累计耗时上限            |
 | `EMBER_WORKER_BUDGET_MAX_TENANT_DAILY_UNITS` | `5000`                | 租户当日单位上限               |
 | `EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS`   | `8`                   | 租户并发槽位上限               |
+
+`EMBER_WORKER_BUDGET_POLICY_VERSION` 范围为 `0..2147483647`，与 PostgreSQL `integer`
+列的非负范围一致；超出时 Worker 在启动时拒绝配置，纯 Budget Policy 校验也会拒绝，不会
+留到 migration 写入时才失败。
 
 `loadWorkerConfig` 返回的 `budget` 是冻结对象，`PostgresBudgetLedger` 在构造时持有它：
 判定与写行在同一个事务内，配置事后被改写也无法影响已经做出的决定。
@@ -196,6 +209,8 @@ Worker 会让所有上限重新变成建议。
   - 12 个并发 `reserve` 争夺 1 个槽位 → 恰好 1 个成功（advisory lock）；
   - 崩溃与重试：`expires_at` 过期后全额计费（`expired`）、死亡尝试不能再结算（`STALE_LEASE`）、
     重试在 1 个槽位的策略下仍能拿到槽位（证明清扫归还了槽位）、重试按自己的账计费；
+  - 过期边界：未清扫的过期预留收到部分 `settle` 或 `release` 都全额变为 `expired`；迟到
+    settlement 与新 Run 的 reserve 清扫在真实 PostgreSQL 上并发时仍收敛为全额费用；
   - 归还语义：`released` 之后不可结算、已结算不可退款；
   - UTC 日：昨天的账不占今天的租户额度、Run 累计不因日期重置、跨日重放不产生第二笔账；
   - 租户隔离：相同 operation id 在两个租户下互不可见、不共享并发 gauge；

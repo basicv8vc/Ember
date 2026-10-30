@@ -100,6 +100,9 @@ export const BUDGET_GUARD_LIMITS = Object.freeze({
   maxLedgerOperations: 1_024,
 });
 
+/** `policy_version` is persisted as PostgreSQL `integer` by migration 0006. */
+export const MAX_BUDGET_POLICY_VERSION = 2_147_483_647;
+
 /**
  * Trusted, server-side simulated budget policy.
  *
@@ -1033,7 +1036,12 @@ function parsePolicyId(value: unknown): string {
 
 /** Version mirrors `parsePolicyVersion` in `validation.ts`: rejected, never coerced. */
 function parsePolicyVersion(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+  if (
+    typeof value !== 'number' ||
+    !Number.isSafeInteger(value) ||
+    value < 0 ||
+    value > MAX_BUDGET_POLICY_VERSION
+  ) {
     return fail('policy.policyVersion', 'invalid_policy_version');
   }
 

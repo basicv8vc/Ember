@@ -1,10 +1,24 @@
 import { randomUUID } from 'node:crypto';
+import { spawn, type ChildProcess } from 'node:child_process';
+import type { Server as HttpServer } from 'node:http';
+import { createServer as createTcpServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
+import { serve, type ServerType } from '@hono/node-server';
 import { TaskEventDtoSchema } from '@ember/contracts';
 import { PostgresAgentRepository, PostgresTaskRepository } from '@ember/postgres';
+import { Hono } from 'hono';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { createApp } from '../../apps/api/src/app.js';
 import { createDevTokenAuthenticator } from '../../apps/api/src/auth/bearer-authenticator.js';
+import { requireTenantAuth } from '../../apps/api/src/auth/auth-middleware.js';
+import type { AppBindings } from '../../apps/api/src/http/app-context.js';
+import {
+  TaskEventStreamRegistry,
+  type TaskEventStreamOptions,
+} from '../../apps/api/src/tasks/event-stream.js';
+import { TASKS_PATH } from '../../apps/api/src/tasks/constants.js';
+import { createTaskRoutes } from '../../apps/api/src/tasks/routes.js';
 import type { TaskStore } from '../../apps/api/src/tasks/task-store.js';
 import { appendTaskEvent } from '../../packages/postgres/src/repositories/event-store.js';
 import { chatCommand, createTenantFixture, type TenantFixture } from './support/fixtures.js';
@@ -51,6 +65,193 @@ function appFor(store: TaskStore = repo): ReturnType<typeof createApp> {
       },
     ]),
     taskStore: store,
+  });
+}
+
+function socketAppFor(
+  store: TaskStore,
+  streamOptions: TaskEventStreamOptions,
+  streamRegistry: TaskEventStreamRegistry,
+): Hono<AppBindings> {
+  const app = new Hono<AppBindings>();
+  const authenticator = createDevTokenAuthenticator([
+    {
+      token: tokenA,
+      tenantId: tenantA.tenantId,
+      principalId: tenantA.principalId,
+      policyVersion: 1,
+    },
+  ]);
+  const tenantAuth = requireTenantAuth({ authenticator });
+  app.use(TASKS_PATH, tenantAuth);
+  app.use(`${TASKS_PATH}/*`, tenantAuth);
+  app.route(TASKS_PATH, createTaskRoutes({ store, streamOptions, streamRegistry }));
+  return app;
+}
+
+class AbortableBlockingWait {
+  private resolveEntered: (() => void) | undefined;
+  private readonly entered = new Promise<void>((resolve) => {
+    this.resolveEntered = resolve;
+  });
+  pendingCount = 0;
+
+  readonly wait: NonNullable<TaskEventStreamOptions['wait']> = (_milliseconds, signal) => {
+    if (signal.aborted) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      this.pendingCount += 1;
+      this.resolveEntered?.();
+      const onAbort = (): void => {
+        signal.removeEventListener('abort', onAbort);
+        this.pendingCount -= 1;
+        resolve();
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  };
+
+  waitUntilEntered(): Promise<void> {
+    return this.entered;
+  }
+}
+
+async function listen(app: Hono<AppBindings>): Promise<{ server: ServerType; url: string }> {
+  return new Promise((resolve, reject) => {
+    const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 }, (info) => {
+      resolve({ server, url: `http://127.0.0.1:${info.port}` });
+    });
+    server.once('error', reject);
+  });
+}
+
+async function closeServer(server: ServerType): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+  });
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number,
+  label: string,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`${label} timed out after ${milliseconds}ms`)),
+      milliseconds,
+    );
+  });
+
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function freeTcpPort(): Promise<number> {
+  const server = createTcpServer();
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', resolve);
+  });
+  const address = server.address();
+  if (address === null || typeof address === 'string') {
+    throw new Error('could not determine a temporary TCP port');
+  }
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => (error === undefined ? resolve() : reject(error)));
+  });
+  return address.port;
+}
+
+function quotePgIdentifier(identifier: string): string {
+  return `"${identifier.replaceAll('"', '""')}"`;
+}
+
+async function createApiDatabaseLogin(): Promise<{
+  readonly connectionString: string;
+  cleanup(): Promise<void>;
+}> {
+  const sourceUrl = process.env.TEST_DATABASE_URL;
+  if (sourceUrl === undefined) {
+    throw new Error('TEST_DATABASE_URL is required for the API shutdown integration test');
+  }
+
+  const role = `ember_sse_${randomUUID().replaceAll('-', '')}`;
+  const password = randomUUID().replaceAll('-', '');
+  const databaseName = decodeURIComponent(new URL(sourceUrl).pathname.slice(1));
+  const quotedRole = quotePgIdentifier(role);
+  const quotedDatabase = quotePgIdentifier(databaseName);
+  const quotedSchema = quotePgIdentifier(db.schema);
+
+  await db.adminPool.query(`CREATE ROLE ${quotedRole} LOGIN PASSWORD '${password}'`);
+  try {
+    await db.adminPool.query(`GRANT USAGE ON SCHEMA ${quotedSchema} TO ${quotedRole}`);
+    await db.adminPool.query(
+      `GRANT SELECT ON ALL TABLES IN SCHEMA ${quotedSchema} TO ${quotedRole}`,
+    );
+    await db.adminPool.query(
+      `ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} SET search_path TO ${quotedSchema}`,
+    );
+  } catch (error) {
+    await db.adminPool.query(`DROP ROLE ${quotedRole}`).catch(() => undefined);
+    throw error;
+  }
+
+  const connectionUrl = new URL(sourceUrl);
+  connectionUrl.username = role;
+  connectionUrl.password = password;
+
+  return {
+    connectionString: connectionUrl.toString(),
+    cleanup: async () => {
+      await db.adminPool.query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`);
+      await db.adminPool.query(`DROP OWNED BY ${quotedRole}`);
+      await db.adminPool.query(`DROP ROLE ${quotedRole}`);
+    },
+  };
+}
+
+function waitForChildOutput(
+  child: ChildProcess,
+  stdout: () => string,
+  stderr: () => string,
+  expected: string,
+  milliseconds: number,
+): Promise<void> {
+  if (stdout().includes(expected)) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error): void => {
+      clearTimeout(timer);
+      child.stdout?.removeListener('data', inspect);
+      child.removeListener('exit', exited);
+      if (error === undefined) {
+        resolve();
+      } else {
+        reject(error);
+      }
+    };
+    const inspect = (): void => {
+      if (stdout().includes(expected)) {
+        finish();
+      }
+    };
+    const exited = (): void =>
+      finish(new Error(`API process exited before ${expected}; stderr: ${stderr()}`));
+    const timer = setTimeout(
+      () => finish(new Error(`API process did not log ${expected}; stderr: ${stderr()}`)),
+      milliseconds,
+    );
+    child.stdout?.on('data', inspect);
+    child.once('exit', exited);
   });
 }
 
@@ -238,4 +439,160 @@ describe('GET /v1/tasks/:taskId/stream with PostgreSQL', () => {
     expect(foreign.status).toBe(404);
     expect(foreign.headers.get('content-type')).not.toContain('text/event-stream');
   });
+
+  it('stops PostgreSQL polling when a real Node HTTP client socket disconnects', async () => {
+    const taskId = await createTaskWithEvents(0);
+    const registry = new TaskEventStreamRegistry();
+    const blockingWait = new AbortableBlockingWait();
+    const counts = { get: 0, listEvents: 0 };
+    const store: TaskStore = {
+      get: async (context, id) => {
+        counts.get += 1;
+        return repo.get(context, id);
+      },
+      listEvents: async (context, id, options) => {
+        counts.listEvents += 1;
+        return repo.listEvents(context, id, options);
+      },
+      create: (context, command) => repo.create(context, command),
+    };
+    const app = socketAppFor(
+      store,
+      {
+        pollIntervalMs: 60_000,
+        heartbeatIntervalMs: 120_000,
+        now: () => 0,
+        wait: blockingWait.wait,
+      },
+      registry,
+    );
+    const { server, url } = await listen(app);
+    const disconnect = new AbortController();
+    let stream: SseReader | undefined;
+
+    try {
+      const response = await fetch(`${url}/v1/tasks/${taskId}/stream`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+        signal: disconnect.signal,
+      });
+      expect(response.status).toBe(200);
+      stream = readerFor(response);
+      const persistedEvents = await repo.listEvents(authA(), taskId, { after: 0, limit: 100 });
+      expect(await readSequences(stream, persistedEvents.length)).toEqual(
+        persistedEvents.map((event) => event.sequence),
+      );
+
+      await blockingWait.waitUntilEntered();
+      expect(blockingWait.pendingCount).toBe(1);
+      const pendingRead = stream.reader.read().then(
+        (result) => (result.done ? 'closed' : 'unexpected-frame'),
+        () => 'aborted',
+      );
+      disconnect.abort();
+
+      const [idle, readResult] = await withTimeout(
+        Promise.all([registry.whenIdle(), pendingRead]),
+        4_000,
+        'socket disconnect cleanup',
+      );
+      void idle;
+      expect(readResult).not.toBe('unexpected-frame');
+      expect(blockingWait.pendingCount).toBe(0);
+      expect(counts).toEqual({ get: 1, listEvents: 1 });
+
+      const stillServing = await fetch(`${url}/v1/tasks/${taskId}`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      expect(stillServing.status).toBe(200);
+    } finally {
+      disconnect.abort();
+      registry.closeAll();
+      await stream?.reader.cancel().catch(() => undefined);
+      (server as HttpServer).closeAllConnections();
+      await closeServer(server);
+    }
+  });
+
+  it('closes an active SSE socket and PostgreSQL pool on production SIGTERM', async () => {
+    const taskId = await createTaskWithEvents(0);
+    const login = await createApiDatabaseLogin();
+    const port = await freeTcpPort();
+    const root = fileURLToPath(new URL('../../', import.meta.url));
+    const child = spawn(process.execPath, ['--import', 'tsx', 'apps/api/src/index.ts'], {
+      cwd: root,
+      env: {
+        ...process.env,
+        DATABASE_URL: login.connectionString,
+        NODE_ENV: 'test',
+        EMBER_ENV: 'test',
+        EMBER_HOST: '127.0.0.1',
+        EMBER_PORT: String(port),
+        EMBER_LOG_LEVEL: 'info',
+        EMBER_DB_POOL_MAX: '2',
+        EMBER_DEV_AUTH_TENANT_A_TOKEN: tokenA,
+        EMBER_DEV_AUTH_TENANT_A_TENANT_ID: tenantA.tenantId,
+        EMBER_DEV_AUTH_TENANT_A_PRINCIPAL_ID: tenantA.principalId,
+        EMBER_DEV_AUTH_TENANT_A_POLICY_VERSION: '1',
+        EMBER_DEV_AUTH_TENANT_B_TOKEN: '',
+        EMBER_DEV_AUTH_TENANT_B_TENANT_ID: '',
+        EMBER_DEV_AUTH_TENANT_B_PRINCIPAL_ID: '',
+        EMBER_DEV_AUTH_TENANT_B_POLICY_VERSION: '',
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout?.on('data', (chunk: Buffer | string) => {
+      stdout += chunk.toString();
+    });
+    child.stderr?.on('data', (chunk: Buffer | string) => {
+      stderr += chunk.toString();
+    });
+    const exited = new Promise<{
+      readonly code: number | null;
+      readonly signal: NodeJS.Signals | null;
+    }>((resolve) => child.once('exit', (code, signal) => resolve({ code, signal })));
+    let stream: SseReader | undefined;
+
+    try {
+      await waitForChildOutput(
+        child,
+        () => stdout,
+        () => stderr,
+        '"message":"api listening"',
+        4_000,
+      );
+      const response = await fetch(`http://127.0.0.1:${port}/v1/tasks/${taskId}/stream`, {
+        headers: { Authorization: `Bearer ${tokenA}` },
+      });
+      expect(response.status).toBe(200);
+      stream = readerFor(response);
+      const persistedEvents = await repo.listEvents(authA(), taskId, { after: 0, limit: 100 });
+      expect(await readSequences(stream, persistedEvents.length)).toEqual(
+        persistedEvents.map((event) => event.sequence),
+      );
+
+      const pendingRead = stream.reader.read().then(
+        (result) => (result.done ? 'closed' : 'unexpected-frame'),
+        () => 'socket-closed',
+      );
+      child.kill('SIGTERM');
+      const [readResult, exit] = await withTimeout(
+        Promise.all([pendingRead, exited]),
+        4_000,
+        'production SIGTERM shutdown',
+      );
+
+      expect(readResult).not.toBe('unexpected-frame');
+      expect(exit).toEqual({ code: 0, signal: null });
+      expect(stdout).toContain('"message":"shutdown complete"');
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill('SIGKILL');
+        await withTimeout(exited, 2_000, 'API child process cleanup').catch(() => undefined);
+      }
+      await stream?.reader.cancel().catch(() => undefined);
+      await login.cleanup();
+    }
+  }, 15_000);
 });

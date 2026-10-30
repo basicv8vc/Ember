@@ -28,14 +28,14 @@ An EventStore failure after headers have been sent ends that connection without 
 
 ## Coverage
 
-| Area           | Coverage                                                                                                                                           |
-| -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Cursor parsing | Default zero, query cursor, Last-Event-ID, equal and conflicting dual cursors, duplicate query key, malformed and oversized values                 |
-| Replay         | More than two pages, persisted sequence order, append during catch-up, terminal task replay                                                        |
-| Reconnect      | Cancel after a received event, reconnect from Last-Event-ID, no skipped or repeated processed sequence over multiple connections                   |
-| Security       | No/invalid token, cross-tenant 404 before event read, shared event DTO redaction contract                                                          |
-| Lifecycle      | Heartbeat comment without cursor advance, client cancellation, shutdown abort, initial EventStore failure before SSE headers                       |
-| Integration    | PostgreSQL-backed events transported through the actual Hono SSE response; multiple reconnections and a committed write during history restoration |
+| Area           | Coverage                                                                                                                                                                                                      |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cursor parsing | Default zero, query cursor, Last-Event-ID, equal and conflicting dual cursors, duplicate query key, malformed and oversized values                                                                            |
+| Replay         | More than two pages, persisted sequence order, append during catch-up, terminal task replay                                                                                                                   |
+| Reconnect      | Cancel after a received event, reconnect from Last-Event-ID, no skipped or repeated processed sequence over multiple connections                                                                              |
+| Security       | No/invalid token, cross-tenant 404 before event read, shared event DTO redaction contract                                                                                                                     |
+| Lifecycle      | Heartbeat comment without cursor advance, client cancellation, shutdown abort, initial EventStore failure before SSE headers                                                                                  |
+| Integration    | PostgreSQL-backed events transported through Hono and a real Node HTTP socket; multiple reconnections, a committed write during restoration, client socket abort, and production `SIGTERM` with pool shutdown |
 
 ## Known limits
 
@@ -51,7 +51,21 @@ The task started from `origin/main` commit `68cc45df9554851698ff550ea52f90349d0b
 | `pnpm typecheck`                                                                           | PASS                                                                                                                                                                                  |
 | `pnpm lint`                                                                                | PASS                                                                                                                                                                                  |
 | `pnpm build`                                                                               | PASS                                                                                                                                                                                  |
-| `pnpm test`                                                                                | Unit: 29 files / 523 tests passed. Integration setup failed because `TEST_DATABASE_URL` is unset; 17 suites could not connect, including this SSE integration file (4 tests skipped). |
-| `vitest run --config vitest.integration.config.ts tests/integration/http-task-sse.test.ts` | Blocked by missing `TEST_DATABASE_URL`; 4 test bodies were skipped. No Docker or local PostgreSQL executable/listener is available in this environment.                               |
+| `pnpm test`                                                                                | Unit: 29 files / 523 tests passed. Integration setup failed because `TEST_DATABASE_URL` is unset; 17 suites could not connect, including this SSE integration file (6 tests skipped). |
+| `vitest run --config vitest.integration.config.ts tests/integration/http-task-sse.test.ts` | Blocked by missing `TEST_DATABASE_URL`; 6 test bodies were skipped. No Docker or local PostgreSQL executable/listener is available in this environment.                               |
 
 The exact SSE unit file passed separately with 15 tests. PostgreSQL transport behavior is covered in `tests/integration/http-task-sse.test.ts`, but remains unverified here until run with the repository's local integration database.
+
+### CI verification for the original PR head
+
+GitHub Actions run [#40977927904](https://github.com/basicv8vc/Ember/actions/runs/40977927904) completed successfully for PR #16 at `bba07cbdff306565f19d7bca03774c7c9444f354`. This is CI evidence from PostgreSQL 17 and complements the local environment record above; it does not indicate CTO approval or merge readiness.
+
+| CI check                                      | Result                                                                             |
+| --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Unit tests                                    | PASS — 29 files / 523 tests                                                        |
+| PostgreSQL integration tests                  | PASS — 17 files / 174 tests                                                        |
+| SSE PostgreSQL integration                    | PASS — 4 tests                                                                     |
+| PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
+| Lint / format / typecheck / build             | PASS                                                                               |
+
+The CI run above validates the original PR head only. The added real-socket disconnect and production shutdown checks in this review follow-up require a new CI run before they can be considered verified.

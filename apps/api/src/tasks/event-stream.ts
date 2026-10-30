@@ -52,10 +52,19 @@ export function resolveTaskEventStreamOptions(
  */
 export class TaskEventStreamRegistry {
   private readonly controllers = new Set<AbortController>();
+  private readonly idleWaiters = new Set<() => void>();
   private closed = false;
 
   get activeCount(): number {
     return this.controllers.size;
+  }
+
+  whenIdle(): Promise<void> {
+    if (this.controllers.size === 0) {
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => this.idleWaiters.add(resolve));
   }
 
   register(controller: AbortController): (() => void) | null {
@@ -65,7 +74,10 @@ export class TaskEventStreamRegistry {
     }
 
     this.controllers.add(controller);
-    return () => this.controllers.delete(controller);
+    return () => {
+      this.controllers.delete(controller);
+      this.resolveIdleWaiters();
+    };
   }
 
   closeAll(): void {
@@ -77,7 +89,17 @@ export class TaskEventStreamRegistry {
     for (const controller of this.controllers) {
       controller.abort();
     }
-    this.controllers.clear();
+  }
+
+  private resolveIdleWaiters(): void {
+    if (this.controllers.size > 0) {
+      return;
+    }
+
+    for (const resolve of this.idleWaiters) {
+      resolve();
+    }
+    this.idleWaiters.clear();
   }
 }
 

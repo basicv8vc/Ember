@@ -102,11 +102,21 @@ export { PostgresCheckpointStore } from './storage/checkpoint-store.js';
 export {
   assertLive,
   CHECKPOINT_SCHEMA_VERSION,
+  lockAndAssertLive,
+  lockGrantRunRow,
+  lockGrantTaskRows,
+  postLockInstant,
   PostgresRunResultCommitter,
   type CommitFaultInjector,
   type CommitFaultPoint,
+  type GrantTaskRow,
   type PostgresRunResultCommitterOptions,
 } from './storage/result-committer.js';
+export {
+  BUDGET_LOCK_NAMESPACE,
+  PostgresBudgetLedger,
+  type PostgresBudgetLedgerOptions,
+} from './storage/budget-ledger.js';
 export {
   prepareTaskCommand,
   TASK_COMMAND_DIGEST_VERSION,

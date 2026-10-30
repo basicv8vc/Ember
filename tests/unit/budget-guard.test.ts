@@ -3,6 +3,7 @@ import { InvalidArgumentError, isDomainError } from '@ember/domain';
 import {
   BUDGET_DIMENSIONS,
   BUDGET_GUARD_LIMITS,
+  MAX_BUDGET_POLICY_VERSION,
   consumeBudgetReservation,
   createBudgetLedger,
   evaluateBudget,
@@ -348,6 +349,13 @@ describe('evaluateBudget validation', () => {
       () => evaluate({ policy: { policyVersion: 1.5 } }),
       'invalid_policy_version',
     );
+    expectInvalidArgument(
+      () => evaluate({ policy: { policyVersion: MAX_BUDGET_POLICY_VERSION + 1 } }),
+      'invalid_policy_version',
+    );
+    expect(evaluate({ policy: { policyVersion: MAX_BUDGET_POLICY_VERSION } })).toMatchObject({
+      policyVersion: MAX_BUDGET_POLICY_VERSION,
+    });
     expectInvalidArgument(() => evaluate({ policy: { maxRunSteps: -1 } }), 'invalid_budget_amount');
     expectInvalidArgument(
       () => evaluate({ policy: { maxTenantDailyUnits: Number.POSITIVE_INFINITY } }),

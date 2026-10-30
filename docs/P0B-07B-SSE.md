@@ -68,9 +68,9 @@ GitHub Actions run [#40977927904](https://github.com/basicv8vc/Ember/actions/run
 | PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
 | Lint / format / typecheck / build             | PASS                                                                               |
 
-### CI verification after the P2 follow-up
+### CI verification after the P2 follow-up, before latest-main integration
 
-GitHub Actions run [#40986713080](https://github.com/basicv8vc/Ember/actions/runs/40986713080) passed for PR #16 at `74528106b5f1394718ce06945a6e4d3631a54aa5` on Node 24 and PostgreSQL 17. The run includes both requested Socket-level checks and all repository checks.
+GitHub Actions run [#40987136715](https://github.com/basicv8vc/Ember/actions/runs/40987136715) passed for PR #16 at `172a92cfca7e86ddc1b0553c812e94d0328bd856` on Node 24 and PostgreSQL 17. This is the final P2-follow-up run before integrating PR #15; it includes both requested Socket-level checks and all repository checks.
 
 | CI check                                      | Result                                                                             |
 | --------------------------------------------- | ---------------------------------------------------------------------------------- |
@@ -80,4 +80,4 @@ GitHub Actions run [#40986713080](https://github.com/basicv8vc/Ember/actions/run
 | PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
 | Lint / format / typecheck / build             | PASS                                                                               |
 
-The first run of the new production SIGTERM test exposed an HTTP server close that remained pending after the SSE response ended. Shutdown now closes remaining HTTP connections after stopping new accepts and aborting SSE loops; the final CI run verifies the API process exits successfully after both HTTP server and pool closure. This CI evidence supplements the original PR-head run above and does not indicate CTO approval or merge readiness.
+The first run of the new production SIGTERM test exposed an HTTP server close that remained pending after the SSE response ended. Shutdown now closes remaining HTTP connections after stopping new accepts and aborting SSE loops; this CI run verifies the API process exits successfully after both HTTP server and pool closure. The latest-main integration is being validated separately and must pass before review readiness. This CI evidence supplements the original PR-head run above and does not indicate CTO approval or merge readiness.

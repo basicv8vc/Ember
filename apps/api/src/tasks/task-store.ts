@@ -5,20 +5,24 @@ import {
   type TaskCommand,
   type TaskEvent,
   type TaskReceipt,
+  type TaskStatus,
   type TaskView,
 } from '@ember/domain';
 
 /**
- * The narrow slice of task persistence the HTTP API needs (P0B-07a).
+ * The narrow slice of task persistence the HTTP API needs (P0B-07a / P0B-08c).
  *
  * This is a port, not a second repository: `PostgresTaskRepository` already implements
- * exactly these methods with tenant-scoped SQL. Declaring the interface locally keeps the
- * HTTP layer free of driver details and makes the API unit-testable with an in-memory fake.
+ * these methods with tenant-scoped SQL. Declaring the interface locally keeps the HTTP layer
+ * free of driver details and makes the API unit-testable with an in-memory fake.
  *
  * Contract that every implementation must honour:
  * - every method takes a verified `AuthContext` and scopes all SQL by `ctx.tenantId`;
  * - `get()` returns `null` both for "no such task" and "belongs to another tenant", so the
  *   API can answer 404 without disclosing existence;
+ * - `cancel()` applies the ADR-0001 cancellation policy in one Task-locked transaction and
+ *   returns the authoritative post-transaction Task state, throwing `NOT_FOUND` for both
+ *   missing and foreign-tenant tasks;
  * - `listEvents()` is ordered by ascending `sequence` and applies `after` **exclusively**
  *   (`sequence > after`), so a client can poll without duplicate events;
  * - failures surface as `DomainError`s; the API maps them, never reinterprets them.
@@ -32,6 +36,23 @@ export interface ListEventsOptions {
   readonly limit?: number;
 }
 
+/**
+ * Authoritative post-transaction Task state returned by `TaskStore.cancel()`.
+ *
+ * - `terminal: true` means the Task is already in a terminal state (`cancelled`, `completed`,
+ *   or `failed`), which the HTTP layer maps to `200 OK`.
+ * - `terminal: false` means the Task is still `running` with `cancel_requested_at` durably
+ *   recorded, which the HTTP layer maps to `202 Accepted`.
+ */
+export interface TaskCancelResult {
+  readonly taskId: Id;
+  readonly status: TaskStatus;
+  readonly cancelRequested: boolean;
+  readonly cancelRequestedAt: string | null;
+  readonly terminal: boolean;
+  readonly updatedAt: string;
+}
+
 export interface TaskStore {
   create(ctx: AuthContext, command: TaskCommand): Promise<TaskReceipt>;
   get(ctx: AuthContext, taskId: Id): Promise<TaskView | null>;
@@ -40,6 +61,7 @@ export interface TaskStore {
     taskId: Id,
     options?: ListEventsOptions,
   ): Promise<readonly TaskEvent[]>;
+  cancel?(ctx: AuthContext, taskId: Id): Promise<TaskCancelResult>;
 }
 
 /**
@@ -60,5 +82,6 @@ export function unconfiguredTaskStore(): TaskStore {
     create: () => unavailable(),
     get: () => unavailable(),
     listEvents: () => unavailable(),
+    cancel: () => unavailable(),
   };
 }

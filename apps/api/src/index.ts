@@ -45,10 +45,9 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
       const serverClosed = new Promise<void>((resolve, reject) => {
         server.close((error) => (error === undefined ? resolve() : reject(error)));
       });
-      // Explicitly release keep-alive sockets left idle after their responses finish. Calling
-      // this after close() avoids a race with newly accepted connections and leaves active
-      // requests to drain normally.
-      httpServer.closeIdleConnections();
+      // SSE loops were aborted above. Close the remaining accepted sockets after close()
+      // stops new connections, so a stuck keep-alive response cannot hold pool shutdown open.
+      httpServer.closeAllConnections();
       await serverClosed;
       logger.info('HTTP server closed');
       await pool.end();

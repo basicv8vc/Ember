@@ -7,7 +7,7 @@ This document outlines the architecture, data models, privacy guardrails, and me
 ### 1.1 Scope Delineation (P0B-09A Foundation vs P0B-09A2 Runtime Integration)
 
 - **PR #22 Deliverable (P0B-09A Foundation)**: Delivers the core `@ember/telemetry` workspace package containing local OpenTelemetry-compatible models, runtime Zod validation schemas, automated privacy scrubbing (tokens, dev credentials, prompts, tenant IDs), quantile reporting with sample/failure tracking, and unit + PostgreSQL integration verification.
-- **Subsequent Step (P0B-09A2 Runtime Integration)**: Designed to wire `@ember/telemetry` directly into the live API gateway and worker execution loops (`apps/api/src/tasks/routes.ts`, `apps/worker/src/poll-loop.ts`, `apps/worker/src/durable-run-handler.ts`). This is staged separately to avoid merge conflicts with the active PR #20 and to utilize a persistent trace context that spans across process boundaries.
+- **Subsequent Step (P0B-09A2 Runtime Integration)**: Designed to wire `@ember/telemetry` directly into the live API gateway and worker execution loops (`apps/api/src/tasks/routes.ts`, `apps/worker/src/poll-loop.ts`, `apps/worker/src/durable-run-handler.ts`). This is staged separately because cross-process trace propagation and durable timestamp capture require a separate integration design. PR #20 has now been merged into main; the foundation branch has incorporated those changes without modifying API/Worker runtime behavior.
 
 ### 1.2 Core Guarantees
 
@@ -16,7 +16,7 @@ This document outlines the architecture, data models, privacy guardrails, and me
 - **Strict Cost Semantics**: Usage records strictly mandate `cost_source = "simulated"` and `actual_vendor_cost_usd = null`.
 - **Statistically Sound Quantiles**: Quantile calculation (P50, P95, P99) preserves sample counts alongside failure, timeout, and cancellation counts, and reports `observed_count` vs `missing_count`.
 - **Low-Cardinality Metrics**: Low-cardinality metric labels prevent metric cardinality explosions in time-series aggregations.
-- **PR #20 Non-Interference**: Implemented as an independent workspace package `@ember/telemetry` (`packages/telemetry`) to avoid merge conflicts with PR #20 (`apps/worker/src/poll-loop.ts`, `durable-run-handler.ts`).
+- **Main Compatibility**: The foundation branch includes PR #20's completed cancellation changes. The API/Worker runtime hooks remain out of scope for this foundation PR; P0B-09A2 must independently prove end-to-end instrumentation.
 
 ---
 
@@ -54,7 +54,7 @@ Every execution trace captures contextual fields conforming to OpenTelemetry sem
 | `tenant_hash`  | `string`         | SHA-256 hash of `tenant_id` truncated to 16 hex chars | Strictly matches `/^[0-9a-f]{16}$/`                           |
 | `task_id`      | `UUID`           | Durable task identifier                               | Valid UUID                                                    |
 | `run_id`       | `UUID`           | Active execution run identifier                       | Valid UUID                                                    |
-| `path`         | `enum`           | Execution route path                                  | `'standard'` \| `'fast_path'`                                 |
+| `path`         | `enum`           | Execution route path                                  | `'fast'` \| `'standard'` \| `'heavy'`                                 |
 | `route_reason` | `string`         | Routing decision explanation                          | Non-empty string (e.g. `'mock.compute:standard'`)             |
 | `provider`     | `literal`        | LLM / Sandbox provider                                | Strictly `"fake"` in P0-B                                     |
 | `attempt`      | `integer`        | Lease/execution attempt counter                       | `>= 1`                                                        |
@@ -188,7 +188,7 @@ The privacy engine automatically filters:
 - **URI Credentials**: `postgres://user:password@host` $\rightarrow$ `postgres://user:[REDACTED]@host`
 - **Private Keys**: `-----BEGIN PRIVATE KEY----- ... -----END PRIVATE KEY-----` $\rightarrow$ `[REDACTED_SECRET]`
 - **User Prompts & Instructions**: Replaced with `[REDACTED_PROMPT]` or `[REDACTED]` based on field context.
-- **Span Status & Exceptions**: `span.setStatus()` description, `recordException()` messages, and stack traces are comprehensively passed through `redactSecrets()`.
+- **Span Status & Exceptions**: `span.setStatus()` descriptions receive pattern-based secret masking; `recordException()` intentionally emits only a stable error code, fixed category, and redacted message. Raw error messages, arbitrary thrown values, and stack traces are never serialized, because pattern matching cannot safely recognize all user input.
 
 ---
 

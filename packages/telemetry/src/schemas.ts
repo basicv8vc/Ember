@@ -23,6 +23,7 @@ import type {
 const nonNegativeInteger = z.number().int().nonnegative();
 const nonNegativeIntegerOrNull = nonNegativeInteger.nullable();
 const isoDateTimeOrNull = IsoDateTimeSchema.nullable();
+const tenantHashSchema = z.string().regex(/^[0-9a-f]{16}$/);
 
 export const TelemetryTraceIdSchema = z
   .string()
@@ -57,7 +58,7 @@ export const RunStageDurationsSchema: z.ZodType<RunStageDurations> = z.strictObj
  */
 export const RunTraceRecordSchema: z.ZodType<RunTraceRecord> = z.strictObject({
   trace_id: TelemetryTraceIdSchema,
-  tenant_hash: z.string().regex(/^[0-9a-f]{16}$/, 'Tenant hash must be 16 lowercase hex characters'),
+  tenant_hash: tenantHashSchema,
   task_id: IdSchema,
   run_id: IdSchema,
   path: ExecutionPathSchema,
@@ -101,7 +102,7 @@ export const RunTraceRecordSchema: z.ZodType<RunTraceRecord> = z.strictObject({
 export const SimulatedUsageRecordSchema: z.ZodType<SimulatedUsageRecord> = z.strictObject({
   usage_id: IdSchema,
   trace_id: TelemetryTraceIdSchema,
-  tenant_hash: z.string().regex(/^[0-9a-f]{16}$/, 'Tenant hash must be 16 lowercase hex characters'),
+  tenant_hash: tenantHashSchema,
   task_id: IdSchema,
   run_id: IdSchema,
   simulated_cpu_ms: nonNegativeInteger,

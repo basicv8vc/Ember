@@ -2,6 +2,9 @@ import type { Server as HttpServer } from 'node:http';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
 import {
+  LocalBlobStore,
+  PostgresArtifactStore,
+  PostgresBlobStore,
   PostgresTaskRepository,
   createPool,
   describeDatabaseTarget,
@@ -97,6 +100,14 @@ function main(): void {
     logger,
     authenticator: createDevTokenAuthenticator(devAuth.tenants),
     taskStore: new PostgresTaskRepository(pool),
+    ...(apiConfig.blobRoot === null
+      ? {}
+      : {
+          artifactStore: new PostgresArtifactStore(
+            pool,
+            new PostgresBlobStore(pool, new LocalBlobStore({ rootDir: apiConfig.blobRoot })),
+          ),
+        }),
   });
 
   if (!isLoopbackHost(apiConfig.host)) {

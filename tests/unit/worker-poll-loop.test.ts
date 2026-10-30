@@ -313,6 +313,17 @@ describe('poll loop', () => {
     expect(build.lines.join('\n')).toContain('result discarded');
   });
 
+  it('converges a cooperatively cancelled execution via finish() when heartbeat observes cancellation', async () => {
+    const build = harness({ block: true, heartbeatResult: false, outcome: 'cancelled' });
+
+    const summary = await run(build, { onWait: (ms) => ms === IDLE_MS && build.stop() });
+
+    expect(summary.claimed).toBe(1);
+    expect(summary.finished).toBe(1);
+    expect(summary.abandoned).toBe(0);
+    expect(build.finishes).toEqual([{ runId: leasedRun(1).runId, outcome: 'cancelled' }]);
+  });
+
   it('logs a single rejection and never retries a fenced finish', async () => {
     const build = harness({ finishResult: false });
 

@@ -25,10 +25,10 @@ export function generateMarkdownReport(r: BenchmarkResult): string {
 
 | Spec Requirement | Target / DoD | Observed Result | Status |
 | :--- | :--- | :--- | :--- |
-| **B-T28: 1,000 Logical Agents** | 1,000 DB agents, 0 resident fake processes | **${a.verifiedDbAgentCount}** agents, **${a.residentSandboxesCount}** resident sandboxes | **PASS** |
-| **B-T29: 100 Concurrency (Local)** | 100 concurrent HTTP requests, 0 task loss | **${c.concurrency}** concurrency, **${rec.lostCount}** lost tasks (${rec.successRatePercent}% success) | **PASS** |
+| **B-T28: 1,000 Logical Agents** | 1,000 DB agents, 0 resident fake processes | **${a.verifiedDbAgentCount}** agents, **${a.residentSandboxesCount}** resident sandboxes | **${a.verifiedDbAgentCount >= 1_000 && a.verifiedDbWorkspaceCount >= 1_000 && a.residentSandboxesCount === 0 ? 'PASS' : 'FAIL'}** |
+| **B-T29: 100 Concurrency (Local)** | 100 concurrent HTTP requests, 0 task loss | **${c.concurrency}** concurrency, **${rec.lostCount}** lost tasks (${rec.successRatePercent}% success) | **${c.concurrency === 100 && evalTarget.zeroTaskLossMet && rec.succeededCount === rec.totalSubmitted ? 'PASS' : 'FAIL'}** |
 | **Durable Ack Latency Goal** | P95 <= 1,000ms (Loopback HTTP -> DB Ack) | P95 = **${l.durableAck.p95Ms}ms** (P50=${l.durableAck.p50Ms}ms) | **${evalTarget.durableAckTargetMet ? 'MET' : 'UNMET'}** |
-| **Fake Sandbox Lifecycle** | Transient execution only; destroyed on finish | Peak live: **${t.peakLiveSandboxes}**, Idle: **${t.idleLiveSandboxes}** | **PASS** |
+| **Fake Sandbox Lifecycle** | Transient execution only; destroyed on finish | Peak live: **${t.peakLiveSandboxes}**, Idle: **${t.idleLiveSandboxes}** | **${t.idleLiveSandboxes === 0 ? 'PASS' : 'FAIL'}** |
 | **Resource & Cost Telemetry** | CPU, RSS, DB conns recorded; cost = simulated | Peak RSS: **${t.peakRssMb}MB**, Cost: **simulated** | **PASS** |
 
 ${
@@ -60,7 +60,7 @@ ${
 - **Persistent Logical Agents**: \`${c.agents}\`
 - **HTTP Request Concurrency**: \`${c.concurrency}\`
 - **Worker Execution Slots**: \`${c.workerConcurrency}\`
-- **Task Mix**: Fast Path **${(c.taskMix.fast * 100).toFixed(0)}%** (\`mock.chat\`), Standard Path **${(c.taskMix.standard * 100).toFixed(0)}%** (\`mock.file\`)
+- **Task Mix**: Fast Path **${(c.taskMix.fast * 100).toFixed(0)}%** (\`mock.chat\`), Standard Path **${(c.taskMix.standard * 100).toFixed(0)}%** (\`mock.compute\`)
 - **Warmup Requests**: \`${c.warmup}\`
 - **Total Executed Requests**: \`${rec.totalSubmitted}\`
 - **Deterministic PRNG Seed**: \`${c.seed}\`
@@ -82,7 +82,7 @@ ${
 
 ## 5. Phase 2 & 3: Task Closed-Loop Accounting (B-T29)
 
-Task reconciliation confirms zero unexplained task loss across the full HTTP -> DB -> Worker -> SSE/Poller lifecycle:
+Task reconciliation independently checks acknowledged Task IDs against PostgreSQL when running with the isolated local harness. Without database access, zero-loss status is unverified:
 
 | Metric | Count | Percentage |
 | :--- | :--- | :--- |
@@ -91,7 +91,10 @@ Task reconciliation confirms zero unexplained task loss across the full HTTP -> 
 | **Terminal Succeeded** | **${rec.succeededCount}** | **${rec.successRatePercent}%** |
 | **Terminal Failed** | ${rec.failedCount} | ${((rec.failedCount / (rec.totalSubmitted || 1)) * 100).toFixed(2)}% |
 | **Timed Out** | ${rec.timedOutCount} | ${((rec.timedOutCount / (rec.totalSubmitted || 1)) * 100).toFixed(2)}% |
-| **Unexplained Task Loss** | **${rec.lostCount}** | **0.00%** |
+| **Persisted Acked Tasks (PostgreSQL)** | ${rec.persistedTaskCount ?? 'not verified'} | - |
+| **Missing Persisted Acked Tasks** | ${rec.missingPersistedTaskCount ?? 'not verified'} | - |
+| **Duplicate Ack Task IDs** | ${rec.duplicateAckCount} | - |
+| **Unexplained Task Loss** | **${rec.lostCount}** | **${rec.hasUnexplainedTaskLoss ? 'FAIL / UNVERIFIED' : 'VERIFIED'}** |
 
 ---
 
@@ -108,7 +111,7 @@ All metrics report sample size, P50, P95, P99, min, mean, and max:
 
 > [!NOTE]
 > - **Durable Ack**: Measured from client HTTP dispatch until \`202 Accepted\` response received with verified database transaction commit.
-> - **First Real Event**: Latency until the first execution lifecycle event (\`leased\`, \`started\` or \`progress\`) after initial acceptance.
+> - **First Real Event**: Only persisted events are counted (missing observations are never synthesized). Latency until the first execution lifecycle event (\`leased\`, \`started\` or \`progress\`) after initial acceptance.
 > - **Queue Wait**: Duration spent in \`queued\` before a leased worker run acquires the execution lease.
 > - **Task Completion**: End-to-end wall clock latency until task reaches terminal status (\`completed\` / \`failed\`).
 
@@ -131,8 +134,8 @@ All metrics report sample size, P50, P95, P99, min, mean, and max:
 
 ## 8. P0-B Definition of Done (DoD) Checklist
 
-- [x] **B-T28**: 1,000 persistent logical Agents created in DB without 1,000 resident OS processes or VMs.
-- [x] **B-T29**: 100 concurrent requests executed locally over HTTP loopback with zero unexplained task loss.
+- [${a.verifiedDbAgentCount >= 1_000 && a.verifiedDbWorkspaceCount >= 1_000 ? 'x' : ' '}] **B-T28**: 1,000 persistent logical Agents created in DB without 1,000 resident OS processes or VMs.
+- [${c.concurrency === 100 && evalTarget.zeroTaskLossMet ? 'x' : ' '}] **B-T29**: 100 concurrent requests executed locally over HTTP loopback with zero unexplained task loss.
 - [x] **Durable Ack measurement**: Latency measured and reported with P50, P95, P99, sample count, and success rate.
 - [x] **Resource Telemetry**: Host CPU, RSS, PostgreSQL connection pool, worker slots, and live sandboxes monitored.
 - [x] **Cost Redaction**: Billed costs explicitly labeled \`simulated\`; no fake USD vendor costs produced.

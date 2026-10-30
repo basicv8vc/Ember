@@ -51,6 +51,9 @@ describe('Benchmark Metrics & Math (Unit)', () => {
 
     expect(() => parseTaskMix('unknown:50')).toThrow(/unknown task kind/);
     expect(() => parseTaskMix('fast:-1')).toThrow(/invalid number/);
+    expect(() => parseTaskMix('fast:Infinity')).toThrow(/invalid number/);
+    expect(() => parseTaskMix({ fast: -1, standard: 2 })).toThrow(/invalid task mix/);
+    expect(() => parseTaskMix({ fast: Infinity, standard: 1 })).toThrow(/invalid task mix/);
   });
 
   it('generateMarkdownReport produces valid markdown with DoD checks', () => {
@@ -106,6 +109,9 @@ describe('Benchmark Metrics & Math (Unit)', () => {
         failedCount: 0,
         timedOutCount: 0,
         lostCount: 0,
+        persistedTaskCount: 1000,
+        missingPersistedTaskCount: 0,
+        duplicateAckCount: 0,
         successRatePercent: 100,
         hasUnexplainedTaskLoss: false,
       },
@@ -191,6 +197,18 @@ describe('Benchmark Metrics & Math (Unit)', () => {
     expect(md).toContain('B-T29: 100 Concurrency (Local)');
     expect(md).toContain('cost_source: simulated');
     expect(md).toContain('Durable Ack Performance Target Met');
+  });
+
+  it('runner rejects invalid benchmark counts before allocating resources', async () => {
+    await expect(runBenchmark({ agents: -1, enableLocalLoad: true })).rejects.toThrow(
+      /invalid agents/,
+    );
+    await expect(runBenchmark({ concurrency: 101, enableLocalLoad: true })).rejects.toThrow(
+      /invalid concurrency/,
+    );
+    await expect(runBenchmark({ warmup: -1, enableLocalLoad: true })).rejects.toThrow(
+      /invalid warmup/,
+    );
   });
 
   it('runner enforces safety guard when heavy load is requested without explicit enablement', async () => {

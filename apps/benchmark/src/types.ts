@@ -236,6 +236,11 @@ export interface ReconciliationReport {
   readonly failedCount: number;
   readonly timedOutCount: number;
   readonly lostCount: number;
+  /** Number of unique acknowledged task IDs verified in PostgreSQL; null without local DB access. */
+  readonly persistedTaskCount: number | null;
+  /** Acknowledged tasks absent from PostgreSQL; null means not verified. */
+  readonly missingPersistedTaskCount: number | null;
+  readonly duplicateAckCount: number;
   readonly successRatePercent: number;
   readonly hasUnexplainedTaskLoss: boolean;
 }

@@ -61,6 +61,25 @@ function resolveConfig(options: BenchmarkOptions): ResolvedBenchmarkConfig {
     options.enableLocalLoad === true || process.env.EMBER_BENCH_ENABLE_LOCAL_LOAD === 'true';
   const workerConcurrency = options.workerConcurrency ?? concurrency;
 
+  const positiveIntegers = { agents, concurrency, totalRequests, workerConcurrency };
+  for (const [name, value] of Object.entries(positiveIntegers)) {
+    if (!Number.isSafeInteger(value) || value < 1) {
+      throw new Error(`invalid ${name}: expected a positive safe integer`);
+    }
+  }
+  if (concurrency > 100) {
+    throw new Error('invalid concurrency: local benchmark limit is 100');
+  }
+  if (!Number.isSafeInteger(warmup) || warmup < 0) {
+    throw new Error('invalid warmup: expected a non-negative safe integer');
+  }
+  if (!Number.isSafeInteger(seed)) {
+    throw new Error('invalid seed: expected a safe integer');
+  }
+  if (durationMs !== null && (!Number.isFinite(durationMs) || durationMs <= 0)) {
+    throw new Error('invalid duration: expected a positive finite number of milliseconds');
+  }
+
   return {
     agents,
     concurrency,
@@ -383,10 +402,6 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
               firstRealEventLatencyMs = Math.max(0, durableAckLatencyMs + queueWaitMs);
               firstRealEventAtHr = requestSentAtHr + firstRealEventLatencyMs;
             }
-          } else if (taskStatus === 'succeeded') {
-            queueWaitMs = Math.max(0, Math.round(taskCompletionLatencyMs - durableAckLatencyMs));
-            firstRealEventLatencyMs = Math.round(durableAckLatencyMs + Math.min(queueWaitMs, 10));
-            firstRealEventAtHr = requestSentAtHr + firstRealEventLatencyMs;
           }
         }
       } catch {
@@ -501,9 +516,29 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
     }
 
     const totalSubmitted = samples.length;
-    const totalAcked = samples.filter((s) => s.httpStatus === 202 || s.httpStatus === 200).length;
-    const lostCount = totalSubmitted - (succeededCount + failedCount + timedOutCount);
-    const hasUnexplainedTaskLoss = lostCount !== 0;
+    const ackedSamples = samples.filter((s) => s.httpStatus === 202 || s.httpStatus === 200);
+    const totalAcked = ackedSamples.length;
+    const ackedTaskIds = ackedSamples.map((s) => s.taskId);
+    const duplicateAckCount = totalAcked - new Set(ackedTaskIds).size;
+
+    // Independently reconcile durable HTTP acknowledgements with authoritative
+    // PostgreSQL rows. Counting local result categories alone cannot detect loss.
+    let persistedTaskCount: number | null = null;
+    let missingPersistedTaskCount: number | null = null;
+    if (harness) {
+      const persisted = await harness.pool.query<{ id: string }>(
+        'SELECT id::text AS id FROM tasks WHERE tenant_id = $1 AND id = ANY($2::uuid[])',
+        [tenantId, ackedTaskIds],
+      );
+      const persistedIds = new Set(persisted.rows.map((row) => row.id));
+      persistedTaskCount = persistedIds.size;
+      missingPersistedTaskCount = ackedTaskIds.filter((id) => !persistedIds.has(id)).length;
+    }
+
+    const unclassifiedCount = totalSubmitted - (succeededCount + failedCount + timedOutCount);
+    const lostCount = unclassifiedCount + (missingPersistedTaskCount ?? 0) + duplicateAckCount;
+    const hasUnexplainedTaskLoss =
+      lostCount !== 0 || (totalAcked > 0 && missingPersistedTaskCount === null);
     const successRatePercent =
       totalSubmitted > 0 ? Number(((succeededCount / totalSubmitted) * 100).toFixed(2)) : 0;
 
@@ -514,6 +549,9 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
       failedCount,
       timedOutCount,
       lostCount,
+      persistedTaskCount,
+      missingPersistedTaskCount,
+      duplicateAckCount,
       successRatePercent,
       hasUnexplainedTaskLoss,
     };
@@ -521,7 +559,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
     // =========================================================================
     // Phase 5: Metrics Aggregation
     // =========================================================================
-    const durableAckValues = samples.map((s) => s.durableAckLatencyMs);
+    const durableAckValues = ackedSamples.map((s) => s.durableAckLatencyMs);
     const firstRealEventValues = samples
       .filter((s) => s.firstRealEventLatencyMs !== null)
       .map((s) => s.firstRealEventLatencyMs!);
@@ -546,7 +584,10 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
     // Phase 6: Target Assessment (Task Spec §12 B-T28, B-T29)
     // =========================================================================
     const durableAckP95ObservedMs = latencyMetrics.durableAck.p95Ms;
-    const durableAckTargetMet = durableAckP95ObservedMs <= 1_000;
+    const durableAckTargetMet =
+      totalAcked === totalSubmitted &&
+      totalAcked > 0 &&
+      durableAckP95ObservedMs <= 1_000;
     let bottleneckAnalysis: string | undefined;
 
     if (!durableAckTargetMet) {

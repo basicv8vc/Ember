@@ -103,6 +103,14 @@ export function parseTaskMix(input?: string | TaskMix): TaskMix {
   }
 
   if (typeof input === 'object') {
+    if (
+      !Number.isFinite(input.fast) ||
+      !Number.isFinite(input.standard) ||
+      input.fast < 0 ||
+      input.standard < 0
+    ) {
+      throw new Error('invalid task mix: weights must be finite and non-negative');
+    }
     const total = input.fast + input.standard;
     if (total <= 0) {
       throw new Error(
@@ -134,7 +142,7 @@ export function parseTaskMix(input?: string | TaskMix): TaskMix {
   for (const part of parts) {
     const [key, val] = part.split(':').map((s) => s.trim());
     const num = val === undefined ? 1 : Number(val);
-    if (Number.isNaN(num) || num < 0) {
+    if (!Number.isFinite(num) || num < 0) {
       throw new Error(`invalid number in task-mix "${input}": "${val}"`);
     }
 

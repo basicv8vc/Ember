@@ -43,6 +43,9 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       expect(result.reconciliation.failedCount).toBe(0);
       expect(result.reconciliation.timedOutCount).toBe(0);
       expect(result.reconciliation.lostCount).toBe(0);
+      expect(result.reconciliation.persistedTaskCount).toBe(6);
+      expect(result.reconciliation.missingPersistedTaskCount).toBe(0);
+      expect(result.reconciliation.duplicateAckCount).toBe(0);
       expect(result.reconciliation.hasUnexplainedTaskLoss).toBe(false);
       expect(result.reconciliation.successRatePercent).toBe(100);
 

@@ -156,12 +156,29 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
 
         return { type: 'finish', outcome: 'succeeded' } as const;
       } catch (error) {
-        const outcome = classifyFailure(error);
+        let effectiveError: unknown = error;
+
+        if (signal.aborted && isDomainError(error) && error.code === 'CANCELLED') {
+          try {
+            await contextReader.read(run, clock.now());
+          } catch (readError) {
+            effectiveError = readError;
+          }
+        }
+
+        if (
+          isDomainError(effectiveError) &&
+          (effectiveError.code === 'STALE_LEASE' || effectiveError.code === 'NOT_FOUND')
+        ) {
+          throw effectiveError;
+        }
+
+        const outcome = classifyFailure(effectiveError);
         logger.warn('simulated execution failed', {
           ...base,
           taskKind: context.kind,
           route: route.path,
-          code: codeOf(error),
+          code: codeOf(effectiveError),
           outcome,
           durationMs: Math.max(0, Math.round(performance.now() - startedAtHr)),
         });

@@ -18,6 +18,9 @@ export default defineConfig({
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),
+      '@ember/telemetry': fileURLToPath(
+        new URL('./packages/telemetry/src/index.ts', import.meta.url),
+      ),
     },
   },
   test: {

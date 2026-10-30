@@ -79,11 +79,12 @@ function raceWithAbort(promise: Promise<unknown>, signal: AbortSignal): Promise<
  * Fencing, retry scheduling and cancellation convergence remain P0B-04's responsibility.
  *
  * Safety rules:
- * - `heartbeat() === false` aborts the execution and **skips** `finish()`; it is never treated
- *   as an execution failure, and the database state plus the Reaper decide what happens next;
+ * - `heartbeat() === false` aborts the execution; non-cancelled outcomes and shutdown aborts
+ *   skip `finish()`, while a cooperatively confirmed `cancelled` outcome converges the Run via
+ *   `finish(run, 'cancelled')` so long as the worker's lease is still valid;
  * - `finish() === false` is logged once and never retried, so a late result can never overwrite
  *   a newer Run;
- * - an aborted execution (shutdown, lease loss, cancellation) never submits a result, so a
+ * - an execution aborted by process shutdown or lease loss never submits a result, so a
  *   worker cannot fabricate a terminal status from work that was cut short.
  *
  * Liveness rules:
@@ -121,6 +122,7 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
     } as const;
 
     let leaseLost = false;
+    let heartbeatFailed = false;
     let completed = false;
 
     // The heartbeat wait listens to both stops, so `heartbeatStop.abort()` interrupts a
@@ -152,6 +154,7 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
         try {
           renewed = await queue.heartbeat(run, clock.now());
         } catch (error) {
+          heartbeatFailed = true;
           logger.warn('lease heartbeat failed', { ...base, code: codeOf(error) });
           renewed = false;
         }
@@ -160,7 +163,7 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
           if (completed) {
             return;
           }
-          // Not a Task failure: this worker simply no longer owns the execution right.
+          // Not a Task failure: either cancellation was requested or lease ownership moved.
           leaseLost = true;
           execution.abort();
           return;
@@ -207,7 +210,14 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
 
       const outcome = completion.outcome;
 
-      if (execution.signal.aborted || leaseLost) {
+      // Process shutdown (`signal.aborted`), a throwing heartbeat, or a non-cancelled outcome
+      // after heartbeat loss must never submit a finish. A cooperatively confirmed `cancelled`
+      // outcome, however, converges the Task/Run immediately via the fenced `finish()` path.
+      if (
+        signal.aborted ||
+        heartbeatFailed ||
+        ((execution.signal.aborted || leaseLost) && outcome !== 'cancelled')
+      ) {
         logger.warn('execution aborted; result discarded', {
           ...base,
           leaseLost,
@@ -299,28 +309,26 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
     }
 
     if (claimed === null) {
-      // Capacity is available, so poll again after at most `idleIntervalMs` even while other
-      // executions are still in flight.
       await waitForNextPoll();
       continue;
     }
 
     counters.claimed += 1;
-    const run = claimed;
-    const task = executeOne(run);
-    inFlight.add(task);
-    void task.then(
-      () => {
-        inFlight.delete(task);
-      },
-      () => {
-        inFlight.delete(task);
-      },
-    );
+    logger.info('run claimed', {
+      taskId: claimed.taskId,
+      runId: claimed.runId,
+      attempt: claimed.attempt,
+      leaseEpoch: claimed.leaseEpoch,
+    });
+
+    const job = executeOne(claimed).finally(() => {
+      inFlight.delete(job);
+    });
+
+    inFlight.add(job);
   }
 
-  // Graceful stop: wait for the in-flight executions, which observe the abort signal.
-  await Promise.allSettled([...inFlight]);
+  await Promise.allSettled(inFlight);
 
   return Object.freeze({ ...counters });
 }

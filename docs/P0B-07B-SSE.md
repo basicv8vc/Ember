@@ -22,7 +22,7 @@ The server does not promise exactly-once delivery across a broken network. It pr
 
 ## Lifetime and failure behavior
 
-The stream polls every 1,000 ms by default and sends a heartbeat every 15,000 ms. Both intervals, the monotonic clock, and the abortable wait are injectable through `createTaskRoutes` for deterministic tests. A terminal task is replayed through its final persisted event and then the stream closes. A client disconnect aborts its wait and stops future polls. On API shutdown, the process shutdown hook aborts registered stream loops before `server.close()` and the PostgreSQL pool shutdown. An already-running database query is allowed to settle; no subsequent poll is started after abort.
+The stream polls every 1,000 ms by default and sends a heartbeat every 15,000 ms. Both intervals, the monotonic clock, and the abortable wait are injectable through `createTaskRoutes` for deterministic tests. A terminal task is replayed through its final persisted event and then the stream closes. A client disconnect aborts its wait and stops future polls. On API shutdown, the process shutdown hook aborts registered stream loops, stops accepting requests, and closes remaining HTTP connections before ending the PostgreSQL pool. An already-running database query is allowed to settle; no subsequent poll is started after abort.
 
 An EventStore failure after headers have been sent ends that connection without changing task state. The client can reconnect from its last received sequence because events remain durable. The regular `GET /events` endpoint remains available as a polling fallback.
 
@@ -34,25 +34,25 @@ An EventStore failure after headers have been sent ends that connection without 
 | Replay         | More than two pages, persisted sequence order, append during catch-up, terminal task replay                                                                                                                   |
 | Reconnect      | Cancel after a received event, reconnect from Last-Event-ID, no skipped or repeated processed sequence over multiple connections                                                                              |
 | Security       | No/invalid token, cross-tenant 404 before event read, shared event DTO redaction contract                                                                                                                     |
-| Lifecycle      | Heartbeat comment without cursor advance, client cancellation, shutdown abort, initial EventStore failure before SSE headers                                                                                  |
+| Lifecycle      | Heartbeat comment without cursor advance, client cancellation, shutdown abort, initial EventStore failure before SSE headers, production HTTP and pool shutdown                                               |
 | Integration    | PostgreSQL-backed events transported through Hono and a real Node HTTP socket; multiple reconnections, a committed write during restoration, client socket abort, and production `SIGTERM` with pool shutdown |
 
 ## Known limits
 
-Polling adds up to one poll interval of discovery latency and one database read per active stream per interval. This is the intended P0-B single-database approach; no external queue or notification service is required. If a database query is already in flight when a client disconnects or shutdown begins, the route stops scheduling further work and lets the PostgreSQL client query settle before the pool can finish closing.
+Polling adds up to one poll interval of discovery latency and one database read per active stream per interval. This is the intended P0-B single-database approach; no external queue or notification service is required. Shutdown closes remaining HTTP connections after aborting SSE loops, so other accepted requests may be interrupted at the SIGTERM cutoff. If a database query is already in flight when a client disconnects or shutdown begins, the route stops scheduling further work and lets the PostgreSQL client query settle before the pool can finish closing.
 
 ## Verification record
 
 The task started from `origin/main` commit `68cc45df9554851698ff550ea52f90349d0bb38f`. Commands and results are recorded here after implementation verification.
 
-| Command                                                                                    | Result                                                                                                                                                                                |
-| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `pnpm format:check`                                                                        | PASS                                                                                                                                                                                  |
-| `pnpm typecheck`                                                                           | PASS                                                                                                                                                                                  |
-| `pnpm lint`                                                                                | PASS                                                                                                                                                                                  |
-| `pnpm build`                                                                               | PASS                                                                                                                                                                                  |
-| `pnpm test`                                                                                | Unit: 29 files / 523 tests passed. Integration setup failed because `TEST_DATABASE_URL` is unset; 17 suites could not connect, including this SSE integration file (6 tests skipped). |
-| `vitest run --config vitest.integration.config.ts tests/integration/http-task-sse.test.ts` | Blocked by missing `TEST_DATABASE_URL`; 6 test bodies were skipped. No Docker or local PostgreSQL executable/listener is available in this environment.                               |
+| Command                                                                                    | Result                                                                                                                                                                                            |
+| ------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm format:check`                                                                        | PASS                                                                                                                                                                                              |
+| `pnpm typecheck`                                                                           | PASS                                                                                                                                                                                              |
+| `pnpm lint`                                                                                | PASS                                                                                                                                                                                              |
+| `pnpm build`                                                                               | PASS                                                                                                                                                                                              |
+| `pnpm test`                                                                                | Unit: 29 files / 523 tests passed. Integration setup failed because `TEST_DATABASE_URL` is unset; 17 suites could not connect (176 tests skipped), including this SSE integration file (6 tests). |
+| `vitest run --config vitest.integration.config.ts tests/integration/http-task-sse.test.ts` | Blocked by missing `TEST_DATABASE_URL`; 6 test bodies were skipped. No Docker or local PostgreSQL executable/listener is available in this environment.                                           |
 
 The exact SSE unit file passed separately with 15 tests. PostgreSQL transport behavior is covered in `tests/integration/http-task-sse.test.ts`, but remains unverified here until run with the repository's local integration database.
 
@@ -68,4 +68,16 @@ GitHub Actions run [#40977927904](https://github.com/basicv8vc/Ember/actions/run
 | PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
 | Lint / format / typecheck / build             | PASS                                                                               |
 
-The CI run above validates the original PR head only. The added real-socket disconnect and production shutdown checks in this review follow-up require a new CI run before they can be considered verified.
+### CI verification after the P2 follow-up
+
+GitHub Actions run [#40986713080](https://github.com/basicv8vc/Ember/actions/runs/40986713080) passed for PR #16 at `74528106b5f1394718ce06945a6e4d3631a54aa5` on Node 24 and PostgreSQL 17. The run includes both requested Socket-level checks and all repository checks.
+
+| CI check                                      | Result                                                                             |
+| --------------------------------------------- | ---------------------------------------------------------------------------------- |
+| Unit tests                                    | PASS — 29 files / 523 tests                                                        |
+| PostgreSQL integration tests                  | PASS — 17 files / 176 tests                                                        |
+| SSE PostgreSQL / Node HTTP integration        | PASS — 6 tests, including client socket disconnect and production `SIGTERM`        |
+| PostgreSQL migrations, first and repeated run | PASS — 5 applied on first run; 0 applied and 5 already applied on the repeated run |
+| Lint / format / typecheck / build             | PASS                                                                               |
+
+The first run of the new production SIGTERM test exposed an HTTP server close that remained pending after the SSE response ended. Shutdown now closes remaining HTTP connections after stopping new accepts and aborting SSE loops; the final CI run verifies the API process exits successfully after both HTTP server and pool closure. This CI evidence supplements the original PR-head run above and does not indicate CTO approval or merge readiness.

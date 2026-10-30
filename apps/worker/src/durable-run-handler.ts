@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto';
 import type {
   BlobStore,
+  BudgetLedger,
+  BudgetReservationAmount,
   CheckpointStore,
   RouteDecision,
   RunExecutionContext,
@@ -20,6 +22,7 @@ import {
 } from '@ember/domain';
 import type { ExecutionClock, ExecutionRouterForRun, SimulatedExecutor } from '@ember/execution';
 import type { PostgresWorkspaceStore } from '@ember/postgres';
+import { stepCost, stepOperationId } from './budget-plan.js';
 import type { WorkerLogger } from './logger.js';
 import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
 
@@ -30,6 +33,9 @@ import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
  * Artifact plus a Step checkpoint, a second fenced commit adds it to the Workspace and
  * terminalizes the Run atomically. A crash between the two leaves a committed checkpoint, so
  * the next Run (new lease epoch) resumes without re-executing the completed step.
+ *
+ * P0B-08b adds transactional budget enforcement to that path: every step takes a durable
+ * reservation **before** it can produce a side effect, and records its consumption after.
  *
  * Deliberately absent: real shell, real LLM, network sandbox, device distribution.
  */
@@ -54,6 +60,11 @@ export interface DurableRunHandlerDependencies {
   readonly checkpoints: CheckpointStore;
   readonly committer: RunResultCommitter;
   readonly workspaces: Pick<PostgresWorkspaceStore, 'loadForRun'>;
+  /**
+   * Durable budget authority (B08b-D1). It is required, not optional: a Worker that could
+   * silently skip the reservation would make the whole limit advisory.
+   */
+  readonly budget: BudgetLedger;
   readonly clock: ExecutionClock;
   readonly logger: WorkerLogger;
 }
@@ -203,6 +214,88 @@ async function executeStep(
   return produceBytes(context, route, typeof output.text === 'string' ? { text: output.text } : {});
 }
 
+/**
+ * Run one durable step under a transactional budget reservation (B08b-D2).
+ *
+ * The order is the whole point:
+ *
+ * ```text
+ * reserve (may deny, writes nothing on denial) → execute → settle(replayed ? release)
+ * ```
+ *
+ * so a refusal happens before the simulated model/sandbox call, before bytes are staged and
+ * before anything is published. Settlement bookkeeping never fails the Run: the step's durable
+ * effect is already committed by then, and a reservation that is left live is charged in full
+ * when its lease expires, which is the safe direction. Failing the Run instead would trade a
+ * bookkeeping error for a duplicate execution.
+ */
+async function runBudgetedStep<T>(input: {
+  readonly budget: BudgetLedger;
+  readonly grant: RunGrant;
+  readonly logger: WorkerLogger;
+  readonly log: Readonly<Record<string, unknown>>;
+  readonly operationId: string;
+  readonly cost: BudgetReservationAmount;
+  readonly signal?: AbortSignal;
+  /** `true` when the step turned out to be a pure replay, so nothing was actually produced. */
+  readonly wasReplay?: (value: T) => boolean;
+  readonly execute: () => Promise<T>;
+}): Promise<T> {
+  const { budget, grant, operationId, cost } = input;
+
+  // A denial throws `BUDGET_EXCEEDED` here, before any side effect exists to compensate.
+  await budget.reserve(grant, { operationId, cost });
+
+  if (input.signal?.aborted === true) {
+    // Nothing started, so nothing is charged: hand the held quota back and stop the Run.
+    await closeReservation(input, 'release', () => budget.release(grant, { operationId }));
+    throw new DomainError('CANCELLED', 'task cancellation was requested before the step started');
+  }
+
+  let value: T;
+
+  try {
+    value = await input.execute();
+  } catch (error) {
+    // The step may already have had an effect, so the reservation is charged in full rather
+    // than refunded: a failure is not a way to get quota back.
+    await closeReservation(input, 'settle', () =>
+      budget.settle(grant, { operationId, consumed: cost }),
+    );
+    throw error;
+  }
+
+  if (input.wasReplay?.(value) === true) {
+    // An already committed operation replayed, so nothing new happened: return the quota.
+    await closeReservation(input, 'release', () => budget.release(grant, { operationId }));
+    return value;
+  }
+
+  await closeReservation(input, 'settle', () =>
+    budget.settle(grant, { operationId, consumed: cost }),
+  );
+
+  return value;
+}
+
+/** Best-effort settlement/release that can never replace the step's own outcome. */
+async function closeReservation(
+  input: { readonly logger: WorkerLogger; readonly log: Readonly<Record<string, unknown>> },
+  operation: 'settle' | 'release',
+  close: () => Promise<unknown>,
+): Promise<void> {
+  try {
+    await close();
+  } catch (error) {
+    input.logger.warn('budget bookkeeping failed', {
+      ...input.log,
+      operation,
+      code: codeOf(error),
+      diagnostic: isDomainError(error) ? error.diagnostic : 'unexpected',
+    });
+  }
+}
+
 export function createDurableRunHandler(deps: DurableRunHandlerDependencies): RunHandler {
   const { contextReader, router, executor, blobs, checkpoints, committer, clock, logger } = deps;
 
@@ -340,30 +433,45 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           );
         }
 
-        const producedBytes = await executeStep(context, route, executor, signal);
-        const staged = await blobs.stage(
-          context.tenantId,
-          producedBytes.bytes,
-          producedBytes.mediaType,
-        );
+        const budgetedProduce = await runBudgetedStep({
+          budget: deps.budget,
+          grant,
+          logger,
+          log: { ...base, stepId: PRODUCE_STEP },
+          operationId: stepOperationId(PRODUCE_STEP, inputDigest, grant.leaseEpoch),
+          cost: stepCost(PRODUCE_STEP),
+          signal,
+          // Execute, stage and commit inside the reservation: the charge covers the whole
+          // step, so nothing is published unless the quota was taken first.
+          execute: async () => {
+            const producedBytes = await executeStep(context, route, executor, signal);
+            const staged = await blobs.stage(
+              context.tenantId,
+              producedBytes.bytes,
+              producedBytes.mediaType,
+            );
 
-        const producedReceipt = await committer.commitStep(grant, {
-          operationId: `step:${PRODUCE_STEP}:${inputDigest.slice(0, 16)}`,
-          mode: 'progress',
-          artifacts: [{ artifactId: staged.stagedId, staged }],
-          checkpoint: {
-            stepId: PRODUCE_STEP,
-            inputDigest,
-            executorVersion: CHECKPOINT_EXECUTOR_VERSION,
-            artifacts: [
-              {
-                artifactId: staged.stagedId,
-                sha256: staged.sha256,
-                size: staged.size,
-                mediaType: staged.mediaType,
-                path: producedBytes.workspacePath,
+            const producedReceipt = await committer.commitStep(grant, {
+              operationId: `step:${PRODUCE_STEP}:${inputDigest.slice(0, 16)}`,
+              mode: 'progress',
+              artifacts: [{ artifactId: staged.stagedId, staged }],
+              checkpoint: {
+                stepId: PRODUCE_STEP,
+                inputDigest,
+                executorVersion: CHECKPOINT_EXECUTOR_VERSION,
+                artifacts: [
+                  {
+                    artifactId: staged.stagedId,
+                    sha256: staged.sha256,
+                    size: staged.size,
+                    mediaType: staged.mediaType,
+                    path: producedBytes.workspacePath,
+                  },
+                ],
               },
-            ],
+            });
+
+            return { producedBytes, staged, producedReceipt };
           },
         });
 
@@ -373,12 +481,13 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
           grant,
           inputDigest,
           {
-            artifactId: producedReceipt.artifactIds[0] ?? staged.stagedId,
-            sha256: staged.sha256,
-            size: staged.size,
-            mediaType: staged.mediaType,
+            artifactId:
+              budgetedProduce.producedReceipt.artifactIds[0] ?? budgetedProduce.staged.stagedId,
+            sha256: budgetedProduce.staged.sha256,
+            size: budgetedProduce.staged.size,
+            mediaType: budgetedProduce.staged.mediaType,
           },
-          producedBytes.workspacePath,
+          budgetedProduce.producedBytes.workspacePath,
           route,
           startedAtHr,
         );
@@ -432,24 +541,36 @@ async function publishResult(
     files: [...workspace.manifest.files.filter((file) => file.path !== workspacePath), entry],
   };
 
-  const receipt = await committer.commitStep(grant, {
-    operationId: `step:${PUBLISH_STEP}:${inputDigest.slice(0, 16)}`,
-    mode: 'result',
-    workspace: { expectedVersion: workspace.version, manifest },
-    checkpoint: {
-      stepId: PUBLISH_STEP,
-      inputDigest,
-      executorVersion: CHECKPOINT_EXECUTOR_VERSION,
-      artifacts: [
-        {
-          artifactId: artifact.artifactId,
-          sha256: artifact.sha256,
-          size: artifact.size,
-          mediaType: artifact.mediaType,
-          path: workspacePath,
+  const receipt = await runBudgetedStep({
+    budget: deps.budget,
+    grant,
+    logger,
+    log: { taskId: grant.taskId, runId: grant.runId, attempt: grant.attempt, stepId: PUBLISH_STEP },
+    operationId: stepOperationId(PUBLISH_STEP, inputDigest, grant.leaseEpoch),
+    cost: stepCost(PUBLISH_STEP),
+    // A replayed terminal commit wrote nothing, so it must not be charged: the earlier
+    // attempt already produced (and paid for) that result.
+    wasReplay: (value) => value.replayed,
+    execute: () =>
+      committer.commitStep(grant, {
+        operationId: `step:${PUBLISH_STEP}:${inputDigest.slice(0, 16)}`,
+        mode: 'result',
+        workspace: { expectedVersion: workspace.version, manifest },
+        checkpoint: {
+          stepId: PUBLISH_STEP,
+          inputDigest,
+          executorVersion: CHECKPOINT_EXECUTOR_VERSION,
+          artifacts: [
+            {
+              artifactId: artifact.artifactId,
+              sha256: artifact.sha256,
+              size: artifact.size,
+              mediaType: artifact.mediaType,
+              path: workspacePath,
+            },
+          ],
         },
-      ],
-    },
+      }),
   });
 
   logger.info('durable execution committed', {

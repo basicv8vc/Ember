@@ -1,4 +1,5 @@
 import { WorkerIdSchema, resolveLeaseQueueConfig, type LeaseQueueConfig } from '@ember/postgres';
+import { MAX_BUDGET_POLICY_VERSION, type BudgetPolicy } from '@ember/execution';
 import { z } from 'zod';
 
 export class WorkerConfigError extends Error {
@@ -34,6 +35,14 @@ export interface WorkerConfig {
   readonly concurrency: number;
   readonly logLevel: LogLevel;
   readonly lease: LeaseQueueConfig;
+  /**
+   * Trusted P0B-08b budget policy (B08b-D3).
+   *
+   * It comes from Worker configuration, never from a Task payload or a request field: a caller
+   * that could name its own limits would make every limit advisory. It is passed to the
+   * durable budget ledger, which evaluates it inside the transaction that charges the Run.
+   */
+  readonly budget: BudgetPolicy;
 }
 
 const workerEnvSchema = z.object({
@@ -51,6 +60,40 @@ const workerEnvSchema = z.object({
   EMBER_WORKER_RETRY_CAP_MS: z.coerce.number().int().min(100).max(300_000).default(30_000),
   EMBER_WORKER_REAPER_BATCH: z.coerce.number().int().min(1).max(100).default(50),
   EMBER_WORKER_BLOB_ROOT: z.string().min(1).optional(),
+  // P0B-08b budget policy. Every limit is a non-negative safe integer; `0` is a legal,
+  // explicit, fail-closed value (it denies every step that would consume that dimension).
+  EMBER_WORKER_BUDGET_POLICY_ID: z.string().min(1).max(128).default('p0b08b-simulated-v1'),
+  EMBER_WORKER_BUDGET_POLICY_VERSION: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(MAX_BUDGET_POLICY_VERSION)
+    .default(1),
+  EMBER_WORKER_BUDGET_MAX_RUN_STEPS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(8),
+  EMBER_WORKER_BUDGET_MAX_RUN_UNITS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(100),
+  EMBER_WORKER_BUDGET_MAX_RUN_ELAPSED_MS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(120_000),
+  EMBER_WORKER_BUDGET_MAX_TENANT_DAILY_UNITS: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(5_000),
+  EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS: z.coerce.number().int().min(0).max(1_024).default(8),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -124,5 +167,14 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     concurrency: parsed.data.EMBER_WORKER_CONCURRENCY,
     logLevel: parsed.data.EMBER_LOG_LEVEL,
     lease,
+    budget: Object.freeze({
+      policyId: parsed.data.EMBER_WORKER_BUDGET_POLICY_ID,
+      policyVersion: parsed.data.EMBER_WORKER_BUDGET_POLICY_VERSION,
+      maxRunSteps: parsed.data.EMBER_WORKER_BUDGET_MAX_RUN_STEPS,
+      maxRunUnits: parsed.data.EMBER_WORKER_BUDGET_MAX_RUN_UNITS,
+      maxRunElapsedMs: parsed.data.EMBER_WORKER_BUDGET_MAX_RUN_ELAPSED_MS,
+      maxTenantDailyUnits: parsed.data.EMBER_WORKER_BUDGET_MAX_TENANT_DAILY_UNITS,
+      maxConcurrentSlots: parsed.data.EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS,
+    }),
   };
 }

@@ -3,6 +3,7 @@ export type { AbortLink, ExecutionClock, Sleeper } from './clock.js';
 export {
   BUDGET_DIMENSIONS,
   BUDGET_GUARD_LIMITS,
+  MAX_BUDGET_POLICY_VERSION,
   consumeBudgetReservation,
   createBudgetLedger,
   evaluateBudget,

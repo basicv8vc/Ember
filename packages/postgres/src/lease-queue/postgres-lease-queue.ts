@@ -129,6 +129,13 @@ UPDATE tasks
  WHERE tenant_id = $3 AND id = $4
 `;
 
+const HEARTBEAT_BUDGET_RESERVATIONS_SQL = `
+UPDATE budget_operations
+   SET expires_at = $1
+ WHERE tenant_id = $2 AND task_id = $3 AND run_id = $4 AND lease_epoch = $5
+   AND state = 'reserved' AND expires_at < $1
+`;
+
 const CONVERGE_OPEN_TASK_SQL = `
 UPDATE tasks
    SET status = $1, lease_expires_at = NULL, updated_at = $2
@@ -545,6 +552,17 @@ export class PostgresLeaseQueue implements LeaseQueue {
     if (taskUpdate.rowCount !== 1) {
       throw new DomainError('DB_UNAVAILABLE', 'heartbeat could not update the leased task');
     }
+
+    // A live reservation follows the lease that protects it. If heartbeat extended only the
+    // Task and Run rows, a later budget reserve could expire this still-running operation at
+    // its original boundary and release its concurrency slot prematurely.
+    await client.query(HEARTBEAT_BUDGET_RESERVATIONS_SQL, [
+      newExpiry,
+      leased.tenantId,
+      leased.taskId,
+      leased.runId,
+      leased.leaseEpoch,
+    ]);
 
     return true;
   }

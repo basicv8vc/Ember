@@ -29,7 +29,7 @@ export function generateMarkdownReport(r: BenchmarkResult): string {
 | **B-T29: 100 Concurrency (Local)** | 100 concurrent HTTP requests, 0 task loss | **${c.concurrency}** concurrency, **${rec.lostCount}** lost tasks (${rec.successRatePercent}% success) | **${c.concurrency === 100 && evalTarget.zeroTaskLossMet && rec.succeededCount === rec.totalSubmitted ? 'PASS' : 'FAIL'}** |
 | **Durable Ack Latency Goal** | P95 <= 1,000ms (Loopback HTTP -> DB Ack) | P95 = **${l.durableAck.p95Ms}ms** (P50=${l.durableAck.p50Ms}ms) | **${evalTarget.durableAckTargetMet ? 'MET' : 'UNMET'}** |
 | **Fake Sandbox Lifecycle** | Transient execution only; destroyed on finish | Peak live: **${t.peakLiveSandboxes}**, Idle: **${t.idleLiveSandboxes}** | **${t.idleLiveSandboxes === 0 ? 'PASS' : 'FAIL'}** |
-| **Resource & Cost Telemetry** | CPU, RSS, DB conns recorded; cost = simulated | Peak RSS: **${t.peakRssMb}MB**, Cost: **simulated** | **PASS** |
+| **Resource & Cost Telemetry** | CPU, RSS, DB conns recorded; cost = simulated | Peak RSS: **${t.peakRssMb}MB**, PG samples: **${t.postgresSampleCount}** | **${t.postgresSampleCount > 0 ? 'PASS' : 'UNVERIFIED'}** |
 
 ${
   !evalTarget.durableAckTargetMet
@@ -58,7 +58,8 @@ ${
 ## 3. Experiment Parameters
 
 - **Persistent Logical Agents**: \`${c.agents}\`
-- **HTTP Request Concurrency**: \`${c.concurrency}\`
+- **HTTP Concurrency Limit**: \`${c.concurrency}\`
+- **Measured Peak In-Flight Task POSTs**: \`${t.peakHttpInFlight}\`
 - **Worker Execution Slots**: \`${c.workerConcurrency}\`
 - **Task Mix**: Fast Path **${(c.taskMix.fast * 100).toFixed(0)}%** (\`mock.chat\`), Standard Path **${(c.taskMix.standard * 100).toFixed(0)}%** (\`mock.compute\`)
 - **Warmup Requests**: \`${c.warmup}\`
@@ -125,8 +126,9 @@ All metrics report sample size, P50, P95, P99, min, mean, and max:
 | **CPU Utilization** | **${t.cpuPercent}%** | Normalized across all available host cores |
 | **Peak Process RSS** | **${t.peakRssMb} MB** (${(t.peakRssBytes / 1024).toFixed(0)} KB) | Peak resident set size of benchmark process |
 | **Peak V8 Heap** | Used: **${t.peakHeapUsedMb} MB**, Total: ${t.peakHeapTotalMb} MB | V8 heap memory during peak concurrency |
-| **PostgreSQL Active Conns** | **${t.peakPostgresActiveConnections}** active (Peak total: ${t.peakPostgresTotalConnections}) | Live backend queries observed on PostgreSQL |
+| **PostgreSQL Active Conns** | **${t.postgresSampleCount > 0 ? t.peakPostgresActiveConnections : 'unverified'}** active (Peak total: ${t.postgresSampleCount > 0 ? t.peakPostgresTotalConnections : 'unverified'}, samples: ${t.postgresSampleCount}) | Live backend queries observed on PostgreSQL |
 | **Worker In-Flight Peak** | **${t.peakInFlightRuns}** / ${t.targetWorkerConcurrency} slots | Peak concurrent runs claimed by worker pool |
+| **Task POST In-Flight Peak** | **${t.peakHttpInFlight}** / ${c.concurrency} | Measured in-flight task submission HTTP requests (not worker concurrency) |
 | **Fake Sandbox Live Peak** | **${t.peakLiveSandboxes}** active (Idle: **${t.idleLiveSandboxes}**) | Live sandbox instances in memory during standard task execution |
 | **Cost Accounting** | \`cost_source: simulated\` | Total simulated CPU: **${t.costAccounting.totalSimulatedCpuMs}ms**, Units: **${t.costAccounting.totalSimulatedUnits}**, Vendor USD: **null** |
 
@@ -137,7 +139,7 @@ All metrics report sample size, P50, P95, P99, min, mean, and max:
 - [${a.verifiedDbAgentCount >= 1_000 && a.verifiedDbWorkspaceCount >= 1_000 ? 'x' : ' '}] **B-T28**: 1,000 persistent logical Agents created in DB without 1,000 resident OS processes or VMs.
 - [${c.concurrency === 100 && evalTarget.zeroTaskLossMet ? 'x' : ' '}] **B-T29**: 100 concurrent requests executed locally over HTTP loopback with zero unexplained task loss.
 - [x] **Durable Ack measurement**: Latency measured and reported with P50, P95, P99, sample count, and success rate.
-- [x] **Resource Telemetry**: Host CPU, RSS, PostgreSQL connection pool, worker slots, and live sandboxes monitored.
+- [${t.postgresSampleCount > 0 ? 'x' : ' '}] **Resource Telemetry**: Host CPU, RSS, PostgreSQL connections, HTTP in-flight requests, worker slots, and live sandboxes monitored.
 - [x] **Cost Redaction**: Billed costs explicitly labeled \`simulated\`; no fake USD vendor costs produced.
 - [x] **Local Isolation Guard**: Bounded resources, ephemeral test schema cleanup, and default safety guards preventing uncontrolled CI execution.
 `;
@@ -181,7 +183,7 @@ export function printConsoleSummary(r: BenchmarkResult): void {
     `  CPU: ${t.cpuPercent}% | Peak RSS: ${t.peakRssMb} MB | Peak Heap: ${t.peakHeapUsedMb} MB`,
   );
   console.log(
-    `  PG Active Conns: ${t.peakPostgresActiveConnections} | Worker In-Flight Peak: ${t.peakInFlightRuns}`,
+    `  PG Active Conns: ${t.postgresSampleCount > 0 ? t.peakPostgresActiveConnections : 'unverified'} (${t.postgresSampleCount} samples) | HTTP POST Peak: ${t.peakHttpInFlight} | Worker Peak: ${t.peakInFlightRuns}`,
   );
   console.log(`  Live Sandboxes Peak: ${t.peakLiveSandboxes} (Idle: ${t.idleLiveSandboxes})`);
   console.log(

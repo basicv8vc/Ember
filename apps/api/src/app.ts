@@ -1,5 +1,8 @@
 import { isDomainError } from '@ember/domain';
 import { Hono } from 'hono';
+import { unconfiguredAgentStore, type AgentStore } from './agents/agent-store.js';
+import { AGENTS_PATH } from './agents/constants.js';
+import { createAgentRoutes } from './agents/routes.js';
 import type { ApprovalHttpStore } from './approvals/approval-store.js';
 import { unconfiguredApprovalHttpStore } from './approvals/approval-store.js';
 import { APPROVALS_PATH, createApprovalRoutes } from './approvals/routes.js';
@@ -44,6 +47,8 @@ export interface AppDependencies {
    * denies every `/v1` request instead of accepting anonymous traffic.
    */
   readonly authenticator?: DevAuthenticator;
+  /** Agent persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
+  readonly agentStore?: AgentStore;
   /** Task persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
   readonly taskStore?: TaskStore;
   /** Artifact persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
@@ -58,9 +63,9 @@ export interface AppDependencies {
  *
  * Cross-cutting order matters and is fixed here:
  * 1. request id (every response, including errors, carries it);
- * 2. tenant authentication for `/v1/tasks` and `/v1/artifacts` — `/healthz` and `/readyz`
- *    stay unauthenticated because an orchestrator has no tenant credential;
- * 3. task and Artifact routes;
+ * 2. tenant authentication for `/v1/agents`, `/v1/tasks` and `/v1/artifacts` — `/healthz` and
+ *    `/readyz` stay unauthenticated because an orchestrator has no tenant credential;
+ * 3. agent, task and Artifact routes;
  * 4. one error mapper for the whole app.
  */
 export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
@@ -70,6 +75,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const serviceVersion = deps.serviceVersion ?? '0.0.0';
   const logger = deps.logger;
   const authenticator = deps.authenticator ?? createDevTokenAuthenticator([]);
+  const agentStore = deps.agentStore ?? unconfiguredAgentStore();
   const taskStore = deps.taskStore ?? unconfiguredTaskStore();
   const artifactStore = deps.artifactStore ?? unconfiguredArtifactHttpStore();
   const approvalStore = deps.approvalStore ?? unconfiguredApprovalHttpStore();
@@ -123,13 +129,17 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
 
   // Both registrations are needed for each base path: `use(path)` matches the collection
   // endpoint exactly, while `use(path + '/*')` matches parameterised routes below it.
-  // Registering only the wildcard would leave `POST /v1/tasks` unauthenticated.
+  // Registering only the wildcard would leave `POST /v1/agents` and `POST /v1/tasks`
+  // unauthenticated.
+  app.use(AGENTS_PATH, tenantAuth);
+  app.use(`${AGENTS_PATH}/*`, tenantAuth);
   app.use(TASKS_PATH, tenantAuth);
   app.use(`${TASKS_PATH}/*`, tenantAuth);
   app.use('/v1/artifacts', tenantAuth);
   app.use('/v1/artifacts/*', tenantAuth);
   app.use(APPROVALS_PATH, tenantAuth);
   app.use(`${APPROVALS_PATH}/*`, tenantAuth);
+  app.route(AGENTS_PATH, createAgentRoutes({ store: agentStore }));
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
   app.route(APPROVALS_PATH, createApprovalRoutes({ approvals: approvalStore }));

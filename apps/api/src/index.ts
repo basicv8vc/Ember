@@ -3,6 +3,7 @@ import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
 import {
   LocalBlobStore,
+  PostgresAgentRepository,
   PostgresApprovalRepository,
   PostgresArtifactStore,
   PostgresBlobStore,
@@ -100,6 +101,7 @@ function main(): void {
     serviceVersion: SERVICE_VERSION,
     logger,
     authenticator: createDevTokenAuthenticator(devAuth.tenants),
+    agentStore: new PostgresAgentRepository(pool),
     taskStore: new PostgresTaskRepository(pool),
     approvalStore: new PostgresApprovalRepository(pool),
     ...(apiConfig.blobRoot === null

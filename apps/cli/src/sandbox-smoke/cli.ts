@@ -205,6 +205,7 @@ export function formatHumanSummary(report: SmokeReport): string {
     '--- Cleanup Status ---',
     `Stop Status:           ${report.cleanup.stopStatus}`,
     `Destroy Status:        ${report.cleanup.destroyStatus}`,
+    `Resource Verification: ${report.cleanup.resourceVerification}`,
     `Leak Status:           ${report.cleanup.leakStatus}`,
     `Sandbox Stopped:       ${report.cleanup.stopSucceeded}`,
     `Sandbox Destroyed:     ${report.cleanup.destroySucceeded}`,

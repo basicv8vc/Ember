@@ -18,7 +18,9 @@ import {
   type SmokeReport,
 } from '../../apps/cli/src/sandbox-smoke/types.js';
 
-function createMockProvider(overrides: Partial<SandboxProvider> = {}): SandboxProvider {
+function createMockProvider(
+  overrides: Partial<SandboxProvider & { liveSandboxCount: () => number }> = {},
+): SandboxProvider & { liveSandboxCount: () => number } {
   const dummySandboxId = randomUUID();
   const dummyStdoutRef = randomUUID();
   const dummyStderrRef = randomUUID();
@@ -57,6 +59,7 @@ function createMockProvider(overrides: Partial<SandboxProvider> = {}): SandboxPr
     stop: (_sandboxId: Id) => Promise.resolve(),
     destroy: (_sandboxId: Id) => Promise.resolve(),
     usage: (_sandboxId: Id) => Promise.resolve(defaultUsage),
+    liveSandboxCount: () => 0,
     ...overrides,
   };
 }
@@ -96,6 +99,7 @@ describe('SandboxSmokeRunner', () => {
     // Verify cleanup
     expect(report.cleanup.stopStatus).toBe('COMPLETED');
     expect(report.cleanup.destroyStatus).toBe('COMPLETED');
+    expect(report.cleanup.resourceVerification).toBe('VERIFIED_ZERO');
     expect(report.cleanup.leakStatus).toBe('VERIFIED_CLEAN');
     expect(report.cleanup.stopSucceeded).toBe(true);
     expect(report.cleanup.destroySucceeded).toBe(true);
@@ -116,7 +120,8 @@ describe('SandboxSmokeRunner', () => {
 
     expect(report.status).toBe('FAIL');
     expect(report.phases.create.status).toBe('FAIL');
-    expect(report.phases.create.error).toContain('simulated create failure');
+    expect(report.phases.create.error).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.phases.create.error).not.toContain('simulated create failure');
     expect(report.phases.waitReady.status).toBe('SKIPPED');
     expect(report.phases.exec.status).toBe('SKIPPED');
     expect(report.phases.stop.status).toBe('SKIPPED');
@@ -125,11 +130,13 @@ describe('SandboxSmokeRunner', () => {
     // Crucial P1 fix: cannot verify zero leakage when create fails mid-provisioning
     expect(report.cleanup.stopStatus).toBe('NOT_ATTEMPTED');
     expect(report.cleanup.destroyStatus).toBe('NOT_ATTEMPTED');
+    expect(report.cleanup.resourceVerification).toBe('NOT_ATTEMPTED');
     expect(report.cleanup.leakStatus).toBe('UNKNOWN');
     expect(report.cleanup.resourcesLeaked).toBe(true);
     expect(report.cleanup.stopSucceeded).toBe(false);
     expect(report.cleanup.destroySucceeded).toBe(false);
-    expect(report.error).toContain('simulated create failure');
+    expect(report.error).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.error).not.toContain('simulated create failure');
   });
 
   it('marks leakStatus as VERIFIED_CLEAN when capabilities check fails before create is attempted', async () => {
@@ -142,9 +149,12 @@ describe('SandboxSmokeRunner', () => {
 
     expect(report.status).toBe('FAIL');
     expect(report.phases.capabilities.status).toBe('FAIL');
+    expect(report.phases.capabilities.error).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.phases.capabilities.error).not.toContain('capabilities discovery failure');
     expect(report.phases.create.status).toBe('SKIPPED');
     expect(report.cleanup.stopStatus).toBe('NOT_ATTEMPTED');
     expect(report.cleanup.destroyStatus).toBe('NOT_ATTEMPTED');
+    expect(report.cleanup.resourceVerification).toBe('NOT_ATTEMPTED');
     expect(report.cleanup.leakStatus).toBe('VERIFIED_CLEAN');
     expect(report.cleanup.resourcesLeaked).toBe(false);
   });
@@ -301,7 +311,8 @@ describe('SandboxSmokeRunner', () => {
     expect(report.cleanup.destroyStatus).toBe('COMPLETED');
     expect(report.cleanup.stopSucceeded).toBe(false);
     expect(report.cleanup.destroySucceeded).toBe(true);
-    expect(report.cleanup.stopError).toContain('simulated stop error');
+    expect(report.cleanup.stopError).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.cleanup.stopError).not.toContain('simulated stop error');
     expect(report.status).toBe('FAIL');
   });
 
@@ -319,11 +330,12 @@ describe('SandboxSmokeRunner', () => {
     expect(report.cleanup.leakStatus).toBe('CONFIRMED_LEAK');
     expect(report.cleanup.destroySucceeded).toBe(false);
     expect(report.cleanup.resourcesLeaked).toBe(true);
-    expect(report.cleanup.destroyError).toContain('simulated destroy error');
+    expect(report.cleanup.destroyError).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.cleanup.destroyError).not.toContain('simulated destroy error');
     expect(report.error).toContain('destroy failed');
   });
 
-  it('preserves original execution error when destroy also fails', async () => {
+  it('preserves failure status when destroy also fails', async () => {
     const provider = createMockProvider({
       exec: () => Promise.reject(new Error('original exec crash')),
       destroy: () => Promise.reject(new Error('secondary destroy failure')),
@@ -335,9 +347,9 @@ describe('SandboxSmokeRunner', () => {
     expect(report.status).toBe('FAIL');
     expect(report.phases.exec.status).toBe('FAIL');
     expect(report.phases.destroy.status).toBe('FAIL');
-    // Original error is prominently preserved, not masked as success or swallowed
-    expect(report.error).toContain('original exec crash');
-    expect(report.error).toContain('secondary destroy failure');
+    expect(report.error).toContain('ERR_PROVIDER_EXECUTION');
+    expect(report.error).not.toContain('original exec crash');
+    expect(report.error).not.toContain('secondary destroy failure');
   });
 
   it('handles AbortSignal cancellation during execution and cleans up', async () => {
@@ -444,6 +456,7 @@ describe('SandboxSmokeRunner', () => {
         stopStatus: 'COMPLETED',
         destroyStatus: 'COMPLETED',
         leakStatus: 'VERIFIED_CLEAN',
+        resourceVerification: 'VERIFIED_ZERO',
         stopSucceeded: true,
         destroySucceeded: true,
         resourcesLeaked: false,
@@ -490,5 +503,192 @@ describe('SandboxSmokeRunner', () => {
         cleanup: { ...baseReport.cleanup, destroyStatus: 'FAILED', destroySucceeded: false },
       }).success,
     ).toBe(false);
+
+    // Inconsistent PASS: stopStatus is FAILED
+    expect(
+      SmokeReportSchema.safeParse({
+        ...baseReport,
+        cleanup: { ...baseReport.cleanup, stopStatus: 'FAILED', stopSucceeded: false },
+      }).success,
+    ).toBe(false);
+
+    // Inconsistent PASS: stopSucceeded is false
+    expect(
+      SmokeReportSchema.safeParse({
+        ...baseReport,
+        cleanup: { ...baseReport.cleanup, stopSucceeded: false },
+      }).success,
+    ).toBe(false);
+
+    // Inconsistent PASS: resourceVerification is not VERIFIED_ZERO
+    expect(
+      SmokeReportSchema.safeParse({
+        ...baseReport,
+        cleanup: {
+          ...baseReport.cleanup,
+          resourceVerification: 'NOT_SUPPORTED',
+          leakStatus: 'UNKNOWN',
+        },
+      }).success,
+    ).toBe(false);
+
+    // Inconsistent PASS: a required phase failed
+    expect(
+      SmokeReportSchema.safeParse({
+        ...baseReport,
+        phases: {
+          ...baseReport.phases,
+          exec: { ...baseReport.phases.exec, status: 'FAIL', error: 'failed' },
+        },
+      }).success,
+    ).toBe(false);
+
+    // Inconsistent PASS: a required phase skipped
+    expect(
+      SmokeReportSchema.safeParse({
+        ...baseReport,
+        phases: {
+          ...baseReport.phases,
+          create: { ...baseReport.phases.create, status: 'SKIPPED' },
+        },
+      }).success,
+    ).toBe(false);
+  });
+
+  it('strictly excludes arbitrary sensitive strings injected into provider errors across all lifecycle phases', async () => {
+    const sensitiveStrings = [
+      'SUPER_SECRET_DB_PASSWORD_1234567890',
+      'postgres://admin:top_secret_credentials@internal-db:5432/ember',
+      'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY',
+      'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.sensitive-jwt-token',
+      'sk-live-0987654321fedcba-api-key',
+      'internal-cluster-token: secret-internal-token-xyz',
+    ];
+
+    for (const secret of sensitiveStrings) {
+      // 1. Error in capabilities
+      {
+        const provider = createMockProvider({
+          capabilities: () => Promise.reject(new Error(`Fatal: ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.phases.capabilities.error).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+
+      // 2. Error in create
+      {
+        const provider = createMockProvider({
+          create: () => Promise.reject(new Error(`Failed to provision sandbox: ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.phases.create.error).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+
+      // 3. Error in waitReady
+      {
+        const provider = createMockProvider({
+          waitReady: () => Promise.reject(new Error(`Sandbox startup crashed with ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.phases.waitReady.error).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+
+      // 4. Error in exec
+      {
+        const provider = createMockProvider({
+          exec: () => Promise.reject(new Error(`Command failed due to: ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.phases.exec.error).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+
+      // 5. Error in stop
+      {
+        const provider = createMockProvider({
+          stop: () => Promise.reject(new Error(`Stop hook crashed: ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.cleanup.stopError).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+
+      // 6. Error in destroy
+      {
+        const provider = createMockProvider({
+          destroy: () => Promise.reject(new Error(`Destroy hook failed: ${secret}`)),
+        });
+        const runner = new SandboxSmokeRunner(provider);
+        const report = await runner.run();
+        expect(report.status).toBe('FAIL');
+        expect(report.cleanup.destroyError).toContain('ERR_PROVIDER_EXECUTION');
+        expect(JSON.stringify(report)).not.toContain(secret);
+      }
+    }
+  });
+
+  it('distinguishes destroy confirmation from independent verification when liveSandboxCount is not supported', async () => {
+    const providerWithoutLiveCount = createMockProvider();
+    delete (providerWithoutLiveCount as { liveSandboxCount?: unknown }).liveSandboxCount;
+
+    const runner = new SandboxSmokeRunner(providerWithoutLiveCount);
+    const report = await runner.run();
+
+    expect(report.cleanup.destroyStatus).toBe('COMPLETED');
+    expect(report.cleanup.destroySucceeded).toBe(true);
+    expect(report.cleanup.resourceVerification).toBe('NOT_SUPPORTED');
+    expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+    expect(report.cleanup.resourcesLeaked).toBe(true);
+    expect(report.status).toBe('FAIL');
+    expect(report.error).toContain('leak status UNKNOWN');
+  });
+
+  it('marks resourceVerification as CHECK_FAILED and leakStatus as UNKNOWN when liveSandboxCount throws', async () => {
+    const sensitiveAuditError = 'CRITICAL_AUDIT_DAEMON_CRASH_SECRET_9876';
+    const provider = createMockProvider({
+      liveSandboxCount: () => {
+        throw new Error(sensitiveAuditError);
+      },
+    });
+
+    const runner = new SandboxSmokeRunner(provider);
+    const report = await runner.run();
+
+    expect(report.cleanup.destroyStatus).toBe('COMPLETED');
+    expect(report.cleanup.destroySucceeded).toBe(true);
+    expect(report.cleanup.resourceVerification).toBe('CHECK_FAILED');
+    expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+    expect(report.cleanup.resourcesLeaked).toBe(true);
+    expect(report.status).toBe('FAIL');
+    expect(JSON.stringify(report)).not.toContain(sensitiveAuditError);
+  });
+
+  it('marks resourceVerification as ACTIVE_RESOURCES_DETECTED and leakStatus as CONFIRMED_LEAK when liveSandboxCount returns positive', async () => {
+    const provider = createMockProvider({
+      liveSandboxCount: () => 2,
+    });
+
+    const runner = new SandboxSmokeRunner(provider);
+    const report = await runner.run();
+
+    expect(report.cleanup.destroyStatus).toBe('COMPLETED');
+    expect(report.cleanup.destroySucceeded).toBe(true);
+    expect(report.cleanup.resourceVerification).toBe('ACTIVE_RESOURCES_DETECTED');
+    expect(report.cleanup.leakStatus).toBe('CONFIRMED_LEAK');
+    expect(report.cleanup.resourcesLeaked).toBe(true);
+    expect(report.status).toBe('FAIL');
   });
 });

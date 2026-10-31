@@ -26,6 +26,12 @@ export type SmokePhaseStatus = 'PASS' | 'FAIL' | 'SKIPPED';
 
 export type SmokeCleanupStepStatus = 'COMPLETED' | 'FAILED' | 'NOT_ATTEMPTED' | 'UNKNOWN';
 export type SmokeLeakStatus = 'VERIFIED_CLEAN' | 'CONFIRMED_LEAK' | 'UNKNOWN';
+export type SmokeResourceVerificationStatus =
+  | 'VERIFIED_ZERO'
+  | 'ACTIVE_RESOURCES_DETECTED'
+  | 'CHECK_FAILED'
+  | 'NOT_SUPPORTED'
+  | 'NOT_ATTEMPTED';
 
 export interface SmokePhaseDetail {
   readonly phase: SmokePhase;
@@ -39,6 +45,7 @@ export interface SmokeCleanupReport {
   readonly stopStatus: SmokeCleanupStepStatus;
   readonly destroyStatus: SmokeCleanupStepStatus;
   readonly leakStatus: SmokeLeakStatus;
+  readonly resourceVerification: SmokeResourceVerificationStatus;
   readonly stopSucceeded: boolean;
   readonly destroySucceeded: boolean;
   readonly resourcesLeaked: boolean;
@@ -166,6 +173,13 @@ export const SmokeReportSchema = z
       stopStatus: z.enum(['COMPLETED', 'FAILED', 'NOT_ATTEMPTED', 'UNKNOWN']),
       destroyStatus: z.enum(['COMPLETED', 'FAILED', 'NOT_ATTEMPTED', 'UNKNOWN']),
       leakStatus: z.enum(['VERIFIED_CLEAN', 'CONFIRMED_LEAK', 'UNKNOWN']),
+      resourceVerification: z.enum([
+        'VERIFIED_ZERO',
+        'ACTIVE_RESOURCES_DETECTED',
+        'CHECK_FAILED',
+        'NOT_SUPPORTED',
+        'NOT_ATTEMPTED',
+      ]),
       stopSucceeded: z.boolean(),
       destroySucceeded: z.boolean(),
       resourcesLeaked: z.boolean(),
@@ -191,6 +205,13 @@ export const SmokeReportSchema = z
           path: ['cleanup', 'resourcesLeaked'],
         });
       }
+      if (data.cleanup.resourceVerification !== 'VERIFIED_ZERO') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.resourceVerification set to VERIFIED_ZERO',
+          path: ['cleanup', 'resourceVerification'],
+        });
+      }
       if (data.cleanup.destroyStatus !== 'COMPLETED') {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
@@ -204,6 +225,29 @@ export const SmokeReportSchema = z
           message: 'A PASS report must have cleanup.destroySucceeded set to true',
           path: ['cleanup', 'destroySucceeded'],
         });
+      }
+      if (data.cleanup.stopStatus !== 'COMPLETED') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.stopStatus set to COMPLETED',
+          path: ['cleanup', 'stopStatus'],
+        });
+      }
+      if (!data.cleanup.stopSucceeded) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.stopSucceeded set to true',
+          path: ['cleanup', 'stopSucceeded'],
+        });
+      }
+      for (const phase of SMOKE_PHASES) {
+        if (data.phases[phase].status !== 'PASS') {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: `A PASS report must have phase "${phase}" status set to PASS`,
+            path: ['phases', phase, 'status'],
+          });
+        }
       }
       if (data.error !== null) {
         ctx.addIssue({

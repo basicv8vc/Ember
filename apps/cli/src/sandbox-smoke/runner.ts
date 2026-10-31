@@ -13,6 +13,7 @@ import {
   type SmokeCleanupReport,
   type SmokeCleanupStepStatus,
   type SmokeLeakStatus,
+  type SmokeResourceVerificationStatus,
   type SmokePhase,
   type SmokePhaseDetail,
   type SmokePhaseStatus,
@@ -38,25 +39,23 @@ async function withBoundedTimeout<T>(
   phaseName: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  signal?.throwIfAborted();
+  if (signal?.aborted) {
+    throw new Error(`Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`);
+  }
 
   let timer: NodeJS.Timeout | undefined;
   let abortHandler: (() => void) | undefined;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`Phase "${phaseName}" timed out after ${timeoutMs}ms`));
+      reject(new Error(`Phase "${phaseName}" timed out after ${timeoutMs}ms [ERR_PHASE_TIMEOUT]`));
     }, timeoutMs);
   });
 
   const abortPromise = new Promise<never>((_, reject) => {
     if (signal) {
       abortHandler = () => {
-        reject(
-          signal.reason instanceof Error
-            ? signal.reason
-            : new Error(`Phase "${phaseName}" was aborted`),
-        );
+        reject(new Error(`Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`));
       };
       signal.addEventListener('abort', abortHandler, { once: true });
     }
@@ -122,6 +121,7 @@ export class SandboxSmokeRunner {
     let capabilitiesResult: SandboxCapabilities | null = null;
     let usageResult: SandboxUsageRecord | null = null;
     let primaryError: unknown = null;
+    let failedPhase: SmokePhase | null = null;
     let stopError: unknown = undefined;
     let destroyError: unknown = undefined;
     let stopStatus: SmokeCleanupStepStatus = 'NOT_ATTEMPTED';
@@ -147,13 +147,14 @@ export class SandboxSmokeRunner {
         };
         return result;
       } catch (err) {
+        failedPhase = phase;
         const durationMs = Math.round((performance.now() - phaseStart) * 100) / 100;
         phaseDurations[phase] = durationMs;
         phaseDetails[phase] = {
           phase,
           status: 'FAIL',
           durationMs,
-          error: formatSanitizedError(err),
+          error: formatSanitizedError(err, phase),
         };
         throw err;
       }
@@ -212,7 +213,9 @@ export class SandboxSmokeRunner {
         async () => {
           const res = await this.provider.exec(createRes.sandboxId, argv, execTimeoutMs);
           if (res.exitCode !== 0) {
-            throw new Error(`Command exited with non-zero exit code: ${res.exitCode}`);
+            throw new Error(
+              `Command exited with non-zero exit code: ${res.exitCode} [ERR_EXEC_FAILED]`,
+            );
           }
           return res;
         },
@@ -257,7 +260,9 @@ export class SandboxSmokeRunner {
             !Number.isFinite(usage.egressBytes) ||
             usage.egressBytes < 0
           ) {
-            throw new Error('SandboxUsageRecord returned non-finite or negative metrics');
+            throw new Error(
+              'SandboxUsageRecord returned non-finite or negative metrics [ERR_INVALID_USAGE]',
+            );
           }
           return usage;
         },
@@ -288,7 +293,7 @@ export class SandboxSmokeRunner {
             phase: 'stop',
             status: 'FAIL',
             durationMs,
-            error: formatSanitizedError(err),
+            error: formatSanitizedError(err, 'stop'),
           };
           stopStatus =
             err instanceof Error && err.message.includes('timed out') ? 'UNKNOWN' : 'FAILED';
@@ -314,7 +319,7 @@ export class SandboxSmokeRunner {
             phase: 'destroy',
             status: 'FAIL',
             durationMs,
-            error: formatSanitizedError(err),
+            error: formatSanitizedError(err, 'destroy'),
           };
           destroyStatus =
             err instanceof Error && err.message.includes('timed out') ? 'UNKNOWN' : 'FAILED';
@@ -326,6 +331,7 @@ export class SandboxSmokeRunner {
     let stopSucceeded = false;
     let destroySucceeded = false;
     let leakStatus: SmokeLeakStatus = 'UNKNOWN';
+    let resourceVerification: SmokeResourceVerificationStatus = 'NOT_ATTEMPTED';
 
     if (sandboxId === null) {
       if (createAttempted) {
@@ -336,6 +342,7 @@ export class SandboxSmokeRunner {
         stopSucceeded = false;
         destroySucceeded = false;
         leakStatus = 'UNKNOWN';
+        resourceVerification = 'NOT_ATTEMPTED';
       } else {
         // create() was never invoked (e.g. capabilities check failed); verified no sandbox exists.
         stopStatus = 'NOT_ATTEMPTED';
@@ -343,26 +350,43 @@ export class SandboxSmokeRunner {
         stopSucceeded = true;
         destroySucceeded = true;
         leakStatus = 'VERIFIED_CLEAN';
+        resourceVerification = 'NOT_ATTEMPTED';
       }
     } else {
       stopSucceeded = stopStatus === 'COMPLETED';
       destroySucceeded = destroyStatus === 'COMPLETED';
 
       if (destroyStatus === 'COMPLETED') {
-        let activeRemaining = false;
-        const maybeProvider = this.provider as unknown as { liveSandboxCount?: () => number };
+        // Destroy confirmation succeeded. Now attempt independent resource verification.
+        const maybeProvider = this.provider as unknown as { liveSandboxCount?: unknown };
         if (typeof maybeProvider.liveSandboxCount === 'function') {
-          activeRemaining = maybeProvider.liveSandboxCount() > 0;
-        }
-
-        if (activeRemaining) {
-          leakStatus = 'CONFIRMED_LEAK';
+          try {
+            const count = (maybeProvider as { liveSandboxCount: () => number }).liveSandboxCount();
+            if (!Number.isSafeInteger(count) || count < 0) {
+              resourceVerification = 'CHECK_FAILED';
+              leakStatus = 'UNKNOWN';
+            } else if (count === 0) {
+              resourceVerification = 'VERIFIED_ZERO';
+              leakStatus = 'VERIFIED_CLEAN';
+            } else {
+              resourceVerification = 'ACTIVE_RESOURCES_DETECTED';
+              leakStatus = 'CONFIRMED_LEAK';
+            }
+          } catch {
+            resourceVerification = 'CHECK_FAILED';
+            leakStatus = 'UNKNOWN';
+          }
         } else {
-          leakStatus = 'VERIFIED_CLEAN';
+          // Provider does NOT implement an independent counting/audit hook (e.g., liveSandboxCount).
+          // Destroy is confirmed (destroySucceeded = true), but independent verification is unsupported.
+          resourceVerification = 'NOT_SUPPORTED';
+          leakStatus = 'UNKNOWN';
         }
       } else if (destroyStatus === 'UNKNOWN') {
+        resourceVerification = 'NOT_ATTEMPTED';
         leakStatus = 'UNKNOWN';
       } else {
+        resourceVerification = 'NOT_ATTEMPTED';
         leakStatus = 'CONFIRMED_LEAK';
       }
     }
@@ -373,11 +397,13 @@ export class SandboxSmokeRunner {
       stopStatus,
       destroyStatus,
       leakStatus,
+      resourceVerification,
       stopSucceeded,
       destroySucceeded,
       resourcesLeaked,
-      stopError: stopError !== undefined ? formatSanitizedError(stopError) : undefined,
-      destroyError: destroyError !== undefined ? formatSanitizedError(destroyError) : undefined,
+      stopError: stopError !== undefined ? formatSanitizedError(stopError, 'stop') : undefined,
+      destroyError:
+        destroyError !== undefined ? formatSanitizedError(destroyError, 'destroy') : undefined,
     };
 
     const totalWallMs = Math.round((performance.now() - startWall) * 100) / 100;
@@ -386,30 +412,38 @@ export class SandboxSmokeRunner {
       phaseDurationsMs: phaseDurations,
     };
 
-    // Status resolution: PASS is strictly forbidden unless verified clean with successful destroy
+    // Status resolution: PASS is strictly forbidden unless verified clean with successful destroy and all required phases PASS
+    const allPhasesPassed = (Object.keys(phaseDetails) as SmokePhase[]).every(
+      (phase) => phaseDetails[phase].status === 'PASS',
+    );
+
     const overallStatus: SmokePhaseStatus =
       primaryError === null &&
       stopSucceeded &&
       destroySucceeded &&
+      stopStatus === 'COMPLETED' &&
+      destroyStatus === 'COMPLETED' &&
+      resourceVerification === 'VERIFIED_ZERO' &&
       leakStatus === 'VERIFIED_CLEAN' &&
-      !resourcesLeaked
+      !resourcesLeaked &&
+      allPhasesPassed
         ? 'PASS'
         : 'FAIL';
 
     let errorMessage: string | null = null;
     if (primaryError !== null) {
-      errorMessage = formatSanitizedError(primaryError);
+      errorMessage = formatSanitizedError(primaryError, failedPhase ?? undefined);
       if (!destroySucceeded) {
-        errorMessage += `; Cleanup failure: destroy ${destroyStatus.toLowerCase()} (${formatSanitizedError(destroyError)})`;
+        errorMessage += `; Cleanup failure: destroy ${destroyStatus.toLowerCase()} (${formatSanitizedError(destroyError, 'destroy')})`;
       } else if (leakStatus === 'UNKNOWN') {
         errorMessage += '; Cleanup status: resource state UNKNOWN after creation failure';
       }
     } else if (!destroySucceeded) {
-      errorMessage = `Cleanup failure: destroy ${destroyStatus.toLowerCase()} (${formatSanitizedError(destroyError)})`;
+      errorMessage = `Cleanup failure: destroy ${destroyStatus.toLowerCase()} (${formatSanitizedError(destroyError, 'destroy')})`;
     } else if (!stopSucceeded) {
-      errorMessage = `Cleanup failure: stop ${stopStatus.toLowerCase()} (${formatSanitizedError(stopError)})`;
+      errorMessage = `Cleanup failure: stop ${stopStatus.toLowerCase()} (${formatSanitizedError(stopError, 'stop')})`;
     } else if (leakStatus !== 'VERIFIED_CLEAN') {
-      errorMessage = `Cleanup failure: leak status ${leakStatus}`;
+      errorMessage = `Cleanup failure: leak status ${leakStatus} (verification: ${resourceVerification})`;
     }
 
     const report: SmokeReport = {

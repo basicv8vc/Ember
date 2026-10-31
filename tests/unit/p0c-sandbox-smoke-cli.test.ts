@@ -149,7 +149,10 @@ describe('SandboxSmoke CLI', () => {
     );
 
     const error = new Error('Database at postgresql://user:mypassword@db:5432/app connection lost');
-    expect(formatSanitizedError(error)).toBe(
+    // Raw arbitrary error messages are converted to safe codes
+    expect(formatSanitizedError(error)).toBe('Provider operation failed [ERR_PROVIDER_EXECUTION]');
+    // Direct string scrubber redacts known credential patterns
+    expect(sanitizeString(error.message)).toBe(
       'Database at postgresql://user:[REDACTED]@db:5432/app connection lost',
     );
 

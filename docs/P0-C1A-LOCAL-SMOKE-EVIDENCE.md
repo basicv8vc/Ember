@@ -102,6 +102,7 @@ Cost Source:           NOT_MEASURED
 --- Cleanup Status ---
 Stop Status:           COMPLETED
 Destroy Status:        COMPLETED
+Resource Verification: VERIFIED_ZERO
 Leak Status:           VERIFIED_CLEAN
 Sandbox Stopped:       true
 Sandbox Destroyed:     true
@@ -230,6 +231,7 @@ Resources Leaked:      false
     "stopStatus": "COMPLETED",
     "destroyStatus": "COMPLETED",
     "leakStatus": "VERIFIED_CLEAN",
+    "resourceVerification": "VERIFIED_ZERO",
     "stopSucceeded": true,
     "destroySucceeded": true,
     "resourcesLeaked": false
@@ -270,7 +272,7 @@ Resources Leaked:      false
 | `pnpm lint`                      |   **0**   | ESLint passed with 0 errors and 0 warnings                                                                                                                                             |
 | `pnpm typecheck`                 |   **0**   | TypeScript typecheck passed (`tsc -p tsconfig.json`)                                                                                                                                   |
 | `pnpm build`                     |   **0**   | Monorepo build passed (`tsc -b tsconfig.build.json`)                                                                                                                                   |
-| `pnpm test:unit`                 |   **0**   | **46 test files passed, 703 unit tests passed** (+2 test files, +27 new tests)                                                                                                         |
+| `pnpm test:unit`                 |   **0**   | **46 test files passed, 707 unit tests passed** (+2 test files, +31 new tests)                                                                                                         |
 | `pnpm sandbox:smoke:local`       |   **0**   | Complete Fake lifecycle verified (8 phases PASS, 4.33ms)                                                                                                                               |
 | `git diff --check`               |   **0**   | Zero trailing whitespace or merge conflict markers                                                                                                                                     |
 | `pnpm demo --scenario fast`      |   **0**   | Fast Path invariants verified against isolated local loopback (145ms)                                                                                                                  |

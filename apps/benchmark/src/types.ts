@@ -90,6 +90,12 @@ export interface BenchmarkOptions {
   readonly apiUrl?: string;
 
   /**
+   * Optional flag to disable periodic PostgreSQL connection sampling (used for A/B overhead comparison).
+   * Default: false.
+   */
+  readonly disablePgSampling?: boolean;
+
+  /**
    * Optional logger function. Default logs to stdout/stderr.
    */
   readonly log?: (message: string) => void;
@@ -113,6 +119,7 @@ export interface ResolvedBenchmarkConfig {
   readonly enableLocalLoad: boolean;
   readonly workerConcurrency: number;
   readonly apiUrl?: string;
+  readonly disablePgSampling?: boolean;
 }
 
 /**

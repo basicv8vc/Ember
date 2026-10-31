@@ -91,4 +91,37 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       }
     }
   });
+
+  it('supports disablePgSampling option and reports zero PostgreSQL samples without faking telemetry PASS', async () => {
+    const tempOutDir = mkdtempSync(path.join(os.tmpdir(), 'ember-bench-smoke-disabled-'));
+
+    try {
+      const result = await runBenchmark({
+        agents: 2,
+        concurrency: 1,
+        warmup: 1,
+        totalRequests: 2,
+        taskMix: { fast: 1, standard: 0 },
+        seed: 102,
+        isolatedSchema: true,
+        keepDb: false,
+        outDir: tempOutDir,
+        enableLocalLoad: true,
+        workerConcurrency: 2,
+        disablePgSampling: true,
+        log: () => undefined,
+      });
+
+      expect(result.config.disablePgSampling).toBe(true);
+      expect(result.telemetry.postgresSampleCount).toBe(0);
+      expect(result.reconciliation.succeededCount).toBe(2);
+      expect(result.reconciliation.hasUnexplainedTaskLoss).toBe(false);
+    } finally {
+      try {
+        rmSync(tempOutDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  });
 });

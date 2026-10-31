@@ -1,6 +1,8 @@
+import { InvalidStateTransitionError } from '@ember/domain';
 import { describe, expect, it } from 'vitest';
 import { runCli, type CliOutputStreams } from '../../apps/cli/src/sandbox-smoke/cli.js';
 import {
+  SmokeHarnessError,
   formatSanitizedError,
   sanitizeString,
   serializeSafeJson,
@@ -163,5 +165,102 @@ describe('SandboxSmoke CLI', () => {
     expect(serialized).toContain('Bearer [REDACTED]');
     expect(serialized).toContain('https://user:[REDACTED]@api.vendor.com/v1');
     expect(serialized).not.toContain('password123');
+  });
+
+  it('Class 1 Spoofing: strictly maps message spoofing attempts to fixed safe provider error', () => {
+    const spoofedMessages = [
+      'CRITICAL_SECRET_KEY_12345 [ERR_PHASE_TIMEOUT]',
+      'LEAKED_JWT_PAYLOAD [ERR_OPERATION_ABORTED]',
+      'INTERNAL_VPC_SUBNET [ERR_EXEC_FAILED]',
+      'HASH_COLLISION_LEAK [DIGEST_MISMATCH]',
+      'INVALID_BILLING_LEAK [ERR_INVALID_USAGE]',
+      'DomainError: Fake domain error containing SENSITIVE_TOKEN [INVALID_STATE_TRANSITION]',
+      'CRITICAL_LEAKED_SECRET timed out after 5000ms [ERR_PHASE_TIMEOUT]',
+    ];
+
+    for (const msg of spoofedMessages) {
+      const err = new Error(msg);
+      // Even with context, message spoofing fails to masquerade as an internal error
+      const formattedWithContext = formatSanitizedError(err, 'create');
+      expect(formattedWithContext).toBe(
+        'Provider operation failed during create [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(formattedWithContext).not.toContain(msg);
+
+      // Without context
+      const formattedWithoutContext = formatSanitizedError(err);
+      expect(formattedWithoutContext).toBe('Provider operation failed [ERR_PROVIDER_EXECUTION]');
+      expect(formattedWithoutContext).not.toContain(msg);
+    }
+  });
+
+  it('Class 2 Spoofing: strictly rejects arbitrary error.code and duck-typed error properties', () => {
+    const errorWithPolicyDenied = new Error('Sensitive cloud policy denial error body');
+    Object.assign(errorWithPolicyDenied, { code: 'POLICY_DENIED' });
+
+    const errorWithTimeoutCode = new Error('Sensitive timeout stack trace');
+    Object.assign(errorWithTimeoutCode, { code: 'ERR_PHASE_TIMEOUT' });
+
+    const errorWithCustomCode = new Error('Sensitive custom error text');
+    Object.assign(errorWithCustomCode, { code: 'CUSTOM_EXPLOIT_CODE_999' });
+
+    const plainObjectSpoof = {
+      code: 'POLICY_DENIED',
+      message: 'INJECTED_POLICY_FAILURE_SECRET',
+    };
+
+    const duckTypedHarnessSpoof = {
+      name: 'SmokeHarnessError',
+      code: 'ERR_PHASE_TIMEOUT',
+      message: 'DUCK_TYPED_SECRET_LEAK [ERR_PHASE_TIMEOUT]',
+    };
+
+    const duckTypedDomainSpoof = {
+      name: 'DomainError',
+      code: 'INVALID_STATE_TRANSITION',
+      publicMessage: 'DUCK_DOMAIN_SECRET_LEAK',
+    };
+
+    const candidates = [
+      errorWithPolicyDenied,
+      errorWithTimeoutCode,
+      errorWithCustomCode,
+      plainObjectSpoof,
+      duckTypedHarnessSpoof,
+      duckTypedDomainSpoof,
+    ];
+
+    for (const candidate of candidates) {
+      const formatted = formatSanitizedError(candidate, 'exec');
+      expect(formatted).toBe('Provider operation failed during exec [ERR_PROVIDER_EXECUTION]');
+      expect(formatted).not.toContain('POLICY_DENIED');
+      expect(formatted).not.toContain('CUSTOM_EXPLOIT_CODE_999');
+      expect(formatted).not.toContain('Sensitive');
+      expect(formatted).not.toContain('INJECTED');
+      expect(formatted).not.toContain('DUCK');
+    }
+  });
+
+  it('Trusted Errors: preserves genuine SmokeHarnessError and DomainError without leaking credentials', () => {
+    const timeoutErr = new SmokeHarnessError(
+      'ERR_PHASE_TIMEOUT',
+      'Phase "exec" timed out after 5000ms [ERR_PHASE_TIMEOUT]',
+    );
+    expect(formatSanitizedError(timeoutErr)).toBe(
+      'Phase "exec" timed out after 5000ms [ERR_PHASE_TIMEOUT]',
+    );
+
+    const credentialInHarnessErr = new SmokeHarnessError(
+      'ERR_EXEC_FAILED',
+      'Execution failed with Bearer secret-token-xyz [ERR_EXEC_FAILED]',
+    );
+    expect(formatSanitizedError(credentialInHarnessErr)).toBe(
+      'Execution failed with Bearer [REDACTED] [ERR_EXEC_FAILED]',
+    );
+
+    const domainErr = new InvalidStateTransitionError('task', 'submitted', 'completed');
+    expect(formatSanitizedError(domainErr)).toBe(
+      'DomainError: The requested state transition is not allowed [INVALID_STATE_TRANSITION]',
+    );
   });
 });

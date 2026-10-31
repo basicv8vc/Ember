@@ -6,7 +6,7 @@ import type {
   SandboxUsageRecord,
 } from '@ember/contracts';
 import type { Id } from '@ember/domain';
-import { formatSanitizedError } from './sanitize.js';
+import { formatSanitizedError, SmokeHarnessError, isSmokeHarnessError } from './sanitize.js';
 import {
   SMOKE_LIMITATIONS,
   SMOKE_SCHEMA_VERSION,
@@ -40,7 +40,10 @@ async function withBoundedTimeout<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   if (signal?.aborted) {
-    throw new Error(`Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`);
+    throw new SmokeHarnessError(
+      'ERR_OPERATION_ABORTED',
+      `Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`,
+    );
   }
 
   let timer: NodeJS.Timeout | undefined;
@@ -48,14 +51,24 @@ async function withBoundedTimeout<T>(
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`Phase "${phaseName}" timed out after ${timeoutMs}ms [ERR_PHASE_TIMEOUT]`));
+      reject(
+        new SmokeHarnessError(
+          'ERR_PHASE_TIMEOUT',
+          `Phase "${phaseName}" timed out after ${timeoutMs}ms [ERR_PHASE_TIMEOUT]`,
+        ),
+      );
     }, timeoutMs);
   });
 
   const abortPromise = new Promise<never>((_, reject) => {
     if (signal) {
       abortHandler = () => {
-        reject(new Error(`Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`));
+        reject(
+          new SmokeHarnessError(
+            'ERR_OPERATION_ABORTED',
+            `Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`,
+          ),
+        );
       };
       signal.addEventListener('abort', abortHandler, { once: true });
     }
@@ -133,7 +146,12 @@ export class SandboxSmokeRunner {
       action: () => Promise<T>,
       detailsExtractor?: (result: T) => Record<string, unknown>,
     ): Promise<T> => {
-      signal?.throwIfAborted();
+      if (signal?.aborted) {
+        throw new SmokeHarnessError(
+          'ERR_OPERATION_ABORTED',
+          `Phase "${phase}" was aborted [ERR_OPERATION_ABORTED]`,
+        );
+      }
       const phaseStart = performance.now();
       try {
         const result = await withBoundedTimeout(action, phaseTimeoutMs, phase, signal);
@@ -213,7 +231,8 @@ export class SandboxSmokeRunner {
         async () => {
           const res = await this.provider.exec(createRes.sandboxId, argv, execTimeoutMs);
           if (res.exitCode !== 0) {
-            throw new Error(
+            throw new SmokeHarnessError(
+              'ERR_EXEC_FAILED',
               `Command exited with non-zero exit code: ${res.exitCode} [ERR_EXEC_FAILED]`,
             );
           }
@@ -234,7 +253,8 @@ export class SandboxSmokeRunner {
           const stderr = await this.provider.readOutput(createRes.sandboxId, execRes.stderrRef);
 
           if (stdout !== expectedSha256) {
-            throw new Error(
+            throw new SmokeHarnessError(
+              'DIGEST_MISMATCH',
               'SHA-256 digest verification failed: mismatch against expected digest [DIGEST_MISMATCH]',
             );
           }
@@ -260,7 +280,8 @@ export class SandboxSmokeRunner {
             !Number.isFinite(usage.egressBytes) ||
             usage.egressBytes < 0
           ) {
-            throw new Error(
+            throw new SmokeHarnessError(
+              'ERR_INVALID_USAGE',
               'SandboxUsageRecord returned non-finite or negative metrics [ERR_INVALID_USAGE]',
             );
           }
@@ -296,7 +317,7 @@ export class SandboxSmokeRunner {
             error: formatSanitizedError(err, 'stop'),
           };
           stopStatus =
-            err instanceof Error && err.message.includes('timed out') ? 'UNKNOWN' : 'FAILED';
+            isSmokeHarnessError(err) && err.code === 'ERR_PHASE_TIMEOUT' ? 'UNKNOWN' : 'FAILED';
         }
 
         // Always attempt destroy, even if stop failed
@@ -322,7 +343,7 @@ export class SandboxSmokeRunner {
             error: formatSanitizedError(err, 'destroy'),
           };
           destroyStatus =
-            err instanceof Error && err.message.includes('timed out') ? 'UNKNOWN' : 'FAILED';
+            isSmokeHarnessError(err) && err.code === 'ERR_PHASE_TIMEOUT' ? 'UNKNOWN' : 'FAILED';
         }
       }
     }

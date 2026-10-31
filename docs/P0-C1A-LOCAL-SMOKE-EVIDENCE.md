@@ -258,8 +258,10 @@ Resources Leaked:      false
    - Located in `apps/cli/src/sandbox-smoke/`.
    - Exports `SandboxSmokeRunner` and `runSandboxSmoke`.
    - Future cloud adapters (Agent B/C) can implement `SandboxProvider` and plug into the same `SandboxSmokeRunner` without duplicating harness lifecycle logic or test assertion pipelines.
-3. **Redaction & Safe Serialization:**
-   - All errors and serialized outputs are sanitized via `formatSanitizedError` and `serializeSafeJson`, ensuring secrets, authorization bearer tokens, and connection strings are replaced with `[REDACTED]`.
+3. **Redaction & Anti-Spoofing Security Architecture:**
+   - All errors and serialized outputs are sanitized via `formatSanitizedError` and `serializeSafeJson`.
+   - Only trusted internal `SmokeHarnessError` instances (marked with a private module Symbol brand) and `@ember/domain` `DomainError` instances (whose client messages are statically mapped) are formatted.
+   - Provider exceptions and arbitrary unverified errors are strictly mapped to fixed safe messages (`Provider operation failed${ctxStr} [ERR_PROVIDER_EXECUTION]`), preventing any message substring spoofing (e.g. embedding `[ERR_PHASE_TIMEOUT]`), arbitrary `error.code` injection (e.g. `code: 'POLICY_DENIED'`), or duck-typed error manipulation of report or cleanup state.
 
 ---
 
@@ -272,7 +274,7 @@ Resources Leaked:      false
 | `pnpm lint`                      |   **0**   | ESLint passed with 0 errors and 0 warnings                                                                                                                                             |
 | `pnpm typecheck`                 |   **0**   | TypeScript typecheck passed (`tsc -p tsconfig.json`)                                                                                                                                   |
 | `pnpm build`                     |   **0**   | Monorepo build passed (`tsc -b tsconfig.build.json`)                                                                                                                                   |
-| `pnpm test:unit`                 |   **0**   | **46 test files passed, 707 unit tests passed** (+2 test files, +31 new tests)                                                                                                         |
+| `pnpm test:unit`                 |   **0**   | **46 test files passed, 712 unit tests passed** (+2 test files, +36 new smoke tests)                                                                                                   |
 | `pnpm sandbox:smoke:local`       |   **0**   | Complete Fake lifecycle verified (8 phases PASS, 4.33ms)                                                                                                                               |
 | `git diff --check`               |   **0**   | Zero trailing whitespace or merge conflict markers                                                                                                                                     |
 | `pnpm demo --scenario fast`      |   **0**   | Fast Path invariants verified against isolated local loopback (145ms)                                                                                                                  |

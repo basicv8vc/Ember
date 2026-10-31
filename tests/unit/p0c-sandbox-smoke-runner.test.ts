@@ -691,4 +691,113 @@ describe('SandboxSmokeRunner', () => {
     expect(report.cleanup.resourcesLeaked).toBe(true);
     expect(report.status).toBe('FAIL');
   });
+
+  it('Class 1 Spoofing in Runner: provider exceptions with spoofed message substrings never bypass error sanitization or manipulate cleanup state', async () => {
+    // 1. exec phase message spoofing
+    {
+      const provider = createMockProvider({
+        exec: () => Promise.reject(new Error('INJECTED_EXEC_SECRET [ERR_PHASE_TIMEOUT]')),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.exec.status).toBe('FAIL');
+      expect(report.phases.exec.error).toBe(
+        'Provider operation failed during exec [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('INJECTED_EXEC_SECRET');
+    }
+
+    // 2. stop phase message spoofing (must NOT trick runner into UNKNOWN status)
+    {
+      const provider = createMockProvider({
+        stop: () => Promise.reject(new Error('INJECTED_STOP_SECRET timed out [ERR_PHASE_TIMEOUT]')),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.stopStatus).toBe('FAILED');
+      expect(report.cleanup.stopError).toBe(
+        'Provider operation failed during stop [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('INJECTED_STOP_SECRET');
+    }
+
+    // 3. destroy phase message spoofing (must NOT trick runner into UNKNOWN status)
+    {
+      const provider = createMockProvider({
+        destroy: () =>
+          Promise.reject(new Error('INJECTED_DESTROY_SECRET timed out [ERR_PHASE_TIMEOUT]')),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.destroyStatus).toBe('FAILED');
+      expect(report.cleanup.destroyError).toBe(
+        'Provider operation failed during destroy [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('INJECTED_DESTROY_SECRET');
+    }
+  });
+
+  it('Class 2 Spoofing in Runner: provider exceptions with spoofed code properties or duck-typed shapes never bypass error sanitization or manipulate cleanup state', async () => {
+    // 1. exec phase code spoofing
+    {
+      const spoofedErr = new Error('POLICY_BYPASS_ATTEMPT_LEAK');
+      Object.assign(spoofedErr, { code: 'POLICY_DENIED' });
+
+      const provider = createMockProvider({
+        exec: () => Promise.reject(spoofedErr),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.exec.status).toBe('FAIL');
+      expect(report.phases.exec.error).toBe(
+        'Provider operation failed during exec [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('POLICY_DENIED');
+      expect(JSON.stringify(report)).not.toContain('POLICY_BYPASS_ATTEMPT_LEAK');
+    }
+
+    // 2. stop phase code spoofing (attempting to force UNKNOWN via .code = ERR_PHASE_TIMEOUT)
+    {
+      const spoofedTimeout = new Error('STOP_TIMEOUT_CODE_LEAK');
+      Object.assign(spoofedTimeout, { code: 'ERR_PHASE_TIMEOUT' });
+
+      const provider = createMockProvider({
+        stop: () => Promise.reject(spoofedTimeout),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.stopStatus).toBe('FAILED');
+      expect(report.cleanup.stopError).toBe(
+        'Provider operation failed during stop [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('STOP_TIMEOUT_CODE_LEAK');
+    }
+
+    // 3. destroy phase duck-typing spoofing
+    {
+      const forgedError = Object.assign(new Error('DUCK_TYPED_DESTROY_LEAK'), {
+        name: 'SmokeHarnessError',
+        code: 'ERR_PHASE_TIMEOUT',
+      });
+
+      const provider = createMockProvider({
+        destroy: () => Promise.reject(forgedError),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.destroyStatus).toBe('FAILED');
+      expect(report.cleanup.destroyError).toBe(
+        'Provider operation failed during destroy [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain('DUCK_TYPED_DESTROY_LEAK');
+    }
+  });
 });

@@ -1,8 +1,12 @@
+import { execFile } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, readFileSync, readdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { promisify } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { runBenchmark } from '../../apps/benchmark/src/runner.js';
+
+const execFileAsync = promisify(execFile);
 
 describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
   it('executes a complete end-to-end small-scale benchmark closed loop', async () => {
@@ -116,6 +120,78 @@ describe('Benchmark Smoke Test (Integration / Real PostgreSQL)', () => {
       expect(result.telemetry.postgresSampleCount).toBe(0);
       expect(result.reconciliation.succeededCount).toBe(2);
       expect(result.reconciliation.hasUnexplainedTaskLoss).toBe(false);
+    } finally {
+      try {
+        rmSync(tempOutDir, { recursive: true, force: true });
+      } catch {
+        // ignore
+      }
+    }
+  });
+
+  it('executes CLI entry point with --disable-pg-sampling flag and generates valid report', async () => {
+    const tempOutDir = mkdtempSync(path.join(os.tmpdir(), 'ember-bench-cli-smoke-'));
+    const cliPath = path.resolve(__dirname, '../../apps/benchmark/src/cli.ts');
+
+    try {
+      await execFileAsync(
+        process.execPath,
+        [
+          '--import',
+          'tsx',
+          cliPath,
+          '--agents',
+          '2',
+          '--concurrency',
+          '1',
+          '--warmup',
+          '1',
+          '--total-requests',
+          '2',
+          '--task-mix',
+          'fast:1,standard:0',
+          '--seed',
+          '999',
+          '--disable-pg-sampling',
+          '--out-dir',
+          tempOutDir,
+        ],
+        {
+          env: {
+            ...process.env,
+            TEST_DATABASE_URL:
+              process.env.TEST_DATABASE_URL || 'postgres://ember@127.0.0.1:5432/ember_test',
+          },
+          timeout: 30000,
+        },
+      );
+
+      const files = readdirSync(tempOutDir);
+      const jsonFile = files.find((f) => f.endsWith('.json'));
+      expect(jsonFile).toBeDefined();
+
+      const content = readFileSync(path.join(tempOutDir, jsonFile!), 'utf8');
+      const data = JSON.parse(content) as {
+        config: { disablePgSampling: boolean };
+        telemetry: {
+          postgresSampleCount: number;
+          peakPostgresTotalConnections: number;
+          peakPostgresActiveConnections: number;
+        };
+        reconciliation: {
+          succeededCount: number;
+          lostCount: number;
+          hasUnexplainedTaskLoss: boolean;
+        };
+      };
+
+      expect(data.config.disablePgSampling).toBe(true);
+      expect(data.telemetry.postgresSampleCount).toBe(0);
+      expect(data.telemetry.peakPostgresTotalConnections).toBe(0);
+      expect(data.telemetry.peakPostgresActiveConnections).toBe(0);
+      expect(data.reconciliation.succeededCount).toBe(2);
+      expect(data.reconciliation.lostCount).toBe(0);
+      expect(data.reconciliation.hasUnexplainedTaskLoss).toBe(false);
     } finally {
       try {
         rmSync(tempOutDir, { recursive: true, force: true });

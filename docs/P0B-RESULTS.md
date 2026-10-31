@@ -21,8 +21,8 @@
 | `pnpm format:check`     | 全仓 Prettier 代码格式排版检查                               |  ~1.1s   |    全仓    |    全仓    |    **PASS (All files match)**     |
 | `pnpm typecheck`        | TypeScript 5.9.3 严格类型检查 (`tsc -p tsconfig.json`)       |  ~1.8s   |    全仓    |    全仓    |     **PASS (0 type errors)**      |
 | `pnpm build`            | TypeScript 项目编译构建 (`tsc -b tsconfig.build.json`)       |  ~2.1s   |    全仓    |    全仓    |    **PASS (Build successful)**    |
-| `pnpm test:unit`        | 内存领域模型、状态机、Schema、Router、遥测计算、报告对账单测 |  ~2.2s   |  44 文件   |  675 用例  |  **PASS (675 passed, 0 failed)**  |
-| `pnpm test:integration` | 真实 PostgreSQL 事务、租约、Fencing、CAS、SSE、遥测集成测试  |  ~4.6s   |  24 文件   |  252 用例  |  **PASS (252 passed, 0 failed)**  |
+| `pnpm test:unit`        | 内存领域模型、状态机、Schema、Router、遥测计算、报告对账单测 |  ~2.2s   |  44 文件   |  676 用例  |  **PASS (676 passed, 0 failed)**  |
+| `pnpm test:integration` | 真实 PostgreSQL 事务、租约、Fencing、CAS、SSE、遥测集成测试  |  ~4.6s   |  24 文件   |  253 用例  |  **PASS (253 passed, 0 failed)**  |
 | `pnpm test:chaos`       | 故障注入、崩溃恢复、幂等回滚、旧 Run 交错混沌测试            |  ~0.8s   |   3 文件   |  19 用例   |  **PASS (19 passed, 0 failed)**   |
 | `pnpm bench:local`      | 1,000 逻辑 Agent、100 并发闭环、PostgreSQL 连接治理压测      |  ~18.9s  |   1 套件   | 1,000 样本 | **PASS (100% Succeeded, 0 Lost)** |
 | `pnpm test:e2e`         | 真实 CLI 与多租户端到端流水线 (PR 10A 交付物)                |    -     |     -      |     -      | **PENDING INTEGRATION (NOT RUN)** |

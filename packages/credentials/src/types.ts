@@ -89,6 +89,11 @@ export interface EgressRule {
  */
 export interface EgressPolicy {
   readonly version: number;
+  /**
+   * Optional strict tenant binding.
+   * If defined, this policy is strictly enforced for this tenant only;
+   * requests from other tenants are rejected with POLICY_DENIED / NO_MATCHING_RULE.
+   */
   readonly tenantId?: Id;
   readonly rules: readonly EgressRule[];
   readonly defaultAction: 'deny';

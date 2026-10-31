@@ -29,6 +29,7 @@ import type {
   EgressDenialCode,
   EgressPolicy,
   EgressRequest,
+  EgressRule,
   RegisterCredentialOptions,
   RotateCredentialOptions,
   SimulatedProxyResult,
@@ -49,9 +50,30 @@ export class CredentialBroker {
     if (!options || !options.registry || !options.policy) {
       throw createInvalidArgumentError('CredentialBroker requires registry and policy');
     }
+    this.assertValidPolicy(options.policy);
     this.registry = options.registry;
     this.policy = options.policy;
     this.auditSink = options.auditSink;
+  }
+
+  private assertValidPolicy(policy: EgressPolicy): void {
+    if (!policy || !Array.isArray(policy.rules)) {
+      throw createInvalidArgumentError('EgressPolicy must define an array of rules');
+    }
+    const seenRuleIds = new Set<string>();
+    const rules: readonly EgressRule[] = policy.rules;
+    for (const rule of rules) {
+      if (!rule || !rule.ruleId || typeof rule.ruleId !== 'string' || rule.ruleId.trim() === '') {
+        throw createInvalidArgumentError('Every rule in EgressPolicy must have a non-empty ruleId');
+      }
+      const normalized = rule.ruleId.trim();
+      if (seenRuleIds.has(normalized)) {
+        throw createInvalidArgumentError(
+          `Duplicate ruleId '${normalized}' detected in egress policy; rule IDs must be unique to prevent rule shadowing and scope bypass`,
+        );
+      }
+      seenRuleIds.add(normalized);
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -147,7 +169,29 @@ export class CredentialBroker {
       throw createNotFoundError('Execution context not found for leased run');
     }
 
-    // 4. Verify context invariants against the caller lease
+    // 4. Verify tenant-scoped policy binding against authoritative context
+    if (this.policy.tenantId !== undefined && this.policy.tenantId !== context.tenantId) {
+      this.recordDenialAudit({
+        tenantId: context.tenantId,
+        taskId: context.taskId,
+        runId: context.runId,
+        credentialRef,
+        credentialVersion: 0,
+        provider: '[UNVERIFIED_PROVIDER]',
+        operation: '[UNVERIFIED_OPERATION]',
+        url: egressRequest.url,
+        method: egressRequest.method,
+        reason: 'Policy tenant mismatch: policy is bound to a different tenant',
+        code: 'NO_MATCHING_RULE',
+        now,
+      });
+      throw createPolicyDeniedError(
+        'Policy tenant mismatch: policy is bound to a different tenant',
+        'NO_MATCHING_RULE',
+      );
+    }
+
+    // 5. Verify context invariants against the caller lease
     if (context.tenantId !== lease.tenantId) {
       throw createStaleLeaseError(
         'Claimed tenantId does not match authoritative execution context',
@@ -176,18 +220,18 @@ export class CredentialBroker {
 
     // Note: context.workerId is purely operational execution identity, never end-user identity.
 
-    // 6. Tenant-isolated credential lookup (Uniform agnosticism: returns NOT_FOUND if foreign)
+    // 7. Tenant-isolated credential lookup (Uniform agnosticism: returns NOT_FOUND if foreign)
     const credential = this.registry.getInternal(context.tenantId, credentialRef, now);
     if (!credential) {
-      // Audit denial
+      // Audit denial: do not echo unverified provider or operation strings
       this.recordDenialAudit({
         tenantId: context.tenantId,
         taskId: context.taskId,
         runId: context.runId,
         credentialRef,
         credentialVersion: 0,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: '[UNVERIFIED_PROVIDER]',
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'Credential not found in tenant',
@@ -197,7 +241,7 @@ export class CredentialBroker {
       throw createNotFoundError('Credential not found in this tenant');
     }
 
-    // 7. Check credential status
+    // 8. Check credential status
     if (credential.status === 'revoked') {
       this.recordDenialAudit({
         tenantId: context.tenantId,
@@ -205,8 +249,8 @@ export class CredentialBroker {
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: credential.provider,
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'Credential has been revoked',
@@ -223,8 +267,8 @@ export class CredentialBroker {
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: credential.provider,
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'Credential has expired',
@@ -234,7 +278,7 @@ export class CredentialBroker {
       throw createPolicyDeniedError('Credential has expired');
     }
 
-    // 8. Provider alignment
+    // 9. Provider alignment
     if (credential.provider !== egressRequest.provider) {
       this.recordDenialAudit({
         tenantId: context.tenantId,
@@ -242,8 +286,8 @@ export class CredentialBroker {
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: '[UNVERIFIED_PROVIDER]',
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'Credential provider mismatch',
@@ -253,8 +297,8 @@ export class CredentialBroker {
       throw createPolicyDeniedError('Credential provider mismatch', 'NO_MATCHING_RULE');
     }
 
-    // 9. Evaluate Egress Policy against request
-    const egressDecision = evaluateEgressRequest(this.policy, egressRequest);
+    // 10. Evaluate Egress Policy against request with tenant scoping
+    const egressDecision = evaluateEgressRequest(this.policy, egressRequest, context.tenantId);
     if (!egressDecision.allowed) {
       this.recordDenialAudit({
         tenantId: context.tenantId,
@@ -262,8 +306,10 @@ export class CredentialBroker {
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: this.policy.rules.some((r) => r.provider === credential.provider)
+          ? credential.provider
+          : '[UNVERIFIED_PROVIDER]',
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: egressDecision.reason,
@@ -276,17 +322,17 @@ export class CredentialBroker {
       );
     }
 
-    // 10. Server-side rule.requiredScopes verification against credential.scopes
-    const matchedRule = this.policy.rules.find((r) => r.ruleId === egressDecision.matchedRuleId);
-    if (!matchedRule) {
+    // 11. Server-side rule.requiredScopes verification against credential.scopes
+    const matchedRules = this.policy.rules.filter((r) => r.ruleId === egressDecision.matchedRuleId);
+    if (matchedRules.length !== 1) {
       this.recordDenialAudit({
         tenantId: context.tenantId,
         taskId: context.taskId,
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: '[UNVERIFIED_PROVIDER]',
+        operation: '[UNVERIFIED_OPERATION]',
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'No matching egress rule found',
@@ -295,6 +341,7 @@ export class CredentialBroker {
       });
       throw createPolicyDeniedError('No matching egress rule found', 'NO_MATCHING_RULE');
     }
+    const matchedRule = matchedRules[0]!;
 
     // Verify credential has all scopes required by the server-side egress rule
     const credScopeSet = new Set<string>(credential.scopes);
@@ -306,8 +353,8 @@ export class CredentialBroker {
         runId: context.runId,
         credentialRef,
         credentialVersion: credential.version,
-        provider: egressRequest.provider,
-        operation: egressRequest.operation,
+        provider: matchedRule.provider,
+        operation: egressDecision.operation,
         url: egressRequest.url,
         method: egressRequest.method,
         reason: 'Required scopes are not satisfied by credential',
@@ -460,6 +507,13 @@ export class CredentialBroker {
     ) {
       throw createUnauthenticatedError('Valid policyVersion is required in AuthContext');
     }
+    // Strict tenant-scoped policy binding
+    if (this.policy.tenantId !== undefined && this.policy.tenantId !== ctx.tenantId) {
+      throw createPolicyDeniedError(
+        'Policy tenant mismatch: policy is bound to a different tenant',
+        'NO_MATCHING_RULE',
+      );
+    }
   }
 
   private assertValidLease(lease: LeasedRun): void {
@@ -522,13 +576,28 @@ export class CredentialBroker {
           ? params.method
           : 'GET';
 
+      // Ensure denial audit strictly redacts unverified caller provider or operation strings
+      const safeProvider =
+        params.provider &&
+        typeof params.provider === 'string' &&
+        this.policy.rules.some((r) => r.provider === params.provider)
+          ? params.provider
+          : '[UNVERIFIED_PROVIDER]';
+
+      const safeOperation =
+        params.operation &&
+        typeof params.operation === 'string' &&
+        this.policy.rules.some((r) => r.allowedOperations.includes(params.operation.trim()))
+          ? params.operation.trim()
+          : '[UNVERIFIED_OPERATION]';
+
       const record = createAuditRecord({
         tenantId: params.tenantId,
         taskId: params.taskId,
         runId: params.runId,
         callerType: 'execution',
-        provider: params.provider,
-        operation: params.operation,
+        provider: safeProvider,
+        operation: safeOperation,
         operationKind: 'read',
         credentialRef: params.credentialRef,
         credentialVersion: params.credentialVersion,

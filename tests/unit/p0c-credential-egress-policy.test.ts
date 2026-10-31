@@ -298,5 +298,61 @@ describe('evaluateEgressRequest & Egress Policy', () => {
         expect(decision.denialCode).toBe('SCOPE_MISMATCH');
       }
     });
+
+    it('rejects policy evaluation when duplicate ruleId is present', () => {
+      const dupPolicy: EgressPolicy = {
+        version: 1,
+        rules: [
+          SYNTHETIC_EGRESS_POLICY.rules[0]!,
+          { ...SYNTHETIC_EGRESS_POLICY.rules[0]! }, // identical ruleId
+        ],
+        defaultAction: 'deny',
+      };
+
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        operationKind: 'read',
+      };
+
+      const decision = evaluateEgressRequest(dupPolicy, request);
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('NO_MATCHING_RULE');
+        expect(decision.reason).toContain('duplicate ruleId');
+      }
+    });
+
+    it('rejects requests when callingTenantId does not match tenant-bound policy', () => {
+      const tenantPolicy: EgressPolicy = {
+        version: 1,
+        tenantId: 'tenant-1111',
+        rules: SYNTHETIC_EGRESS_POLICY.rules,
+        defaultAction: 'deny',
+      };
+
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        operationKind: 'read',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      // Mismatched tenant
+      const deniedDecision = evaluateEgressRequest(tenantPolicy, request, 'tenant-2222');
+      expect(deniedDecision.allowed).toBe(false);
+      if (!deniedDecision.allowed) {
+        expect(deniedDecision.denialCode).toBe('NO_MATCHING_RULE');
+        expect(deniedDecision.reason).toContain('Policy tenant mismatch');
+      }
+
+      // Matching tenant
+      const allowedDecision = evaluateEgressRequest(tenantPolicy, request, 'tenant-1111');
+      expect(allowedDecision.allowed).toBe(true);
+    });
   });
 });

@@ -881,4 +881,194 @@ describe('CredentialBroker & CredentialProxy', () => {
       expect(record.targetOrigin).toBe(SYNTHETIC_ORIGIN);
     });
   });
+
+  describe('duplicate ruleId defense, unverified audit redaction, and tenant-scoped policy binding', () => {
+    it('rejects egress policies with duplicate ruleId in broker constructor to prevent rule shadowing and scope bypass', () => {
+      const registry = new InMemoryCredentialRegistry();
+      const duplicateRulePolicy = {
+        version: 1,
+        rules: [
+          {
+            ruleId: 'rule-shadow',
+            provider: SYNTHETIC_PROVIDER,
+            allowedOrigins: [SYNTHETIC_ORIGIN],
+            allowedMethods: ['GET'] as const,
+            allowedPathPatterns: ['/v1/status'],
+            requiredScopes: ['permissive:scope'],
+            allowedOperations: ['get_status'],
+            operationKind: 'read' as const,
+          },
+          {
+            ruleId: 'rule-shadow', // duplicate!
+            provider: SYNTHETIC_PROVIDER,
+            allowedOrigins: [SYNTHETIC_ORIGIN],
+            allowedMethods: ['GET'] as const,
+            allowedPathPatterns: ['/v1/status'],
+            requiredScopes: ['strict:admin:scope'],
+            allowedOperations: ['get_status'],
+            operationKind: 'read' as const,
+          },
+        ],
+        defaultAction: 'deny' as const,
+      };
+
+      try {
+        new CredentialBroker({ registry, policy: duplicateRulePolicy });
+        expect.unreachable('Should have rejected duplicate ruleId');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('INVALID_ARGUMENT');
+          expect(err.diagnostic).toContain("Duplicate ruleId 'rule-shadow' detected");
+        }
+      }
+    });
+
+    it('strictly replaces unverified provider and operation with safe placeholders in denial audit records', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const { broker } = createBroker(auditSink);
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const hostileProvider = 'hostile_connector_drop_tables_--';
+      const hostileOperation = 'stolen_token_leak_in_operation_abc999';
+      const hostileRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: hostileProvider,
+        operation: hostileOperation,
+      };
+
+      await expect(
+        broker.executeWithCredential(lease, cred.credentialRef, hostileRequest, reader, BASE_TIME),
+      ).rejects.toThrow(DomainError);
+
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      const audit = records[0]!;
+      const auditJson = JSON.stringify(audit);
+
+      // Verify unverified provider and operation are NOT logged in raw form
+      expect(auditJson).not.toContain(hostileProvider);
+      expect(auditJson).not.toContain(hostileOperation);
+      expect(audit.provider).toBe('[UNVERIFIED_PROVIDER]');
+      expect(audit.operation).toBe('[UNVERIFIED_OPERATION]');
+      expect(audit.decision).toBe('DENIED');
+    });
+
+    it('enforces strict tenant-scoped policy binding in execution plane', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const registry = new InMemoryCredentialRegistry();
+      const tenantScopedPolicy = {
+        version: 1,
+        tenantId: TENANT_A, // Bound exclusively to Tenant A
+        rules: SYNTHETIC_EGRESS_POLICY.rules,
+        defaultAction: 'deny' as const,
+      };
+
+      const broker = new CredentialBroker({
+        registry,
+        policy: tenantScopedPolicy,
+        auditSink,
+      });
+
+      // Register credential in Tenant A
+      const credA = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      // Tenant B attempts to execute through Tenant A's policy
+      const leaseB = makeSyntheticLease(TENANT_B);
+      const readerB = makeMockContextReader({ tenantId: TENANT_B });
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          leaseB,
+          credA.credentialRef,
+          egressRequest,
+          readerB,
+          BASE_TIME,
+        );
+        expect.unreachable('Tenant B must be rejected when policy is scoped to Tenant A');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+          expect(err.diagnostic).toContain('Policy tenant mismatch');
+        }
+      }
+
+      // Check denial audit
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      expect(records[0]?.decision).toBe('DENIED');
+      expect(records[0]?.provider).toBe('[UNVERIFIED_PROVIDER]');
+      expect(records[0]?.operation).toBe('[UNVERIFIED_OPERATION]');
+
+      // Tenant A executes matching the policy: succeeds!
+      const leaseA = makeSyntheticLease(TENANT_A);
+      const readerA = makeMockContextReader({ tenantId: TENANT_A });
+      const allowedResult = await broker.executeWithCredential(
+        leaseA,
+        credA.credentialRef,
+        egressRequest,
+        readerA,
+        BASE_TIME,
+      );
+      expect(allowedResult.status).toBe('SIMULATED');
+      expect(allowedResult.allowed).toBe(true);
+    });
+
+    it('enforces strict tenant-scoped policy binding in management plane', async () => {
+      const registry = new InMemoryCredentialRegistry();
+      const tenantScopedPolicy = {
+        version: 1,
+        tenantId: TENANT_A,
+        rules: SYNTHETIC_EGRESS_POLICY.rules,
+        defaultAction: 'deny' as const,
+      };
+
+      const broker = new CredentialBroker({
+        registry,
+        policy: tenantScopedPolicy,
+      });
+
+      const authCtxB: AuthContext = makeSyntheticAuthContext(TENANT_B);
+
+      // Tenant B management call rejected
+      await expect(
+        broker.registerCredential(
+          authCtxB,
+          { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+          BASE_TIME,
+        ),
+      ).rejects.toThrow(DomainError);
+
+      await expect(broker.listCredentials(authCtxB, BASE_TIME)).rejects.toThrow(DomainError);
+
+      // Tenant A management call allowed
+      const credA = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+      expect(credA.tenantId).toBe(TENANT_A);
+    });
+  });
 });

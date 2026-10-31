@@ -125,6 +125,7 @@ export function sanitizeUrl(url: URL): string {
 export function evaluateEgressRequest(
   policy: EgressPolicy,
   request: EgressRequest,
+  callingTenantId?: string,
 ): EgressDecision {
   if (!policy || !Array.isArray(policy.rules)) {
     return {
@@ -132,6 +133,41 @@ export function evaluateEgressRequest(
       reason: 'Egress policy is missing or malformed',
       denialCode: 'NO_MATCHING_RULE',
     };
+  }
+
+  // 0a. Validate tenant binding if policy is tenant-scoped
+  if (
+    callingTenantId !== undefined &&
+    policy.tenantId !== undefined &&
+    policy.tenantId !== callingTenantId
+  ) {
+    return {
+      allowed: false,
+      reason: 'Policy tenant mismatch: policy is bound to a different tenant',
+      denialCode: 'NO_MATCHING_RULE',
+    };
+  }
+
+  // 0b. Validate ruleId uniqueness to prevent rule shadowing and scope bypass
+  const seenRuleIds = new Set<string>();
+  const rules: readonly EgressRule[] = policy.rules;
+  for (const rule of rules) {
+    if (!rule || !rule.ruleId || typeof rule.ruleId !== 'string' || rule.ruleId.trim() === '') {
+      return {
+        allowed: false,
+        reason: 'Egress policy integrity violation: rule is missing valid ruleId',
+        denialCode: 'NO_MATCHING_RULE',
+      };
+    }
+    const normalizedRuleId = rule.ruleId.trim();
+    if (seenRuleIds.has(normalizedRuleId)) {
+      return {
+        allowed: false,
+        reason: 'Egress policy integrity violation: duplicate ruleId detected',
+        denialCode: 'NO_MATCHING_RULE',
+      };
+    }
+    seenRuleIds.add(normalizedRuleId);
   }
 
   if (!request || typeof request.url !== 'string' || request.url.trim() === '') {
@@ -391,8 +427,9 @@ export function evaluateRedirectCandidate(
   policy: EgressPolicy,
   originalRequest: EgressRequest,
   redirectUrl: string,
+  callingTenantId?: string,
 ): EgressDecision {
-  const originalDecision = evaluateEgressRequest(policy, originalRequest);
+  const originalDecision = evaluateEgressRequest(policy, originalRequest, callingTenantId);
   if (!originalDecision.allowed) {
     return {
       allowed: false,
@@ -415,7 +452,7 @@ export function evaluateRedirectCandidate(
     url: redirectUrl,
   };
 
-  const hopDecision = evaluateEgressRequest(policy, hopRequest);
+  const hopDecision = evaluateEgressRequest(policy, hopRequest, callingTenantId);
   if (!hopDecision.allowed) {
     return {
       allowed: false,

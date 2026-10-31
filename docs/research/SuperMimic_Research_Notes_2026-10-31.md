@@ -38,9 +38,121 @@ tags:
 >
 > 在可复现的单 GPU 基准上，能否以更低的训练成本达到与原始方法相近甚至更好的控制性能？
 
-## 二、我们如何理解 World Model
+## 二、SuperMimic 的强化学习问题：严格定义（Goal-conditioned POMDP）
 
-### 2.1 从强化学习的 MDP 出发
+> [!important] 先给出严格结论
+> **SuperMimic 不是只有 State、Action 和 Reward 的抽象 RL 问题。** 论文 Method §3.1 明确将其描述为 **目标条件化的部分可观测马尔可夫决策过程（goal-conditioned POMDP）**。MuJoCo Warp 提供仿真环境，控制策略看见的是**部分且带噪声的本体观测**；世界模型则学习仿真器的动力学以供想象 rollout 和 BPTT 使用。
+
+### 2.1 数学定义：从 MDP 简写到完整 POMDP
+
+为了与常见强化学习记法对应，可以先使用教学式简写：
+
+$
+\boxed{\mathcal M=(\mathcal S,\mathcal A,P,R,\mathcal O,\mathcal G,\gamma)}
+$
+
+但**这不是完整的 POMDP 定义，也不是原论文逐字给出的元组**：它没有显式写出观测生成机制、初始状态分布和终止规则。论文仅用 $\mathcal M$ 指代目标条件化 POMDP。为严谨地描述某个目标接口 $i$，本文采用以下**形式化重述**：
+
+$
+\boxed{
+\mathcal M_i=
+(\mathcal X,\mathcal A,\mathcal O,\mathcal G_i,
+P_i,Z_i,R_i,D_i,\rho_{0,i},\gamma)
+}
+$
+
+其中 $\mathcal X$ 是足以使转移满足 Markov 性的**扩展环境状态空间**；$Z_i$ 是观测核；$D_i$ 是终止规则；$\rho_{0,i}$ 是初始状态分布。$\mathcal G_i$ 是目标空间。这些符号是为了使问题定义完整而引入的，**不代表作者公开了完整的状态向量编码**。
+
+### 2.2 逐个模块对照原论文
+
+| 模块 | 数学符号 | SuperMimic 的具体定义 |
+|---|---|---|
+| **Environment** | — | MuJoCo Warp 物理仿真器中的 Unitree G1 人形机器人；接触、刚体和执行器由仿真器推进（不是实体机器人）。 |
+| **State** | $s_t$ / $x_t$ | $s_t$ 是仿真器物理状态（包括机器人位置、姿态、关节坐标及速度等）；严谨的 Markov 定义可扩展成 $x_t$，还要处理参考动作进度、上一动作、环境上下文等。原论文**没有给出完整 $s_t$ 维度**。 |
+| **Observation** | $o_t\in\mathcal O$ | 每帧 **93 维**本体观测：29 关节位置偏差 + 29 关节速度 + 3 基座角速度 + 3 投影重力 + 29 上一步动作。Policy 使用最近 **10 帧**。 |
+| **Action** | $a_t\in\mathcal A\subseteq\mathbb R^{29}$ | **29 维连续动作**，每维控制一个关节设定点的归一化参数；经缩放和平移后输入低增益 PD 控制器，**不是直接输出关节力矩**。 |
+| **Transition** | $P_i(x_{t+1}\mid x_t,a_t)$ | 扩展状态的转移；其共享物理部分由 MuJoCo Warp 的 $P_\xi^{\mathrm{phys}}(s' \mid s,a)$ 给出。世界模型学习近似 $f_\omega(s,a,\xi)$。 |
+| **Goal** | $g_t\in\mathcal G_i$ | Motion Tracking：来自参考动作的目标（编码器输入未来 **10 帧**）；Velocity Tracking：目标平面速度和偏航角速度 $(v_x,v_y,\omega_z)$。 |
+| **Reward** | $r_{t+1}=R_i(x_t,a_t,x_{t+1},g_t)$ | **每步计算的稠密奖励（Dense Reward）**。运动跟踪接口比较身体位置、姿态和速度，并加入动作平滑、关节限位惩罚；不同目标接口的奖励不同。 |
+| **Termination** | $d_{t+1}=D_i(x_{t+1},g_{t+1})$ | Motion Tracking：相对参考动作的根节点高度误差超过 **0.25 m**，或倾斜误差超过 **0.8** 时终止；世界模型使用连续预测终止概率。 |
+| **Discount** | $\gamma$ | **0.99**（论文附录训练超参数）。 |
+| **Observation kernel** | $Z_i(o_t\mid x_t)$ | 无噪声本体观测加传感器噪声：$o_t=\bar o_t+\eta_t$，$\eta_t\sim\rho_\eta$。 |
+| **Initial distribution** | $\rho_{0,i}$ | episode / imagined rollout 的起点分布；仿真采集可按参考动作片段与进度重置，世界模型想象则从 Replay Buffer 中的已记录状态出发。 |
+| **Policy / Actor** | $\pi_{\theta,i}$ | **确定性策略**：使用观测历史与当前 Goal 输出 29 维动作。 |
+| **World Model** | $f_\omega$ | **不是另一个 Policy**，而是学习的确定性可微动力学替代模型，配合奖励、观测、终止组件用于想象。 |
+| **Critic** | $V_{\psi_i}$ | 估计 imagined horizon 之后的回报；每种 Goal Interface 可有自己的 Critic。 |
+
+**概念边界：** Environment 是运行系统；$P$ 才是它在 RL 数学中对应的状态转移机制。World Model 是对这一机制的**学习近似**，不能把三者当作同一个对象。
+
+### 2.3 为什么是 POMDP？完整 Markov State 到底是什么？
+
+论文将 $s_t$ 作为紧凑的仿真状态记号，并未给出所有内部状态变量的逐项张量定义。严格建模时，至少需要考虑：
+
+- **物理状态**：机器人足以决定下一时刻刚体/关节运动的状态 $s_t^{\mathrm{phys}}$；如果执行器具有内部动态，也应包含必需的内部状态。
+- **仿真上下文**：每个 episode 固定的物理随机化参数 $\xi$（如摩擦、关节标定偏移、质心偏移）。未对 $\xi$ 条件化时，单独的物理状态不一定构成同一确定性转移模型。
+- **任务进度**：Motion Tracking 的参考片段和时间索引 $\tau_t$，否则无法仅凭当前身体状态确定“下一帧应该模仿什么”。速度接口则需纳入当前命令及其更新规则。
+- **上一动作**：动作平滑奖励和本体观测显式使用 $a_{t-1}$；要将这些机制写成只依赖当前扩展状态的函数，需要保留它。
+
+因此，可以**概念性**地写成（并非论文直接给出的状态向量）：
+
+$
+x_t=(s_t^{\mathrm{phys}},\,\xi,\,\tau_t,\,g_t^{\mathrm{cmd}},\,a_{t-1},\,\ldots).
+$
+
+其中省略号只代表实现若存在其他影响 Markov 性的内部变量，也必须纳入；不应据此虚构实际维度。于是可以把完整环境视为扩展状态上的 MDP，而 Policy 只访问部分有噪声的观测，形成 **POMDP**。**93 维是 Observation，不是完整 State；10 帧观测历史也不保证严格恢复 Markov 性。**
+
+### 2.4 一次状态转移：环境到底执行了什么？
+
+设 $h_t=(o_{t-9},\ldots,o_t)$ 是控制器观察历史，$i$ 表示目标接口：
+
+$
+\begin{aligned}
+g_t&\in\mathcal G_i,\qquad o_t=\bar o(x_t)+\eta_t,\\
+a_t&=\pi_{\theta,i}(h_t,g_t),\quad a_t\in\mathbb R^{29},\\
+a_t^{\mathrm{exec}}&=a_t+\epsilon_t
+\quad\text{（仅数据采集阶段可选的动作噪声）},\\
+s_{t+1}^{\mathrm{phys}}&\sim
+P_\xi^{\mathrm{phys}}(\cdot\mid s_t^{\mathrm{phys}},a_t^{\mathrm{exec}}),\\
+r_{t+1}&=R_i(x_t,a_t^{\mathrm{exec}},x_{t+1},g_t),\\
+d_{t+1}&=D_i(x_{t+1},g_{t+1}).
+\end{aligned}
+$
+
+数据采集时 Replay Buffer 记录**实际执行的带噪动作**；想象阶段使用未额外施加采集动作噪声的确定性 Policy。物理参数 $\xi$ 在 episode 内固定，观测噪声由模型外采样。这里用随机核 $P_\xi^{\mathrm{phys}}$ 是通用 RL 记法；在完整状态和仿真条件确定时，物理模拟器的转移可以是确定性的。
+
+Action 转换与时间尺度：
+
+$
+q_t^{\mathrm{sp}}=\boldsymbol{\alpha}a_t^{\mathrm{exec}}+q^0,\qquad
+\Delta t=0.02\,\mathrm{s}\quad(50\,\mathrm{Hz}).
+$
+
+MuJoCo Warp 在每个控制步内进行 **4 个 5 ms 物理子步**；$\boldsymbol\alpha$ 是逐关节动作缩放，不能未经实现核对便声称 $\mathcal A=[-1,1]^{29}$。
+
+### 2.5 目标函数，以及多 Goal Interface 的关系
+
+Motion Tracking 的奖励在**每个控制步**依据动作跟踪误差计算，权重、公式和终止阈值详见下文第 3.5 节。标准折扣目标可写为（论文 Method §3.1）：
+
+$
+\boxed{
+J_i(\theta)=
+\mathbb E\left[\sum_{t\ge0}\gamma^t c_t r_{t+1}^{(i)}\right],
+\quad
+c_0=1,\quad c_{t+1}=c_t(1-d_{t+1}),\quad\gamma=0.99.
+}
+$
+
+这个 $J_i$ 是目标条件化的真实**模拟器**回报；论文用可微世界模型构造近似目标 $\hat J_i$，通过 $H=32$ 步 imagined rollout + Critic bootstrap + BPTT 优化 $\theta$。因此**并不是对 MuJoCo Warp 直接反传梯度**。
+
+论文附录 *Joint training across goal interfaces* 进一步提出：每个接口 $i$ 具有自己的 $\mathcal G_i$、$R_i$、$D_i$ 和 $V_{\psi_i}$，但共享同一套物理动力学与世界模型。共享的 Policy Decoder 与接口专用 Goal Encoder 组合形成 $\pi_{\theta,i}$。训练时可以按接口分布 $p(i)$ 优化 $\mathbb E_{i\sim p}[\hat J_i(\theta)]$。
+
+**阅读顺序**：先掌握本节的 *POMDP 定义和一次状态转移*，再读第 3 节的 *World Model、BPTT 和具体奖励函数*。这两部分刻意区分了 **“RL 问题本身”** 与 **“SuperMimic 用什么算法求解它”**。
+
+**论文依据**：原始 TeX 的 sections/method.tex（§3.1–3.3）和 sections/appendix.tex（*Instantiation: observation, action, reward, and sim context*；*Joint training across goal interfaces*；训练超参数表）。
+
+## 三、我们如何理解 World Model
+
+### 3.1 从强化学习的 MDP 出发
 
 标准 MDP 可表示为：
 
@@ -69,7 +181,7 @@ $$
 
 在给定完整状态、动作和环境参数的情况下，确定性模型相当于用一个点质量分布近似转移概率；它**不直接输出完整的转移概率分布**。
 
-### 2.2 世界模型如何“学会物理”
+### 3.2 世界模型如何“学会物理”
 
 讨论中形成的理解：SuperMimic 先通过传统物理模拟器产生状态转移样本，然后让神经网络拟合这些结果。
 
@@ -94,7 +206,7 @@ Policy 优化
 
 网络学习的是这些因素对状态转移的**综合映射**，并不意味着网络内部显式出现 $M(q)$、$G(q)$ 或“摩擦模块”。
 
-### 2.3 多步预测比单步 MSE 更关键
+### 3.3 多步预测比单步 MSE 更关键
 
 讨论中提到的设置：**8 步世界模型自回归训练**；策略学习期间使用更长的 **32 步 imagined rollout**（以论文配置为参考，正式实验前复核）。
 
@@ -116,7 +228,7 @@ $$
 >
 > 的质量会直接影响 BPTT 的策略更新方向。仅看 8-step state MSE 可能不足以判断世界模型好坏。
 
-### 2.4 World Model、Policy、Critic 的区别
+### 3.4 World Model、Policy、Critic 的区别
 
 | 模块 | 回答的问题 | 在 SuperMimic 中的作用 |
 |---|---|---|
@@ -137,27 +249,10 @@ $$
 
 Motion Encoder、Velocity Encoder、Decoder 可能属于不同控制模式/输入路径，不能未经核对就把它们解释为“始终同时运行的五个独立模型”。
 
-### 2.5 SuperMimic：把控制问题逐项映射到 POMDP
+### 3.5 SuperMimic 任务的论文实现细节（Reward、Termination、BPTT）
 
-> [!summary] 一张表理解整个问题
-> **MuJoCo Warp 充当环境，Policy 根据有噪声的本体观测和运动目标输出 29 维连续关节指令；环境按物理规律推进状态，每步提供稠密跟踪奖励；World Model 拟合这一转移过程，Critic 估计想象时域之外的回报。**
-
-论文 Method §3.1 明确将任务称为 **goal-conditioned POMDP（目标条件化、部分可观测马尔可夫决策过程）**。为了讨论方便，可将其组成写成 $\mathcal M=(\mathcal S,\mathcal A,P,\mathcal O,R,\mathcal G,\gamma,d)$；这是一种**说明性记法**，不是论文逐字给出的标准元组。目标参考序列的时间索引、episode 内固定的随机化物理参数等，也应作为扩展状态/上下文考虑，才便于严格讨论 Markov 性。
-
-| 元素 | SuperMimic 中的对象 | 核心问题 |
-|---|---|---|
-| **Environment** | MuJoCo Warp + Unitree G1 的刚体、关节、驱动与接触仿真 | 执行动作后实际仿真会发生什么？ |
-| **State $s_t$** | 仿真器使用的完整物理状态（姿态、关节坐标、速度等） | 机器人真实处于什么物理状态？ |
-| **Observation $o_t$** | 有噪声的 93 维本体观测；Policy 使用最近 10 帧 | 控制器能“看到”什么？ |
-| **Action $a_t$** | 对 29 个关节给出的连续、归一化设定点动作 | 控制器下一步发什么指令？ |
-| **Goal $g_t$** | 未来参考动作序列，或目标平面速度与偏航角速度 | 希望机器人完成什么？ |
-| **Transition $P$** | 给定物理状态、动作和随机化参数 $\xi$ 的状态转移 | 动作如何改变环境？ |
-| **Reward $r_{t+1}$** | 每步连续计算的动作/速度跟踪奖励与惩罚 | 完成目标得怎么样？ |
-| **Termination $d_{t+1}$** | 高度/倾斜超阈值等终止条件；WM 中预测软终止概率 | 本条轨迹是否应该结束？ |
-| **Discount $\gamma$** | 0.99 | 如何权衡近远期回报？ |
-| **Policy $\pi_\theta$** | 确定性 Actor：观测历史 + Goal → Action | 下一步执行哪个动作？ |
-| **World Model $f_\omega$** | 学习到的可微环境动力学及奖励/观测/终止组件 | 能否低成本模拟环境并传递梯度？ |
-| **Critic $V_\psi$** | 预测未来价值；不同 Goal Interface 有各自 Critic | 32 步之外还有多少回报？ |
+> [!info] 与第二节的关系
+> 第**二**节是强化学习问题的**严格定义**，本节依据论文 Method / Appendix 进一步列出 93 维 Observation 的组成、Reward 计算与权重、具体终止条件，以及 Dyna-style 训练流程。**不要将世界模型的学习算法当作 MDP 定义的一部分。**
 
 #### State、Observation、Goal 不能混淆
 
@@ -297,7 +392,7 @@ Critic 不是环境本身的状态转移模型；它学习估计**世界模型�
 
 **原文依据**：`sections/method.tex`（§3.1–3.3 与图 2），`sections/appendix.tex`（Instantiation: observation, action, reward, and sim context；Joint training across goal interfaces；Network architectures；Training loop and hyperparameters）。
 
-## 三、Model-Based RL 与 Model-Free RL 的厘清
+## 四、Model-Based RL 与 Model-Free RL 的厘清
 
 我们的核心判断：**“使用模拟器训练”不等于 “Model-Based RL”。**
 
@@ -312,9 +407,9 @@ Critic 不是环境本身的状态转移模型；它学习估计**世界模型�
 - **SuperMimic**：通过学习到的可微世界模型进行策略优化；其新意不是“第一次把 MBRL 用于机器人”，而是大规模人形全身动作的训练效率与性能。
 - **PPO-WM 消融**：即使用世界模型生成 imagined trajectories、但仍用 PPO 更新，也属于使用世界模型的 Model-Based RL；区别在于是否直接利用动力学梯度。
 
-## 四、与 LLM RL 的思想联系（暂不展开实验）
+## 五、与 LLM RL 的思想联系（暂不展开实验）
 
-### 4.1 为什么普通 LLM RL post-training 通常是 Model-Free
+### 5.1 为什么普通 LLM RL post-training 通常是 Model-Free
 
 对纯文本逐 token 生成，可以将：
 
@@ -330,7 +425,7 @@ $$
 
 而不是给定动作后的外部环境转移模型 $P(s_{t+1}\mid s_t,a_t)$。因此，常规 PPO / GRPO 在这种设置下仍属于 Model-Free RL。
 
-### 4.2 一个值得保留的观点：Policy 内部可能包含隐式 World Model
+### 5.2 一个值得保留的观点：Policy 内部可能包含隐式 World Model
 
 我们并不认为 **Reward Model = World Model**。更有启发的假设是：
 
@@ -345,9 +440,9 @@ $$
 
 **决定：** 这条路线作为未来灵感记录，**不在当前单 GPU 研究阶段执行 LLM 实验**。
 
-## 五、最想探索的长期方向：World Model 与 Policy 融合
+## 六、最想探索的长期方向：World Model 与 Policy 融合
 
-### 5.1 目标要分成两个不同问题
+### 6.1 目标要分成两个不同问题
 
 **A. 网络架构融合（Model Unification）**
 
@@ -360,7 +455,7 @@ $$
 > [!tip] 关键澄清
 > SuperMimic **已经让策略梯度穿过冻结参数的 World Model，端到端传回 Policy**。我们希望探索的下一步，是**共享参数、共享表征或更紧密的联合优化**，不是简单地“第一次实现梯度穿越 World Model”。
 
-### 5.2 候选的 Unified Dynamics–Policy Network
+### 6.2 候选的 Unified Dynamics–Policy Network
 
 ```text
 训练时可用的状态 / 动力学参数 ξ      部署时可用的本体观测 / 运动目标
@@ -378,7 +473,7 @@ $$
 
 只是**候选架构草图**，不是论文现有结构。必要时可以共享部分 trunk，而将动力学所需的 privileged state 和部署时的 observation 分开处理。
 
-### 5.3 为什么“合成一个模型”不等于“更好”
+### 6.3 为什么“合成一个模型”不等于“更好”
 
 - **Model Exploitation**：如果 RL 奖励梯度直接更新动力学网络，模型可能虚构有利于高回报但不真实的状态轨迹。
 - **目标冲突**：精确状态预测与有利于控制的特征提取不一定完全一致。
@@ -388,7 +483,7 @@ $$
 
 所以第一版不宜直接用 RL loss 无约束地更新所有动力学参数。更合理的是先做**部分表示共享 + 物理监督 + 明确的梯度隔离**，再逐步放宽。
 
-### 5.4 更深层的研究问题
+### 6.4 更深层的研究问题
 
 **世界模型一定要完整重建所有物理状态吗？**
 
@@ -402,7 +497,7 @@ $$
 
 再由统一表示服务策略与价值估计。但要额外评估低维 latent 是否丢失接触/稳定性相关信息，以及训练时与部署时观测的不一致。
 
-## 六、单 GPU 研究路线与实验计划
+## 七、单 GPU 研究路线与实验计划
 
 > [!success] 实施原则
 > **一个实验只改动一个主要变量**。每次固定数据、训练预算、评测动作、随机种子和硬件条件；为 Colab 的中断保存 checkpoint 与实验日志。
@@ -468,7 +563,7 @@ $$
 
 这些是**假设**，不是已经成立的创新或实验结果。
 
-## 七、评价指标与实验规范
+## 八、评价指标与实验规范
 
 | 维度 | 应记录的指标 | 为什么 |
 |---|---|---|
@@ -483,7 +578,7 @@ $$
 > [!warning] 公平比较
 > 不能将缩减并行环境数、缩短 horizon 后得到的 return 与论文原始 H100 大规模配置直接当成同等条件的 SOTA 对比。**先在我们自己的相同条件下建立 baseline，再比较算法改动。**
 
-## 八、悬而未决的问题
+## 九、悬而未决的问题
 
 - [ ] 哪个社区实现最接近论文？是否能证明其超参数、损失函数与更新逻辑一致？
 - [ ] 原始 2048×3 动力学模型的输入/输出维度、激活函数、残差形式和状态归一化究竟如何定义？
@@ -494,7 +589,7 @@ $$
 - [ ] 部分共享表示会不会导致 privileged state 泄漏到部署 Policy？
 - [ ] **联合训练究竟能减少 GPU-hours，还是只减少网络数量？**
 
-## 九、研究资料
+## 十、研究资料
 
 **论文 / 源码**
 
@@ -512,7 +607,7 @@ $$
 - [karpathy/nanoGPT](https://github.com/karpathy/nanoGPT) —— 启发我们构建简单、统一、以实测为中心的算法基准。
 - 可延伸阅读：ControlVAE、TD-MPC2、Dreamer 系列、PWM 等；**阅读不等于当前启动实验**。
 
-## 十、下一步的最小行动
+## 十一、下一步的最小行动
 
 **唯一近期目标：完成 P0。**
 

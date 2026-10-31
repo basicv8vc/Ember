@@ -228,26 +228,98 @@ $$
 >
 > 的质量会直接影响 BPTT 的策略更新方向。仅看 8-step state MSE 可能不足以判断世界模型好坏。
 
-### 3.4 World Model、Policy、Critic 的区别
+### 3.4 SuperMimic 的可训练模型：结构与优化
 
-| 模块 | 回答的问题 | 在 SuperMimic 中的作用 |
-|---|---|---|
-| World Model | “执行动作之后，环境会怎样？” | 预测状态转移；提供 imagined rollout 与梯度路径 |
-| Policy / Actor | “当前应该采取哪个动作？” | 生成机器人关节控制动作 |
-| Critic | “从当前状态出发，未来价值如何？” | 估计未来回报，辅助策略训练 |
-| Reward / Observation / Termination | “表现如何、能观察到什么、何时结束？” | 可由解析函数或预测模块实现，**不必全部是独立神经网络** |
+**结论：SuperMimic 核心训练三类模型——World Model、Policy（Actor）、Critic。** Policy 由 Goal Encoder 与 Shared Decoder 组成；扩展到更多 Goal Interface 时，不必复制 World Model，但通常需要对应的 Encoder 和独立 Critic。
 
-此前对话中记录的论文网络规格（**实验前请核对源文件**）：
+#### 3.4.1 原论文附录网络结构表
 
-| 网络 | 讨论中提到的隐藏层配置 |
-|---|---|
-| Dynamics / World Model | MLP `(2048, 2048, 2048)` |
-| Motion Encoder | MLP `(2048, 1024, 512, 256)` |
-| Velocity Encoder | MLP `(256, 256)` |
-| Policy / Shared Decoder | MLP `(2048, 1024, 512, 256)` |
-| Critic | MLP `(256, 128)` |
+| 模型类别 | 网络 / 子模块 | MLP 隐藏层宽度 | 输入 → 输出 | 职责 |
+|---|---|---|---|---|
+| **World Model** | **Dynamics** $f_\omega$ | **(2048, 2048, 2048)** | $\hat s_t,a_t,\xi$ → $\hat s_{t+1}$ | 预测物理状态转移 |
+| **Policy** | **Motion Encoder** $\mathrm{enc}_{\theta,\mathrm{motion}}$ | **(2048, 1024, 512, 256)** | 未来 **10 帧**参考动作 → 32D latent $z$ | 编码动作跟踪目标 |
+| **Policy** | **Shared Decoder** $\mathrm{dec}_\theta$ | **(2048, 1024, 512, 256)** | $z$ + 最近 **10 帧**本体观测 → 29D 连续动作 $a_t$ | 控制 29 个关节 |
+| **Critic** | $V_{\psi_i}$ | **(256, 128)** | $\hat s_t,g_t,\xi$ → 标量 $V$ | 估计长期回报；**每种 Goal Interface 各有一个** |
+| **Policy（扩展）** | **Velocity Encoder** $\mathrm{enc}_{\theta,\mathrm{vel}}$ | **(256, 256)** | 归一化速度命令 $(v_x,v_y,\omega_z)$ + 最近 10 帧观测的特征 → 32D $z$ | 编码速度跟踪目标 |
 
-Motion Encoder、Velocity Encoder、Decoder 可能属于不同控制模式/输入路径，不能未经核对就把它们解释为“始终同时运行的五个独立模型”。
+MLP 括号内表示**隐藏层宽度**，不是输入/输出维度。两个 Encoder 输出的 latent 均为 **32 维并受 tanh 约束**。论文未逐一公开所有网络的激活函数、拼接方式或其他底层实现细节，不能仅凭这张表推断。
+
+- **默认 Motion Tracking**：三类可训练模型、**四个主要网络模块**：Dynamics、Motion Encoder、Shared Decoder、Critic。
+- **加入 Velocity Tracking**：新增 Velocity Encoder 和对应 Critic；继续复用 Dynamics、Shared Decoder。
+- **不应把 5 行网络配置理解为 5 个在默认任务中始终同时训练的独立模型**。
+
+#### 3.4.2 数据流：Actor 与环境模型如何配合
+
+~~~text
+目标 g_t
+ ├─ Motion Tracking：未来 10 帧参考动作 → Motion Encoder ──┐
+ └─ Velocity Tracking：速度命令 + 观测特征 → Velocity Encoder ┤
+                                                              ▼
+                                                       latent z：32D
+                                                              │
+最近 10 帧本体观测 o[t-9:t]（10 × 93）────────────────────────┤
+                                                              ▼
+                                                        Shared Decoder
+                                                              │
+                                                       29D Action a_t
+                                      ┌───────────────────────┴─────────────┐
+                                      ▼                                     ▼
+                                MuJoCo Warp                            World Model
+                         采集真实仿真轨迹 / Buffer               Dynamics f_ω：预测 ŝ[t+1]
+                                                                            │
+                                                     Reward / Observation / Termination
+                                                                            │
+                                                               32 步 imagined rollout
+                                                                            │
+                                                         Critic 估计 horizon 后的价值
+                                                                            │
+                                                              BPTT 更新 Actor
+~~~
+
+注意：**10 × 93 = 930 是 Policy 的观测历史长度，不是 World Model 完整物理状态 $s_t$ 的维度**。World Model 以状态、动作和仿真上下文为输入，而不是简单对 930 维观测进行预测。
+
+#### 3.4.3 World Model：Dynamics + 三类输出组件
+
+原论文 Method §3.2 将完整 World Model 写成：
+
+$$
+\begin{aligned}
+\hat s_{t+1}&=f_\omega(\hat s_t,a_t,\xi) && \text{Dynamics}\\
+\hat r_{t+1}&=r_\omega(\hat s_t,a_t,g_t) && \text{Reward}\\
+\hat{\bar o}_t&=g_\omega(\hat s_t,\xi) && \text{Noise-free Observation}\\
+\hat d_t&=d_\omega(\hat s_t,g_t) && \text{Termination}
+\end{aligned}
+$$
+
+其中 **Dynamics** 明确采用三层 2048 的 MLP。Reward、Observation、Termination **各自可以由学习模块或解析函数实现**；论文并未声称它们一定是三张额外的 MLP。因此不能简单把四种计算功能等同于四个独立、都必须训练的神经网络。
+
+#### 3.4.4 训练目标与梯度：哪一个模型何时更新？
+
+| 模型 | 可学习参数 | 训练信号 | 更新方式 |
+|---|---|---|---|
+| **World Model** | $\omega$ | MuJoCo Warp 的 Replay Buffer 连续 **8 步**状态、奖励、无噪声观测与终止标签 | 多步自回归预测损失，更新 Dynamics 及需要学习的 Heads |
+| **Actor / Policy** | $\theta$ | World Model 内 **32 步** imagined rollout 的折扣累计回报，末端由 Critic bootstrap | **BPTT** 穿过固定权重的 World Model，直接对策略参数求导 |
+| **Critic** | $\psi_i$ | Imagined rollout 的 **GAE** 回报目标（$\lambda=0.95$） | 最小化预测 Value 与 GAE 目标的均方误差 |
+
+$$
+\omega\leftarrow\omega-\alpha_\omega\nabla_\omega\mathcal L_{\mathrm{WM}},
+\qquad
+\theta\leftarrow\theta+\alpha_\theta\nabla_\theta\hat J_i,
+\qquad
+\psi_i\leftarrow\arg\min_{\psi_i}\mathcal L_{V_i}.
+$$
+
+**“Policy 阶段冻结 World Model”意味着固定其参数 $\omega$，不是切断 $\partial f_\omega/\partial a$ 的梯度。** 策略依旧需要穿过世界模型反向传播。World Model 的权重和 Actor 的权重会在不同训练阶段交替更新。
+
+**多 Goal Interface 的关键细节**：针对下游接口，回报梯度穿过 Shared Decoder 到该接口 Encoder，**但不更新 Decoder 权重**；Shared Decoder 仍通过 Motion Tracking 目标训练。Velocity Encoder 还可用与 Motion Encoder 的 latent 对齐损失辅助训练。每个接口使用自己的 Critic，而**共用一个 Dynamics Model**。
+
+> [!note] 复现前需核对
+> 1. Goal Encoder 的输入序列定义、32D latent 与 tanh；
+> 2. World Model 的完整状态向量编码，以及各 Head 是学习还是解析计算；
+> 3. World Model **8 步训练**、Actor **32 步 BPTT** 与 Critic **GAE** 分别对应不同优化目标；
+> 4. 若要研究模型压缩或加速，需分别测量 Dynamics、Goal Encoder、Shared Decoder、Critic 的计算与显存成本。
+
+**论文出处**：原始 LaTeX 的 sections/appendix.tex（Network architectures、Joint training across goal interfaces、Training loop and hyperparameters），以及 sections/method.tex（Learning a differentiable world model、Learning the policy through the world model）。
 
 ### 3.5 SuperMimic 任务的论文实现细节（Reward、Termination、BPTT）
 

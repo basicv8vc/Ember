@@ -53,10 +53,17 @@ export function assertSafeTestDatabaseUrl(databaseUrl: string): void {
     const dbName = parsed.pathname.replace(/^\//, '').toLowerCase();
 
     const isLocalHost =
-      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '';
+      hostname === 'localhost' ||
+      hostname === '127.0.0.1' ||
+      hostname === '::1' ||
+      hostname === '[::1]' ||
+      hostname === '';
 
+    // Extract database name tokens delimited by underscore, hyphen, or dot
+    const dbTokens = dbName.split(/[_\-.]+/);
     const isTestOrDevDb =
-      dbName.includes('test') || dbName.includes('demo') || dbName.includes('dev');
+      !dbName.includes('prod') &&
+      dbTokens.some((token) => token === 'test' || token === 'demo' || token === 'dev');
 
     if (process.env.EMBER_ENV === 'production') {
       throw new DomainError(
@@ -65,7 +72,7 @@ export function assertSafeTestDatabaseUrl(databaseUrl: string): void {
       );
     }
 
-    if (!isLocalHost && !isTestOrDevDb) {
+    if (!isLocalHost || !isTestOrDevDb) {
       throw new DomainError(
         'POLICY_DENIED',
         `Refused to run E2E cluster against non-local or non-test database: host='${hostname}', db='${dbName}'`,

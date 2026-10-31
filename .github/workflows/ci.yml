@@ -1,6 +1,8 @@
 name: CI
 
 on:
+  push:
+    branches: [main]
   pull_request:
     branches: [main]
   workflow_dispatch:
@@ -85,3 +87,9 @@ jobs:
 
       - name: Chaos tests (real PostgreSQL)
         run: pnpm test:chaos
+
+      - name: End-to-end tests (real HTTP + PostgreSQL)
+        run: pnpm test:e2e
+
+      - name: Demo CLI smoke (fast path)
+        run: pnpm demo --scenario fast

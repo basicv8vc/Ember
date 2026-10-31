@@ -135,17 +135,19 @@ export function evaluateEgressRequest(
     };
   }
 
-  // 0a. Validate tenant binding if policy is tenant-scoped
-  if (
-    callingTenantId !== undefined &&
-    policy.tenantId !== undefined &&
-    policy.tenantId !== callingTenantId
-  ) {
-    return {
-      allowed: false,
-      reason: 'Policy tenant mismatch: policy is bound to a different tenant',
-      denialCode: 'NO_MATCHING_RULE',
-    };
+  // 0a. Validate tenant binding if policy is tenant-scoped (Fail-Closed if callingTenantId is missing or mismatched)
+  if (policy.tenantId !== undefined) {
+    if (
+      typeof callingTenantId !== 'string' ||
+      callingTenantId.trim() === '' ||
+      policy.tenantId !== callingTenantId
+    ) {
+      return {
+        allowed: false,
+        reason: 'Policy tenant mismatch: tenant-bound policy requires matching callingTenantId',
+        denialCode: 'NO_MATCHING_RULE',
+      };
+    }
   }
 
   // 0b. Validate ruleId uniqueness to prevent rule shadowing and scope bypass

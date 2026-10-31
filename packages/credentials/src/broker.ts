@@ -169,10 +169,16 @@ export class CredentialBroker {
       throw createNotFoundError('Execution context not found for leased run');
     }
 
-    // 4. Verify tenant-scoped policy binding against authoritative context
-    if (this.policy.tenantId !== undefined && this.policy.tenantId !== context.tenantId) {
+    // 4. Verify tenant-scoped policy binding against authoritative context (fail-closed if missing or mismatched)
+    if (
+      this.policy.tenantId !== undefined &&
+      (!context.tenantId ||
+        typeof context.tenantId !== 'string' ||
+        context.tenantId.trim() === '' ||
+        this.policy.tenantId !== context.tenantId)
+    ) {
       this.recordDenialAudit({
-        tenantId: context.tenantId,
+        tenantId: context.tenantId || '[MISSING_TENANT]',
         taskId: context.taskId,
         runId: context.runId,
         credentialRef,
@@ -507,8 +513,14 @@ export class CredentialBroker {
     ) {
       throw createUnauthenticatedError('Valid policyVersion is required in AuthContext');
     }
-    // Strict tenant-scoped policy binding
-    if (this.policy.tenantId !== undefined && this.policy.tenantId !== ctx.tenantId) {
+    // Strict tenant-scoped policy binding (fail-closed if missing or mismatched)
+    if (
+      this.policy.tenantId !== undefined &&
+      (!ctx.tenantId ||
+        typeof ctx.tenantId !== 'string' ||
+        ctx.tenantId.trim() === '' ||
+        this.policy.tenantId !== ctx.tenantId)
+    ) {
       throw createPolicyDeniedError(
         'Policy tenant mismatch: policy is bound to a different tenant',
         'NO_MATCHING_RULE',
@@ -576,18 +588,24 @@ export class CredentialBroker {
           ? params.method
           : 'GET';
 
-      // Ensure denial audit strictly redacts unverified caller provider or operation strings
+      // Ensure denial audit strictly redacts unverified caller provider or operation strings,
+      // and binds operation whitelist checks strictly to the verified provider to prevent cross-provider mislabeling.
+      const rules: readonly EgressRule[] = this.policy.rules;
       const safeProvider =
         params.provider &&
         typeof params.provider === 'string' &&
-        this.policy.rules.some((r) => r.provider === params.provider)
+        rules.some((r) => r.provider === params.provider)
           ? params.provider
           : '[UNVERIFIED_PROVIDER]';
 
       const safeOperation =
+        safeProvider !== '[UNVERIFIED_PROVIDER]' &&
         params.operation &&
         typeof params.operation === 'string' &&
-        this.policy.rules.some((r) => r.allowedOperations.includes(params.operation.trim()))
+        rules.some(
+          (r) =>
+            r.provider === safeProvider && r.allowedOperations.includes(params.operation.trim()),
+        )
           ? params.operation.trim()
           : '[UNVERIFIED_OPERATION]';
 

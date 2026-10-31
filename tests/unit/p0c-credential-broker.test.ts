@@ -13,6 +13,7 @@ import {
   makeMockContextReader,
   makeSyntheticAuthContext,
   makeSyntheticLease,
+  type EgressPolicy,
   type EgressRequest,
 } from '@ember/credentials';
 
@@ -963,6 +964,87 @@ describe('CredentialBroker & CredentialProxy', () => {
       expect(audit.decision).toBe('DENIED');
     });
 
+    it('binds audit operation whitelist strictly to verified provider, preventing cross-provider mislabeling', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const registry = new InMemoryCredentialRegistry();
+
+      // Policy has two distinct providers:
+      // Provider 1: 'provider-alpha' allows operation 'alpha_read'
+      // Provider 2: 'provider-beta' allows operation 'beta_execute'
+      const multiProviderPolicy: EgressPolicy = {
+        version: 1,
+        rules: [
+          {
+            ruleId: 'rule-alpha',
+            provider: 'provider-alpha',
+            allowedOrigins: [SYNTHETIC_ORIGIN],
+            allowedMethods: ['GET'],
+            allowedPathPatterns: ['/alpha/data'],
+            requiredScopes: ['alpha:scope'],
+            allowedOperations: ['alpha_read'],
+            operationKind: 'read',
+          },
+          {
+            ruleId: 'rule-beta',
+            provider: 'provider-beta',
+            allowedOrigins: [SYNTHETIC_ORIGIN],
+            allowedMethods: ['GET'],
+            allowedPathPatterns: ['/beta/data'],
+            requiredScopes: ['beta:scope'],
+            allowedOperations: ['beta_execute'],
+            operationKind: 'read',
+          },
+        ],
+        defaultAction: 'deny',
+      };
+
+      const broker = new CredentialBroker({
+        registry,
+        policy: multiProviderPolicy,
+        auditSink,
+      });
+
+      const credAlpha = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: 'provider-alpha', scopes: ['alpha:scope'] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      // Attack / Misattribution scenario:
+      // The caller requests provider-alpha, but passes operation 'beta_execute'
+      // ('beta_execute' is valid for provider-beta, but ILLEGAL for provider-alpha)
+      const crossProviderRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/alpha/data`,
+        method: 'GET',
+        provider: 'provider-alpha',
+        operation: 'beta_execute',
+      };
+
+      await expect(
+        broker.executeWithCredential(
+          lease,
+          credAlpha.credentialRef,
+          crossProviderRequest,
+          reader,
+          BASE_TIME,
+        ),
+      ).rejects.toThrow(DomainError);
+
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      const denialRecord = records[0]!;
+
+      // Provider is verified as 'provider-alpha'
+      expect(denialRecord.provider).toBe('provider-alpha');
+      // Operation MUST NOT be mislabeled as 'beta_execute' because beta_execute belongs to provider-beta!
+      // It must be replaced with '[UNVERIFIED_OPERATION]'!
+      expect(denialRecord.operation).toBe('[UNVERIFIED_OPERATION]');
+      expect(denialRecord.decision).toBe('DENIED');
+    });
+
     it('enforces strict tenant-scoped policy binding in execution plane', async () => {
       const auditSink = new InMemoryAuditSink();
       const registry = new InMemoryCredentialRegistry();
@@ -1069,6 +1151,49 @@ describe('CredentialBroker & CredentialProxy', () => {
         BASE_TIME,
       );
       expect(credA.tenantId).toBe(TENANT_A);
+    });
+
+    it('fails closed when tenant-bound policy is accessed with empty context tenantId', async () => {
+      const registry = new InMemoryCredentialRegistry();
+      const tenantScopedPolicy = {
+        version: 1,
+        tenantId: TENANT_A,
+        rules: SYNTHETIC_EGRESS_POLICY.rules,
+        defaultAction: 'deny' as const,
+      };
+
+      const broker = new CredentialBroker({
+        registry,
+        policy: tenantScopedPolicy,
+      });
+
+      // Management plane: empty tenantId in AuthContext fails closed
+      const emptyTenantAuthCtx: AuthContext = {
+        tenantId: '',
+        principalId: 'user-1',
+        policyVersion: 1,
+      };
+      await expect(broker.listCredentials(emptyTenantAuthCtx, BASE_TIME)).rejects.toThrow(
+        DomainError,
+      );
+
+      // Execution plane: empty tenantId in context reader fails closed
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+      const lease = makeSyntheticLease(TENANT_A);
+      const brokenReader = makeMockContextReader({ tenantId: '' });
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+      };
+      await expect(
+        broker.executeWithCredential(lease, cred.credentialRef, request, brokenReader, BASE_TIME),
+      ).rejects.toThrow(DomainError);
     });
   });
 });

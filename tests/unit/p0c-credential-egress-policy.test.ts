@@ -354,5 +354,65 @@ describe('evaluateEgressRequest & Egress Policy', () => {
       const allowedDecision = evaluateEgressRequest(tenantPolicy, request, 'tenant-1111');
       expect(allowedDecision.allowed).toBe(true);
     });
+
+    it('fails closed when tenant-bound policy is evaluated without callingTenantId or with empty/whitespace callingTenantId', () => {
+      const tenantPolicy: EgressPolicy = {
+        version: 1,
+        tenantId: 'tenant-1111',
+        rules: SYNTHETIC_EGRESS_POLICY.rules,
+        defaultAction: 'deny',
+      };
+
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        operationKind: 'read',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      // 1. callingTenantId omitted completely
+      const missingTenantDecision = evaluateEgressRequest(tenantPolicy, request);
+      expect(missingTenantDecision.allowed).toBe(false);
+      if (!missingTenantDecision.allowed) {
+        expect(missingTenantDecision.denialCode).toBe('NO_MATCHING_RULE');
+        expect(missingTenantDecision.reason).toContain(
+          'tenant-bound policy requires matching callingTenantId',
+        );
+      }
+
+      // 2. callingTenantId is undefined
+      const undefinedTenantDecision = evaluateEgressRequest(tenantPolicy, request, undefined);
+      expect(undefinedTenantDecision.allowed).toBe(false);
+      if (!undefinedTenantDecision.allowed) {
+        expect(undefinedTenantDecision.denialCode).toBe('NO_MATCHING_RULE');
+      }
+
+      // 3. callingTenantId is empty string
+      const emptyTenantDecision = evaluateEgressRequest(tenantPolicy, request, '');
+      expect(emptyTenantDecision.allowed).toBe(false);
+      if (!emptyTenantDecision.allowed) {
+        expect(emptyTenantDecision.denialCode).toBe('NO_MATCHING_RULE');
+      }
+
+      // 4. callingTenantId is whitespace only
+      const whitespaceTenantDecision = evaluateEgressRequest(tenantPolicy, request, '   ');
+      expect(whitespaceTenantDecision.allowed).toBe(false);
+      if (!whitespaceTenantDecision.allowed) {
+        expect(whitespaceTenantDecision.denialCode).toBe('NO_MATCHING_RULE');
+      }
+
+      // 5. evaluateRedirectCandidate also fails closed when callingTenantId is omitted on tenant-bound policy
+      const redirectDecision = evaluateRedirectCandidate(
+        tenantPolicy,
+        request,
+        `${SYNTHETIC_ORIGIN}/v1/status/redirected`,
+      );
+      expect(redirectDecision.allowed).toBe(false);
+      if (!redirectDecision.allowed) {
+        expect(redirectDecision.denialCode).toBe('NO_MATCHING_RULE');
+      }
+    });
   });
 });

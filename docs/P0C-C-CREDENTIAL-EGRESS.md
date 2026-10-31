@@ -78,11 +78,11 @@ flowchart TD
 4. **Egress Policy & Server-Side Scope/Operation Binding Boundary**:
    - Outbound network requests are evaluated by `evaluateEgressRequest` under a default-deny policy.
    - **Duplicate RuleId Defense**: Policy integrity checks strictly enforce unique `ruleId`s across all rules. Duplicate `ruleId`s are rejected in both policy engine and broker initialization, preventing rule shadowing and scope evaluation bypasses.
-   - **Tenant-Scoped Policy Binding**: When `EgressPolicy.tenantId` is specified, the policy is strictly bound to that tenant. Requests or management actions from other tenants are rejected with `POLICY_DENIED` / `NO_MATCHING_RULE`.
+   - **Tenant-Scoped Policy Binding**: When `EgressPolicy.tenantId` is specified, the policy is strictly bound to that tenant. Any request or management action missing `callingTenantId` or originating from a different tenant fails closed and is rejected with `POLICY_DENIED` / `NO_MATCHING_RULE`.
    - **Server-Side Scope Enforcement**: The credential's `scopes` in the registry must satisfy the server-side rule's `requiredScopes`. Untrusted callers cannot bypass permissions by omitting, passing empty (`[]`), or forging `requestedScopes`.
    - **Strict Operation ID Binding**: Every `EgressRule` explicitly specifies `allowedOperations`. Requests with unlisted, forged, or empty operation IDs are rejected with `OPERATION_NOT_ALLOWED`.
    - **Sanitized Diagnostics & Audit Redaction**: All audit `denialReason` entries and exception diagnostics are mapped to static, safe message codes. Under no circumstances are raw paths, query strings, scope lists, secret tokens, or `String(err)` emitted.
-   - **Unverified Audit Redaction**: On denial, unverified `operation` and `provider` inputs are strictly replaced with safe placeholders (`[UNVERIFIED_PROVIDER]`, `[UNVERIFIED_OPERATION]`), preventing hostile injection strings or stolen tokens from persisting into audit trails.
+   - **Unverified Audit Redaction & Provider-Operation Binding**: On denial, unverified `operation` and `provider` inputs are strictly replaced with safe placeholders (`[UNVERIFIED_PROVIDER]`, `[UNVERIFIED_OPERATION]`). The operation whitelist check is strictly bound to the verified provider, preventing cross-provider mislabeling from polluting audit trails.
    - Non-HTTPS, IP literals, localhosts, fragments, userinfo, non-443 ports, mutating methods, unknown query parameters, and unlisted origins are rejected.
    - Every redirect hop is independently re-evaluated; implicit forwarding is forbidden.
 
@@ -196,7 +196,7 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
 | `pnpm lint`                      |    `0`    | ESLint passed with 0 errors, 0 warnings.                                          |
 | `pnpm typecheck`                 |    `0`    | TypeScript `tsc -p tsconfig.json` passed with 0 errors.                           |
 | `pnpm build`                     |    `0`    | TypeScript `tsc -b tsconfig.build.json` passed with 0 errors.                     |
-| `pnpm test:unit`                 |    `0`    | 49 test files passed, 780 total tests passed (104 new P0-C1C tests).              |
+| `pnpm test:unit`                 |    `0`    | 49 test files passed, 783 total tests passed (107 new P0-C1C tests).              |
 | `git diff --check`               |    `0`    | No whitespace errors, no unresolved merge markers.                                |
 | `pnpm test:integration`          | `NOT RUN` | Local PostgreSQL Docker environment is not running (`docker: command not found`). |
 | `pnpm test:chaos`                | `NOT RUN` | Requires PostgreSQL daemon.                                                       |
@@ -212,7 +212,7 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
    - Rotation invalidation: old `credentialRef` immediately revoked, distinct new `credentialRef` issued with incremented version.
    - Rejection of reusing old credential reference during rotation.
    - Status transition on revocation and expiration.
-2. `tests/unit/p0c-credential-egress-policy.test.ts` (20 tests):
+2. `tests/unit/p0c-credential-egress-policy.test.ts` (21 tests):
    - Default-deny with empty policy and unknown providers.
    - Configured synthetic read-only fixture execution.
    - Blocking mutating methods (`POST`, `PUT`, `DELETE`, `PATCH`).
@@ -221,7 +221,7 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
    - Strict operation ID binding against `allowedOperations`.
    - Scope validation: empty requestedScopes rejection, required scopes satisfaction, ungranted scope rejection.
    - Duplicate `ruleId` policy integrity rejection.
-   - Tenant-scoped policy binding rejection on tenant mismatch.
+   - Tenant-scoped policy binding rejection on tenant mismatch or missing callingTenantId (Fail-Closed).
    - Independent re-evaluation of redirect candidates.
 3. `tests/unit/p0c-credential-adversarial-url.test.ts` (46 tests):
    - Rejection of subdomain suffix spoofing (`allowed.example.evil.com`).
@@ -235,7 +235,7 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
    - Strict rejection of unlisted, spoofed, or whitespace operation IDs.
    - Denial reasons never leak raw URL paths, query parameters, or scope lists.
    - Target allowlist matching for valid read-only endpoints.
-4. `tests/unit/p0c-credential-broker.test.ts` (24 tests):
+4. `tests/unit/p0c-credential-broker.test.ts` (26 tests):
    - Management API with `AuthContext`.
    - Execution API with `LeasedRun` and injected `RunExecutionContextReader`.
    - Rejection of mismatched tenant, task, run, attempt, or lease epoch.
@@ -248,7 +248,8 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
    - Strict operation ID binding in broker.
    - Rejection of duplicate `ruleId` in broker constructor.
    - Strict replacement of unverified `operation` and `provider` with `[UNVERIFIED_OPERATION]` and `[UNVERIFIED_PROVIDER]` in denial audit records.
-   - Strict tenant-scoped policy binding in execution plane and management plane.
+   - Strict binding of audit operation whitelist check to verified provider (preventing cross-provider mislabeling).
+   - Strict tenant-scoped policy binding in execution plane and management plane (Fail-Closed on missing or mismatched tenantId).
    - Context reader failure diagnostic redaction (no `String(err)` or connection string leakage).
    - Audit `denialReason` non-leakage verification.
    - Rejection of workerId self-authorization and prompt injection text.

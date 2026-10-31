@@ -72,6 +72,31 @@ describe('DemoCluster Initialization Safety & Rollback Verification', () => {
       assertBoth('postgres://user:pass@production-db.internal:5432/production', false);
       assertBoth('postgres://user:pass@prod.aws.com:5432/ember_prod', false);
     });
+
+    it('strictly rejects query parameter host/target overrides (e.g. ?host=remote.example.com)', () => {
+      // Host override bypass attempt
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?host=remote.example.com', false);
+      assertBoth('postgres://ember:dev@localhost:5432/ember_test?Host=remote.example.com', false);
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?hostaddr=10.0.0.1', false);
+
+      // Port or database override bypass attempt
+      assertBoth('postgres://ember:dev@localhost:5432/ember_test?port=5433', false);
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?database=production', false);
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?dbname=production', false);
+
+      // Disallowed/unnecessary query parameters
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?foo=bar', false);
+      assertBoth('postgres://ember:dev@localhost:5432/ember_test?token=hidden', false);
+
+      // Allowed safe parameter (sslmode) passes
+      assertBoth('postgres://ember:dev@127.0.0.1:5432/ember_test?sslmode=disable', true);
+    });
+
+    it('strictly rejects empty hostnames', () => {
+      assertBoth('postgres:///ember_test', false);
+      assertBoth('postgres://:5432/ember_test', false);
+      assertBoth('postgres://ember:dev@/ember_test', false);
+    });
   });
 
   it('cleans up all schema and pool resources when initialization fails mid-way', async () => {

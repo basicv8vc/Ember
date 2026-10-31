@@ -52,12 +52,19 @@ export function assertSafeTestDatabaseUrl(databaseUrl: string): void {
     const hostname = parsed.hostname.toLowerCase();
     const dbName = parsed.pathname.replace(/^\//, '').toLowerCase();
 
+    // Reject empty hostname to avoid relying on environment or socket defaults
+    if (!hostname || hostname.trim() === '') {
+      throw new DomainError(
+        'POLICY_DENIED',
+        'Refused to run E2E cluster with empty database hostname',
+      );
+    }
+
     const isLocalHost =
       hostname === 'localhost' ||
       hostname === '127.0.0.1' ||
       hostname === '::1' ||
-      hostname === '[::1]' ||
-      hostname === '';
+      hostname === '[::1]';
 
     // Extract database name tokens delimited by underscore, hyphen, or dot
     const dbTokens = dbName.split(/[_\-.]+/);
@@ -77,6 +84,36 @@ export function assertSafeTestDatabaseUrl(databaseUrl: string): void {
         'POLICY_DENIED',
         `Refused to run E2E cluster against non-local or non-test database: host='${hostname}', db='${dbName}'`,
       );
+    }
+
+    // Inspect query parameters: node-postgres (pg-connection-string) allows query parameters
+    // like ?host=, ?hostaddr=, or ?port= to override connection targets.
+    // Disallow target-altering and unnecessary query parameters for safe local clusters.
+    const forbiddenTargetParams = new Set([
+      'host',
+      'hostaddr',
+      'port',
+      'database',
+      'dbname',
+      'user',
+      'username',
+    ]);
+    const allowedQueryParams = new Set(['sslmode']);
+
+    for (const [key] of parsed.searchParams) {
+      const lowerKey = key.toLowerCase();
+      if (forbiddenTargetParams.has(lowerKey)) {
+        throw new DomainError(
+          'POLICY_DENIED',
+          `Refused to run E2E cluster with target-altering query parameter: '${key}'`,
+        );
+      }
+      if (!allowedQueryParams.has(lowerKey)) {
+        throw new DomainError(
+          'POLICY_DENIED',
+          `Refused to run E2E cluster with unnecessary query parameter: '${key}'`,
+        );
+      }
     }
   } catch (err) {
     if (err instanceof DomainError) throw err;

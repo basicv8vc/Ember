@@ -223,10 +223,11 @@ All checks were executed in the isolated worktree `feature/p0c-1c-credential-egr
    - Rejection of revoked or expired credentials.
    - Rejection of workerId self-authorization and prompt injection text.
    - Verification of `CredentialProxy` facade metrics.
-5. `tests/unit/p0c-credential-zero-network.test.ts` (3 tests):
+5. `tests/unit/p0c-credential-zero-network.test.ts` (4 tests):
    - Verification that Node `http`, `https`, `net`, `dns`, and global `fetch` calls are strictly `0`.
    - Verification that `FakeSandboxProvider.capabilities().networkPolicy` is `false`.
    - Inspection of audit records and results confirming zero token/secret/Authorization leakage.
+   - Verification that `credentialRef` is replaced by non-reusable `credentialRefDigest` and URL path/query parameters are stripped, retaining only `targetOrigin` and fixed operation identifiers.
 
 ---
 
@@ -245,9 +246,9 @@ Below is an authentic audit record produced by `InMemoryAuditSink` during test e
   "provider": "synthetic-connector",
   "operation": "status_check",
   "operationKind": "read",
-  "credentialRef": "cred_e286bbad-d142-4e4b-9759-aa672534a66e",
+  "credentialRefDigest": "e286bbad01424e4b",
   "credentialVersion": 1,
-  "url": "https://api.synthetic-connector.example/v1/status",
+  "targetOrigin": "https://api.synthetic-connector.example",
   "method": "GET",
   "decision": "ALLOWED",
   "networkCallsMade": 0
@@ -257,6 +258,9 @@ Below is an authentic audit record produced by `InMemoryAuditSink` during test e
 Key security properties demonstrated:
 
 - Raw `tenantId` UUID is replaced by a 16-hex SHA-256 hash `tenantHash`.
+- Raw `credentialRef` is replaced by a non-reusable 16-hex SHA-256 digest `credentialRefDigest`.
+- Destination is stripped down to `targetOrigin` (scheme + host), strictly preventing sensitive URL path parameters or query parameters from leaking into logs.
+- Fixed operation identifiers (`provider`, `operation`, `operationKind`) provide clean categorization.
 - Zero raw secrets, Authorization headers, or bearer tokens are captured.
 - `networkCallsMade` is strictly `0`.
 

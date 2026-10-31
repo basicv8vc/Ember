@@ -168,6 +168,11 @@ export interface SimulatedProxyResult {
 
 /**
  * Redacted audit record guaranteeing zero secret leakage and zero network activity.
+ *
+ * In accordance with hardened audit guidelines:
+ * - credentialRef is stored strictly as a non-reusable reference digest (SHA-256 slice).
+ * - targetOrigin stores only scheme + host/domain, never sensitive URL paths or query params.
+ * - operation and provider serve as fixed operation identifiers.
  */
 export interface RedactedAuditRecord {
   readonly auditId: string;
@@ -179,9 +184,9 @@ export interface RedactedAuditRecord {
   readonly provider: string;
   readonly operation: string;
   readonly operationKind: ConnectorOperationKind;
-  readonly credentialRef: string;
+  readonly credentialRefDigest: string;
   readonly credentialVersion: number;
-  readonly url: string;
+  readonly targetOrigin: string;
   readonly method: HttpMethod;
   readonly decision: 'ALLOWED' | 'DENIED';
   readonly denialReason?: string;

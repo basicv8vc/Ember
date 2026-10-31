@@ -189,9 +189,82 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
       expect(auditJson).not.toContain('Bearer');
       expect(auditJson).not.toContain('secret_cursor_val');
 
+      // Verify raw credentialRef is NOT present in the audit record, only non-reusable digest
+      expect(auditJson).not.toContain(cred.credentialRef);
+      expect(records[0]?.credentialRefDigest).toBeDefined();
+      expect(records[0]?.credentialRefDigest.length).toBe(16);
+
+      // Verify URL path and query parameters are stripped; only targetOrigin is retained
+      expect(auditJson).not.toContain('/v1/items');
+      expect(records[0]?.targetOrigin).toBe(SYNTHETIC_ORIGIN);
+
       // Verify tenantId is hashed in audit record
       expect(records[0]?.tenantHash).not.toBe(TENANT_A);
       expect(records[0]?.tenantHash.length).toBe(16);
+    });
+
+    it('replaces credentialRef with non-reusable digest and strips sensitive URL paths in audit trail', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const registry = new InMemoryCredentialRegistry();
+      const broker = new CredentialBroker({
+        registry,
+        policy: SYNTHETIC_EGRESS_POLICY,
+        auditSink,
+      });
+
+      const sensitiveRefId = 'cred_private_token_vault_ref_998877';
+      const cred = await broker.registerCredential(
+        AUTH_CTX,
+        {
+          credentialRef: sensitiveRefId,
+          provider: SYNTHETIC_PROVIDER,
+          scopes: [SYNTHETIC_SCOPE_READ],
+        },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const sensitivePathUrl = `${SYNTHETIC_ORIGIN}/v1/items/doc_confidential_secret_id_443322`;
+      const egressRequest: EgressRequest = {
+        url: sensitivePathUrl,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_confidential_doc',
+        operationKind: 'read',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      await broker.executeWithCredential(
+        lease,
+        cred.credentialRef,
+        egressRequest,
+        reader,
+        BASE_TIME,
+      );
+
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      const audit = records[0]!;
+      const auditText = JSON.stringify(audit);
+
+      // Raw reference string must NOT exist in the audit log
+      expect(auditText).not.toContain(sensitiveRefId);
+      expect(audit.credentialRefDigest).not.toBe(sensitiveRefId);
+      expect(audit.credentialRefDigest.length).toBe(16);
+
+      // Path parameter and resource IDs must NOT exist in the audit log
+      expect(auditText).not.toContain('doc_confidential_secret_id_443322');
+      expect(auditText).not.toContain('/v1/items');
+
+      // Fixed identifiers only
+      expect(audit.targetOrigin).toBe(SYNTHETIC_ORIGIN);
+      expect(audit.provider).toBe(SYNTHETIC_PROVIDER);
+      expect(audit.operation).toBe('get_confidential_doc');
+      expect(audit.operationKind).toBe('read');
+      expect(audit.decision).toBe('ALLOWED');
+      expect(audit.networkCallsMade).toBe(0);
     });
   });
 });

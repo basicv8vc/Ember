@@ -310,7 +310,7 @@ export class CredentialBroker {
       operationKind: 'read',
       credentialRef: credential.credentialRef,
       credentialVersion: credential.version,
-      url: egressDecision.sanitizedUrl,
+      targetUrlOrOrigin: egressRequest.url,
       method: egressRequest.method,
       decision: 'ALLOWED',
       now,
@@ -413,11 +413,6 @@ export class CredentialBroker {
     if (!this.auditSink) return;
 
     try {
-      const sanitizedUrl =
-        params.url && params.url.includes('@')
-          ? '[REDACTED_SUSPICIOUS_URL]'
-          : (params.url?.split('?')[0] ?? '[UNKNOWN_URL]');
-
       const validMethod =
         params.method === 'GET' ||
         params.method === 'HEAD' ||
@@ -439,7 +434,7 @@ export class CredentialBroker {
         operationKind: 'read',
         credentialRef: params.credentialRef,
         credentialVersion: params.credentialVersion,
-        url: sanitizedUrl,
+        targetUrlOrOrigin: params.url,
         method: validMethod,
         decision: 'DENIED',
         denialReason: params.reason,

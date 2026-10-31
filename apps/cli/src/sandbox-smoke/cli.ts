@@ -8,6 +8,18 @@ import type { SmokeReport } from './types.js';
 
 export const KNOWN_CLOUD_PROVIDERS = ['cloudflare', 'e2b', 'daytona', 'boat'] as const;
 
+function parseStrictTimeoutMs(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) {
+    return null;
+  }
+  const val = Number(trimmed);
+  if (!Number.isSafeInteger(val) || val < 100 || val > 60_000) {
+    return null;
+  }
+  return val;
+}
+
 export interface CliOutputStreams {
   writeStdout(text: string): void;
   writeStderr(text: string): void;
@@ -103,10 +115,11 @@ Options:
 
     if (arg.startsWith('--timeout-ms=') || arg.startsWith('--timeout=')) {
       const prefix = arg.startsWith('--timeout-ms=') ? '--timeout-ms=' : '--timeout=';
-      const val = Number.parseInt(arg.slice(prefix.length), 10);
-      if (Number.isNaN(val) || val < 100 || val > 60_000) {
+      const raw = arg.slice(prefix.length);
+      const val = parseStrictTimeoutMs(raw);
+      if (val === null) {
         output.writeStderr(
-          `[ERROR] Invalid timeout value "${arg}": must be an integer between 100 and 60000 ms.\n`,
+          `[ERROR] Invalid timeout value "${raw}": must be an integer between 100 and 60000 ms.\n`,
         );
         return null;
       }
@@ -117,8 +130,8 @@ Options:
 
     if (arg === '--timeout-ms' || arg === '--timeout') {
       const next = args[i + 1];
-      const val = next !== undefined ? Number.parseInt(next, 10) : Number.NaN;
-      if (Number.isNaN(val) || val < 100 || val > 60_000) {
+      const val = next !== undefined ? parseStrictTimeoutMs(next) : null;
+      if (val === null) {
         output.writeStderr(
           `[ERROR] Invalid timeout value "${next}": must be an integer between 100 and 60000 ms.\n`,
         );
@@ -190,6 +203,9 @@ export function formatHumanSummary(report: SmokeReport): string {
     `Cost Source:           ${report.costSource}`,
     '',
     '--- Cleanup Status ---',
+    `Stop Status:           ${report.cleanup.stopStatus}`,
+    `Destroy Status:        ${report.cleanup.destroyStatus}`,
+    `Leak Status:           ${report.cleanup.leakStatus}`,
     `Sandbox Stopped:       ${report.cleanup.stopSucceeded}`,
     `Sandbox Destroyed:     ${report.cleanup.destroySucceeded}`,
     `Resources Leaked:      ${report.cleanup.resourcesLeaked}`,

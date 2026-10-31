@@ -103,9 +103,18 @@ describe('SandboxSmoke CLI', () => {
   });
 
   it('rejects illegal timeout arguments with non-zero exit', async () => {
-    for (const badTimeout of ['-50', '0', '9999999', 'invalid']) {
+    for (const badTimeout of ['-50', '0', '9999999', 'invalid', '100abc', '100.5']) {
       const streams = createBufferedStreams();
       const code = await runCli(['--timeout-ms', badTimeout], streams);
+
+      expect(code).toBe(1);
+      expect(streams.stderr).toContain('Invalid timeout value');
+      expect(streams.stdout).toBe('');
+    }
+
+    for (const badTimeout of ['--timeout-ms=100abc', '--timeout=100.5']) {
+      const streams = createBufferedStreams();
+      const code = await runCli([badTimeout], streams);
 
       expect(code).toBe(1);
       expect(streams.stderr).toContain('Invalid timeout value');

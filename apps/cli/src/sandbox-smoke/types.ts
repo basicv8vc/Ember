@@ -24,6 +24,9 @@ export type SmokePhase = (typeof SMOKE_PHASES)[number];
 
 export type SmokePhaseStatus = 'PASS' | 'FAIL' | 'SKIPPED';
 
+export type SmokeCleanupStepStatus = 'COMPLETED' | 'FAILED' | 'NOT_ATTEMPTED' | 'UNKNOWN';
+export type SmokeLeakStatus = 'VERIFIED_CLEAN' | 'CONFIRMED_LEAK' | 'UNKNOWN';
+
 export interface SmokePhaseDetail {
   readonly phase: SmokePhase;
   readonly status: SmokePhaseStatus;
@@ -33,6 +36,9 @@ export interface SmokePhaseDetail {
 }
 
 export interface SmokeCleanupReport {
+  readonly stopStatus: SmokeCleanupStepStatus;
+  readonly destroyStatus: SmokeCleanupStepStatus;
+  readonly leakStatus: SmokeLeakStatus;
   readonly stopSucceeded: boolean;
   readonly destroySucceeded: boolean;
   readonly resourcesLeaked: boolean;
@@ -100,67 +106,111 @@ const PhaseDetailSchema = z.strictObject({
  *
  * Guarantees that vendor cold start, vendor costs, and real isolation CANNOT be falsely marked
  * as passed, measured, or non-null in this local simulation tier.
+ * Also enforces that an overall PASS report MUST be verified clean with completed destroy.
  */
-export const SmokeReportSchema = z.strictObject({
-  schemaVersion: z.literal(SMOKE_SCHEMA_VERSION),
-  testId: z.string().uuid(),
-  provider: z.literal('fake'),
-  mode: z.literal('LOCAL_SIMULATION'),
-  status: z.enum(['PASS', 'FAIL']),
-  phases: z.strictObject({
-    capabilities: PhaseDetailSchema,
-    create: PhaseDetailSchema,
-    waitReady: PhaseDetailSchema,
-    exec: PhaseDetailSchema,
-    readOutput: PhaseDetailSchema,
-    usage: PhaseDetailSchema,
-    stop: PhaseDetailSchema,
-    destroy: PhaseDetailSchema,
-  }),
-  timing: z.strictObject({
-    totalWallMs: z.number().nonnegative(),
-    phaseDurationsMs: z.strictObject({
-      capabilities: z.number().nonnegative(),
-      create: z.number().nonnegative(),
-      waitReady: z.number().nonnegative(),
-      exec: z.number().nonnegative(),
-      readOutput: z.number().nonnegative(),
-      usage: z.number().nonnegative(),
-      stop: z.number().nonnegative(),
-      destroy: z.number().nonnegative(),
+export const SmokeReportSchema = z
+  .strictObject({
+    schemaVersion: z.literal(SMOKE_SCHEMA_VERSION),
+    testId: z.string().uuid(),
+    provider: z.literal('fake'),
+    mode: z.literal('LOCAL_SIMULATION'),
+    status: z.enum(['PASS', 'FAIL']),
+    phases: z.strictObject({
+      capabilities: PhaseDetailSchema,
+      create: PhaseDetailSchema,
+      waitReady: PhaseDetailSchema,
+      exec: PhaseDetailSchema,
+      readOutput: PhaseDetailSchema,
+      usage: PhaseDetailSchema,
+      stop: PhaseDetailSchema,
+      destroy: PhaseDetailSchema,
     }),
-  }),
-  usageSource: z.literal('SIMULATED'),
-  usage: z
-    .strictObject({
-      cpuSeconds: z.number().nonnegative(),
-      memoryGiBSeconds: z.number().nonnegative(),
-      egressBytes: z.number().nonnegative(),
-    })
-    .nullable(),
-  realIsolationStatus: z.literal('NOT_MEASURED'),
-  vendorColdStartMs: z.null(),
-  vendorCostUsd: z.null(),
-  costSource: z.literal('NOT_MEASURED'),
-  capabilities: z
-    .strictObject({
-      shell: z.boolean(),
-      browser: z.boolean(),
-      filesystemSnapshot: z.boolean(),
-      memoryResume: z.boolean(),
-      diskSurvivesStop: z.boolean(),
-      forkFromSnapshot: z.boolean(),
-      persistentVolume: z.boolean(),
-      networkPolicy: z.boolean(),
-    })
-    .nullable(),
-  cleanup: z.strictObject({
-    stopSucceeded: z.boolean(),
-    destroySucceeded: z.boolean(),
-    resourcesLeaked: z.boolean(),
-    stopError: z.string().optional(),
-    destroyError: z.string().optional(),
-  }),
-  error: z.string().nullable(),
-  limitations: z.array(z.string()).readonly(),
-});
+    timing: z.strictObject({
+      totalWallMs: z.number().nonnegative(),
+      phaseDurationsMs: z.strictObject({
+        capabilities: z.number().nonnegative(),
+        create: z.number().nonnegative(),
+        waitReady: z.number().nonnegative(),
+        exec: z.number().nonnegative(),
+        readOutput: z.number().nonnegative(),
+        usage: z.number().nonnegative(),
+        stop: z.number().nonnegative(),
+        destroy: z.number().nonnegative(),
+      }),
+    }),
+    usageSource: z.literal('SIMULATED'),
+    usage: z
+      .strictObject({
+        cpuSeconds: z.number().nonnegative(),
+        memoryGiBSeconds: z.number().nonnegative(),
+        egressBytes: z.number().nonnegative(),
+      })
+      .nullable(),
+    realIsolationStatus: z.literal('NOT_MEASURED'),
+    vendorColdStartMs: z.null(),
+    vendorCostUsd: z.null(),
+    costSource: z.literal('NOT_MEASURED'),
+    capabilities: z
+      .strictObject({
+        shell: z.boolean(),
+        browser: z.boolean(),
+        filesystemSnapshot: z.boolean(),
+        memoryResume: z.boolean(),
+        diskSurvivesStop: z.boolean(),
+        forkFromSnapshot: z.boolean(),
+        persistentVolume: z.boolean(),
+        networkPolicy: z.boolean(),
+      })
+      .nullable(),
+    cleanup: z.strictObject({
+      stopStatus: z.enum(['COMPLETED', 'FAILED', 'NOT_ATTEMPTED', 'UNKNOWN']),
+      destroyStatus: z.enum(['COMPLETED', 'FAILED', 'NOT_ATTEMPTED', 'UNKNOWN']),
+      leakStatus: z.enum(['VERIFIED_CLEAN', 'CONFIRMED_LEAK', 'UNKNOWN']),
+      stopSucceeded: z.boolean(),
+      destroySucceeded: z.boolean(),
+      resourcesLeaked: z.boolean(),
+      stopError: z.string().optional(),
+      destroyError: z.string().optional(),
+    }),
+    error: z.string().nullable(),
+    limitations: z.array(z.string()).readonly(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.status === 'PASS') {
+      if (data.cleanup.leakStatus !== 'VERIFIED_CLEAN') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.leakStatus set to VERIFIED_CLEAN',
+          path: ['cleanup', 'leakStatus'],
+        });
+      }
+      if (data.cleanup.resourcesLeaked !== false) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.resourcesLeaked set to false',
+          path: ['cleanup', 'resourcesLeaked'],
+        });
+      }
+      if (data.cleanup.destroyStatus !== 'COMPLETED') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.destroyStatus set to COMPLETED',
+          path: ['cleanup', 'destroyStatus'],
+        });
+      }
+      if (!data.cleanup.destroySucceeded) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have cleanup.destroySucceeded set to true',
+          path: ['cleanup', 'destroySucceeded'],
+        });
+      }
+      if (data.error !== null) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: 'A PASS report must have error set to null',
+          path: ['error'],
+        });
+      }
+    }
+  });

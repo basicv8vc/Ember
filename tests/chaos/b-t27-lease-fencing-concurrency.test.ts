@@ -35,6 +35,7 @@ import {
   dumpFailureDiagnostics,
   globalFaultRecorder,
   simulateWorkerCrash,
+  withTimeout,
 } from './harness/index.js';
 
 /**
@@ -116,7 +117,7 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
     const agent = await agents.create(ctx, { name: `agent-${label}-${randomUUID()}` });
     const created = await createQueuedTask(tasks, ctx, agent.agentId, label);
     await parkOtherOpenTasks(db.pool, created.taskId);
-    const now = await databaseNow(db.pool);
+    const now = new Date((await databaseNow(db.pool)).getTime() + 10);
     const lease = await queue.claimNext(workerName, now);
     if (lease === null) {
       throw new Error(`failed to claim task ${created.taskId}`);
@@ -470,6 +471,255 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
       const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
       const completedEvents = events.filter((e) => e.phase === 'completed');
       expect(completedEvents).toHaveLength(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 5. 并发 Cancellation 与 Terminal Result Commit 竞争（确定性分支验证）
+  // ---------------------------------------------------------------------------
+  describe('Concurrent Cancellation vs Terminal Result Commit Race', () => {
+    // -------------------------------------------------------------------------
+    // 5.1 Commit-first 路径：commitStep 率先获取行锁，并发 cancel 随后到达排队，
+    // commit 完成后，cancel 无法颠覆终态，保持单一 completed 终态与单条 terminal event
+    // -------------------------------------------------------------------------
+    it('verifies Commit-first branch: commit wins task row lock, concurrent cancel queues and cannot overturn completed terminal state', async () => {
+      const committer = createCommitter();
+      const task = await claimForAgent('commit-first-race', 'worker-commit-first');
+      const taskId = task.lease.taskId;
+
+      const staged = await blobs.stage(
+        tenant.tenantId,
+        Buffer.from('commit-first race output'),
+        'text/plain',
+      );
+
+      const commitRequest: CommitStepRequest = {
+        operationId: `op:commit-first:${taskId}`,
+        mode: 'result',
+        artifacts: [{ artifactId: staged.stagedId, staged }],
+      };
+
+      const barrierClassId = prng.nextInt(10_000, 99_999);
+      const barrierObjId = prng.nextInt(10_000, 99_999);
+      const funcName = `pause_commit_${barrierClassId}`;
+      const triggerName = `${funcName}_trg`;
+
+      const barrierClient = await db.pool.connect();
+      await barrierClient.query('SELECT pg_advisory_lock($1, $2)', [barrierClassId, barrierObjId]);
+
+      try {
+        await db.pool.query(`
+          CREATE OR REPLACE FUNCTION ${funcName}()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            PERFORM pg_advisory_lock(${barrierClassId}, ${barrierObjId});
+            RETURN NEW;
+          END;
+          $$;
+
+          CREATE TRIGGER ${triggerName}
+            BEFORE INSERT ON artifacts
+            FOR EACH ROW EXECUTE FUNCTION ${funcName}();
+        `);
+
+        // 1. 启动 commitStep（持有 tasks 行锁后，在 INSERT INTO artifacts 处等待 advisory lock）
+        const commitPromise = committer.commitStep(task.grant, commitRequest);
+
+        // 2. 确定性等待 commitStep 持有 tasks 行锁并进入 advisory lock 阻塞
+        await withTimeout(
+          (async () => {
+            while (true) {
+              const res = await db.adminPool.query<{ pid: number }>(
+                `SELECT pid FROM pg_locks
+                  WHERE locktype = 'advisory'
+                    AND classid = $1
+                    AND objid = $2
+                    AND NOT granted`,
+                [barrierClassId, barrierObjId],
+              );
+              if (res.rows.length > 0) {
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 20));
+            }
+          })(),
+          5_000,
+          'waiting for commitStep to hold task lock and pause on advisory lock',
+        );
+
+        // 3. 此时 commitStep 已经持有 tasks 行的 FOR UPDATE 锁。
+        // 并发发起 tasks.cancel，由于行锁已被占用，cancel 必将被排队等待在 tasks 行锁上
+        const cancelPromise = tasks.cancel(ctx, taskId);
+
+        // 4. 等待 cancel 请求排队在 row-lock 后
+        await new Promise((r) => setTimeout(r, 50));
+
+        // 5. 释放 advisory lock，允许 commitStep 继续完成事务提交
+        await barrierClient.query('SELECT pg_advisory_unlock($1, $2)', [
+          barrierClassId,
+          barrierObjId,
+        ]);
+
+        // 6. 两者并发结束
+        const [commitResult, cancelOutcome] = await Promise.all([commitPromise, cancelPromise]);
+
+        // 7. 严格断言 Commit-first 路径不变量：
+        // a. commitStep 成功落库
+        expect(commitResult.replayed).toBe(false);
+
+        // b. cancel 感知到任务已处于终态 (completed)，返回 terminal: true 且无多余取消
+        expect(cancelOutcome.terminal).toBe(true);
+        expect(cancelOutcome.status).toBe('completed');
+        expect(cancelOutcome.cancelRequested).toBe(false);
+
+        // c. 数据库中 Task 状态严格为 completed
+        const taskInDb = await readTask(db.observerPool, tenant.tenantId, taskId);
+        expect(taskInDb.status).toBe('completed');
+
+        // d. 审计事件流中，terminal 事件有且仅有 1 个，且为 completed，绝无 cancelled 事件
+        const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
+        const terminalEvents = events.filter((e) =>
+          ['completed', 'cancelled', 'failed'].includes(e.phase),
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(terminalEvents[0]?.phase).toBe('completed');
+      } finally {
+        await barrierClient.query('SELECT pg_advisory_unlock_all()');
+        barrierClient.release();
+        await db.pool.query(`
+          DROP TRIGGER IF EXISTS ${triggerName} ON artifacts;
+          DROP FUNCTION IF EXISTS ${funcName}();
+        `);
+      }
+    });
+
+    // -------------------------------------------------------------------------
+    // 5.2 Cancel-first 路径：tasks.cancel 率先获取行锁并落库 cancel_requested_at，
+    // 并发 commitStep 随后到达排队，获取锁后识别取消意图，坚决返回 CANCELLED 错误，
+    // 零非法写入，Worker 协同退出，最终单一 cancelled 终态
+    // -------------------------------------------------------------------------
+    it('verifies Cancel-first branch: cancel wins task row lock, commit receives CANCELLED, zero artifacts committed, and task converges to cancelled', async () => {
+      const committer = createCommitter();
+      const task = await claimForAgent('cancel-first-race', 'worker-cancel-first');
+      const taskId = task.lease.taskId;
+
+      const staged = await blobs.stage(
+        tenant.tenantId,
+        Buffer.from('cancel-first race output'),
+        'text/plain',
+      );
+
+      const commitRequest: CommitStepRequest = {
+        operationId: `op:cancel-first:${taskId}`,
+        mode: 'result',
+        artifacts: [{ artifactId: staged.stagedId, staged }],
+      };
+
+      const barrierClassId = prng.nextInt(10_000, 99_999);
+      const barrierObjId = prng.nextInt(10_000, 99_999);
+      const funcName = `pause_cancel_${barrierClassId}`;
+      const triggerName = `${funcName}_trg`;
+
+      const barrierClient = await db.pool.connect();
+      await barrierClient.query('SELECT pg_advisory_lock($1, $2)', [barrierClassId, barrierObjId]);
+
+      try {
+        await db.pool.query(`
+          CREATE OR REPLACE FUNCTION ${funcName}()
+          RETURNS trigger LANGUAGE plpgsql AS $$
+          BEGIN
+            IF NEW.cancel_requested_at IS NOT NULL AND OLD.cancel_requested_at IS NULL THEN
+              PERFORM pg_advisory_lock(${barrierClassId}, ${barrierObjId});
+            END IF;
+            RETURN NEW;
+          END;
+          $$;
+
+          CREATE TRIGGER ${triggerName}
+            AFTER UPDATE ON tasks
+            FOR EACH ROW EXECUTE FUNCTION ${funcName}();
+        `);
+
+        // 1. 启动 tasks.cancel（持有 tasks 行锁并写入 cancel_requested_at 后，在 trigger 处暂停）
+        const cancelPromise = tasks.cancel(ctx, taskId);
+
+        // 2. 确定性等待 cancel 进入 advisory lock 等待
+        await withTimeout(
+          (async () => {
+            while (true) {
+              const res = await db.adminPool.query<{ pid: number }>(
+                `SELECT pid FROM pg_locks
+                  WHERE locktype = 'advisory'
+                    AND classid = $1
+                    AND objid = $2
+                    AND NOT granted`,
+                [barrierClassId, barrierObjId],
+              );
+              if (res.rows.length > 0) {
+                break;
+              }
+              await new Promise((r) => setTimeout(r, 20));
+            }
+          })(),
+          5_000,
+          'waiting for tasks.cancel to write cancel_requested_at and pause on advisory lock',
+        );
+
+        // 3. 此时 tasks.cancel 已经锁住 tasks 行并记录了 cancel_requested_at。
+        // 并发发起 committer.commitStep，commitStep 将排队在 tasks 行锁上
+        const commitPromise = committer.commitStep(task.grant, commitRequest);
+        commitPromise.catch(() => {}); // 避免在 await cancelPromise 期间因提前 reject 产生 unhandled rejection
+
+        // 4. 等待 commitStep 排队在 row-lock 后
+        await new Promise((r) => setTimeout(r, 50));
+
+        // 5. 释放 advisory lock，允许 tasks.cancel 提交事务
+        await barrierClient.query('SELECT pg_advisory_unlock($1, $2)', [
+          barrierClassId,
+          barrierObjId,
+        ]);
+
+        // 6. 等待 cancel 事务成功提交并返回
+        const cancelOutcome = await cancelPromise;
+        expect(cancelOutcome.terminal).toBe(false);
+        expect(cancelOutcome.cancelRequested).toBe(true);
+
+        // 7. commitStep 获取到锁后，发现 cancel_requested_at 已落库，必须被拒绝并抛出 CANCELLED
+        await expect(commitPromise).rejects.toMatchObject({
+          code: 'CANCELLED',
+        });
+
+        // 8. 验证零非法提交：artifacts 关系表中绝无此 staged artifact
+        const artifactsCheck = await db.observerPool.query<{ count: string }>(
+          'SELECT count(*)::text AS count FROM artifacts WHERE tenant_id = $1 AND task_id = $2',
+          [tenant.tenantId, taskId],
+        );
+        expect(Number(artifactsCheck.rows[0]?.count ?? '0')).toBe(0);
+
+        // 9. Worker 感知到 CANCELLED 错误后，协同完成取消收敛
+        const finishRes = await queue.finish(task.lease, 'cancelled');
+        expect(finishRes).toBe(true);
+
+        // 10. 验证最终数据库不变量：
+        // a. Task 终态严格为 cancelled
+        const finalTask = await readTask(db.observerPool, tenant.tenantId, taskId);
+        expect(finalTask.status).toBe('cancelled');
+
+        // b. 审计事件流中，terminal 事件有且仅有 1 个，且为 cancelled，绝无 completed 事件
+        const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
+        const terminalEvents = events.filter((e) =>
+          ['completed', 'cancelled', 'failed'].includes(e.phase),
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(terminalEvents[0]?.phase).toBe('cancelled');
+      } finally {
+        await barrierClient.query('SELECT pg_advisory_unlock_all()');
+        barrierClient.release();
+        await db.pool.query(`
+          DROP TRIGGER IF EXISTS ${triggerName} ON tasks;
+          DROP FUNCTION IF EXISTS ${funcName}();
+        `);
+      }
     });
   });
 });

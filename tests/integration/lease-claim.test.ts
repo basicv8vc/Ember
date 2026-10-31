@@ -42,7 +42,7 @@ let queueA: PostgresLeaseQueue;
 let queueB: PostgresLeaseQueue;
 
 async function syncClock(): Promise<void> {
-  clock.set(await databaseNow(db.pool));
+  clock.set(new Date((await databaseNow(db.pool)).getTime() + 5));
 }
 
 beforeAll(async () => {

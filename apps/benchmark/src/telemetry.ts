@@ -12,6 +12,7 @@ export interface TelemetryCollectorOptions {
   readonly pool?: QueryablePool;
   readonly sampleIntervalMs?: number;
   readonly targetWorkerConcurrency?: number;
+  readonly disablePostgresSampling?: boolean;
 }
 
 /**
@@ -23,6 +24,7 @@ export class TelemetryCollector {
   private postgresSampleCount = 0;
   private readonly sampleIntervalMs: number;
   private readonly targetWorkerConcurrency: number;
+  private readonly disablePostgresSampling: boolean;
 
   private timer?: NodeJS.Timeout;
   private startTimeHr: number = 0;
@@ -48,6 +50,7 @@ export class TelemetryCollector {
     this.pool = options.pool;
     this.sampleIntervalMs = options.sampleIntervalMs ?? 100;
     this.targetWorkerConcurrency = options.targetWorkerConcurrency ?? 100;
+    this.disablePostgresSampling = options.disablePostgresSampling ?? false;
   }
 
   /** Attach the local PostgreSQL admin pool after the harness starts. */
@@ -125,7 +128,7 @@ export class TelemetryCollector {
   private async sample(): Promise<void> {
     this.sampleProcessMemory();
 
-    if (this.pool) {
+    if (this.pool && !this.disablePostgresSampling) {
       try {
         const res = await this.pool.query<{ active: string; total: string }>(`
           SELECT

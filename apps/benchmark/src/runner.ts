@@ -61,6 +61,7 @@ function resolveConfig(options: BenchmarkOptions): ResolvedBenchmarkConfig {
   const enableLocalLoad =
     options.enableLocalLoad === true || process.env.EMBER_BENCH_ENABLE_LOCAL_LOAD === 'true';
   const workerConcurrency = options.workerConcurrency ?? concurrency;
+  const disablePgSampling = options.disablePgSampling === true;
 
   const positiveIntegers = { agents, concurrency, totalRequests, workerConcurrency };
   for (const [name, value] of Object.entries(positiveIntegers)) {
@@ -96,6 +97,7 @@ function resolveConfig(options: BenchmarkOptions): ResolvedBenchmarkConfig {
     enableLocalLoad,
     workerConcurrency,
     apiUrl: options.apiUrl,
+    disablePgSampling,
   };
 }
 
@@ -133,6 +135,7 @@ export async function runBenchmark(options: BenchmarkOptions = {}): Promise<Benc
   let peakHttpInFlight = 0;
   const telemetry = new TelemetryCollector({
     targetWorkerConcurrency: config.workerConcurrency,
+    disablePostgresSampling: config.disablePgSampling,
   });
 
   let harness: BenchmarkHarness | undefined;

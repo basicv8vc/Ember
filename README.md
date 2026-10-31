@@ -8,35 +8,34 @@ on demand for active work instead of renting one full VM per user. The long-term
 whether 1,000 logical agents can be served with good responsiveness, safe isolation, and sane
 cost while only active tasks consume expensive runtime.
 
-> **Scope of this repository right now:** P0B-01 (repository foundation), P0B-02
-> (domain models, state machines and contracts) and P0B-03 (PostgreSQL durable task inbox)
-> are merged on `main`. P0B-04 adds durable PostgreSQL lease claiming, heartbeat, reaper,
-> fencing and bounded retry in this Draft PR. There is still **no Agent execution**, no
-> task HTTP API, no sandbox provider, no real LLM and no complete cancellation API.
-> A successful lease claim is not a successful Task execution. Nothing here proves sandbox
-> isolation, real LLM behaviour or 1,000-agent production performance. See
-> [P0-B status](#p0-b-status) below.
+> **Scope of this repository right now:** P0B-01 through P0B-09 are merged on `main`
+> (PR #24 baseline `2ec04f6`). This includes domain contracts, PostgreSQL durable inbox & lease queue,
+> execution router, fake LLM/sandbox, artifact store, workspace CAS & checkpoints, HTTP task/agent/artifact
+> APIs with tenant authZ, SSE event streaming, cooperative cancellation, persistent mock approval,
+> budget ledger, OpenTelemetry-compatible telemetry, chaos testing, and local load benchmarking.
+> P0B-10 is currently undergoing parallel vertical completion (10A: Demo/E2E, 10B: Process Recovery,
+> 10C: Benchmark Audit & Evidence). `pnpm demo` and `test:e2e` will be finalized upon merging PR 10A.
+> See [P0-B status](#p0-b-status) below.
 
 ## P0-B status
 
-| Work package | Scope                                                                                                                | Status                     |
-| ------------ | -------------------------------------------------------------------------------------------------------------------- | -------------------------- |
-| **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Merged on `main`**       |
-| **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Merged on `main`**       |
-| **P0B-03**   | PostgreSQL business schema, tenant-scoped repositories, canonical digest, atomic/idempotent task creation            | **Merged on `main`**       |
-| **P0B-04**   | PostgreSQL durable lease queue, heartbeat, reaper, fencing, bounded retry, ADR-0001 cancellation                     | **Implemented in this PR** |
-| P0B-05       | Execution router, deterministic mock LLM, fake sandbox                                                               | Not started                |
-| P0B-06       | Artifact store, workspace CAS, checkpoints                                                                           | Not started                |
-| P0B-07       | Task HTTP API, tenant authZ, event log, SSE                                                                          | Not started                |
-| P0B-08       | Cancellation, mock approval, budget guard                                                                            | Not started                |
-| P0B-09       | Telemetry, chaos and local load tests                                                                                | Not started                |
-| P0B-10       | Demo commands, results report, final review                                                                          | Not started                |
+| Work package | Scope                                                                                                                | Status                    |
+| ------------ | -------------------------------------------------------------------------------------------------------------------- | ------------------------- |
+| **P0B-01**   | Repository foundation: Node/TypeScript/pnpm workspace, Hono API, local PostgreSQL, migration runner, tests, CI, docs | **Merged on `main`**      |
+| **P0B-02**   | Domain models, Task/Run state machines, Zod schemas, contracts, error model                                          | **Merged on `main`**      |
+| **P0B-03**   | PostgreSQL business schema, tenant-scoped repositories, canonical digest, atomic/idempotent task creation            | **Merged on `main`**      |
+| **P0B-04**   | PostgreSQL durable lease queue, heartbeat, reaper, fencing, bounded retry, ADR-0001 cancellation                     | **Merged on `main`**      |
+| **P0B-05**   | Execution router, deterministic fake LLM, fake sandbox                                                               | **Merged on `main`**      |
+| **P0B-06**   | Artifact store, workspace CAS, step checkpoints                                                                      | **Merged on `main`**      |
+| **P0B-07**   | Task/Agent/Artifact HTTP API, tenant authZ, event log, SSE streaming                                                 | **Merged on `main`**      |
+| **P0B-08**   | Cooperative cancellation, persistent mock approval, durable budget guard                                             | **Merged on `main`**      |
+| **P0B-09**   | Telemetry & observability, chaos crash tests, local load benchmark (1,000 agents / 100 concurrency)                  | **Merged on `main`**      |
+| **P0B-10**   | Demo commands, process recovery, benchmark results audit, final DoD review                                           | **In Progress (10A/B/C)** |
 
-P0B-04 now provides a durable `PostgresLeaseQueue` and a minimal `reaper-only` worker
-process. There is intentionally **no Agent execution, no Execution Router, no sandbox and
-no task HTTP API** yet. `claimNext` returning a lease only means a fenced Run was persisted;
-it does not mean the Task ran or succeeded. `GET /healthz` returning 200 is not evidence
-that P0-B works end to end.
+P0B-01～09 provide the complete core control plane and durable execution slice. In P0B-10,
+three parallel workstreams are active: P0B-10A (Demo & E2E tests), P0B-10B (Process Recovery),
+and P0B-10C (Benchmark Evidence & Results Audit). End-to-end demo and CLI flows (`pnpm demo`,
+`pnpm test:e2e`) will be verified on `main` following 10A/10B integration.
 
 ## Repository layout
 
@@ -218,8 +217,8 @@ pnpm start
 | `pnpm install --frozen-lockfile`    | Reproducible install from `pnpm-lock.yaml`                   |
 | `pnpm dev`                          | API with env-file loading and watch mode on `127.0.0.1:8787` |
 | `pnpm start`                        | Run the built API from `apps/api/dist`                       |
-| `pnpm dev:worker`                   | Reaper-only worker (no Task execution; P0B-05 will add it)   |
-| `pnpm start:worker`                 | Run the built reaper-only worker from `apps/worker/dist`     |
+| `pnpm dev:worker`                   | Worker process with lease reaper and execution loop          |
+| `pnpm start:worker`                 | Run the built worker from `apps/worker/dist`                 |
 | `pnpm build`                        | `tsc -b` project-reference build (Node ESM output)           |
 | `pnpm typecheck`                    | `tsc --noEmit` over apps, packages, and tests (strict)       |
 | `pnpm lint`                         | ESLint flat config with type-aware TypeScript rules          |
@@ -230,9 +229,9 @@ pnpm start
 | `pnpm dev:db` / `pnpm dev:db:down`  | Start / stop the local PostgreSQL container                  |
 | `pnpm db:migrate`                   | Apply pending migrations (safe to re-run)                    |
 
-`pnpm dev` starts the API only. `pnpm dev:worker` is a separate process and only runs the
-lease Reaper. It **does not claim or execute Tasks**: the production entry refuses
-`EMBER_WORKER_MODE=poll` until P0B-05 provides the Execution Router and a real RunHandler.
+`pnpm dev` starts the API service. `pnpm dev:worker` starts the background Worker process,
+which runs the lease Reaper and supports task execution via `EMBER_WORKER_MODE=poll` with
+the deterministic Execution Router, FakeLLM, FakeSandbox, and durable artifact/checkpoint stores.
 
 ## Environment variables
 

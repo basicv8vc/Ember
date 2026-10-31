@@ -36,6 +36,7 @@ Options:
   --keep-db                 Do not drop the isolated test schema after benchmark completion
   --enable-local-load       Explicit flag required for heavy load (>50 agents or >20 concurrency)
   --worker-concurrency <n>  Worker execution concurrency slots (default: 100)
+  --disable-pg-sampling     Disable periodic PostgreSQL activity sampling (for A/B overhead analysis)
   --api-url <url>           External Ember API URL (if omitted, boots local ephemeral server)
   -h, --help                Show this help message
 `);
@@ -78,6 +79,8 @@ function parseCliArgs(args: readonly string[]): BenchmarkOptions {
       options.enableLocalLoad = true;
     } else if (arg === '--worker-concurrency') {
       options.workerConcurrency = parseInt(args[++i]!, 10);
+    } else if (arg === '--disable-pg-sampling') {
+      options.disablePgSampling = true;
     } else if (arg === '--api-url') {
       options.apiUrl = args[++i]!;
     }

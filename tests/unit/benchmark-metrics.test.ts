@@ -7,6 +7,7 @@ import {
 import { generateMarkdownReport } from '../../apps/benchmark/src/report.js';
 import { sanitizeReportConfig } from '../../apps/benchmark/src/evidence.js';
 import { runBenchmark } from '../../apps/benchmark/src/runner.js';
+import { TelemetryCollector } from '../../apps/benchmark/src/telemetry.js';
 import type { BenchmarkResult } from '../../apps/benchmark/src/types.js';
 
 describe('Benchmark Metrics & Math (Unit)', () => {
@@ -249,5 +250,188 @@ describe('Benchmark Metrics & Math (Unit)', () => {
         enableLocalLoad: false,
       }),
     ).rejects.toThrow(/Safety guard/);
+  });
+
+  it('TelemetryCollector defaults to sampling enabled, but skips query and retains 0 samples when disablePostgresSampling is true', async () => {
+    let queryCount = 0;
+    const mockPool = {
+      query: <R extends Record<string, unknown> = Record<string, unknown>>() => {
+        queryCount++;
+        return Promise.resolve({
+          rows: [{ active: '5', total: '12' }] as unknown as readonly R[],
+        });
+      },
+    };
+
+    // 1. Default (enabled)
+    const enabledCollector = new TelemetryCollector();
+    enabledCollector.attachPool(mockPool);
+    enabledCollector.start();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    enabledCollector.stop();
+    expect(queryCount).toBeGreaterThan(0);
+    const enabledSummary = enabledCollector.getSummary();
+    expect(enabledSummary.postgresSampleCount).toBeGreaterThan(0);
+    expect(enabledSummary.peakPostgresActiveConnections).toBe(5);
+    expect(enabledSummary.peakPostgresTotalConnections).toBe(12);
+
+    // 2. Disabled
+    queryCount = 0;
+    const disabledCollector = new TelemetryCollector({ disablePostgresSampling: true });
+    disabledCollector.attachPool(mockPool);
+    disabledCollector.start();
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    disabledCollector.stop();
+    expect(queryCount).toBe(0);
+    const disabledSummary = disabledCollector.getSummary();
+    expect(disabledSummary.postgresSampleCount).toBe(0);
+    expect(disabledSummary.peakPostgresActiveConnections).toBe(0);
+    expect(disabledSummary.peakPostgresTotalConnections).toBe(0);
+  });
+
+  it('generateMarkdownReport accurately renders unverified when postgresSampleCount is 0, never faking a PASS', () => {
+    const mockResultWithoutSamples: BenchmarkResult = {
+      scenarioId: 'ember-p0b-09c-local-load',
+      gitSha: 'test-sha-1234',
+      timestamp: '2026-10-30T00:00:00.000Z',
+      durationTotalMs: 12345,
+      config: {
+        agents: 1000,
+        concurrency: 100,
+        taskMix: { fast: 0.7, standard: 0.3 },
+        warmup: 50,
+        totalRequests: 1000,
+        durationMs: null,
+        seed: 42,
+        outDir: 'benchmarks/results',
+        databaseUrl: 'postgres://localhost/test',
+        isolatedSchema: true,
+        keepDb: false,
+        enableLocalLoad: true,
+        workerConcurrency: 100,
+        disablePgSampling: true,
+      },
+      machine: {
+        osPlatform: 'darwin',
+        osRelease: '24.0.0',
+        osType: 'Darwin',
+        osVersion: 'Darwin Kernel',
+        cpuModel: 'Apple M3',
+        cpuCores: 8,
+        totalMemoryBytes: 16 * 1024 * 1024 * 1024,
+        totalMemoryGb: 16,
+        nodeVersion: 'v24.11.0',
+        postgresVersion: 'PostgreSQL 17.0',
+      },
+      agentProvisioning: {
+        requestedCount: 1000,
+        createdCount: 1000,
+        durationMs: 2500,
+        throughputPerSec: 400,
+        p50CreationLatencyMs: 2.1,
+        p95CreationLatencyMs: 4.5,
+        p99CreationLatencyMs: 8.2,
+        verifiedDbAgentCount: 1000,
+        verifiedDbWorkspaceCount: 1000,
+        residentProcessesCount: 0,
+        residentSandboxesCount: 0,
+      },
+      reconciliation: {
+        totalSubmitted: 1000,
+        totalAcked: 1000,
+        succeededCount: 1000,
+        failedCount: 0,
+        timedOutCount: 0,
+        lostCount: 0,
+        persistedTaskCount: 1000,
+        missingPersistedTaskCount: 0,
+        duplicateAckCount: 0,
+        successRatePercent: 100,
+        hasUnexplainedTaskLoss: false,
+      },
+      latencyMetrics: {
+        durableAck: {
+          count: 1000,
+          minMs: 5,
+          meanMs: 25,
+          p50Ms: 22,
+          p90Ms: 45,
+          p95Ms: 58,
+          p99Ms: 85,
+          maxMs: 120,
+          stdDevMs: 12,
+        },
+        firstRealEvent: {
+          count: 1000,
+          minMs: 8,
+          meanMs: 30,
+          p50Ms: 28,
+          p90Ms: 55,
+          p95Ms: 70,
+          p99Ms: 95,
+          maxMs: 140,
+          stdDevMs: 15,
+        },
+        queueWait: {
+          count: 1000,
+          minMs: 2,
+          meanMs: 8,
+          p50Ms: 7,
+          p90Ms: 15,
+          p95Ms: 20,
+          p99Ms: 35,
+          maxMs: 50,
+          stdDevMs: 5,
+        },
+        taskCompletion: {
+          count: 1000,
+          minMs: 12,
+          meanMs: 45,
+          p50Ms: 40,
+          p90Ms: 75,
+          p95Ms: 90,
+          p99Ms: 125,
+          maxMs: 180,
+          stdDevMs: 20,
+        },
+      },
+      telemetry: {
+        cpuUserMs: 1500,
+        cpuSystemMs: 800,
+        cpuPercent: 35.5,
+        peakRssBytes: 150 * 1024 * 1024,
+        peakRssMb: 150,
+        peakHeapUsedMb: 65,
+        peakHeapTotalMb: 95,
+        peakPostgresActiveConnections: 0,
+        peakPostgresTotalConnections: 0,
+        postgresSampleCount: 0,
+        peakHttpInFlight: 20,
+        targetWorkerConcurrency: 100,
+        peakInFlightRuns: 28,
+        peakLiveSandboxes: 8,
+        idleLiveSandboxes: 0,
+        costAccounting: {
+          costSource: 'simulated',
+          totalSimulatedCpuMs: 1000,
+          totalSimulatedUnits: 8000,
+          actualVendorCostUsd: null,
+        },
+      },
+      targetAssessment: {
+        durableAckP95TargetMs: 1000,
+        durableAckP95ObservedMs: 58,
+        durableAckTargetMet: true,
+        zeroResidentSandboxesMet: true,
+        zeroTaskLossMet: true,
+      },
+    };
+
+    const md = generateMarkdownReport(mockResultWithoutSamples);
+    expect(md).toContain('Peak RSS: **150MB**, PG samples: **0** | **UNVERIFIED** |');
+    expect(md).not.toContain('Peak RSS: **150MB**, PG samples: **0** | **PASS** |');
+    expect(md).toContain('**unverified** active');
+    expect(md).toContain('- [ ] **Resource Telemetry**:');
+    expect(md).not.toContain('- [x] **Resource Telemetry**:');
   });
 });

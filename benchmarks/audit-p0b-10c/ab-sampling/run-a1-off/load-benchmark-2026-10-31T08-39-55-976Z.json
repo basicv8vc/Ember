@@ -1,0 +1,139 @@
+{
+  "scenarioId": "ember-p0b-09c-local-load",
+  "gitSha": "4a21b5f5796bc80020efb5e31d9c23dfc8f18338",
+  "timestamp": "2026-10-31T08:39:55.976Z",
+  "config": {
+    "agents": 500,
+    "concurrency": 50,
+    "taskMix": {
+      "fast": 0.7,
+      "standard": 0.3
+    },
+    "warmup": 20,
+    "totalRequests": 500,
+    "durationMs": null,
+    "seed": 101,
+    "outDir": "benchmarks/audit-p0b-10c/ab-sampling/run-a1-off",
+    "databaseUrl": "[REDACTED]",
+    "isolatedSchema": true,
+    "keepDb": false,
+    "enableLocalLoad": true,
+    "workerConcurrency": 50,
+    "disablePgSampling": true
+  },
+  "machine": {
+    "osPlatform": "darwin",
+    "osRelease": "25.5.0",
+    "osType": "Darwin",
+    "osVersion": "Darwin Kernel Version 25.5.0: Mon Apr 27 20:38:00 PDT 2026; root:xnu-12377.121.6~2/RELEASE_ARM64_T8103",
+    "cpuModel": "Apple M1",
+    "cpuCores": 8,
+    "totalMemoryBytes": 17179869184,
+    "totalMemoryGb": 16,
+    "nodeVersion": "v24.11.0",
+    "postgresVersion": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.3.34.2), 64-bit"
+  },
+  "agentProvisioning": {
+    "requestedCount": 500,
+    "createdCount": 500,
+    "durationMs": 471.5,
+    "throughputPerSec": 1060.3,
+    "p50CreationLatencyMs": 19.51,
+    "p95CreationLatencyMs": 47.79,
+    "p99CreationLatencyMs": 82.71,
+    "verifiedDbAgentCount": 500,
+    "verifiedDbWorkspaceCount": 500,
+    "residentProcessesCount": 0,
+    "residentSandboxesCount": 0
+  },
+  "reconciliation": {
+    "totalSubmitted": 500,
+    "totalAcked": 500,
+    "succeededCount": 500,
+    "failedCount": 0,
+    "timedOutCount": 0,
+    "lostCount": 0,
+    "persistedTaskCount": 500,
+    "missingPersistedTaskCount": 0,
+    "duplicateAckCount": 0,
+    "successRatePercent": 100,
+    "hasUnexplainedTaskLoss": false
+  },
+  "latencyMetrics": {
+    "durableAck": {
+      "count": 500,
+      "minMs": 1.38,
+      "meanMs": 11.48,
+      "p50Ms": 5.25,
+      "p90Ms": 29.68,
+      "p95Ms": 38.55,
+      "p99Ms": 50.53,
+      "maxMs": 324.26,
+      "stdDevMs": 18.7
+    },
+    "firstRealEvent": {
+      "count": 500,
+      "minMs": 29.47,
+      "meanMs": 371.51,
+      "p50Ms": 258.01,
+      "p90Ms": 591.78,
+      "p95Ms": 1236.19,
+      "p99Ms": 1601.26,
+      "maxMs": 1663.59,
+      "stdDevMs": 318.68
+    },
+    "queueWait": {
+      "count": 500,
+      "minMs": 10,
+      "meanMs": 360.03,
+      "p50Ms": 247.5,
+      "p90Ms": 582.5,
+      "p95Ms": 1233.2,
+      "p99Ms": 1586.01,
+      "maxMs": 1646,
+      "stdDevMs": 314.5
+    },
+    "taskCompletion": {
+      "count": 500,
+      "minMs": 121.42,
+      "meanMs": 1277.67,
+      "p50Ms": 957.92,
+      "p90Ms": 2891.89,
+      "p95Ms": 3107.21,
+      "p99Ms": 3312.78,
+      "maxMs": 3343.85,
+      "stdDevMs": 810.29
+    }
+  },
+  "telemetry": {
+    "cpuUserMs": 9760,
+    "cpuSystemMs": 3033,
+    "cpuPercent": 11.1,
+    "peakRssBytes": 295141376,
+    "peakRssMb": 281.5,
+    "peakHeapUsedMb": 146.4,
+    "peakHeapTotalMb": 235.3,
+    "peakPostgresActiveConnections": 0,
+    "peakPostgresTotalConnections": 0,
+    "postgresSampleCount": 0,
+    "peakHttpInFlight": 50,
+    "targetWorkerConcurrency": 50,
+    "peakInFlightRuns": 38,
+    "peakLiveSandboxes": 2,
+    "idleLiveSandboxes": 0,
+    "costAccounting": {
+      "costSource": "simulated",
+      "totalSimulatedCpuMs": 640,
+      "totalSimulatedUnits": 3900,
+      "actualVendorCostUsd": null
+    }
+  },
+  "targetAssessment": {
+    "durableAckP95TargetMs": 1000,
+    "durableAckP95ObservedMs": 38.55,
+    "durableAckTargetMet": true,
+    "zeroResidentSandboxesMet": true,
+    "zeroTaskLossMet": true
+  },
+  "durationTotalMs": 14595
+}

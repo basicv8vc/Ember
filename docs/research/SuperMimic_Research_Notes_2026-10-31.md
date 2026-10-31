@@ -248,33 +248,46 @@ MLP 括号内表示**隐藏层宽度**，不是输入/输出维度。两个 Enco
 - **加入 Velocity Tracking**：新增 Velocity Encoder 和对应 Critic；继续复用 Dynamics、Shared Decoder。
 - **不应把 5 行网络配置理解为 5 个在默认任务中始终同时训练的独立模型**。
 
-#### 3.4.2 数据流：Actor 与环境模型如何配合
+#### 3.4.2 模型数据流：Actor 结构与训练闭环
 
-~~~text
-目标 g_t
- ├─ Motion Tracking：未来 10 帧参考动作 → Motion Encoder ──┐
- └─ Velocity Tracking：速度命令 + 观测特征 → Velocity Encoder ┤
-                                                              ▼
-                                                       latent z：32D
-                                                              │
-最近 10 帧本体观测 o[t-9:t]（10 × 93）────────────────────────┤
-                                                              ▼
-                                                        Shared Decoder
-                                                              │
-                                                       29D Action a_t
-                                      ┌───────────────────────┴─────────────┐
-                                      ▼                                     ▼
-                                MuJoCo Warp                            World Model
-                         采集真实仿真轨迹 / Buffer               Dynamics f_ω：预测 ŝ[t+1]
-                                                                            │
-                                                     Reward / Observation / Termination
-                                                                            │
-                                                               32 步 imagined rollout
-                                                                            │
-                                                         Critic 估计 horizon 后的价值
-                                                                            │
-                                                              BPTT 更新 Actor
-~~~
+下面使用 GitHub 原生渲染的 **Mermaid 流程图**，分别表示 Policy 的组成和 MuJoCo Warp / World Model 的交替训练，避免把两种不同阶段误画成同一时间步的并行仿真。
+
+**图 A：Policy / Actor 的网络结构**（不同 Goal Interface 选用不同 Encoder，共享 Decoder）。
+
+```mermaid
+flowchart TD
+    G{"Goal Interface"}
+    G -->|"Motion Tracking"| MT["未来 10 帧参考动作"]
+    G -->|"Velocity Tracking"| VT["速度命令 + 观测特征"]
+    MT --> ME["Motion Encoder"]
+    VT --> VE["Velocity Encoder"]
+    ME --> Z["32D latent z"]
+    VE --> Z
+    O["最近 10 帧本体观测 (10 × 93)"] --> DEC["Shared Policy Decoder"]
+    Z --> DEC
+    DEC --> A["29D 连续动作 a_t"]
+```
+
+**图 B：MuJoCo Warp、World Model、Actor 与 Critic 的训练关系**。
+
+```mermaid
+flowchart TD
+    P["Policy / Actor"] -->|"阶段 A：真实仿真数据采集"| E["MuJoCo Warp"]
+    E --> B["Replay Buffer"]
+    B -->|"8 步自回归拟合"| WM["World Model / Dynamics"]
+    B -->|"采样想象起始状态"| I["32 步 Imagined Rollout"]
+    WM -->|"预测下一物理状态"| I
+    P -->|"阶段 B：策略输出动作"| I
+    I --> R["Reward / Observation / Termination"]
+    R --> C["累计回报 + Critic 末端价值"]
+    C -->|"BPTT 更新策略参数"| UP["Policy Optimization"]
+    UP -.->|"新策略继续采集数据"| P
+```
+
+- **图 A 表示 Actor 的结构**，不是五个模型总在同一步同时运行：Motion Encoder 和 Velocity Encoder 分别对应各自的任务接口。
+- **图 B 表示交替训练的两个阶段**，不是一个动作同时送给 MuJoCo Warp 与 World Model 推进同一条轨迹。World Model 利用 Buffer 中的仿真数据拟合；Policy 在 imagined rollout 中用它优化。
+- **Critic 是独立的价值网络**，预测想象时域之后的回报；其 GAE 价值拟合不同于 Actor 的 BPTT 更新。若有多个 Goal Interface，每个接口可拥有独立 Critic。
+- 在下游 Velocity Tracking 更新中，Shared Decoder 的权重按照论文所述保持固定；但 Policy 梯度仍会经过 Decoder 的计算图传回 Velocity Encoder。
 
 注意：**10 × 93 = 930 是 Policy 的观测历史长度，不是 World Model 完整物理状态 $s_t$ 的维度**。World Model 以状态、动作和仿真上下文为输入，而不是简单对 930 维观测进行预测。
 

@@ -108,20 +108,29 @@ _Note_: To enable task polling in local development, configure `EMBER_WORKER_MOD
   4. Computation runs inside sandbox; output bytes are staged and committed to blob storage and PostgreSQL.
   5. Checkpoint committed to `step_checkpoints`; Workspace version bumped via CAS (e.g. from 0 to 1).
   6. `FakeSandboxProvider.destroy()` is called in `finally`.
-  7. Client downloads artifact via HTTP `GET /v1/artifacts/:artifactId` and validates raw SHA-256 match.
+  7. Client downloads artifact raw bytes via HTTP `GET /v1/artifacts/:artifactId` and strictly verifies:
+     - Computed text output matches expected SHA-256.
+     - Downloaded raw byte length strictly equals artifact metadata `size`.
+     - Raw SHA-256 of downloaded bytes strictly matches artifact metadata `sha256`.
   8. Assertions verify active lingering sandboxes count is **0**.
 
 ### Scenario C — Simulated Lease Expiration & Checkpoint Resume with Fencing
 
-- **Goal**: Prove that a task can resume from a committed step checkpoint after lease expiration without duplicating work, and that late commits from stale workers are rejected by lease fencing.
+- **Goal**: Prove that a task can resume from a committed step checkpoint after a worker crash and lease expiration without duplicating work, and that late commits from stale workers are rejected by lease fencing.
 - **Execution Flow**:
-  1. `POST /v1/tasks` submits a `mock.approval` task.
-  2. Run 1 (Epoch 1) executes the `produce` step in a sandbox, stages the artifact, commits the step checkpoint, commits a pending approval, and parks the task in `waiting_approval`.
-  3. Fencing assertion: a simulated rogue/stale worker with an expired lease epoch attempts `commitStep`; rejected with `STALE_LEASE`.
-  4. Client grants approval via HTTP `POST /v1/approvals/:approvalId/decision` (`{ decision: 'approve' }`).
-  5. Task transitions back to `queued`.
-  6. Run 2 (Epoch 2) claims the task, queries checkpoints, detects that `produce` was already committed, **skips produce**, publishes the result, and completes the task.
-  7. Total checkpoints in PostgreSQL remain exactly 2 (`produce` and terminal `pause_completed`), verifying zero duplicate execution.
+  1. Background worker loop is paused; `POST /v1/tasks` submits a `mock.compute` task.
+  2. Worker 1 (`worker-crash-1`) claims the task and executes the `produce` step, stages the artifact, and commits the step checkpoint with `mode: 'progress'`. Task and Run 1 remain in `running` status.
+  3. Controlled crash simulation: rewinds `runs.leased_until` to the past and rewinds `tasks.created_at` / `tasks.lease_expires_at` to satisfy `tasks_check` while making the lease expired.
+  4. Background reaper (`queue.reapExpired()`) transitions Run 1 to `lease_expired` and Task to `retryable_failed`.
+  5. Fencing assertion: the crashed Worker 1 attempts a late write using its original `RunGrant`; strictly rejected by PostgreSQL with `DomainError('STALE_LEASE')`.
+  6. Task retry is scheduled (`next_run_at = now() - 1 second`) and background worker loop is restarted.
+  7. Worker 2 claims the task (Run 2 with higher lease epoch), queries checkpoints, detects that `produce` was already committed, **skips produce**, publishes the result, and completes the task.
+  8. Strict assertions verify:
+     - Run 1 status is `lease_expired`.
+     - Run 2 status is `succeeded`.
+     - Checkpoint count for `produce` is strictly **1** (zero duplicate executions).
+     - Total checkpoint count is strictly **2** (`produce` + `publish`).
+     - Task final status is `completed`.
 
 ### Scenario D — Tenant Isolation & Non-Discoverable Authorization
 
@@ -141,18 +150,18 @@ _Note_: To enable task polling in local development, configure `EMBER_WORKER_MOD
 
 ## 4. B-T Requirements Traceability Matrix
 
-| Requirement | Category             | Test File                                       | Verified Property                                                                                                         |  Status  |
-| :---------- | :------------------- | :---------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------ | :------: |
-| **B-T05**   | Budget Guard         | `tests/e2e/b-t05-budget-guard.test.ts`          | Exceeding budget limit rejects step reservation; marks run and task `failed` (`BUDGET_EXCEEDED`)                          | **PASS** |
-| **B-T15**   | Fast Path E2E        | `tests/e2e/b-t15-fast-task.test.ts`             | Real HTTP POST agent/task, Durable Ack, SSE event phases, FakeSandbox count = 0                                           | **PASS** |
-| **B-T16**   | Standard Path E2E    | `tests/e2e/b-t16-standard-task.test.ts`         | Real HTTP compute task, FakeSandbox create/destroy, Artifact content/hash, CAS bump, 0 lingering sandboxes                | **PASS** |
-| **B-T17**   | Resume & Fencing     | `tests/e2e/b-t17-workspace-resume.test.ts`      | Workspace CAS version increment, Checkpoint resumption skipping produce, Stale worker fencing (`STALE_LEASE`)             | **PASS** |
-| **B-T18**   | SSE Reconnect        | `tests/e2e/b-t18-sse-reconnect.test.ts`         | SSE client disconnects, reconnects with `Last-Event-ID`, replays missing events monotonically without gaps                | **PASS** |
-| **B-T19**   | Cancellation         | `tests/e2e/b-t19-cancellation.test.ts`          | Queued cancel (`200 OK`, `terminal: true`), Running cancel (`202 Accepted`), cooperative halt to unique `cancelled` state | **PASS** |
-| **B-T20**   | Mock Approval        | `tests/e2e/b-t20-mock-approval.test.ts`         | Parks in `waiting_approval`, approve decision resumes from checkpoint, deny decision fails task                           | **PASS** |
-| **B-T21**   | Security Isolation   | `tests/e2e/b-t21-23-security-isolation.test.ts` | Tenant B querying Tenant A task returns `404 NOT_FOUND` without resource enumeration leak                                 | **PASS** |
-| **B-T22**   | Resource Privacy     | `tests/e2e/b-t21-23-security-isolation.test.ts` | Tenant B reading Tenant A artifacts, events, or SSE streams returns `404 NOT_FOUND`                                       | **PASS** |
-| **B-T23**   | Authentication Guard | `tests/e2e/b-t21-23-security-isolation.test.ts` | Missing or invalid bearer tokens return `401 UNAUTHENTICATED`                                                             | **PASS** |
+| Requirement | Category             | Test File                                       | Verified Property                                                                                                                                                                  |  Status  |
+| :---------- | :------------------- | :---------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :------: |
+| **B-T05**   | Budget Guard         | `tests/e2e/b-t05-budget-guard.test.ts`          | Exceeding budget limit rejects step reservation; marks run and task `failed` (`BUDGET_EXCEEDED`)                                                                                   | **PASS** |
+| **B-T15**   | Fast Path E2E        | `tests/e2e/b-t15-fast-task.test.ts`             | Real HTTP POST agent/task, Durable Ack, SSE event phases, FakeSandbox count = 0                                                                                                    | **PASS** |
+| **B-T16**   | Standard Path E2E    | `tests/e2e/b-t16-standard-task.test.ts`         | Real HTTP compute task, FakeSandbox create/destroy, Artifact raw byte length & SHA-256 metadata verification, CAS bump, 0 lingering sandboxes                                      | **PASS** |
+| **B-T17**   | Resume & Fencing     | `tests/e2e/b-t17-workspace-resume.test.ts`      | Distinct Sandbox IDs (`sandboxId1 !== sandboxId2`), Workspace CAS version increment, Checkpoint resumption skipping produce, Stale worker fencing (`STALE_LEASE`)                  | **PASS** |
+| **B-T18**   | SSE Reconnect        | `tests/e2e/b-t18-sse-reconnect.test.ts`         | SSE client disconnects, reconnects with `Last-Event-ID`, replays missing events monotonically without gaps                                                                         | **PASS** |
+| **B-T19**   | Cancellation         | `tests/e2e/b-t19-cancellation.test.ts`          | Queued cancel (`200 OK`, `terminal: true`), Confirmed running state before cancel (`202 Accepted`), cooperative halt to unique `cancelled` state, zero subsequent step checkpoints | **PASS** |
+| **B-T20**   | Mock Approval        | `tests/e2e/b-t20-mock-approval.test.ts`         | Parks in `waiting_approval`, approve decision resumes from checkpoint, deny decision fails task                                                                                    | **PASS** |
+| **B-T21**   | Security Isolation   | `tests/e2e/b-t21-23-security-isolation.test.ts` | Tenant B querying Tenant A task returns `404 NOT_FOUND` without resource enumeration leak                                                                                          | **PASS** |
+| **B-T22**   | Resource Privacy     | `tests/e2e/b-t21-23-security-isolation.test.ts` | Tenant B reading Tenant A artifacts, events, or SSE streams returns `404 NOT_FOUND`                                                                                                | **PASS** |
+| **B-T23**   | Authentication Guard | `tests/e2e/b-t21-23-security-isolation.test.ts` | Missing or invalid bearer tokens return `401 UNAUTHENTICATED`                                                                                                                      | **PASS** |
 
 ---
 

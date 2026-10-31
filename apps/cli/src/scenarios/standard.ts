@@ -169,7 +169,10 @@ export async function runStandardScenario(
       };
     }
 
-    const downloadedText = (await downloadRes.text()).trim();
+    const rawBuffer = Buffer.from(await downloadRes.arrayBuffer());
+    const downloadedText = rawBuffer.toString('utf8').trim();
+
+    // 1. Verify calculated execution output matches expected SHA-256
     if (downloadedText !== expectedSha256) {
       ui.stepFailed(`Artifact content mismatch: expected ${expectedSha256}, got ${downloadedText}`);
       return {
@@ -181,9 +184,40 @@ export async function runStandardScenario(
       };
     }
 
-    ui.stepOk('Artifact Verified (SHA-256 match)');
+    // 2. Verify downloaded byte length strictly equals artifact metadata size
+    if (rawBuffer.byteLength !== targetArtifact.size) {
+      ui.stepFailed(
+        `Artifact size mismatch: metadata claims ${targetArtifact.size} bytes, downloaded ${rawBuffer.byteLength} bytes`,
+      );
+      return {
+        name: 'Standard Path',
+        description: 'Standard computation runs inside transient FakeSandbox and commits Artifact',
+        passed: false,
+        durationMs: Date.now() - start,
+        error: 'Artifact size mismatch',
+      };
+    }
+
+    // 3. Verify SHA-256 of downloaded raw bytes strictly matches artifact metadata sha256
+    const downloadedSha256 = createHash('sha256').update(rawBuffer).digest('hex');
+    if (downloadedSha256 !== targetArtifact.sha256) {
+      ui.stepFailed(
+        `Artifact metadata SHA-256 mismatch: metadata claims ${targetArtifact.sha256}, calculated ${downloadedSha256}`,
+      );
+      return {
+        name: 'Standard Path',
+        description: 'Standard computation runs inside transient FakeSandbox and commits Artifact',
+        passed: false,
+        durationMs: Date.now() - start,
+        error: 'Artifact SHA-256 mismatch',
+      };
+    }
+
+    ui.stepOk('Artifact Verified (Content, Metadata Size & Raw SHA-256 exact match)');
     ui.detail('Artifact ID', sanitizeId(targetArtifact.artifact_id));
-    ui.detail('Content Hash (SHA-256)', expectedSha256);
+    ui.detail('Payload Hash (SHA-256)', expectedSha256);
+    ui.detail('Raw Byte Size', `${rawBuffer.byteLength} bytes (matches metadata)`);
+    ui.detail('Metadata Hash', `${downloadedSha256} (matches metadata)`);
     ui.detail('Active Sandboxes Remaining', `${cluster.activeSandboxes} (Cleaned Up)`);
 
     return {

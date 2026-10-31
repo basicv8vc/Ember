@@ -20,7 +20,31 @@ export async function runDemo(options: DemoRunnerOptions = {}): Promise<boolean>
   ui.banner('Ember P0-B Local Demo CLI — Full Real HTTP + Worker Closed Loop');
 
   let cluster: DemoCluster | undefined;
+  let cleaningUp = false;
   const results: ScenarioResult[] = [];
+
+  const cleanup = async (signalName?: string): Promise<void> => {
+    if (cleaningUp) return;
+    cleaningUp = true;
+    if (cluster) {
+      process.stdout.write(
+        `\n  ${signalName ? `[${signalName}] ` : ''}Gracefully tearing down local demo cluster, dropping schema and temp blobs ... `,
+      );
+      await cluster.stop().catch(() => undefined);
+      process.stdout.write('DONE\n');
+      cluster = undefined;
+    }
+  };
+
+  const onSigInt = (): void => {
+    void cleanup('SIGINT').then(() => process.exit(130));
+  };
+  const onSigTerm = (): void => {
+    void cleanup('SIGTERM').then(() => process.exit(143));
+  };
+
+  process.on('SIGINT', onSigInt);
+  process.on('SIGTERM', onSigTerm);
 
   try {
     process.stdout.write(
@@ -53,13 +77,9 @@ export async function runDemo(options: DemoRunnerOptions = {}): Promise<boolean>
     process.stderr.write(`\n❌ Fatal demo error: ${message}\n`);
     return false;
   } finally {
-    if (cluster) {
-      process.stdout.write(
-        '\n  Gracefully tearing down local demo cluster, dropping schema and temp blobs ... ',
-      );
-      await cluster.stop();
-      process.stdout.write('DONE\n');
-    }
+    process.removeListener('SIGINT', onSigInt);
+    process.removeListener('SIGTERM', onSigTerm);
+    await cleanup();
   }
 
   return ui.summary(results);

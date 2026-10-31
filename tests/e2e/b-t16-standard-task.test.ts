@@ -83,8 +83,16 @@ describe('B-T16 E2E Standard Task Closed Loop', () => {
       token: cluster.tenantA.token,
     });
     expect(downloadRes.status).toBe(200);
-    const downloadedContent = (await downloadRes.text()).trim();
+
+    const rawBuffer = Buffer.from(await downloadRes.arrayBuffer());
+    const downloadedContent = rawBuffer.toString('utf8').trim();
+    // Verify execution output value
     expect(downloadedContent).toBe(expectedHash);
+    // Verify downloaded byte size matches artifact metadata size
+    expect(rawBuffer.byteLength).toBe(artifact.size);
+    // Verify downloaded bytes SHA-256 matches artifact metadata sha256
+    const calculatedSha256 = createHash('sha256').update(rawBuffer).digest('hex');
+    expect(calculatedSha256).toBe(artifact.sha256);
 
     // 6. Verify Checkpoint was committed to PostgreSQL
     const cpRows = await cluster.appPool.query<{ count: string }>(

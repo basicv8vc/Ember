@@ -6,7 +6,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
-import type { Id } from '@ember/domain';
+import { DomainError, type Id } from '@ember/domain';
 import type { BudgetPolicy, FakeSandboxProvider } from '@ember/execution';
 import { DeterministicExecutionRouter, DeterministicExecutor } from '@ember/execution';
 import {
@@ -37,12 +37,45 @@ import {
   createDurableRunHandler,
   DURABLE_TASK_KINDS,
 } from '../../worker/src/durable-run-handler.js';
-import { createWorkerLogger } from '../../worker/src/logger.js';
+import { createWorkerLogger, type WorkerLogger } from '../../worker/src/logger.js';
 import { runPollLoop } from '../../worker/src/poll-loop.js';
 import { runReaperLoop } from '../../worker/src/reaper-loop.js';
+import type { RunHandler } from '../../worker/src/run-handler.js';
 
 const migrationsDir = fileURLToPath(new URL('../../../migrations', import.meta.url));
 const schemaPattern = /^ember_demo_[a-f0-9]{12}$/;
+
+/** Ensure Demo only executes against safe local or test databases. */
+export function assertSafeTestDatabaseUrl(databaseUrl: string): void {
+  try {
+    const parsed = new URL(databaseUrl);
+    const hostname = parsed.hostname.toLowerCase();
+    const dbName = parsed.pathname.replace(/^\//, '').toLowerCase();
+
+    const isLocalHost =
+      hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1' || hostname === '';
+
+    const isTestOrDevDb =
+      dbName.includes('test') || dbName.includes('demo') || dbName.includes('dev');
+
+    if (process.env.EMBER_ENV === 'production') {
+      throw new DomainError(
+        'POLICY_DENIED',
+        'Refused to start Demo cluster in production environment (EMBER_ENV=production)',
+      );
+    }
+
+    if (!isLocalHost && !isTestOrDevDb) {
+      throw new DomainError(
+        'POLICY_DENIED',
+        `Refused to run Demo cluster against non-local or non-test database: host='${hostname}', db='${dbName}'`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof DomainError) throw err;
+    throw new DomainError('INVALID_ARGUMENT', `Invalid database URL: ${String(err)}`);
+  }
+}
 
 export interface TenantContext {
   readonly tenantId: Id;
@@ -76,16 +109,21 @@ export class DemoCluster {
   readonly adminPool: ReturnType<typeof createPool>;
   readonly appPool: ReturnType<typeof createPool>;
   readonly workerPool: ReturnType<typeof createPool>;
+  readonly queue: PostgresLeaseQueue;
 
   private server?: ServerType;
-  private readonly workerAbort = new AbortController();
+  private workerAbort?: AbortController;
   private workerDone?: Promise<unknown>;
+  private workerHandler?: RunHandler;
+  private workerLogger?: WorkerLogger;
+  private workerConcurrency = 4;
   private readonly baseConfig: DatabaseConfig;
 
   // Observable metrics for scenario assertions
   totalSandboxesCreated = 0;
   activeSandboxes = 0;
   totalSandboxesDestroyed = 0;
+  readonly createdSandboxIds: string[] = [];
 
   private constructor(
     schema: string,
@@ -98,6 +136,7 @@ export class DemoCluster {
     appPool: ReturnType<typeof createPool>,
     workerPool: ReturnType<typeof createPool>,
     baseConfig: DatabaseConfig,
+    queue: PostgresLeaseQueue,
   ) {
     this.schema = schema;
     this.apiUrl = apiUrl;
@@ -109,6 +148,7 @@ export class DemoCluster {
     this.appPool = appPool;
     this.workerPool = workerPool;
     this.baseConfig = baseConfig;
+    this.queue = queue;
   }
 
   static async start(options: DemoClusterOptions = {}): Promise<DemoCluster> {
@@ -118,213 +158,274 @@ export class DemoCluster {
       process.env.TEST_DATABASE_URL ??
       'postgres://ember:ember_local_dev_only@127.0.0.1:5432/ember_test';
 
+    assertSafeTestDatabaseUrl(rawDbUrl);
+
     const baseConfig = loadDatabaseConfig({ DATABASE_URL: rawDbUrl });
     const adminPool = createPool({ ...baseConfig, maxConnections: 3 });
 
+    let schemaCreated = false;
+    let appPool: ReturnType<typeof createPool> | undefined;
+    let workerPool: ReturnType<typeof createPool> | undefined;
+    let tempBlobDir: string | undefined;
+    let server: ServerType | undefined;
+    let cluster: DemoCluster | undefined;
+
     const schema = `ember_demo_${randomBytes(6).toString('hex')}`;
-    await adminPool.query(`CREATE SCHEMA "${schema}"`);
 
-    const appPool = createPool({
-      ...baseConfig,
-      maxConnections: 15,
-      searchPath: schema,
-    });
+    try {
+      await adminPool.query(`CREATE SCHEMA "${schema}"`);
+      schemaCreated = true;
 
-    const workerPool = createPool({
-      ...baseConfig,
-      maxConnections: 15,
-      searchPath: schema,
-    });
+      appPool = createPool({
+        ...baseConfig,
+        maxConnections: 15,
+        searchPath: schema,
+      });
 
-    await runMigrations(appPool, migrationsDir);
+      workerPool = createPool({
+        ...baseConfig,
+        maxConnections: 15,
+        searchPath: schema,
+      });
 
-    // Setup Tenant A and Tenant B dev credentials
-    const tenantA: TenantContext = {
-      tenantId: randomUUID(),
-      principalId: randomUUID(),
-      token: `dev-token-a-${randomBytes(16).toString('hex')}`,
-      name: 'Tenant Alpha (Primary Dev Tenant)',
-    };
+      await runMigrations(appPool, migrationsDir);
 
-    const tenantB: TenantContext = {
-      tenantId: randomUUID(),
-      principalId: randomUUID(),
-      token: `dev-token-b-${randomBytes(16).toString('hex')}`,
-      name: 'Tenant Beta (Isolation Verification Tenant)',
-    };
+      // Setup Tenant A and Tenant B dev credentials
+      const tenantA: TenantContext = {
+        tenantId: randomUUID(),
+        principalId: randomUUID(),
+        token: `dev-token-a-${randomBytes(16).toString('hex')}`,
+        name: 'Tenant Alpha (Primary Dev Tenant)',
+      };
 
-    await appPool.query('INSERT INTO tenants (id, name) VALUES ($1, $2), ($3, $4)', [
-      tenantA.tenantId,
-      tenantA.name,
-      tenantB.tenantId,
-      tenantB.name,
-    ]);
+      const tenantB: TenantContext = {
+        tenantId: randomUUID(),
+        principalId: randomUUID(),
+        token: `dev-token-b-${randomBytes(16).toString('hex')}`,
+        name: 'Tenant Beta (Isolation Verification Tenant)',
+      };
 
-    await appPool.query(
-      'INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, $3), ($4, $5, $6)',
-      [
-        tenantA.principalId,
+      await appPool.query('INSERT INTO tenants (id, name) VALUES ($1, $2), ($3, $4)', [
         tenantA.tenantId,
-        'owner',
-        tenantB.principalId,
+        tenantA.name,
         tenantB.tenantId,
-        'owner',
-      ],
-    );
+        tenantB.name,
+      ]);
 
-    const authenticator = createDevTokenAuthenticator([
-      {
-        token: tenantA.token,
-        tenantId: tenantA.tenantId,
-        principalId: tenantA.principalId,
-        policyVersion: 1,
-      },
-      {
-        token: tenantB.token,
-        tenantId: tenantB.tenantId,
-        principalId: tenantB.principalId,
-        policyVersion: 1,
-      },
-    ]);
+      await appPool.query(
+        'INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, $3), ($4, $5, $6)',
+        [
+          tenantA.principalId,
+          tenantA.tenantId,
+          'owner',
+          tenantB.principalId,
+          tenantB.tenantId,
+          'owner',
+        ],
+      );
 
-    const tempBlobDir = mkdtempSync(path.join(os.tmpdir(), 'ember-demo-blobs-'));
-    const blobStore = new PostgresBlobStore(appPool, new LocalBlobStore({ rootDir: tempBlobDir }));
-    const artifactStore = new PostgresArtifactStore(appPool, blobStore);
+      const authenticator = createDevTokenAuthenticator([
+        {
+          token: tenantA.token,
+          tenantId: tenantA.tenantId,
+          principalId: tenantA.principalId,
+          policyVersion: 1,
+        },
+        {
+          token: tenantB.token,
+          tenantId: tenantB.tenantId,
+          principalId: tenantB.principalId,
+          policyVersion: 1,
+        },
+      ]);
 
-    const logger = createWorkerLogger({ level: 'error', sink: () => undefined });
-    const app = createApp({
-      readiness: createDatabaseReadiness(appPool),
-      serviceVersion: '0.0.0-demo',
-      logger,
-      authenticator,
-      agentStore: new PostgresAgentRepository(appPool),
-      taskStore: new PostgresTaskRepository(appPool),
-      approvalStore: new PostgresApprovalRepository(appPool),
-      artifactStore,
-    });
+      tempBlobDir = mkdtempSync(path.join(os.tmpdir(), 'ember-demo-blobs-'));
+      const blobStore = new PostgresBlobStore(
+        appPool,
+        new LocalBlobStore({ rootDir: tempBlobDir }),
+      );
+      const artifactStore = new PostgresArtifactStore(appPool, blobStore);
 
-    let serverPort = 0;
-    const server = await new Promise<ServerType>((resolve, reject) => {
-      try {
-        const s = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 }, (info) => {
-          serverPort = info.port;
-          resolve(s);
-        });
-      } catch (err) {
-        reject(err instanceof Error ? err : new Error(String(err)));
-      }
-    });
+      const logger = createWorkerLogger({ level: 'error', sink: () => undefined });
+      const app = createApp({
+        readiness: createDatabaseReadiness(appPool),
+        serviceVersion: '0.0.0-demo',
+        logger,
+        authenticator,
+        agentStore: new PostgresAgentRepository(appPool),
+        taskStore: new PostgresTaskRepository(appPool),
+        approvalStore: new PostgresApprovalRepository(appPool),
+        artifactStore,
+      });
 
-    const apiUrl = `http://127.0.0.1:${serverPort}`;
-    const cluster = new DemoCluster(
-      schema,
-      apiUrl,
-      tenantA,
-      tenantB,
-      tempBlobDir,
-      blobStore,
-      adminPool,
-      appPool,
-      workerPool,
-      baseConfig,
-    );
-    cluster.server = server;
+      let serverPort = 0;
+      server = await new Promise<ServerType>((resolve, reject) => {
+        try {
+          const s = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 }, (info) => {
+            serverPort = info.port;
+            resolve(s);
+          });
+        } catch (err) {
+          reject(err instanceof Error ? err : new Error(String(err)));
+        }
+      });
 
-    // Start Worker
-    const queue = new PostgresLeaseQueue(workerPool, {
-      leaseDurationMs: 15_000,
-      heartbeatIntervalMs: 3_000,
-      clock: systemClock,
-      claimableKinds: DURABLE_TASK_KINDS,
-    });
-
-    const contextReader = new PostgresRunExecutionContextReader(workerPool, systemClock);
-    const router = new DeterministicExecutionRouter();
-
-    const executor = new DeterministicExecutor({
-      sandboxExecDurationMs: 2,
-      onSandboxProvider: (provider: FakeSandboxProvider) => {
-        const originalCreate = provider.create.bind(provider);
-        const originalDestroy = provider.destroy.bind(provider);
-
-        provider.create = async (...args) => {
-          const res = await originalCreate(...args);
-          cluster.totalSandboxesCreated += 1;
-          cluster.activeSandboxes += 1;
-          return res;
-        };
-
-        provider.destroy = async (...args) => {
-          const res = await originalDestroy(...args);
-          cluster.activeSandboxes = Math.max(0, cluster.activeSandboxes - 1);
-          cluster.totalSandboxesDestroyed += 1;
-          return res;
-        };
-      },
-    });
-
-    const workerBlobs = new PostgresBlobStore(
-      workerPool,
-      new LocalBlobStore({ rootDir: tempBlobDir }),
-    );
-    const committer = new PostgresRunResultCommitter(workerPool, {
-      policy: {
+      const queue = new PostgresLeaseQueue(workerPool, {
         leaseDurationMs: 15_000,
         heartbeatIntervalMs: 3_000,
-        reaperBatchSize: 20,
-        baseDelayMs: 500,
-        capDelayMs: 5_000,
-      },
-      blobs: workerBlobs,
-    });
+        clock: systemClock,
+        claimableKinds: DURABLE_TASK_KINDS,
+      });
 
-    const handler = createDurableRunHandler({
-      contextReader,
-      router,
-      executor,
-      blobs: workerBlobs,
-      checkpoints: new PostgresCheckpointStore(workerPool),
-      committer,
-      workspaces: new PostgresWorkspaceStore(workerPool),
-      approvals: new PostgresApprovalRepository(workerPool, { clock: systemClock }),
-      budget: new PostgresBudgetLedger(workerPool, { policy: DEMO_BUDGET }),
-      clock: systemClock,
-      logger,
-    });
+      const apiUrl = `http://127.0.0.1:${serverPort}`;
+      cluster = new DemoCluster(
+        schema,
+        apiUrl,
+        tenantA,
+        tenantB,
+        tempBlobDir,
+        blobStore,
+        adminPool,
+        appPool,
+        workerPool,
+        baseConfig,
+        queue,
+      );
+      cluster.server = server;
 
+      // Start Worker
+      const contextReader = new PostgresRunExecutionContextReader(workerPool, systemClock);
+      const router = new DeterministicExecutionRouter();
+
+      const executor = new DeterministicExecutor({
+        sandboxExecDurationMs: 2,
+        onSandboxProvider: (provider: FakeSandboxProvider) => {
+          const originalCreate = provider.create.bind(provider);
+          const originalDestroy = provider.destroy.bind(provider);
+
+          provider.create = async (...args) => {
+            const res = await originalCreate(...args);
+            cluster!.totalSandboxesCreated += 1;
+            cluster!.activeSandboxes += 1;
+            cluster!.createdSandboxIds.push(res.sandboxId);
+            return res;
+          };
+
+          provider.destroy = async (...args) => {
+            const res = await originalDestroy(...args);
+            cluster!.activeSandboxes = Math.max(0, cluster!.activeSandboxes - 1);
+            cluster!.totalSandboxesDestroyed += 1;
+            return res;
+          };
+        },
+      });
+
+      const workerBlobs = new PostgresBlobStore(
+        workerPool,
+        new LocalBlobStore({ rootDir: tempBlobDir }),
+      );
+      const committer = new PostgresRunResultCommitter(workerPool, {
+        policy: {
+          leaseDurationMs: 15_000,
+          heartbeatIntervalMs: 3_000,
+          reaperBatchSize: 20,
+          baseDelayMs: 500,
+          capDelayMs: 5_000,
+        },
+        blobs: workerBlobs,
+      });
+
+      const handler = createDurableRunHandler({
+        contextReader,
+        router,
+        executor,
+        blobs: workerBlobs,
+        checkpoints: new PostgresCheckpointStore(workerPool),
+        committer,
+        workspaces: new PostgresWorkspaceStore(workerPool),
+        approvals: new PostgresApprovalRepository(workerPool, { clock: systemClock }),
+        budget: new PostgresBudgetLedger(workerPool, { policy: DEMO_BUDGET }),
+        clock: systemClock,
+        logger,
+      });
+
+      cluster.workerHandler = handler;
+      cluster.workerLogger = logger;
+      cluster.workerConcurrency = options.workerConcurrency ?? 4;
+      cluster.startWorker();
+
+      return cluster;
+    } catch (error) {
+      if (cluster) {
+        await cluster.stop().catch(() => undefined);
+      } else {
+        if (server) {
+          server.close();
+          (server as HttpServer).closeAllConnections?.();
+        }
+        if (appPool) await appPool.end().catch(() => undefined);
+        if (workerPool) await workerPool.end().catch(() => undefined);
+        if (schemaCreated) {
+          await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
+        }
+        await adminPool.end().catch(() => undefined);
+        if (tempBlobDir) {
+          try {
+            rmSync(tempBlobDir, { recursive: true, force: true });
+          } catch {
+            // Ignore
+          }
+        }
+      }
+      throw error;
+    }
+  }
+
+  async stopWorker(): Promise<void> {
+    if (this.workerAbort) {
+      this.workerAbort.abort();
+      this.workerAbort = undefined;
+    }
+    if (this.workerDone) {
+      await this.workerDone.catch(() => undefined);
+      this.workerDone = undefined;
+    }
+  }
+
+  startWorker(): void {
+    if (this.workerDone || !this.workerHandler || !this.workerLogger) {
+      return;
+    }
+    if (!Number.isInteger(this.workerConcurrency) || this.workerConcurrency < 1) {
+      throw new Error(`Invalid worker concurrency: ${this.workerConcurrency}`);
+    }
+    this.workerAbort = new AbortController();
     const reaper = runReaperLoop({
-      queue,
+      queue: this.queue,
       clock: systemClock,
       intervalMs: 500,
       errorBackoffMs: 200,
-      logger,
-      signal: cluster.workerAbort.signal,
+      logger: this.workerLogger,
+      signal: this.workerAbort.signal,
     });
-
     const poller = runPollLoop({
-      queue,
-      handler,
+      queue: this.queue,
+      handler: this.workerHandler,
       clock: systemClock,
       workerId: 'worker-demo-main',
-      concurrency: options.workerConcurrency ?? 4,
+      concurrency: this.workerConcurrency,
       heartbeatIntervalMs: 3_000,
       idleIntervalMs: 25,
       errorBackoffMs: 100,
-      logger,
-      signal: cluster.workerAbort.signal,
+      logger: this.workerLogger,
+      signal: this.workerAbort.signal,
     });
-
-    cluster.workerDone = Promise.all([reaper, poller]);
-
-    return cluster;
+    this.workerDone = Promise.all([reaper, poller]);
   }
 
   async stop(): Promise<void> {
     // 1. Abort worker and drain loops
-    this.workerAbort.abort();
-    if (this.workerDone) {
-      await this.workerDone.catch(() => undefined);
-    }
+    await this.stopWorker();
 
     // 2. Terminate active SSE event streams & close HTTP listener
     shutdownTaskEventStreams();

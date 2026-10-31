@@ -20,6 +20,7 @@ const CUSTOM_RULE: EgressRule = {
   allowedPathPatterns: ['/v1/resource', '/v1/resource/*'],
   allowedQueryParams: ['safe_query'],
   requiredScopes: ['custom:read'],
+  allowedOperations: ['test_operation'],
   operationKind: 'read',
   allowRedirects: true,
 };
@@ -257,6 +258,55 @@ describe('Adversarial URL Matrix and Edge Cases', () => {
         operation: 'get_status',
       });
       expect(decision.allowed).toBe(true);
+    });
+  });
+
+  describe('operation ID strict binding and scope bypass defense', () => {
+    it('rejects unlisted or spoofed operation IDs with OPERATION_NOT_ALLOWED', () => {
+      const decision = evaluateEgressRequest(CUSTOM_POLICY, {
+        ...req('https://allowed.example/v1/resource'),
+        operation: 'unlisted_delete_op',
+      });
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('OPERATION_NOT_ALLOWED');
+        expect(decision.reason).not.toContain('unlisted_delete_op');
+      }
+    });
+
+    it('rejects empty or whitespace operation identifiers', () => {
+      const decision = evaluateEgressRequest(CUSTOM_POLICY, {
+        ...req('https://allowed.example/v1/resource'),
+        operation: '   ',
+      });
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('OPERATION_NOT_ALLOWED');
+      }
+    });
+
+    it('rejects empty requestedScopes when rule requires scopes', () => {
+      const decision = evaluateEgressRequest(CUSTOM_POLICY, {
+        ...req('https://allowed.example/v1/resource'),
+        requestedScopes: [],
+      });
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('SCOPE_MISMATCH');
+      }
+    });
+
+    it('denial reasons never contain raw paths or sensitive query parameters', () => {
+      const decision = evaluateEgressRequest(CUSTOM_POLICY, {
+        ...req('https://allowed.example/secret/unauthorized/path?token=supersecret123'),
+        operation: 'test_operation',
+      });
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.reason).not.toContain('secret/unauthorized');
+        expect(decision.reason).not.toContain('supersecret123');
+        expect(decision.reason).not.toContain('token');
+      }
     });
   });
 });

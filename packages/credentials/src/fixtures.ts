@@ -24,6 +24,16 @@ export const SYNTHETIC_READ_RULE: EgressRule = Object.freeze({
   allowedPathPatterns: Object.freeze(['/v1/status', '/v1/items', '/v1/items/*']),
   allowedQueryParams: Object.freeze(['limit', 'cursor']),
   requiredScopes: Object.freeze([SYNTHETIC_SCOPE_READ]),
+  allowedOperations: Object.freeze([
+    'check_status',
+    'head_status',
+    'get_item',
+    'get_status',
+    'list_items',
+    'status_check',
+    'get_items',
+    'get_confidential_doc',
+  ]),
   operationKind: 'read',
   allowRedirects: true,
 });

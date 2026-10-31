@@ -137,7 +137,10 @@ export class CredentialBroker {
       if (isDomainError(err)) {
         throw err;
       }
-      throw new DomainError('DB_UNAVAILABLE', `Context reader failed: ${String(err)}`);
+      throw new DomainError(
+        'DB_UNAVAILABLE',
+        'Context reader failed during authoritative verification',
+      );
     }
 
     if (!context) {
@@ -243,40 +246,14 @@ export class CredentialBroker {
         operation: egressRequest.operation,
         url: egressRequest.url,
         method: egressRequest.method,
-        reason: `Credential provider mismatch: expected ${credential.provider}, got ${egressRequest.provider}`,
+        reason: 'Credential provider mismatch',
         code: 'NO_MATCHING_RULE',
         now,
       });
-      throw createPolicyDeniedError('Credential provider mismatch');
+      throw createPolicyDeniedError('Credential provider mismatch', 'NO_MATCHING_RULE');
     }
 
-    // 9. Scope verification
-    if (egressRequest.requestedScopes && egressRequest.requestedScopes.length > 0) {
-      const credScopeSet = new Set(credential.scopes);
-      const ungranted = egressRequest.requestedScopes.filter((s) => !credScopeSet.has(s));
-      if (ungranted.length > 0) {
-        this.recordDenialAudit({
-          tenantId: context.tenantId,
-          taskId: context.taskId,
-          runId: context.runId,
-          credentialRef,
-          credentialVersion: credential.version,
-          provider: egressRequest.provider,
-          operation: egressRequest.operation,
-          url: egressRequest.url,
-          method: egressRequest.method,
-          reason: `Credential lacks requested scope(s): ${ungranted.join(', ')}`,
-          code: 'SCOPE_MISMATCH',
-          now,
-        });
-        throw createPolicyDeniedError(
-          `Credential lacks requested scope(s): ${ungranted.join(', ')}`,
-          'SCOPE_MISMATCH',
-        );
-      }
-    }
-
-    // 10. Evaluate Egress Policy
+    // 9. Evaluate Egress Policy against request
     const egressDecision = evaluateEgressRequest(this.policy, egressRequest);
     if (!egressDecision.allowed) {
       this.recordDenialAudit({
@@ -294,9 +271,124 @@ export class CredentialBroker {
         now,
       });
       throw createPolicyDeniedError(
-        `Egress request denied: ${egressDecision.reason}`,
+        'Egress request denied by security policy',
         egressDecision.denialCode,
       );
+    }
+
+    // 10. Server-side rule.requiredScopes verification against credential.scopes
+    const matchedRule = this.policy.rules.find((r) => r.ruleId === egressDecision.matchedRuleId);
+    if (!matchedRule) {
+      this.recordDenialAudit({
+        tenantId: context.tenantId,
+        taskId: context.taskId,
+        runId: context.runId,
+        credentialRef,
+        credentialVersion: credential.version,
+        provider: egressRequest.provider,
+        operation: egressRequest.operation,
+        url: egressRequest.url,
+        method: egressRequest.method,
+        reason: 'No matching egress rule found',
+        code: 'NO_MATCHING_RULE',
+        now,
+      });
+      throw createPolicyDeniedError('No matching egress rule found', 'NO_MATCHING_RULE');
+    }
+
+    // Verify credential has all scopes required by the server-side egress rule
+    const credScopeSet = new Set<string>(credential.scopes);
+    const missingInCredential = matchedRule.requiredScopes.filter((s) => !credScopeSet.has(s));
+    if (missingInCredential.length > 0) {
+      this.recordDenialAudit({
+        tenantId: context.tenantId,
+        taskId: context.taskId,
+        runId: context.runId,
+        credentialRef,
+        credentialVersion: credential.version,
+        provider: egressRequest.provider,
+        operation: egressRequest.operation,
+        url: egressRequest.url,
+        method: egressRequest.method,
+        reason: 'Required scopes are not satisfied by credential',
+        code: 'SCOPE_MISMATCH',
+        now,
+      });
+      throw createPolicyDeniedError(
+        'Credential scopes do not satisfy required rule scopes',
+        'SCOPE_MISMATCH',
+      );
+    }
+
+    // Verify caller cannot bypass via missing, empty, or forged requestedScopes
+    if (egressRequest.requestedScopes !== undefined) {
+      if (egressRequest.requestedScopes.length === 0) {
+        if (matchedRule.requiredScopes.length > 0) {
+          this.recordDenialAudit({
+            tenantId: context.tenantId,
+            taskId: context.taskId,
+            runId: context.runId,
+            credentialRef,
+            credentialVersion: credential.version,
+            provider: egressRequest.provider,
+            operation: egressRequest.operation,
+            url: egressRequest.url,
+            method: egressRequest.method,
+            reason: 'Empty requested scopes cannot satisfy required rule scopes',
+            code: 'SCOPE_MISMATCH',
+            now,
+          });
+          throw createPolicyDeniedError(
+            'Empty requested scopes cannot satisfy required rule scopes',
+            'SCOPE_MISMATCH',
+          );
+        }
+      } else {
+        const ungranted = egressRequest.requestedScopes.filter((s) => !credScopeSet.has(s));
+        if (ungranted.length > 0) {
+          this.recordDenialAudit({
+            tenantId: context.tenantId,
+            taskId: context.taskId,
+            runId: context.runId,
+            credentialRef,
+            credentialVersion: credential.version,
+            provider: egressRequest.provider,
+            operation: egressRequest.operation,
+            url: egressRequest.url,
+            method: egressRequest.method,
+            reason: 'Requested scopes exceed credential scopes',
+            code: 'SCOPE_MISMATCH',
+            now,
+          });
+          throw createPolicyDeniedError(
+            'Requested scopes exceed credential scopes',
+            'SCOPE_MISMATCH',
+          );
+        }
+
+        const requestedSet = new Set<string>(egressRequest.requestedScopes);
+        const missingInRequested = matchedRule.requiredScopes.filter((s) => !requestedSet.has(s));
+        if (missingInRequested.length > 0) {
+          this.recordDenialAudit({
+            tenantId: context.tenantId,
+            taskId: context.taskId,
+            runId: context.runId,
+            credentialRef,
+            credentialVersion: credential.version,
+            provider: egressRequest.provider,
+            operation: egressRequest.operation,
+            url: egressRequest.url,
+            method: egressRequest.method,
+            reason: 'Requested scopes do not satisfy required rule scopes',
+            code: 'SCOPE_MISMATCH',
+            now,
+          });
+          throw createPolicyDeniedError(
+            'Requested scopes do not satisfy required rule scopes',
+            'SCOPE_MISMATCH',
+          );
+        }
+      }
     }
 
     // 11. Record approved audit record (networkCallsMade: 0 guaranteed)
@@ -345,6 +437,12 @@ export class CredentialBroker {
   // Internal Validators and Helpers
   // ---------------------------------------------------------------------------
 
+  /**
+   * CRITICAL PERIMETER TRUST BOUNDARY (RFC v0.2 ADR-005):
+   * AuthContext is authoritative perimeter data injected EXCLUSIVELY by the trusted API gateway
+   * after upstream mTLS or validated session verification.
+   * Untrusted caller runtimes or agent sandboxes cannot synthesize or modify AuthContext.
+   */
   private assertValidAuthContext(ctx: AuthContext): void {
     if (!ctx || typeof ctx !== 'object') {
       throw createUnauthenticatedError('AuthContext is required');

@@ -63,8 +63,9 @@ describe('CredentialBroker & CredentialProxy', () => {
 
       const rotated = await broker.rotateCredential(AUTH_CTX_A, cred.credentialRef, {}, BASE_TIME);
       expect(rotated.version).toBe(2);
+      expect(rotated.credentialRef).not.toBe(cred.credentialRef);
 
-      const revoked = await broker.revokeCredential(AUTH_CTX_A, cred.credentialRef, BASE_TIME);
+      const revoked = await broker.revokeCredential(AUTH_CTX_A, rotated.credentialRef, BASE_TIME);
       expect(revoked.status).toBe('revoked');
     });
 
@@ -547,6 +548,337 @@ describe('CredentialBroker & CredentialProxy', () => {
       expect(result.allowed).toBe(true);
       expect(proxy.activeSocketsCount()).toBe(0);
       expect(proxy.networkCallsAttempted()).toBe(0);
+    });
+  });
+
+  describe('server-side rule.requiredScopes enforcement and anti-bypass', () => {
+    it('denies execution when credential lacks server-side rule requiredScopes even if caller omits requestedScopes', async () => {
+      const { broker } = createBroker();
+
+      // Credential only has 'read:profile', but rule requires 'connector:read'
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: ['read:profile'] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        // requestedScopes deliberately omitted to test bypass attempt
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          egressRequest,
+          reader,
+          BASE_TIME,
+        );
+        expect.unreachable(
+          'Should have rejected credential lacking server-side rule required scopes',
+        );
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+          expect(err.diagnostic).toContain('SCOPE_MISMATCH');
+          // Diagnostic must be redacted, no scope names leaked
+          expect(err.diagnostic).not.toContain('connector:read');
+          expect(err.diagnostic).not.toContain('read:profile');
+        }
+      }
+    });
+
+    it('denies execution when caller passes empty requestedScopes: []', async () => {
+      const { broker } = createBroker();
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          egressRequest,
+          reader,
+          BASE_TIME,
+        );
+        expect.unreachable('Should have rejected empty requestedScopes');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+          expect(err.diagnostic).toContain('SCOPE_MISMATCH');
+        }
+      }
+    });
+
+    it('denies execution when caller attempts to forge requestedScopes not held by the credential', async () => {
+      const { broker } = createBroker();
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [SYNTHETIC_SCOPE_READ, 'unauthorized:forged_admin_scope'],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          egressRequest,
+          reader,
+          BASE_TIME,
+        );
+        expect.unreachable('Should have rejected forged requestedScopes');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+          expect(err.diagnostic).toContain('SCOPE_MISMATCH');
+          // Diagnostic must not echo the forged scope string
+          expect(err.diagnostic).not.toContain('unauthorized:forged_admin_scope');
+        }
+      }
+    });
+  });
+
+  describe('credential rotation invalidation', () => {
+    it('invalidates old credentialRef on rotation: rejects old reference and allows new reference', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const { broker } = createBroker(auditSink);
+
+      const initialCred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      // 1. Initial credential works before rotation
+      const initialResult = await broker.executeWithCredential(
+        lease,
+        initialCred.credentialRef,
+        egressRequest,
+        reader,
+        BASE_TIME,
+      );
+      expect(initialResult.allowed).toBe(true);
+
+      // 2. Rotate the credential
+      const rotateTime = new Date('2026-10-31T12:05:00.000Z');
+      const rotatedCred = await broker.rotateCredential(
+        AUTH_CTX_A,
+        initialCred.credentialRef,
+        {},
+        rotateTime,
+      );
+
+      expect(rotatedCred.credentialRef).not.toBe(initialCred.credentialRef);
+      expect(rotatedCred.version).toBe(2);
+
+      // 3. Execution presenting old credentialRef MUST be rejected
+      try {
+        await broker.executeWithCredential(
+          lease,
+          initialCred.credentialRef,
+          egressRequest,
+          reader,
+          rotateTime,
+        );
+        expect.unreachable('Old credential reference must be rejected after rotation');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+        }
+      }
+
+      // 4. Execution presenting new credentialRef MUST be allowed
+      const newResult = await broker.executeWithCredential(
+        lease,
+        rotatedCred.credentialRef,
+        egressRequest,
+        reader,
+        rotateTime,
+      );
+      expect(newResult.status).toBe('SIMULATED');
+      expect(newResult.allowed).toBe(true);
+    });
+  });
+
+  describe('operation ID strict binding and error diagnostics redaction', () => {
+    it('rejects unlisted operation IDs with OPERATION_NOT_ALLOWED', async () => {
+      const { broker } = createBroker();
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'unlisted_delete_all_data',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          egressRequest,
+          reader,
+          BASE_TIME,
+        );
+        expect.unreachable('Unlisted operation must be rejected');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('POLICY_DENIED');
+          expect(err.diagnostic).toContain('OPERATION_NOT_ALLOWED');
+          expect(err.diagnostic).not.toContain('unlisted_delete_all_data');
+        }
+      }
+    });
+
+    it('redacts diagnostics and prevents String(err) leak when contextReader throws', async () => {
+      const { broker } = createBroker();
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const secretSqlLeak = 'DATABASE_CONN_SECRET=postgres://admin:super_secret_pw@db:5432';
+      const hostileReader = {
+        read: () => Promise.reject(new Error(secretSqlLeak)),
+      };
+
+      const egressRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          egressRequest,
+          hostileReader,
+          BASE_TIME,
+        );
+        expect.unreachable('Hostile reader error should have caused throw');
+      } catch (err) {
+        expect(isDomainError(err)).toBe(true);
+        if (isDomainError(err)) {
+          expect(err.code).toBe('DB_UNAVAILABLE');
+          // Diagnostic must NOT leak String(err)
+          expect(err.diagnostic).not.toContain(secretSqlLeak);
+          expect(err.diagnostic).not.toContain('super_secret_pw');
+          expect(err.message).not.toContain('super_secret_pw');
+        }
+      }
+    });
+
+    it('audit denialReason never exposes raw path, query params, tokens, or scope lists', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const { broker } = createBroker(auditSink);
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX_A,
+        { provider: SYNTHETIC_PROVIDER, scopes: [SYNTHETIC_SCOPE_READ] },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const sensitivePath = '/v1/users/secret_user_id/documents';
+      const sensitiveToken = 'sensitive_query_token_xyz987';
+      const evilRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}${sensitivePath}?token=${sensitiveToken}&unallowed_key=1`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      try {
+        await broker.executeWithCredential(
+          lease,
+          cred.credentialRef,
+          evilRequest,
+          reader,
+          BASE_TIME,
+        );
+      } catch {
+        // Expected denial
+      }
+
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      const record = records[0]!;
+      expect(record.decision).toBe('DENIED');
+      expect(record.denialReason).toBeDefined();
+
+      // Absolute non-leakage verification
+      expect(record.denialReason).not.toContain(sensitivePath);
+      expect(record.denialReason).not.toContain(sensitiveToken);
+      expect(record.denialReason).not.toContain('unallowed_key');
+      expect(record.targetOrigin).toBe(SYNTHETIC_ORIGIN);
     });
   });
 });

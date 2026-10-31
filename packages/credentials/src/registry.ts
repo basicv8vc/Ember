@@ -213,17 +213,43 @@ export class InMemoryCredentialRegistry {
         ? Array.from(new Set<string>(options.newScopes.map((s: string): string => s.trim())))
         : existing.scopes;
 
+    const newCredentialRef =
+      options.newCredentialRef && options.newCredentialRef.trim() !== ''
+        ? options.newCredentialRef.trim()
+        : `cred_${randomUUID()}`;
+
+    if (newCredentialRef === credentialRef) {
+      throw createInvalidArgumentError(
+        'New credential reference must be distinct from rotated reference',
+      );
+    }
+
+    if (tenantMap.has(newCredentialRef)) {
+      throw createInvalidArgumentError(`Credential reference ${newCredentialRef} already exists`);
+    }
+
+    // Invalidate the old credential reference so it can never be used again
+    const invalidatedOld: CredentialMetadata = {
+      ...existing,
+      status: 'revoked',
+      updatedAt: now.toISOString(),
+    };
+    tenantMap.set(credentialRef, invalidatedOld);
+
+    // Register the rotated credential with the new reference and incremented version
     const rotated: CredentialMetadata = {
       ...existing,
+      credentialRef: newCredentialRef,
       scopes,
       status,
       version: existing.version + 1,
       expiresAt,
+      createdAt: existing.createdAt,
       updatedAt: now.toISOString(),
       ...(options.description !== undefined ? { description: options.description.trim() } : {}),
     };
 
-    tenantMap.set(credentialRef, rotated);
+    tenantMap.set(newCredentialRef, rotated);
     return freezeMetadata(rotated);
   }
 

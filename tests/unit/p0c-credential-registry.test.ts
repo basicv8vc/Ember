@@ -122,7 +122,7 @@ describe('InMemoryCredentialRegistry', () => {
   });
 
   describe('lifecycle: rotate, revoke, and expiry', () => {
-    it('advances version monotonically on rotation and updates timestamp', () => {
+    it('invalidates old credentialRef, issues a new credentialRef, and advances version monotonically on rotation', () => {
       const registry = new InMemoryCredentialRegistry();
 
       const cred = registry.register(
@@ -135,6 +135,7 @@ describe('InMemoryCredentialRegistry', () => {
       );
 
       expect(cred.version).toBe(1);
+      expect(cred.status).toBe('active');
 
       const rotateTime = new Date('2026-10-31T12:05:00.000Z');
       const rotated = registry.rotate(
@@ -144,9 +145,29 @@ describe('InMemoryCredentialRegistry', () => {
         rotateTime,
       );
 
+      // New credential reference is distinct and active with incremented version
+      expect(rotated.credentialRef).not.toBe(cred.credentialRef);
       expect(rotated.version).toBe(2);
+      expect(rotated.status).toBe('active');
       expect(rotated.scopes).toEqual(['read:profile', 'read:email']);
       expect(rotated.updatedAt).toBe(rotateTime.toISOString());
+
+      // Old credential reference is immediately invalidated (revoked)
+      const oldRecord = registry.get(TENANT_A, cred.credentialRef, rotateTime);
+      expect(oldRecord.status).toBe('revoked');
+
+      // Attempting to rotate the invalidated old reference is rejected
+      expect(() => registry.rotate(TENANT_A, cred.credentialRef, {}, rotateTime)).toThrow();
+
+      // Attempting to rotate with an identical newCredentialRef is rejected
+      expect(() =>
+        registry.rotate(
+          TENANT_A,
+          rotated.credentialRef,
+          { newCredentialRef: rotated.credentialRef },
+          rotateTime,
+        ),
+      ).toThrow();
     });
 
     it('revokes a credential and marks it unusable', () => {

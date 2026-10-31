@@ -170,7 +170,7 @@ describe('evaluateEgressRequest & Egress Policy', () => {
         url: `${SYNTHETIC_ORIGIN}/v1/status`,
         method: 'GET',
         provider: SYNTHETIC_PROVIDER,
-        operation: 'admin_status',
+        operation: 'get_status',
         operationKind: 'read',
         requestedScopes: ['connector:admin', SYNTHETIC_SCOPE_READ],
       };
@@ -192,6 +192,7 @@ describe('evaluateEgressRequest & Egress Policy', () => {
         allowedMethods: ['GET'],
         allowedPathPatterns: ['/v1/status'],
         requiredScopes: [SYNTHETIC_SCOPE_READ],
+        allowedOperations: ['get_status'],
         operationKind: 'read',
         allowRedirects: false,
       };
@@ -259,6 +260,42 @@ describe('evaluateEgressRequest & Egress Policy', () => {
       expect(decision.allowed).toBe(true);
       if (decision.allowed) {
         expect(decision.sanitizedUrl).toBe(targetUrl);
+      }
+    });
+  });
+
+  describe('operation ID binding and scope defenses', () => {
+    it('denies requests with operation ID not included in rule allowedOperations', () => {
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'unlisted_synthetic_operation',
+        operationKind: 'read',
+      };
+
+      const decision = evaluateEgressRequest(SYNTHETIC_EGRESS_POLICY, request);
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('OPERATION_NOT_ALLOWED');
+        expect(decision.reason).not.toContain('unlisted_synthetic_operation');
+      }
+    });
+
+    it('denies requests with empty requestedScopes when rule requires scopes', () => {
+      const request: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}/v1/status`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'get_status',
+        operationKind: 'read',
+        requestedScopes: [],
+      };
+
+      const decision = evaluateEgressRequest(SYNTHETIC_EGRESS_POLICY, request);
+      expect(decision.allowed).toBe(false);
+      if (!decision.allowed) {
+        expect(decision.denialCode).toBe('SCOPE_MISMATCH');
       }
     });
   });

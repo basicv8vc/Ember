@@ -266,5 +266,56 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
       expect(audit.decision).toBe('ALLOWED');
       expect(audit.networkCallsMade).toBe(0);
     });
+
+    it('denial audit records strictly sanitize denialReason without echoing raw paths, queries, scopes, or error strings', async () => {
+      const auditSink = new InMemoryAuditSink();
+      const registry = new InMemoryCredentialRegistry();
+      const broker = new CredentialBroker({
+        registry,
+        policy: SYNTHETIC_EGRESS_POLICY,
+        auditSink,
+      });
+
+      const cred = await broker.registerCredential(
+        AUTH_CTX,
+        {
+          provider: SYNTHETIC_PROVIDER,
+          scopes: [SYNTHETIC_SCOPE_READ],
+        },
+        BASE_TIME,
+      );
+
+      const lease = makeSyntheticLease(TENANT_A);
+      const reader = makeMockContextReader();
+
+      const evilPath = '/v1/secret/vault/passwords';
+      const evilQuery = 'api_key=secret_token_12345';
+      const evilRequest: EgressRequest = {
+        url: `${SYNTHETIC_ORIGIN}${evilPath}?${evilQuery}`,
+        method: 'GET',
+        provider: SYNTHETIC_PROVIDER,
+        operation: 'status_check',
+        requestedScopes: [SYNTHETIC_SCOPE_READ],
+      };
+
+      await expect(
+        broker.executeWithCredential(lease, cred.credentialRef, evilRequest, reader, BASE_TIME),
+      ).rejects.toThrow();
+
+      const records = auditSink.getRecords();
+      expect(records.length).toBe(1);
+      const audit = records[0]!;
+      const auditText = JSON.stringify(audit);
+
+      expect(audit.decision).toBe('DENIED');
+      expect(audit.denialReason).toBeDefined();
+
+      // Ensure no raw paths, queries, or secrets leaked into the audit record
+      expect(auditText).not.toContain(evilPath);
+      expect(auditText).not.toContain('secret_token_12345');
+      expect(auditText).not.toContain('api_key');
+      expect(audit.targetOrigin).toBe(SYNTHETIC_ORIGIN);
+      expect(audit.networkCallsMade).toBe(0);
+    });
   });
 });

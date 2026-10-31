@@ -196,7 +196,7 @@ export function evaluateEgressRequest(
   if (parsedUrl.protocol !== 'https:') {
     return {
       allowed: false,
-      reason: `Protocol '${parsedUrl.protocol}' is forbidden; only 'https:' is permitted`,
+      reason: 'Protocol scheme is forbidden; only https is permitted',
       denialCode: 'UNSUPPORTED_SCHEME',
     };
   }
@@ -205,7 +205,7 @@ export function evaluateEgressRequest(
   if (parsedUrl.username !== '' || parsedUrl.password !== '') {
     return {
       allowed: false,
-      reason: 'Userinfo in URL is forbidden',
+      reason: 'Userinfo credentials in URL are forbidden',
       denialCode: 'USERINFO_FORBIDDEN',
     };
   }
@@ -214,7 +214,7 @@ export function evaluateEgressRequest(
   if (parsedUrl.port !== '' && parsedUrl.port !== '443') {
     return {
       allowed: false,
-      reason: `Non-standard port '${parsedUrl.port}' is forbidden; only port 443 is permitted`,
+      reason: 'Non-standard port is forbidden; only port 443 is permitted',
       denialCode: 'INVALID_PORT',
     };
   }
@@ -225,7 +225,7 @@ export function evaluateEgressRequest(
   if (isIpLiteral(hostname)) {
     return {
       allowed: false,
-      reason: `IP address literals ('${hostname}') are forbidden`,
+      reason: 'IP address literals are forbidden',
       denialCode: 'IP_LITERAL_FORBIDDEN',
     };
   }
@@ -234,7 +234,7 @@ export function evaluateEgressRequest(
   if (isLocalOrPrivateHost(hostname)) {
     return {
       allowed: false,
-      reason: `Localhost and private network destinations ('${hostname}') are forbidden`,
+      reason: 'Localhost and private network destinations are forbidden',
       denialCode: 'PRIVATE_OR_LOCAL_HOST',
     };
   }
@@ -243,7 +243,7 @@ export function evaluateEgressRequest(
   if (!READ_ONLY_METHODS.has(request.method)) {
     return {
       allowed: false,
-      reason: `HTTP method '${request.method}' is a mutating method; only read-only methods (GET, HEAD) are allowed`,
+      reason: 'Mutating HTTP methods are blocked; only read-only methods (GET, HEAD) are allowed',
       denialCode: 'WRITE_OPERATION_BLOCKED',
     };
   }
@@ -251,12 +251,27 @@ export function evaluateEgressRequest(
   if (request.operationKind && request.operationKind !== 'read') {
     return {
       allowed: false,
-      reason: `Operation kind '${request.operationKind}' is not read-only`,
+      reason: 'Operation kind must be read-only',
       denialCode: 'WRITE_OPERATION_BLOCKED',
     };
   }
 
-  // 11. Match against configured rules
+  // 11. Operation identifier presence validation
+  if (
+    !request.operation ||
+    typeof request.operation !== 'string' ||
+    request.operation.trim() === ''
+  ) {
+    return {
+      allowed: false,
+      reason: 'Operation identifier must be a non-empty string',
+      denialCode: 'OPERATION_NOT_ALLOWED',
+    };
+  }
+
+  const normalizedOperation = request.operation.trim();
+
+  // 12. Match against configured rules
   const candidateRules: readonly EgressRule[] = policy.rules.filter(
     (rule: EgressRule): boolean =>
       rule.provider === request.provider && rule.operationKind === 'read',
@@ -265,7 +280,7 @@ export function evaluateEgressRequest(
   if (candidateRules.length === 0) {
     return {
       allowed: false,
-      reason: `No egress rule configured for provider '${request.provider}' with read operations`,
+      reason: 'No egress rule configured for provider with read operations',
       denialCode: 'NO_MATCHING_RULE',
     };
   }
@@ -278,52 +293,75 @@ export function evaluateEgressRequest(
   let bestDenialCode: EgressDenialCode = 'NO_MATCHING_RULE';
 
   for (const rule of candidateRules) {
-    // 11a. Exact Origin match (prevents subdomain spoofing like allowed.example.evil.com)
+    // 12a. Operation ID binding against rule allowlist
+    if (!rule.allowedOperations || !rule.allowedOperations.includes(normalizedOperation)) {
+      bestDenialReason = 'Operation is not permitted by egress rule';
+      bestDenialCode = 'OPERATION_NOT_ALLOWED';
+      continue;
+    }
+
+    // 12b. Exact Origin match (prevents subdomain spoofing like allowed.example.evil.com)
     const originMatch = rule.allowedOrigins.some(
       (origin: string): boolean => origin.toLowerCase() === requestOrigin,
     );
     if (!originMatch) {
-      bestDenialReason = `Origin '${requestOrigin}' is not in the allowlist for rule '${rule.ruleId}'`;
+      bestDenialReason = 'Target origin is not permitted by egress rule';
       bestDenialCode = 'ORIGIN_NOT_ALLOWED';
       continue;
     }
 
-    // 11b. Method match
+    // 12c. Method match
     if (!rule.allowedMethods.includes(request.method)) {
-      bestDenialReason = `Method '${request.method}' is not permitted for rule '${rule.ruleId}'`;
+      bestDenialReason = 'HTTP method is not permitted by egress rule';
       bestDenialCode = 'METHOD_NOT_ALLOWED';
       continue;
     }
 
-    // 11c. Path pattern match
+    // 12d. Path pattern match
     const pathMatch = rule.allowedPathPatterns.some((pattern: string): boolean =>
       matchPathPattern(pattern, requestPath),
     );
     if (!pathMatch) {
-      bestDenialReason = `Path '${requestPath}' does not match any allowed pattern for rule '${rule.ruleId}'`;
+      bestDenialReason = 'Request path does not match rule allowlist';
       bestDenialCode = 'PATH_NOT_ALLOWED';
       continue;
     }
 
-    // 11d. Query parameter allowlist match
+    // 12e. Query parameter allowlist match
     if (queryParamKeys.length > 0) {
       const allowedQuerySet: Set<string> = new Set<string>(rule.allowedQueryParams ?? []);
       const unallowedQueryKeys = queryParamKeys.filter((k: string) => !allowedQuerySet.has(k));
       if (unallowedQueryKeys.length > 0) {
-        bestDenialReason = `Query parameter key(s) [${unallowedQueryKeys.join(', ')}] not allowed for rule '${rule.ruleId}'`;
+        bestDenialReason = 'Query parameters contain disallowed keys';
         bestDenialCode = 'QUERY_PARAM_NOT_ALLOWED';
         continue;
       }
     }
 
-    // 11e. Scope match
-    if (request.requestedScopes && request.requestedScopes.length > 0) {
-      const ruleScopeSet: Set<string> = new Set<string>(rule.requiredScopes);
-      const missingScopes = request.requestedScopes.filter((s: string) => !ruleScopeSet.has(s));
-      if (missingScopes.length > 0) {
-        bestDenialReason = `Requested scope(s) [${missingScopes.join(', ')}] exceed permitted rule scopes`;
-        bestDenialCode = 'SCOPE_MISMATCH';
-        continue;
+    // 12f. Scope validation: check requestedScopes against rule.requiredScopes
+    if (request.requestedScopes !== undefined) {
+      if (request.requestedScopes.length === 0) {
+        if (rule.requiredScopes.length > 0) {
+          bestDenialReason = 'Empty requested scopes cannot satisfy required rule scopes';
+          bestDenialCode = 'SCOPE_MISMATCH';
+          continue;
+        }
+      } else {
+        const ruleScopeSet = new Set<string>(rule.requiredScopes);
+        const unpermitted = request.requestedScopes.filter((s: string) => !ruleScopeSet.has(s));
+        if (unpermitted.length > 0) {
+          bestDenialReason = 'Requested scopes exceed permitted rule scopes';
+          bestDenialCode = 'SCOPE_MISMATCH';
+          continue;
+        }
+
+        const reqScopeSet = new Set<string>(request.requestedScopes);
+        const missingRequired = rule.requiredScopes.filter((s: string) => !reqScopeSet.has(s));
+        if (missingRequired.length > 0) {
+          bestDenialReason = 'Requested scopes do not satisfy required rule scopes';
+          bestDenialCode = 'SCOPE_MISMATCH';
+          continue;
+        }
       }
     }
 
@@ -334,7 +372,7 @@ export function evaluateEgressRequest(
       sanitizedUrl: sanitizeUrl(parsedUrl),
       method: request.method,
       provider: request.provider,
-      operation: request.operation,
+      operation: normalizedOperation,
     };
   }
 
@@ -358,7 +396,7 @@ export function evaluateRedirectCandidate(
   if (!originalDecision.allowed) {
     return {
       allowed: false,
-      reason: `Original request was not allowed: ${originalDecision.reason}`,
+      reason: 'Original request was not permitted by egress policy',
       denialCode: originalDecision.denialCode,
     };
   }
@@ -381,9 +419,8 @@ export function evaluateRedirectCandidate(
   if (!hopDecision.allowed) {
     return {
       allowed: false,
-      reason: `Redirect target '${redirectUrl}' denied: ${hopDecision.reason}`,
+      reason: 'Redirect target is not permitted by egress policy',
       denialCode: 'REDIRECT_TARGET_DENIED',
-      diagnostic: hopDecision.reason,
     };
   }
 

@@ -17,6 +17,42 @@ import type {
   RedactedAuditRecord,
 } from './types.js';
 
+export const SAFE_DENIAL_REASONS: Readonly<Record<EgressDenialCode, string>> = Object.freeze({
+  INVALID_URL: 'Request URL format is invalid',
+  UNSUPPORTED_SCHEME: 'Protocol scheme is not permitted',
+  USERINFO_FORBIDDEN: 'Userinfo credentials in URL are forbidden',
+  FRAGMENT_FORBIDDEN: 'URL fragment identifiers are forbidden',
+  IP_LITERAL_FORBIDDEN: 'IP address literals are forbidden',
+  PRIVATE_OR_LOCAL_HOST: 'Private or loopback network targets are forbidden',
+  INVALID_PORT: 'Non-standard port is forbidden',
+  ORIGIN_NOT_ALLOWED: 'Target origin is not permitted by egress policy',
+  METHOD_NOT_ALLOWED: 'HTTP method is not permitted for rule',
+  PATH_NOT_ALLOWED: 'Request path is not permitted by egress policy',
+  QUERY_PARAM_NOT_ALLOWED: 'Query parameter keys are not permitted',
+  OPERATION_NOT_ALLOWED: 'Operation is not permitted by egress rule',
+  WRITE_OPERATION_BLOCKED: 'Mutating write operations are blocked',
+  SCOPE_MISMATCH: 'Required scopes are not satisfied',
+  NO_MATCHING_RULE: 'No matching egress policy rule found',
+  REDIRECT_TARGET_DENIED: 'Redirect target is not permitted',
+});
+
+/**
+ * Sanitizes a denial reason to guarantee zero leakage of raw paths, query strings,
+ * scopes, tokens, or raw error strings (such as String(err)).
+ */
+export function sanitizeAuditDenialReason(
+  code?: EgressDenialCode,
+  fallbackReason?: string,
+): string | undefined {
+  if (code && SAFE_DENIAL_REASONS[code]) {
+    return SAFE_DENIAL_REASONS[code];
+  }
+  if (!fallbackReason) {
+    return undefined;
+  }
+  return 'Access denied by security policy';
+}
+
 export function hashTenantId(tenantId: string): string {
   return createHash('sha256').update(tenantId, 'utf8').digest('hex').slice(0, 16);
 }
@@ -77,8 +113,12 @@ export function createAuditRecord(params: RecordAuditParams): RedactedAuditRecor
     targetOrigin: extractTargetOrigin(params.targetUrlOrOrigin),
     method: params.method,
     decision: params.decision,
-    ...(params.denialReason ? { denialReason: params.denialReason } : {}),
-    ...(params.denialCode ? { denialCode: params.denialCode } : {}),
+    ...(params.decision === 'DENIED'
+      ? {
+          denialReason: sanitizeAuditDenialReason(params.denialCode, params.denialReason),
+          ...(params.denialCode ? { denialCode: params.denialCode } : {}),
+        }
+      : {}),
     networkCallsMade: 0,
   });
 }

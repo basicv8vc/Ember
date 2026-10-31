@@ -46,6 +46,8 @@ export interface RegisterCredentialOptions {
 }
 
 export interface RotateCredentialOptions {
+  /** Optional new synthetic reference ID; auto-generated if omitted. Must differ from rotated ref. */
+  readonly newCredentialRef?: string;
   /** Optional updated expiration instant. */
   readonly newExpiresAt?: string | null;
   /** Optional updated scopes. */
@@ -74,6 +76,8 @@ export interface EgressRule {
   readonly allowedQueryParams?: readonly string[];
   /** Scopes required for this rule. */
   readonly requiredScopes: readonly string[];
+  /** Whitelisted operation IDs explicitly permitted for this rule. */
+  readonly allowedOperations: readonly string[];
   /** Operation classification. In P0-C1C, only 'read' is allowed. */
   readonly operationKind: ConnectorOperationKind;
   /** Whether redirect candidates may be evaluated (each hop is re-authenticated). */
@@ -204,6 +208,15 @@ export interface ExecutionCallerContext {
   readonly now?: Date;
 }
 
+/**
+ * Context presented for management plane operations.
+ *
+ * CRITICAL TRUST BOUNDARY:
+ * `AuthContext` is strictly created and authenticated by the trusted perimeter API gateway
+ * (e.g. reverse proxy / perimeter authentication middleware after validating mTLS or JWT session).
+ * It CANNOT be synthesized, forged, or supplied by untrusted user agents, sandbox code,
+ * or tenant-controlled worker execution runtimes.
+ */
 export interface ManagementCallerContext {
   readonly authContext: AuthContext;
   readonly now?: Date;

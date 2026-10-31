@@ -2,11 +2,11 @@
 
 > **任务标识**：P0B-10B — Crash/Recovery 与不变量验收补强  
 > **基线分支/Commit (Base SHA)**：`origin/main` @ `2ec04f6c7459820c20813554a749c60447d33e88` (PR #24 merge commit)  
-> **Head Commit (Head SHA)**：`feature/p0b-10b-process-recovery` @ `29e923ab7ffcc1f1afe4aa0d573f1b2748f7d173`  
+> **Head 追踪 (Dynamic Head)**：分支 `feature/p0b-10b-process-recovery` (PR [#25](https://github.com/basicv8vc/Ember/pull/25))
 > **工作区 (Worktree)**：`/Users/lj/Downloads/worktrees/ember-p0b-10b-process-recovery`  
 > **交付分支**：`feature/p0b-10b-process-recovery`  
 > **角色**：Senior Distributed Systems / Reliability Engineer  
-> **核心交付**：真实 OS Worker 子进程 `SIGKILL` 强杀与自主断点恢复测试、并发取消与提交竞态测试、B-T24～27 审计矩阵、5 轮稳定性证据、Draft PR。严格禁止自动合并或推送至 main。
+> **核心交付**：真实 OS Worker 子进程 `SIGKILL` 强杀与自主断点恢复测试、确定性并发取消与提交竞态双分支测试、B-T24～27 审计矩阵、5 轮稳定性证据、Draft PR。严格禁止自动合并或推送至 main。
 
 ---
 
@@ -23,38 +23,39 @@
 修改文件 (只针对测试与微秒时钟补偿，零修改生产代码)：
   tests/chaos/harness/index.ts                         - 导出 worker-subprocess
   tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts - 消除测试 claimNext microsecond 截断抖动
-  tests/chaos/b-t27-lease-fencing-concurrency.test.ts  - 新增 Concurrent Cancellation vs Terminal Commit 竞态测试 + 消除时钟抖动
+  tests/chaos/b-t27-lease-fencing-concurrency.test.ts  - 新增 Commit-first 与 Cancel-first 确定性双分支竞态测试 + 消除时钟抖动
   tests/integration/lease-claim.test.ts                - 消除 syncClock 边界截断抖动
   tests/integration/lease-fencing.test.ts              - 消除 syncClock 边界截断抖动
   tests/integration/lease-recovery.test.ts             - 消除 syncClock 边界截断抖动
 ```
 
-### 1.2 执行环境
+### 1.2 执行环境与 CI 状态
 
 - **OS**: macOS Darwin 24.6.0 (Apple Silicon)
-- **Node.js**: v22.14.0
+- **Node.js**: v22.14.0 (本地) / Node 24 LTS (GitHub Actions CI)
 - **pnpm**: 10.6.5
-- **PostgreSQL**: PostgreSQL 17.4 (Homebrew Local, port 5432)
+- **PostgreSQL**: PostgreSQL 17.4 (Homebrew Local / CI PostgreSQL 17, port 5432)
 - **数据库隔离**: 每次测试独立动态生成 `ember_it_*` Schema，测试退出执行完整 `DROP SCHEMA ... CASCADE` 清理。
+- **GitHub Actions CI**: **通过** (PR #25 CI/Verify `Node 24 LTS + PostgreSQL 17` 全量检查通过，0 failing, 0 cancelled)。
 
 ---
 
 ## 2. 现有覆盖审计矩阵 (Existing Coverage Audit)
 
-| 场景编号    | 故障与可靠性场景                                         | 对应测试文件 / 测试名称                                                                                                                                            |         是否真进程故障          |                                 独立 PostgreSQL 证据                                 |                   安全与确定性保障                   | 审计结论                                                                                        |
-| :---------- | :------------------------------------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-----------------------------: | :----------------------------------------------------------------------------------: | :--------------------------------------------------: | :---------------------------------------------------------------------------------------------- |
-| **B-T25.1** | DB Commit 前连接中断 (Tx 未提交)                         | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`cancels transaction and preserves zero accepted events`                                                          |      否 (DB Backend 中断)       |                          是 (独立 Schema, 查询 tasks 为 0)                           |       是 (pg_terminate_backend 仅中断特定 pid)       | **已覆盖**：原有测试严谨，无需重写                                                              |
-| **B-T25.2** | DB Commit 后、HTTP Ack 前断连                            | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`persists task when backend dies after commit but before ack`                                                     |         否 (连接池中断)         |               是 (Task/accepted 事件存在，重试同 key 返回相同 taskId)                |          是 (确定性断开 client connection)           | **已覆盖**：原有测试完整满足幂等与持久化标准                                                    |
-| **B-T25.3** | 幂等键冲突与租户隔离安全                                 | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`rejects payload mismatch under same idempotency key`                                                             |               否                |               是 (返回 IDEMPOTENCY_PAYLOAD_MISMATCH，零 SQL/DSN 泄露)                |              是 (纯契约与错误映射断言)               | **已覆盖**：无内部凭据泄露风险                                                                  |
-| **B-T26.1** | Blob 已落盘、DB Commit 前崩溃                            | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`<br>`orphan blob uncommitted crash recovery`                                                                 |         否 (模拟未提交)         |                     是 (Blob 孤立存在但 artifacts 关系表不可见)                      |             是 (隔离 artifact 目录检查)              | **已覆盖**：孤立 blob 路径受控，查询不可见                                                      |
-| **B-T26.2** | Checkpoint 提交后 Worker 逻辑中断恢复                    | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`<br>`recovers execution from committed step checkpoint`                                                      |        否 (模拟租约回拨)        |                            是 (断点数据在 DB 中正确读取)                             |           是 (手动 clock 回拨触发 reaper)            | **存在缺口**：仅通过 SQL 时间回拨模拟，未验证真实 Worker OS 进程崩溃与文件描述符/未提交事务释放 |
-| **B-T26.3** | **【新增】真实 Worker OS 子进程 SIGKILL 与自主断点恢复** | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`SIGKILLs real Worker OS process after Step 1 checkpoint; recovered Worker resumes from checkpoint` | **是 (真实 OS 子进程 SIGKILL)** |          **是 (真实 PostgreSQL advisory_lock 屏障 + 跨进程租约/断点对账)**           | **是 (严格限定 child.pid，无 sleep 竞态，超时保护)** | **已补齐**：真实 OS 强杀并验证已提交步骤零重复执行                                              |
-| **B-T26.4** | **【新增】真实 Worker 初始阶段崩溃完全回滚**             | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`SIGKILLs Worker OS process before any checkpoint is committed`                                     | **是 (真实 OS 子进程 SIGKILL)** |                   **是 (断言无半提交 checkpoint，新进程全量执行)**                   |            **是 (锁定 pg_locks 后强杀)**             | **已补齐**：验证无断点时系统干净重试                                                            |
-| **B-T26.5** | **【新增】独立 Reaper 进程跨进程收敛已强杀 Worker 任务** | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`demonstrates standalone Reaper process independently converging a task`                            |   **是 (独立 Reaper 子进程)**   |          **是 (Reaper 将 running 状态转换为 retryable_failed 并重新排队)**           |              **是 (双子进程分别托管)**               | **已补齐**：验证纯 Reaper 模式的独立发现与自愈能力                                              |
-| **B-T27.1** | 旧 Run 延迟/旧 epoch 提交防护 (Fencing)                  | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>`rejects late commitStep from stale worker with FAILED_PRECONDITION`                                      |       否 (模拟过期 grant)       |                         是 (ResultCommitter CAS 校验 epoch)                          |              是 (精确 grant/epoch 传递)              | **已覆盖**：版本栅栏可靠                                                                        |
-| **B-T27.2** | 任务终态竞争唯一性                                       | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>`guarantees exactly one winning execution terminal state`                                                 |      否 (多并发 committer)      |                     是 (仅 1 个 terminal event，Task 仅一个终态)                     |              是 (Barrier 同步并发触发)               | **已覆盖**：行级锁防止双写                                                                      |
-| **B-T27.3** | **【新增】并发 Cancellation 与 Terminal Commit 竞争**    | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>`produces exactly one authoritative terminal state and maintains event sequence invariants`               |        否 (并发异步争抢)        | 是 (行锁串行化：要么 completed 获胜，要么 cancel 写入后 committer 被 CANCELLED 拒绝) |           是 (createBarrier(2) 毫秒级对齐)           | **已补齐**：消除并发终态冲突，不变量完整                                                        |
-| **B-T24**   | 安全隔离与 Artifact Root 越权防护                        | `tests/integration/artifact-integrity.test.ts`<br>`tests/integration/http-artifact-api.test.ts`                                                                    |               否                |                 是 (路径穿越 `../` 拦截、软链接越界拦截、跨租户 404)                 |          是 (文件系统与 HTTP 边界双重断言)           | **已覆盖**：租户隔离与文件系统边界完备                                                          |
+| 场景编号    | 故障与可靠性场景                                                  | 对应测试文件 / 测试名称                                                                                                                                                                                                                                                                                                                            |         是否真进程故障          |                                                                           独立 PostgreSQL 证据                                                                            |                             安全与确定性保障                              | 审计结论                                                                                        |
+| :---------- | :---------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | :-----------------------------: | :-----------------------------------------------------------------------------------------------------------------------------------------------------------------------: | :-----------------------------------------------------------------------: | :---------------------------------------------------------------------------------------------- |
+| **B-T25.1** | DB Commit 前连接中断 (Tx 未提交)                                  | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`cancels transaction and preserves zero accepted events`                                                                                                                                                                                                                                          |      否 (DB Backend 中断)       |                                                                     是 (独立 Schema, 查询 tasks 为 0)                                                                     |                 是 (pg_terminate_backend 仅中断特定 pid)                  | **已覆盖**：原有测试严谨，无需重写                                                              |
+| **B-T25.2** | DB Commit 后、HTTP Ack 前断连                                     | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`persists task when backend dies after commit but before ack`                                                                                                                                                                                                                                     |         否 (连接池中断)         |                                                          是 (Task/accepted 事件存在，重试同 key 返回相同 taskId)                                                          |                     是 (确定性断开 client connection)                     | **已覆盖**：原有测试完整满足幂等与持久化标准                                                    |
+| **B-T25.3** | 幂等键冲突与租户隔离安全                                          | `tests/chaos/b-t25-durable-ack-crash.test.ts`<br>`rejects payload mismatch under same idempotency key`                                                                                                                                                                                                                                             |               否                |                                                          是 (返回 IDEMPOTENCY_PAYLOAD_MISMATCH，零 SQL/DSN 泄露)                                                          |                         是 (纯契约与错误映射断言)                         | **已覆盖**：无内部凭据泄露风险                                                                  |
+| **B-T26.1** | Blob 已落盘、DB Commit 前崩溃                                     | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`<br>`orphan blob uncommitted crash recovery`                                                                                                                                                                                                                                                 |         否 (模拟未提交)         |                                                                是 (Blob 孤立存在但 artifacts 关系表不可见)                                                                |                        是 (隔离 artifact 目录检查)                        | **已覆盖**：孤立 blob 路径受控，查询不可见                                                      |
+| **B-T26.2** | Checkpoint 提交后 Worker 逻辑中断恢复                             | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`<br>`recovers execution from committed step checkpoint`                                                                                                                                                                                                                                      |        否 (模拟租约回拨)        |                                                                       是 (断点数据在 DB 中正确读取)                                                                       |                      是 (手动 clock 回拨触发 reaper)                      | **存在缺口**：仅通过 SQL 时间回拨模拟，未验证真实 Worker OS 进程崩溃与文件描述符/未提交事务释放 |
+| **B-T26.3** | **【新增】真实 Worker OS 子进程 SIGKILL 与自主断点恢复**          | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`SIGKILLs real Worker OS process after Step 1 checkpoint; recovered Worker resumes from checkpoint`                                                                                                                                                                                 | **是 (真实 OS 子进程 SIGKILL)** |                                                     **是 (真实 PostgreSQL advisory_lock 屏障 + 跨进程租约/断点对账)**                                                     |           **是 (严格限定 child.pid，无 sleep 竞态，超时保护)**            | **已补齐**：真实 OS 强杀并验证已提交步骤零重复执行                                              |
+| **B-T26.4** | **【新增】真实 Worker 初始阶段崩溃完全回滚**                      | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`SIGKILLs Worker OS process before any checkpoint is committed`                                                                                                                                                                                                                     | **是 (真实 OS 子进程 SIGKILL)** |                                                             **是 (断言无半提交 checkpoint，新进程全量执行)**                                                              |                       **是 (锁定 pg_locks 后强杀)**                       | **已补齐**：验证无断点时系统干净重试                                                            |
+| **B-T26.5** | **【新增】独立 Reaper 进程跨进程收敛已强杀 Worker 任务**          | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`<br>`demonstrates standalone Reaper process independently converging a task`                                                                                                                                                                                                            |   **是 (独立 Reaper 子进程)**   |                                                     **是 (Reaper 将 running 状态转换为 retryable_failed 并重新排队)**                                                     |                         **是 (双子进程分别托管)**                         | **已补齐**：验证纯 Reaper 模式的独立发现与自愈能力                                              |
+| **B-T27.1** | 旧 Run 延迟/旧 epoch 提交防护 (Fencing)                           | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>`rejects late commitStep from stale worker with FAILED_PRECONDITION`                                                                                                                                                                                                                      |       否 (模拟过期 grant)       |                                                                    是 (ResultCommitter CAS 校验 epoch)                                                                    |                        是 (精确 grant/epoch 传递)                         | **已覆盖**：版本栅栏可靠                                                                        |
+| **B-T27.2** | 任务终态竞争唯一性                                                | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>`guarantees exactly one winning execution terminal state`                                                                                                                                                                                                                                 |      否 (多并发 committer)      |                                                               是 (仅 1 个 terminal event，Task 仅一个终态)                                                                |                         是 (Barrier 同步并发触发)                         | **已覆盖**：行级锁防止双写                                                                      |
+| **B-T27.3** | **【强化】并发 Cancellation 与 Terminal Commit 确定性双分支竞争** | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`<br>1. `verifies Commit-first branch: commit wins task row lock, concurrent cancel queues and cannot overturn completed terminal state`<br>2. `verifies Cancel-first branch: cancel wins task row lock, commit receives CANCELLED, zero artifacts committed, and task converges to cancelled` |  否 (行级锁与触发器确定性拦截)  | 是 (分支 A 证明 commit 先获取锁后 cancel 无法颠覆终态且零 duplicate event；分支 B 证明 cancel 先写入后 commit 被坚决拒绝，零非法写入，Reaper/Worker 协同推进至 cancelled) | 是 (使用 PostgreSQL advisory lock 与行锁等待检测，两分支完全独立、可重复) | **已补齐并强化**：消除单次竞争的不确定性，双分支均有独立证据                                    |
+| **B-T24**   | 安全隔离与 Artifact Root 越权防护                                 | `tests/integration/artifact-integrity.test.ts`<br>`tests/integration/http-artifact-api.test.ts`                                                                                                                                                                                                                                                    |               否                |                                                           是 (路径穿越 `../` 拦截、软链接越界拦截、跨租户 404)                                                            |                     是 (文件系统与 HTTP 边界双重断言)                     | **已覆盖**：租户隔离与文件系统边界完备                                                          |
 
 ---
 
@@ -104,27 +105,35 @@
 - 模拟执行 Worker 突然断电崩溃。
 - Reaper 进程独立通过定时扫描 `tasks` 表，发现过期的 `lease_expires_at`，自主调用收敛逻辑将其置为 `retryable_failed` 并安排下次重试。
 
-### 3.3 并发取消与终态提交竞争 (B-T27)
+### 3.3 并发取消与终态提交确定性双分支竞争 (B-T27)
 
-在分布式场景下，任务执行完毕准备调用 `committer.commitStep` 与外部用户调用 `tasks.cancel` 可能在微秒级别发生竞态：
+针对 CTO Review 提出的单次并发 race 无法保证两个获胜路径均被覆盖的问题，通过 PostgreSQL 咨询锁与行级锁等待机制，分别构建了两个**完全确定性、可独立重复验证**的分支用例：
 
-- 使用 `createBarrier(2)` 将取消请求与提交请求对齐并发起。
-- **行级锁权威收敛**：
-  - 若 `commitStep` 先获得锁：任务进入 `completed`，后续取消操作感知到已终态，保持 `completed`；
-  - 若 `tasks.cancel` 先获得锁：写入 `cancel_requested_at`，`commitStep` 事务在检查任务存活时被坚决拦截，抛出 `CANCELLED` 异常并**完全回滚所有 Step 写入**；随后 Worker 协同退出，任务收敛为 `cancelled`。
-- **不变量保证**：无论何种竞态时序，Task 只能产生一个合法终态，终端事件（`completed` 或 `cancelled`）有且仅有一条。
+#### 分支 A：Commit-First 确定性路径
+
+- **机制**：在 `artifacts` 插入前设置 Advisory Lock 触发器。`committer.commitStep` 首先获取 `tasks` 行的 `FOR UPDATE` 排他锁，在插入 artifact 时进入触发器等待。
+- **并发到达**：随后发起 `tasks.cancel`，由于 `tasks` 行锁已被占用，cancel 请求必然在 PostgreSQL 内核中排队等待行锁释放。
+- **释放与收敛**：释放 Advisory Lock，`commitStep` 完成事务提交（状态置为 `completed` 并写入 terminal event）。随后 `tasks.cancel` 获得行锁，感知到任务已处于终态，返回 `terminal: true, status: 'completed'`，零覆盖、不追加任何事件。
+- **不变量**：Task 终态严格为 `completed`，审计事件中 terminal event 严格为 1 条（`completed`），绝无 `cancelled` 事件。
+
+#### 分支 B：Cancel-First 确定性路径
+
+- **机制**：在 `tasks` 表更新 `cancel_requested_at` 之后设置 Advisory Lock 触发器。`tasks.cancel` 首先获取 `tasks` 行排他锁并记录取消意图，随后在触发器处暂停。
+- **并发到达**：并发发起 `committer.commitStep`，被排队阻塞在 `tasks` 行锁上。
+- **释放与拦截**：释放 Advisory Lock，`tasks.cancel` 提交事务。`commitStep` 获得行锁后，在执行前检查检测到 `task.cancel_requested_at !== null`，坚决抛出 `DomainError('CANCELLED')`，事务完整回滚。
+- **不变量与零污染**：`artifacts` 表中该任务的产物记录为 0（零非法写入）。Worker 捕获 `CANCELLED` 后协同调用 `queue.finish('cancelled')`，最终 Task 终态严格为 `cancelled`，terminal event 严格为 1 条（`cancelled`），绝无 `completed` 事件。
 
 ---
 
 ## 4. B-T24～27 验收结果与执行证据
 
-| 编号        | 测试用例全名                                           | 测试文件路径                                                                                    | 判定结果 | 验证方式                                                          | 剩余风险与说明                     |
-| :---------- | :----------------------------------------------------- | :---------------------------------------------------------------------------------------------- | :------: | :---------------------------------------------------------------- | :--------------------------------- |
-| **B-T24**   | Artifact traversal, symlink, cross-tenant isolation    | `tests/integration/artifact-integrity.test.ts`<br>`tests/integration/http-artifact-api.test.ts` | **PASS** | 实际运行 19 + 7 项断言，覆盖 `../` 越界、绝对路径绕过、跨租户隔离 | 无。内核基于规范化根目录与受限沙箱 |
-| **B-T25**   | Durable Ack, uncommitted abort, idempotency key replay | `tests/chaos/b-t25-durable-ack-crash.test.ts`                                                   | **PASS** | 实际运行 6 项混沌断言，终止事务与连接断开                         | 无。PostgreSQL WAL 事务保证原子性  |
-| **B-T26**   | Real OS Worker Process SIGKILL & Autonomous Recovery   | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`                                     | **PASS** | **真实子进程 SIGKILL 强杀** (3 项)，断点恢复与 Reaper 收敛        | 无。依赖数据库级锁屏障，无时间竞争 |
-| **B-T26-A** | Uncommitted Blob Orphan & Step Checkpoint Isolation    | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`                                          | **PASS** | 实际运行 9 项断言，验证孤立文件隔离与幂等覆盖                     | 无。本地 Blob 存储校验完整         |
-| **B-T27**   | Old Run vs New Run Interleaving, Fencing & Cancel Race | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`                                           | **PASS** | 实际运行 5 项断言 (包含新增的 Cancel vs Commit 竞态)              | 无。Epoch 乐观锁与 Advisory 锁保障 |
+| 编号        | 测试用例全名                                                         | 测试文件路径                                                                                    | 判定结果 | 验证方式                                                                   | 剩余风险与说明                     |
+| :---------- | :------------------------------------------------------------------- | :---------------------------------------------------------------------------------------------- | :------: | :------------------------------------------------------------------------- | :--------------------------------- |
+| **B-T24**   | Artifact traversal, symlink, cross-tenant isolation                  | `tests/integration/artifact-integrity.test.ts`<br>`tests/integration/http-artifact-api.test.ts` | **PASS** | 实际运行 19 + 7 项断言，覆盖 `../` 越界、绝对路径绕过、跨租户隔离          | 无。内核基于规范化根目录与受限沙箱 |
+| **B-T25**   | Durable Ack, uncommitted abort, idempotency key replay               | `tests/chaos/b-t25-durable-ack-crash.test.ts`                                                   | **PASS** | 实际运行 6 项混沌断言，终止事务与连接断开                                  | 无。PostgreSQL WAL 事务保证原子性  |
+| **B-T26**   | Real OS Worker Process SIGKILL & Autonomous Recovery                 | `tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts`                                     | **PASS** | **真实子进程 SIGKILL 强杀** (3 项)，断点恢复与 Reaper 收敛                 | 无。依赖数据库级锁屏障，无时间竞争 |
+| **B-T26-A** | Uncommitted Blob Orphan & Step Checkpoint Isolation                  | `tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts`                                          | **PASS** | 实际运行 9 项断言，验证孤立文件隔离与幂等覆盖                              | 无。本地 Blob 存储校验完整         |
+| **B-T27**   | Old Run vs New Run Interleaving, Fencing & Cancel/Commit Dual Branch | `tests/chaos/b-t27-lease-fencing-concurrency.test.ts`                                           | **PASS** | 实际运行 6 项断言 (包含 Commit-first 与 Cancel-first 确定性双分支竞态测试) | 无。Epoch 乐观锁与 Advisory 锁保障 |
 
 ---
 
@@ -195,12 +204,13 @@ pnpm lint && pnpm format:check && pnpm typecheck && pnpm build && git diff --che
 
 ### 6.2 测试套件全量执行结果
 
-| 测试套件类型          | 执行命令                | 测试文件数 | 通过测试数 | 耗时  |                    结果                     |
-| :-------------------- | :---------------------- | :--------: | :--------: | :---: | :-----------------------------------------: |
-| **Unit Tests**        | `pnpm test:unit`        |     43     | 670 / 670  | 1.76s |                **100% PASS**                |
-| **Integration Tests** | `pnpm test:integration` |     24     | 251 / 251  | 4.60s |                **100% PASS**                |
-| **Chaos Tests**       | `pnpm test:chaos`       |     4      |  23 / 23   | 9.32s |                **100% PASS**                |
-| **E2E Tests**         | `pnpm test:e2e`         |     -      |     -      |   -   | **NOT AVAILABLE ON BASE** (由 Agent A 负责) |
+| 测试套件类型          | 执行命令                | 测试文件数 | 通过测试数 |  耗时  |                    结果                     |
+| :-------------------- | :---------------------- | :--------: | :--------: | :----: | :-----------------------------------------: |
+| **GitHub Actions CI** | CI Workflow (PR #25)    |    全部    |  全量通过  | 1m45s  |   **PASS (Node 24 LTS + PostgreSQL 17)**    |
+| **Unit Tests**        | `pnpm test:unit`        |     43     | 670 / 670  | 1.76s  |                **100% PASS**                |
+| **Integration Tests** | `pnpm test:integration` |     24     | 251 / 251  | 4.60s  |                **100% PASS**                |
+| **Chaos Tests**       | `pnpm test:chaos`       |     4      |  24 / 24   | 10.18s |                **100% PASS**                |
+| **E2E Tests**         | `pnpm test:e2e`         |     -      |     -      |   -    | **NOT AVAILABLE ON BASE** (由 Agent A 负责) |
 
 ### 6.3 真实 SIGKILL 恢复用例 5 轮连续重复验证
 
@@ -218,6 +228,23 @@ for i in {1..5}; do node --env-file-if-exists=.env.local ./node_modules/vitest/v
 | **Iteration 4** |   3    |   3    |   0    |     8.76s      |          **PASS**           |
 | **Iteration 5** |   3    |   3    |   0    |     8.95s      |          **PASS**           |
 |  **汇总统计**   | **15** | **15** | **0**  | **平均 8.89s** | **100.0% 通过率 (0 Flake)** |
+
+### 6.4 B-T27 确定性双分支竞态用例 5 轮连续重复验证
+
+针对 B-T27 中强化的 Commit-first 与 Cancel-first 双分支确定性同步用例进行 5 轮连续独立运行：
+
+```bash
+for i in {1..5}; do node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run tests/chaos/b-t27-lease-fencing-concurrency.test.ts --config vitest.chaos.config.ts; done
+```
+
+|      轮次       | 测试数 | 通过数 | 失败数 |    执行耗时    |        测试套件状态         |
+| :-------------: | :----: | :----: | :----: | :------------: | :-------------------------: |
+| **Iteration 1** |   6    |   6    |   0    |     0.77s      |          **PASS**           |
+| **Iteration 2** |   6    |   6    |   0    |     0.82s      |          **PASS**           |
+| **Iteration 3** |   6    |   6    |   0    |     0.74s      |          **PASS**           |
+| **Iteration 4** |   6    |   6    |   0    |     0.75s      |          **PASS**           |
+| **Iteration 5** |   6    |   6    |   0    |     0.78s      |          **PASS**           |
+|  **汇总统计**   | **30** | **30** | **0**  | **平均 0.77s** | **100.0% 通过率 (0 Flake)** |
 
 ---
 

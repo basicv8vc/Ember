@@ -116,7 +116,7 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
     const agent = await agents.create(ctx, { name: `agent-${label}-${randomUUID()}` });
     const created = await createQueuedTask(tasks, ctx, agent.agentId, label);
     await parkOtherOpenTasks(db.pool, created.taskId);
-    const now = await databaseNow(db.pool);
+    const now = new Date((await databaseNow(db.pool)).getTime() + 10);
     const lease = await queue.claimNext(workerName, now);
     if (lease === null) {
       throw new Error(`failed to claim task ${created.taskId}`);
@@ -470,6 +470,80 @@ describe('B-T27: Old Run vs New Run Interleaving & Lease Fencing Chaos Verificat
       const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
       const completedEvents = events.filter((e) => e.phase === 'completed');
       expect(completedEvents).toHaveLength(1);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 5. 并发 Cancellation 与 Terminal Result Commit 竞争
+  // ---------------------------------------------------------------------------
+  describe('Concurrent Cancellation vs Terminal Result Commit Race', () => {
+    it('produces exactly one authoritative terminal state and maintains event sequence invariants under concurrent cancel and commit', async () => {
+      const committer = createCommitter();
+      const task = await claimForAgent('cancel-vs-commit-race', 'worker-cancel-race');
+      const taskId = task.lease.taskId;
+
+      const staged = await blobs.stage(
+        tenant.tenantId,
+        Buffer.from('cancel-commit race output'),
+        'text/plain',
+      );
+
+      const commitRequest: CommitStepRequest = {
+        operationId: `op:cancel-commit-race:${taskId}`,
+        mode: 'result',
+        artifacts: [{ artifactId: staged.stagedId, staged }],
+      };
+
+      const barrier = createBarrier(2, 'cancel-vs-commit-barrier');
+
+      // 并发发起任务取消与终态提交
+      const [_cancelOutcome, commitResult] = await Promise.allSettled([
+        (async () => {
+          await barrier.wait();
+          return tasks.cancel(ctx, taskId);
+        })(),
+        (async () => {
+          await barrier.wait();
+          return committer.commitStep(task.grant, commitRequest);
+        })(),
+      ]);
+
+      // 验证无论哪个分支先抢到锁，数据库不变量得到保证：
+      // 情况 A: commitStep 先抢到锁并提交 -> Task 变为 completed，Run 变为 succeeded
+      // 情况 B: tasks.cancel 先抢到锁并记录 cancel_requested_at -> commitStep 必须被坚决拒绝 (CANCELLED)，零写入，随后 Reaper 将 Task 收敛为 cancelled
+      const taskAfterRace = await readTask(db.observerPool, tenant.tenantId, taskId);
+
+      if (taskAfterRace.status === 'completed') {
+        // commitStep 获胜
+        expect(commitResult.status).toBe('fulfilled');
+        const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
+        const terminalEvents = events.filter((e) =>
+          ['completed', 'cancelled', 'failed'].includes(e.phase),
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(terminalEvents[0]?.phase).toBe('completed');
+      } else {
+        // cancel 意图已成功落库，commitStep 必须被 CANCELLED 拒绝
+        expect(taskAfterRace.cancel_requested_at).not.toBeNull();
+        expect(commitResult.status).toBe('rejected');
+        expect((commitResult as PromiseRejectedResult).reason).toMatchObject({
+          code: 'CANCELLED',
+        });
+
+        // 协同取消：Worker 感知到取消拒绝后调用 finish('cancelled') 将 Task 收敛为 cancelled
+        const finishRes = await queue.finish(task.lease, 'cancelled');
+        expect(finishRes).toBe(true);
+
+        const convergedTask = await readTask(db.observerPool, tenant.tenantId, taskId);
+        expect(convergedTask.status).toBe('cancelled');
+
+        const events = await listEventSnapshots(db.observerPool, tenant.tenantId, taskId);
+        const terminalEvents = events.filter((e) =>
+          ['completed', 'cancelled', 'failed'].includes(e.phase),
+        );
+        expect(terminalEvents).toHaveLength(1);
+        expect(terminalEvents[0]?.phase).toBe('cancelled');
+      }
     });
   });
 });

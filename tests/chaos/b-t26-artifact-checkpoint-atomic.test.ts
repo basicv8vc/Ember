@@ -142,7 +142,7 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
   async function claim(label: string): Promise<ClaimedTask> {
     const created = await createQueuedTask(tasks, ctx, agentId, label);
     await parkOtherOpenTasks(db.pool, created.taskId);
-    const now = await databaseNow(db.pool);
+    const now = new Date((await databaseNow(db.pool)).getTime() + 10);
     const lease = await queue.claimNext('worker-b-t26', now);
     if (lease === null) {
       throw new Error(`failed to claim task ${created.taskId}`);

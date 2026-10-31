@@ -38,7 +38,7 @@ Sentinel-lite deliberately separates concerns from Ember's existing governance m
 
 ## 3. Closed Action Categories & Decision Matrix
 
-Sentinel-lite defines a closed set of 7 action categories with a strict default-deny policy:
+Sentinel-lite defines a closed set of 7 action categories with a strict default-deny policy. All category lists and reason codes are deeply frozen (`Object.freeze`) at runtime to prevent in-process prototype or array tampering:
 
 | Action Category   | Policy Invariant                                   | Default Verdict              | Allowed When                                              | Reason Code                                          |
 | :---------------- | :------------------------------------------------- | :--------------------------- | :-------------------------------------------------------- | :--------------------------------------------------- |
@@ -53,13 +53,15 @@ Sentinel-lite defines a closed set of 7 action categories with a strict default-
 
 ### Key Policy Invariants
 
-1. **High-Risk Hard Denial:** `network.egress`, `host.exec`, and `credential.use` are permanently denied in Round 1. Even if an administrator mistakenly places them inside `policy.allowedActions`, `evaluateSentinelPolicy` will reject them.
-2. **Mutations Require Approval:** `external.mutate` can **ONLY** evaluate to `require_approval`. It can never evaluate to `allow`.
-3. **Local Mock Write Restriction:** `mock.write` defaults to `deny` in `createDefaultSentinelPolicy`. It is only permitted when explicitly enabled as a pure local mock.
+1. **Explicit Safe Mock Limitation (`isSafeMockActionCategory`):** Only `mock.read`, `mock.write`, and `mock.compute` can **EVER** enter the `allow` decision branch. Non-mock categories, even if mistakenly or maliciously configured in `policy.allowedActions`, will **NEVER** receive `allow`.
+2. **Runtime Immutability:** `SENTINEL_ACTION_CATEGORIES`, `SAFE_MOCK_ACTION_CATEGORIES`, and `SENTINEL_REASON_CODES` are deeply frozen with `Object.freeze()`. Any runtime attempt to mutate, append, or modify elements throws a `TypeError`.
+3. **High-Risk Hard Denial:** `network.egress`, `host.exec`, and `credential.use` are permanently denied in Round 1.
+4. **Mutations Require Approval:** `external.mutate` can **ONLY** evaluate to `require_approval`. It can never evaluate to `allow`.
+5. **Local Mock Write Restriction:** `mock.write` defaults to `deny` in `createDefaultSentinelPolicy`. It is only permitted when explicitly enabled as a pure local mock.
 
 ---
 
-## 4. Input Sanitization & Anti-Spoofing Architecture
+## 4. Input Sanitization, Anti-Spoofing & Identity Boundaries
 
 ### Minimal Non-Sensitive Intent
 
@@ -71,6 +73,12 @@ Sentinel-lite defines a closed set of 7 action categories with a strict default-
 - `runId`: Verified UUID string.
 - `taskId` / `actionId`: Optional UUID strings.
 
+### Critical Identity & Lease Verification Boundary
+
+> [!IMPORTANT]
+> At the Sentinel-lite layer, validation of `tenantId` and `runId` is **strictly syntactic** (UUID syntax) and **scope-matching** (`intent.tenantId === policy.tenantId`).
+> String equality between two Tenant IDs does **NOT** constitute cryptographic identity verification or active lease ownership. Full authentication (bearer token verification) and lease ownership must be provided by subsequent control plane / execution runtime integration (Gateway Auth middleware and Postgres lease manager).
+
 ### Rejection of Sensitive Payloads
 
 - **Strict Schema Rejection:** Passing raw prompts, command strings, tokens, URL secrets, file contents, or client-asserted roles (`role: "admin"`, `isApproved: true`) fails schema validation closed (`DENY_INVALID_INTENT`).
@@ -79,7 +87,9 @@ Sentinel-lite defines a closed set of 7 action categories with a strict default-
 
 ---
 
-## 5. Interception Gate Wrapper
+## 5. Interception Gate Wrapper & Error Normalization
+
+### Pre-Execution Gate Wrapper
 
 `enforceSentinelGate` and `enforceSentinelGateSync` wrap actions prior to execution:
 
@@ -104,6 +114,15 @@ export async function enforceSentinelGate<T>(
 3. **Require Approval:** `action()` is invoked **0 times**. Throws `DomainError('POLICY_DENIED')`.
 4. **Invalid Schema / Parse Failure:** `action()` is invoked **0 times**. Throws `DomainError('POLICY_DENIED')`.
 
+### Runtime Error Validation & Normalization
+
+The public error conversion function `toSentinelDeniedError(decision: unknown): DomainError` validates and sanitizes its argument at runtime:
+
+- Null, undefined, primitive, or malformed inputs are safely normalized to `verdict=deny reason=DENY_DEFAULT action=unknown version=0`.
+- Arbitrary strings or prompt injection attempts in `verdict`, `reasonCode`, or `actionCategory` are matched against frozen sets; unrecognized strings fall back to safe enum values.
+- `policyVersion` is checked for positive integer finiteness, normalizing invalid values to `0`.
+- Diagnostics are guaranteed to contain **zero** caller-injected strings or sensitive tokens.
+
 ---
 
 ## 6. Implementation & File Boundaries
@@ -111,8 +130,8 @@ export async function enforceSentinelGate<T>(
 Strict ownership was maintained during this change. No forbidden files were modified:
 
 - **Created:**
-  - `packages/execution/src/sentinel-lite.ts`: Complete policy engine, strict schemas, evaluator, and gate wrappers.
-  - `tests/unit/sentinel-lite.test.ts`: Comprehensive test suite (52 tests).
+  - `packages/execution/src/sentinel-lite.ts`: Complete policy engine, strict schemas, evaluator, runtime-frozen constants, and gate wrappers.
+  - `tests/unit/sentinel-lite.test.ts`: Comprehensive test suite (57 tests).
   - `docs/P0C-SENTINEL-LITE.md`: Architecture, specification, and verification document.
 - **Modified:**
   - `packages/execution/src/index.ts`: Appended Sentinel-lite public exports only.
@@ -128,17 +147,19 @@ Strict ownership was maintained during this change. No forbidden files were modi
 
 All tests and validation scripts pass in the isolated worktree (`feature/p0c-1b-sentinel-policy`):
 
-| Check / Test Command             | Exit Code | Result / Details                                        |
-| :------------------------------- | :-------- | :------------------------------------------------------ |
-| `pnpm install --frozen-lockfile` | `0`       | Lockfile up to date, 0 added                            |
-| `pnpm format:check`              | `0`       | Prettier check clean across all files                   |
-| `pnpm lint`                      | `0`       | ESLint clean with 0 warnings/errors                     |
-| `pnpm typecheck`                 | `0`       | `tsc -p tsconfig.json` clean                            |
-| `pnpm build`                     | `0`       | `tsc -b tsconfig.build.json` clean                      |
-| `pnpm test:unit`                 | `0`       | 45 test files, 728 tests passed (52 new Sentinel tests) |
-| `git diff --check`               | `0`       | Clean diff, no trailing whitespace                      |
-
-_(Note: Postgres integration / chaos / e2e tests were not part of this pure in-memory module change and are marked according to DoD)_.
+| Check / Test Command             | Exit Code | Result / Details                                                                                                                                                                                                                             |
+| :------------------------------- | :-------: | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `pnpm install --frozen-lockfile` |    `0`    | Lockfile up to date, 0 added                                                                                                                                                                                                                 |
+| `pnpm format:check`              |    `0`    | Prettier check clean across all files                                                                                                                                                                                                        |
+| `pnpm lint`                      |    `0`    | ESLint clean with 0 warnings/errors                                                                                                                                                                                                          |
+| `pnpm typecheck`                 |    `0`    | `tsc -p tsconfig.json` clean                                                                                                                                                                                                                 |
+| `pnpm build`                     |    `0`    | `tsc -b tsconfig.build.json` clean                                                                                                                                                                                                           |
+| `pnpm test:unit`                 |    `0`    | 45 test files, 733 tests passed (57 new Sentinel tests)                                                                                                                                                                                      |
+| `git diff --check`               |    `0`    | Clean diff, no trailing whitespace                                                                                                                                                                                                           |
+| `pnpm test:integration`          |    `1`    | **BLOCKED IN WORKTREE (exit 1)**: Local run blocked due to missing `TEST_DATABASE_URL` (creating `.env*` is forbidden by task boundaries). Note: Remote GitHub Actions CI (Run 41205957355) with PostgreSQL 17 passed all integration tests. |
+| `pnpm test:chaos`                |     -     | **NOT RUN** (Requires active database infrastructure / forbidden `.env*`)                                                                                                                                                                    |
+| `pnpm test:e2e`                  |     -     | **NOT RUN** (Requires active database & HTTP services / forbidden `.env*`)                                                                                                                                                                   |
+| `pnpm demo --scenario fast`      |     -     | **NOT RUN** (Requires active database infrastructure / forbidden `.env*`)                                                                                                                                                                    |
 
 ---
 

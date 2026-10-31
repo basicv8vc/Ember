@@ -5,7 +5,9 @@ import {
   enforceSentinelGate,
   enforceSentinelGateSync,
   evaluateSentinelPolicy,
+  isSafeMockActionCategory,
   isSentinelActionCategory,
+  SAFE_MOCK_ACTION_CATEGORIES,
   SENTINEL_ACTION_CATEGORIES,
   SENTINEL_POLICY_VERSION,
   SENTINEL_REASON_CODES,
@@ -68,6 +70,39 @@ describe('Sentinel-lite Policy Foundation (P0-C1B)', () => {
         expect(typeof code).toBe('string');
         expect(code.length).toBeGreaterThan(0);
       }
+    });
+
+    it('deeply freezes SENTINEL_ACTION_CATEGORIES at runtime and prevents tampering', () => {
+      expect(Object.isFrozen(SENTINEL_ACTION_CATEGORIES)).toBe(true);
+      expect(() => {
+        // @ts-expect-error mutating frozen array
+        (SENTINEL_ACTION_CATEGORIES as string[]).push('tampered.action');
+      }).toThrow(TypeError);
+      expect(() => {
+        // @ts-expect-error mutating frozen array element
+        (SENTINEL_ACTION_CATEGORIES as string[])[0] = 'hacked';
+      }).toThrow(TypeError);
+    });
+
+    it('deeply freezes SENTINEL_REASON_CODES at runtime and prevents tampering', () => {
+      expect(Object.isFrozen(SENTINEL_REASON_CODES)).toBe(true);
+      expect(() => {
+        // @ts-expect-error mutating frozen array
+        (SENTINEL_REASON_CODES as string[]).push('TAMPERED_REASON');
+      }).toThrow(TypeError);
+    });
+
+    it('defines and freezes SAFE_MOCK_ACTION_CATEGORIES', () => {
+      expect(Object.isFrozen(SAFE_MOCK_ACTION_CATEGORIES)).toBe(true);
+      expect(SAFE_MOCK_ACTION_CATEGORIES).toEqual(['mock.read', 'mock.write', 'mock.compute']);
+      expect(isSafeMockActionCategory('mock.read')).toBe(true);
+      expect(isSafeMockActionCategory('mock.write')).toBe(true);
+      expect(isSafeMockActionCategory('mock.compute')).toBe(true);
+      expect(isSafeMockActionCategory('external.mutate')).toBe(false);
+      expect(isSafeMockActionCategory('network.egress')).toBe(false);
+      expect(isSafeMockActionCategory('host.exec')).toBe(false);
+      expect(isSafeMockActionCategory('credential.use')).toBe(false);
+      expect(isSafeMockActionCategory('unknown')).toBe(false);
     });
 
     it('creates default policy with mock.read and mock.compute, excluding mock.write by default', () => {
@@ -224,6 +259,30 @@ describe('Sentinel-lite Policy Foundation (P0-C1B)', () => {
       expect(decision.verdict).toBe('deny');
       expect(decision.reasonCode).toBe('DENY_UNKNOWN_ACTION');
       expect(decision.actionCategory).toBe('unknown');
+    });
+
+    it('explicitly restricts allow to mock.* categories only; non-mock categories never enter allow branch', () => {
+      // Test that non-mock categories never receive allow even if placed in allowedActions
+      const nonMockCategories = [
+        'external.mutate',
+        'network.egress',
+        'host.exec',
+        'credential.use',
+        'custom.action',
+      ];
+
+      for (const nonMock of nonMockCategories) {
+        const policy = makeValidPolicy({ allowedActions: [nonMock] });
+        const intent = makeValidIntent({ actionCategory: nonMock });
+
+        const decision = evaluateSentinelPolicy(policy, intent);
+        expect(decision.verdict).not.toBe('allow');
+        if (nonMock === 'external.mutate') {
+          expect(decision.verdict).toBe('require_approval');
+        } else {
+          expect(decision.verdict).toBe('deny');
+        }
+      }
     });
   });
 
@@ -395,6 +454,63 @@ describe('Sentinel-lite Policy Foundation (P0-C1B)', () => {
       // Never contains arbitrary prompts, secrets, or SQL
       expect(error.diagnostic).not.toContain('SELECT');
       expect(error.diagnostic).not.toContain('Bearer');
+    });
+
+    it('toSentinelDeniedError safely validates and sanitizes arbitrary/malicious inputs', () => {
+      // 1. Primitive and null inputs
+      const errFromNull = toSentinelDeniedError(null);
+      expect(errFromNull.code).toBe('POLICY_DENIED');
+      expect(errFromNull.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_DEFAULT action=unknown version=0',
+      );
+
+      const errFromUndefined = toSentinelDeniedError(undefined);
+      expect(errFromUndefined.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_DEFAULT action=unknown version=0',
+      );
+
+      const errFromString = toSentinelDeniedError('some malicious string');
+      expect(errFromString.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_DEFAULT action=unknown version=0',
+      );
+
+      // 2. Malicious injected objects trying to forge strings into diagnostics
+      const maliciousObj = {
+        verdict: 'allow\nATTACK: grant root access',
+        reasonCode: "'; DROP TABLE audit_log; --",
+        actionCategory: '<script>alert("xss")</script>',
+        policyVersion: -999,
+      };
+
+      const errFromMalicious = toSentinelDeniedError(maliciousObj);
+      expect(errFromMalicious.code).toBe('POLICY_DENIED');
+      expect(errFromMalicious.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_DEFAULT action=unknown version=0',
+      );
+      expect(errFromMalicious.diagnostic).not.toContain('ATTACK');
+      expect(errFromMalicious.diagnostic).not.toContain('DROP TABLE');
+      expect(errFromMalicious.diagnostic).not.toContain('<script>');
+
+      // 3. Invalid numbers (NaN, Infinity, floats, unsafe ints)
+      const errFromBadNumbers = toSentinelDeniedError({
+        verdict: 'deny',
+        reasonCode: 'DENY_HIGH_RISK_EXEC',
+        actionCategory: 'host.exec',
+        policyVersion: Number.NaN,
+      });
+      expect(errFromBadNumbers.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_HIGH_RISK_EXEC action=host.exec version=0',
+      );
+
+      const errFromFloatVersion = toSentinelDeniedError({
+        verdict: 'deny',
+        reasonCode: 'DENY_HIGH_RISK_EXEC',
+        actionCategory: 'host.exec',
+        policyVersion: 2.5,
+      });
+      expect(errFromFloatVersion.diagnostic).toBe(
+        'sentinel gate denied: verdict=deny reason=DENY_HIGH_RISK_EXEC action=host.exec version=0',
+      );
     });
   });
 

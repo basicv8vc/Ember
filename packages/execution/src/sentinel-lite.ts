@@ -18,8 +18,10 @@ export const SENTINEL_POLICY_VERSION = 1;
  * - Local safe mocks: `mock.read`, `mock.write`, `mock.compute`
  * - Mutating operations requiring durable human approval: `external.mutate`
  * - Hard-denied high-risk actions in Round 1: `network.egress`, `host.exec`, `credential.use`
+ *
+ * Deeply frozen at runtime to prevent in-process tampering.
  */
-export const SENTINEL_ACTION_CATEGORIES = [
+export const SENTINEL_ACTION_CATEGORIES: readonly [
   'mock.read',
   'mock.write',
   'mock.compute',
@@ -27,9 +29,35 @@ export const SENTINEL_ACTION_CATEGORIES = [
   'network.egress',
   'host.exec',
   'credential.use',
-] as const;
+] = Object.freeze([
+  'mock.read',
+  'mock.write',
+  'mock.compute',
+  'external.mutate',
+  'network.egress',
+  'host.exec',
+  'credential.use',
+] as const);
 
 export type SentinelActionCategory = (typeof SENTINEL_ACTION_CATEGORIES)[number];
+
+/**
+ * Safe local mock action categories. Only these three categories can ever enter
+ * the `allow` decision branch when explicitly permitted by policy.
+ */
+export const SAFE_MOCK_ACTION_CATEGORIES: readonly ['mock.read', 'mock.write', 'mock.compute'] =
+  Object.freeze(['mock.read', 'mock.write', 'mock.compute'] as const);
+
+export type SafeMockActionCategory = (typeof SAFE_MOCK_ACTION_CATEGORIES)[number];
+
+/**
+ * Check whether a given value is an explicitly safe mock action category.
+ */
+export function isSafeMockActionCategory(value: unknown): value is SafeMockActionCategory {
+  return (
+    typeof value === 'string' && (SAFE_MOCK_ACTION_CATEGORIES as readonly string[]).includes(value)
+  );
+}
 
 /**
  * Check whether a given value is a known Sentinel action category.
@@ -44,8 +72,9 @@ export function isSentinelActionCategory(value: unknown): value is SentinelActio
  * Stable, non-sensitive reason codes for Sentinel decisions.
  *
  * Never derives from or reflects user prompt text, command bodies, URLs, or secrets.
+ * Deeply frozen at runtime.
  */
-export const SENTINEL_REASON_CODES = [
+export const SENTINEL_REASON_CODES: readonly [
   'ALLOWED_LOCAL_MOCK',
   'REQUIRE_APPROVAL_EXTERNAL_MUTATE',
   'DENY_HIGH_RISK_EGRESS',
@@ -58,7 +87,20 @@ export const SENTINEL_REASON_CODES = [
   'DENY_INVALID_POLICY',
   'DENY_TENANT_MISMATCH',
   'DENY_DEFAULT',
-] as const;
+] = Object.freeze([
+  'ALLOWED_LOCAL_MOCK',
+  'REQUIRE_APPROVAL_EXTERNAL_MUTATE',
+  'DENY_HIGH_RISK_EGRESS',
+  'DENY_HIGH_RISK_EXEC',
+  'DENY_HIGH_RISK_CREDENTIAL',
+  'DENY_MOCK_ACTION_DISALLOWED',
+  'DENY_UNKNOWN_ACTION',
+  'DENY_POLICY_VERSION_MISMATCH',
+  'DENY_INVALID_INTENT',
+  'DENY_INVALID_POLICY',
+  'DENY_TENANT_MISMATCH',
+  'DENY_DEFAULT',
+] as const);
 
 export type SentinelReasonCode = (typeof SENTINEL_REASON_CODES)[number];
 
@@ -165,17 +207,59 @@ export function createDefaultSentinelPolicy(
   return deepFreeze(SentinelPolicySchema.parse(policy));
 }
 
+const VALID_VERDICTS: ReadonlySet<string> = new Set(['allow', 'require_approval', 'deny']);
+const VALID_REASON_CODES: ReadonlySet<string> = new Set(SENTINEL_REASON_CODES);
+
 /**
  * Adapt a non-allow decision to the existing stable domain error vocabulary.
  *
  * Uses `POLICY_DENIED`. The diagnostic names only fixed verdict, reason code,
  * normalized action category, and policy version. It never echoes prompts or secrets.
+ *
+ * Runtime validation is enforced on `decision` to prevent untrusted / malicious objects
+ * from injecting arbitrary strings into diagnostic text.
  */
-export function toSentinelDeniedError(decision: SentinelDecision): DomainError {
+export function toSentinelDeniedError(decision: unknown): DomainError {
+  let safeVerdict: SentinelVerdict = 'deny';
+  let safeReason: SentinelReasonCode = 'DENY_DEFAULT';
+  let safeAction: SentinelActionCategory | 'unknown' = 'unknown';
+  let safeVersion = 0;
+
+  if (decision !== null && typeof decision === 'object') {
+    const candidate = decision as Record<string, unknown>;
+
+    if (typeof candidate['verdict'] === 'string' && VALID_VERDICTS.has(candidate['verdict'])) {
+      safeVerdict = candidate['verdict'] as SentinelVerdict;
+    }
+
+    if (
+      typeof candidate['reasonCode'] === 'string' &&
+      VALID_REASON_CODES.has(candidate['reasonCode'])
+    ) {
+      safeReason = candidate['reasonCode'] as SentinelReasonCode;
+    }
+
+    if (
+      typeof candidate['actionCategory'] === 'string' &&
+      isSentinelActionCategory(candidate['actionCategory'])
+    ) {
+      safeAction = candidate['actionCategory'];
+    }
+
+    if (
+      typeof candidate['policyVersion'] === 'number' &&
+      Number.isInteger(candidate['policyVersion']) &&
+      candidate['policyVersion'] >= 1 &&
+      candidate['policyVersion'] <= Number.MAX_SAFE_INTEGER
+    ) {
+      safeVersion = candidate['policyVersion'];
+    }
+  }
+
   return new DomainError(
     'POLICY_DENIED',
-    `sentinel gate denied: verdict=${decision.verdict} reason=${decision.reasonCode} ` +
-      `action=${decision.actionCategory} version=${decision.policyVersion}`,
+    `sentinel gate denied: verdict=${safeVerdict} reason=${safeReason} ` +
+      `action=${safeAction} version=${safeVersion}`,
   );
 }
 
@@ -192,8 +276,9 @@ export function toSentinelDeniedError(decision: SentinelDecision): DomainError {
  * 5. `external.mutate` is ALWAYS `require_approval`, never granting direct execution rights.
  * 6. Local safe mock operations (`mock.read`, `mock.compute`, `mock.write`) can be `allow`
  *    only if explicitly present in `policy.allowedActions`.
- * 7. Unknown actions fail closed (`DENY_UNKNOWN_ACTION`).
- * 8. Never reads clock, never calls random, never accesses DB or network, does not mutate inputs.
+ * 7. Non-mock categories can NEVER enter the `allow` branch under any circumstances.
+ * 8. Unknown actions fail closed (`DENY_UNKNOWN_ACTION`).
+ * 9. Never reads clock, never calls random, never accesses DB or network, does not mutate inputs.
  *    The returned decision is deeply frozen.
  */
 export function evaluateSentinelPolicy(
@@ -227,7 +312,7 @@ export function evaluateSentinelPolicy(
     );
   }
 
-  // Step 4: Tenant matching check (anti-spoofing)
+  // Step 4: Tenant matching check (anti-spoofing boundary check)
   if (trustedIntent.tenantId !== trustedPolicy.tenantId) {
     const safeCategory = isSentinelActionCategory(trustedIntent.actionCategory)
       ? trustedIntent.actionCategory
@@ -263,12 +348,21 @@ export function evaluateSentinelPolicy(
     );
   }
 
-  // Step 8: Local mock operations (mock.read, mock.compute, mock.write)
-  if (trustedPolicy.allowedActions.includes(category)) {
-    return makeDecision('allow', 'ALLOWED_LOCAL_MOCK', category, trustedPolicy.policyVersion);
+  // Step 8: Only explicitly safe mock categories can ever enter the allow check
+  if (isSafeMockActionCategory(category)) {
+    if (trustedPolicy.allowedActions.includes(category)) {
+      return makeDecision('allow', 'ALLOWED_LOCAL_MOCK', category, trustedPolicy.policyVersion);
+    }
+    return makeDecision(
+      'deny',
+      'DENY_MOCK_ACTION_DISALLOWED',
+      category,
+      trustedPolicy.policyVersion,
+    );
   }
 
-  return makeDecision('deny', 'DENY_MOCK_ACTION_DISALLOWED', category, trustedPolicy.policyVersion);
+  // Step 9: Any non-mock category that somehow reaches here is unconditionally denied
+  return makeDecision('deny', 'DENY_DEFAULT', 'unknown', trustedPolicy.policyVersion);
 }
 
 /**

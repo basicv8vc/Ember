@@ -241,21 +241,37 @@ describe('SandboxSmoke CLI', () => {
     }
   });
 
-  it('Trusted Errors: preserves genuine SmokeHarnessError and DomainError without leaking credentials', () => {
-    const timeoutErr = new SmokeHarnessError(
-      'ERR_PHASE_TIMEOUT',
-      'Phase "exec" timed out after 5000ms [ERR_PHASE_TIMEOUT]',
-    );
+  it('Trusted Errors: generates safe public message strictly from error code and rejects forged messages', () => {
+    const timeoutErr = new SmokeHarnessError('ERR_PHASE_TIMEOUT', {
+      phase: 'exec',
+      timeoutMs: 5000,
+    });
     expect(formatSanitizedError(timeoutErr)).toBe(
       'Phase "exec" timed out after 5000ms [ERR_PHASE_TIMEOUT]',
     );
 
-    const credentialInHarnessErr = new SmokeHarnessError(
-      'ERR_EXEC_FAILED',
-      'Execution failed with Bearer secret-token-xyz [ERR_EXEC_FAILED]',
+    // Overwriting .message on genuine SmokeHarnessError has zero effect (formatSanitizedError maps from code)
+    const forgedMessageHarnessErr = new SmokeHarnessError('ERR_EXEC_FAILED', {
+      exitCode: 1,
+    });
+    Object.assign(forgedMessageHarnessErr, {
+      message: 'Execution failed with Bearer secret-token-xyz [ERR_EXEC_FAILED]',
+    });
+    expect(formatSanitizedError(forgedMessageHarnessErr)).toBe(
+      'Command exited with non-zero exit code: 1 [ERR_EXEC_FAILED]',
     );
-    expect(formatSanitizedError(credentialInHarnessErr)).toBe(
-      'Execution failed with Bearer [REDACTED] [ERR_EXEC_FAILED]',
+    expect(formatSanitizedError(forgedMessageHarnessErr)).not.toContain('secret-token-xyz');
+
+    // Passing an unrecognized or sensitive phase name falls back to safe generic "Phase"
+    const maliciousPhaseErr = new SmokeHarnessError('ERR_PHASE_TIMEOUT', {
+      phase: 'MALICIOUS_SECRET_CUSTOMER_DOCUMENT_999',
+      timeoutMs: 5000,
+    });
+    expect(formatSanitizedError(maliciousPhaseErr)).toBe(
+      'Phase timed out after 5000ms [ERR_PHASE_TIMEOUT]',
+    );
+    expect(formatSanitizedError(maliciousPhaseErr)).not.toContain(
+      'MALICIOUS_SECRET_CUSTOMER_DOCUMENT_999',
     );
 
     const domainErr = new InvalidStateTransitionError('task', 'submitted', 'completed');

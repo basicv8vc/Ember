@@ -6,7 +6,12 @@ import type {
   SandboxUsageRecord,
 } from '@ember/contracts';
 import type { Id } from '@ember/domain';
-import { formatSanitizedError, SmokeHarnessError, isSmokeHarnessError } from './sanitize.js';
+import {
+  formatSanitizedError,
+  SmokeHarnessError,
+  isSmokeHarnessError,
+  UntrustedProviderError,
+} from './sanitize.js';
 import {
   SMOKE_LIMITATIONS,
   SMOKE_SCHEMA_VERSION,
@@ -30,6 +35,60 @@ export const DEFAULT_TIMEOUT_MS = 10_000;
 export const DEFAULT_EXEC_ARGV = Object.freeze(['sha256', 'hello ember']);
 
 /**
+ * Wraps a SandboxProvider instance at the invocation boundary with explicit try/catch guards.
+ * Ensures that any error (synchronous exception or asynchronous promise rejection)
+ * originating from a Provider method is unconditionally converted into an UntrustedProviderError.
+ * This guarantees that Provider exceptions can NEVER enter internal harness error branches
+ * or masquerade as trusted internal signals.
+ */
+export function createBoundaryGuardedProvider(provider: SandboxProvider): SandboxProvider {
+  const guardAsync = <Args extends unknown[], R>(
+    fn: (...args: Args) => Promise<R>,
+  ): ((...args: Args) => Promise<R>) => {
+    return async (...args: Args): Promise<R> => {
+      try {
+        return await fn(...args);
+      } catch (err: unknown) {
+        throw new UntrustedProviderError(err);
+      }
+    };
+  };
+
+  const guardSync = <Args extends unknown[], R>(
+    fn: (...args: Args) => R,
+  ): ((...args: Args) => R) => {
+    return (...args: Args): R => {
+      try {
+        return fn(...args);
+      } catch (err: unknown) {
+        throw new UntrustedProviderError(err);
+      }
+    };
+  };
+
+  const maybeLive = provider as unknown as { liveSandboxCount?: unknown };
+  const guarded: SandboxProvider & { liveSandboxCount?: () => number } = {
+    capabilities: guardAsync((...args) => provider.capabilities(...args)),
+    create: guardAsync((...args) => provider.create(...args)),
+    waitReady: guardAsync((...args) => provider.waitReady(...args)),
+    exec: guardAsync((...args) => provider.exec(...args)),
+    readOutput: guardAsync((...args) => provider.readOutput(...args)),
+    putFile: guardAsync((...args) => provider.putFile(...args)),
+    getFile: guardAsync((...args) => provider.getFile(...args)),
+    stop: guardAsync((...args) => provider.stop(...args)),
+    destroy: guardAsync((...args) => provider.destroy(...args)),
+    usage: guardAsync((...args) => provider.usage(...args)),
+  };
+
+  if (typeof maybeLive.liveSandboxCount === 'function') {
+    const liveFn = maybeLive.liveSandboxCount.bind(provider) as () => number;
+    guarded.liveSandboxCount = guardSync(liveFn);
+  }
+
+  return guarded;
+}
+
+/**
  * Wraps an asynchronous operation with an effective wall-clock timeout and AbortSignal race.
  * Prevents unresolving or hanging promises from hanging the runner indefinitely.
  */
@@ -40,10 +99,7 @@ async function withBoundedTimeout<T>(
   signal?: AbortSignal,
 ): Promise<T> {
   if (signal?.aborted) {
-    throw new SmokeHarnessError(
-      'ERR_OPERATION_ABORTED',
-      `Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`,
-    );
+    throw new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase: phaseName });
   }
 
   let timer: NodeJS.Timeout | undefined;
@@ -51,24 +107,14 @@ async function withBoundedTimeout<T>(
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      reject(
-        new SmokeHarnessError(
-          'ERR_PHASE_TIMEOUT',
-          `Phase "${phaseName}" timed out after ${timeoutMs}ms [ERR_PHASE_TIMEOUT]`,
-        ),
-      );
+      reject(new SmokeHarnessError('ERR_PHASE_TIMEOUT', { phase: phaseName, timeoutMs }));
     }, timeoutMs);
   });
 
   const abortPromise = new Promise<never>((_, reject) => {
     if (signal) {
       abortHandler = () => {
-        reject(
-          new SmokeHarnessError(
-            'ERR_OPERATION_ABORTED',
-            `Phase "${phaseName}" was aborted [ERR_OPERATION_ABORTED]`,
-          ),
-        );
+        reject(new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase: phaseName }));
       };
       signal.addEventListener('abort', abortHandler, { once: true });
     }
@@ -90,7 +136,7 @@ export class SandboxSmokeRunner {
   private readonly provider: SandboxProvider;
 
   constructor(provider: SandboxProvider) {
-    this.provider = provider;
+    this.provider = createBoundaryGuardedProvider(provider);
   }
 
   async run(options: Omit<SmokeRunnerOptions, 'provider'> = {}): Promise<SmokeReport> {
@@ -147,10 +193,7 @@ export class SandboxSmokeRunner {
       detailsExtractor?: (result: T) => Record<string, unknown>,
     ): Promise<T> => {
       if (signal?.aborted) {
-        throw new SmokeHarnessError(
-          'ERR_OPERATION_ABORTED',
-          `Phase "${phase}" was aborted [ERR_OPERATION_ABORTED]`,
-        );
+        throw new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase });
       }
       const phaseStart = performance.now();
       try {
@@ -231,10 +274,7 @@ export class SandboxSmokeRunner {
         async () => {
           const res = await this.provider.exec(createRes.sandboxId, argv, execTimeoutMs);
           if (res.exitCode !== 0) {
-            throw new SmokeHarnessError(
-              'ERR_EXEC_FAILED',
-              `Command exited with non-zero exit code: ${res.exitCode} [ERR_EXEC_FAILED]`,
-            );
+            throw new SmokeHarnessError('ERR_EXEC_FAILED', { exitCode: res.exitCode });
           }
           return res;
         },
@@ -253,10 +293,7 @@ export class SandboxSmokeRunner {
           const stderr = await this.provider.readOutput(createRes.sandboxId, execRes.stderrRef);
 
           if (stdout !== expectedSha256) {
-            throw new SmokeHarnessError(
-              'DIGEST_MISMATCH',
-              'SHA-256 digest verification failed: mismatch against expected digest [DIGEST_MISMATCH]',
-            );
+            throw new SmokeHarnessError('DIGEST_MISMATCH', { phase: 'readOutput' });
           }
           return { stdout, stderr };
         },
@@ -280,10 +317,7 @@ export class SandboxSmokeRunner {
             !Number.isFinite(usage.egressBytes) ||
             usage.egressBytes < 0
           ) {
-            throw new SmokeHarnessError(
-              'ERR_INVALID_USAGE',
-              'SandboxUsageRecord returned non-finite or negative metrics [ERR_INVALID_USAGE]',
-            );
+            throw new SmokeHarnessError('ERR_INVALID_USAGE', { phase: 'usage' });
           }
           return usage;
         },

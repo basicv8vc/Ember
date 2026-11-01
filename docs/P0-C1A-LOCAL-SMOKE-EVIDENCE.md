@@ -260,8 +260,9 @@ Resources Leaked:      false
    - Future cloud adapters (Agent B/C) can implement `SandboxProvider` and plug into the same `SandboxSmokeRunner` without duplicating harness lifecycle logic or test assertion pipelines.
 3. **Redaction & Anti-Spoofing Security Architecture:**
    - All errors and serialized outputs are sanitized via `formatSanitizedError` and `serializeSafeJson`.
-   - Only trusted internal `SmokeHarnessError` instances (marked with a private module Symbol brand) and `@ember/domain` `DomainError` instances (whose client messages are statically mapped) are formatted.
-   - Provider exceptions and arbitrary unverified errors are strictly mapped to fixed safe messages (`Provider operation failed${ctxStr} [ERR_PROVIDER_EXECUTION]`), preventing any message substring spoofing (e.g. embedding `[ERR_PHASE_TIMEOUT]`), arbitrary `error.code` injection (e.g. `code: 'POLICY_DENIED'`), or duck-typed error manipulation of report or cleanup state.
+   - **Provider Invocation Boundary Guard:** All calls to Provider methods are wrapped with `createBoundaryGuardedProvider`, catching any error (synchronous or promise rejection) and wrapping it into `UntrustedProviderError`. Even if a Provider directly instantiates `SmokeHarnessError`, it is intercepted at the boundary and treated as untrusted provider execution failure.
+   - **Fixed Error Code Mapping:** The public text of internal `SmokeHarnessError` is generated strictly from fixed error code templates (`formatHarnessErrorMessage`). It completely ignores arbitrary incoming `message` fields, preventing any customer document or secret leakage.
+   - **State Machine Protection:** Cleanup timeout status (`UNKNOWN`) requires trusted internal `SmokeHarnessError` with code `ERR_PHASE_TIMEOUT`. Provider exceptions cannot disguise cleanup failure as a timeout.
 
 ---
 
@@ -274,10 +275,10 @@ Resources Leaked:      false
 | `pnpm lint`                      |   **0**   | ESLint passed with 0 errors and 0 warnings                                                                                                                                             |
 | `pnpm typecheck`                 |   **0**   | TypeScript typecheck passed (`tsc -p tsconfig.json`)                                                                                                                                   |
 | `pnpm build`                     |   **0**   | Monorepo build passed (`tsc -b tsconfig.build.json`)                                                                                                                                   |
-| `pnpm test:unit`                 |   **0**   | **46 test files passed, 712 unit tests passed** (+2 test files, +36 new smoke tests)                                                                                                   |
-| `pnpm sandbox:smoke:local`       |   **0**   | Complete Fake lifecycle verified (8 phases PASS, 4.33ms)                                                                                                                               |
+| `pnpm test:unit`                 |   **0**   | **46 test files passed, 713 unit tests passed** (+2 test files, +37 new smoke tests)                                                                                                   |
+| `pnpm sandbox:smoke:local`       |   **0**   | Complete Fake lifecycle verified (8 phases PASS, ~5ms)                                                                                                                                 |
 | `git diff --check`               |   **0**   | Zero trailing whitespace or merge conflict markers                                                                                                                                     |
-| `pnpm demo --scenario fast`      |   **0**   | Fast Path invariants verified against isolated local loopback (145ms)                                                                                                                  |
+| `pnpm demo --scenario fast`      |   **0**   | Fast Path invariants verified against isolated local loopback (149ms)                                                                                                                  |
 | `pnpm test:integration`          |   **1**   | **Failed (exit 1)**: `TEST_DATABASE_URL is required for integration tests`. The integration harness requires `.env.local` which cannot be modified due to strict file ownership rules. |
 | `pnpm test:chaos` / `test:e2e`   | _Skipped_ | Unrun: same prerequisite dependency on `.env.local` / `TEST_DATABASE_URL`.                                                                                                             |
 

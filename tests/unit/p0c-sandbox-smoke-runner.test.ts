@@ -12,6 +12,7 @@ import {
   EXPECTED_HELLO_EMBER_SHA256,
   SandboxSmokeRunner,
 } from '../../apps/cli/src/sandbox-smoke/runner.js';
+import { SmokeHarnessError } from '../../apps/cli/src/sandbox-smoke/sanitize.js';
 import {
   SMOKE_SCHEMA_VERSION,
   SmokeReportSchema,
@@ -798,6 +799,92 @@ describe('SandboxSmokeRunner', () => {
         'Provider operation failed during destroy [ERR_PROVIDER_EXECUTION]',
       );
       expect(JSON.stringify(report)).not.toContain('DUCK_TYPED_DESTROY_LEAK');
+    }
+  });
+
+  it('Adversarial Boundary Test: Provider directly throwing genuine SmokeHarnessError never leaks sensitive content and cannot disguise cleanup failure as timeout', async () => {
+    const sensitiveDoc = 'PRIVATE_CUSTOMER_DOCUMENT_9988776655';
+
+    // 1. Provider directly throws real SmokeHarnessError during exec
+    {
+      const maliciousRealErr = new SmokeHarnessError('ERR_EXEC_FAILED', {
+        exitCode: 42,
+      });
+      Object.assign(maliciousRealErr, {
+        message: `${sensitiveDoc} [ERR_EXEC_FAILED]`,
+        customerPii: sensitiveDoc,
+      });
+
+      const provider = createMockProvider({
+        exec: () => Promise.reject(maliciousRealErr),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.exec.status).toBe('FAIL');
+      // Intercepted at provider invocation boundary, mapped to fixed safe message:
+      expect(report.phases.exec.error).toBe(
+        'Provider operation failed during exec [ERR_PROVIDER_EXECUTION]',
+      );
+      expect(JSON.stringify(report)).not.toContain(sensitiveDoc);
+    }
+
+    // 2. Provider directly throws real SmokeHarnessError during stop (cannot spoof timeout into UNKNOWN)
+    {
+      const realTimeoutErr = new SmokeHarnessError('ERR_PHASE_TIMEOUT', {
+        phase: 'stop',
+        timeoutMs: 3000,
+      });
+
+      const provider = createMockProvider({
+        stop: () => Promise.reject(realTimeoutErr),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.stopStatus).toBe('FAILED');
+      expect(report.cleanup.stopStatus).not.toBe('UNKNOWN');
+      expect(report.cleanup.stopError).toBe(
+        'Provider operation failed during stop [ERR_PROVIDER_EXECUTION]',
+      );
+    }
+
+    // 3. Provider directly throws real SmokeHarnessError during destroy (cannot spoof timeout into UNKNOWN)
+    {
+      const realTimeoutErr = new SmokeHarnessError('ERR_PHASE_TIMEOUT', {
+        phase: 'destroy',
+        timeoutMs: 3000,
+      });
+
+      const provider = createMockProvider({
+        destroy: () => Promise.reject(realTimeoutErr),
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.cleanup.destroyStatus).toBe('FAILED');
+      expect(report.cleanup.destroyStatus).not.toBe('UNKNOWN');
+      expect(report.cleanup.destroyError).toBe(
+        'Provider operation failed during destroy [ERR_PROVIDER_EXECUTION]',
+      );
+    }
+
+    // 4. Provider throws synchronously during capabilities
+    {
+      const provider = createMockProvider({
+        capabilities: () => {
+          throw new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase: 'capabilities' });
+        },
+      });
+      const runner = new SandboxSmokeRunner(provider);
+      const report = await runner.run();
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.capabilities.status).toBe('FAIL');
+      expect(report.phases.capabilities.error).toBe(
+        'Provider operation failed during capabilities [ERR_PROVIDER_EXECUTION]',
+      );
     }
   });
 });

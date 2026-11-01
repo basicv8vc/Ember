@@ -59,6 +59,17 @@ export interface WorkerConfig {
     readonly policyVersion: number;
     readonly allowedActions: readonly string[];
   };
+  /**
+   * Autonomous Commitment Scheduler settings (P0-C3B).
+   * Default disabled in production until Gate 3 review.
+   */
+  readonly scheduler: {
+    readonly enabled: boolean;
+    readonly intervalMs: number;
+    readonly batchSize: number;
+    readonly concurrency: number;
+    readonly stalledTimeoutSeconds: number;
+  };
 }
 
 const workerEnvSchema = z.object({
@@ -123,6 +134,15 @@ const workerEnvSchema = z.object({
     .default('false')
     .transform((val) => val === 'true'),
   EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS: z.string().optional(),
+  // P0-C3B Autonomous Commitment Scheduler configuration. Default disabled.
+  EMBER_SCHEDULER_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((val) => val === 'true'),
+  EMBER_SCHEDULER_INTERVAL_MS: z.coerce.number().int().min(100).max(600_000).default(5_000),
+  EMBER_SCHEDULER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
+  EMBER_SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
+  EMBER_SCHEDULER_STALLED_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(86_400).default(120),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -217,6 +237,13 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
             ? ['mock.read', 'mock.compute', 'mock.write']
             : ['mock.read', 'mock.compute'],
       ),
+    }),
+    scheduler: Object.freeze({
+      enabled: parsed.data.EMBER_SCHEDULER_ENABLED,
+      intervalMs: parsed.data.EMBER_SCHEDULER_INTERVAL_MS,
+      batchSize: parsed.data.EMBER_SCHEDULER_BATCH_SIZE,
+      concurrency: parsed.data.EMBER_SCHEDULER_CONCURRENCY,
+      stalledTimeoutSeconds: parsed.data.EMBER_SCHEDULER_STALLED_TIMEOUT_SECONDS,
     }),
   };
 }

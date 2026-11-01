@@ -48,14 +48,14 @@ apps/ios/
 
 ## 可靠性与测试矩阵
 
-| 测试层 | 必测内容 | 证据标准 |
-| --- | --- | --- |
-| Domain reducer 单元 | 所有 7 个状态、terminal 不回退、重复事件丢弃、乱序回补 | XCTest 真实结果 |
+| 测试层               | 必测内容                                                                                                              | 证据标准                                                                   |
+| -------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| Domain reducer 单元  | 所有 7 个状态、terminal 不回退、重复事件丢弃、乱序回补                                                                | XCTest 真实结果                                                            |
 | API contract fixture | Receipt 202/200、Agent 201、Task/Events/SSE、Cancel 202/200、Approval/Artifact、Error 400/401/403/404/409/429/503/504 | 与 Ember `packages/contracts`、`apps/api/src/**` 审核的 JSON fixtures 对齐 |
-| SSE parser | chunk split、`Last-Event-ID`、多行 JSON data、heartbeat、不匹配游标 400、网络断开 | 无真网可测 |
-| UI Test (simulator) | onboarding→任务→详情→取消/失败/审批、前后台、重启、Dark、Dynamic Type、VoiceOver 语义标签 | 截图 + xcodebuild/Simulator 日志；没有 Mac runner 则 NOT RUN |
-| 集成（经批准环境） | 真正 server ack、唯一任务、回放、数据隔离与权限、无假成果 | 只在 CTO 提供的安全测试环境；不使用生产凭据 |
-| 生产验收 | auth、安全、日志隐私、APNs、模型费用/限额、App Store | 均尚未授权、NOT RUN |
+| SSE parser           | chunk split、`Last-Event-ID`、多行 JSON data、heartbeat、不匹配游标 400、网络断开                                     | 无真网可测                                                                 |
+| UI Test (simulator)  | onboarding→任务→详情→取消/失败/审批、前后台、重启、Dark、Dynamic Type、VoiceOver 语义标签                             | 截图 + xcodebuild/Simulator 日志；没有 Mac runner 则 NOT RUN               |
+| 集成（经批准环境）   | 真正 server ack、唯一任务、回放、数据隔离与权限、无假成果                                                             | 只在 CTO 提供的安全测试环境；不使用生产凭据                                |
+| 生产验收             | auth、安全、日志隐私、APNs、模型费用/限额、App Store                                                                  | 均尚未授权、NOT RUN                                                        |
 
 UI 可以先用强制“MOCK ONLY” fixtures 实作可点击的模拟器体验，但不让其发送真实敏感信息，不伪装执行中或通知成功。
 

@@ -38,6 +38,9 @@
 		};
 		666666666666666666666666 /* EmberUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
+			exceptions = (
+				B00000000000000000000005 /* Exclude UI test documentation resources */,
+			);
 			path = EmberUITests;
 			sourceTree = "<group>";
 		};
@@ -58,6 +61,15 @@
 				"Features/Settings/.gitkeep",
 			);
 			target = 777777777777777777777777 /* Ember */;
+		};
+		B00000000000000000000005 /* Exclude UI test documentation resources */ = {
+			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
+			membershipExceptions = (
+				"DesignSystem/Evidence/README.md",
+				"TaskFlow/README.md",
+				"Integration/INTEGRATION_NOTES.md",
+			);
+			target = 999999999999999999999999 /* EmberUITests */;
 		};
 /* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
 

@@ -1,12 +1,12 @@
-# Ember P0-C3-0 — Shared Contract Freeze (v1.0)
+# Ember P0-C3-0 — Shared Contract Freeze (v1.1)
 
-> **Status:** PROPOSED — Submitted by Lane A for CTO Review & Freeze Confirmation.  
+> **Status:** PROPOSED (Revision 1) — Updated with CTO Changes Requested (4× P1, 2× P2).  
 > **Milestone:** P0-C3 (Persistent Promise Loop).  
 > **Lane A (Commitment Persistence & HTTP API):** Owner of shared contracts, PostgreSQL schemas, and API facade.  
-> **Lane B (Scheduler & Outcome Runtime):** Consumer of `DueCommitmentStore`, occurrence reservation, and outcome persistence.  
-> **Lane C (Read-Only Source & Consent Boundary):** Provider of `source_profile_id` validation and `SourceSnapshot` shape.  
+> **Lane B (Scheduler & Outcome Runtime):** Consumer of `DueCommitmentStore`, occurrence reservation, and lease-checked outcome persistence.  
+> **Lane C (Read-Only Source & Consent Boundary):** Provider of `SourceReader`, consent checking, and frozen `SourceSnapshot` specification.  
 > **Baseline Commit:** `bbcad275418cd59c29b742cd2cc6e3bd825c6054` (post-PR #43, post-PR #51, post-PR #52 `origin/main`).  
-> **Rule:** No lane may begin production implementation until the CTO signs off on this frozen specification.
+> **Rule:** Parallel implementation across lanes begins only after CTO signs off on **C3-0 FROZEN**.
 
 ---
 
@@ -26,27 +26,30 @@ A **CommitmentOutcome** is an append-only, non-sensitive summary produced by an 
                                    | (AuthContext: tenantId, principalId)
                                    v
 +-----------------------------------------------------------------------------------+
-| Lane A: Commitment Persistence & HTTP API                                          |
-|   - Durable PostgreSQL storage: commitments, occurrences, outcomes                |
-|   - Strict CAS optimistic locking on version                                      |
+| Lane A: Commitment Persistence & HTTP API                                         |
+|   - PostgreSQL authoritative clock & storage: commitments, occurrences, outcomes   |
+|   - Row-level lock & CAS optimistic locking on version                            |
 |   - Idempotency-Key deduplication (SHA-256 fingerprint)                           |
 +-----------------------------------------------------------------------------------+
                   |                                     ^
-(DueCommitmentStore)                                    | (appendOutcomeIfAbsent)
+(DueCommitmentStore)                                    | (appendOutcomeIfAbsent with
+                  |                                     |  WorkerLeaseGrant check)
                   v                                     |
 +-----------------------------------------------------------------------------------+
 | Lane B: Durable Cloud Scheduler & Guarded Worker Runtime                          |
-|   - findDueCommitments(now, limit)                                                |
-|   - reserveOccurrence(commitmentId, scheduledFor, expectedVersion)                |
-|   - markDispatched(occurrenceId, taskId) -> dispatches durable Task               |
-|   - Guarded execution: Sentinel deny = 0 budget, 0 source callback               |
+|   - findDueCommitments(limit) [PostgreSQL clock authoritative]                    |
+|   - reserveOccurrence(commitmentId, expectedVersion) [Slot locked in DB]          |
+|   - deriveTaskCreationIdempotencyKey(occurrenceId) [Crash-safe Task dispatch]     |
+|   - markDispatched(occurrenceId, taskId)                                          |
+|   - Guarded execution: Sentinel deny = 0 budget, 0 source callback                |
 +-----------------------------------------------------------------------------------+
                   |
-                  v (readSnapshot)
+                  v (readSnapshot(profileId, trustedContext, signal))
 +-----------------------------------------------------------------------------------+
 | Lane C: Read-Only Source Port & Consent Boundary                                  |
 |   - source_profile_id validation & FakeSourceReader fixtures                      |
-|   - Zero-network default, zero credentials, untrusted data only                    |
+|   - Pre-read Consent check; in-flight AbortSignal on revocation/cancellation      |
+|   - Zero-network default, zero credentials, untrusted data only                   |
 +-----------------------------------------------------------------------------------+
 ```
 
@@ -76,7 +79,20 @@ export const OCCURRENCE_STATUSES = [
 ] as const;
 export type OccurrenceStatus = (typeof OCCURRENCE_STATUSES)[number];
 
-export const OUTCOME_RESULT_STATUSES = ['succeeded', 'failed', 'denied', 'no_change'] as const;
+/**
+ * Unified outcome result statuses (P2 reconciled between Lane A and Lane B).
+ *
+ * - `meaningful_change`: meaningful update detected and summarized for the user
+ * - `no_change`: check executed successfully; source had no meaningful delta
+ * - `failed`: execution failed due to deterministic or infrastructure fault
+ * - `denied`: operation rejected by Sentinel, budget, or consent policy
+ */
+export const OUTCOME_RESULT_STATUSES = [
+  'meaningful_change',
+  'no_change',
+  'failed',
+  'denied',
+] as const;
 export type OutcomeResultStatus = (typeof OUTCOME_RESULT_STATUSES)[number];
 
 /** Bounded title: 1 to 140 unicode characters, trimmed, no multiline control characters. */
@@ -93,6 +109,19 @@ export const COMMITMENT_INTERVAL_LIMITS = Object.freeze({
 
 /** Source profile ID: 3 to 64 chars, lowercase alphanumeric, dots, dashes, underscores. */
 export const SOURCE_PROFILE_ID_REGEX = /^[a-z0-9][a-z0-9._-]{2,63}$/;
+
+/**
+ * Frozen SourceSnapshot item limits (P2 reconciled across Lanes A, B, and C).
+ */
+export const SOURCE_SNAPSHOT_LIMITS = Object.freeze({
+  profileIdMinChars: 3,
+  profileIdMaxChars: 64,
+  itemIdMaxChars: 128,
+  itemTitleMaxChars: 256,
+  itemContentSnippetMaxChars: 1_000,
+  maxItems: 50,
+  maxPayloadBytes: 65_536, // 64 KiB ceiling
+});
 
 /** Outcome summary bound: 1 to 2,000 characters. */
 export const OUTCOME_SUMMARY_LIMITS = Object.freeze({
@@ -115,7 +144,7 @@ export interface CommitmentDto {
   readonly schedule_kind: ScheduleKind; // once | interval
   readonly interval_seconds: number | null; // null for once; 900..2592000 for interval
   readonly next_due_at: string | null; // RFC 3339 timestamp or null
-  readonly source_profile_id: string; // Regex matching ^[a-z0-9][a-z0-9._-]{2,63}$
+  readonly source_profile_id: string; // Matches ^[a-z0-9][a-z0-9._-]{2,63}$
   readonly version: number; // Positive integer (starts at 1, increments on state change)
   readonly created_at: string; // RFC 3339
   readonly updated_at: string; // RFC 3339
@@ -171,7 +200,7 @@ export interface CommitmentOutcomeDto {
   readonly occurrence_id: string; // UUIDv4
   readonly task_id: string; // UUIDv4
   readonly summary: string; // 1..2000 characters, non-sensitive
-  readonly result_status: OutcomeResultStatus; // succeeded | failed | denied | no_change
+  readonly result_status: OutcomeResultStatus; // meaningful_change | no_change | failed | denied
   readonly created_at: string; // RFC 3339
 }
 ```
@@ -182,7 +211,7 @@ export interface CommitmentOutcomeDto {
 export interface CommitmentOutcomePageDto {
   readonly commitment_id: string;
   readonly outcomes: readonly CommitmentOutcomeDto[];
-  readonly next_cursor?: string; // Opaque base64 cursor or ISO timestamp cursor
+  readonly next_cursor?: string; // Opaque cursor for chronological pagination
 }
 ```
 
@@ -264,7 +293,7 @@ export interface CommitmentRepository {
 
   /**
    * Transition paused -> active.
-   * Recalculates next_due_at if it is in the past.
+   * Recalculates next_due_at if it is in the past using DB clock.
    * Rejects terminal states with INVALID_STATE_TRANSITION.
    */
   resume(
@@ -275,7 +304,7 @@ export interface CommitmentRepository {
 
   /**
    * Transition active|paused -> cancelled.
-   * Irreversible. Immediately clears next_due_at to prevent future scheduling.
+   * Irreversible. Immediately clears next_due_at in DB to prevent future scheduling.
    * Idempotent if already cancelled.
    */
   cancel(
@@ -303,9 +332,36 @@ export interface CommitmentRepository {
 
 ## 4. DueCommitmentStore Interface (Scheduler Integration Port for Lane B)
 
-Lane B's scheduler does not use `AuthContext` (it operates cloud-side on trusted persisted data). It consumes the narrow `DueCommitmentStore` port implemented by Lane A:
+### 4.1 P1 Revisions Addressed
+
+1. **PostgreSQL as Authoritative Clock:**
+   The caller does **not** supply caller-local `now` or `scheduledFor`. PostgreSQL's `clock_timestamp()` is authoritative.
+   `findDueCommitments` queries `WHERE next_due_at <= clock_timestamp()`.
+   `reserveOccurrence` locks the commitment row via `SELECT ... FOR UPDATE`, validates `next_due_at <= clock_timestamp()`, and takes the persisted `next_due_at` as the authoritative `scheduled_for` timestamp. (An optional `asOfOverride` / `slotTimeOverride` is available solely in test harnesses).
+2. **Authoritative Lease Verification on Outcome Append:**
+   `appendOutcomeIfAbsent` requires a verified `WorkerLeaseGrant`. In the database transaction, it verifies:
+   - The caller owns the current valid lease in the `runs` table (`runs.worker_id = grant.workerId AND runs.lease_epoch = grant.leaseEpoch AND runs.lease_expires_at > clock_timestamp()`).
+   - The occurrence's `task_id` matches `grant.taskId`.
+   - The commitment's status is **not** `cancelled`. If cancelled, outcome write is rejected (`POLICY_DENIED` / fail closed).
+   - Old/stale workers cannot bypass checks via idempotent replays.
+3. **Atomic State Check on Commitment Completion:**
+   `markCommitmentCompleted` validates under row lock that `status = 'active'`. If the commitment was cancelled, it updates 0 rows and returns `false`. Late workers can **never** turn a `cancelled` commitment into `completed`.
+4. **Interrupted Dispatch Recovery & Reconciliation:**
+   - **Stable Task Idempotency Key:** `deriveTaskCreationIdempotencyKey(occurrenceId)` produces `commitment-occ:${occurrenceId}` so crashing before binding `taskId` never creates duplicate Tasks on retry.
+   - **Reconciliation Sweep:** `findStalledPendingOccurrences` identifies orphan pending occurrences that exceeded the dispatch deadline.
+   - **Re-binding:** `reconcilePendingOccurrence` atomically binds `task_id` and transitions status to `dispatched`.
+
+### 4.2 TypeScript Port Definition
 
 ```typescript
+export interface WorkerLeaseGrant {
+  readonly tenantId: Id;
+  readonly taskId: Id;
+  readonly runId: Id;
+  readonly leaseEpoch: number;
+  readonly workerId: string;
+}
+
 export interface DueCommitment {
   readonly commitmentId: Id;
   readonly tenantId: Id;
@@ -321,11 +377,11 @@ export interface DueCommitment {
 export interface ReservedSlot {
   readonly occurrenceId: Id;
   readonly commitmentId: Id;
-  readonly scheduledFor: Date;
+  readonly scheduledFor: Date; // Authoritative timestamp locked from commitment.next_due_at
   readonly commitmentVersion: number;
 }
 
-export interface NewOutcomeRecord {
+export interface AppendOutcomeCommand {
   readonly occurrenceId: Id;
   readonly commitmentId: Id;
   readonly taskId: Id;
@@ -333,25 +389,35 @@ export interface NewOutcomeRecord {
   readonly resultStatus: OutcomeResultStatus;
 }
 
+export interface StalledPendingOccurrence {
+  readonly occurrenceId: Id;
+  readonly commitmentId: Id;
+  readonly scheduledFor: Date;
+  readonly createdAt: Date;
+  readonly taskCreationIdempotencyKey: string;
+}
+
 export interface DueCommitmentStore {
   /**
-   * Query up to `limit` active commitments where next_due_at <= now.
-   * Read-only sweep with skip-locked or bounded row selection.
+   * Query up to `limit` active commitments where next_due_at <= clock_timestamp().
+   * PostgreSQL clock is authoritative. `asOfOverride` is strictly for virtual-clock tests.
    */
-  findDueCommitments(now: Date, limit: number): Promise<readonly DueCommitment[]>;
+  findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]>;
 
   /**
    * Transactional atomic reservation of one occurrence slot:
-   * 1. SELECT commitment FOR UPDATE. Verifies status == 'active' and version == expectedVersion.
-   * 2. Checks if occurrence (commitment_id, scheduled_for) already exists.
-   * 3. Inserts pending occurrence with generated occurrence_id.
-   * 4. Updates commitment next_due_at and increments version.
+   * 1. SELECT commitment FOR UPDATE. Verifies status == 'active', next_due_at <= now,
+   *    and version == expectedVersion.
+   * 2. Authoritative scheduledFor is taken directly from commitment.next_due_at.
+   * 3. Checks if occurrence (commitment_id, scheduled_for) already exists.
+   * 4. Inserts pending occurrence with generated occurrence_id.
+   * 5. Advances commitment next_due_at (or null if once) and increments version.
    * Returns null if commitment was modified, paused, cancelled, or slot already reserved.
    */
   reserveOccurrence(
     commitmentId: Id,
-    scheduledFor: Date,
     expectedVersion: number,
+    slotTimeOverride?: Date, // Optional override strictly for test harnesses
   ): Promise<ReservedSlot | null>;
 
   /**
@@ -360,47 +426,66 @@ export interface DueCommitmentStore {
   markDispatched(occurrenceId: Id, taskId: Id): Promise<void>;
 
   /**
-   * Records occurrence failure if Task creation or dispatch failed before running.
+   * Durably append an outcome for an occurrence with authoritative lease verification.
+   * In a single transaction:
+   * 1. Verifies runs table: worker_id, lease_epoch, lease_expires_at > now().
+   * 2. Verifies occurrence matches grant.taskId.
+   * 3. Verifies commitment is NOT cancelled.
+   * 4. Inserts outcome row (unique on occurrence_id).
+   * 5. Advances occurrence status to 'completed' (or 'failed' if result_status is failed/denied).
+   * Throws STALE_LEASE if worker lease expired or is stale.
+   * Returns false if outcome was already committed.
    */
-  markOccurrenceFailed(occurrenceId: Id, reasonCode: string): Promise<void>;
-
-  /**
-   * Durably append an outcome for an occurrence.
-   * Idempotent: (occurrence_id) has a unique constraint. If already committed, returns false.
-   */
-  appendOutcomeIfAbsent(outcome: NewOutcomeRecord): Promise<boolean>;
+  appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;
 
   /**
    * Advance one-shot commitment to 'completed' once outcome is stored.
+   * Atomically verifies status == 'active' [AND version == expectedVersion].
+   * If commitment was cancelled in the interim, updates 0 rows and returns false.
    */
-  markCommitmentCompleted(commitmentId: Id): Promise<void>;
+  markCommitmentCompleted(commitmentId: Id, expectedVersion?: number): Promise<boolean>;
+
+  /**
+   * Find occurrences stalled in 'pending' status for longer than timeoutSeconds.
+   */
+  findStalledPendingOccurrences(
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<readonly StalledPendingOccurrence[]>;
+
+  /**
+   * Crash recovery: bind existing or replayed Task ID to stalled occurrence and mark 'dispatched'.
+   */
+  reconcilePendingOccurrence(occurrenceId: Id, taskId: Id): Promise<boolean>;
+
+  /**
+   * Mark pending occurrence failed or cancelled if dispatch failed permanently.
+   */
+  markOccurrenceFailed(occurrenceId: Id, reasonCode: string): Promise<void>;
+}
+
+/**
+ * Deterministic derivation of Task creation idempotency key from occurrenceId.
+ * Format: `commitment-occ:${occurrenceId}`
+ */
+export function deriveTaskCreationIdempotencyKey(occurrenceId: Id): string {
+  return `commitment-occ:${occurrenceId}`;
 }
 ```
 
-### Scheduling Invariants
-
-1. **Single Occurrence Identity:** The composite key `(commitment_id, scheduled_for)` is unique. Two concurrent scheduler ticks or processes racing on the same due slot will result in exactly one inserted occurrence row; the second will safely receive `null` and do nothing.
-2. **At-Least-Once Execution vs Single Dispatch Record:** The scheduler guarantees a single dispatch record per slot. External side effects are never claimed as exactly-once.
-3. **No Resurrecting Cancelled Work:** `reserveOccurrence` checks status under row lock. If cancelled concurrently, reservation fails closed.
-
 ---
 
-## 5. SourceProfile ID & SourceSnapshot Minimal Contract (Lane C Boundary)
+## 5. SourceReader Contract & Consent Boundary (Lane B / Lane C Unification)
 
-Lane C provides read-only source fixtures and policy checks. Lane A persists `source_profile_id` and Lane B passes `SourceSnapshot` to the summary engine.
+### 5.1 Unified Source Types & Limits (P1 & P2 Reconciled)
 
 ```typescript
-/**
- * Opaque server-owned profile identifier.
- * NEVER a caller-provided raw URL, file path, or secret token.
- * Examples: 'fixture.github-release', 'fixture.weather-report'
- */
 export type SourceProfileId = string;
 
 export interface SourceSnapshotItem {
-  readonly id: string; // Bounded <= 128 chars
-  readonly title: string; // Bounded <= 256 chars
-  readonly contentSnippet: string; // Bounded <= 1,000 chars, untrusted text
+  readonly id: string; // Max 128 chars
+  readonly title: string; // Max 256 chars
+  readonly contentSnippet: string; // Max 1,000 chars, untrusted text
   readonly observedAt: string; // RFC 3339
 }
 
@@ -408,15 +493,46 @@ export interface SourceSnapshot {
   readonly sourceProfileId: SourceProfileId;
   readonly observedAt: string; // RFC 3339
   readonly digest: string; // SHA-256 hex string (64 characters)
-  readonly safeItems: readonly SourceSnapshotItem[]; // Maximum 50 items
+  readonly boundedSafeItems: readonly SourceSnapshotItem[]; // Max 50 items (P2 unified)
+}
+
+/**
+ * Server-derived execution context passed to SourceReader.
+ * NEVER accepted from client JSON.
+ */
+export interface TrustedSourceAccessContext {
+  readonly tenantId: Id;
+  readonly commitmentId: Id;
+  readonly taskId: Id;
+  readonly runId: Id;
+  readonly leaseEpoch: number;
+  readonly authorizedAt: string; // RFC 3339
+}
+
+/**
+ * Unified SourceReader interface implemented by Lane C and consumed by Lane B.
+ */
+export interface SourceReader {
+  readSnapshot(
+    profileId: SourceProfileId,
+    trustedContext: TrustedSourceAccessContext,
+    signal: AbortSignal,
+  ): Promise<SourceSnapshot>;
 }
 ```
 
-### Safety Rules:
+### 5.2 Consent Verification & Revocation Rules (P1 Reconciled)
 
-- **Untrusted Data Only:** Snapshot items are data to compare or summarize, **never instructions** to override Sentinel, change execution routes, or request credentials.
-- **Redaction Invariant:** Neither `source_profile_id` nor `SourceSnapshot` may contain bearer tokens, private keys, passwords, or query strings with secrets.
-- **Zero-Network Default:** In P0-C3, only deterministic fixtures are permitted. Live network egress is disabled.
+1. **Pre-Read Consent Gate:**  
+   Before calling `SourceReader.readSnapshot()`, the runtime verifies that the source profile is active, allowlisted, belongs to `trustedContext.tenantId`, and has not expired or been revoked. If consent check fails, **0 reader invocations and 0 network calls** are made; the occurrence fails with a `POLICY_DENIED` outcome.
+2. **In-Flight Cancellation / Revocation:**  
+   If a user pauses/cancels the commitment or revokes source consent while a snapshot read is in-flight, the runtime aborts the `AbortSignal`. `FakeSourceReader` / future readers must cease processing immediately.
+3. **Publication Boundary on Revoked/Cancelled State:**  
+   Even if a snapshot read completes before revocation is observed, `DueCommitmentStore.appendOutcomeIfAbsent` performs an atomic check on the commitment status inside the PostgreSQL transaction. If the commitment status is `cancelled`, the outcome write is **aborted and rejected**. A cancelled commitment can never publish new visible outcomes.
+4. **Untrusted Data Invariant:**  
+   Content inside `boundedSafeItems` is strictly data. Prompt injection patterns (e.g. `System: ignore previous instructions`) are never interpreted as instructions, tool calls, or policy changes.
+5. **Zero-Network Default:**  
+   In P0-C3, all source reads are served from deterministic local fixtures. Live network egress remains strictly disabled.
 
 ---
 
@@ -544,7 +660,7 @@ CREATE TABLE IF NOT EXISTS commitments (
   CONSTRAINT commitments_version_positive_check CHECK (version >= 1)
 );
 
--- Index for due work discovery by scheduler
+-- Index for due work discovery by scheduler (using authoritative DB clock)
 CREATE INDEX IF NOT EXISTS commitments_due_scheduling_idx
   ON commitments (next_due_at)
   WHERE status = 'active' AND next_due_at IS NOT NULL;
@@ -572,6 +688,11 @@ CREATE TABLE IF NOT EXISTS commitment_occurrences (
 CREATE INDEX IF NOT EXISTS occurrences_commitment_order_idx
   ON commitment_occurrences (commitment_id, scheduled_for DESC);
 
+-- Index for crash recovery / orphan pending reconciliation
+CREATE INDEX IF NOT EXISTS occurrences_pending_reap_idx
+  ON commitment_occurrences (created_at)
+  WHERE status = 'pending';
+
 -- 3. Commitment Outcomes table
 CREATE TABLE IF NOT EXISTS commitment_outcomes (
   id uuid PRIMARY KEY,
@@ -586,7 +707,7 @@ CREATE TABLE IF NOT EXISTS commitment_outcomes (
     REFERENCES commitments (tenant_id, id) ON DELETE RESTRICT,
   CONSTRAINT outcomes_occurrence_unique UNIQUE (occurrence_id),
   CONSTRAINT outcomes_summary_length_check CHECK (char_length(summary) >= 1 AND char_length(summary) <= 2000),
-  CONSTRAINT outcomes_result_status_check CHECK (result_status IN ('succeeded', 'failed', 'denied', 'no_change'))
+  CONSTRAINT outcomes_result_status_check CHECK (result_status IN ('meaningful_change', 'no_change', 'failed', 'denied'))
 );
 
 CREATE INDEX IF NOT EXISTS outcomes_commitment_order_idx
@@ -595,15 +716,15 @@ CREATE INDEX IF NOT EXISTS outcomes_commitment_order_idx
 
 ---
 
-## 9. Cross-Lane Interface Handoff Table
+## 9. Cross-Lane Interface Handoff Table & Sign-Off Checklist
 
-| Provider   | Consumer      | Frozen Interface / Artifact | Description                                                                          |
-| :--------- | :------------ | :-------------------------- | :----------------------------------------------------------------------------------- |
-| **Lane A** | **Lane B**    | `DueCommitmentStore` port   | `findDueCommitments`, `reserveOccurrence`, `markDispatched`, `appendOutcomeIfAbsent` |
-| **Lane A** | **Lane B, C** | `@ember/contracts` DTOs     | `CommitmentDto`, `CommitmentOccurrenceDto`, `CommitmentOutcomeDto`, `SourceSnapshot` |
-| **Lane A** | **iOS Inbox** | REST Endpoints              | `GET /v1/commitments`, `GET /v1/commitments/:id/outcomes`                            |
-| **Lane C** | **Lane A**    | `SOURCE_PROFILE_ID_REGEX`   | Format validation for accepted source profiles                                       |
-| **Lane C** | **Lane B**    | `FakeSourceReader`          | Returns `SourceSnapshot` for deterministic test evaluation                           |
+| Provider   | Consumer      | Frozen Interface / Artifact | Description                                                                                                                                                               | Status          |
+| :--------- | :------------ | :-------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | :-------------- |
+| **Lane A** | **Lane B**    | `DueCommitmentStore` port   | DB-clock authoritative `findDueCommitments`, `reserveOccurrence`, `deriveTaskCreationIdempotencyKey`, `reconcilePendingOccurrence`, lease-checked `appendOutcomeIfAbsent` | **P1 RESOLVED** |
+| **Lane A** | **Lane B, C** | `@ember/contracts` DTOs     | `CommitmentDto`, `CommitmentOccurrenceDto`, `CommitmentOutcomeDto`, `SourceSnapshot` (`boundedSafeItems`), `OutcomeResultStatus`                                          | **P2 RESOLVED** |
+| **Lane A** | **iOS Inbox** | REST Endpoints              | `GET /v1/commitments`, `GET /v1/commitments/:id/outcomes`                                                                                                                 | **FROZEN**      |
+| **Lane C** | **Lane A**    | `SOURCE_PROFILE_ID_REGEX`   | Format validation for accepted source profiles                                                                                                                            | **FROZEN**      |
+| **Lane C** | **Lane B**    | `SourceReader`              | `readSnapshot(profileId, trustedContext, signal)` with consent check & in-flight revocation                                                                               | **P1 RESOLVED** |
 
 ---
 
@@ -616,6 +737,6 @@ CREATE INDEX IF NOT EXISTS outcomes_commitment_order_idx
 
 ---
 
-## 11. CTO Freeze Confirmation Request
+## 11. Final CTO Freeze Sign-Off Request
 
-Lane A requests CTO review on this specification. Once confirmed as **C3-0 FROZEN**, Lane A, Lane B, and Lane C may begin parallel implementation on their dedicated branches.
+All 4 P1 and 2 P2 items requested by CTO have been incorporated into this document. Lane A submits this revision on PR #56 for final **C3-0 FROZEN** confirmation.

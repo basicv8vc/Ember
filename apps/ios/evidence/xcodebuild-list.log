@@ -1,0 +1,19 @@
+Command line invocation:
+    /Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild -list -project apps/ios/Ember.xcodeproj
+
+2026-11-01 17:35:25.762 xcodebuild[1328:2987534]  DVTProvisioningProfileManager: Failed to load profile "/Users/lj/Library/Developer/Xcode/UserData/Provisioning Profiles/-" (Error Domain=DVTProvisioningProfileSourceErrorDomain Code=0 "No provisioning profile provider found for profile "/Users/lj/Library/Developer/Xcode/UserData/Provisioning Profiles/-"." UserInfo={NSLocalizedDescription=No provisioning profile provider found for profile "/Users/lj/Library/Developer/Xcode/UserData/Provisioning Profiles/-".})
+2026-11-01 17:35:26.589 xcodebuild[1328:2987362]  DVTDeviceOperation: Encountered a build number "" that is incompatible with DVTBuildVersion.
+Information about project "Ember":
+    Targets:
+        Ember
+        EmberTests
+        EmberUITests
+
+    Build Configurations:
+        Debug
+        Release
+
+    If no build configuration is specified and -scheme is not passed then "Release" is used.
+
+    Schemes:
+        Ember

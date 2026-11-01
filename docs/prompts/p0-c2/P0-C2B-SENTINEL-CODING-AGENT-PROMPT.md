@@ -16,9 +16,11 @@
 ## 1. Objective & Boundaries
 
 ### 1.1 Objective
+
 Wire the **Sentinel-lite deterministic action admission gate** (`packages/execution/src/sentinel-lite.ts`) into **both** Worker execution boundaries (`apps/worker/src/run-handler.ts` and `apps/worker/src/durable-run-handler.ts`). Every claimed mock action must be checked against an authoritative, trusted server-side policy **before task effects / budget reservations**. Preserve existing Budget Guard, Lease Fencing, CAS, Checkpoint, Retry, Cancellation and Durable Approval semantics.
 
 ### 1.2 In-Scope
+
 1. **Admission Gate Evaluation (`evaluateSentinelPolicy`):**
    - Use `evaluateSentinelPolicy(policy, intent)` rather than `enforceSentinelGate(...)` (which unconditionally throws on `require_approval`).
    - Evaluate the tri-state verdict (`allow` | `require_approval` | `deny`):
@@ -27,16 +29,17 @@ Wire the **Sentinel-lite deterministic action admission gate** (`packages/execut
      - **`allow`:** Proceed to `reserveBudget(...)` and step execution.
 2. **Closed and exact Task Kind / phase classification (no ambiguous `A / B` aliases):**
 
-   | Kind / phase | Sentinel category | Additional invariant |
-   | --- | --- | --- |
-   | `mock.chat` logical action | `mock.compute` | Local FakeLLM only; Fast Path stays zero Sandbox |
-   | `mock.compute` logical action | `mock.compute` | Local deterministic compute only |
-   | `mock.file` logical action | `mock.write` | Local logical Workspace write; requires **explicit trusted opt-in** to `mock.write`, never misclassify as `mock.read` |
-   | `mock.approval` proposal/`produce` | `mock.compute` | Only creates a local simulated proposal, artifact, checkpoint and pending Approval; no external mutation |
-   | `mock.approval` resumed simulated `publish` | `mock.write` | Requires a committed, matching Approval **and** trusted local `mock.write` opt-in; publication is local CAS bookkeeping, not external API mutation |
-   | Actual `external.mutate`, `network.egress`, `host.exec`, `credential.use`, unknown action | `require_approval` or `deny` per Sentinel | **Never dispatch any real side-effect callback in P0-C2**, even if an Approval is marked approved |
+   | Kind / phase                                                                              | Sentinel category                         | Additional invariant                                                                                                                               |
+   | ----------------------------------------------------------------------------------------- | ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | `mock.chat` logical action                                                                | `mock.compute`                            | Local FakeLLM only; Fast Path stays zero Sandbox                                                                                                   |
+   | `mock.compute` logical action                                                             | `mock.compute`                            | Local deterministic compute only                                                                                                                   |
+   | `mock.file` logical action                                                                | `mock.write`                              | Local logical Workspace write; requires **explicit trusted opt-in** to `mock.write`, never misclassify as `mock.read`                              |
+   | `mock.approval` proposal/`produce`                                                        | `mock.compute`                            | Only creates a local simulated proposal, artifact, checkpoint and pending Approval; no external mutation                                           |
+   | `mock.approval` resumed simulated `publish`                                               | `mock.write`                              | Requires a committed, matching Approval **and** trusted local `mock.write` opt-in; publication is local CAS bookkeeping, not external API mutation |
+   | Actual `external.mutate`, `network.egress`, `host.exec`, `credential.use`, unknown action | `require_approval` or `deny` per Sentinel | **Never dispatch any real side-effect callback in P0-C2**, even if an Approval is marked approved                                                  |
 
    Internal checkpoint/event/lease bookkeeping is not to be relabeled as an untrusted `mock.read` to bypass `mock.write`. Verify the policy **again on checkpoint resume**; preserve the committed action digest and fencing checks before `publish`. A policy rejection may stop a run without deleting previously committed side effects. Default `createDefaultSentinelPolicy()` still excludes `mock.write`; enable it only through a **trusted local/test policy fixture or explicit trusted configuration** for legitimate P0-B mock scenarios. Do not silently loosen the global default.
+
 3. **Existing Domain State Machine Alignment:**
    - Use existing domain states from `@ember/domain`. Do NOT invent non-existent statuses like `policy_denied`.
    - On denial: Run status **`failed_terminal`**; Task terminal status **`failed`** via the existing queue/committer. Never invent Run status `failed`, never invent Task status `policy_denied`.
@@ -50,6 +53,7 @@ Wire the **Sentinel-lite deterministic action admission gate** (`packages/execut
    - Wire Lane C's simulated Broker facade in the **trusted Worker composition root** only. Pass no raw credentials, caller-supplied policy or untrusted worker ID. A live egress/credential action remains blocked; only synthetic `SIMULATED` responses are allowed. Keep the Worker fully operational when no simulated credential action is requested.
 
 ### 1.3 Out-of-Scope (Strict Non-Goals)
+
 - **NO Bypassing Sentinel for External Mutate:** `external.mutate` must NEVER evaluate directly to `allow`.
 - **NO Direct Edits to Sandbox Contracts:** Do NOT modify `packages/contracts/src/interfaces.ts` (owned by Agent C2A).
 - **NO Direct Edits to Credential Internals:** Do NOT modify `packages/credentials/src/**` (owned by Agent C2C).
@@ -60,6 +64,7 @@ Wire the **Sentinel-lite deterministic action admission gate** (`packages/execut
 ## 2. File Ownership & Change Windows
 
 ### 2.1 Allowed Write Paths
+
 - `apps/worker/src/durable-run-handler.ts`
 - `apps/worker/src/run-handler.ts` (**non-durable simulated path must not bypass admission**)
 - `apps/worker/src/poll-loop.ts`
@@ -80,6 +85,7 @@ Wire the **Sentinel-lite deterministic action admission gate** (`packages/execut
 - `docs/P0-C2B-SENTINEL-WORKER-ADMISSION.md` (new)
 
 ### 2.2 Forbidden Paths (STRICT)
+
 - `packages/credentials/src/**`
 - `packages/contracts/**`
 - `packages/postgres/src/**`
@@ -104,6 +110,7 @@ flowchart TD
 ```
 
 ### Critical Security Invariants:
+
 1. **Pre-Execution Denial:** If Sentinel evaluates to `deny`, neither `reserveBudget` nor `executor.execute` is ever called.
 2. **Deadlock-Free Approval Creation:** The preparation phase (`produce` step of `mock.approval`) is treated as a local simulation that creates the approval entity. It is not blocked by requiring prior approval.
 3. **Mutation Gate:** Real `external.mutate` is **never executable in P0-C2**, with or without approval. Existing `mock.approval` approval status only authorizes a local **simulated publish** after matching action digest, task/tenant, fencing and explicit `mock.write` policy allowance.
@@ -125,7 +132,11 @@ flowchart TD
    ```
 2. **Implement Sentinel Pre-Execution Gate in both Worker handlers:**
    ```typescript
-   import { evaluateSentinelPolicy, createDefaultSentinelPolicy, toSentinelDeniedError } from '@ember/execution';
+   import {
+     evaluateSentinelPolicy,
+     createDefaultSentinelPolicy,
+     toSentinelDeniedError,
+   } from '@ember/execution';
 
    // Before runBudgetedStep(...) in durable-run-handler.ts; the actual
    // existing helper is named runBudgetedStep, NOT executeStepWithBudget.

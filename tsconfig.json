@@ -5,6 +5,7 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
+      "@ember/connectors": ["./packages/connectors/src/index.ts"],
       "@ember/contracts": ["./packages/contracts/src/index.ts"],
       "@ember/credentials": ["./packages/credentials/src/index.ts"],
       "@ember/domain": ["./packages/domain/src/index.ts"],

@@ -136,7 +136,7 @@ describe('SandboxAdapter', () => {
 
       // Verify cleanup: 0 live sandboxes remaining
       expect(provider.liveSandboxCount()).toBe(0);
-      expect(adapter.liveSandboxCount()).toBe(0);
+      expect(adapter.liveSandboxCount?.()).toBe(0);
       expect(adapter.sandboxState(res.sandboxId)).toBe('destroyed');
     });
 
@@ -172,6 +172,59 @@ describe('SandboxAdapter', () => {
 
       expect(stopCalled).toBe(true);
       expect(destroyCalled).toBe(true);
+    });
+
+    it('stop 失败后仍尝试 destroy', async () => {
+      let stopCalled = false;
+      let destroyCalled = false;
+
+      const provider = createMockProvider({
+        stop: () => {
+          stopCalled = true;
+          return Promise.reject(new Error('stop failed'));
+        },
+        destroy: () => {
+          destroyCalled = true;
+          return Promise.resolve();
+        },
+      });
+
+      const adapter = new SandboxAdapter(provider);
+      const runErr = await attempt(() =>
+        adapter.run({
+          spec: createDummySpec(),
+          argv: ['sha256', 'test'],
+        }),
+      );
+
+      expect(stopCalled).toBe(true);
+      expect(destroyCalled).toBe(true);
+      expect(isDomainError(runErr)).toBe(true);
+      expect((runErr as DomainError).code).toBe('SANDBOX_NOT_READY');
+      expect((runErr as DomainError).diagnostic).toContain('stop');
+    });
+
+    it('destroy 失败、资源状态不可知时，完整 run 不返回无条件成功', async () => {
+      let destroyAttempted = false;
+      const provider = createMockProvider({
+        destroy: () => {
+          destroyAttempted = true;
+          return Promise.reject(new Error('destroy failed unexpectedly'));
+        },
+      });
+
+      const adapter = new SandboxAdapter(provider);
+      const runErr = await attempt(() =>
+        adapter.run({
+          spec: createDummySpec(),
+          argv: ['sha256', 'test'],
+        }),
+      );
+
+      expect(destroyAttempted).toBe(true);
+      expect(isDomainError(runErr)).toBe(true);
+      expect((runErr as DomainError).code).toBe('SANDBOX_NOT_READY');
+      expect((runErr as DomainError).diagnostic).toContain('destroy');
     });
   });
 
@@ -245,6 +298,45 @@ describe('SandboxAdapter', () => {
       const adapter = new SandboxAdapter(provider);
 
       await expect(adapter.waitReady(randomUUID())).rejects.toThrow(DomainError);
+    });
+
+    it('destroy 抛错、超时后，生命周期状态不伪报 destroyed', async () => {
+      // Case A: destroy throws error
+      const failingProvider = createMockProvider({
+        destroy: () => Promise.reject(new Error('underlying destroy failed')),
+      });
+      const adapterA = new SandboxAdapter(failingProvider);
+      const { sandboxId: idA } = await adapterA.create(createDummySpec());
+      await adapterA.waitReady(idA);
+      await adapterA.stop(idA);
+      expect(adapterA.sandboxState(idA)).toBe('stopped');
+
+      const destroyErrA = await attempt(() => adapterA.destroy(idA));
+      expect(isDomainError(destroyErrA)).toBe(true);
+      // Must NOT be reported as 'destroyed'
+      expect(adapterA.sandboxState(idA)).toBe('stopped');
+
+      // Case B: destroy times out
+      const hangingProvider = createMockProvider({
+        destroy: () => new Promise<void>(() => {}), // never resolves
+      });
+      const adapterB = new SandboxAdapter(hangingProvider, { cleanupTimeoutMs: 50 });
+      const { sandboxId: idB } = await adapterB.create(createDummySpec());
+      await adapterB.waitReady(idB);
+      expect(adapterB.sandboxState(idB)).toBe('ready');
+
+      const destroyErrB = await attempt(() => adapterB.destroy(idB, 50));
+      expect(isDomainError(destroyErrB)).toBe(true);
+      expect((destroyErrB as DomainError).code).toBe('EXECUTION_TIMEOUT');
+      // Must NOT be reported as 'destroyed'
+      expect(adapterB.sandboxState(idB)).toBe('ready');
+    });
+
+    it('缺少原生 liveSandboxCount 的 Provider 不暴露 liveSandboxCount 方法', () => {
+      const { liveSandboxCount: _ignored, ...providerWithoutCount } = createMockProvider();
+
+      const adapter = new SandboxAdapter(providerWithoutCount);
+      expect(adapter.liveSandboxCount).toBeUndefined();
     });
   });
 
@@ -396,33 +488,49 @@ describe('SandboxAdapter', () => {
       expect(sanitized.message).not.toContain('INJECTED_TIMEOUT');
     });
 
-    it('preserves legitimate DomainError code but sanitizes raw message', () => {
+    it('unconditionally maps untrusted DomainErrors to SANDBOX_NOT_READY and sanitizes raw message', () => {
       const policyDenied = new DomainError('POLICY_DENIED', 'internal unverified detail');
       const sanitized = sanitizeProviderError(policyDenied, 'create');
 
-      expect(sanitized.code).toBe('POLICY_DENIED');
+      expect(sanitized.code).toBe('SANDBOX_NOT_READY');
       expect(sanitized.diagnostic).not.toContain('internal unverified detail');
+      expect(sanitized.diagnostic).toContain('create');
     });
 
-    it('sanitizes untrusted DomainErrors carrying sensitive tokens in diagnostic without leaking to public error, diagnostic, or JSON', () => {
-      const sensitiveToken = 'ghp_SUPER_SECRET_TOKEN_VALUE_DO_NOT_LEAK_99999';
+    it('不可信 Provider 直接抛出真实 DomainError 时不能伪造权威错误码', async () => {
+      const forgedCodes = [
+        'CANCELLED',
+        'STALE_LEASE',
+        'EXECUTION_TIMEOUT',
+        'POLICY_DENIED',
+        'DEADLINE_EXCEEDED',
+      ] as const;
 
-      // Provider throws DomainError with sensitive token in diagnostic (both CANCELLED and other codes)
-      const cancelledErr = new DomainError('CANCELLED', `Aborted with token ${sensitiveToken}`);
-      const sanitizedCancelled = sanitizeProviderError(cancelledErr, 'exec');
+      for (const forgedCode of forgedCodes) {
+        const sensitiveToken = 'ghp_SUPER_SECRET_TOKEN_VALUE_DO_NOT_LEAK_99999';
+        const maliciousProvider = createMockProvider({
+          create: () =>
+            Promise.reject(
+              new DomainError(
+                forgedCode,
+                `Adversarial provider forging ${forgedCode} with token=${sensitiveToken}`,
+              ),
+            ),
+        });
 
-      expect(sanitizedCancelled.code).toBe('CANCELLED');
-      expect(sanitizedCancelled.message).not.toContain(sensitiveToken);
-      expect(sanitizedCancelled.diagnostic).not.toContain(sensitiveToken);
-      expect(JSON.stringify(sanitizedCancelled.toJSON())).not.toContain(sensitiveToken);
+        const adapter = new SandboxAdapter(maliciousProvider);
+        const caught = await attempt(() => adapter.create(createDummySpec()));
 
-      const policyErr = new DomainError('POLICY_DENIED', `Access token invalid: ${sensitiveToken}`);
-      const sanitizedPolicy = sanitizeProviderError(policyErr, 'exec');
-
-      expect(sanitizedPolicy.code).toBe('POLICY_DENIED');
-      expect(sanitizedPolicy.message).not.toContain(sensitiveToken);
-      expect(sanitizedPolicy.diagnostic).not.toContain(sensitiveToken);
-      expect(JSON.stringify(sanitizedPolicy.toJSON())).not.toContain(sensitiveToken);
+        expect(isDomainError(caught)).toBe(true);
+        const domainErr = caught as DomainError;
+        // MUST unconditionally be mapped to SANDBOX_NOT_READY
+        expect(domainErr.code).toBe('SANDBOX_NOT_READY');
+        expect(domainErr.code).not.toBe(forgedCode);
+        expect(domainErr.diagnostic).not.toContain('Adversarial provider');
+        expect(domainErr.diagnostic).not.toContain(sensitiveToken);
+        expect(domainErr.message).not.toContain(sensitiveToken);
+        expect(JSON.stringify(domainErr.toJSON())).not.toContain(sensitiveToken);
+      }
     });
 
     it('neutralizes adversarial phase strings to prevent diagnostic injection', () => {
@@ -578,6 +686,91 @@ describe('SandboxAdapter', () => {
       await expect(
         executor.execute(createContext(), DEFAULT_ROUTE, controller.signal),
       ).rejects.toThrow(DomainError);
+    });
+
+    it('Factory Promise 永久挂起时能在有限时间内退出', async () => {
+      const hangingFactory: SandboxProviderFactory = {
+        createProvider: () => new Promise<never>(() => {}), // never resolves
+      };
+
+      const executor = new DeterministicExecutor({
+        sandboxFactory: hangingFactory,
+        sandboxReadyDeadlineMs: 100, // Bounded timeout for test
+      });
+
+      const start = Date.now();
+      const caught = await attempt(() =>
+        executor.execute(createContext(), DEFAULT_ROUTE, new AbortController().signal),
+      );
+      const elapsed = Date.now() - start;
+
+      expect(isDomainError(caught)).toBe(true);
+      expect((caught as DomainError).code).toBe('EXECUTION_TIMEOUT');
+      expect(elapsed).toBeLessThan(1_000);
+    });
+
+    it('Factory 创建期间 Abort 正确生效', async () => {
+      const controller = new AbortController();
+      const delayedFactory: SandboxProviderFactory = {
+        createProvider: async ({ signal }) => {
+          return new Promise<never>((_, reject) => {
+            signal.addEventListener('abort', () => {
+              reject(new Error('aborted in factory'));
+            });
+          });
+        },
+      };
+
+      const executor = new DeterministicExecutor({
+        sandboxFactory: delayedFactory,
+        sandboxReadyDeadlineMs: 5_000,
+      });
+
+      const execPromise = executor.execute(createContext(), DEFAULT_ROUTE, controller.signal);
+      setTimeout(() => controller.abort(), 30);
+
+      const caught = await attempt(() => execPromise);
+      expect(isDomainError(caught)).toBe(true);
+      expect((caught as DomainError).code).toBe('CANCELLED');
+    });
+
+    it('Factory 原始异常包含 Token/URL/密码时，不泄露到错误或报告', async () => {
+      const sensitiveToken = 'sk-super-secret-factory-token-abcdef123456';
+      const sensitivePassword = 'pAssw0rd_factory_leak_test';
+      const sensitiveUrl = `https://user:${sensitivePassword}@api.sandbox.internal/v1`;
+
+      const leakingFactory: SandboxProviderFactory = {
+        createProvider: () => {
+          return Promise.reject(
+            new Error(
+              `Failed to initialize provider: url=${sensitiveUrl}, bearer=${sensitiveToken}`,
+            ),
+          );
+        },
+      };
+
+      const executor = new DeterministicExecutor({
+        sandboxFactory: leakingFactory,
+      });
+
+      const caught = await attempt(() =>
+        executor.execute(createContext(), DEFAULT_ROUTE, new AbortController().signal),
+      );
+
+      expect(isDomainError(caught)).toBe(true);
+      const domainErr = caught as DomainError;
+      expect(domainErr.code).toBe('SANDBOX_NOT_READY');
+
+      const serialized = JSON.stringify(domainErr.toJSON());
+      expect(domainErr.message).not.toContain(sensitiveToken);
+      expect(domainErr.message).not.toContain(sensitivePassword);
+      expect(domainErr.message).not.toContain(sensitiveUrl);
+      expect(domainErr.diagnostic).not.toContain(sensitiveToken);
+      expect(domainErr.diagnostic).not.toContain(sensitivePassword);
+      expect(domainErr.diagnostic).not.toContain(sensitiveUrl);
+      expect(domainErr.stack).not.toContain(sensitiveToken);
+      expect(serialized).not.toContain(sensitiveToken);
+      expect(serialized).not.toContain(sensitivePassword);
     });
   });
 });

@@ -21,6 +21,7 @@ import {
 } from './clock.js';
 import { simulatedId } from './crypto.js';
 import { computeSha256 } from './mock-compute.js';
+import { brandAdapterTimeout } from './sandbox-adapter.js';
 
 /** Image digest of the in-memory simulation. No container or VM exists. */
 export const FAKE_SANDBOX_IMAGE_DIGEST = 'sha256:ember-fake-sandbox-v1';
@@ -285,9 +286,8 @@ export class FakeSandboxProvider implements SandboxProvider {
     }
 
     if (this.readyDelayMs >= deadline) {
-      throw new DomainError(
-        'EXECUTION_TIMEOUT',
-        'simulated sandbox readiness exceeded its deadline',
+      throw brandAdapterTimeout(
+        new DomainError('EXECUTION_TIMEOUT', 'simulated sandbox readiness exceeded its deadline'),
       );
     }
 
@@ -342,7 +342,9 @@ export class FakeSandboxProvider implements SandboxProvider {
     }
 
     if (this.execDurationMs >= timeout) {
-      throw new DomainError('EXECUTION_TIMEOUT', 'simulated exec exceeded its timeout');
+      throw brandAdapterTimeout(
+        new DomainError('EXECUTION_TIMEOUT', 'simulated exec exceeded its timeout'),
+      );
     }
 
     await this.sleep(this.execDurationMs, this.signal);

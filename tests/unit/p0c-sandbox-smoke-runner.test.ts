@@ -991,5 +991,39 @@ describe('SandboxSmokeRunner', () => {
       expect(fakeProvider.liveSandboxCount()).toBe(0);
       expect(SmokeReportSchema.safeParse(report).success).toBe(true);
     });
+
+    it('缺少原生 liveSandboxCount 的 Provider 不会被误判为 VERIFIED_CLEAN', async () => {
+      const tenantId = randomUUID();
+      const { liveSandboxCount: _ignored, ...providerWithoutLiveCount } = createMockProvider();
+
+      // 1. Direct smoke run
+      const directRunner = new SandboxSmokeRunner(providerWithoutLiveCount);
+      const directReport = await directRunner.run({ tenantId });
+
+      // Because independent verification is not supported, overall status MUST fail-closed to FAIL
+      expect(directReport.status).toBe('FAIL');
+      expect(directReport.cleanup.destroyStatus).toBe('COMPLETED');
+      expect(directReport.cleanup.resourceVerification).toBe('NOT_SUPPORTED');
+      expect(directReport.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(directReport.cleanup.leakStatus).not.toBe('VERIFIED_CLEAN');
+      expect(directReport.cleanup.resourceVerification).not.toBe('VERIFIED_ZERO');
+      expect(directReport.cleanup.resourcesLeaked).toBe(true);
+
+      // 2. Wrapped in SandboxAdapter
+      const adapter = new SandboxAdapter(providerWithoutLiveCount);
+      expect(adapter.liveSandboxCount).toBeUndefined();
+
+      const adapterRunner = new SandboxSmokeRunner(adapter);
+      const adapterReport = await adapterRunner.run({ tenantId });
+
+      expect(adapterReport.status).toBe('FAIL');
+      expect(adapterReport.cleanup.destroyStatus).toBe('COMPLETED');
+      expect(adapterReport.cleanup.resourceVerification).toBe('NOT_SUPPORTED');
+      expect(adapterReport.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(adapterReport.cleanup.leakStatus).not.toBe('VERIFIED_CLEAN');
+      expect(adapterReport.cleanup.resourceVerification).not.toBe('VERIFIED_ZERO');
+      expect(adapterReport.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(adapterReport).success).toBe(true);
+    });
   });
 });

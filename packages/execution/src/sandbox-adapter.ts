@@ -6,11 +6,32 @@ import type {
   SandboxSpec,
   SandboxUsageRecord,
 } from '@ember/contracts';
-import { DomainError, type Id, isDomainError } from '@ember/domain';
+import { DomainError, type Id } from '@ember/domain';
 import { parseBoundedTimeoutMs, throwIfAborted } from './clock.js';
 
 const ADAPTER_TIMEOUT_BRAND = Symbol('AdapterTimeoutBrand');
 const ADAPTER_ABORT_BRAND = Symbol('AdapterAbortBrand');
+
+export function brandAdapterTimeout(err: DomainError): DomainError {
+  (err as unknown as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] = true;
+  return err;
+}
+
+export function isAdapterTimeout(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] === true
+  );
+}
+
+export function isAdapterAbort(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as Record<symbol, boolean>)[ADAPTER_ABORT_BRAND] === true
+  );
+}
 
 export type SandboxAdapterState = 'created' | 'ready' | 'executed' | 'stopped' | 'destroyed';
 
@@ -38,9 +59,17 @@ export interface SandboxRunResult {
   readonly usage: SandboxUsageRecord;
 }
 
+function toThrowError(err: unknown, fallbackMessage: string): Error {
+  if (err instanceof Error) {
+    return err;
+  }
+  return new DomainError('SANDBOX_NOT_READY', fallbackMessage);
+}
+
 const VALID_ADAPTER_PHASES = new Set([
   'capabilities',
   'create',
+  'factory_create',
   'waitReady',
   'exec',
   'readOutput',
@@ -61,25 +90,16 @@ function resolveSafePhase(phase: string): string {
  * 1. An untrusted provider exception is NEVER allowed to reflect raw error messages,
  *    stack traces, or injected secrets/tokens into public error messages, diagnostic,
  *    or serialized JSON representations.
- * 2. An untrusted provider exception cannot spoof an internal adapter timeout
- *    (e.g., by throwing EXECUTION_TIMEOUT or ERR_PHASE_TIMEOUT).
- * 3. Legitimate DomainErrors (e.g. POLICY_DENIED, EXECUTION_TIMEOUT) preserve their error code,
- *    but their diagnostic is replaced with safe static text, completely discarding provider internals.
+ * 2. An untrusted provider exception CANNOT spoof authoritative domain error codes
+ *    (e.g., CANCELLED, STALE_LEASE, EXECUTION_TIMEOUT, POLICY_DENIED). Any error directly
+ *    thrown by an untrusted provider is unconditionally mapped to SANDBOX_NOT_READY.
+ * 3. Genuine timeouts and aborts are established exclusively by the adapter's internal
+ *    race guards and branded tokens.
  * 4. The returned DomainError is ALWAYS a newly instantiated instance whose message,
- *    diagnostic, and stack trace originate within the trusted boundary.
+ *    diagnostic, and stack trace originate strictly within the trusted boundary.
  */
-export function sanitizeProviderError(err: unknown, phase: string): DomainError {
+export function sanitizeProviderError(_err: unknown, phase: string): DomainError {
   const safePhase = resolveSafePhase(phase);
-
-  if (isDomainError(err)) {
-    if (err.code === 'CANCELLED') {
-      return new DomainError('CANCELLED', `simulated execution was cancelled during ${safePhase}`);
-    }
-    // For valid DomainErrors (e.g. EXECUTION_TIMEOUT, POLICY_DENIED, INVALID_ARGUMENT),
-    // preserve the code, but sanitize the diagnostic to prevent reflecting arbitrary strings from provider.
-    return new DomainError(err.code, `sandbox provider rejected operation during ${safePhase}`);
-  }
-
   return new DomainError(
     'SANDBOX_NOT_READY',
     `sandbox provider operation failed during ${safePhase}`,
@@ -89,7 +109,7 @@ export function sanitizeProviderError(err: unknown, phase: string): DomainError 
 /**
  * Internal race guard that bounds asynchronous operations by a wall-clock timeout and abort signal.
  */
-async function withBoundedTimeout<T>(
+export async function withBoundedTimeout<T>(
   action: () => Promise<T>,
   timeoutMs: number,
   phase: string,
@@ -156,6 +176,7 @@ export class SandboxAdapter implements SandboxProvider {
   private readonly execTimeoutMs: number;
   private readonly cleanupTimeoutMs: number;
   private readonly states = new Map<Id, SandboxAdapterState>();
+  readonly liveSandboxCount?: () => number;
 
   constructor(provider: SandboxProvider, options: SandboxAdapterOptions = {}) {
     this.provider = provider;
@@ -174,6 +195,15 @@ export class SandboxAdapter implements SandboxProvider {
       'cleanupTimeoutMs',
       60_000,
     );
+
+    // Only expose liveSandboxCount if the underlying provider natively implements it.
+    // Never fake an independent count from adapter-internal lifecycle state!
+    const maybeProvider = provider as unknown as { liveSandboxCount?: unknown };
+    if (typeof maybeProvider.liveSandboxCount === 'function') {
+      this.liveSandboxCount = () => {
+        return (provider as unknown as { liveSandboxCount: () => number }).liveSandboxCount();
+      };
+    }
   }
 
   /**
@@ -332,13 +362,10 @@ export class SandboxAdapter implements SandboxProvider {
       60_000,
     );
 
-    try {
-      await this.invokeGuarded(() => this.provider.stop(sandboxId), timeout, 'stop', signal);
-    } finally {
-      const current = this.states.get(sandboxId);
-      if (current !== 'destroyed') {
-        this.states.set(sandboxId, 'stopped');
-      }
+    await this.invokeGuarded(() => this.provider.stop(sandboxId), timeout, 'stop', signal);
+    const current = this.states.get(sandboxId);
+    if (current !== 'destroyed') {
+      this.states.set(sandboxId, 'stopped');
     }
   }
 
@@ -349,11 +376,8 @@ export class SandboxAdapter implements SandboxProvider {
       60_000,
     );
 
-    try {
-      await this.invokeGuarded(() => this.provider.destroy(sandboxId), timeout, 'destroy', signal);
-    } finally {
-      this.states.set(sandboxId, 'destroyed');
-    }
+    await this.invokeGuarded(() => this.provider.destroy(sandboxId), timeout, 'destroy', signal);
+    this.states.set(sandboxId, 'destroyed');
   }
 
   putFile(sandboxId: Id, path: string, artifactRef: Id): Promise<void> {
@@ -395,25 +419,6 @@ export class SandboxAdapter implements SandboxProvider {
   }
 
   /**
-   * Reports the live sandbox count. Delegates to the underlying provider if supported,
-   * or falls back to adapter-tracked live state.
-   */
-  liveSandboxCount(): number {
-    const maybeLive = this.provider as unknown as { liveSandboxCount?: () => number };
-    if (typeof maybeLive.liveSandboxCount === 'function') {
-      return maybeLive.liveSandboxCount();
-    }
-
-    let count = 0;
-    for (const state of this.states.values()) {
-      if (state !== 'destroyed') {
-        count += 1;
-      }
-    }
-    return count;
-  }
-
-  /**
    * Returns current adapter lifecycle state of a sandbox.
    */
   sandboxState(sandboxId: Id): SandboxAdapterState | null {
@@ -427,6 +432,10 @@ export class SandboxAdapter implements SandboxProvider {
   async run(options: SandboxRunOptions): Promise<SandboxRunResult> {
     throwIfAborted(options.signal);
     let sandboxId: Id | null = null;
+    let primaryResult: SandboxRunResult | null = null;
+    let primaryError: unknown = null;
+    let stopError: unknown = null;
+    let destroyError: unknown = null;
 
     try {
       const created = await this.create(options.spec, options.signal);
@@ -455,7 +464,7 @@ export class SandboxAdapter implements SandboxProvider {
       const stderr = await this.readOutput(sandboxId, execRes.stderrRef, options.signal);
       const usage = await this.usage(sandboxId, options.signal);
 
-      return Object.freeze({
+      primaryResult = Object.freeze({
         sandboxId,
         exitCode: execRes.exitCode,
         stdout,
@@ -463,12 +472,40 @@ export class SandboxAdapter implements SandboxProvider {
         digest: stdout,
         usage,
       });
+    } catch (err: unknown) {
+      primaryError = err;
     } finally {
       if (sandboxId !== null) {
-        await this.stop(sandboxId).catch(() => undefined);
-        await this.destroy(sandboxId).catch(() => undefined);
+        try {
+          await this.stop(sandboxId);
+        } catch (err: unknown) {
+          stopError = err;
+        }
+
+        try {
+          await this.destroy(sandboxId);
+        } catch (err: unknown) {
+          destroyError = err;
+        }
       }
     }
+
+    if (primaryError !== null) {
+      throw toThrowError(primaryError, 'primary sandbox execution failed');
+    }
+
+    if (destroyError !== null) {
+      throw toThrowError(destroyError, 'sandbox destroy cleanup failed');
+    }
+    if (stopError !== null) {
+      throw toThrowError(stopError, 'sandbox stop cleanup failed');
+    }
+
+    if (!primaryResult) {
+      throw new DomainError('SANDBOX_NOT_READY', 'sandbox run terminated without result');
+    }
+
+    return primaryResult;
   }
 
   private async invokeGuarded<T>(

@@ -95,6 +95,6 @@ describe('SandboxAdapter Integration (End-to-End Runtime Layer)', () => {
     // Clean up
     await adapterA.stop(sandboxId);
     await adapterA.destroy(sandboxId);
-    expect(adapterA.liveSandboxCount()).toBe(0);
+    expect(adapterA.liveSandboxCount?.()).toBe(0);
   });
 });

@@ -1,6 +1,7 @@
 import type {
   RouteDecision,
   RunExecutionContext,
+  SandboxProvider,
   SandboxProviderFactory,
   SandboxSpec,
   SandboxUsageRecord,
@@ -23,7 +24,13 @@ import {
   FakeSandboxProviderFactory,
 } from './fake-sandbox.js';
 import { assertSupportedComputeOperation, computeSha256 } from './mock-compute.js';
-import { SandboxAdapter } from './sandbox-adapter.js';
+import {
+  isAdapterAbort,
+  isAdapterTimeout,
+  SandboxAdapter,
+  sanitizeProviderError,
+  withBoundedTimeout,
+} from './sandbox-adapter.js';
 import { parseTaskInput, parseTaskKind } from './validation.js';
 
 /**
@@ -372,11 +379,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
     throwIfAborted(signal);
     const sizing = SANDBOX_SPEC_BY_ROUTE[route.path];
 
-    const provider = await this.sandboxFactory.createProvider({
-      tenantId: ctx.tenantId,
-      runId: ctx.runId,
-      signal,
-    });
+    const provider = await this.resolveSandboxProvider(ctx, signal);
 
     if (provider instanceof FakeSandboxProvider) {
       this.onSandboxProvider?.(provider);
@@ -415,5 +418,46 @@ export class DeterministicExecutor implements SimulatedExecutor {
       digest: res.digest,
       usage: res.usage,
     };
+  }
+
+  private async resolveSandboxProvider(
+    ctx: RunExecutionContext,
+    signal: AbortSignal,
+  ): Promise<SandboxProvider> {
+    const factoryTimeoutMs = Math.min(this.sandboxReadyDeadlineMs, 5_000);
+    try {
+      const provider = await withBoundedTimeout<SandboxProvider>(
+        () =>
+          this.sandboxFactory.createProvider({
+            tenantId: ctx.tenantId,
+            runId: ctx.runId,
+            signal,
+          }),
+        factoryTimeoutMs,
+        'factory_create',
+        signal,
+      );
+
+      const candidate = provider as unknown;
+      if (
+        !candidate ||
+        typeof candidate !== 'object' ||
+        typeof (candidate as Record<string, unknown>)['create'] !== 'function' ||
+        typeof (candidate as Record<string, unknown>)['exec'] !== 'function'
+      ) {
+        throw new DomainError('SANDBOX_NOT_READY', 'sandbox factory returned an invalid provider');
+      }
+
+      return provider;
+    } catch (err: unknown) {
+      if (signal.aborted || isAdapterAbort(err)) {
+        throwIfAborted(signal);
+        throw new DomainError('CANCELLED', 'simulated execution was aborted by its caller');
+      }
+      if (isAdapterTimeout(err)) {
+        throw err instanceof Error ? err : new Error(String(err));
+      }
+      throw sanitizeProviderError(err, 'factory_create');
+    }
   }
 }

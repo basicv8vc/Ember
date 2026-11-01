@@ -24,13 +24,7 @@ import {
   FakeSandboxProviderFactory,
 } from './fake-sandbox.js';
 import { assertSupportedComputeOperation, computeSha256 } from './mock-compute.js';
-import {
-  isAdapterAbort,
-  isAdapterTimeout,
-  SandboxAdapter,
-  sanitizeProviderError,
-  withBoundedTimeout,
-} from './sandbox-adapter.js';
+import { SandboxAdapter, withBoundedTimeout } from './sandbox-adapter.js';
 import { parseTaskInput, parseTaskKind } from './validation.js';
 
 /**
@@ -425,39 +419,28 @@ export class DeterministicExecutor implements SimulatedExecutor {
     signal: AbortSignal,
   ): Promise<SandboxProvider> {
     const factoryTimeoutMs = Math.min(this.sandboxReadyDeadlineMs, 5_000);
-    try {
-      const provider = await withBoundedTimeout<SandboxProvider>(
-        () =>
-          this.sandboxFactory.createProvider({
-            tenantId: ctx.tenantId,
-            runId: ctx.runId,
-            signal,
-          }),
-        factoryTimeoutMs,
-        'factory_create',
-        signal,
-      );
+    const provider = await withBoundedTimeout<SandboxProvider>(
+      () =>
+        this.sandboxFactory.createProvider({
+          tenantId: ctx.tenantId,
+          runId: ctx.runId,
+          signal,
+        }),
+      factoryTimeoutMs,
+      'factory_create',
+      signal,
+    );
 
-      const candidate = provider as unknown;
-      if (
-        !candidate ||
-        typeof candidate !== 'object' ||
-        typeof (candidate as Record<string, unknown>)['create'] !== 'function' ||
-        typeof (candidate as Record<string, unknown>)['exec'] !== 'function'
-      ) {
-        throw new DomainError('SANDBOX_NOT_READY', 'sandbox factory returned an invalid provider');
-      }
-
-      return provider;
-    } catch (err: unknown) {
-      if (signal.aborted || isAdapterAbort(err)) {
-        throwIfAborted(signal);
-        throw new DomainError('CANCELLED', 'simulated execution was aborted by its caller');
-      }
-      if (isAdapterTimeout(err)) {
-        throw err instanceof Error ? err : new Error(String(err));
-      }
-      throw sanitizeProviderError(err, 'factory_create');
+    const candidate = provider as unknown;
+    if (
+      !candidate ||
+      typeof candidate !== 'object' ||
+      typeof (candidate as Record<string, unknown>)['create'] !== 'function' ||
+      typeof (candidate as Record<string, unknown>)['exec'] !== 'function'
+    ) {
+      throw new DomainError('SANDBOX_NOT_READY', 'sandbox factory returned an invalid provider');
     }
+
+    return provider;
   }
 }

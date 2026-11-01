@@ -98,7 +98,7 @@ Provider exceptions are treated as untrusted. Any raw exception thrown by a prov
 
 ### 3.2 Anti-Spoofing Protections
 
-- **No Spoofed Timeouts:** An untrusted provider that throws an error containing `ERR_PHASE_TIMEOUT` or a forged `EXECUTION_TIMEOUT` cannot deceive the harness. Genuine adapter/harness timeouts are internally branded (`Symbol('AdapterTimeoutBrand')`). Unbranded provider errors are mapped to `SANDBOX_NOT_READY`.
+- **Strict Rejection Boundary Normalization (No Spoofed Timeouts or Cancellations):** Untrusted providers cannot deceive the adapter or worker by throwing forged `EXECUTION_TIMEOUT`, `CANCELLED`, `STALE_LEASE`, or `POLICY_DENIED` errors, nor can they bypass sanitization by injecting brand symbols or duck-typed properties. All provider action promises are intercepted and unconditionally normalized at the rejection boundary (`Promise.resolve().then(action).catch(err => { throw sanitizeProviderError(err, safePhase); })`). Authentic timeouts originate solely from the adapter's own wall-clock timer branch, and authentic cancellations originate solely from the caller's `AbortSignal` listener branch.
 - **No False Cleanups:** Calling `stop()` and `destroy()` does not imply zero leakage. If `create()` fails or hangs before returning a `sandboxId`, the runner assumes the state is `UNKNOWN` and marks `resourcesLeaked: true`.
 
 ---
@@ -125,14 +125,15 @@ Provider exceptions are treated as untrusted. Any raw exception thrown by a prov
 ### 5.2 Unit Tests (`pnpm test:unit`)
 
 - **Files Passed:** 53 / 53 (exceeds ≥ 52 baseline)
-- **Tests Passed:** 901 / 901 (exceeds ≥ 877 baseline)
-- Added dedicated test suite `tests/unit/p0c-sandbox-adapter.test.ts` (18 tests) covering:
+- **Tests Passed:** 919 / 919 (exceeds ≥ 877 baseline)
+- Added dedicated test suite `tests/unit/p0c-sandbox-adapter.test.ts` (30 tests) covering:
   - Normal lifecycle execution and automatic cleanup
   - State transition validations and out-of-order rejection
   - Bounded timeout enforcement on create, waitReady, exec, usage, stop, destroy
   - AbortSignal cancellation propagation
-  - Adversarial error sanitization and timeout anti-spoofing
-  - Pluggable `SandboxProviderFactory` injection in `DeterministicExecutor`
+  - Adversarial error sanitization and rejection boundary normalization
+  - Anti-spoofing tests against duck-typed/symbol brand forging of `STALE_LEASE`, `CANCELLED`, `EXECUTION_TIMEOUT`, and credential leaks
+  - Pluggable `SandboxProviderFactory` injection in `DeterministicExecutor` with factory timeout and cancellation
 - Extended `tests/unit/p0c-sandbox-smoke-runner.test.ts` with factory lifecycle and tri-state leak verification.
 
 ### 5.3 Integration Tests (`pnpm test:integration`)

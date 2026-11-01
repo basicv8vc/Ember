@@ -533,6 +533,91 @@ describe('SandboxAdapter', () => {
       }
     });
 
+    it('针对品牌伪造的对抗性测试：验证伪造 STALE_LEASE、CANCELLED、EXECUTION_TIMEOUT 及敏感诊断不会原样透传', async () => {
+      const spoofedCodes = [
+        'STALE_LEASE',
+        'CANCELLED',
+        'EXECUTION_TIMEOUT',
+        'POLICY_DENIED',
+        'DEADLINE_EXCEEDED',
+      ] as const;
+
+      const sensitiveDiagnostic = 'secret_private_token=ghp_ADVERSARIAL_LEAK_SECRET_12345';
+      const secretUrl = 'https://admin:pAssw0rd@sandbox.internal.net/v1';
+
+      for (const spoofedCode of spoofedCodes) {
+        // Construct an adversarial error attempting to masquerade with duck-typed symbol brands,
+        // prototype symbols, or internal property injection.
+        const adversarialError = new DomainError(
+          spoofedCode,
+          `Adversarial spoofing ${spoofedCode}: ${sensitiveDiagnostic}, url=${secretUrl}`,
+        );
+
+        // Attempting to inject duck-typed brand properties or symbol keys
+        (adversarialError as unknown as Record<string, unknown>)['isAdapterTimeout'] = true;
+        (adversarialError as unknown as Record<string, unknown>)['isAdapterAbort'] = true;
+        (adversarialError as unknown as Record<symbol, unknown>)[
+          Symbol.for('AdapterTimeoutBrand')
+        ] = true;
+        (adversarialError as unknown as Record<symbol, unknown>)[Symbol.for('AdapterAbortBrand')] =
+          true;
+        (adversarialError as unknown as Record<symbol, unknown>)[Symbol('AdapterTimeoutBrand')] =
+          true;
+        (adversarialError as unknown as Record<symbol, unknown>)[Symbol('AdapterAbortBrand')] =
+          true;
+
+        const maliciousProvider = createMockProvider({
+          create: () => Promise.reject(adversarialError),
+          exec: () => Promise.reject(adversarialError),
+        });
+
+        const adapter = new SandboxAdapter(maliciousProvider);
+
+        // Test 1: adapter.create() boundary
+        const caughtCreate = await attempt(() => adapter.create(createDummySpec()));
+        expect(isDomainError(caughtCreate)).toBe(true);
+        const errCreate = caughtCreate as DomainError;
+        expect(errCreate.code).toBe('SANDBOX_NOT_READY');
+        expect(errCreate.code).not.toBe(spoofedCode);
+        expect(errCreate.message).not.toContain(sensitiveDiagnostic);
+        expect(errCreate.diagnostic).not.toContain(sensitiveDiagnostic);
+        expect(errCreate.message).not.toContain('pAssw0rd');
+        expect(errCreate.diagnostic).not.toContain('pAssw0rd');
+        expect(JSON.stringify(errCreate.toJSON())).not.toContain(sensitiveDiagnostic);
+
+        // Test 2: adapter.run() boundary
+        const caughtRun = await attempt(() =>
+          adapter.run({
+            spec: createDummySpec(),
+            argv: ['sha256', 'test'],
+          }),
+        );
+        expect(isDomainError(caughtRun)).toBe(true);
+        const errRun = caughtRun as DomainError;
+        expect(errRun.code).toBe('SANDBOX_NOT_READY');
+        expect(errRun.code).not.toBe(spoofedCode);
+        expect(errRun.message).not.toContain(sensitiveDiagnostic);
+        expect(errRun.diagnostic).not.toContain(sensitiveDiagnostic);
+        expect(JSON.stringify(errRun.toJSON())).not.toContain(sensitiveDiagnostic);
+
+        // Test 3: Factory rejection boundary in DeterministicExecutor
+        const maliciousFactory = {
+          createProvider: () => Promise.reject(adversarialError),
+        };
+        const executor = new DeterministicExecutor({ sandboxFactory: maliciousFactory });
+        const caughtExec = await attempt(() =>
+          executor.execute(createContext(), DEFAULT_ROUTE, new AbortController().signal),
+        );
+        expect(isDomainError(caughtExec)).toBe(true);
+        const errExec = caughtExec as DomainError;
+        expect(errExec.code).toBe('SANDBOX_NOT_READY');
+        expect(errExec.code).not.toBe(spoofedCode);
+        expect(errExec.message).not.toContain(sensitiveDiagnostic);
+        expect(errExec.diagnostic).not.toContain(sensitiveDiagnostic);
+        expect(JSON.stringify(errExec.toJSON())).not.toContain(sensitiveDiagnostic);
+      }
+    });
+
     it('neutralizes adversarial phase strings to prevent diagnostic injection', () => {
       const adversarialPhase = 'exec; DROP TABLE tasks; token=injected-leak';
       const rawErr = new Error('simulated network drop');

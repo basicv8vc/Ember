@@ -9,30 +9,6 @@ import type {
 import { DomainError, type Id } from '@ember/domain';
 import { parseBoundedTimeoutMs, throwIfAborted } from './clock.js';
 
-const ADAPTER_TIMEOUT_BRAND = Symbol('AdapterTimeoutBrand');
-const ADAPTER_ABORT_BRAND = Symbol('AdapterAbortBrand');
-
-export function brandAdapterTimeout(err: DomainError): DomainError {
-  (err as unknown as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] = true;
-  return err;
-}
-
-export function isAdapterTimeout(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    (err as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] === true
-  );
-}
-
-export function isAdapterAbort(err: unknown): boolean {
-  return (
-    typeof err === 'object' &&
-    err !== null &&
-    (err as Record<symbol, boolean>)[ADAPTER_ABORT_BRAND] === true
-  );
-}
-
 export type SandboxAdapterState = 'created' | 'ready' | 'executed' | 'stopped' | 'destroyed';
 
 /**
@@ -108,6 +84,13 @@ export function sanitizeProviderError(_err: unknown, phase: string): DomainError
 
 /**
  * Internal race guard that bounds asynchronous operations by a wall-clock timeout and abort signal.
+ *
+ * Security Invariants:
+ * 1. Rejection Boundary Normalization: Any error rejected by `action()` is caught immediately
+ *    at the action promise boundary and unconditionally normalized via `sanitizeProviderError()`.
+ *    An untrusted provider cannot forge timeout, cancellation, or authoritative codes, nor leak secrets.
+ * 2. Authentic Timeouts: EXECUTION_TIMEOUT can ONLY originate from this function's wall-clock timer callback.
+ * 3. Authentic Aborts: CANCELLED can ONLY originate from the caller's AbortSignal event listener.
  */
 export async function withBoundedTimeout<T>(
   action: () => Promise<T>,
@@ -115,42 +98,45 @@ export async function withBoundedTimeout<T>(
   phase: string,
   signal?: AbortSignal,
 ): Promise<T> {
+  const safePhase = resolveSafePhase(phase);
   if (signal?.aborted) {
-    const abortErr = new DomainError('CANCELLED', 'simulated execution was aborted by its caller');
-    (abortErr as unknown as Record<symbol, boolean>)[ADAPTER_ABORT_BRAND] = true;
-    throw abortErr;
+    throw new DomainError('CANCELLED', 'simulated execution was aborted by its caller');
   }
 
   let timer: NodeJS.Timeout | undefined;
   let abortHandler: (() => void) | undefined;
 
+  // 1. Untrusted Provider Action Rejection Boundary
+  const guardedActionPromise = Promise.resolve()
+    .then(action)
+    .catch((err: unknown) => {
+      throw sanitizeProviderError(err, safePhase);
+    });
+
+  // 2. Adapter Internal Wall-Clock Timeout Branch
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      const timeoutErr = new DomainError(
-        'EXECUTION_TIMEOUT',
-        `sandbox ${phase} exceeded timeout of ${timeoutMs}ms`,
+      reject(
+        new DomainError(
+          'EXECUTION_TIMEOUT',
+          `sandbox ${safePhase} exceeded timeout of ${timeoutMs}ms`,
+        ),
       );
-      (timeoutErr as unknown as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] = true;
-      reject(timeoutErr);
     }, timeoutMs);
   });
 
+  // 3. Adapter Internal Caller-Abort Branch
   const abortPromise = new Promise<never>((_, reject) => {
     if (signal) {
       abortHandler = () => {
-        const abortErr = new DomainError(
-          'CANCELLED',
-          'simulated execution was aborted by its caller',
-        );
-        (abortErr as unknown as Record<symbol, boolean>)[ADAPTER_ABORT_BRAND] = true;
-        reject(abortErr);
+        reject(new DomainError('CANCELLED', 'simulated execution was aborted by its caller'));
       };
       signal.addEventListener('abort', abortHandler, { once: true });
     }
   });
 
   try {
-    return await Promise.race([action(), timeoutPromise, abortPromise]);
+    return await Promise.race([guardedActionPromise, timeoutPromise, abortPromise]);
   } finally {
     if (timer !== undefined) {
       clearTimeout(timer);
@@ -514,24 +500,6 @@ export class SandboxAdapter implements SandboxProvider {
     phase: string,
     signal?: AbortSignal,
   ): Promise<T> {
-    try {
-      return await withBoundedTimeout(fn, timeoutMs, phase, signal);
-    } catch (err: unknown) {
-      if (
-        err &&
-        typeof err === 'object' &&
-        ((err as Record<symbol, boolean>)[ADAPTER_TIMEOUT_BRAND] ||
-          (err as Record<symbol, boolean>)[ADAPTER_ABORT_BRAND])
-      ) {
-        // Genuine adapter-level timeout or abort
-        throw err;
-      }
-
-      if (signal?.aborted) {
-        throwIfAborted(signal);
-      }
-
-      throw sanitizeProviderError(err, phase);
-    }
+    return withBoundedTimeout(fn, timeoutMs, phase, signal);
   }
 }

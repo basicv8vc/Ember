@@ -45,12 +45,12 @@ For networking and reconnection state, incremental SSE parsing, task status/comm
 
 ## Operational tracker
 
-The iOS Lead maintains a current merged-PR count and most recent successful `main` QA SHA in the M2 integration Issue/PR or status document; only **verified** test evidence may reset the counter. The batch containing PR #47 starts with **1 routine M2 feature merge and no post-integration full-suite success** as of this decision.
+The iOS Lead maintains a current merged-PR count and most recent successful `main` QA SHA in the M2 integration Issue/PR or status document; only **verified** test evidence may reset the counter. The current M2 batch contains **2 routine feature merges (#47 and #48) and no successful post-integration full-suite run** as of this update. At most **one further routine PR** may merge before the required shared validation checkpoint.
 
 For the active lanes:
 
 - **Agent A / PR #47:** already merged after technical review, with prior-head test evidence and final-head build recorded honestly. Its merge counts toward the first M2 batch; scroll/VoiceOver and actual App route verification are deferred to integration.
-- **Agent C / PR #48:** routine mock presentation may use fast lane, but definitive-error vs ambiguous-ACK code must be reviewed and targeted-tested if its behavior is changed; no false full-journey claim.
+- **Agent C / PR #48:** merged at `1fa610f08fafde686bf3de6bb9f4e649b33e294f` while the review's definitive-error vs unknown-ACK concern remained open. Track the correction as a separate, narrowly scoped follow-up with focused verification before M2 acceptance; the merge is **not evidence** of a validated full user journey.
 - **Agent B / Issue #46:** SSE, lost ACK, cancellation races and state coordination are **high risk** and require focused deterministic tests, scheduled exclusively, before merge.
 
 ## Scope and toolchain

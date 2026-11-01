@@ -43,6 +43,7 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
         registry,
         policy: SYNTHETIC_EGRESS_POLICY,
         auditSink,
+        trustedWorkerId: 'worker-synthetic-1',
       });
       const proxy = new CredentialProxy({ broker });
 
@@ -137,6 +138,7 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
         registry,
         policy: SYNTHETIC_EGRESS_POLICY,
         auditSink,
+        trustedWorkerId: 'worker-synthetic-1',
       });
 
       const cred = await broker.registerCredential(
@@ -210,6 +212,7 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
         registry,
         policy: SYNTHETIC_EGRESS_POLICY,
         auditSink,
+        trustedWorkerId: 'worker-synthetic-1',
       });
 
       const sensitiveRefId = 'cred_private_token_vault_ref_998877';
@@ -274,6 +277,7 @@ describe('Zero-Network Execution & Non-Leakage Guarantees', () => {
         registry,
         policy: SYNTHETIC_EGRESS_POLICY,
         auditSink,
+        trustedWorkerId: 'worker-synthetic-1',
       });
 
       const cred = await broker.registerCredential(

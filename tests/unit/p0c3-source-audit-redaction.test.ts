@@ -13,12 +13,10 @@ describe('P0-C3C: Source Audit Sanitization and Redaction', () => {
   const validContext: TrustedSourceAccessContext = {
     tenantId: TEST_TENANT_A,
     commitmentId: 'comm_11111111-1111-1111-1111-111111111111',
-    occurrenceId: 'occ_11111111-1111-1111-1111-111111111111',
     taskId: 'task_11111111-1111-1111-1111-111111111111',
     runId: 'run_11111111-1111-1111-1111-111111111111',
     leaseEpoch: 1,
-    callerType: 'worker_runtime',
-    verifiedAt: '2026-11-01T12:00:00.000Z',
+    authorizedAt: '2026-11-01T12:00:00.000Z',
   };
 
   it('hashes tenantId using SHA-256 and never leaks raw tenantId string in audit records', async () => {
@@ -71,7 +69,6 @@ describe('P0-C3C: Source Audit Sanitization and Redaction', () => {
     const validRecord = createSourceAuditRecord({
       tenantId: TEST_TENANT_A,
       commitmentId: 'comm_1',
-      occurrenceId: 'occ_1',
       taskId: 'task_1',
       sourceProfileId: 'sp_ember_releases',
       decision: 'ALLOWED',

@@ -110,10 +110,10 @@ export class FakeSourceReader implements SourceReader {
     // Validate bounds (items count and total UTF-8 payload bytes)
     validateSnapshotBounds(sanitizedItems, SOURCE_SNAPSHOT_LIMITS.maxItems, this.maxPayloadBytes);
 
-    // Compute canonical digest over canonical JSON representation of { sourceProfileId, items }
+    // Compute canonical digest over canonical JSON representation of { sourceProfileId, boundedSafeItems }
     const digest = computeCanonicalDigest({
       sourceProfileId,
-      items: sanitizedItems,
+      boundedSafeItems: sanitizedItems,
     });
 
     const observedAt = this.fixedObservedAt ?? new Date().toISOString();
@@ -122,7 +122,7 @@ export class FakeSourceReader implements SourceReader {
       sourceProfileId,
       observedAt,
       digest,
-      items: Object.freeze(sanitizedItems),
+      boundedSafeItems: Object.freeze(sanitizedItems),
     };
 
     return deepFreeze(snapshot);

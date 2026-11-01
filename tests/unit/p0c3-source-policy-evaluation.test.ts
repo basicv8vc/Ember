@@ -15,12 +15,10 @@ describe('P0-C3C: Pure Source Access Policy Evaluation', () => {
   const validContext: TrustedSourceAccessContext = {
     tenantId: TEST_TENANT_A,
     commitmentId: 'comm_11111111-1111-1111-1111-111111111111',
-    occurrenceId: 'occ_11111111-1111-1111-1111-111111111111',
     taskId: 'task_11111111-1111-1111-1111-111111111111',
     runId: 'run_11111111-1111-1111-1111-111111111111',
     leaseEpoch: 1,
-    callerType: 'worker_runtime',
-    verifiedAt: '2026-11-01T12:00:00.000Z',
+    authorizedAt: '2026-11-01T12:00:00.000Z',
   };
 
   const validPolicy: SourceAccessPolicy = {

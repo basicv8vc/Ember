@@ -42,7 +42,6 @@ export function sanitizeDenialReason(code?: SourceDenialCode): string | undefine
 export interface CreateAuditRecordParams {
   readonly tenantId: string;
   readonly commitmentId: string;
-  readonly occurrenceId: string;
   readonly taskId: string;
   readonly sourceProfileId: string;
   readonly decision: 'ALLOWED' | 'DENIED';
@@ -59,7 +58,6 @@ export function createSourceAuditRecord(params: CreateAuditRecordParams): Source
     timestamp,
     tenantIdHash: hashTenantId(params.tenantId),
     commitmentId: params.commitmentId,
-    occurrenceId: params.occurrenceId,
     taskId: params.taskId,
     sourceProfileId: params.sourceProfileId,
     decision: params.decision,

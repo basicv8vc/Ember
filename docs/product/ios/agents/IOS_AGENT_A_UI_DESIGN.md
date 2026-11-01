@@ -1,6 +1,6 @@
 # DRAFT Agent A — iOS Design System & Onboarding
 
-> IOS-LEAD-001 / M2 planning only. **DO NOT EXECUTE before CTO approves PRD, architecture, target, shared protocols and implementation gate.**
+> IOS-LEAD-001 / M2 planning only. Requires merged and locally build-verified Lead-owned M1 Xcode skeleton + test targets; no Agent owns project file. **DO NOT EXECUTE before CTO approves PRD, architecture, target, shared protocols and implementation gate.**
 
 ## Role & first instruction after authorization
 

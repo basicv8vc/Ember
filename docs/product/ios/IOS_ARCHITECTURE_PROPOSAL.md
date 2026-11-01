@@ -10,6 +10,12 @@
 - **依赖**：第一轮只用 Apple 原生 SwiftUI / Foundation / URLSession / AuthenticationServices 等系统 Framework。无第三方 SDK、监控/分析或付费基础设施；需要新增时先走 CTO Review。
 - **中心架构**：任务为一等实体，消息只是交互表层。iOS 不运行 Agent、不持有 Postgres 或 Worker 租约、不决定 cloud/Mac placement。Authority = cloud Task/Run/Event/Artifact + verified identity。
 
+## CTO review-driven M1 build prerequisite
+
+Before **any** three-lane coding begins, the iOS Lead owns a **separate M1 Draft PR** establishing `apps/ios/Ember.xcodeproj`, shared app/unit/UI-test schemes, minimal launchable SwiftUI app, discoverable source groups and real Simulator smoke. M1 is a build-verified baseline, **not** an “integrate Xcode only after all three lanes” task. Agents A/B/C inherit it and independently run tests from their own worktrees; the Lead alone may change the project file and app composition root.
+
+Proposed pinned local toolchain: Apple silicon Mac, macOS Tahoe 26.6+, **Xcode 27.1**, iOS 27.1 Simulator if installed, target iOS 17.0. Confirm installed versions with `sw_vers`, `xcodebuild -version`, `xcode-select -p` and `xcrun simctl list devices available` at M1. Xcode requirements: https://developer.apple.com/xcode/system-requirements/. Local Mac is the initial test executor, **not** existing Linux CI; macOS hosted CI is deferred until CTO authorizes costs. If this environment is unavailable, M1 is blocked pending CTO-approved alternative, not “tests passed”. Exact commands and test evidence are in `IOS_SPRINT_PLAN.md`.
+
 ## 逻辑层与建议目录（仅待批文件布局）
 
 ```text

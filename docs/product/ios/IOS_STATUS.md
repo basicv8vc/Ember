@@ -24,6 +24,18 @@
 - M2 simulated SwiftUI interactive milestone, with explicit MOCK ONLY markings; M3 first authorized real-user pilot.
 - Monorepo `apps/ios` and iOS 17+ recommended but not established. No UI/simulator result yet.
 
+## CTO review feedback (relayed by Jia; changes requested)
+
+- **P1 accepted for correction**: M1 must establish a single-owner, independently compilable Xcode project and `EmberTests`/`EmberUITests` before A/B/C begin. Owner is iOS Lead, local Apple silicon Mac toolchain proposed as macOS Tahoe 26.6+ / Xcode 27.1 / available Simulator; verify actual host and attach logs. Hosted macOS CI remains unapproved.
+- **P2 corrected**: Approval Decision row now uses separate valid `{"decision":"approve"}` and `{"decision":"deny"}` request examples; no raw table separator inside code text.
+- **P2 clarified**: M3 minimum = same-installation force-quit/relaunch restoration of server-backed task/agent under the same account; M4 = after reinstall or on another device plus APNs/deep-link/approval-specific test gates.
+- **PR metadata**: never rely on a stale quoted Head SHA. The current SHA and Draft status must be checked against GitHub PR #37 after the final correction commit.
+- **D1**: CTO agrees `apps/ios` + SwiftUI + Apple-native, iOS 17+ **for first implementation**; release support floor to be revisited.
+- **D2**: CTO agrees bounded Notes → Action Items **in principle**; Platform auth/inbox/result/real cloud execution requires separate work.
+- **D3**: CTO agrees a server-side authenticated unknown-ACK lookup is preferred; production approval and APNs remain unauthorized until dedicated security/privacy gates.
+
+This is Jia-relayed review input, **not** evidence of a formal GitHub Approval review or permission to merge/start Agents. M0 remains Changes Requested until revised PR is accepted. M1 starts only after M0 merger/explicit authorization.
+
 ## Exactly three CTO decision requests (with recommendation)
 
 | #      | Decision and owner                                                     | Recommended option                                                                                                                                                                                              | Alternative / impact                                                                                                          | Required response                                                             |

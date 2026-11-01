@@ -1,6 +1,6 @@
 # DRAFT Agent C — Task Experience (Promise → Progress → Outcome)
 
-> IOS-LEAD-001 / M2 planning only. **DO NOT EXECUTE before CTO approval and Agent B shared protocol freeze.**
+> IOS-LEAD-001 / M2 planning only. Requires merged and locally build-verified Lead-owned M1 Xcode skeleton + test targets; no Agent owns project file. **DO NOT EXECUTE before CTO approval and Agent B shared protocol freeze.**
 
 ## Role & first instruction after authorization
 

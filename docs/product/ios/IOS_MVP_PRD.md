@@ -56,6 +56,8 @@ Mac 远控与设备发现、浏览器自动化、邮件/日历/金融账户 Conn
 
 Proposed product validation targets (not current SLO): 5 位普通用户中的至少 4 位能无需引导完成首任务；100% 的“已接收”屏幕有服务端 Receipt；0 次将 Mock 结果标成真实；所有终态可在冷启动后解释；真实服务端执行与成本阈值另由 CTO 批准。具体数值在试用数据到来后复审。
 
+**Recovery milestone scope:** M3 must recover server-backed Task/Agent after force quit and relaunch on the **same installed device/account**; M4 separately verifies account linkage after reinstall and another device. M3 does not claim full cross-device restoration.
+
 ## Open decisions
 
 本文件不授予生产授权。请见 `IOS_STATUS.md` 的 3 项 CTO Review Request；验收首轮文档不等于上线许可。参照 `IOS_API_DEPENDENCIES.md`、`IOS_USER_JOURNEY.md`、`IOS_SPRINT_PLAN.md`。

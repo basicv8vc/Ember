@@ -1,6 +1,6 @@
 # DRAFT Agent B — iOS API / State & Contract Owner
 
-> IOS-LEAD-001 / M2 planning only. **DO NOT EXECUTE until CTO approves PRD/architecture/interface and implementation gate.**
+> IOS-LEAD-001 / M2 planning only. Requires merged and locally build-verified Lead-owned M1 Xcode skeleton + test targets; no Agent owns project file. **DO NOT EXECUTE until CTO approves PRD/architecture/interface and implementation gate.**
 
 ## Role & first instruction after authorization
 

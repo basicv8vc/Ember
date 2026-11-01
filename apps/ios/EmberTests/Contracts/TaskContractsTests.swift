@@ -26,6 +26,22 @@ final class TaskContractsTests: XCTestCase {
         XCTAssertNil(running.events[2].payload.artifactID)
     }
 
+    func testUnknownTaskEventPayloadKeysAreRejectedWithoutEchoingThem() throws {
+        let running = try provider.load(.running)
+        var event = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(running.events[0])) as? [String: Any]
+        )
+        var payload = try XCTUnwrap(event["payload"] as? [String: Any])
+        payload["futureField"] = "do-not-echo"
+        event["payload"] = payload
+        let data = try JSONSerialization.data(withJSONObject: event)
+
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskEventDTO.self, from: data)) { error in
+            XCTAssertFalse(String(describing: error).contains("futureField"))
+            XCTAssertFalse(String(describing: error).contains("do-not-echo"))
+        }
+    }
+
     func testApprovalDTOUsesDigestOnlyShape() throws {
         let approval = try provider.loadApprovalFixture()
 
@@ -90,7 +106,7 @@ final class TaskContractsTests: XCTestCase {
 }
 
 final class FakeTaskRepositoryTests: XCTestCase {
-    func testReceiptIsDeterministicAndSameKeyReplays() async throws {
+    func testSameKeyAndSameRequestReturnsTheSameTaskAndMarksReplay() async throws {
         let repository = try FakeTaskRepository()
         let secondRepository = try FakeTaskRepository()
         let request = CreateTaskRequestDTO.compute(
@@ -101,13 +117,72 @@ final class FakeTaskRepositoryTests: XCTestCase {
 
         let first = try await repository.createTask(request, idempotencyKey: "fixture-key-01")
         let replay = try await repository.createTask(request, idempotencyKey: "fixture-key-01")
-        let independent = try await secondRepository.createTask(request, idempotencyKey: "other-key-02")
+        let independent = try await secondRepository.createTask(request, idempotencyKey: "fixture-key-01")
 
         XCTAssertEqual(first.taskID, replay.taskID)
         XCTAssertEqual(first, independent)
         XCTAssertEqual(first.status, .queued)
         XCTAssertFalse(first.replayed)
         XCTAssertTrue(replay.replayed)
+    }
+
+    func testDifferentKeysCreateDistinctReadableTasksAndMatchingEvents() async throws {
+        let repository = try FakeTaskRepository()
+        let agentID = UUID(uuidString: "00000000-0000-4000-8000-000000000201")!
+        let chat = CreateTaskRequestDTO.chat(
+            agentID: agentID,
+            prompt: "first fixture prompt",
+            maxOutputTokens: 32,
+            deadlineAt: nil
+        )
+        let compute = CreateTaskRequestDTO.compute(
+            agentID: agentID,
+            text: "second fixture input",
+            deadlineAt: nil
+        )
+
+        let chatReceipt = try await repository.createTask(chat, idempotencyKey: "chat-key-01")
+        let computeReceipt = try await repository.createTask(compute, idempotencyKey: "compute-key-02")
+        let chatTask = try await repository.fetchTask(id: chatReceipt.taskID)
+        let computeTask = try await repository.fetchTask(id: computeReceipt.taskID)
+        let chatEvents = try await repository.fetchEvents(taskID: chatReceipt.taskID, after: nil)
+        let computeEvents = try await repository.fetchEvents(taskID: computeReceipt.taskID, after: nil)
+
+        XCTAssertNotEqual(chatReceipt.taskID, computeReceipt.taskID)
+        XCTAssertEqual(chatTask.kind, .mockChat)
+        XCTAssertEqual(computeTask.kind, .mockCompute)
+        XCTAssertEqual(chatEvents.events.map(\.payload.taskKind), [.mockChat])
+        XCTAssertEqual(computeEvents.events.map(\.payload.taskKind), [.mockCompute])
+        XCTAssertEqual(chatEvents.events.first?.taskID, chatReceipt.taskID)
+        XCTAssertEqual(computeEvents.events.first?.taskID, computeReceipt.taskID)
+    }
+
+    func testSameKeyWithDifferentRequestReturnsDeterministicNonEchoingConflict() async throws {
+        let repository = try FakeTaskRepository()
+        let agentID = UUID(uuidString: "00000000-0000-4000-8000-000000000201")!
+        let original = CreateTaskRequestDTO.chat(
+            agentID: agentID,
+            prompt: "sensitive original prompt",
+            maxOutputTokens: 32,
+            deadlineAt: nil
+        )
+        let conflicting = CreateTaskRequestDTO.chat(
+            agentID: agentID,
+            prompt: "sensitive changed prompt",
+            maxOutputTokens: 32,
+            deadlineAt: nil
+        )
+        _ = try await repository.createTask(original, idempotencyKey: "conflict-key-03")
+
+        for _ in 0..<2 {
+            do {
+                _ = try await repository.createTask(conflicting, idempotencyKey: "conflict-key-03")
+                XCTFail("Expected an idempotency conflict")
+            } catch let error as FakeTaskRepositoryError {
+                XCTAssertEqual(error, .idempotencyConflict)
+                XCTAssertFalse(String(describing: error).contains("sensitive"))
+            }
+        }
     }
 
     func testEventCursorIsExclusiveAndPageIsOrdered() async throws {

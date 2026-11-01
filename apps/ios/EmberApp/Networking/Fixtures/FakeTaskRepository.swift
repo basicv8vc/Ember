@@ -1,20 +1,29 @@
+import CryptoKit
 import Foundation
 
 public enum FakeTaskRepositoryError: Error, Equatable {
     case taskNotFound
     case receiptFixtureMissing
+    case idempotencyConflict
+    case requestEncodingFailed
 }
 
-/// A fixed, in-memory repository for previews and deterministic UI tests.
+/// An in-memory repository for previews and deterministic UI tests.
 ///
-/// It returns the bundled receipt for each first idempotency key and marks a repeated key
-/// as replayed. It does not execute the submitted input or produce a real task outcome.
+/// New task IDs are derived from a namespaced hash of the idempotency key. The request body
+/// is canonically encoded and hashed only for same-key conflict detection; raw input is not
+/// retained in the idempotency record or included in errors. No task is actually executed.
 public actor FakeTaskRepository: TaskRepositoryProtocol {
-    private let receipt: TaskReceiptDTO
+    private struct IdempotencyRecord {
+        let requestDigest: String
+        let receipt: TaskReceiptDTO
+    }
+
+    private let receiptTemplate: TaskReceiptDTO
     private var tasks: [UUID: TaskDTO] = [:]
     private var taskScenarios: [UUID: MockTaskScenarioFixture] = [:]
     private var events: [UUID: [TaskEventDTO]] = [:]
-    private var receiptsByIdempotencyKey: [String: TaskReceiptDTO] = [:]
+    private var receiptsByIdempotencyKey: [String: IdempotencyRecord] = [:]
     private var cancelRaceApplied = Set<UUID>()
 
     public init(provider: any MockScenarioProvider = BundledMockScenarioProvider()) throws {
@@ -22,7 +31,7 @@ public actor FakeTaskRepository: TaskRepositoryProtocol {
         guard let receipt = receiptScenario.receipt else {
             throw FakeTaskRepositoryError.receiptFixtureMissing
         }
-        self.receipt = receipt
+        self.receiptTemplate = receipt
 
         for scenarioID in MockScenarioID.allCases where scenarioID != .receipt {
             let scenario = try provider.load(scenarioID)
@@ -37,24 +46,80 @@ public actor FakeTaskRepository: TaskRepositoryProtocol {
         _ request: CreateTaskRequestDTO,
         idempotencyKey: String
     ) async throws -> TaskReceiptDTO {
-        _ = request
+        let digest = try Self.requestDigest(request)
         if let existing = receiptsByIdempotencyKey[idempotencyKey] {
+            guard existing.requestDigest == digest else {
+                throw FakeTaskRepositoryError.idempotencyConflict
+            }
             return TaskReceiptDTO(
-                taskID: existing.taskID,
-                status: existing.status,
-                acceptedAt: existing.acceptedAt,
+                taskID: existing.receipt.taskID,
+                status: existing.receipt.status,
+                acceptedAt: existing.receipt.acceptedAt,
                 replayed: true
             )
         }
 
+        let taskID = Self.deterministicUUID(namespace: "ember.fake.task.v1", value: idempotencyKey)
+        guard tasks[taskID] == nil else {
+            throw FakeTaskRepositoryError.idempotencyConflict
+        }
+
+        let task = TaskDTO(
+            taskID: taskID,
+            agentID: request.agentID,
+            kind: request.taskKind,
+            status: receiptTemplate.status,
+            currentRunID: nil,
+            attemptCount: 0,
+            createdAt: receiptTemplate.acceptedAt,
+            updatedAt: receiptTemplate.acceptedAt,
+            deadlineAt: request.deadlineAt
+        )
+        let event = TaskEventDTO(
+            taskID: taskID,
+            sequence: 1,
+            phase: .accepted,
+            occurredAt: receiptTemplate.acceptedAt,
+            traceID: Self.deterministicUUID(namespace: "ember.fake.trace.v1", value: taskID.uuidString),
+            payload: TaskEventPayloadDTO(taskKind: request.taskKind, replayed: false)
+        )
         let accepted = TaskReceiptDTO(
-            taskID: receipt.taskID,
-            status: receipt.status,
-            acceptedAt: receipt.acceptedAt,
+            taskID: taskID,
+            status: receiptTemplate.status,
+            acceptedAt: receiptTemplate.acceptedAt,
             replayed: false
         )
-        receiptsByIdempotencyKey[idempotencyKey] = accepted
+        tasks[taskID] = task
+        events[taskID] = [event]
+        receiptsByIdempotencyKey[idempotencyKey] = IdempotencyRecord(
+            requestDigest: digest,
+            receipt: accepted
+        )
         return accepted
+    }
+
+    private static func requestDigest(_ request: CreateTaskRequestDTO) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        do {
+            let data = try encoder.encode(request)
+            return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        } catch {
+            throw FakeTaskRepositoryError.requestEncodingFailed
+        }
+    }
+
+    private static func deterministicUUID(namespace: String, value: String) -> UUID {
+        let data = Data("\(namespace)\u{0}\(value)".utf8)
+        var bytes = Array(SHA256.hash(data: data).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x80
+        bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+            bytes[8], bytes[9], bytes[10], bytes[11],
+            bytes[12], bytes[13], bytes[14], bytes[15]
+        ))
     }
 
     public func fetchTask(id: UUID) async throws -> TaskDTO {
@@ -108,5 +173,40 @@ public actor FakeTaskRepository: TaskRepositoryProtocol {
             terminal: terminal,
             updatedAt: task.updatedAt
         )
+    }
+}
+
+private extension CreateTaskRequestDTO {
+    var agentID: UUID {
+        switch self {
+        case let .chat(agentID, _, _, _),
+             let .compute(agentID, _, _),
+             let .file(agentID, _, _, _, _),
+             let .approval(agentID, _, _, _):
+            return agentID
+        }
+    }
+
+    var taskKind: TaskKind {
+        switch self {
+        case .chat:
+            return .mockChat
+        case .compute:
+            return .mockCompute
+        case .file:
+            return .mockFile
+        case .approval:
+            return .mockApproval
+        }
+    }
+
+    var deadlineAt: String? {
+        switch self {
+        case let .chat(_, _, _, deadlineAt),
+             let .compute(_, _, deadlineAt),
+             let .file(_, _, _, _, deadlineAt),
+             let .approval(_, _, _, deadlineAt):
+            return deadlineAt
+        }
     }
 }

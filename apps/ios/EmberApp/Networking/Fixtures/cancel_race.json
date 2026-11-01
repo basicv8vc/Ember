@@ -27,7 +27,11 @@
       "phase": "started",
       "occurred_at": "2026-11-01T00:00:01Z",
       "trace_id": "00000000-0000-4000-8000-000000000306",
-      "payload": { "runId": "00000000-0000-4000-8000-000000000306", "attempt": 1, "toStatus": "running" }
+      "payload": {
+        "runId": "00000000-0000-4000-8000-000000000306",
+        "attempt": 1,
+        "toStatus": "running"
+      }
     }
   ],
   "cancel_response": {

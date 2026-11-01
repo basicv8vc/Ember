@@ -27,7 +27,12 @@
       "phase": "started",
       "occurred_at": "2026-11-01T00:00:01Z",
       "trace_id": "00000000-0000-4000-8000-000000000302",
-      "payload": { "runId": "00000000-0000-4000-8000-000000000302", "attempt": 1, "toStatus": "running", "runStatus": "running" }
+      "payload": {
+        "runId": "00000000-0000-4000-8000-000000000302",
+        "attempt": 1,
+        "toStatus": "running",
+        "runStatus": "running"
+      }
     },
     {
       "task_id": "00000000-0000-4000-8000-000000000102",
@@ -35,7 +40,11 @@
       "phase": "progress",
       "occurred_at": "2026-11-01T00:00:02Z",
       "trace_id": "00000000-0000-4000-8000-000000000302",
-      "payload": { "runId": "00000000-0000-4000-8000-000000000302", "attempt": 1, "simulated": true }
+      "payload": {
+        "runId": "00000000-0000-4000-8000-000000000302",
+        "attempt": 1,
+        "simulated": true
+      }
     }
   ],
   "cancel_response": null,

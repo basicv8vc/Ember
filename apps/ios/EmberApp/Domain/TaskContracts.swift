@@ -186,7 +186,7 @@ public struct TaskEventPayloadDTO: Codable, Equatable, Sendable {
         self.simulated = simulated
     }
 
-    enum CodingKeys: String, CodingKey {
+    enum CodingKeys: String, CodingKey, CaseIterable {
         case taskKind = "taskKind"
         case runID = "runId"
         case attempt
@@ -204,6 +204,56 @@ public struct TaskEventPayloadDTO: Codable, Equatable, Sendable {
         case policyVersion
         case simulated
     }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: DynamicPayloadKey.self)
+        let allowedKeys = Set(CodingKeys.allCases.map(\.rawValue))
+        guard container.allKeys.allSatisfy({ allowedKeys.contains($0.stringValue) }) else {
+            throw DecodingError.dataCorrupted(
+                .init(
+                    codingPath: decoder.codingPath,
+                    debugDescription: "Task event payload contains an unsupported field."
+                )
+            )
+        }
+
+        taskKind = try container.decodeIfPresent(TaskKind.self, forKey: payloadKey("taskKind"))
+        runID = try container.decodeIfPresent(UUID.self, forKey: payloadKey("runId"))
+        attempt = try container.decodeIfPresent(Int.self, forKey: payloadKey("attempt"))
+        route = try container.decodeIfPresent(TaskExecutionPath.self, forKey: payloadKey("route"))
+        fromStatus = try container.decodeIfPresent(TaskStatus.self, forKey: payloadKey("fromStatus"))
+        toStatus = try container.decodeIfPresent(TaskStatus.self, forKey: payloadKey("toStatus"))
+        runStatus = try container.decodeIfPresent(TaskRunStatus.self, forKey: payloadKey("runStatus"))
+        errorCode = try container.decodeIfPresent(TaskErrorCode.self, forKey: payloadKey("errorCode"))
+        artifactID = try container.decodeIfPresent(UUID.self, forKey: payloadKey("artifactId"))
+        workspaceVersion = try container.decodeIfPresent(Int.self, forKey: payloadKey("workspaceVersion"))
+        sandboxID = try container.decodeIfPresent(UUID.self, forKey: payloadKey("sandboxId"))
+        durationMs = try container.decodeIfPresent(Int.self, forKey: payloadKey("durationMs"))
+        replayed = try container.decodeIfPresent(Bool.self, forKey: payloadKey("replayed"))
+        cancelRequested = try container.decodeIfPresent(Bool.self, forKey: payloadKey("cancelRequested"))
+        policyVersion = try container.decodeIfPresent(Int.self, forKey: payloadKey("policyVersion"))
+        simulated = try container.decodeIfPresent(Bool.self, forKey: payloadKey("simulated"))
+    }
+}
+
+private struct DynamicPayloadKey: CodingKey {
+    let stringValue: String
+    let intValue: Int? = nil
+
+    init?(stringValue: String) {
+        self.stringValue = stringValue
+    }
+
+    init?(intValue: Int) {
+        return nil
+    }
+}
+
+private func payloadKey(_ stringValue: String) -> DynamicPayloadKey {
+    guard let key = DynamicPayloadKey(stringValue: stringValue) else {
+        preconditionFailure("Static CodingKey could not be created")
+    }
+    return key
 }
 
 public struct TaskEventDTO: Codable, Equatable, Sendable {

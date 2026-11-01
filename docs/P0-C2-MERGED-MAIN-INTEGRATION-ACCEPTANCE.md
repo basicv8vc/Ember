@@ -9,7 +9,8 @@
 > **Worktree Directory:** `/Users/lj/Downloads/worktrees/ember-p0c2-acceptance`  
 > **Evaluator:** Autonomous Integration & Security Acceptance Agent  
 > **Review Gate:** CTO Formal Audit & Release Review  
-> **CTO Review Verdict:** **PASS (DoD FULLY SATISFIED — Formal Archive Completed)**
+> **CTO Technical Acceptance:** **PASS (previously confirmed)**  
+> **Evidence Archive PR Review:** **PENDING**
 
 ---
 
@@ -47,23 +48,23 @@ Per CTO review directives, the evidence boundaries are explicitly defined as fol
 
 ## 3. Definition of Done (DoD) Checklist & Verification Matrix
 
-|   #    | Acceptance Criterion               | Verification Method                          | Observed Result                                                                                             |  Status  |
-| :----: | :--------------------------------- | :------------------------------------------- | :---------------------------------------------------------------------------------------------------------- | :------: |
-| **1**  | **Git Worktree Isolation**         | `git worktree add -d ...` & `git diff`       | Isolated worktree at `ba705a4`; product source code modifications = **0 lines**.                            | **PASS** |
-| **2**  | **Upstream CI Completion**         | `gh run view 41296491659`                    | GitHub Actions CI run on `main` push completed successfully in 2m47s.                                       | **PASS** |
-| **3**  | **Code Quality Gates**             | `format:check`, `lint`, `typecheck`, `build` | Prettier clean, ESLint clean, TypeScript typecheck clean, Project References built.                         | **PASS** |
-| **4a** | **Unit Test Suite**                | `pnpm test:unit`                             | **53/53** files, **934/934** tests passed in 2.32s.                                                         | **PASS** |
-| **4b** | **Integration Test Suite**         | `pnpm test:integration`                      | **29/29** files, **294/294** tests passed in 4.91s against live PostgreSQL.                                 | **PASS** |
-| **4c** | **Chaos Test Suite**               | `pnpm test:chaos`                            | **5/5** files, **27/27** tests passed in 8.88s (including SIGKILL recovery & Sentinel fencing).             | **PASS** |
-| **4d** | **End-to-End Test Suite**          | `pnpm test:e2e`                              | **8/8** files, **13/13** tests passed in 1.32s over full HTTP API + Worker loopback.                        | **PASS** |
-| **5**  | **Official Demo Scenarios**        | `pnpm demo`                                  | All 4 scenarios passed (Fast 140ms, Standard 118ms, Crash/Resume 104ms, Tenant Isolation 119ms).            | **PASS** |
-| **6**  | **Local Sandbox Smoke**            | `pnpm sandbox:smoke:local`                   | 8-phase fail-closed lifecycle passed (3.94ms); `leakStatus: VERIFIED_CLEAN`; honest `NOT_MEASURED` bounds.  | **PASS** |
-| **7a** | **Sentinel Admission Invariants**  | Dedicated unit, integration, chaos suites    | Deny-first semantics (0 budget on deny), closed action matrix, human approval deadlock freedom.             | **PASS** |
-| **7b** | **Sandbox Adapter Invariants**     | Dedicated unit, integration, smoke suites    | 8-phase lifecycle, tri-state leak model, anti-spoofing rejection boundary normalization.                    | **PASS** |
-| **7c** | **Credential Broker Invariants**   | Dedicated unit & integration suites          | Authoritative DB context reader, operational identity binding, zero network egress (`networkCallsMade: 0`). | **PASS** |
-| **8**  | **High-Concurrency Benchmark**     | 1,000 Agents / 100 Concurrency / 1,000 Tasks | 100% success rate, 0 task loss, Durable Ack P95 = 38.77 ms ($\le$ 1,000 ms target).                         | **PASS** |
-| **9**  | **Database & Resource Integrity**  | PostgreSQL connection & task audit           | 1,000 tasks reconciled, 0 connection leak, peak 51 PG conns (127 samples), 0 lingering sandboxes.           | **PASS** |
-| **10** | **Evidence Archiving & Integrity** | Repository archive & `SHA256SUMS`            | Benchmark JSON, Markdown report, 10 raw logs, tarball archive, and cryptographic checksums stored in repo.  | **PASS** |
+|   #    | Acceptance Criterion               | Verification Method                          | Observed Result                                                                                                     |  Status  |
+| :----: | :--------------------------------- | :------------------------------------------- | :------------------------------------------------------------------------------------------------------------------ | :------: |
+| **1**  | **Git Worktree Isolation**         | `git worktree add -d ...` & `git diff`       | Isolated worktree at `ba705a4`; product source code modifications = **0 lines**.                                    | **PASS** |
+| **2**  | **Upstream CI Completion**         | `gh run view 41296491659`                    | GitHub Actions CI run on `main` push completed successfully in 2m47s.                                               | **PASS** |
+| **3**  | **Code Quality Gates**             | `format:check`, `lint`, `typecheck`, `build` | Prettier clean, ESLint clean, TypeScript typecheck clean, Project References built.                                 | **PASS** |
+| **4a** | **Unit Test Suite**                | `pnpm test:unit`                             | **53/53** files, **934/934** tests passed in 2.32s.                                                                 | **PASS** |
+| **4b** | **Integration Test Suite**         | `pnpm test:integration`                      | **29/29** files, **294/294** tests passed in 4.91s against live PostgreSQL.                                         | **PASS** |
+| **4c** | **Chaos Test Suite**               | `pnpm test:chaos`                            | **5/5** files, **27/27** tests passed in 8.88s (including SIGKILL recovery & Sentinel fencing).                     | **PASS** |
+| **4d** | **End-to-End Test Suite**          | `pnpm test:e2e`                              | **8/8** files, **13/13** tests passed in 1.32s over full HTTP API + Worker loopback.                                | **PASS** |
+| **5**  | **Official Demo Scenarios**        | `pnpm demo`                                  | All 4 scenarios passed (Fast 140ms, Standard 118ms, Crash/Resume 104ms, Tenant Isolation 119ms).                    | **PASS** |
+| **6**  | **Local Sandbox Smoke**            | `pnpm sandbox:smoke:local`                   | 8-phase fail-closed lifecycle passed (3.94ms); `leakStatus: VERIFIED_CLEAN`; honest `NOT_MEASURED` bounds.          | **PASS** |
+| **7a** | **Sentinel Admission Invariants**  | Dedicated unit, integration, chaos suites    | Deny-first semantics (0 budget on deny), closed action matrix, human approval deadlock freedom.                     | **PASS** |
+| **7b** | **Sandbox Adapter Invariants**     | Dedicated unit, integration, smoke suites    | 8-phase lifecycle, tri-state leak model, anti-spoofing rejection boundary normalization.                            | **PASS** |
+| **7c** | **Credential Broker Invariants**   | Dedicated unit & integration suites          | Authoritative DB context reader, operational identity binding, zero network egress (`networkCallsMade: 0`).         | **PASS** |
+| **8**  | **High-Concurrency Benchmark**     | 1,000 Agents / 100 Concurrency / 1,000 Tasks | 100% success rate, 0 task loss, Durable Ack P95 = 38.77 ms ($\le$ 1,000 ms target).                                 | **PASS** |
+| **9**  | **Database & Resource Integrity**  | PostgreSQL connection & task audit           | 1,000 tasks reconciled, 0 connection leak, peak 51 active / 53 total PG conns (127 samples), 0 lingering sandboxes. | **PASS** |
+| **10** | **Evidence Archiving & Integrity** | Repository archive & `SHA256SUMS`            | Benchmark JSON, Markdown report, 10 raw logs, tarball archive, and cryptographic checksums stored in repo.          | **PASS** |
 
 ---
 
@@ -129,26 +130,45 @@ Benchmark parameters: `--enable-local-load --agents 1000 --concurrency 100 -n 10
 
 All benchmark evidence, logs, and cryptographic checksums are stored under `benchmarks/audit-p0c-c2/`:
 
-| Artifact File                                  | Description                                       | SHA-256 Checksum                                                   |
-| :--------------------------------------------- | :------------------------------------------------ | :----------------------------------------------------------------- |
-| `load-benchmark-2026-11-01T10-23-27-758Z.json` | Benchmark machine-readable output                 | `4b2a264454786d9d1265d1916179f7d41b5c7ee33da0e3fef8d73b871b61484d` |
-| `load-benchmark-2026-11-01T10-23-27-758Z.md`   | Benchmark generated markdown report               | `be2bee8beab569db93b5526d34774d68b8cf0a6fe5fa64d90a7a0b9b0ef9203f` |
-| `logs-archive.tar.gz`                          | Compressed tarball of all 10 raw execution logs   | `86db56c4736914a2a005519563efa9773fbc0332335fc5b10125c4c233bda003` |
-| `logs/01-ci-verification.log`                  | GitHub Actions CI run verification log            | `4d3627eda6bf7519f8a86a0b65050b35ba876147abe66bceb7e5099f8fd761fc` |
-| `logs/02-code-quality.log`                     | Prettier, ESLint, TypeScript check & build log    | `e961689470eddc914d993ccdbd0dd259963de0957d8a05026636f664a7eb8ff0` |
-| `logs/03-unit-tests.log`                       | Full Unit test execution log (934 passed)         | `af6be4171103cc38bef6a028888e477141b488f1967956786353eb99bb94dc70` |
-| `logs/04-integration-tests.log`                | Full Integration test execution log (294 passed)  | `d1ae2d58895bab9111b39f14dda3d05d6a72e42f3ac480290899a8d8833b3827` |
-| `logs/05-chaos-tests.log`                      | Full Chaos test execution log (27 passed)         | `fc6b70a05b53e9f17699a4c954a773c9807d7520a30f29fa149db842a1e8c5d6` |
-| `logs/06-e2e-tests.log`                        | Full End-to-End test execution log (13 passed)    | `414961a92df3fa55335cfcdf8955c7d459cf117bb6270bb4a75e1ce1e801f122` |
-| `logs/07-demo-scenarios.log`                   | Four official demo scenarios execution log        | `1168aefa78dcf512b5a49cd44746a354cb75f7a5fa153a113db3394cc33fac55` |
-| `logs/08-sandbox-smoke.log`                    | Sandbox local smoke harness execution log         | `c4a24577295cb1d15975a817af221523a189fa5609494a8ab590b731d41a7538` |
-| `logs/09-security-invariants.log`              | Sentinel, Sandbox, Credential invariant tests log | `9bb2ed2284807b4108b0d3e78293e54e90ec6367ac3c8ffbad2872a61090ed2b` |
-| `logs/10-benchmark-raw.log`                    | Benchmark CLI console output raw log              | `b5f602b3246600d0618993e9eeb4be28dcb80397d3a7e4427ae6f8c7f3017058` |
-| `SHA256SUMS`                                   | Cryptographic checksum manifest file              | Verified against individual digests                                |
+| Artifact File                                  | Description                                                                | SHA-256 Checksum                                                   |
+| :--------------------------------------------- | :------------------------------------------------------------------------- | :----------------------------------------------------------------- |
+| `load-benchmark-2026-11-01T10-23-27-758Z.json` | Benchmark machine-readable output                                          | `4b2a264454786d9d1265d1916179f7d41b5c7ee33da0e3fef8d73b871b61484d` |
+| `load-benchmark-2026-11-01T10-23-27-758Z.md`   | Benchmark generated markdown report                                        | `be2bee8beab569db93b5526d34774d68b8cf0a6fe5fa64d90a7a0b9b0ef9203f` |
+| `logs-archive.tar.gz`                          | Compressed tarball of all 10 raw execution logs and summaries              | `86db56c4736914a2a005519563efa9773fbc0332335fc5b10125c4c233bda003` |
+| `logs/01-ci-verification.log`                  | Upstream GitHub Actions CI run metadata and outcome (Verification Summary) | `4d3627eda6bf7519f8a86a0b65050b35ba876147abe66bceb7e5099f8fd761fc` |
+| `logs/02-code-quality.log`                     | Prettier, ESLint, TypeScript check & build outcome (Verification Summary)  | `e961689470eddc914d993ccdbd0dd259963de0957d8a05026636f664a7eb8ff0` |
+| `logs/03-unit-tests.log`                       | Full Unit test execution output (Raw Console Log)                          | `af6be4171103cc38bef6a028888e477141b488f1967956786353eb99bb94dc70` |
+| `logs/04-integration-tests.log`                | Full Integration test execution output (Raw Console Log)                   | `d1ae2d58895bab9111b39f14dda3d05d6a72e42f3ac480290899a8d8833b3827` |
+| `logs/05-chaos-tests.log`                      | Full Chaos test execution output (Raw Console Log)                         | `fc6b70a05b53e9f17699a4c954a773c9807d7520a30f29fa149db842a1e8c5d6` |
+| `logs/06-e2e-tests.log`                        | Full End-to-End test execution output (Raw Console Log)                    | `414961a92df3fa55335cfcdf8955c7d459cf117bb6270bb4a75e1ce1e801f122` |
+| `logs/07-demo-scenarios.log`                   | Four official demo scenarios execution output (Raw Console Log)            | `1168aefa78dcf512b5a49cd44746a354cb75f7a5fa153a113db3394cc33fac55` |
+| `logs/08-sandbox-smoke.log`                    | Sandbox local smoke harness execution output (Raw Console Log)             | `c4a24577295cb1d15975a817af221523a189fa5609494a8ab590b731d41a7538` |
+| `logs/09-security-invariants.log`              | Sentinel, Sandbox, Credential invariant test output (Raw Console Log)      | `9bb2ed2284807b4108b0d3e78293e54e90ec6367ac3c8ffbad2872a61090ed2b` |
+| `logs/10-benchmark-raw.log`                    | Benchmark CLI console output (Raw Console Log)                             | `b5f602b3246600d0618993e9eeb4be28dcb80397d3a7e4427ae6f8c7f3017058` |
+| `SHA256SUMS`                                   | Cryptographic checksum manifest file                                       | Verified against individual digests                                |
 
-To verify artifact integrity locally:
+### 7.1 Cryptographic Integrity Verification Evidence
+
+Local execution proof:
 
 ```bash
-cd benchmarks/audit-p0c-c2
-shasum -a 256 -c SHA256SUMS
+$ cd benchmarks/audit-p0c-c2 && shasum -a 256 -c SHA256SUMS
+load-benchmark-2026-11-01T10-23-27-758Z.json: OK
+load-benchmark-2026-11-01T10-23-27-758Z.md: OK
+logs-archive.tar.gz: OK
+logs/01-ci-verification.log: OK
+logs/02-code-quality.log: OK
+logs/03-unit-tests.log: OK
+logs/04-integration-tests.log: OK
+logs/05-chaos-tests.log: OK
+logs/06-e2e-tests.log: OK
+logs/07-demo-scenarios.log: OK
+logs/08-sandbox-smoke.log: OK
+logs/09-security-invariants.log: OK
+logs/10-benchmark-raw.log: OK
+$ echo $?
+0
 ```
+
+- **Verification Result:** All 13 files match cryptographic digests (13/13 OK).
+- **Process Exit Code:** `0` (Success, no tampering detected).

@@ -32,12 +32,7 @@ export const KNOWN_RUNNER_ERROR_CODES = [
   'ERR_PROVIDER_EXECUTION',
 ] as const;
 
-export type SmokeHarnessErrorCode =
-  | 'ERR_PHASE_TIMEOUT'
-  | 'ERR_OPERATION_ABORTED'
-  | 'ERR_EXEC_FAILED'
-  | 'DIGEST_MISMATCH'
-  | 'ERR_INVALID_USAGE';
+export type SmokeHarnessErrorCode = (typeof KNOWN_RUNNER_ERROR_CODES)[number];
 
 export interface SmokeHarnessErrorOptions {
   phase?: string;
@@ -86,6 +81,8 @@ export function formatHarnessErrorMessage(
       return 'SHA-256 digest verification failed: mismatch against expected digest [DIGEST_MISMATCH]';
     case 'ERR_INVALID_USAGE':
       return 'SandboxUsageRecord returned non-finite or negative metrics [ERR_INVALID_USAGE]';
+    case 'ERR_PROVIDER_EXECUTION':
+      return 'Sandbox provider execution failed [ERR_PROVIDER_EXECUTION]';
     default:
       return 'Runner harness failure [ERR_RUNNER_INTERNAL]';
   }

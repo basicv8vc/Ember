@@ -1,6 +1,7 @@
 import type {
   SandboxCapabilities,
   SandboxProvider,
+  SandboxProviderFactory,
   SandboxSpec,
   SandboxUsageRecord,
 } from '@ember/contracts';
@@ -87,7 +88,8 @@ export interface SmokeReport {
 }
 
 export interface SmokeRunnerOptions {
-  readonly provider: SandboxProvider;
+  readonly provider?: SandboxProvider;
+  readonly factory?: SandboxProviderFactory;
   readonly tenantId?: Id;
   readonly runId?: Id;
   readonly imageDigest?: string;

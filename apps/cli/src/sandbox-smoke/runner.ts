@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   SandboxCapabilities,
   SandboxProvider,
+  SandboxProviderFactory,
   SandboxSpec,
   SandboxUsageRecord,
 } from '@ember/contracts';
@@ -133,13 +134,20 @@ async function withBoundedTimeout<T>(
 }
 
 export class SandboxSmokeRunner {
-  private readonly provider: SandboxProvider;
+  private readonly provider?: SandboxProvider;
+  private readonly factory?: SandboxProviderFactory;
 
-  constructor(provider: SandboxProvider) {
-    this.provider = createBoundaryGuardedProvider(provider);
+  constructor(target?: SandboxProvider | SandboxProviderFactory) {
+    if (target !== undefined) {
+      if (typeof (target as SandboxProviderFactory).createProvider === 'function') {
+        this.factory = target as SandboxProviderFactory;
+      } else {
+        this.provider = createBoundaryGuardedProvider(target as SandboxProvider);
+      }
+    }
   }
 
-  async run(options: Omit<SmokeRunnerOptions, 'provider'> = {}): Promise<SmokeReport> {
+  async run(options: SmokeRunnerOptions = {}): Promise<SmokeReport> {
     const testId = randomUUID();
     const tenantId = options.tenantId ?? randomUUID();
     const runId = options.runId ?? randomUUID();
@@ -151,6 +159,13 @@ export class SandboxSmokeRunner {
     const argv = options.argv ?? DEFAULT_EXEC_ARGV;
     const expectedSha256 = options.expectedSha256 ?? EXPECTED_HELLO_EMBER_SHA256;
     const signal = options.signal;
+
+    let activeProvider: SandboxProvider | undefined =
+      options.provider !== undefined
+        ? createBoundaryGuardedProvider(options.provider)
+        : this.provider;
+
+    const activeFactory = options.factory ?? this.factory;
 
     const startWall = performance.now();
     const phaseDurations: Record<SmokePhase, number> = {
@@ -222,11 +237,54 @@ export class SandboxSmokeRunner {
     };
 
     try {
+      if (activeProvider === undefined) {
+        if (activeFactory !== undefined) {
+          createAttempted = true;
+          if (signal?.aborted) {
+            phaseDetails.create = {
+              phase: 'create',
+              status: 'FAIL',
+              durationMs: 0,
+              error: formatSanitizedError(
+                new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase: 'create' }),
+                'create',
+              ),
+            };
+            throw new SmokeHarnessError('ERR_OPERATION_ABORTED', { phase: 'create' });
+          }
+          try {
+            const constructed = await withBoundedTimeout(
+              () =>
+                activeFactory.createProvider({
+                  tenantId,
+                  runId,
+                  signal: signal ?? new AbortController().signal,
+                }),
+              Math.min(timeoutMs, 5_000),
+              'create',
+              signal,
+            );
+            activeProvider = createBoundaryGuardedProvider(constructed);
+            createAttempted = false;
+          } catch (err) {
+            phaseDetails.create = {
+              phase: 'create',
+              status: 'FAIL',
+              durationMs: 0,
+              error: formatSanitizedError(err, 'create'),
+            };
+            throw err;
+          }
+        } else {
+          throw new SmokeHarnessError('ERR_PROVIDER_EXECUTION', { phase: 'create' });
+        }
+      }
+
       // Phase 1: Capabilities discovery
       capabilitiesResult = await executePhase(
         'capabilities',
         Math.min(timeoutMs, 5_000),
-        () => this.provider.capabilities(),
+        () => activeProvider!.capabilities(),
         (caps) => ({
           shell: caps.shell,
           browser: caps.browser,
@@ -255,7 +313,7 @@ export class SandboxSmokeRunner {
       const createRes = await executePhase(
         'create',
         Math.min(timeoutMs, 5_000),
-        () => this.provider.create(spec),
+        () => activeProvider!.create(spec),
         (res) => ({
           sandboxId: res.sandboxId,
         }),
@@ -264,7 +322,7 @@ export class SandboxSmokeRunner {
 
       // Phase 3: Wait for ready
       await executePhase('waitReady', readyDeadlineMs, () =>
-        this.provider.waitReady(createRes.sandboxId, readyDeadlineMs),
+        activeProvider!.waitReady(createRes.sandboxId, readyDeadlineMs),
       );
 
       // Phase 4: Allowlisted Exec
@@ -272,7 +330,7 @@ export class SandboxSmokeRunner {
         'exec',
         execTimeoutMs,
         async () => {
-          const res = await this.provider.exec(createRes.sandboxId, argv, execTimeoutMs);
+          const res = await activeProvider!.exec(createRes.sandboxId, argv, execTimeoutMs);
           if (res.exitCode !== 0) {
             throw new SmokeHarnessError('ERR_EXEC_FAILED', { exitCode: res.exitCode });
           }
@@ -289,8 +347,8 @@ export class SandboxSmokeRunner {
         'readOutput',
         Math.min(timeoutMs, 5_000),
         async () => {
-          const stdout = await this.provider.readOutput(createRes.sandboxId, execRes.stdoutRef);
-          const stderr = await this.provider.readOutput(createRes.sandboxId, execRes.stderrRef);
+          const stdout = await activeProvider!.readOutput(createRes.sandboxId, execRes.stdoutRef);
+          const stderr = await activeProvider!.readOutput(createRes.sandboxId, execRes.stderrRef);
 
           if (stdout !== expectedSha256) {
             throw new SmokeHarnessError('DIGEST_MISMATCH', { phase: 'readOutput' });
@@ -308,7 +366,7 @@ export class SandboxSmokeRunner {
         'usage',
         Math.min(timeoutMs, 5_000),
         async () => {
-          const usage = await this.provider.usage(createRes.sandboxId);
+          const usage = await activeProvider!.usage(createRes.sandboxId);
           if (
             !Number.isFinite(usage.cpuSeconds) ||
             usage.cpuSeconds < 0 ||
@@ -331,11 +389,15 @@ export class SandboxSmokeRunner {
       primaryError = err;
     } finally {
       // Phases 7 & 8: Guaranteed cleanup on all paths
-      if (sandboxId !== null) {
+      if (sandboxId !== null && activeProvider !== undefined) {
         // Attempt stop
         const stopStart = performance.now();
         try {
-          await withBoundedTimeout(() => this.provider.stop(sandboxId!), cleanupTimeoutMs, 'stop');
+          await withBoundedTimeout(
+            () => activeProvider!.stop(sandboxId!),
+            cleanupTimeoutMs,
+            'stop',
+          );
           const durationMs = Math.round((performance.now() - stopStart) * 100) / 100;
           phaseDurations.stop = durationMs;
           phaseDetails.stop = { phase: 'stop', status: 'PASS', durationMs };
@@ -358,7 +420,7 @@ export class SandboxSmokeRunner {
         const destroyStart = performance.now();
         try {
           await withBoundedTimeout(
-            () => this.provider.destroy(sandboxId!),
+            () => activeProvider!.destroy(sandboxId!),
             cleanupTimeoutMs,
             'destroy',
           );
@@ -413,7 +475,7 @@ export class SandboxSmokeRunner {
 
       if (destroyStatus === 'COMPLETED') {
         // Destroy confirmation succeeded. Now attempt independent resource verification.
-        const maybeProvider = this.provider as unknown as { liveSandboxCount?: unknown };
+        const maybeProvider = activeProvider as unknown as { liveSandboxCount?: unknown };
         if (typeof maybeProvider.liveSandboxCount === 'function') {
           try {
             const count = (maybeProvider as { liveSandboxCount: () => number }).liveSandboxCount();
@@ -526,6 +588,6 @@ export class SandboxSmokeRunner {
 }
 
 export async function runSandboxSmoke(options: SmokeRunnerOptions): Promise<SmokeReport> {
-  const runner = new SandboxSmokeRunner(options.provider);
+  const runner = new SandboxSmokeRunner(options.factory ?? options.provider);
   return runner.run(options);
 }

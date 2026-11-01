@@ -36,6 +36,11 @@ enum TaskComposeSubmissionState: Equatable {
     case accepted(TaskReceiptDTO)
 }
 
+private enum TaskComposeErrorDisposition {
+    case unknownAcknowledgement
+    case definiteFailure(TaskComposeSubmissionFailure)
+}
+
 @MainActor
 @Observable
 final class TaskComposeSubmissionModel {
@@ -143,19 +148,55 @@ final class TaskComposeSubmissionModel {
         } catch {
             // Do not surface localizedDescription: repository errors can contain request data.
             draft = request.content
-            state = .definiteFailure(Self.classify(error))
+            switch Self.classify(error) {
+            case .unknownAcknowledgement:
+                state = .unknownAcknowledgement(request)
+            case let .definiteFailure(failure):
+                state = .definiteFailure(failure)
+            }
         }
     }
 
-    private static func classify(_ error: any Error) -> TaskComposeSubmissionFailure {
-        if let demoError = error as? TaskJourneyDemoError,
-           demoError == .repositoryUnavailable {
-            return .repositoryUnavailable
+    private static func classify(_ error: any Error) -> TaskComposeErrorDisposition {
+        if let demoError = error as? TaskJourneyDemoError {
+            switch demoError {
+            case .repositoryUnavailable:
+                return .definiteFailure(.repositoryUnavailable)
+            case .receiptUnknown:
+                return .unknownAcknowledgement
+            }
         }
-        if let repositoryError = error as? FakeTaskRepositoryError,
-           repositoryError == .idempotencyConflict {
-            return .idempotencyConflict
+
+        if let repositoryError = error as? FakeTaskRepositoryError {
+            switch repositoryError {
+            case .idempotencyConflict:
+                return .definiteFailure(.idempotencyConflict)
+            case .receiptFixtureMissing, .requestEncodingFailed:
+                return .definiteFailure(.repositoryUnavailable)
+            case .taskNotFound:
+                return .unknownAcknowledgement
+            }
         }
-        return .rejected
+
+        if let repositoryError = error as? TaskAPIRepositoryError {
+            switch repositoryError {
+            case .mockEndpointRequired, .invalidRequest, .invalidIdempotencyKey, .invalidCursor:
+                // These are local/preflight failures that occur before a create request is sent.
+                return .definiteFailure(.repositoryUnavailable)
+            case .idempotencyConflict:
+                return .definiteFailure(.idempotencyConflict)
+            case .badRequest, .unauthenticated, .forbidden, .notFound, .conflict, .rateLimited:
+                // A typed 4xx response is an explicit server rejection.
+                return .definiteFailure(.rejected)
+            case let .unexpectedStatus(status) where (400..<500).contains(status) && status != 408:
+                return .definiteFailure(.rejected)
+            default:
+                // Transport errors, 5xx, invalid receipts, and unknown repository failures
+                // do not establish whether the create was accepted.
+                return .unknownAcknowledgement
+            }
+        }
+
+        return .unknownAcknowledgement
     }
 }

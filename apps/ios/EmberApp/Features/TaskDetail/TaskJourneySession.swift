@@ -90,6 +90,9 @@ final class TaskJourneySession {
             deadlineAt: nil
         )
         let receipt = try await repository.createTask(request, idempotencyKey: idempotencyKey)
+        guard Self.isValidCreateReceipt(receipt) else {
+            throw TaskJourneyDemoError.receiptUnknown
+        }
 
         // Simulate a lost acknowledgement after the local fake accepted the request. Retrying
         // the unchanged draft and key returns the same receipt with replayed=true.
@@ -121,6 +124,16 @@ final class TaskJourneySession {
             // Follow-up display reads cannot undo a valid create receipt or trigger a new POST.
         }
         return receipt
+    }
+
+    private static func isValidCreateReceipt(_ receipt: TaskReceiptDTO) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if formatter.date(from: receipt.acceptedAt) != nil {
+            return true
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: receipt.acceptedAt) != nil
     }
 
     func select(taskID: UUID) {

@@ -61,6 +61,107 @@ final class TaskComposeSubmissionModelTests: XCTestCase {
         }
     }
 
+    func testTransportFailureAfterAcceptanceRetriesExactContentAndKey() async throws {
+        let repository = try RecordingTaskRepository(firstFailure: .acceptedThenTransportFailure)
+        let session = TaskJourneySession(repository: repository, includeFixtureRecords: false)
+        let model = makeModel(keys: ["network-key", "must-not-be-used"])
+        let note = "First line.\nSecond line stays byte-for-byte the same."
+        model.draft = note
+
+        let first = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        await model.finishSubmission(first, in: session) { _ in }
+
+        guard case let .unknownAcknowledgement(frozenRequest) = model.state else {
+            return XCTFail("A transport error after possible acceptance must remain unconfirmed.")
+        }
+        XCTAssertEqual(frozenRequest.content, note)
+        XCTAssertEqual(frozenRequest.idempotencyKey, "network-key")
+        XCTAssertEqual(model.draft, note)
+        XCTAssertFalse(model.canEditDraft)
+        XCTAssertFalse(model.statusMessage?.contains(note) == true)
+
+        let retry = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        XCTAssertEqual(retry.request, frozenRequest)
+        await model.finishSubmission(retry, in: session) { _ in }
+
+        guard case let .accepted(receipt) = model.state else {
+            return XCTFail("Same-key replay should recover the receipt without making a second task.")
+        }
+        XCTAssertTrue(receipt.replayed)
+        XCTAssertEqual(session.records.map(\.id), [receipt.taskID])
+        let attempts = await repository.recordedAttempts()
+        XCTAssertEqual(attempts.count, 2)
+        XCTAssertEqual(attempts.map(\.idempotencyKey), ["network-key", "network-key"])
+        if attempts.count == 2 {
+            XCTAssertEqual(attempts[1].prompt, attempts[0].prompt)
+        }
+    }
+
+    func testInvalidReceiptRemainsUnknownAndRetriesWithTheOriginalKey() async throws {
+        let repository = try RecordingTaskRepository(firstFailure: .invalidReceiptAfterAcceptance)
+        let session = TaskJourneySession(repository: repository, includeFixtureRecords: false)
+        let model = makeModel(keys: ["invalid-receipt-key", "must-not-be-used"])
+        let note = "The response timestamp is malformed."
+        model.draft = note
+
+        let first = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        await model.finishSubmission(first, in: session) { _ in }
+
+        guard case let .unknownAcknowledgement(frozenRequest) = model.state else {
+            return XCTFail("A malformed receipt cannot establish acceptance or definite rejection.")
+        }
+        XCTAssertEqual(frozenRequest.content, note)
+        XCTAssertEqual(frozenRequest.idempotencyKey, "invalid-receipt-key")
+        XCTAssertFalse(model.canEditDraft)
+
+        let retry = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        XCTAssertEqual(retry.request, frozenRequest)
+        await model.finishSubmission(retry, in: session) { _ in }
+
+        guard case let .accepted(receipt) = model.state else {
+            return XCTFail("The replayed valid receipt should resolve the unknown response.")
+        }
+        XCTAssertTrue(receipt.replayed)
+        XCTAssertEqual(session.records.map(\.id), [receipt.taskID])
+        let attempts = await repository.recordedAttempts()
+        XCTAssertEqual(attempts.map(\.idempotencyKey), ["invalid-receipt-key", "invalid-receipt-key"])
+        if attempts.count == 2 {
+            XCTAssertEqual(attempts[1].prompt, attempts[0].prompt)
+        }
+    }
+
+    func testServerErrorAfterAcceptanceRemainsUnknownAndReplaysSameRequest() async throws {
+        let repository = try RecordingTaskRepository(firstFailure: .acceptedThenServerError)
+        let session = TaskJourneySession(repository: repository, includeFixtureRecords: false)
+        let model = makeModel(keys: ["server-error-key", "must-not-be-used"])
+        let note = "The server accepted this before returning 503."
+        model.draft = note
+
+        let first = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        await model.finishSubmission(first, in: session) { _ in }
+
+        guard case let .unknownAcknowledgement(frozenRequest) = model.state else {
+            return XCTFail("A server error cannot prove that the request was not accepted.")
+        }
+        XCTAssertEqual(frozenRequest.content, note)
+        XCTAssertEqual(frozenRequest.idempotencyKey, "server-error-key")
+
+        let retry = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
+        XCTAssertEqual(retry.request, frozenRequest)
+        await model.finishSubmission(retry, in: session) { _ in }
+
+        guard case let .accepted(receipt) = model.state else {
+            return XCTFail("Same-key replay should resolve a 5xx response after acceptance.")
+        }
+        XCTAssertTrue(receipt.replayed)
+        XCTAssertEqual(session.records.map(\.id), [receipt.taskID])
+        let attempts = await repository.recordedAttempts()
+        XCTAssertEqual(attempts.map(\.idempotencyKey), ["server-error-key", "server-error-key"])
+        if attempts.count == 2 {
+            XCTAssertEqual(attempts[1].prompt, attempts[0].prompt)
+        }
+    }
+
     func testDefiniteIdempotencyConflictKeepsDraftEditableAndUsesFreshKey() async throws {
         let repository = try RecordingTaskRepository(firstFailure: .idempotencyConflict)
         let session = TaskJourneySession(repository: repository, includeFixtureRecords: false)
@@ -138,7 +239,7 @@ final class TaskComposeSubmissionModelTests: XCTestCase {
         XCTAssertNil(model.beginSubmission(simulateUnknownReceipt: false))
     }
 
-    func testDefiniteRepositoryFailurePreservesDraftWithoutEchoingErrorText() async throws {
+    func testUnclassifiedRepositoryErrorRemainsUnknownWithoutEchoingNote() async throws {
         let repository = try RecordingTaskRepository(firstFailure: .echoNote("do-not-log-this-note"))
         let session = TaskJourneySession(repository: repository, includeFixtureRecords: false)
         let model = makeModel(keys: ["failed-key"])
@@ -148,10 +249,14 @@ final class TaskComposeSubmissionModelTests: XCTestCase {
         let attempt = try XCTUnwrap(model.beginSubmission(simulateUnknownReceipt: false))
         await model.finishSubmission(attempt, in: session) { _ in }
 
-        XCTAssertEqual(model.state, .definiteFailure(.rejected))
+        guard case let .unknownAcknowledgement(request) = model.state else {
+            return XCTFail("An unclassified repository error cannot prove the request was rejected.")
+        }
+        XCTAssertEqual(request.idempotencyKey, "failed-key")
+        XCTAssertEqual(request.content, note)
         XCTAssertEqual(model.draft, note)
-        XCTAssertTrue(model.canEditDraft)
-        XCTAssertFalse(model.isAwaitingReceipt)
+        XCTAssertFalse(model.canEditDraft)
+        XCTAssertTrue(model.isAwaitingReceipt)
         XCTAssertFalse(model.statusMessage?.contains(note) == true)
     }
 
@@ -169,6 +274,9 @@ final class TaskComposeSubmissionModelTests: XCTestCase {
 
 private enum PlannedRepositoryFailure: Sendable {
     case idempotencyConflict
+    case acceptedThenTransportFailure
+    case acceptedThenServerError
+    case invalidReceiptAfterAcceptance
     case echoNote(String)
 }
 
@@ -217,6 +325,20 @@ private actor RecordingTaskRepository: TaskRepositoryProtocol {
             switch failure {
             case .idempotencyConflict:
                 throw FakeTaskRepositoryError.idempotencyConflict
+            case .acceptedThenTransportFailure:
+                _ = try await base.createTask(request, idempotencyKey: idempotencyKey)
+                throw TaskAPIRepositoryError.transportFailure
+            case .acceptedThenServerError:
+                _ = try await base.createTask(request, idempotencyKey: idempotencyKey)
+                throw TaskAPIRepositoryError.serviceUnavailable
+            case .invalidReceiptAfterAcceptance:
+                let accepted = try await base.createTask(request, idempotencyKey: idempotencyKey)
+                return TaskReceiptDTO(
+                    taskID: accepted.taskID,
+                    status: accepted.status,
+                    acceptedAt: "not-an-iso-timestamp",
+                    replayed: accepted.replayed
+                )
             case let .echoNote(note):
                 throw NoteEchoFailure(note: note)
             }

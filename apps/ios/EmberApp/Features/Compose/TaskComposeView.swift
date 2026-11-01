@@ -116,7 +116,7 @@ struct TaskComposeView: View {
                 .accessibilityLabel("笔记内容")
                 .accessibilityIdentifier("compose-note-input")
 
-            Text("空白内容不能提交。笔记只在内存中用于这次模拟；FakeTaskRepository 不联网，也不保留原文。")
+            Text("空白内容不能提交。笔记只在内存中用于这次模拟；本机演示不会联网，也不会保留原文。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -156,7 +156,7 @@ struct TaskComposeView: View {
             Label("已接收 · \(receipt.replayed ? "幂等重放 200" : "新建 202")", systemImage: "checkmark.circle.fill")
                 .font(.headline)
                 .foregroundStyle(.green)
-            Text("这只表示 FakeTaskRepository 接收了本机模拟请求，不表示任务已经完成。")
+            Text("这只表示本机演示已接收模拟请求，不表示任务已经完成。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text("Task ID · \(receipt.taskID.uuidString)")

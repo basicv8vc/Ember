@@ -97,25 +97,29 @@ final class TaskJourneySession {
             throw TaskJourneyDemoError.receiptUnknown
         }
 
-        let task = try await repository.fetchTask(id: receipt.taskID)
-        let eventPage = try await repository.fetchEvents(taskID: receipt.taskID, after: nil)
-        let record = TaskJourneyRecord(
-            title: "笔记整理 · 本机会话",
-            task: task,
-            events: eventPage.events,
-            presentation: TaskPresentationState(
-                taskStatus: task.status,
-                connectionPhase: .connected,
-                commandInFlight: nil,
-                capability: .mockOnly
-            ),
-            origin: .createdInThisSession,
-            outcomeFixture: nil,
-            approvalAvailability: .notApplicable
-        )
-        records.insert(record, at: 0)
-        selectedTaskID = task.taskID
-        cancelMessageByTaskID[task.taskID] = nil
+        do {
+            let task = try await repository.fetchTask(id: receipt.taskID)
+            let eventPage = try await repository.fetchEvents(taskID: receipt.taskID, after: nil)
+            let record = TaskJourneyRecord(
+                title: "笔记整理 · 本机会话",
+                task: task,
+                events: eventPage.events,
+                presentation: TaskPresentationState(
+                    taskStatus: task.status,
+                    connectionPhase: .connected,
+                    commandInFlight: nil,
+                    capability: .mockOnly
+                ),
+                origin: .createdInThisSession,
+                outcomeFixture: nil,
+                approvalAvailability: .notApplicable
+            )
+            records.insert(record, at: 0)
+            selectedTaskID = task.taskID
+            cancelMessageByTaskID[task.taskID] = nil
+        } catch {
+            // Follow-up display reads cannot undo a valid create receipt or trigger a new POST.
+        }
         return receipt
     }
 

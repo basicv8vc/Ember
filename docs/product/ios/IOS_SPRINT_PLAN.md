@@ -1,5 +1,8 @@
 # Ember iOS — Milestones & First Sprint Plan
 
+> **M2 delivery gate updated · CTO APPROVED 2026-11-01:** [IOS_M2_FAST_LANE.md](IOS_M2_FAST_LANE.md) ([Issue #50](https://github.com/basicv8vc/Ember/issues/50)).
+> This supersedes the older M2 per-lane Simulator test/screenshot text below. M1, B0, security and production gates are unchanged.
+
 > Planning-only draft · 2026-11-01 · Base `f02075b7d8139149efdb6bc28ac05d7f5d764ae5`
 > **All Coding Agent prompts are drafts; none may start implementation before CTO approval.**
 

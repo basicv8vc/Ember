@@ -16,9 +16,11 @@
 ## 1. Objective & Boundaries
 
 ### 1.1 Objective
+
 Connect the **simulated Credential Broker and Egress Policy engine** (`packages/credentials/`) through the **existing** `RunExecutionContextReader` interface to the PostgreSQL-backed implementation supplied by a **trusted composition root**. Establish fail-closed operational worker-identity consistency and tenant/operation/scope checks without introducing a live Vault, proxy or external network call. **Do not claim that string worker-ID comparison is cryptographic authentication.**
 
 ### 1.2 In-Scope
+
 1. **Reuse Existing Context Reader (DO NOT Re-implement):**
    - Reuse `PostgresRunExecutionContextReader` from `@ember/postgres` (`packages/postgres/src/repositories/run-execution-context-reader.ts`) **in integration tests and, later, the trusted Worker composition root**. Do **not** import `@ember/postgres` from production `packages/credentials/src/**`; this package remains interface-driven.
    - Preserve `CredentialBroker.executeWithCredential(lease, credentialRef, egressRequest, contextReader, now)` and the existing `RunExecutionContextReader` interface from `@ember/contracts` (whose `read()` **returns** `RunExecutionContext` or **throws**; it does not return `null`). No duplicate reader and no new cycle between credentials and postgres.
@@ -39,6 +41,7 @@ Connect the **simulated Credential Broker and Egress Policy engine** (`packages/
    - Zero HTTP/TCP sockets to real internet endpoints (`tests/unit/p0c-credential-zero-network.test.ts` must pass).
 
 ### 1.3 Out-of-Scope (Strict Non-Goals)
+
 - **NO Duplicate Postgres Reader:** Do NOT create a new context reader in `packages/postgres/src/run-context.ts` or anywhere else.
 - **NO Direct Edits to Worker Run Loop:** Do NOT modify `apps/worker/**` (Lane B will wire the reader/broker into the worker).
 - **NO Changes to Sandbox Interfaces:** Do NOT touch `packages/contracts/src/interfaces.ts`.
@@ -50,12 +53,14 @@ Connect the **simulated Credential Broker and Egress Policy engine** (`packages/
 ## 2. File Ownership & Change Windows
 
 ### 2.1 Allowed Write Paths
+
 - `packages/credentials/src/**`
 - `tests/unit/p0c-credential-*.test.ts`
 - `tests/integration/credential-broker-postgres.test.ts` (new)
 - `docs/P0-C2C-CREDENTIAL-CONTEXT-WIRING.md` (new)
 
 ### 2.2 Forbidden Paths (STRICT)
+
 - `packages/postgres/src/**` (existing reader is frozen and reused as-is)
 - `apps/worker/**` (violators will be rejected)
 - `packages/contracts/**`
@@ -106,9 +111,9 @@ Connect the **simulated Credential Broker and Egress Policy engine** (`packages/
    ```typescript
    export interface CredentialBrokerOptions {
      readonly registry: InMemoryCredentialRegistry;
-     readonly policy: EgressPolicy;              // trusted, not caller supplied
+     readonly policy: EgressPolicy; // trusted, not caller supplied
      readonly auditSink?: AuditSink;
-     readonly trustedWorkerId?: string;         // trusted Worker config binding
+     readonly trustedWorkerId?: string; // trusted Worker config binding
    }
    ```
    Execution must fail closed when `trustedWorkerId` is absent/invalid, while pure management APIs remain available if appropriate. Verify `context.workerId === this.trustedWorkerId` immediately after the authoritative reader returns, **before** any credential lookup/audit of user-supplied operation details. Keep `executeWithCredential()`'s existing argument and type contract; if a breaking change is truly necessary, document compatibility and update all call sites/tests. Never expose a public per-call override.

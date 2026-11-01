@@ -16,9 +16,11 @@
 ## 1. Objective & Boundaries
 
 ### 1.1 Objective
+
 Design and implement a **provider-neutral sandbox runtime adapter and factory abstraction** that decouples Ember's execution engine (`DeterministicExecutor`) from concrete provider implementations, while strictly preserving the **fail-closed 8-phase lifecycle, independent resource verification, and tri-state leak detection** established in P0-C1A.
 
 ### 1.2 In-Scope
+
 1. **Contracts (`packages/contracts/src/interfaces.ts`):**
    - Define `SandboxProviderFactory` and `SandboxAdapterOptions` interfaces extending the existing `SandboxProvider` contract (`#L262-L275`).
 2. **Adapter Layer (`packages/execution/src/sandbox-adapter.ts`):**
@@ -38,6 +40,7 @@ Design and implement a **provider-neutral sandbox runtime adapter and factory ab
    - Distinguish a Provider's successful `destroy()` acknowledgment from independent resource verification. A missing/throwing `liveSandboxCount`-style check can never create a false PASS.
 
 ### 1.3 Out-of-Scope (Strict Non-Goals)
+
 - **NO Cloud Vendor SDKs or Calls:** Zero calls to Cloudflare, E2B, Daytona, or Boat. Passing `--provider <vendor>` must continue to fail closed with exit code 1.
 - **NO Edits to Worker Run Loops:** Do NOT modify `apps/worker/**` (owned exclusively by Agent C2B).
 - **NO Edits to Credentials/Egress:** Do NOT touch `packages/credentials/**` (owned exclusively by Agent C2C).
@@ -48,6 +51,7 @@ Design and implement a **provider-neutral sandbox runtime adapter and factory ab
 ## 2. File Ownership & Change Windows
 
 ### 2.1 Allowed Write Paths
+
 - `packages/contracts/src/interfaces.ts` (sandbox interface extensions only)
 - `packages/contracts/src/index.ts`
 - `packages/execution/src/sandbox-adapter.ts` (new)
@@ -60,6 +64,7 @@ Design and implement a **provider-neutral sandbox runtime adapter and factory ab
 - `docs/P0-C2A-SANDBOX-ADAPTER.md` (new)
 
 ### 2.2 Forbidden Paths (STRICT)
+
 - `apps/worker/**` (violators will be rejected)
 - `packages/credentials/**`
 - `packages/postgres/**`

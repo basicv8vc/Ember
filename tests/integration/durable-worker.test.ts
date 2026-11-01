@@ -8,6 +8,7 @@ import type {
 } from '@ember/contracts';
 import type { AuthContext } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   type BudgetPolicy,
@@ -92,6 +93,12 @@ function handlerWith(committer: RunResultCommitter) {
     budget: new PostgresBudgetLedger(db.pool, { policy: PERMISSIVE_BUDGET }),
     clock,
     logger,
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        tenantId: context.tenantId,
+        policyVersion: context.policyVersion,
+        allowMockWrite: true,
+      }),
   });
 }
 

@@ -8,7 +8,11 @@ import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
 import { DomainError, type Id } from '@ember/domain';
 import type { BudgetPolicy, FakeSandboxProvider } from '@ember/execution';
-import { DeterministicExecutionRouter, DeterministicExecutor } from '@ember/execution';
+import {
+  createDefaultSentinelPolicy,
+  DeterministicExecutionRouter,
+  DeterministicExecutor,
+} from '@ember/execution';
 import {
   LocalBlobStore,
   PostgresAgentRepository,
@@ -391,6 +395,13 @@ export class DemoCluster {
         budget: new PostgresBudgetLedger(workerPool, { policy: DEMO_BUDGET }),
         clock: systemClock,
         logger,
+        sentinelPolicy: (context) =>
+          createDefaultSentinelPolicy({
+            policyId: 'ember-demo-sentinel-v1',
+            policyVersion: 1,
+            tenantId: context.tenantId,
+            allowMockWrite: true,
+          }),
       });
 
       cluster.workerHandler = handler;

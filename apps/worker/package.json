@@ -10,6 +10,7 @@
   },
   "dependencies": {
     "@ember/contracts": "workspace:*",
+    "@ember/credentials": "workspace:*",
     "@ember/domain": "workspace:*",
     "@ember/execution": "workspace:*",
     "@ember/postgres": "workspace:*",

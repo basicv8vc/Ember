@@ -1,3 +1,4 @@
+import type { RunExecutionContext } from '@ember/contracts';
 import {
   LocalBlobStore,
   PostgresApprovalRepository,
@@ -14,10 +15,17 @@ import {
   systemClock,
 } from '@ember/postgres';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   EXECUTABLE_TASK_KINDS,
+  type SentinelPolicy,
 } from '@ember/execution';
+import {
+  CredentialBroker,
+  InMemoryCredentialRegistry,
+  SYNTHETIC_EGRESS_POLICY,
+} from '@ember/credentials';
 import { loadWorkerConfig } from './config.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, type WorkerLogger } from './logger.js';
@@ -81,6 +89,9 @@ async function main(): Promise<void> {
     concurrency: config.concurrency,
     budgetPolicyId: config.budget.policyId,
     budgetPolicyVersion: config.budget.policyVersion,
+    sentinelPolicyId: config.sentinel.policyId,
+    sentinelPolicyVersion: config.sentinel.policyVersion,
+    credentialBrokerBound: true,
     ...(config.mode === 'poll' ? { claimableKinds } : {}),
   });
 
@@ -103,6 +114,14 @@ async function main(): Promise<void> {
     const router = new DeterministicExecutionRouter();
     const executor = new DeterministicExecutor();
 
+    // Wire Lane C's simulated Credential Broker in trusted composition root (P0-C2C / P0-C2B)
+    const credentialRegistry = new InMemoryCredentialRegistry();
+    const credentialBroker = new CredentialBroker({
+      registry: credentialRegistry,
+      policy: SYNTHETIC_EGRESS_POLICY,
+      trustedWorkerId: config.workerId,
+    });
+
     // With a controlled blob root the worker runs the P0B-06 durable path: artifacts,
     // checkpoints and the terminal Run state are committed by one fenced transaction.
     // Without it, only the in-memory P0B-05 simulation is available.
@@ -111,9 +130,25 @@ async function main(): Promise<void> {
         ? null
         : new PostgresBlobStore(pool, new LocalBlobStore({ rootDir: config.blobRoot }));
 
+    const sentinelPolicy = (context: RunExecutionContext): SentinelPolicy =>
+      createDefaultSentinelPolicy({
+        policyId: config.sentinel.policyId,
+        policyVersion: config.sentinel.policyVersion,
+        tenantId: context.tenantId,
+        allowedActions: config.sentinel.allowedActions,
+      });
+
     const handler =
       blobs === null
-        ? createRunHandler({ contextReader, router, executor, clock: systemClock, logger })
+        ? createRunHandler({
+            contextReader,
+            router,
+            executor,
+            clock: systemClock,
+            logger,
+            sentinelPolicy,
+            credentialBroker,
+          })
         : createDurableRunHandler({
             contextReader,
             router,
@@ -131,6 +166,8 @@ async function main(): Promise<void> {
             budget: new PostgresBudgetLedger(pool, { policy: config.budget }),
             clock: systemClock,
             logger,
+            sentinelPolicy,
+            credentialBroker,
           });
 
     // Both loops share one stop signal: a shutdown drains the reaper and stops claiming new

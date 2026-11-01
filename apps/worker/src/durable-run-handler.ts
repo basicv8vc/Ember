@@ -22,11 +22,16 @@ import {
 } from '@ember/domain';
 import {
   computeApprovalActionDigest,
+  evaluateSentinelPolicy,
+  resolveSentinelCategory,
+  toSentinelDeniedError,
   type ExecutionClock,
   type ExecutionRouterForRun,
+  type SentinelPolicy,
   type SimulatedExecutor,
 } from '@ember/execution';
 import type { PostgresApprovalRepository, PostgresWorkspaceStore } from '@ember/postgres';
+import type { CredentialBroker } from '@ember/credentials';
 import { stepCost, stepOperationId } from './budget-plan.js';
 import type { WorkerLogger } from './logger.js';
 import type { RunHandler, RunHandlerCompletion } from './run-handler.js';
@@ -97,6 +102,45 @@ export interface DurableRunHandlerDependencies {
   readonly budget: BudgetLedger;
   readonly clock: ExecutionClock;
   readonly logger: WorkerLogger;
+  /**
+   * Authoritative, trusted server-side Sentinel policy or policy resolver.
+   * If omitted, malformed, or resolving to undefined, the handler fails closed with POLICY_DENIED.
+   */
+  readonly sentinelPolicy?:
+    SentinelPolicy | ((context: RunExecutionContext) => SentinelPolicy | undefined);
+  /**
+   * Authoritative, trusted server-side Credential Broker facade (P0-C2C).
+   */
+  readonly credentialBroker?: CredentialBroker;
+}
+
+function resolveWorkerSentinelPolicy(
+  deps: DurableRunHandlerDependencies,
+  context: RunExecutionContext,
+): SentinelPolicy | undefined {
+  return typeof deps.sentinelPolicy === 'function'
+    ? deps.sentinelPolicy(context)
+    : deps.sentinelPolicy;
+}
+
+function enforceSentinelAdmission(
+  deps: DurableRunHandlerDependencies,
+  context: RunExecutionContext,
+  phase: 'produce' | 'publish',
+): void {
+  const policy = resolveWorkerSentinelPolicy(deps, context);
+  const intent = {
+    tenantId: context.tenantId,
+    runId: context.runId,
+    taskId: context.taskId,
+    actionCategory: resolveSentinelCategory(context.kind, phase),
+    policyVersion: context.policyVersion,
+  };
+
+  const decision = evaluateSentinelPolicy(policy, intent);
+  if (decision.verdict !== 'allow') {
+    throw toSentinelDeniedError(decision);
+  }
 }
 
 interface ProducedBytes {
@@ -598,6 +642,8 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
 
         const approvalTtlMs = deps.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
 
+        enforceSentinelAdmission(deps, context, PRODUCE_STEP);
+
         const budgetedProduce = await runBudgetedStep({
           budget: deps.budget,
           grant,
@@ -766,6 +812,8 @@ async function publishResult(
   signal: AbortSignal,
   assertStepLive: () => Promise<void>,
 ): Promise<RunHandlerCompletion> {
+  enforceSentinelAdmission(deps, context, PUBLISH_STEP);
+
   const { workspaces, committer, logger } = deps;
   const workspace = await workspaces.loadForRun(context.tenantId, context.agentId);
   const entry = {

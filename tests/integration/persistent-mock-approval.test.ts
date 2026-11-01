@@ -8,6 +8,7 @@ import type {
 } from '@ember/contracts';
 import type { AuthContext } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   computeApprovalActionDigest,
@@ -130,6 +131,12 @@ function buildHandler(
     approvalTtlMs: APPROVAL_TTL_MS,
     clock,
     logger,
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        tenantId: context.tenantId,
+        policyVersion: context.policyVersion,
+        allowMockWrite: true,
+      }),
     ...overrides,
   });
 

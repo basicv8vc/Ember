@@ -66,6 +66,8 @@ public struct PromiseComposerCard: View {
 
                         Text(isSubmitting ? "composer.submitting" : "composer.submit")
                             .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
                     }
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
@@ -104,7 +106,7 @@ private struct PromiseComposerPreviewHarness: View {
     var body: some View {
         PromiseComposerCard(text: $text, onSubmit: {})
             .padding(16)
-            .frame(width: 360)
+            .frame(width: 320)
             .background(EmberDesignTokens.groupedBackground)
     }
 }

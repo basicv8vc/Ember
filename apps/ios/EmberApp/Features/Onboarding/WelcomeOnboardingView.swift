@@ -33,8 +33,6 @@ public struct WelcomeOnboardingView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                MockOnlyBanner()
-
                 VStack(alignment: .leading, spacing: 12) {
                     OnboardingStepRow(
                         symbol: "tray.and.arrow.down",
@@ -58,33 +56,46 @@ public struct WelcomeOnboardingView: View {
                     message: "onboarding.cloud_message",
                     tone: .warning
                 )
-
-                VStack(spacing: 10) {
-                    Button(action: onViewDemo) {
-                        HStack(spacing: 10) {
-                            Image(systemName: "play.fill")
-                                .accessibilityHidden(true)
-                            Text("onboarding.demo_action")
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .font(.body.weight(.semibold))
-                        .frame(maxWidth: .infinity, minHeight: 52)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.borderedProminent)
-
-                    Text("onboarding.signin_note")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
             }
             .padding(24)
             .frame(maxWidth: 520, alignment: .leading)
             .frame(maxWidth: .infinity, alignment: .center)
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 10) {
+                MockOnlyBanner()
+
+                Button(action: onViewDemo) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "play.fill")
+                            .accessibilityHidden(true)
+                        Text("onboarding.demo_action")
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, minHeight: 52)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.borderedProminent)
+
+                Text("onboarding.signin_note")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(.horizontal, 24)
+            .padding(.top, 12)
+            .padding(.bottom, 12)
+            .frame(maxWidth: 520)
+            .frame(maxWidth: .infinity)
+            .background(.regularMaterial)
+            .overlay(alignment: .top) {
+                EmberDesignTokens.separator
+                    .frame(height: 1)
+            }
+        }
         .accessibilityIdentifier("mock-onboarding-screen")
     }
 }

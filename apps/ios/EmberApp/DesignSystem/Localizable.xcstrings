@@ -518,13 +518,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Mock only — this draft is not submitted."
+            "value": "Mock only — submitting creates a simulated task; no real cloud or AI processing occurs."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "仅模拟演示：草稿不会提交。"
+            "value": "仅为模拟：提交会创建模拟任务，不会进行真实云端或 AI 处理。"
           }
         }
       }

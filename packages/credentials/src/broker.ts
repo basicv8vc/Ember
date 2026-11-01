@@ -39,12 +39,14 @@ export interface CredentialBrokerOptions {
   readonly registry: InMemoryCredentialRegistry;
   readonly policy: EgressPolicy;
   readonly auditSink?: AuditSink;
+  readonly trustedWorkerId?: string;
 }
 
 export class CredentialBroker {
   readonly registry: InMemoryCredentialRegistry;
   readonly policy: EgressPolicy;
   readonly auditSink?: AuditSink;
+  readonly trustedWorkerId?: string;
 
   constructor(options: CredentialBrokerOptions) {
     if (!options || !options.registry || !options.policy) {
@@ -54,6 +56,14 @@ export class CredentialBroker {
     this.registry = options.registry;
     this.policy = options.policy;
     this.auditSink = options.auditSink;
+    if (options.trustedWorkerId !== undefined) {
+      if (typeof options.trustedWorkerId !== 'string' || options.trustedWorkerId.trim() === '') {
+        throw createInvalidArgumentError(
+          'trustedWorkerId must be a non-empty string when provided',
+        );
+      }
+      this.trustedWorkerId = options.trustedWorkerId.trim();
+    }
   }
 
   private assertValidPolicy(policy: EgressPolicy): void {
@@ -143,15 +153,24 @@ export class CredentialBroker {
     contextReader: RunExecutionContextReader,
     now: Date = new Date(),
   ): Promise<SimulatedProxyResult> {
-    // 1. Validate lease input structure
+    // 1. Fail closed if trusted worker identity is not configured on broker
+    if (
+      !this.trustedWorkerId ||
+      typeof this.trustedWorkerId !== 'string' ||
+      this.trustedWorkerId.trim() === ''
+    ) {
+      throw createUnauthenticatedError('Trusted worker identity is required for execution');
+    }
+
+    // 2. Validate lease input structure
     this.assertValidLease(lease);
 
-    // 2. Validate context reader presence
+    // 3. Validate context reader presence
     if (!contextReader || typeof contextReader.read !== 'function') {
       throw createUnauthenticatedError('Injected RunExecutionContextReader is required');
     }
 
-    // 3. Authoritative verification of the claimed lease
+    // 4. Authoritative verification of the claimed lease
     let context: RunExecutionContext;
     try {
       context = await contextReader.read(lease, now);
@@ -169,7 +188,19 @@ export class CredentialBroker {
       throw createNotFoundError('Execution context not found for leased run');
     }
 
-    // 4. Verify tenant-scoped policy binding against authoritative context (fail-closed if missing or mismatched)
+    // 5. Authoritative operational worker identity verification (fail closed immediately)
+    if (
+      !context.workerId ||
+      typeof context.workerId !== 'string' ||
+      context.workerId.trim() === '' ||
+      context.workerId !== this.trustedWorkerId
+    ) {
+      throw createUnauthenticatedError(
+        'Operational worker identity mismatch with authoritative execution context',
+      );
+    }
+
+    // 6. Verify tenant-scoped policy binding against authoritative context (fail-closed if missing or mismatched)
     if (
       this.policy.tenantId !== undefined &&
       (!context.tenantId ||
@@ -197,7 +228,7 @@ export class CredentialBroker {
       );
     }
 
-    // 5. Verify context invariants against the caller lease
+    // 7. Verify context invariants against the caller lease
     if (context.tenantId !== lease.tenantId) {
       throw createStaleLeaseError(
         'Claimed tenantId does not match authoritative execution context',
@@ -218,7 +249,7 @@ export class CredentialBroker {
       );
     }
 
-    // 5. Check lease expiry
+    // 8. Check lease expiry
     const leaseExpiryMs = new Date(lease.leaseExpiresAt).getTime();
     if (Number.isNaN(leaseExpiryMs) || now.getTime() >= leaseExpiryMs) {
       throw createStaleLeaseError('Leased run claim has expired');
@@ -226,7 +257,7 @@ export class CredentialBroker {
 
     // Note: context.workerId is purely operational execution identity, never end-user identity.
 
-    // 7. Tenant-isolated credential lookup (Uniform agnosticism: returns NOT_FOUND if foreign)
+    // 9. Tenant-isolated credential lookup (Uniform agnosticism: returns NOT_FOUND if foreign)
     const credential = this.registry.getInternal(context.tenantId, credentialRef, now);
     if (!credential) {
       // Audit denial: do not echo unverified provider or operation strings
@@ -247,7 +278,7 @@ export class CredentialBroker {
       throw createNotFoundError('Credential not found in this tenant');
     }
 
-    // 8. Check credential status
+    // 10. Check credential status
     if (credential.status === 'revoked') {
       this.recordDenialAudit({
         tenantId: context.tenantId,
@@ -284,7 +315,7 @@ export class CredentialBroker {
       throw createPolicyDeniedError('Credential has expired');
     }
 
-    // 9. Provider alignment
+    // 11. Provider alignment
     if (credential.provider !== egressRequest.provider) {
       this.recordDenialAudit({
         tenantId: context.tenantId,
@@ -303,7 +334,7 @@ export class CredentialBroker {
       throw createPolicyDeniedError('Credential provider mismatch', 'NO_MATCHING_RULE');
     }
 
-    // 10. Evaluate Egress Policy against request with tenant scoping
+    // 12. Evaluate Egress Policy against request with tenant scoping
     const egressDecision = evaluateEgressRequest(this.policy, egressRequest, context.tenantId);
     if (!egressDecision.allowed) {
       this.recordDenialAudit({
@@ -328,7 +359,7 @@ export class CredentialBroker {
       );
     }
 
-    // 11. Server-side rule.requiredScopes verification against credential.scopes
+    // 13. Server-side rule.requiredScopes verification against credential.scopes
     const matchedRules = this.policy.rules.filter((r) => r.ruleId === egressDecision.matchedRuleId);
     if (matchedRules.length !== 1) {
       this.recordDenialAudit({
@@ -444,7 +475,7 @@ export class CredentialBroker {
       }
     }
 
-    // 11. Record approved audit record (networkCallsMade: 0 guaranteed)
+    // 14. Record approved audit record (networkCallsMade: 0 guaranteed)
     const auditRecord = createAuditRecord({
       tenantId: context.tenantId,
       taskId: context.taskId,
@@ -465,7 +496,7 @@ export class CredentialBroker {
       this.auditSink.record(auditRecord);
     }
 
-    // 12. Return synthetic, redacted SIMULATED result. No network socket or HTTP call is made.
+    // 15. Return synthetic, redacted SIMULATED result. No network socket or HTTP call is made.
     return Object.freeze({
       status: 'SIMULATED',
       allowed: true,

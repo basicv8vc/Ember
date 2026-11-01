@@ -2,7 +2,8 @@
 
 > Updated: **2026-11-01 (Asia/Shanghai)**
 > Mission: **IOS-LEAD-001 / M0 docs-only Draft PR**
-> Verified Ember main SHA at audit: **`f02075b7d8139149efdb6bc28ac05d7f5d764ae5`**
+> Initial code audit main SHA: **`f02075b7d8139149efdb6bc28ac05d7f5d764ae5`**
+> Post-audit main refresh (2026-11-01): **`3b6c87092d856277d6b0fce71926a5f7fcd8bc06`** (merged PR #35; iOS HTTP routes unchanged)
 > Verified Shua main SHA at audit: **`13711dcb1516f99ca95af7a084caf4e7bda496fe`**
 > Draft PR: **see PR that contains this file**; actual PR number/head SHA must be taken from GitHub (this file intentionally avoids a guessed ID).
 
@@ -13,7 +14,7 @@
 - Code confirms authenticated local-dev HTTP Agent/Task/Event/SSE/Cancel/Approval/Artifact routes; server Task/Run/Workspace and tenant-scoped persistence. Test files are present for them. **No test command was executed in this docs-only session**.
 - Only `mock.*` task kinds, FakeLLM/FakeSandbox, and mock approval. No production end-user Auth, server Task list, rich result text API, APNs or real safe model gateway detected in audited main.
 - P0-B 10A/B/C merged via PRs #25/#26/#27 and CI evidence PR #28; top-level README's historical P0-B status/endpoints paragraphs lag behind actual code.
-- P0-C1 policy/sandbox-smoke/credential foundations merged (#30–#32), P0-C2 prompt docs merged (#33–#34); **P0-C2C PR #35 remains Draft, not on main at snapshot**. No live egress/credentials/remote sandbox guarantee.
+- P0-C1 policy/sandbox-smoke/credential foundations merged (#30–#32), P0-C2 prompt docs merged (#33–#34); **At original audit PR #35 was Draft; it subsequently merged into main** (`3b6c8709`). Its five changed files are a credential broker, tests and spec; it does not wire production Worker, real Vault, external egress or remote sandbox. P0-C2A #39 and P0-C2B #38 are still open at the refresh.
 - Read Shua CoPaper specified five SwiftUI files (plus QuickSetup/Typography/Persona references) at pinned SHA; recorded decisions and risk in `IOS_UI_REFERENCE_AUDIT.md`.
 - Prepared M0 design documents and three **unexecuted** Coding Agent prompt drafts; no mobile production code, login integration, paid service, deployment, or merge.
 

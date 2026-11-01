@@ -1,6 +1,6 @@
 # Ember iOS — API Dependency & Gap Audit
 
-> PROPOSED · 2026-11-01 · Ember code snapshot `f02075b7d8139149efdb6bc28ac05d7f5d764ae5` (main)
+> PROPOSED · 2026-11-01 · HTTP code audit `f02075b7d8139149efdb6bc28ac05d7f5d764ae5`; post-audit main refresh `3b6c87092d856277d6b0fce71926a5f7fcd8bc06` (PR #35 changes no iOS-facing routes)
 > This is **not** a production API guarantee. Sources: `apps/api/src/app.ts`, `apps/api/src/{agents,tasks,approvals,artifacts}/*.ts`, `packages/contracts/src/*.ts` and listed tests.
 
 ## Audit classification
@@ -56,7 +56,7 @@ Do not implement or invent endpoint URLs above; names are **discussion placehold
 ## Versioned evidence and current caveats
 
 - Full SHA `f02075b7d8139149efdb6bc28ac05d7f5d764ae5` incorporates merged P0B-10A/B/C and P0-C1 local security foundations. `README.md` contains **stale historical claims** that “/v1 doesn't exist” and P0B-10 is in progress; route code and merged PRs #25–#28 are stronger current evidence.
-- P0-C2 kickoff prompts are merged (PR #33/#34) but **P0-C2C PR #35 is Draft/unmerged** as of this audit. Do not count its worker context wiring as current main. `docs/prompts/p0-c2/P0-C2-THREE-LANE-KICKOFF.md` still explicitly blocks live egress, host exec, credential use and paid cloud execution.
+- P0-C2 kickoff prompts are merged (PR #33/#34) but **P0-C2C PR #35 was Draft at the initial snapshot, **then merged** into current main `3b6c8709`. The five merged files cover broker code, tests and a spec; production Worker wiring, real credential vault, external egress and remote authentication remain unimplemented. `docs/prompts/p0-c2/P0-C2-THREE-LANE-KICKOFF.md` still explicitly blocks live egress, host exec, credential use and paid cloud execution.
 - Tests establish local code behavior, not production deployment or security approval; iOS-specific API contract integration tests are **NOT RUN**.
 
 ## Approval asks

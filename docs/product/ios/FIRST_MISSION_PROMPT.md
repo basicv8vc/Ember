@@ -24,6 +24,26 @@
 
 第一阶段验证的是 **Promise → Progress → Outcome**：用户交代一件有价值的事，Ember 可靠接收，持续记录进展，必要时请求批准，最终交付结果或诚实解释失败。不要设计一个只会回复聊天气泡、却无法追踪承诺的泛聊天 App。
 
+### 现有 iOS 设计参考：Shua / CoPaper
+
+Jia 已明确建议参考其现有项目 [Shua](https://github.com/slowfastai/shua) 的 CoPaper UI，以及其他成熟的 iOS 交互。将它作为**经过真实项目实践的设计参考**，而不是要求 Ember 复制 Shua 的产品或代码。
+
+请先只读审查 Shua 当前 `main`，优先看以下已存在的 SwiftUI 实现：
+
+- `Shua/Shua/Harness/Views/HarnessComposerCard.swift`：共享的输入卡片、流式发送/停止状态、可选控制项与轻量视觉层次。
+- `Shua/Shua/Harness/Views/DiscussionView.swift`：完整讨论页的消息、工具栏与流式交互。
+- `Shua/Shua/Harness/Views/ChatSidebarView.swift`：历史会话搜索、切换、重命名、删除确认与状态同步。
+- `Shua/Shua/Harness/Views/SidebarDrawerContainer.swift`：覆盖式抽屉、边缘手势、可访问性及 WebView 动画性能取舍。
+- `Shua/Shua/Harness/Views/PaperDiscussionInlineComposer.swift`：上下文入口与完整讨论页共用 Composer 的方式。
+
+还可按需查看 Shua 的 Onboarding、卡片与 Typography 组件。对每项设计明确分类为 **可借鉴 / 需改造 / 不适用**，并提供源文件证据、适合 Ember 的理由以及潜在性能与无障碍问题。尤其注意：
+
+- Ember 的中心是**伙伴与可追踪的承诺**，不能把 CoPaper 的论文讨论会话直接等同于 Agent Task。
+- CoPaper 中的 Provider Key、会员门控和论文上下文，不应原封不动迁入 Ember 的云端认证及审批流程。
+- Shua 某些 CoPaper 视图标注 `iOS 17+`，不能据此擅自确定 Ember 的最低 iOS 版本。
+- 不直接复制跨仓库源码、图片、品牌素材或私有配置。若未来需要代码复用，先提交许可、依赖与维护边界方案供 CTO 审核。
+- 如果新对话不能访问私有 Shua 仓库，明确列出所需文件或截图向 Jia 请求，不臆造审查结论。
+
 ### 执行任务：先研究，再提交设计，不直接写 App
 
 1. **只读仓库审计。** 从 GitHub 获取当前 `origin/main` 的真实 SHA，阅读 README、架构 RFC v0.2、P0-B 的 Task/Events/Approval 相关 API 与测试、P0-C2 Kickoff 和已合并代码。明确哪些是运行中的真实能力，哪些仍是 Fake/Simulated，以及 iOS 目前是否已有工程。不要引用过期的固定 SHA 作为最新事实。
@@ -42,6 +62,7 @@
 - `IOS_USER_JOURNEY.md` — 关键状态、异常分支、文字线框图或 Mermaid 流程。
 - `IOS_ARCHITECTURE_PROPOSAL.md` — SwiftUI 架构、目录和测试建议、待批技术决定。
 - `IOS_API_DEPENDENCIES.md` — 现存 API 证据与缺口矩阵（注明真实代码路径/Commit）。
+- `IOS_UI_REFERENCE_AUDIT.md` — Shua/CoPaper 交互参考矩阵、源文件证据与 Ember 的取舍建议。
 - `IOS_SPRINT_PLAN.md` — 里程碑、依赖、三线任务、可检验交付物。
 - `IOS_STATUS.md` — 本次审计 SHA、完成事实、阻塞、待审 PR、下一步。
 
@@ -55,6 +76,7 @@
 - [ ] MVP 可以用一个真实用户旅程解释，且有失败/恢复/审批的分支。
 - [ ] iPhone 云端独立可用；Mac 不作为前提。
 - [ ] 模拟能力与真实能力在文档和 Demo 计划中明确区分。
+- [ ] CoPaper 参考已逐项审查；只借鉴合适的交互原则，不直接克隆论文讨论产品或未经批准跨仓库复制代码。
 - [ ] API 依赖无假设性“已实现”端点，缺口可提交 CTO/Platform。
 - [ ] 三线文件所有权不冲突，DoD 含 iOS 模拟器测试与 UX 验证要求。
 - [ ] 明确不在没有实际测试时宣称真机验证或 App Store 可发布。

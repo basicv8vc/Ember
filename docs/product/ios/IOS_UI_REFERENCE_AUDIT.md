@@ -1,0 +1,38 @@
+# Shua / CoPaper → Ember iOS UI Reference Audit
+
+> Read-only analysis · 2026-11-01 · Shua `slowfastai/shua` main at `13711dcb1516f99ca95af7a084caf4e7bda496fe`
+> Ember baseline `f02075b7d8139149efdb6bc28ac05d7f5d764ae5` · NO source/asset copying authorized.
+
+Five required files were retrieved and read. These are observed implementation choices, **not** a statement that every UI behavior was retested on a device. Source paths are relative to Shua repository and line ranges to the recorded SHA.
+
+| CoPaper source / code evidence | Judgment | Proposed Ember use | Pitfall / mitigation |
+| --- | --- | --- | --- |
+| `Shua/Shua/Harness/Views/HarnessComposerCard.swift` L12–36, 58–72: shared stateless card with bound draft, focus, primary action; L192–240: compact option chip / send-stop; L100–143 dual shadow/light stroke | **可借鉴，需改造** | One reusable `PromiseComposerCard` with multi-line input and high-contrast “委托” action. State owned by parent; tapping empty area focuses input. | Shua “stop stream” is **not** cancel durable Task. Ember needs separate `Submitting`, `Cancel requested` and `Terminal` states. Strip model reasoning chips until supported. Avoid layered offscreen shadow in large lists; test Reduce Motion/VoiceOver and hit target ≥44 pt. |
+| `DiscussionView.swift` L484–532: `NavigationStack` shell and explicit toolbar; L761–840: message WebView with contextual suggestions; L899–950: inline dismissible recoverable error banner; L975–1021: Composer wiring | **选择性借鉴** | Familiar top-level shell, templated first-task suggestions, recoverable inline network/error card. Main surface becomes Task promise/activity/outcome, **not** scrolling assistant chat bubbles. | WKWebView can have rendering/voiceover/performance overhead; begin with native SwiftUI timeline and text. No external provider/model switcher in P0; streaming text ≠ authoritative Task event. |
+| `ChatSidebarView.swift` L20–39, 165–201, 232–294, 304–423: cached titles, search, grouped history, guarded rename/delete, errors | **需改造** | Light task inbox, compact status metadata, local filter only when full server list exists; single source of truth for selection and actions. | Shua queries local `HarnessStore`; Ember's server currently lacks list/rename/delete. Do **not** expose controls without APIs. Never purge another device's/scene's tasks as “empty chats”; a Task is not a disposable session. |
+| `SidebarDrawerContainer.swift` L1–32, 53–108: overlay drawer does not animate content layer; edge gesture; accessibilityHidden; backdrop hit testing | **可借鉴（后置）** | If navigation density grows, overlay sidebar pattern prevents transforming heavy content. Prefer system navigation first in P0; later evaluate drawer on iPhone/iPad. | Existing WebView flicker avoided by freezing content transform; if reused, inspect gesture conflict with interactive navigation and ensure no invisible tappable areas / VoiceOver reachability. No direct cross-repo code copy. |
+| `PaperDiscussionInlineComposer.swift` L23–58, 60–90: shared visual shell, full-card hit area, immutable launch payload, `fullScreenCover` | **可借鉴，需改造** | Home card acts as entry into task composer with unambiguous target/seed template; clicking should **not auto-submit**. Use value-type draft launch snapshot to avoid lost first input. | Shua Premium gate/paywall, paper-bound context and BYOK setup **不适用**；Ember approval/auth are independent security workflows. |
+| `DiscussionView.swift` L54–61, 102–205: explicit third-party consent and differentiated missing-key/failure; lifecycle gating | **原则可借鉴，不照搬** | Explicit cloud-processing consent, truthful distinct auth/network/server failure and scene re-sync. | CoPaper BYOK key UX is not Ember cloud identity. Do not use an arbitrary client consent Boolean as sole server authorization. |
+| `QuickSetupFlowView.swift` L22–95, 122–183: contained onboarding steps, primary CTA visibility | **部分可借鉴** | Short first-run value + privacy/account step; no multi-page feature tour before first tangible outcome. | Avoid the long multi-topic onboarding for a single Task use case; account-specific gating under CTO review. |
+| `AppTypography.swift` L159 onward: dynamic type abstraction | **原则可借鉴** | Use semantic font roles and Dynamic Type tests for status/time fields. | No wholesale copy of Shua typography palette/fonts; long translated status must wrap. |
+| `HarnessPersonaEditorView.swift` L3–25, 51–80: natural-language persona sheet bound to local profile | **暂不适用** | P1 research for relationship customization | P0 validation is trust in promises; adding persona config first increases setup cost and cloud-memory privacy decisions. |
+
+## Original lessons worth keeping
+
+1. **Touch target vs appearance**: Shua makes the entire visible composer card focusable (Composer L58–72), and its inline shell makes the whole card an entry (Inline L60–78). Ember should not hide its main action behind a tiny icon.
+2. **Separate view from business truth**: Shua's shared Composer doesn't own streaming state. Ember's UI state is computed from durable server events; local animations have no authority to change Task status.
+3. **Errors are product surfaces**: inline, recoverable error messages (Discussion L900–950), plus different load vs per-row action errors (Sidebar L20–31), avoid burying recoverable faults or implying every failure is an auth error.
+4. **Don't repeat earlier performance hazards**: sidebar content/WKWebView kept stationary during animation, list title derivation cached on reload, main view not redrawn on every streaming tick. For Ember the natural simplification is native timeline first.
+5. **iOS version is an independent decision**: required CoPaper views use `@available(iOS 17, *)`. That does **not** set Ember's deployment target; proposed alternatives in `IOS_ARCHITECTURE_PROPOSAL.md`.
+
+## Ember design language v0 — no borrowed assets
+
+- Core metaphor: calm personal partner + “promise card” rather than academic chat. Task statuses use consistent text + semantic icon; no stochastic fake progress animation.
+- One primary action per screen, lightweight warm card styling, comfortable spacing, conservative shadows, semantic dynamic text, support light/dark and Reduce Motion.
+- Trust surfaces have higher visual priority than personality: accepted timestamp, connection state, approval meaning, source of result and cancellation consequence.
+- Don’t transfer Shua's CoPaper source files, artwork, names, paid gates, Provider Key architecture, paper-specific citation menus or local discussion-persistence logic.
+
+## Verification still required after approval
+
+- No Shua simulator or on-device performance test run during this audit; UX judgments are **static code review**.
+- Prototype two modes (native task timeline vs optional drawer) on 3 device sizes, Dynamic Type accessibility, VoiceOver, dark mode, weak network; submit screenshots and the actual xcodebuild/UITest logs.

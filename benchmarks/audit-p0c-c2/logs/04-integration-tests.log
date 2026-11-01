@@ -1,0 +1,54 @@
+$ node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts
+
+ RUN  v5.0.5 /Users/lj/Downloads/worktrees/ember-p0c2-acceptance
+
+ ✓ |integration| tests/integration/artifact-integrity.test.ts (19 tests) 733ms
+ ✓ |integration| tests/integration/execution-worker.test.ts (10 tests) 771ms
+   ✓ P0B05-T02 claim → execute → finish (3)
+     ✓ does not claim or mutate a Task of a kind it cannot execute 426ms
+ ✓ |integration| tests/integration/http-task-sse.test.ts (6 tests) 863ms
+   ✓ GET /v1/tasks/:taskId/stream with PostgreSQL (6)
+     ✓ closes an active SSE socket and PostgreSQL pool on production SIGTERM 347ms
+ ✓ |integration| tests/integration/cooperative-cancellation.test.ts (19 tests) 1371ms
+ ✓ |integration| tests/integration/persistent-mock-approval.test.ts (19 tests) 1751ms
+ ✓ |integration| tests/integration/lease-claim.test.ts (9 tests) 684ms
+ ✓ |integration| tests/integration/migrations.test.ts (7 tests) 290ms
+ ✓ |integration| tests/integration/result-commit.test.ts (23 tests) 2003ms
+   ✓ P0B06 fencing and concurrency around the commit (6)
+     ✓ re-validates the lease after a row-lock wait that outlived it 650ms
+ ✓ |integration| tests/integration/persistent-budget.test.ts (19 tests) 1028ms
+ ✓ |integration| tests/integration/advisory-lock-barrier.test.ts (6 tests) 1108ms
+ ✓ |integration| tests/integration/cancellation-retry.test.ts (9 tests) 467ms
+ ✓ |integration| tests/integration/durable-worker.test.ts (4 tests) 546ms
+ ✓ |integration| tests/integration/checkpoint-resume.test.ts (7 tests) 733ms
+ ✓ |integration| tests/integration/duplicate-upload.test.ts (5 tests) 657ms
+ ✓ |integration| tests/integration/lease-recovery.test.ts (14 tests) 831ms
+ ✓ |integration| tests/integration/durable-task-inbox.test.ts (19 tests) 912ms
+ ✓ |integration| tests/integration/lease-fencing.test.ts (10 tests) 833ms
+ ✓ |integration| tests/integration/benchmark-smoke.test.ts (3 tests) 3411ms
+   ✓ Benchmark Smoke Test (Integration / Real PostgreSQL) (3)
+     ✓ executes a complete end-to-end small-scale benchmark closed loop 1226ms
+     ✓ supports disablePgSampling option and reports zero PostgreSQL samples without faking telemetry PASS 877ms
+     ✓ executes CLI entry point with --disable-pg-sampling flag and generates valid report 1308ms
+ ✓ |integration| tests/integration/http-artifact-api.test.ts (4 tests) 655ms
+ ✓ |integration| tests/integration/task-idempotency.test.ts (6 tests) 745ms
+ ✓ |integration| tests/integration/http-agent-api.test.ts (11 tests) 641ms
+ ✓ |integration| tests/integration/demo-cluster-rollback.test.ts (7 tests) 538ms
+   ✓ DemoCluster Initialization Safety & Rollback Verification (7)
+     ✓ cleans up all schema and pool resources when initialization fails mid-way 531ms
+ ✓ |integration| tests/integration/workspace-cas.test.ts (10 tests) 899ms
+ ✓ |integration| tests/integration/telemetry-observability.test.ts (2 tests) 343ms
+ ✓ |integration| tests/integration/sandbox-adapter.test.ts (2 tests) 13ms
+ ✓ |integration| tests/integration/http-task-api.test.ts (12 tests) 606ms
+ ✓ |integration| tests/integration/credential-broker-postgres.test.ts (12 tests) 614ms
+ ✓ |integration| tests/integration/worker-sentinel-nondurable.test.ts (7 tests) 423ms
+ ✓ |integration| tests/integration/worker-sentinel-admission.test.ts (13 tests) 814ms
+
+ Test Files  29 passed (29)
+      Tests  294 passed (294)
+   Start at  18:24:40
+   Duration  4.91s (tests 86%, import 11%, transform 3%)
+
+    Isolate  29 workers spawned · ~99ms startup each (spawn + environment, per file)
+             at least ~312ms faster with isolate: false — reuses workers across files instead of one per file
+

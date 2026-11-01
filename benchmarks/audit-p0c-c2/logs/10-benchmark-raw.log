@@ -1,0 +1,47 @@
+$ node --env-file-if-exists=.env.local --import tsx apps/benchmark/src/cli.ts --enable-local-load --agents 1000 --concurrency 100 -n 1000 --task-mix fast:70,standard:30
+[Ember Bench] Starting benchmark configuration:
+  - Agents: 1000
+  - Concurrency: 100
+  - Task Mix: fast 70%, standard 30%
+  - Warmup requests: 50
+  - Total requests: 1000
+  - Seed: 42
+  - Isolated Schema: true
+[Ember Bench] Initializing isolated local test harness in PostgreSQL...
+[Ember Bench] Harness ready. Schema: ember_bench_2812a3fe2643, API URL: http://127.0.0.1:58021
+[Ember Bench] Phase 1: Provisioning 1000 persistent logical agents...
+[Ember Bench] Phase 1 Complete: 1000 agents in 526ms (1902.2 agents/s, P95=37.2ms). DB records: 1000 agents, 1000 workspaces. Resident sandboxes: 0.
+[Ember Bench] Phase 2: Warming up with 50 requests...
+[Ember Bench] Phase 2: Warmup complete.
+[Ember Bench] Phase 3: Executing load benchmark with concurrency=100...
+[Ember Bench] Phase 3: Load execution finished in 11640ms. Executed 1000 task samples.
+[Ember Bench] Phase 4: Reconciling task accounting and invariants...
+[Ember Bench] Results saved to:
+  - benchmarks/results/load-benchmark-2026-11-01T10-23-27-758Z.json
+  - benchmarks/results/load-benchmark-2026-11-01T10-23-27-758Z.md
+[Ember Bench] Cleaning up isolated test harness...
+[Ember Bench] Clean up complete.
+
+===============================================================
+             EMBER LOCAL LOAD BENCHMARK SUMMARY               
+===============================================================
+Agents: 1000 | Concurrency: 100 | Samples: 1000
+Success Rate: 100% (1000/1000) | Lost: 0
+---------------------------------------------------------------
+LATENCY METRICS (ms):
+  Durable Ack:      P50=4.84  P95=38.77  P99=55.22  (Min=1.03, Max=58.7)
+  First Real Event: P50=727.57  P95=936.1  P99=1074.35
+  Queue Wait:       P50=723  P95=920.2  P99=1019.13
+  Task Completion:  P50=1135.55  P95=1401.74  P99=1531.5
+---------------------------------------------------------------
+SYSTEM TELEMETRY:
+  CPU: 16.4% | Peak RSS: 363.6 MB | Peak Heap: 149.3 MB
+  PG Active Conns: 51 (127 samples) | HTTP POST Peak: 100 | Worker Peak: 39
+  Live Sandboxes Peak: 2 (Idle: 0)
+  Cost Source: simulated (Simulated CPU: 1306ms)
+---------------------------------------------------------------
+TARGET STATUS: Durable Ack P95 <= 1s -> [MET] (38.77ms)
+TARGET STATUS: Zero Task Loss -> [MET]
+TARGET STATUS: Zero Resident Sandboxes -> [MET]
+===============================================================
+

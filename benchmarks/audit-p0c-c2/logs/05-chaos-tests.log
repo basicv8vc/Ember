@@ -1,0 +1,23 @@
+$ node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.chaos.config.ts
+
+ RUN  v5.0.5 /Users/lj/Downloads/worktrees/ember-p0c2-acceptance
+
+ ✓ |chaos| tests/chaos/b-t25-durable-ack-crash.test.ts (6 tests) 634ms
+ ✓ |chaos| tests/chaos/b-t27-lease-fencing-concurrency.test.ts (6 tests) 649ms
+ ✓ |chaos| tests/chaos/b-t26-artifact-checkpoint-atomic.test.ts (9 tests) 662ms
+ ✓ |chaos| tests/chaos/b-t28-sentinel-worker-fencing.test.ts (3 tests) 6924ms
+   ✓ B-T28: Sentinel Runtime Admission & Worker Fencing Chaos Verification (3)
+     ✓ SIGKILLs Worker 1 after Step 1 checkpoint; Worker 2 resumes without mock.write and fails closed with checkpoint preserved 2949ms
+     ✓ SIGKILLs Worker 1 after Step 1 checkpoint; Worker 2 resumes with mock.write and completes without re-executing Step 1 2898ms
+     ✓ durable mock.approval produces pending approval; approval decision cannot bypass Sentinel admission denial on publish 622ms
+ ✓ |chaos| tests/chaos/b-t26-worker-process-sigkill-recovery.test.ts (3 tests) 8633ms
+   ✓ B-T26 / P0B-10B: Real Worker OS Process SIGKILL & Autonomous Recovery (3)
+     ✓ SIGKILLs real Worker OS process after Step 1 checkpoint; recovered Worker resumes from checkpoint without re-running Step 1 2973ms
+     ✓ SIGKILLs Worker OS process before any checkpoint is committed; rolls back completely and new Worker runs both steps cleanly 2928ms
+     ✓ demonstrates standalone Reaper process independently converging a task after Poll Worker is SIGKILLed 2567ms
+
+ Test Files  5 passed (5)
+      Tests  27 passed (27)
+   Start at  18:24:53
+   Duration  8.88s (tests 96%, import 3%, transform 1%)
+

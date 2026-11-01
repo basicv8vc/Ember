@@ -1,0 +1,176 @@
+$ node --import tsx apps/cli/src/sandbox-smoke/cli.ts
+================================================================================
+Ember Sandbox Smoke Harness (Local Fake Simulation)
+================================================================================
+Schema Version:        1.0.0
+Test ID:               dcd51f95-d90f-4043-baa2-6dd9d0fd1d34
+Provider:              fake
+Mode:                  LOCAL_SIMULATION
+Status:                PASS
+Total Wall Clock:      6.37 ms
+
+--- Lifecycle Phases ---
+• capabilities    : PASS    (0.13 ms)
+• create          : PASS    (2.73 ms)
+• waitReady       : PASS    (0.14 ms)
+• exec            : PASS    (1.76 ms)
+• readOutput      : PASS    (0.09 ms)
+• usage           : PASS    (0.05 ms)
+• stop            : PASS    (0.04 ms)
+• destroy         : PASS    (0.04 ms)
+
+--- Resource & Telemetry Footprint ---
+Usage Source:          SIMULATED
+CPU Seconds:           0.001000
+Memory GiB*Seconds:    0.000500
+Egress Bytes:          0
+
+--- Security & Measurement Boundaries ---
+Real Isolation:        NOT_MEASURED (Process memory isolation only; no VM/container)
+Vendor Cold Start:     NOT_MEASURED (null)
+Vendor Cost:           NOT_MEASURED (null)
+Cost Source:           NOT_MEASURED
+
+--- Cleanup Status ---
+Stop Status:           COMPLETED
+Destroy Status:        COMPLETED
+Resource Verification: VERIFIED_ZERO
+Leak Status:           VERIFIED_CLEAN
+Sandbox Stopped:       true
+Sandbox Destroyed:     true
+Resources Leaked:      false
+
+--- Important Limitations ---
+• Fake sandbox runs strictly in-process with memory isolation only; it provides NO VM, container, or network boundary.
+• Snapshot and resume capabilities are UNSUPPORTED and fail-closed.
+• Network policy enforcement is UNSUPPORTED; capabilities.networkPolicy is false.
+• Vendor latency, cold-start latency, and cloud execution costs are NOT_MEASURED.
+• This harness evaluates the provider-neutral lifecycle contract, not third-party cloud infrastructure.
+================================================================================
+
+--- Machine-Readable JSON Report ---
+{
+  "schemaVersion": "1.0.0",
+  "testId": "dcd51f95-d90f-4043-baa2-6dd9d0fd1d34",
+  "provider": "fake",
+  "mode": "LOCAL_SIMULATION",
+  "status": "PASS",
+  "phases": {
+    "capabilities": {
+      "phase": "capabilities",
+      "status": "PASS",
+      "durationMs": 0.13,
+      "details": {
+        "shell": false,
+        "browser": false,
+        "filesystemSnapshot": false,
+        "memoryResume": false,
+        "diskSurvivesStop": false,
+        "forkFromSnapshot": false,
+        "persistentVolume": false,
+        "networkPolicy": false
+      }
+    },
+    "create": {
+      "phase": "create",
+      "status": "PASS",
+      "durationMs": 2.73,
+      "details": {
+        "sandboxId": "efb366b4-dac0-84ea-b829-1e8bd68f52a3"
+      }
+    },
+    "waitReady": {
+      "phase": "waitReady",
+      "status": "PASS",
+      "durationMs": 0.14
+    },
+    "exec": {
+      "phase": "exec",
+      "status": "PASS",
+      "durationMs": 1.76,
+      "details": {
+        "exitCode": 0,
+        "operation": "sha256"
+      }
+    },
+    "readOutput": {
+      "phase": "readOutput",
+      "status": "PASS",
+      "durationMs": 0.09,
+      "details": {
+        "stdoutDigestMatches": true,
+        "stderrEmpty": true
+      }
+    },
+    "usage": {
+      "phase": "usage",
+      "status": "PASS",
+      "durationMs": 0.05,
+      "details": {
+        "cpuSeconds": 0.001,
+        "memoryGiBSeconds": 0.0005,
+        "egressBytes": 0
+      }
+    },
+    "stop": {
+      "phase": "stop",
+      "status": "PASS",
+      "durationMs": 0.04
+    },
+    "destroy": {
+      "phase": "destroy",
+      "status": "PASS",
+      "durationMs": 0.04
+    }
+  },
+  "timing": {
+    "totalWallMs": 6.37,
+    "phaseDurationsMs": {
+      "capabilities": 0.13,
+      "create": 2.73,
+      "waitReady": 0.14,
+      "exec": 1.76,
+      "readOutput": 0.09,
+      "usage": 0.05,
+      "stop": 0.04,
+      "destroy": 0.04
+    }
+  },
+  "usageSource": "SIMULATED",
+  "usage": {
+    "cpuSeconds": 0.001,
+    "memoryGiBSeconds": 0.0005,
+    "egressBytes": 0
+  },
+  "realIsolationStatus": "NOT_MEASURED",
+  "vendorColdStartMs": null,
+  "vendorCostUsd": null,
+  "costSource": "NOT_MEASURED",
+  "capabilities": {
+    "shell": false,
+    "browser": false,
+    "filesystemSnapshot": false,
+    "memoryResume": false,
+    "diskSurvivesStop": false,
+    "forkFromSnapshot": false,
+    "persistentVolume": false,
+    "networkPolicy": false
+  },
+  "cleanup": {
+    "stopStatus": "COMPLETED",
+    "destroyStatus": "COMPLETED",
+    "leakStatus": "VERIFIED_CLEAN",
+    "resourceVerification": "VERIFIED_ZERO",
+    "stopSucceeded": true,
+    "destroySucceeded": true,
+    "resourcesLeaked": false
+  },
+  "error": null,
+  "limitations": [
+    "Fake sandbox runs strictly in-process with memory isolation only; it provides NO VM, container, or network boundary.",
+    "Snapshot and resume capabilities are UNSUPPORTED and fail-closed.",
+    "Network policy enforcement is UNSUPPORTED; capabilities.networkPolicy is false.",
+    "Vendor latency, cold-start latency, and cloud execution costs are NOT_MEASURED.",
+    "This harness evaluates the provider-neutral lifecycle contract, not third-party cloud infrastructure."
+  ]
+}

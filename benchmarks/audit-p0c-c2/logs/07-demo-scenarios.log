@@ -1,0 +1,80 @@
+$ node --env-file-if-exists=.env.local --import tsx apps/cli/src/index.ts
+
+================================================================================
+  Ember P0-B Local Demo CLI — Full Real HTTP + Worker Closed Loop
+================================================================================
+
+  Initializing isolated PostgreSQL schema and local loopback API/Worker cluster ... READY (http://127.0.0.1:58848)
+
+--------------------------------------------------------------------------------
+▶ Scenario A: Fast Path (No Sandbox Execution)
+--------------------------------------------------------------------------------
+  [1/4] Creating Agent A via HTTP POST /v1/agents ... OK (Agent ID: 61d7e5ef...2d8f)
+  [2/4] Submitting Fast Task (mock.chat) via HTTP POST /v1/tasks ... OK (Durable Ack: Task ID dfa5ed45...d4b1)
+      • Initial Status: queued
+  [3/4] Awaiting Worker execution and terminal completion ... OK (Status: completed)
+  [4/4] Verifying Fast Path architectural invariants ... OK (Invariants Verified)
+      • Fake Sandbox Count: 0 (Zero Sandboxes Allocated)
+      • Observed Event Phases: accepted ➔ leased ➔ started ➔ progress ➔ completed
+
+--------------------------------------------------------------------------------
+▶ Scenario B: Standard Path (Fake Sandbox Lifecycle, CAS & Artifact Store)
+--------------------------------------------------------------------------------
+  [1/5] Creating Agent for Standard Path via HTTP POST /v1/agents ... OK (Agent ID: e64bce47...2387)
+  [2/5] Submitting Standard Task (mock.compute) via HTTP POST /v1/tasks ... OK (Durable Ack: Task ID 704dc2c3...fc8b)
+  [3/5] Awaiting Worker execution, Checkpoint commit, and CAS version update ... OK (Status: completed)
+  [4/5] Verifying Fake Sandbox lifecycle and isolation ... OK (Created: 1, Destroyed: 1, Active Lingering: 0)
+  [5/5] Verifying Artifact Store & Content-Addressed Storage via HTTP GET ... OK (Artifact Verified (Content, Metadata Size & Raw SHA-256 exact match))
+      • Artifact ID: 64341ee2...d0bf
+      • Payload Hash (SHA-256): 5906d928f93619a5e2eb19787bcf80c54371ea31f103ebe454fc6a7935ad1a5c
+      • Raw Byte Size: 65 bytes (matches metadata)
+      • Metadata Hash: 1a830ee53eb38e74e33894df591d705481d4fd1966c0845a5668f62ef848241f (matches metadata)
+      • Active Sandboxes Remaining: 0 (Cleaned Up)
+
+--------------------------------------------------------------------------------
+▶ Scenario C: Simulated Lease Expiration & Checkpoint Resume with Fencing
+--------------------------------------------------------------------------------
+  [1/6] Creating Agent for Resume Path via HTTP POST /v1/agents ... OK (Agent ID: 24e6ff37...e844)
+  [2/6] Submitting Task with Checkpointed Stage via HTTP POST /v1/tasks ... OK (Task ID: d76924fd...4752)
+  [3/6] Worker 1 claims Task, executes produce step, and commits Checkpoint ... OK (Checkpoint Committed (Step: produce, Run: 3429abfb...6944, Epoch: 1, Task: running))
+  [4/6] Simulating Worker 1 crash & lease expiration, triggering Reaper recovery ... OK (Reaper Converged (Run 1: lease_expired, Task: retryable_failed))
+  [5/6] Simulating stale Worker 1 late-write and verifying Lease Fencing rejection ... OK (Fencing Protected: Stale write rejected with STALE_LEASE)
+  [6/6] Worker 2 claims task, detects Checkpoint, skips produce, and completes ... OK (Status: completed)
+      • Run 1 Status: lease_expired
+      • Run 2 Status: succeeded
+      • Produce Checkpoints in DB: 1 (Strictly 1, zero duplicated executions)
+      • Total Checkpoints in DB: 2 (produce + publish)
+      • Terminal State: completed
+
+--------------------------------------------------------------------------------
+▶ Scenario D: Tenant Isolation & Non-Discoverable Authorization
+--------------------------------------------------------------------------------
+  [1/6] Provisioning Tenant A Task and Artifact via HTTP ... OK (Tenant A Task: d987bf2e...fe90)
+  [2/6] Tenant B querying Tenant A Task via HTTP GET /v1/tasks/:id ... OK (Protected: HTTP 404 NOT_FOUND (Non-discoverable))
+  [3/6] Tenant B querying Tenant A Event log via HTTP GET /v1/tasks/:id/events ... OK (Protected: HTTP 404 NOT_FOUND (Events hidden))
+  [4/6] Tenant B querying Tenant A Artifact via HTTP GET /v1/tasks/:id/artifacts ... OK (Protected: HTTP 404 NOT_FOUND (Artifacts hidden))
+  [5/6] Tenant B attempting to cancel Tenant A Task via HTTP POST /v1/tasks/:id/cancel ... OK (Protected: HTTP 404 NOT_FOUND (Operation denied))
+  [6/6] Testing unauthenticated and forged token requests ... OK (Protected: HTTP 401 UNAUTHENTICATED (Enforced))
+      • Cross-Tenant Data Leakage: None (SQL tenant filtering strictly verified)
+      • Cross-Tenant Task Status: 404 NOT_FOUND
+      • Cross-Tenant Event Status: 404 NOT_FOUND
+      • Cross-Tenant Artifact Status: 404 NOT_FOUND
+      • Missing Token Status: 401 UNAUTHENTICATED
+
+  Gracefully tearing down local demo cluster, dropping schema and temp blobs ... DONE
+
+================================================================================
+  DEMO VERIFICATION SUMMARY
+================================================================================
+┌───────────────────────────────────────┬────────────┬─────────────┐
+│ Scenario                              │ Result     │ Duration    │
+├───────────────────────────────────────┼────────────┼─────────────┤
+│ Fast Path                             │ ✓ PASS     │       140ms │
+│ Standard Path                         │ ✓ PASS     │       118ms │
+│ Crash / Resume                        │ ✓ PASS     │       104ms │
+│ Tenant Isolation                      │ ✓ PASS     │       119ms │
+└───────────────────────────────────────┴────────────┴─────────────┘
+Total: 4 passed, 0 failed (481ms)
+
+🎉 OVERALL STATUS: ALL 4 OFFICIAL SCENARIOS PASSED (DoD VERIFIED)
+

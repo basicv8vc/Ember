@@ -131,3 +131,4 @@ export {
   TASK_COMMAND_MAX_BYTES,
   type PreparedTaskCommand,
 } from './task-digest.js';
+export { PostgresCommitmentRepository } from './repositories/commitment-repository.js';

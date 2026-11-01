@@ -11,6 +11,12 @@ import { createDevTokenAuthenticator, type DevAuthenticator } from './auth/beare
 import type { ArtifactHttpStore } from './artifacts/artifact-store.js';
 import { unconfiguredArtifactHttpStore } from './artifacts/artifact-store.js';
 import { createArtifactRoutes } from './artifacts/routes.js';
+import { COMMITMENTS_PATH } from './commitments/constants.js';
+import { createCommitmentRoutes } from './commitments/routes.js';
+import {
+  unconfiguredCommitmentStore,
+  type CommitmentStore,
+} from './commitments/commitment-store.js';
 import {
   requestIdMiddleware,
   requestIdOf,
@@ -55,6 +61,8 @@ export interface AppDependencies {
   readonly artifactStore?: ArtifactHttpStore;
   /** Approval persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
   readonly approvalStore?: ApprovalHttpStore;
+  /** Commitment persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
+  readonly commitmentStore?: CommitmentStore;
 }
 
 /**
@@ -79,6 +87,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const taskStore = deps.taskStore ?? unconfiguredTaskStore();
   const artifactStore = deps.artifactStore ?? unconfiguredArtifactHttpStore();
   const approvalStore = deps.approvalStore ?? unconfiguredApprovalHttpStore();
+  const commitmentStore = deps.commitmentStore ?? unconfiguredCommitmentStore();
   const tenantAuth = requireTenantAuth({ authenticator, logger });
 
   /**
@@ -139,8 +148,11 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   app.use('/v1/artifacts/*', tenantAuth);
   app.use(APPROVALS_PATH, tenantAuth);
   app.use(`${APPROVALS_PATH}/*`, tenantAuth);
+  app.use(COMMITMENTS_PATH, tenantAuth);
+  app.use(`${COMMITMENTS_PATH}/*`, tenantAuth);
   app.route(AGENTS_PATH, createAgentRoutes({ store: agentStore }));
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
+  app.route(COMMITMENTS_PATH, createCommitmentRoutes({ store: commitmentStore }));
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
   app.route('/v1', createApprovalRoutes({ approvals: approvalStore, tasks: taskStore }));
 

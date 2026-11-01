@@ -1,12 +1,12 @@
-# Ember P0-C3-0 — Shared Contract Freeze (v1.1)
+# Ember P0-C3-0 — Shared Contract Freeze (v1.2 — FROZEN)
 
-> **Status:** PROPOSED (Revision 1) — Updated with CTO Changes Requested (4× P1, 2× P2).  
+> **Status:** FROZEN — Approved by CTO for Parallel Implementation (Stage 2 Kickoff).  
 > **Milestone:** P0-C3 (Persistent Promise Loop).  
 > **Lane A (Commitment Persistence & HTTP API):** Owner of shared contracts, PostgreSQL schemas, and API facade.  
 > **Lane B (Scheduler & Outcome Runtime):** Consumer of `DueCommitmentStore`, occurrence reservation, and lease-checked outcome persistence.  
 > **Lane C (Read-Only Source & Consent Boundary):** Provider of `SourceReader`, consent checking, and frozen `SourceSnapshot` specification.  
 > **Baseline Commit:** `bbcad275418cd59c29b742cd2cc6e3bd825c6054` (post-PR #43, post-PR #51, post-PR #52 `origin/main`).  
-> **Rule:** Parallel implementation across lanes begins only after CTO signs off on **C3-0 FROZEN**.
+> **Rule:** Parallel implementation across lanes is authorized. All three lanes follow the frozen interfaces herein.
 
 ---
 
@@ -120,7 +120,7 @@ export const SOURCE_SNAPSHOT_LIMITS = Object.freeze({
   itemTitleMaxChars: 256,
   itemContentSnippetMaxChars: 1_000,
   maxItems: 50,
-  maxPayloadBytes: 65_536, // 64 KiB ceiling
+  maxPayloadBytes: 32_768, // 32 KiB ceiling (CTO Frozen)
 });
 
 /** Outcome summary bound: 1 to 2,000 characters. */
@@ -334,15 +334,18 @@ export interface CommitmentRepository {
 
 ### 4.1 P1 Revisions Addressed
 
-1. **PostgreSQL as Authoritative Clock:**
+1. **PostgreSQL as Authoritative Clock & Schedule Compensation:**
    The caller does **not** supply caller-local `now` or `scheduledFor`. PostgreSQL's `clock_timestamp()` is authoritative.
    `findDueCommitments` queries `WHERE next_due_at <= clock_timestamp()`.
-   `reserveOccurrence` locks the commitment row via `SELECT ... FOR UPDATE`, validates `next_due_at <= clock_timestamp()`, and takes the persisted `next_due_at` as the authoritative `scheduled_for` timestamp. (An optional `asOfOverride` / `slotTimeOverride` is available solely in test harnesses).
-2. **Authoritative Lease Verification on Outcome Append:**
+   `reserveOccurrence` locks the commitment row via `SELECT ... FOR UPDATE`, validates `next_due_at <= clock_timestamp()`, and takes the persisted `next_due_at` as the authoritative `scheduled_for` timestamp. (Test time override parameters are strictly for test harnesses and must not be accessible in production invocation paths).
+   **Schedule Compensation Invariant:** To prevent task storms when the system recovers after downtime, the scheduler compensates **at most one historical interval** per run. The subsequent `next_due_at` is advanced past any skipped intervals (i.e. `GREATEST(scheduled_for + interval, clock_timestamp() + interval)`).
+2. **Authoritative Lease & Active Status Verification on Outcome Append:**
    `appendOutcomeIfAbsent` requires a verified `WorkerLeaseGrant`. In the database transaction, it verifies:
-   - The caller owns the current valid lease in the `runs` table (`runs.worker_id = grant.workerId AND runs.lease_epoch = grant.leaseEpoch AND runs.lease_expires_at > clock_timestamp()`).
+   - Valid lease on `runs`: matches `runs.worker_id = grant.workerId`, `runs.lease_epoch = grant.leaseEpoch`, and `runs.leased_until > clock_timestamp()` (using the real column `runs.leased_until`).
+   - Valid lease on `tasks`: confirms the underlying task is in a valid execution state (`running` or `queued`).
    - The occurrence's `task_id` matches `grant.taskId`.
-   - The commitment's status is **not** `cancelled`. If cancelled, outcome write is rejected (`POLICY_DENIED` / fail closed).
+   - The commitment's status must still be strictly `active`. If paused or cancelled, outcome write is rejected fail-closed.
+   - Note on Consent: Before publication, consent is re-evaluated; in-memory `FakeConsentRegistry` does not provide cross-process atomicity guarantees, so persistent database guards serve as the authoritative gate.
    - Old/stale workers cannot bypass checks via idempotent replays.
 3. **Atomic State Check on Commitment Completion:**
    `markCommitmentCompleted` validates under row lock that `status = 'active'`. If the commitment was cancelled, it updates 0 rows and returns `false`. Late workers can **never** turn a `cancelled` commitment into `completed`.

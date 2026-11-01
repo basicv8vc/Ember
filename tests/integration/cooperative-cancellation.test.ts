@@ -21,6 +21,7 @@ import {
   type TaskStatus,
 } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   type BudgetPolicy,
@@ -297,6 +298,12 @@ function buildHandler(
       options.budget ?? new PostgresBudgetLedger(db.pool, { policy: PERMISSIVE_BUDGET_POLICY }),
     clock,
     logger: createWorkerLogger({ level: 'error', sink: () => undefined }),
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        tenantId: context.tenantId,
+        policyVersion: context.policyVersion,
+        allowMockWrite: true,
+      }),
   });
 }
 

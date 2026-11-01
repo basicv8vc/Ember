@@ -93,6 +93,7 @@ export {
   isSentinelActionCategory,
   parseSentinelIntent,
   parseSentinelPolicy,
+  resolveSentinelCategory,
   SAFE_MOCK_ACTION_CATEGORIES,
   SENTINEL_ACTION_CATEGORIES,
   SENTINEL_POLICY_VERSION,

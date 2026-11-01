@@ -69,6 +69,44 @@ export function isSentinelActionCategory(value: unknown): value is SentinelActio
 }
 
 /**
+ * Closed and exact mapping from Task Kind and execution phase to Sentinel action category.
+ *
+ * Implements the P0-C2B closed admission matrix (§1.2):
+ * - `mock.chat` -> `mock.compute` (FakeLLM compute only; zero sandbox)
+ * - `mock.compute` -> `mock.compute` (deterministic compute only)
+ * - `mock.file` -> `mock.write` (Workspace write; requires explicit trusted opt-in)
+ * - `mock.approval` produce -> `mock.compute` (simulated local proposal; no mutation)
+ * - `mock.approval` publish -> `mock.write` (simulated local CAS publish; requires approved status & mock.write opt-in)
+ * - `external.mutate` -> `external.mutate` (pure require_approval; blocked in P0-C2)
+ * - `network.egress` -> `network.egress` (permanently denied in Round 1)
+ * - `host.exec` -> `host.exec` (permanently denied in Round 1)
+ * - `credential.use` -> `credential.use` (permanently denied in Round 1)
+ * - Any unknown action -> 'unknown' (evaluated as DENY_UNKNOWN_ACTION by evaluateSentinelPolicy)
+ */
+export function resolveSentinelCategory(
+  kind: string,
+  phase: 'produce' | 'publish' = 'produce',
+): SentinelActionCategory | 'unknown' {
+  if (kind === 'mock.chat' || kind === 'mock.compute') {
+    return 'mock.compute';
+  }
+
+  if (kind === 'mock.file') {
+    return 'mock.write';
+  }
+
+  if (kind === 'mock.approval') {
+    return phase === 'publish' ? 'mock.write' : 'mock.compute';
+  }
+
+  if (isSentinelActionCategory(kind)) {
+    return kind;
+  }
+
+  return 'unknown';
+}
+
+/**
  * Stable, non-sensitive reason codes for Sentinel decisions.
  *
  * Never derives from or reflects user prompt text, command bodies, URLs, or secrets.

@@ -1,5 +1,9 @@
 import { WorkerIdSchema, resolveLeaseQueueConfig, type LeaseQueueConfig } from '@ember/postgres';
-import { MAX_BUDGET_POLICY_VERSION, type BudgetPolicy } from '@ember/execution';
+import {
+  MAX_BUDGET_POLICY_VERSION,
+  SENTINEL_POLICY_VERSION,
+  type BudgetPolicy,
+} from '@ember/execution';
 import { z } from 'zod';
 
 export class WorkerConfigError extends Error {
@@ -43,6 +47,18 @@ export interface WorkerConfig {
    * durable budget ledger, which evaluates it inside the transaction that charges the Run.
    */
   readonly budget: BudgetPolicy;
+  /**
+   * Trusted Sentinel admission policy settings (P0-C2B).
+   *
+   * Configures the authoritative server-side Sentinel policy ID, version, and allowed actions.
+   * Default excludes mock.write unless explicitly enabled via EMBER_WORKER_SENTINEL_ALLOW_MOCK_WRITE
+   * or EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS.
+   */
+  readonly sentinel: {
+    readonly policyId: string;
+    readonly policyVersion: number;
+    readonly allowedActions: readonly string[];
+  };
 }
 
 const workerEnvSchema = z.object({
@@ -94,6 +110,19 @@ const workerEnvSchema = z.object({
     .max(Number.MAX_SAFE_INTEGER)
     .default(5_000),
   EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS: z.coerce.number().int().min(0).max(1_024).default(8),
+  // P0-C2B Sentinel admission policy configuration.
+  EMBER_WORKER_SENTINEL_POLICY_ID: z.string().min(1).max(128).default('sentinel-policy-default'),
+  EMBER_WORKER_SENTINEL_POLICY_VERSION: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(Number.MAX_SAFE_INTEGER)
+    .default(SENTINEL_POLICY_VERSION),
+  EMBER_WORKER_SENTINEL_ALLOW_MOCK_WRITE: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((val) => val === 'true'),
+  EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS: z.string().optional(),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -175,6 +204,19 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       maxRunElapsedMs: parsed.data.EMBER_WORKER_BUDGET_MAX_RUN_ELAPSED_MS,
       maxTenantDailyUnits: parsed.data.EMBER_WORKER_BUDGET_MAX_TENANT_DAILY_UNITS,
       maxConcurrentSlots: parsed.data.EMBER_WORKER_BUDGET_MAX_CONCURRENT_SLOTS,
+    }),
+    sentinel: Object.freeze({
+      policyId: parsed.data.EMBER_WORKER_SENTINEL_POLICY_ID,
+      policyVersion: parsed.data.EMBER_WORKER_SENTINEL_POLICY_VERSION,
+      allowedActions: Object.freeze(
+        parsed.data.EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS !== undefined
+          ? parsed.data.EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS.split(',')
+              .map((a) => a.trim())
+              .filter((a) => a.length > 0)
+          : parsed.data.EMBER_WORKER_SENTINEL_ALLOW_MOCK_WRITE
+            ? ['mock.read', 'mock.compute', 'mock.write']
+            : ['mock.read', 'mock.compute'],
+      ),
     }),
   };
 }

@@ -6,6 +6,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { CommitStepRequest, RunExecutionContext, RunGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   type BudgetPolicy,
@@ -491,6 +492,12 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
         budget: budgetLedger,
         clock: { now: () => new Date() },
         logger: workerLogger,
+        sentinelPolicy: (context) =>
+          createDefaultSentinelPolicy({
+            tenantId: context.tenantId,
+            policyVersion: context.policyVersion,
+            allowMockWrite: true,
+          }),
       });
 
       // 1. Worker 1 领取并开始执行
@@ -537,6 +544,12 @@ describe('B-T26: Artifact & Checkpoint Atomicity Chaos Verification', () => {
         budget: budgetLedger,
         clock: { now: () => new Date() },
         logger: workerLogger,
+        sentinelPolicy: (context) =>
+          createDefaultSentinelPolicy({
+            tenantId: context.tenantId,
+            policyVersion: context.policyVersion,
+            allowMockWrite: true,
+          }),
       });
 
       // 4. 重启后的 Worker 2 领取任务（新的 Run 与递增的 Lease Epoch）

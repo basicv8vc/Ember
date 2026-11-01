@@ -10,7 +10,16 @@ import {
   type LeasedRun,
   type RunTerminalStatus,
 } from '@ember/domain';
-import type { ExecutionClock, ExecutionRouterForRun, SimulatedExecutor } from '@ember/execution';
+import {
+  evaluateSentinelPolicy,
+  resolveSentinelCategory,
+  toSentinelDeniedError,
+  type ExecutionClock,
+  type ExecutionRouterForRun,
+  type SentinelPolicy,
+  type SimulatedExecutor,
+} from '@ember/execution';
+import type { CredentialBroker } from '@ember/credentials';
 import type { WorkerLogger } from './logger.js';
 
 /**
@@ -37,6 +46,16 @@ export interface RunHandlerDependencies {
   readonly executor: SimulatedExecutor;
   readonly clock: ExecutionClock;
   readonly logger: WorkerLogger;
+  /**
+   * Authoritative, trusted server-side Sentinel policy or policy resolver.
+   * If omitted, malformed, or resolving to undefined, the handler fails closed with POLICY_DENIED.
+   */
+  readonly sentinelPolicy?:
+    SentinelPolicy | ((context: RunExecutionContext) => SentinelPolicy | undefined);
+  /**
+   * Authoritative, trusted server-side Credential Broker facade (P0-C2C).
+   */
+  readonly credentialBroker?: CredentialBroker;
 }
 
 /**
@@ -141,6 +160,24 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
       }
 
       try {
+        const policy =
+          typeof deps.sentinelPolicy === 'function'
+            ? deps.sentinelPolicy(context)
+            : deps.sentinelPolicy;
+
+        const intent = {
+          tenantId: context.tenantId,
+          runId: context.runId,
+          taskId: context.taskId,
+          actionCategory: resolveSentinelCategory(context.kind, 'produce'),
+          policyVersion: context.policyVersion,
+        };
+
+        const decision = evaluateSentinelPolicy(policy, intent);
+        if (decision.verdict !== 'allow') {
+          throw toSentinelDeniedError(decision);
+        }
+
         const result = await executor.execute(context, route, signal);
 
         logger.info('simulated execution finished', {

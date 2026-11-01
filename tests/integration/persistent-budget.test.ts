@@ -5,6 +5,7 @@ import type { RunExecutionContext, RunGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
 import { isDomainError } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   type BudgetPolicy,
@@ -92,6 +93,12 @@ function handlerWith(policy: BudgetPolicy) {
     budget: ledgerWith(policy),
     clock,
     logger,
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        tenantId: context.tenantId,
+        policyVersion: context.policyVersion,
+        allowMockWrite: true,
+      }),
   });
 }
 

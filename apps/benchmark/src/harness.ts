@@ -9,6 +9,7 @@ import { serve } from '@hono/node-server';
 import type { Id } from '@ember/domain';
 import type { BudgetPolicy } from '@ember/execution';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   type FakeSandboxProvider,
@@ -233,6 +234,13 @@ export async function createBenchmarkHarness(
     budget: new PostgresBudgetLedger(workerPool, { policy: BENCHMARK_BUDGET }),
     clock: systemClock,
     logger: apiLogger,
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        policyId: 'ember-benchmark-sentinel-v1',
+        policyVersion: 1,
+        tenantId: context.tenantId,
+        allowMockWrite: true,
+      }),
   });
 
   // Track worker in-flight concurrency

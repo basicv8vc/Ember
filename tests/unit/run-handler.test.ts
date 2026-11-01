@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import type { RouteDecision, RunExecutionContext } from '@ember/contracts';
-import type { SimulatedExecutionResult } from '@ember/execution';
+import {
+  createDefaultSentinelPolicy,
+  type SentinelPolicy,
+  type SimulatedExecutionResult,
+} from '@ember/execution';
 import { DomainError, type Id, type LeasedRun } from '@ember/domain';
 import { createRunHandler, type RunHandlerCompletion } from '../../apps/worker/src/run-handler.js';
 
@@ -85,6 +89,9 @@ function handler(options: {
   readonly read?: () => Promise<RunExecutionContext>;
   readonly decide?: () => Promise<RouteDecision>;
   readonly execute?: (signal: AbortSignal) => Promise<SimulatedExecutionResult>;
+  readonly sentinelPolicy?:
+    SentinelPolicy | ((context: RunExecutionContext) => SentinelPolicy | undefined);
+  readonly omitSentinelPolicy?: boolean;
 }): {
   readonly handle: (run: LeasedRun, signal: AbortSignal) => Promise<RunHandlerCompletion>;
   readonly lines: string[];
@@ -94,6 +101,13 @@ function handler(options: {
   const { logger, lines } = captureLogger();
   const routerCalls: unknown[] = [];
   const signals: AbortSignal[] = [];
+
+  const defaultPolicy = (ctx: RunExecutionContext): SentinelPolicy =>
+    createDefaultSentinelPolicy({
+      tenantId: ctx.tenantId,
+      policyVersion: ctx.policyVersion,
+      allowMockWrite: true,
+    });
 
   const runHandler = createRunHandler({
     contextReader: {
@@ -113,6 +127,9 @@ function handler(options: {
     },
     clock: { now: () => new Date('2026-10-28T00:00:00.000Z') },
     logger,
+    sentinelPolicy: options.omitSentinelPolicy
+      ? undefined
+      : (options.sentinelPolicy ?? defaultPolicy),
   });
 
   return {
@@ -274,5 +291,125 @@ describe('run handler', () => {
     expect(logs).toContain('fast');
     expect(logs).not.toContain('PROMPT-SENTINEL');
     expect(logs).not.toContain('OUTPUT-SENTINEL');
+  });
+
+  describe('Sentinel pre-execution admission gate', () => {
+    it('fails closed with failed_terminal and 0 executor calls when policy is omitted', async () => {
+      let executorCalled = false;
+      const harness = handler({
+        omitSentinelPolicy: true,
+        execute: () => {
+          executorCalled = true;
+          return Promise.resolve(simulatedResult());
+        },
+      });
+
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+        'failed_terminal',
+      );
+      expect(executorCalled).toBe(false);
+      expect(harness.lines.join('\n')).toContain('POLICY_DENIED');
+    });
+
+    it('denies mock.file when policy does not allow mock.write, never calling executor', async () => {
+      let executorCalled = false;
+      const harness = handler({
+        read: () =>
+          Promise.resolve(
+            context({
+              kind: 'mock.file',
+              input: { fileKey: 'test.txt', content: 'hello' },
+            }),
+          ),
+        sentinelPolicy: (ctx) =>
+          createDefaultSentinelPolicy({
+            tenantId: ctx.tenantId,
+            policyVersion: ctx.policyVersion,
+            allowMockWrite: false, // Default: mock.write is disallowed!
+          }),
+        execute: () => {
+          executorCalled = true;
+          return Promise.resolve(simulatedResult());
+        },
+      });
+
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+        'failed_terminal',
+      );
+      expect(executorCalled).toBe(false);
+      expect(harness.lines.join('\n')).toContain('POLICY_DENIED');
+    });
+
+    it('fails closed when policy tenantId mismatches context tenantId', async () => {
+      let executorCalled = false;
+      const harness = handler({
+        sentinelPolicy: () =>
+          createDefaultSentinelPolicy({
+            tenantId: '99999999-9999-4999-8999-999999999999',
+            allowMockWrite: true,
+          }),
+        execute: () => {
+          executorCalled = true;
+          return Promise.resolve(simulatedResult());
+        },
+      });
+
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+        'failed_terminal',
+      );
+      expect(executorCalled).toBe(false);
+      expect(harness.lines.join('\n')).toContain('POLICY_DENIED');
+    });
+
+    it('fails closed when policyVersion mismatches context policyVersion', async () => {
+      let executorCalled = false;
+      const harness = handler({
+        sentinelPolicy: (ctx) =>
+          createDefaultSentinelPolicy({
+            tenantId: ctx.tenantId,
+            policyVersion: ctx.policyVersion + 1,
+            allowMockWrite: true,
+          }),
+        execute: () => {
+          executorCalled = true;
+          return Promise.resolve(simulatedResult());
+        },
+      });
+
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+        'failed_terminal',
+      );
+      expect(executorCalled).toBe(false);
+      expect(harness.lines.join('\n')).toContain('POLICY_DENIED');
+    });
+
+    it('blocks external.mutate in non-durable handler with zero executor calls', async () => {
+      let executorCalled = false;
+      const harness = handler({
+        read: () =>
+          Promise.resolve(
+            context({
+              kind: 'external.mutate' as unknown as 'mock.chat',
+              input: { prompt: 'deploy' },
+            }),
+          ),
+        sentinelPolicy: (ctx) =>
+          createDefaultSentinelPolicy({
+            tenantId: ctx.tenantId,
+            policyVersion: ctx.policyVersion,
+            allowMockWrite: true,
+          }),
+        execute: () => {
+          executorCalled = true;
+          return Promise.resolve(simulatedResult());
+        },
+      });
+
+      await expect(outcomeOf(harness.handle(LEASE, new AbortController().signal))).resolves.toBe(
+        'failed_terminal',
+      );
+      expect(executorCalled).toBe(false);
+      expect(harness.lines.join('\n')).toContain('POLICY_DENIED');
+    });
   });
 });

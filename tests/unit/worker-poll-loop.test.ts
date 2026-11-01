@@ -531,4 +531,52 @@ describe('P0B-08b budget policy configuration', () => {
       WorkerConfigError,
     );
   });
+
+  describe('P0-C2B Sentinel admission policy configuration', () => {
+    it('defaults to safe mock read/compute policy excluding mock.write', () => {
+      const { sentinel } = loadWorkerConfig({});
+
+      expect(sentinel).toEqual({
+        policyId: 'sentinel-policy-default',
+        policyVersion: 1,
+        allowedActions: ['mock.read', 'mock.compute'],
+      });
+      expect(Object.isFrozen(sentinel)).toBe(true);
+      expect(Object.isFrozen(sentinel.allowedActions)).toBe(true);
+    });
+
+    it('enables mock.write when explicitly opted in via env flag', () => {
+      const { sentinel } = loadWorkerConfig({
+        EMBER_WORKER_SENTINEL_ALLOW_MOCK_WRITE: 'true',
+      });
+
+      expect(sentinel.allowedActions).toEqual(['mock.read', 'mock.compute', 'mock.write']);
+    });
+
+    it('parses explicit comma-separated allowed actions list', () => {
+      const { sentinel } = loadWorkerConfig({
+        EMBER_WORKER_SENTINEL_POLICY_ID: 'custom-sentinel-v2',
+        EMBER_WORKER_SENTINEL_POLICY_VERSION: '2',
+        EMBER_WORKER_SENTINEL_ALLOWED_ACTIONS: 'mock.read, mock.write',
+      });
+
+      expect(sentinel.policyId).toBe('custom-sentinel-v2');
+      expect(sentinel.policyVersion).toBe(2);
+      expect(sentinel.allowedActions).toEqual(['mock.read', 'mock.write']);
+    });
+
+    it('rejects invalid policy version or empty policy ID', () => {
+      expect(() =>
+        loadWorkerConfig({
+          EMBER_WORKER_SENTINEL_POLICY_VERSION: '0',
+        }),
+      ).toThrow(WorkerConfigError);
+
+      expect(() =>
+        loadWorkerConfig({
+          EMBER_WORKER_SENTINEL_POLICY_ID: '',
+        }),
+      ).toThrow(WorkerConfigError);
+    });
+  });
 });

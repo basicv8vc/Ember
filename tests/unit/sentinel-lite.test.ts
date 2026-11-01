@@ -7,6 +7,7 @@ import {
   evaluateSentinelPolicy,
   isSafeMockActionCategory,
   isSentinelActionCategory,
+  resolveSentinelCategory,
   SAFE_MOCK_ACTION_CATEGORIES,
   SENTINEL_ACTION_CATEGORIES,
   SENTINEL_POLICY_VERSION,
@@ -655,6 +656,45 @@ describe('Sentinel-lite Policy Foundation (P0-C1B)', () => {
 
       await expect(enforceSentinelGate(policy, intent, callback)).rejects.toThrow(customError);
       expect(callback).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('P0-C2B resolveSentinelCategory mapping matrix', () => {
+    it('maps mock.chat to mock.compute for all phases', () => {
+      expect(resolveSentinelCategory('mock.chat', 'produce')).toBe('mock.compute');
+      expect(resolveSentinelCategory('mock.chat', 'publish')).toBe('mock.compute');
+    });
+
+    it('maps mock.compute to mock.compute for all phases', () => {
+      expect(resolveSentinelCategory('mock.compute', 'produce')).toBe('mock.compute');
+      expect(resolveSentinelCategory('mock.compute', 'publish')).toBe('mock.compute');
+    });
+
+    it('maps mock.file to mock.write for all phases', () => {
+      expect(resolveSentinelCategory('mock.file', 'produce')).toBe('mock.write');
+      expect(resolveSentinelCategory('mock.file', 'publish')).toBe('mock.write');
+    });
+
+    it('maps mock.approval produce to mock.compute and publish to mock.write', () => {
+      expect(resolveSentinelCategory('mock.approval', 'produce')).toBe('mock.compute');
+      expect(resolveSentinelCategory('mock.approval')).toBe('mock.compute');
+      expect(resolveSentinelCategory('mock.approval', 'publish')).toBe('mock.write');
+    });
+
+    it('preserves known Sentinel action categories passed directly', () => {
+      expect(resolveSentinelCategory('external.mutate')).toBe('external.mutate');
+      expect(resolveSentinelCategory('network.egress')).toBe('network.egress');
+      expect(resolveSentinelCategory('host.exec')).toBe('host.exec');
+      expect(resolveSentinelCategory('credential.use')).toBe('credential.use');
+      expect(resolveSentinelCategory('mock.read')).toBe('mock.read');
+      expect(resolveSentinelCategory('mock.write')).toBe('mock.write');
+      expect(resolveSentinelCategory('mock.compute')).toBe('mock.compute');
+    });
+
+    it('returns unknown for unrecognized task kinds or actions', () => {
+      expect(resolveSentinelCategory('invalid.task.kind')).toBe('unknown');
+      expect(resolveSentinelCategory('')).toBe('unknown');
+      expect(resolveSentinelCategory('unsupported.action')).toBe('unknown');
     });
   });
 });

@@ -6,9 +6,14 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
+import type { RunExecutionContext } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
-import type { BudgetPolicy, FakeSandboxProvider } from '@ember/execution';
-import { DeterministicExecutionRouter, DeterministicExecutor } from '@ember/execution';
+import type { BudgetPolicy, FakeSandboxProvider, SentinelPolicy } from '@ember/execution';
+import {
+  createDefaultSentinelPolicy,
+  DeterministicExecutionRouter,
+  DeterministicExecutor,
+} from '@ember/execution';
 import {
   LocalBlobStore,
   PostgresAgentRepository,
@@ -131,6 +136,8 @@ export interface E2eClusterOptions {
   readonly databaseUrl?: string;
   readonly workerConcurrency?: number;
   readonly budgetPolicy?: BudgetPolicy;
+  readonly sentinelPolicy?:
+    SentinelPolicy | ((context: RunExecutionContext) => SentinelPolicy | undefined);
   readonly sandboxExecDurationMs?: number;
   readonly startWorker?: boolean;
 }
@@ -397,6 +404,15 @@ export class E2eCluster {
           }),
           clock: systemClock,
           logger,
+          sentinelPolicy:
+            options.sentinelPolicy ??
+            ((context) =>
+              createDefaultSentinelPolicy({
+                policyId: 'ember-e2e-sentinel-v1',
+                policyVersion: 1,
+                tenantId: context.tenantId,
+                allowMockWrite: true,
+              })),
         });
 
         cluster.workerHandler = handler;

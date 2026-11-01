@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AuthContext } from '@ember/domain';
 import {
+  createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
   EXECUTABLE_TASK_KINDS,
@@ -64,6 +65,12 @@ function buildHandler(
     executor,
     clock,
     logger: createWorkerLogger({ level: 'error', sink: () => undefined }),
+    sentinelPolicy: (context) =>
+      createDefaultSentinelPolicy({
+        tenantId: context.tenantId,
+        policyVersion: context.policyVersion,
+        allowMockWrite: true,
+      }),
   });
 }
 

@@ -44,7 +44,7 @@ Shared-file boundary: A is the initial sole owner of contracts/index, postgres/i
 3. Authenticated HTTP facade
    - POST /v1/commitments accepts an Idempotency-Key and returns 201 on create; repeated identical submission returns the same id without another row; conflicting replay fails via the existing error contract.
    - GET list/detail/outcomes, POST pause/resume/cancel. All use only verified AuthContext; foreign-tenant and nonexistent IDs produce indistinguishable 404 responses.
-   - Version/CAS for concurrent edits and explicit terminal state behavior. Cancel stops *future scheduling* without deleting previously completed Task/Outcome.
+   - Version/CAS for concurrent edits and explicit terminal state behavior. Cancel stops _future scheduling_ without deleting previously completed Task/Outcome.
    - No new authentication modes and no exposure of internal prompt, SQL, worker, or credential details.
 
 4. Transactional repository interface for B lane

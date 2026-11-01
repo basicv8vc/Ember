@@ -39,7 +39,7 @@ A commitment is **long-lived intent**; a Task is **one execution occurrence**. N
 
 Lane A is the sole initial owner of the shared TypeScript contract; B and C consume it only after the freeze, or code against private structural ports without modifying shared files. Suggested minimal shape:
 
-~~~text
+```text
 Commitment:
   commitment_id, tenant_id, agent_id, title,
   status (active|paused|completed|cancelled),
@@ -57,20 +57,20 @@ SourceSnapshot:
 CommitmentOutcome:
   commitment_id, occurrence_id, task_id, summary,
   result_status, created_at
-~~~
+```
 
 Internal persistence can use more columns but may not leak them into wire DTOs. IDs are server generated; the tenant is always from authenticated server context. Human-provided text is bounded and sanitized in audit/logs. Source snapshots and summaries must not carry credential strings or raw provider errors.
 
 Suggested HTTP surface (exact wire schemas to be frozen in C3-0 before parallel coding):
 
-| Operation | Route | Contract |
-| :-- | :-- | :-- |
-| Create | POST /v1/commitments | 201 created; validated body and Idempotency-Key |
-| List | GET /v1/commitments | tenant-scoped, cursor/pagination bounded |
-| Detail | GET /v1/commitments/:id | 200 own resource, uniform 404 otherwise |
+| Operation    | Route                                     | Contract                                             |
+| :----------- | :---------------------------------------- | :--------------------------------------------------- |
+| Create       | POST /v1/commitments                      | 201 created; validated body and Idempotency-Key      |
+| List         | GET /v1/commitments                       | tenant-scoped, cursor/pagination bounded             |
+| Detail       | GET /v1/commitments/:id                   | 200 own resource, uniform 404 otherwise              |
 | Pause/resume | POST /v1/commitments/:id/pause or /resume | optimistic version; idempotent, server-authoritative |
-| Cancel | POST /v1/commitments/:id/cancel | stop future dispatch; do not erase completed history |
-| Outcomes | GET /v1/commitments/:id/outcomes | ordered, paginated, tenant-scoped |
+| Cancel       | POST /v1/commitments/:id/cancel           | stop future dispatch; do not erase completed history |
+| Outcomes     | GET /v1/commitments/:id/outcomes          | ordered, paginated, tenant-scoped                    |
 
 Existing Task receipt, Task detail, event-page and SSE APIs remain unchanged. **Do not silently revise iOS B0 TaskRepositoryProtocol, existing task schemas, or enum spellings.** A future iOS commitment repository is a separate iOS Lead-reviewed contract.
 
@@ -96,11 +96,11 @@ Existing Task receipt, Task detail, event-page and SSE APIs remain unchanged. **
 
 ## 6. Three coding lanes and shared-file ownership
 
-| Lane | Exclusive initial scope | Product deliverable |
-| :-- | :-- | :-- |
-| C3A — Commitment Persistence & API | migrations/0008*; packages/postgres commitment repositories; packages/contracts commitment DTOs; apps/api/src/commitments; related API mount only | Durable tenant-scoped commitment CRUD, occurrence/ outcome storage, idempotency |
-| C3B — Scheduler & Outcome Runtime | packages/execution/src/commitment-*; apps/worker/src/commitment-*; related tests | Due-work dispatch and deterministic processing through existing controls |
-| C3C — Source & Consent Boundary | packages/connectors/** (new); tests/unit/p0c3-source-*; docs/P0C3-C-*; narrowly allocated root package references | Fake source snapshots, strict read-only source-policy interface, permissions/revocation and zero-network proof |
+| Lane                               | Exclusive initial scope                                                                                                                           | Product deliverable                                                                                            |
+| :--------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------- |
+| C3A — Commitment Persistence & API | migrations/0008*; packages/postgres commitment repositories; packages/contracts commitment DTOs; apps/api/src/commitments; related API mount only | Durable tenant-scoped commitment CRUD, occurrence/ outcome storage, idempotency                                |
+| C3B — Scheduler & Outcome Runtime  | packages/execution/src/commitment-_; apps/worker/src/commitment-_; related tests                                                                  | Due-work dispatch and deterministic processing through existing controls                                       |
+| C3C — Source & Consent Boundary    | packages/connectors/** (new); tests/unit/p0c3-source-_; docs/P0C3-C-_; narrowly allocated root package references                                 | Fake source snapshots, strict read-only source-policy interface, permissions/revocation and zero-network proof |
 
 **Shared owner / integration window:** packages/contracts/index and packages/postgres/index belong to A. packages/execution/index and apps/worker/** belong to B. Root tsconfig, unit Vitest config, pnpm-lock.yaml and any new package manifest wiring belong to C. apps/api/src/app.ts belongs to A. If a required edit crosses ownership, stop and describe a small Integration Pass change rather than editing another lane's file.
 
@@ -116,16 +116,16 @@ No lane may touch apps/ios/**, historical migrations, P0-C2 acceptance artifacts
 
 Minimum new evidence matrix:
 
-| ID | Test | DoD |
-| :-- | :-- | :-- |
-| C3-T01 | Create/list/detail | Tenant isolation, bounded inputs, idempotent 201/replay |
-| C3-T02 | Two schedulers racing | Exactly one occurrence/dispatch record per due slot |
-| C3-T03 | Pause/cancel race | No future occurrence after committed pause/cancel |
-| C3-T04 | SIGKILL/reaper | Resume without duplicate visible outcome; stale lease rejected |
-| C3-T05 | Sentinel deny / budget | No source callback or new budget reservation on deny |
+| ID     | Test                   | DoD                                                              |
+| :----- | :--------------------- | :--------------------------------------------------------------- |
+| C3-T01 | Create/list/detail     | Tenant isolation, bounded inputs, idempotent 201/replay          |
+| C3-T02 | Two schedulers racing  | Exactly one occurrence/dispatch record per due slot              |
+| C3-T03 | Pause/cancel race      | No future occurrence after committed pause/cancel                |
+| C3-T04 | SIGKILL/reaper         | Resume without duplicate visible outcome; stale lease rejected   |
+| C3-T05 | Sentinel deny / budget | No source callback or new budget reservation on deny             |
 | C3-T06 | Source-policy & revoke | Revoked/unknown source fails closed; no network in default tests |
-| C3-T07 | API to Inbox contract | Outcome pagination/order and Task link remain stable |
-| C3-T08 | Reconciliation | Every outcome maps to one persisted occurrence and task lineage |
+| C3-T07 | API to Inbox contract  | Outcome pagination/order and Task link remain stable             |
+| C3-T08 | Reconciliation         | Every outcome maps to one persisted occurrence and task lineage  |
 
 **Acceptance labels:** Promise-loop Fake Integration may be PASS; real live source fetching, real LLM reasoning, actual credential execution, APNs delivery, multi-day soak and production SLA remain NOT IMPLEMENTED / NOT VERIFIED. Do not collapse these into one marketing PASS.
 

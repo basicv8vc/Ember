@@ -17,7 +17,7 @@ Do **not** activate real Gmail, Google Drive, private GitHub, OAuth, production 
 Allowed:
 
 - New packages/connectors/** (including its own package.json, tsconfig and src/**).
-- New tests/unit/p0c3-source-*.test.ts, tests/integration/p0c3-source-*.test.ts when fixture-only.
+- New tests/unit/p0c3-source-_.test.ts, tests/integration/p0c3-source-_.test.ts when fixture-only.
 - docs/P0C3-C-SOURCE-CONSENT.md.
 - Append-only root workspace project references, unit Vitest includes and pnpm-lock.yaml **only if necessary** to register @ember/connectors. C is sole owner of these specific root files in this round.
 

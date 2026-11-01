@@ -264,6 +264,7 @@ export interface SandboxProvider {
   create(spec: SandboxSpec): Promise<{ sandboxId: Id }>;
   waitReady(sandboxId: Id, deadlineMs: number): Promise<void>;
   exec(sandboxId: Id, argv: readonly string[], timeoutMs: number): Promise<SandboxExecResult>;
+  readOutput(sandboxId: Id, ref: Id): Promise<string>;
   putFile(sandboxId: Id, path: string, artifactRef: Id): Promise<void>;
   getFile(sandboxId: Id, path: string): Promise<{ artifactRef: Id }>;
   snapshot?(sandboxId: Id): Promise<{ restoreRef: string }>;

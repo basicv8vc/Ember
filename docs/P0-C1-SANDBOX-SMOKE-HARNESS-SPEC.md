@@ -30,11 +30,14 @@ All candidate backends must implement the standard `SandboxProvider` contract de
 
 ```typescript
 export interface SandboxProvider {
+  /** Explicit provider capabilities */
+  capabilities(): Promise<SandboxCapabilities>;
+
   /** Create a sandbox instance with bounded spec and resource ceilings */
   create(spec: SandboxSpec): Promise<{ sandboxId: Id }>;
 
   /** Wait until sandbox enters ready state or throw on timeout */
-  waitReady(sandboxId: Id, timeoutMs: number): Promise<void>;
+  waitReady(sandboxId: Id, deadlineMs: number): Promise<void>;
 
   /** Execute a bounded, allowlisted command inside the sandbox */
   exec(sandboxId: Id, argv: readonly string[], timeoutMs: number): Promise<SandboxExecResult>;
@@ -45,6 +48,10 @@ export interface SandboxProvider {
   /** Transfer artifact to/from controlled root (with integrity validation) */
   putFile(sandboxId: Id, path: string, artifactRef: Id): Promise<void>;
   getFile(sandboxId: Id, path: string): Promise<{ artifactRef: Id }>;
+
+  /** Optional checkpoint snapshot and resume */
+  snapshot?(sandboxId: Id): Promise<{ restoreRef: string }>;
+  resume?(sandboxId: Id): Promise<void>;
 
   /** Graceful shutdown */
   stop(sandboxId: Id): Promise<void>;
@@ -110,7 +117,43 @@ export interface SandboxProvider {
 
 ## 4. Universal Measurement & Telemetry Schema
 
-For P0-C1 evaluation, each smoke run across the four providers will populate the following standardized telemetry record:
+### 4.1 P0-C1A Local Fake Simulation Schema
+
+In P0-C1A, prior to cloud authorization and credentials, the provider-neutral harness executes against `FakeSandboxProvider` with `mode: 'LOCAL_SIMULATION'`. The schema enforces strict boundary invariants to prevent synthetic metrics from masquerading as cloud benchmarks:
+
+- `provider: 'fake'`
+- `mode: 'LOCAL_SIMULATION'`
+- `usageSource: 'SIMULATED'`
+- `realIsolationStatus: 'NOT_MEASURED'`
+- `vendorColdStartMs: null`
+- `vendorCostUsd: null`
+- `costSource: 'NOT_MEASURED'`
+
+```typescript
+export interface SmokeReport {
+  readonly schemaVersion: '1.0.0';
+  readonly testId: string;
+  readonly provider: 'fake';
+  readonly mode: 'LOCAL_SIMULATION';
+  readonly status: 'PASS' | 'FAIL';
+  readonly phases: Record<SmokePhase, SmokePhaseDetail>;
+  readonly timing: SmokeTimingReport;
+  readonly usageSource: 'SIMULATED';
+  readonly usage: SandboxUsageRecord | null;
+  readonly realIsolationStatus: 'NOT_MEASURED';
+  readonly vendorColdStartMs: null;
+  readonly vendorCostUsd: null;
+  readonly costSource: 'NOT_MEASURED';
+  readonly capabilities: SandboxCapabilities | null;
+  readonly cleanup: SmokeCleanupReport;
+  readonly error: string | null;
+  readonly limitations: readonly string[];
+}
+```
+
+### 4.2 Candidate Cloud Provider Telemetry Record (Deferred to Authorized P0-C1)
+
+For future P0-C1 evaluation upon explicit human authorization and budget approval, each smoke run across candidate cloud providers will populate the following standardized telemetry record:
 
 ```typescript
 export interface SandboxSmokeRecord {

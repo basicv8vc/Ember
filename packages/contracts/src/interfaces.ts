@@ -273,3 +273,27 @@ export interface SandboxProvider {
   destroy(sandboxId: Id): Promise<void>;
   usage(sandboxId: Id): Promise<SandboxUsageRecord>;
 }
+
+/**
+ * Factory abstraction for creating a Run-scoped SandboxProvider instance.
+ *
+ * Decouples the execution engine from concrete provider implementations.
+ * Implementations must accept a trusted Run cancellation / lease-loss signal.
+ * Factory implementations must not retain the signal or raw user payload in exported reports.
+ */
+export interface SandboxProviderFactory {
+  createProvider(context: {
+    tenantId: Id;
+    runId: Id;
+    signal: AbortSignal; // trusted Run cancellation/lease-loss signal
+  }): Promise<SandboxProvider>;
+}
+
+/**
+ * Configuration options for bounded sandbox runtime adapter execution.
+ */
+export interface SandboxAdapterOptions {
+  readonly readyDeadlineMs?: number;
+  readonly execTimeoutMs?: number;
+  readonly cleanupTimeoutMs?: number;
+}

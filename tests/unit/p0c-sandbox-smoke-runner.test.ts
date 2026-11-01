@@ -2,11 +2,12 @@ import { randomUUID } from 'node:crypto';
 import type {
   SandboxCapabilities,
   SandboxProvider,
+  SandboxProviderFactory,
   SandboxSpec,
   SandboxUsageRecord,
 } from '@ember/contracts';
 import type { Id } from '@ember/domain';
-import { FakeSandboxProvider } from '@ember/execution';
+import { FakeSandboxProvider, FakeSandboxProviderFactory, SandboxAdapter } from '@ember/execution';
 import { describe, expect, it } from 'vitest';
 import {
   EXPECTED_HELLO_EMBER_SHA256,
@@ -886,5 +887,143 @@ describe('SandboxSmokeRunner', () => {
         'Provider operation failed during capabilities [ERR_PROVIDER_EXECUTION]',
       );
     }
+  });
+
+  describe('SandboxProviderFactory Integration & Tri-State Leak Detection', () => {
+    it('executes full smoke harness cleanly through FakeSandboxProviderFactory', async () => {
+      const tenantId = randomUUID();
+      const factory = new FakeSandboxProviderFactory();
+      const runner = new SandboxSmokeRunner(factory);
+
+      const report = await runner.run({ tenantId });
+
+      expect(report.status).toBe('PASS');
+      expect(report.cleanup.stopStatus).toBe('COMPLETED');
+      expect(report.cleanup.destroyStatus).toBe('COMPLETED');
+      expect(report.cleanup.resourceVerification).toBe('VERIFIED_ZERO');
+      expect(report.cleanup.leakStatus).toBe('VERIFIED_CLEAN');
+      expect(report.cleanup.resourcesLeaked).toBe(false);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('marks leakStatus as UNKNOWN, resourcesLeaked as true, and status FAIL when factory.createProvider() fails', async () => {
+      const failingFactory: SandboxProviderFactory = {
+        createProvider: () =>
+          Promise.reject(new Error('simulated factory failure in cloud provider')),
+      };
+
+      const runner = new SandboxSmokeRunner(failingFactory);
+      const report = await runner.run();
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.create.status).toBe('FAIL');
+      expect(report.cleanup.stopStatus).toBe('NOT_ATTEMPTED');
+      expect(report.cleanup.destroyStatus).toBe('NOT_ATTEMPTED');
+      expect(report.cleanup.resourceVerification).toBe('NOT_ATTEMPTED');
+      expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(report.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('marks leakStatus as UNKNOWN when factory.createProvider() hangs and times out', async () => {
+      const hangingFactory: SandboxProviderFactory = {
+        createProvider: () => new Promise<never>(() => {}),
+      };
+
+      const runner = new SandboxSmokeRunner(hangingFactory);
+      const report = await runner.run({ timeoutMs: 100 });
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.create.status).toBe('FAIL');
+      expect(report.phases.create.error).toContain('timed out');
+      expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(report.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('propagates AbortSignal cancellation during factory creation', async () => {
+      const controller = new AbortController();
+      const factory: SandboxProviderFactory = {
+        createProvider: () => {
+          controller.abort();
+          return new Promise<never>(() => {});
+        },
+      };
+      const runner = new SandboxSmokeRunner(factory);
+
+      const report = await runner.run({ signal: controller.signal });
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.create.status).toBe('FAIL');
+      expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(report.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('handles pre-aborted signal before factory creation with fail-closed UNKNOWN leakStatus', async () => {
+      const controller = new AbortController();
+      controller.abort();
+
+      const factory = new FakeSandboxProviderFactory();
+      const runner = new SandboxSmokeRunner(factory);
+
+      const report = await runner.run({ signal: controller.signal });
+
+      expect(report.status).toBe('FAIL');
+      expect(report.phases.create.status).toBe('FAIL');
+      expect(report.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(report.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('executes full smoke harness successfully when provider is wrapped in SandboxAdapter', async () => {
+      const tenantId = randomUUID();
+      const fakeProvider = new FakeSandboxProvider({ tenantId });
+      const adapter = new SandboxAdapter(fakeProvider);
+      const runner = new SandboxSmokeRunner(adapter);
+
+      const report = await runner.run({ tenantId });
+
+      expect(report.status).toBe('PASS');
+      expect(report.cleanup.leakStatus).toBe('VERIFIED_CLEAN');
+      expect(report.cleanup.resourceVerification).toBe('VERIFIED_ZERO');
+      expect(report.cleanup.resourcesLeaked).toBe(false);
+      expect(fakeProvider.liveSandboxCount()).toBe(0);
+      expect(SmokeReportSchema.safeParse(report).success).toBe(true);
+    });
+
+    it('缺少原生 liveSandboxCount 的 Provider 不会被误判为 VERIFIED_CLEAN', async () => {
+      const tenantId = randomUUID();
+      const { liveSandboxCount: _ignored, ...providerWithoutLiveCount } = createMockProvider();
+
+      // 1. Direct smoke run
+      const directRunner = new SandboxSmokeRunner(providerWithoutLiveCount);
+      const directReport = await directRunner.run({ tenantId });
+
+      // Because independent verification is not supported, overall status MUST fail-closed to FAIL
+      expect(directReport.status).toBe('FAIL');
+      expect(directReport.cleanup.destroyStatus).toBe('COMPLETED');
+      expect(directReport.cleanup.resourceVerification).toBe('NOT_SUPPORTED');
+      expect(directReport.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(directReport.cleanup.leakStatus).not.toBe('VERIFIED_CLEAN');
+      expect(directReport.cleanup.resourceVerification).not.toBe('VERIFIED_ZERO');
+      expect(directReport.cleanup.resourcesLeaked).toBe(true);
+
+      // 2. Wrapped in SandboxAdapter
+      const adapter = new SandboxAdapter(providerWithoutLiveCount);
+      expect(adapter.liveSandboxCount).toBeUndefined();
+
+      const adapterRunner = new SandboxSmokeRunner(adapter);
+      const adapterReport = await adapterRunner.run({ tenantId });
+
+      expect(adapterReport.status).toBe('FAIL');
+      expect(adapterReport.cleanup.destroyStatus).toBe('COMPLETED');
+      expect(adapterReport.cleanup.resourceVerification).toBe('NOT_SUPPORTED');
+      expect(adapterReport.cleanup.leakStatus).toBe('UNKNOWN');
+      expect(adapterReport.cleanup.leakStatus).not.toBe('VERIFIED_CLEAN');
+      expect(adapterReport.cleanup.resourceVerification).not.toBe('VERIFIED_ZERO');
+      expect(adapterReport.cleanup.resourcesLeaked).toBe(true);
+      expect(SmokeReportSchema.safeParse(adapterReport).success).toBe(true);
+    });
   });
 });

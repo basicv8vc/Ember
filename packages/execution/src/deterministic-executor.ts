@@ -1,4 +1,11 @@
-import type { RouteDecision, RunExecutionContext, SandboxUsageRecord } from '@ember/contracts';
+import type {
+  RouteDecision,
+  RunExecutionContext,
+  SandboxProvider,
+  SandboxProviderFactory,
+  SandboxSpec,
+  SandboxUsageRecord,
+} from '@ember/contracts';
 import { DomainError, type ExecutionPath, type Id, type TaskKind } from '@ember/domain';
 import {
   parseBoundedTimeoutMs,
@@ -11,8 +18,13 @@ import {
   type Sleeper,
 } from './clock.js';
 import { FakeLlm, type FakeLlmUsage } from './fake-llm.js';
-import { FAKE_SANDBOX_IMAGE_DIGEST, FakeSandboxProvider } from './fake-sandbox.js';
+import {
+  FAKE_SANDBOX_IMAGE_DIGEST,
+  FakeSandboxProvider,
+  FakeSandboxProviderFactory,
+} from './fake-sandbox.js';
 import { assertSupportedComputeOperation, computeSha256 } from './mock-compute.js';
+import { SandboxAdapter, withBoundedTimeout } from './sandbox-adapter.js';
 import { parseTaskInput, parseTaskKind } from './validation.js';
 
 /**
@@ -118,6 +130,8 @@ export interface DeterministicExecutorOptions {
   readonly sandboxExecTimeoutMs?: number;
   /** Optional observer invoked when a FakeSandboxProvider is created for a Run. */
   readonly onSandboxProvider?: (provider: FakeSandboxProvider) => void;
+  /** Optional factory for creating Run-scoped SandboxProvider instances; defaults to in-memory fake factory. */
+  readonly sandboxFactory?: SandboxProviderFactory;
 }
 
 const SANDBOX_SPEC_BY_ROUTE: Readonly<
@@ -148,6 +162,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
   private readonly sandboxReadyDeadlineMs: number;
   private readonly sandboxExecTimeoutMs: number;
   private readonly onSandboxProvider: ((provider: FakeSandboxProvider) => void) | undefined;
+  private readonly sandboxFactory: SandboxProviderFactory;
 
   constructor(options: DeterministicExecutorOptions = {}) {
     this.clock = options.clock ?? systemExecutionClock;
@@ -170,6 +185,13 @@ export class DeterministicExecutor implements SimulatedExecutor {
       60_000,
     );
     this.onSandboxProvider = options.onSandboxProvider;
+    this.sandboxFactory =
+      options.sandboxFactory ??
+      new FakeSandboxProviderFactory({
+        clock: this.clock,
+        sleep: this.sleep,
+        execDurationMs: this.sandboxExecDurationMs,
+      });
   }
 
   async execute(
@@ -348,17 +370,22 @@ export class DeterministicExecutor implements SimulatedExecutor {
     text: string,
     signal: AbortSignal,
   ): Promise<{ sandboxId: Id; digest: string; usage: SandboxUsageRecord }> {
+    throwIfAborted(signal);
     const sizing = SANDBOX_SPEC_BY_ROUTE[route.path];
-    const provider = new FakeSandboxProvider({
-      tenantId: ctx.tenantId,
-      clock: this.clock,
-      sleep: this.sleep,
-      signal,
-      execDurationMs: this.sandboxExecDurationMs,
-    });
-    this.onSandboxProvider?.(provider);
 
-    const { sandboxId } = await provider.create({
+    const provider = await this.resolveSandboxProvider(ctx, signal);
+
+    if (provider instanceof FakeSandboxProvider) {
+      this.onSandboxProvider?.(provider);
+    }
+
+    const adapter = new SandboxAdapter(provider, {
+      readyDeadlineMs: this.sandboxReadyDeadlineMs,
+      execTimeoutMs: this.sandboxExecTimeoutMs,
+      cleanupTimeoutMs: Math.min(this.sandboxExecTimeoutMs, 5_000),
+    });
+
+    const spec: SandboxSpec = {
       tenantId: ctx.tenantId,
       runId: ctx.runId,
       imageDigest: FAKE_SANDBOX_IMAGE_DIGEST,
@@ -366,28 +393,54 @@ export class DeterministicExecutor implements SimulatedExecutor {
       memoryMiB: sizing.memoryMiB,
       maxLifetimeSec: SANDBOX_MAX_LIFETIME_SEC,
       networkPolicyId: 'none',
+    };
+
+    const res = await adapter.run({
+      spec,
+      argv: ['sha256', text],
+      signal,
+      readyDeadlineMs: this.sandboxReadyDeadlineMs,
+      execTimeoutMs: this.sandboxExecTimeoutMs,
+      beforeExec: () => {
+        // Reject an unsupported operation before the sandbox is asked to do anything.
+        assertSupportedComputeOperation(operation);
+      },
     });
 
-    try {
-      await provider.waitReady(sandboxId, this.sandboxReadyDeadlineMs);
+    return {
+      sandboxId: res.sandboxId,
+      digest: res.digest,
+      usage: res.usage,
+    };
+  }
 
-      // Reject an unsupported operation before the sandbox is asked to do anything. The
-      // digest itself is produced by the simulated command below, so this only validates.
-      assertSupportedComputeOperation(operation);
+  private async resolveSandboxProvider(
+    ctx: RunExecutionContext,
+    signal: AbortSignal,
+  ): Promise<SandboxProvider> {
+    const factoryTimeoutMs = Math.min(this.sandboxReadyDeadlineMs, 5_000);
+    const provider = await withBoundedTimeout<SandboxProvider>(
+      () =>
+        this.sandboxFactory.createProvider({
+          tenantId: ctx.tenantId,
+          runId: ctx.runId,
+          signal,
+        }),
+      factoryTimeoutMs,
+      'factory_create',
+      signal,
+    );
 
-      const exec = await provider.exec(sandboxId, ['sha256', text], this.sandboxExecTimeoutMs);
-
-      if (exec.exitCode !== 0) {
-        throw new DomainError('MOCK_TOOL_FAILED', 'simulated sandbox command did not succeed');
-      }
-
-      const digest = await provider.readOutput(sandboxId, exec.stdoutRef);
-      const usage = await provider.usage(sandboxId);
-
-      return { sandboxId, digest, usage };
-    } finally {
-      await provider.stop(sandboxId).catch(() => undefined);
-      await provider.destroy(sandboxId).catch(() => undefined);
+    const candidate = provider as unknown;
+    if (
+      !candidate ||
+      typeof candidate !== 'object' ||
+      typeof (candidate as Record<string, unknown>)['create'] !== 'function' ||
+      typeof (candidate as Record<string, unknown>)['exec'] !== 'function'
+    ) {
+      throw new DomainError('SANDBOX_NOT_READY', 'sandbox factory returned an invalid provider');
     }
+
+    return provider;
   }
 }

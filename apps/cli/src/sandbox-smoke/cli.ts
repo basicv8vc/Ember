@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FakeSandboxProvider } from '@ember/execution';
+import { FakeSandboxProviderFactory } from '@ember/execution';
 import { SandboxSmokeRunner } from './runner.js';
 import { formatSanitizedError, serializeSafeJson } from './sanitize.js';
 import type { SmokeReport } from './types.js';
@@ -250,8 +250,8 @@ export async function runCli(
 
   try {
     const tenantId = randomUUID();
-    const provider = new FakeSandboxProvider({ tenantId });
-    const runner = new SandboxSmokeRunner(provider);
+    const factory = new FakeSandboxProviderFactory();
+    const runner = new SandboxSmokeRunner(factory);
 
     const report = await runner.run({
       tenantId,

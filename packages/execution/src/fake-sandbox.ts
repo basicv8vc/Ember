@@ -3,6 +3,7 @@ import type {
   SandboxCapabilities,
   SandboxExecResult,
   SandboxProvider,
+  SandboxProviderFactory,
   SandboxSpec,
   SandboxUsageRecord,
 } from '@ember/contracts';
@@ -284,6 +285,7 @@ export class FakeSandboxProvider implements SandboxProvider {
     }
 
     if (this.readyDelayMs >= deadline) {
+      await new Promise((resolve) => setTimeout(resolve, deadline + 20));
       throw new DomainError(
         'EXECUTION_TIMEOUT',
         'simulated sandbox readiness exceeded its deadline',
@@ -341,6 +343,7 @@ export class FakeSandboxProvider implements SandboxProvider {
     }
 
     if (this.execDurationMs >= timeout) {
+      await new Promise((resolve) => setTimeout(resolve, timeout + 20));
       throw new DomainError('EXECUTION_TIMEOUT', 'simulated exec exceeded its timeout');
     }
 
@@ -522,3 +525,46 @@ export class FakeSandboxProvider implements SandboxProvider {
     }
   }
 }
+
+export interface FakeSandboxFactoryOptions {
+  readonly clock?: ExecutionClock;
+  readonly sleep?: Sleeper;
+  readonly readyDelayMs?: number;
+  readonly execDurationMs?: number;
+  readonly onProvider?: (provider: FakeSandboxProvider) => void;
+}
+
+/**
+ * Provider factory for producing in-memory, deterministic FakeSandboxProvider instances.
+ */
+export class FakeSandboxProviderFactory implements SandboxProviderFactory {
+  private readonly options: FakeSandboxFactoryOptions;
+
+  constructor(options: FakeSandboxFactoryOptions = {}) {
+    this.options = options;
+  }
+
+  async createProvider(context: {
+    tenantId: Id;
+    runId: Id;
+    signal: AbortSignal;
+  }): Promise<SandboxProvider> {
+    await Promise.resolve();
+    throwIfAborted(context.signal);
+    const provider = new FakeSandboxProvider({
+      tenantId: context.tenantId,
+      clock: this.options.clock,
+      sleep: this.options.sleep,
+      signal: context.signal,
+      readyDelayMs: this.options.readyDelayMs,
+      execDurationMs: this.options.execDurationMs,
+    });
+    this.options.onProvider?.(provider);
+    return provider;
+  }
+}
+
+/**
+ * Default singleton factory instance for FakeSandboxProvider.
+ */
+export const defaultFakeSandboxFactory: SandboxProviderFactory = new FakeSandboxProviderFactory();

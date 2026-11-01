@@ -43,14 +43,24 @@ export {
 export { FAKE_LLM_LIMITS, FAKE_LLM_MODEL, FakeLlm } from './fake-llm.js';
 export type { FakeLlmFault, FakeLlmRequest, FakeLlmResponse, FakeLlmUsage } from './fake-llm.js';
 export {
+  defaultFakeSandboxFactory,
   FAKE_SANDBOX_IMAGE_DIGEST,
   FAKE_SANDBOX_LIMITS,
   FAKE_SANDBOX_OPERATIONS,
   FakeSandboxProvider,
+  FakeSandboxProviderFactory,
+  type FakeSandboxFactoryOptions,
   type FakeSandboxOperation,
   type FakeSandboxProviderOptions,
   type FakeSandboxState,
 } from './fake-sandbox.js';
+export {
+  SandboxAdapter,
+  sanitizeProviderError,
+  type SandboxAdapterState,
+  type SandboxRunOptions,
+  type SandboxRunResult,
+} from './sandbox-adapter.js';
 export {
   assertSupportedComputeOperation,
   computeSha256,

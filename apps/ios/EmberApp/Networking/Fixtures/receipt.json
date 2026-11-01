@@ -1,0 +1,17 @@
+{
+  "scenario_id": "receipt",
+  "receipt": {
+    "task_id": "00000000-0000-4000-8000-000000000101",
+    "status": "queued",
+    "accepted_at": "2026-11-01T00:00:00Z",
+    "replayed": false
+  },
+  "task": null,
+  "events": [],
+  "cancel_response": null,
+  "snapshot_after_cancel": null,
+  "event_after_cancel": null,
+  "approval_availability": "not_applicable",
+  "presentation_states": [],
+  "outcome_fixture": null
+}

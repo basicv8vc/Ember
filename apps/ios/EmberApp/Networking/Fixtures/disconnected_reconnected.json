@@ -1,0 +1,41 @@
+{
+  "scenario_id": "disconnected_reconnected",
+  "receipt": null,
+  "task": {
+    "task_id": "00000000-0000-4000-8000-000000000105",
+    "agent_id": "00000000-0000-4000-8000-000000000201",
+    "kind": "mock.compute",
+    "status": "running",
+    "current_run_id": "00000000-0000-4000-8000-000000000305",
+    "attempt_count": 1,
+    "created_at": "2026-11-01T00:00:00Z",
+    "updated_at": "2026-11-01T00:00:02Z",
+    "deadline_at": null
+  },
+  "events": [],
+  "cancel_response": null,
+  "snapshot_after_cancel": null,
+  "event_after_cancel": null,
+  "approval_availability": "not_applicable",
+  "presentation_states": [
+    {
+      "task_status": "running",
+      "connection_phase": "disconnected",
+      "command_in_flight": null,
+      "capability": "mock_only"
+    },
+    {
+      "task_status": "running",
+      "connection_phase": "connecting",
+      "command_in_flight": null,
+      "capability": "mock_only"
+    },
+    {
+      "task_status": "running",
+      "connection_phase": "connected",
+      "command_in_flight": null,
+      "capability": "mock_only"
+    }
+  ],
+  "outcome_fixture": null
+}

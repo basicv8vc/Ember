@@ -1,0 +1,14 @@
+=== GitHub Actions CI Verification ===
+Commit SHA: ba705a4a9868fc0ec19d3817b9295e9b023e294b
+Branch: main
+Workflow: CI
+Run ID: 41296491659
+Status: completed
+Conclusion: success
+Event: push
+Display Title: Merge pull request #38 from basicv8vc/feature/p0c-2b-sentinel-runtime-admission
+URL: https://github.com/basicv8vc/Ember/actions/runs/41296491659
+
+Job Details:
+✓ Verify (Node 24 LTS + PostgreSQL 17) in 2m47s (ID 124818323187)
+Result: SUCCESS

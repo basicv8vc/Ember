@@ -27,7 +27,7 @@ A **CommitmentOutcome** is an append-only, non-sensitive summary produced by an 
                                    v
 +-----------------------------------------------------------------------------------+
 | Lane A: Commitment Persistence & HTTP API                                         |
-|   - PostgreSQL authoritative clock & storage: commitments, occurrences, outcomes   |
+|   - PostgreSQL authoritative clock & storage: commitments, occurrences, outcomes  |
 |   - Row-level lock & CAS optimistic locking on version                            |
 |   - Idempotency-Key deduplication (SHA-256 fingerprint)                           |
 +-----------------------------------------------------------------------------------+

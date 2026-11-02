@@ -2,12 +2,13 @@
 
 ## Commitment Persistence & HTTP API
 
-**Version:** 1.1.0 FROZEN  
+**Version:** 1.2.0 FROZEN  
 **Author:** Ember P0-C3A Coding Agent (Commitment Persistence & HTTP API)  
 **Status:** Completed & Verified (CTO review fixes applied: P0-C3A-1 … P0-C3A-4)  
 **Branch:** `feature/p0c-3a-commitment-api`  
 **Base Commit:** `bbcad275418cd59c29b742cd2cc6e3bd825c6054`  
-**Implementation Head Commit:** `16c7cac1805f55bbdb1bf979f0e341c2fd6e328c` — the SHA that the quality gates, PostgreSQL integration, E2E and GitHub CI below were executed against.  
+**Implementation Head Commit:** `91e26135e3dffce9f7b51ee03e1cd4976f0a7d3a` — the exact SHA that every gate below was executed against and that GitHub CI run [`41379600792`](https://github.com/basicv8vc/Ember/actions/runs/41379600792) passed on (3m04s).  
+**PR Head SHA:** `91e26135e3dffce9f7b51ee03e1cd4976f0a7d3a` (PR #56 head at verification time). The commits pushed after it are documentation-only — this SHA record plus the CAS/schema wording corrections — and re-run the identical CI job without changing executable behaviour.  
 **Contract Reference:** `docs/P0-C3-0-CONTRACT-FREEZE.md` (v1.2 FROZEN APPROVED)
 
 ---
@@ -267,26 +268,28 @@ Agent C's `FakeSourceReader` and consent evaluation integrate via the frozen con
 
 ## 8. Verification & Quality Gates
 
-All checks and tests were executed against real PostgreSQL 17 in the isolated worktree, on the
-`Implementation Head Commit` recorded at the top of this document:
+All checks and tests were re-executed against real PostgreSQL 17 (Homebrew `postgresql@17`, local
+`ember_test` database) in this worktree on the `Implementation Head Commit` recorded at the top of
+this document, and the same commit is green in GitHub CI. The counts below are the ones observed on
+that SHA, not carried over from an earlier revision.
 
-| Gate                                   | Status | Command                                                         | Result                                        |
-| -------------------------------------- | ------ | --------------------------------------------------------------- | --------------------------------------------- |
-| **Format**                             | PASS   | `pnpm format:check`                                             | Exit code 0 (All files conform to Prettier)   |
-| **Lint**                               | PASS   | `pnpm lint`                                                     | Exit code 0 (Zero warnings, zero errors)      |
-| **Typecheck**                          | PASS   | `pnpm typecheck`                                                | Exit code 0 (`tsc -p tsconfig.json`)          |
-| **Build**                              | PASS   | `pnpm build`                                                    | Exit code 0 (`tsc -b tsconfig.build.json`)    |
-| **Migrations (first + repeat run)**    | PASS   | `pnpm db:migrate` twice                                         | 8 idempotent migrations, second run applies 0 |
-| **Unit Tests (Contracts)**             | PASS   | `vitest run tests/unit/p0c3-commitment-contracts.test.ts`       | 16/16 passed                                  |
-| **Unit Tests (HTTP API)**              | PASS   | `vitest run tests/unit/p0c3-commitment-api.test.ts`             | 12/12 passed                                  |
-| **Integration Tests (P0-C3A)**         | PASS   | `vitest run tests/integration/p0c3-commitment-postgres.test.ts` | 17/17 passed                                  |
-| **Integration Tests (Migrations)**     | PASS   | `vitest run tests/integration/migrations.test.ts`               | 7/7 passed                                    |
-| **Full Integration Suite**             | PASS   | `pnpm test:integration`                                         | 30 files passed (311/311 tests)               |
-| **E2E Tests (P0-C3A HTTP + Postgres)** | PASS   | `vitest run tests/e2e/p0c3-commitment-e2e.test.ts`              | 5/5 passed                                    |
-| **Full E2E Suite**                     | PASS   | `pnpm test:e2e`                                                 | 9 files passed (18/18 tests)                  |
-| **Chaos Suite**                        | PASS   | `pnpm test:chaos`                                               | 5 files passed (27/27 tests)                  |
-| **Full Unit Suite**                    | PASS   | `pnpm test:unit`                                                | 55 files passed (962/962 tests)               |
-| **GitHub CI**                          | PASS   | `.github/workflows/ci.yml` on the PR head                       | `Verify (Node 24 LTS + PostgreSQL 17)` green  |
+| Gate                                   | Status | Command                                                         | Result                                                          |
+| -------------------------------------- | ------ | --------------------------------------------------------------- | --------------------------------------------------------------- |
+| **Format**                             | PASS   | `pnpm format:check`                                             | Exit code 0 (All files conform to Prettier)                     |
+| **Lint**                               | PASS   | `pnpm lint`                                                     | Exit code 0 (Zero warnings, zero errors)                        |
+| **Typecheck**                          | PASS   | `pnpm typecheck`                                                | Exit code 0 (`tsc -p tsconfig.json`)                            |
+| **Build**                              | PASS   | `pnpm build`                                                    | Exit code 0 (`tsc -b tsconfig.build.json`)                      |
+| **Migrations (first + repeat run)**    | PASS   | `pnpm db:migrate` twice                                         | 8 idempotent migrations, second run applies 0                   |
+| **Unit Tests (Contracts)**             | PASS   | `vitest run tests/unit/p0c3-commitment-contracts.test.ts`       | 16/16 passed                                                    |
+| **Unit Tests (HTTP API)**              | PASS   | `vitest run tests/unit/p0c3-commitment-api.test.ts`             | 12/12 passed                                                    |
+| **Integration Tests (P0-C3A)**         | PASS   | `vitest run tests/integration/p0c3-commitment-postgres.test.ts` | 17/17 passed                                                    |
+| **Integration Tests (Migrations)**     | PASS   | `vitest run tests/integration/migrations.test.ts`               | 7/7 passed                                                      |
+| **Full Integration Suite**             | PASS   | `pnpm test:integration`                                         | 30 files passed (311/311 tests)                                 |
+| **E2E Tests (P0-C3A HTTP + Postgres)** | PASS   | `vitest run tests/e2e/p0c3-commitment-e2e.test.ts`              | 5/5 passed                                                      |
+| **Full E2E Suite**                     | PASS   | `pnpm test:e2e`                                                 | 9 files passed (18/18 tests)                                    |
+| **Chaos Suite**                        | PASS   | `pnpm test:chaos`                                               | 5 files passed (27/27 tests)                                    |
+| **Full Unit Suite**                    | PASS   | `pnpm test:unit`                                                | 55 files passed (962/962 tests)                                 |
+| **GitHub CI**                          | PASS   | `.github/workflows/ci.yml` on `91e2613`                         | `Verify (Node 24 LTS + PostgreSQL 17)` green, run `41379600792` |
 
 **Total new P0-C3A tests passed:** 50/50 (16 contracts + 12 API + 17 integration + 5 E2E) +
 7/7 migration verification tests.
@@ -299,3 +302,18 @@ All checks and tests were executed against real PostgreSQL 17 in the isolated wo
 | C3A-2 | Publish requires `commitments.status = 'active'`, `tasks.status = 'running'`, `runs.status = 'running'` and a valid lease; locks are taken as commitment → occurrence → task → run | `serialises outcome publication behind a concurrent cancellation and never writes after it` (real second session holds the commitment lock, publisher blocks, then fails closed with `POLICY_DENIED` and 0 outcome rows) + `rejects outcome append if Task is cancelled or Run is not running` |
 | C3A-3 | `completed → cancelled` is rejected with `INVALID_STATE_TRANSITION`; terminal no-ops never bump `version`                                                                          | `strictly forbids completed -> cancelled transition…`, `enforces the full transition table and idempotent terminal semantics`, API unit test and E2E `409 INVALID_STATE_TRANSITION`                                                                                                            |
 | C3A-4 | `StalledPendingOccurrence` returns `tenantId` / `agentId` / `sourceProfileId` / `scheduleKind` / `intervalSeconds` from the DB join; no synthetic tenant                           | `finds stalled occurrences and reconciles task dispatch` asserts every field equals the seeded tenant/agent/profile/schedule values                                                                                                                                                            |
+
+### 8.2 Mutation Check: the Regression Tests Are Load-Bearing
+
+A passing test proves nothing if it would also pass with the fix reverted. Each fix above was
+therefore reverted in isolation — with the production file restored afterwards — and the matching
+test was re-run against real PostgreSQL 17:
+
+| Reverted behaviour                                                               | Targeted test                                         | Observed result                                                 |
+| -------------------------------------------------------------------------------- | ----------------------------------------------------- | --------------------------------------------------------------- |
+| `cancel()` accepts `completed` (the `completed` branch removed)                  | `strictly forbids completed -> cancelled transition…` | FAIL — `promise resolved "{ …(12) }" instead of rejecting`      |
+| `appendOutcomeIfAbsent` drops the `FOR UPDATE` on the commitment row             | `serialises outcome publication behind a concurrent…` | FAIL — `expected true to be false` (publisher no longer blocks) |
+| Lease expiry moved off the DB clock (`clock_timestamp() + interval '100 years'`) | `determines lease validity entirely via PostgreSQL…`  | FAIL — valid lease rejected (`DomainError: Lease is stale…`)    |
+
+Each revert makes exactly the intended test fail and nothing else, so the three P1 guarantees are
+pinned by executable evidence rather than by comments.

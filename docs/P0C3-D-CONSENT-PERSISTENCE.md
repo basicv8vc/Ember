@@ -364,14 +364,16 @@ count and the idempotent replay.
 CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`, 10 steps: Lint, Check formatting,
 Typecheck, Unit, Build, Migrate ×2, Integration, Chaos, E2E, Demo CLI smoke):
 
-| Field       | Value                                                                                          |
-| ----------- | ---------------------------------------------------------------------------------------------- |
-| Code commit | `514cd151dfa5d31f6f40f95bcbcffbea1332718a` (implementation + this report + migration comments) |
-| Base SHA    | `14a3f30fd2e48501dfe941747b9ab5b916878932` (`main`, PR #83)                                    |
-| Run         | [`41442921738`](https://github.com/basicv8vc/Ember/actions/runs/41442921738) — **PASS**        |
+| Field        | Value                                                                                          |
+| ------------ | ---------------------------------------------------------------------------------------------- |
+| Code commit  | `514cd151dfa5d31f6f40f95bcbcffbea1332718a` (implementation + this report + migration comments) |
+| Base SHA     | `14a3f30fd2e48501dfe941747b9ab5b916878932` (`main`, PR #83)                                    |
+| Run 1 (code) | [`41442921738`](https://github.com/basicv8vc/Ember/actions/runs/41442921738) — **PASS**        |
+| Run 2 (docs) | [`41443602008`](https://github.com/basicv8vc/Ember/actions/runs/41443602008) — **PASS**        |
+| Run 3 (docs) | [`41444213883`](https://github.com/basicv8vc/Ember/actions/runs/41444213883) — **PASS**        |
 
-Every local gate above ran on that same commit. Commits after it change documentation only; live
-status is `gh pr checks 84`.
+Every local gate above ran on the code commit. Runs 2 and 3 cover commits that change documentation
+and SQL comments only (`0cb03d6`, `8dd0459`). Live status is `gh pr checks 84`.
 
 ---
 

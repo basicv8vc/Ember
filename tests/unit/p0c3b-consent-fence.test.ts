@@ -338,7 +338,6 @@ describe('P0-C3B: versioned Consent authorization fence', () => {
   });
 });
 
-
 describe('P0-C3B: fence re-verification inside the source reader', () => {
   it('denies the read when the fence names another tenant (0 reader callbacks)', async () => {
     const recorder: Recorder = { events: [] };
@@ -422,7 +421,6 @@ describe('P0-C3B: fence re-verification inside the source reader', () => {
   });
 });
 
-
 describe('P0-C3B: deny-all Consent placeholder', () => {
   it('is fence-shaped, branded, and rejects every entry point', async () => {
     const placeholder = createUnavailableConsentAuthority();
@@ -435,9 +433,9 @@ describe('P0-C3B: deny-all Consent placeholder', () => {
     await expect(placeholder.authorizeFence(TENANT_ID, SOURCE_PROFILE_ID)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
-    await expect(
-      placeholder.assertFenceCurrent(placeholderFence()),
-    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+    await expect(placeholder.assertFenceCurrent(placeholderFence())).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
     await expect(placeholder.assertActive(TENANT_ID, SOURCE_PROFILE_ID)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
@@ -504,8 +502,6 @@ describe('P0-C3B: transaction-scoped Consent publication guard', () => {
     ).resolves.toBeUndefined();
   });
 });
-
-
 
 describe('P0-C3B: scheduler startup gate', () => {
   interface CapturedLogs {

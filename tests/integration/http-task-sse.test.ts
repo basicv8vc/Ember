@@ -216,8 +216,8 @@ async function createApiDatabaseLogin(): Promise<{
       `ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} SET search_path TO ${quotedSchema}`,
     );
   } catch (error) {
-    await db
-      .roleAdminPool.query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`)
+    await db.roleAdminPool
+      .query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`)
       .catch(() => undefined);
     await revokeRolePrivileges(quotedRole, quotedSchema);
     await db.roleAdminPool.query(`DROP ROLE ${quotedRole}`).catch(() => undefined);

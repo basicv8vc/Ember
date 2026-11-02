@@ -124,10 +124,7 @@ export interface ResolvedGenerationConsentAuthority {
     tenantId: string,
     sourceProfileId: string,
     now?: Date,
-  ):
-    | AuthorizedConsentGenerationView
-    | null
-    | Promise<AuthorizedConsentGenerationView | null>;
+  ): AuthorizedConsentGenerationView | null | Promise<AuthorizedConsentGenerationView | null>;
 }
 
 /** True when the value exposes P0-C3C's `resolveGeneration` read port. */
@@ -196,7 +193,10 @@ export function fromResolvedGenerationConsent(
       await resolveActive(tenantId, sourceProfileId);
     },
 
-    async authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence> {
+    async authorizeFence(
+      tenantId: Id,
+      sourceProfileId: string,
+    ): Promise<ConsentAuthorizationFence> {
       const generation = await resolveActive(tenantId, sourceProfileId);
 
       return parseConsentFence({
@@ -215,7 +215,9 @@ export function fromResolvedGenerationConsent(
       // Generation identity, not just the version number: a lineage whose versions restart on
       // re-grant would otherwise accept an authorization minted before the re-grant.
       if (generation.grantId !== parsed.grantId || generation.version !== parsed.grantVersion) {
-        throw consentDenied('Source Consent was re-granted or revoked after the read was authorized');
+        throw consentDenied(
+          'Source Consent was re-granted or revoked after the read was authorized',
+        );
       }
     },
   };

@@ -6,7 +6,10 @@ import {
   systemClock,
 } from '@ember/postgres';
 import type { createPool } from '@ember/postgres';
-import { evaluateSchedulerConsentGate, createCommitmentConsentPublicationGuard } from './commitment-consent.js';
+import {
+  evaluateSchedulerConsentGate,
+  createCommitmentConsentPublicationGuard,
+} from './commitment-consent.js';
 import { CommitmentScheduler, DEFAULT_MAX_ERROR_BACKOFF_MS } from './commitment-scheduler.js';
 import type { WorkerConfig } from './config.js';
 import type { WorkerLogger } from './logger.js';

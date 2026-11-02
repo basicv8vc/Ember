@@ -4,6 +4,7 @@ import type { AuthContext, Id } from '@ember/domain';
 import {
   PostgresAgentRepository,
   PostgresCommitmentRepository,
+  PostgresConsentRepository,
   PostgresTaskRepository,
 } from '@ember/postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
@@ -33,6 +34,14 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
 
     ctxA = { tenantId: tenantA.tenantId, principalId: tenantA.principalId, policyVersion: 1 };
     ctxB = { tenantId: tenantB.tenantId, principalId: tenantB.principalId, policyVersion: 1 };
+
+    // P0-C3D: dispatch is consent-gated, so every tenant that dispatches in this suite holds an
+    // effective grant for the profile it schedules against. Without one, `markDispatched` and
+    // `reconcilePendingOccurrence` fail closed before a Task can be bound to an occurrence.
+    const consentRepo = new PostgresConsentRepository(db.pool);
+    for (const ctx of [ctxA, ctxB]) {
+      await consentRepo.grant(ctx, { sourceProfileId: 'fixture.github-release' });
+    }
 
     const agent = await agentRepo.create(ctxA, {
       name: 'Agent Alpha',

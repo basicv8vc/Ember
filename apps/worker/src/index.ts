@@ -5,6 +5,7 @@ import {
   PostgresBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
+  PostgresCommitmentRepository,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
@@ -15,6 +16,7 @@ import {
   systemClock,
 } from '@ember/postgres';
 import {
+  CommitmentOrchestrator,
   createDefaultSentinelPolicy,
   DeterministicExecutionRouter,
   DeterministicExecutor,
@@ -27,6 +29,17 @@ import {
   SYNTHETIC_EGRESS_POLICY,
 } from '@ember/credentials';
 import { loadWorkerConfig } from './config.js';
+import {
+  createCommitmentConsentPublicationGuard,
+  evaluateSchedulerConsentGate,
+} from './commitment-consent.js';
+import { createCommitmentRunHandler } from './commitment-handler.js';
+import { createCommitmentRouteAwareRunHandler } from './commitment-run-router.js';
+import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
+import {
+  CommitmentSourceReader,
+  createUnavailableConsentAuthority,
+} from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, type WorkerLogger } from './logger.js';
 import { runPollLoop } from './poll-loop.js';
@@ -74,6 +87,19 @@ async function main(): Promise<void> {
   });
   const controller = new AbortController();
 
+  // P0-C3B Consent integration seam (single object, four gates).
+  //
+  // The authority wired here simultaneously arms: the orchestrator's versioned pre-read fence,
+  // the reader's pre- and post-read fence re-verification, the transaction-scoped publication
+  // guard inside `PostgresCommitmentRepository`, and the scheduler startup gate. Lane C has not
+  // landed durable Consent persistence yet, so this is the deny-all placeholder and every one of
+  // those gates fails closed.
+  //
+  // The whole integration is replacing this one binding with a P0-C3C `resolveGeneration`
+  // authority wrapped in `fromResolvedGenerationConsent(...)`; no gate changes when it lands.
+  const consentAuthority = createUnavailableConsentAuthority();
+  const consentGate = evaluateSchedulerConsentGate(consentAuthority);
+
   registerShutdown(controller, logger);
 
   logger.info('worker starting', {
@@ -92,10 +118,24 @@ async function main(): Promise<void> {
     sentinelPolicyId: config.sentinel.policyId,
     sentinelPolicyVersion: config.sentinel.policyVersion,
     credentialBrokerBound: true,
+    schedulerEnabled: config.scheduler.enabled,
+    consentReady: consentGate.ready,
+    consentReadiness: consentGate.reason,
     ...(config.mode === 'poll' ? { claimableKinds } : {}),
   });
 
+  let schedulerLoop: Promise<void> = Promise.resolve();
+  let reaperLoop: Promise<void> | undefined;
   try {
+    // P0-C3B: shares `controller.signal`, so SIGINT/SIGTERM drains it with every other loop.
+    schedulerLoop = startCommitmentScheduler({
+      config,
+      pool,
+      logger,
+      signal: controller.signal,
+      consent: consentAuthority,
+    });
+
     const reaper = runReaperLoop({
       queue,
       clock: systemClock,
@@ -104,9 +144,11 @@ async function main(): Promise<void> {
       logger,
       signal: controller.signal,
     });
+    reaperLoop = reaper;
 
     if (config.mode === 'reaper-only') {
-      await reaper;
+      // The scheduler still shares this lifecycle: shutdown drains both loops together.
+      await Promise.all([reaper, schedulerLoop]);
       return;
     }
 
@@ -138,7 +180,21 @@ async function main(): Promise<void> {
         allowedActions: config.sentinel.allowedActions,
       });
 
-    const handler =
+    // The commitment orchestrator resolves its policy from the occurrence context, which carries
+    // the same trusted tenant but not the Run-only fields.
+    const commitmentSentinelPolicy = (context: { readonly tenantId: string }): SentinelPolicy =>
+      createDefaultSentinelPolicy({
+        policyId: config.sentinel.policyId,
+        policyVersion: config.sentinel.policyVersion,
+        tenantId: context.tenantId,
+        allowedActions: config.sentinel.allowedActions,
+      });
+
+    // One durable budget ledger backs both execution paths, so the commitment loop cannot
+    // silently exceed a limit the standard path enforces.
+    const budgetLedger = new PostgresBudgetLedger(pool, { policy: config.budget });
+
+    const defaultHandler =
       blobs === null
         ? createRunHandler({
             contextReader,
@@ -161,20 +217,62 @@ async function main(): Promise<void> {
             }),
             workspaces: new PostgresWorkspaceStore(pool),
             approvals: new PostgresApprovalRepository(pool, { clock: systemClock }),
-            // P0B-08b: every step of the durable path reserves durable budget before it can
-            // produce a side effect. The policy is Worker configuration, not Task input.
-            budget: new PostgresBudgetLedger(pool, { policy: config.budget }),
+            budget: budgetLedger,
             clock: systemClock,
             logger,
             sentinelPolicy,
             credentialBroker,
           });
 
-    // Both loops share one stop signal: a shutdown drains the reaper and stops claiming new
-    // Runs, while in-flight simulations observe the abort and discard their results.
+    // P0-C3B execution runtime: authoritative PostgreSQL commitment store, consent-gated source
+    // reader, guarded orchestrator and the occurrence-aware run handler. The store carries the
+    // transaction-scoped Consent publication guard, so an Outcome can only be appended while the
+    // same authority reports active Consent.
+    const commitmentStore = new PostgresCommitmentRepository(pool, {
+      consentPublicationGuard: createCommitmentConsentPublicationGuard(consentAuthority),
+    });
+
+    const commitmentHandler = createCommitmentRunHandler({
+      contextReader,
+      store: commitmentStore,
+      orchestrator: new CommitmentOrchestrator({
+        store: {
+          findAuthoritativeOutcome: (grant, query) =>
+            commitmentStore.findAuthoritativeOutcome(grant, query),
+          appendOutcomeIfAbsent: (grant, cmd) => commitmentStore.appendOutcomeIfAbsent(grant, cmd),
+        },
+        // Consumed exactly like Lane C's durable authority will be: the orchestrator captures a
+        // versioned fence before the read and re-verifies it immediately before publication. The
+        // placeholder rejects both calls, so nothing is read and nothing is published.
+        consent: consentAuthority,
+        sourceReader: new CommitmentSourceReader({
+          consent: consentAuthority,
+          logger,
+        }),
+        budget: budgetLedger,
+        sentinelPolicy: commitmentSentinelPolicy,
+        clock: systemClock,
+        logger,
+      }),
+      clock: systemClock,
+      workerId: config.workerId,
+      logger,
+    });
+
+    const handler = createCommitmentRouteAwareRunHandler({
+      contextReader,
+      clock: systemClock,
+      commitmentHandler,
+      defaultHandler,
+      logger,
+    });
+
+    // Every loop shares one stop signal: shutdown drains the reaper and scheduler while the poll
+    // loop stops claiming new Runs, and in-flight executions observe the abort.
     try {
       const summary = await Promise.all([
         reaper,
+        schedulerLoop,
         runPollLoop({
           queue,
           handler,
@@ -187,17 +285,21 @@ async function main(): Promise<void> {
           logger,
           signal: controller.signal,
         }),
-      ]).then(([, pollSummary]) => pollSummary);
+      ]).then(([, , pollSummary]) => pollSummary);
 
       logger.info('poll loop stopped', { ...summary, workerId: config.workerId });
     } catch (error) {
-      // A failing poll loop must never leave the reaper running: abort first, then drain it,
-      // so the pool can be closed exactly once below.
+      // A failing poll loop must never leave the reaper or scheduler running: abort first, then
+      // drain them, so the pool can be closed exactly once below.
       controller.abort();
-      await reaper.catch(() => undefined);
+      await Promise.allSettled([reaper, schedulerLoop]);
       throw error;
     }
   } finally {
+    // Also drain loops if initialization failed before reaching the main Promise.all. Otherwise
+    // the scheduler could keep using a pool that is already closing.
+    controller.abort();
+    await Promise.allSettled([schedulerLoop, ...(reaperLoop === undefined ? [] : [reaperLoop])]);
     await pool.end();
     logger.info('worker stopped', { workerId: config.workerId });
   }

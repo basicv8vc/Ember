@@ -131,7 +131,13 @@ export {
   TASK_COMMAND_MAX_BYTES,
   type PreparedTaskCommand,
 } from './task-digest.js';
-export { PostgresCommitmentRepository } from './repositories/commitment-repository.js';
+export {
+  PostgresCommitmentRepository,
+  type ConsentDispatchFence,
+  type ConsentPublicationGuard,
+  type PostgresCommitmentRepositoryOptions,
+} from './repositories/commitment-repository.js';
+export { PostgresCommitmentTaskDispatcher } from './repositories/commitment-task-dispatcher.js';
 export { PostgresConsentRepository } from './repositories/consent-repository.js';
 export {
   assertConsentAllowed,
@@ -141,3 +147,4 @@ export {
   SELECT_CONSENT_SQL,
   type ConsentGrantRow,
 } from './repositories/consent-fence.js';
+export { PostgresConsentPublicationGuard } from './repositories/consent-publication-guard.js';

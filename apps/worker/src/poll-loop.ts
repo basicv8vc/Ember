@@ -243,6 +243,21 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
         completed = true;
       }
 
+      // Handlers that own non-Run state (a Commitment Occurrence) receive the authoritative
+      // verdict of the fenced `finish()` and must only write when it was accepted.
+      if (completion.finalize !== undefined) {
+        try {
+          await completion.finalize(finished);
+        } catch (error) {
+          // The Run is already terminal; a failing hook must not be retried here.
+          logger.error('run finalizer failed', {
+            ...base,
+            outcome,
+            code: codeOf(error),
+          });
+        }
+      }
+
       if (!finished) {
         // Never retry a rejected finish: the lease belongs to someone else now.
         logger.warn('finish rejected; lease no longer valid', {

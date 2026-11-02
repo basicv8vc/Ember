@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type {
   AppendOutcomeCommand,
+  AuthoritativeOutcome,
+  AuthoritativeOutcomeQuery,
   CommitmentDto,
   CommitmentOutcomeDto,
   CommitmentRepository,
@@ -8,8 +10,10 @@ import type {
   CreateCommitmentCommand,
   DueCommitment,
   DueCommitmentStore,
+  FinalizeOccurrenceCommand,
   ListCommitmentsOptions,
   ListOutcomesOptions,
+  OccurrenceExecutionIdentity,
   OutcomeResultStatus,
   ReservedSlot,
   ScheduleKind,
@@ -21,12 +25,35 @@ import { deriveTaskCreationIdempotencyKey } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
-import {
-  assertConsentAllowed,
-  evaluateConsentRow,
-  SELECT_CONSENT_FOR_UPDATE_SQL,
-  type ConsentGrantRow,
-} from './consent-fence.js';
+
+/**
+ * Transaction-scoped consent dependency required for publication and replay lookup.
+ *
+ * Lane C currently has no durable consent implementation, so the repository's default is a
+ * deny-all guard. A future adapter must resolve and lock Lane C's authoritative consent record
+ * using this same client; it must not consult caller-supplied status or process-local state.
+ */
+export interface ConsentPublicationGuard {
+  assertActive(
+    client: pg.PoolClient,
+    params: { readonly tenantId: Id; readonly sourceProfileId: string },
+  ): Promise<void>;
+}
+
+export interface PostgresCommitmentRepositoryOptions {
+  readonly consentPublicationGuard?: ConsentPublicationGuard;
+}
+
+const MISSING_CONSENT_PUBLICATION_GUARD: ConsentPublicationGuard = Object.freeze({
+  assertActive(): Promise<void> {
+    return Promise.reject(
+      new DomainError(
+        'POLICY_DENIED',
+        'Durable source consent publication authority is not configured',
+      ),
+    );
+  },
+});
 
 interface CommitmentRow {
   id: string;
@@ -156,90 +183,15 @@ function decodeCursor(cursor: string | undefined): CursorData | undefined {
   }
 }
 
-type DispatchTransition = 'dispatched' | 'missing' | 'not_pending';
-
-/**
- * The one place an occurrence becomes `dispatched` (P0-C3D).
- *
- * Runs inside the caller's transaction and applies the shared lock order
- * `commitments -> commitment_occurrences -> consent_grants`:
- *
- * 1. Resolve the occurrence's tenant and commitment, then lock the commitment row. Every
- *    commitment writer (cancel, pause, publish, dispatch) takes this lock first, so no two
- *    writers can form a wait cycle.
- * 2. Lock the occurrence and require `pending`.
- * 3. Lock the source profile's consent grant and require an effective `read_snapshot`
- *    authorization. A revoked, expired or missing grant fails closed inside the same
- *    transaction, so an occurrence can never be bound to a task without consent.
- * 4. Record `consent_version`, the fence publication later compares against.
- */
-async function dispatchOccurrence(
-  client: pg.PoolClient,
-  occurrenceId: Id,
-  taskId: Id,
-): Promise<DispatchTransition> {
-  const locate = await client.query<{ tenant_id: string; commitment_id: string }>(
-    `SELECT tenant_id, commitment_id FROM commitment_occurrences WHERE id = $1`,
-    [occurrenceId],
-  );
-  const located = locate.rows[0];
-
-  if (located === undefined) {
-    return 'missing';
-  }
-
-  const commitRes = await client.query<{ source_profile_id: string }>(
-    `SELECT source_profile_id
-       FROM commitments
-      WHERE tenant_id = $1 AND id = $2
-      FOR UPDATE`,
-    [located.tenant_id, located.commitment_id],
-  );
-  const commitmentRow = commitRes.rows[0];
-
-  if (commitmentRow === undefined) {
-    return 'missing';
-  }
-
-  const occRes = await client.query<{ status: string }>(
-    `SELECT status
-       FROM commitment_occurrences
-      WHERE tenant_id = $1 AND id = $2
-      FOR UPDATE`,
-    [located.tenant_id, occurrenceId],
-  );
-  const occurrenceRow = occRes.rows[0];
-
-  if (occurrenceRow === undefined) {
-    return 'missing';
-  }
-
-  if (occurrenceRow.status !== 'pending') {
-    return 'not_pending';
-  }
-
-  const consentRes = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
-    located.tenant_id,
-    commitmentRow.source_profile_id,
-  ]);
-  const decision = evaluateConsentRow(consentRes.rows[0], 'read_snapshot');
-  assertConsentAllowed(decision, 'read_snapshot');
-
-  await client.query(
-    `UPDATE commitment_occurrences
-        SET task_id = $2,
-            status = 'dispatched',
-            consent_version = $3,
-            updated_at = clock_timestamp()
-      WHERE tenant_id = $4 AND id = $1`,
-    [occurrenceId, taskId, decision.consentVersion, located.tenant_id],
-  );
-
-  return 'dispatched';
-}
-
 export class PostgresCommitmentRepository implements CommitmentRepository, DueCommitmentStore {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly pool: pg.Pool;
+  private readonly consentPublicationGuard: ConsentPublicationGuard;
+
+  constructor(pool: pg.Pool, options: PostgresCommitmentRepositoryOptions = {}) {
+    this.pool = pool;
+    this.consentPublicationGuard =
+      options.consentPublicationGuard ?? MISSING_CONSENT_PUBLICATION_GUARD;
+  }
 
   async create(
     ctx: AuthContext,
@@ -546,11 +498,14 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         throw new DomainError('DB_UNAVAILABLE', 'Failed to update commitment status');
       }
 
-      // Cancel any in-flight pending occurrences for this commitment
+      // Cancel every non-terminal occurrence of this commitment: a dispatched occurrence whose
+      // Worker is still executing must observe the cancellation (its Outcome publication is
+      // rejected inside the publication transaction), and it must not be left `dispatched`
+      // forever after the Task/Run terminate.
       await client.query(
         `UPDATE commitment_occurrences
          SET status = 'cancelled', updated_at = clock_timestamp()
-         WHERE tenant_id = $1 AND commitment_id = $2 AND status = 'pending'`,
+         WHERE tenant_id = $1 AND commitment_id = $2 AND status IN ('pending', 'dispatched')`,
         [ctx.tenantId, commitmentId],
       );
 
@@ -625,7 +580,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
     const sql = `
       SELECT id, tenant_id, agent_id, title, source_profile_id, schedule_kind,
-             interval_seconds, next_due_at, version
+             interval_seconds, next_due_at, version, status
       FROM commitments
       WHERE status = 'active'
         AND next_due_at IS NOT NULL
@@ -647,6 +602,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         interval_seconds: number | null;
         next_due_at: Date | string;
         version: number;
+        status: string;
       }>(sql, values);
 
       return result.rows.map((row) => ({
@@ -659,6 +615,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         intervalSeconds: row.interval_seconds,
         nextDueAt: new Date(row.next_due_at),
         version: row.version,
+        status: row.status as CommitmentStatus,
       }));
     } catch (error) {
       throw asDomainError(error);
@@ -784,27 +741,56 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   }
 
   /**
-   * Transition a pending occurrence to `dispatched`, recording the consent version that
-   * authorised the work (P0-C3D).
+   * Bind the created Task to the reserved Occurrence and advance it to `dispatched`.
    *
-   * Lock order: commitments -> commitment_occurrences -> consent_grants. Every commitment
-   * writer in this repository acquires the commitment row first, so the dispatch cannot
-   * deadlock against `cancel()`/`pause()` or against outcome publication.
-   *
-   * Dispatch without an effective `read_snapshot` grant fails closed: no task is ever bound to
-   * an occurrence, and the occurrence stays `pending` for the next scheduler pass.
+   * Idempotent by design: two schedulers may both dispatch the same occurrence after a crash
+   * (the Task insert is itself idempotent on `commitment-occ:<occurrenceId>`), so re-binding the
+   * *same* Task is a no-op instead of a failure. Binding a *different* Task is rejected, which
+   * is what keeps duplicate Task dispatch from ever becoming a second occurrence binding.
    */
   async markDispatched(occurrenceId: Id, taskId: Id): Promise<void> {
-    return withTransaction(this.pool, async (client) => {
-      const outcome = await dispatchOccurrence(client, occurrenceId, taskId);
+    const sql = `
+      UPDATE commitment_occurrences o
+      SET task_id = $2, status = 'dispatched', updated_at = clock_timestamp()
+      WHERE o.id = $1
+        AND o.status IN ('pending', 'dispatched')
+        AND (o.task_id IS NULL OR o.task_id = $2)
+        AND EXISTS (
+          SELECT 1 FROM tasks t WHERE t.tenant_id = o.tenant_id AND t.id = $2
+        )
+      RETURNING o.task_id
+    `;
 
-      if (outcome !== 'dispatched') {
+    try {
+      const res = await this.pool.query<{ task_id: string }>(sql, [occurrenceId, taskId]);
+      if ((res.rowCount ?? 0) > 0) {
+        return;
+      }
+
+      const current = await this.pool.query<{ status: string; task_id: string | null }>(
+        `SELECT status, task_id FROM commitment_occurrences WHERE id = $1`,
+        [occurrenceId],
+      );
+      const row = current.rows[0];
+
+      if (row === undefined) {
+        throw new DomainError('NOT_FOUND', 'Occurrence does not exist');
+      }
+
+      if (row.task_id !== null && row.task_id !== taskId) {
         throw new DomainError(
           'INVALID_STATE_TRANSITION',
-          'Occurrence was not in pending status or does not exist',
+          'Occurrence is already bound to a different Task',
         );
       }
-    });
+
+      throw new DomainError(
+        'INVALID_STATE_TRANSITION',
+        `Occurrence cannot be dispatched from '${row.status}' status`,
+      );
+    } catch (error) {
+      throw asDomainError(error);
+    }
   }
 
   async appendOutcomeIfAbsent(
@@ -812,42 +798,37 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
     cmd: AppendOutcomeCommand,
   ): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      // Lock order for every commitment writer in this repository:
-      //   commitments -> commitment_occurrences -> tasks -> runs -> consent_grants
+      // Lock order for publication:
+      //   commitments -> commitment_occurrences -> tasks -> runs -> consent authority
       //
       // Taking the commitment row lock FIRST serialises publication against `cancel()` and
       // `pause()` (which acquire the same lock), so a cancellation that wins the lock is
       // always observed by the publisher instead of being raced past. Task -> run matches the
-      // order used by `ResultCommitter` and `PostgresLeaseQueue`, so no two writers can form a
-      // wait cycle.
+      // order used by `ResultCommitter` and `PostgresLeaseQueue`. The future consent adapter must
+      // acquire its authoritative grant lock LAST. Lane C has not supplied that persistence or
+      // revocation implementation; the default guard therefore rejects publication.
       //
       // 1. Lock the commitment and require it to still accept outcomes.
       const commitSql = `
-        SELECT status, source_profile_id
+        SELECT status, source_profile_id, schedule_kind
         FROM commitments
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
       `;
-      const commitRes = await client.query<{ status: string; source_profile_id: string }>(
-        commitSql,
-        [grant.tenantId, cmd.commitmentId],
-      );
+      const commitRes = await client.query<{
+        status: string;
+        source_profile_id: string;
+        schedule_kind: string;
+      }>(commitSql, [grant.tenantId, cmd.commitmentId]);
 
       const commitRow = commitRes.rows[0];
       if (commitRow === undefined) {
         throw new DomainError('NOT_FOUND', 'Commitment not found');
       }
 
-      if (commitRow.status !== 'active') {
-        throw new DomainError(
-          'POLICY_DENIED',
-          `Cannot publish outcome for commitment in '${commitRow.status}' status`,
-        );
-      }
-
       // 2. Lock and verify occurrence
       const occSql = `
-        SELECT id, status, task_id, consent_version
+        SELECT id, status, task_id
         FROM commitment_occurrences
         WHERE tenant_id = $1 AND commitment_id = $2 AND id = $3
         FOR UPDATE
@@ -856,16 +837,11 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         id: string;
         status: string;
         task_id: string | null;
-        consent_version: number | null;
       }>(occSql, [grant.tenantId, cmd.commitmentId, cmd.occurrenceId]);
 
       const occRow = occRes.rows[0];
       if (occRow === undefined) {
         throw new DomainError('NOT_FOUND', 'Occurrence not found');
-      }
-
-      if (occRow.status === 'cancelled') {
-        throw new DomainError('POLICY_DENIED', 'Cannot publish outcome for cancelled occurrence');
       }
 
       if (occRow.task_id !== grant.taskId) {
@@ -878,26 +854,19 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
       // 3. Lock the Task and require it to still be executing. A cancelled, failed or
       //    completed Task can never publish an outcome, even if its Run row still looks live.
       const taskSql = `
-        SELECT status
+        SELECT status, cancel_requested_at
         FROM tasks
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
       `;
-      const taskRes = await client.query<{ status: string }>(taskSql, [
-        grant.tenantId,
-        grant.taskId,
-      ]);
+      const taskRes = await client.query<{
+        status: string;
+        cancel_requested_at: Date | string | null;
+      }>(taskSql, [grant.tenantId, grant.taskId]);
 
       const taskRow = taskRes.rows[0];
       if (taskRow === undefined) {
         throw new DomainError('NOT_FOUND', 'Task not found in this tenant');
-      }
-
-      if (taskRow.status !== 'running') {
-        throw new DomainError(
-          'INVALID_STATE_TRANSITION',
-          `Task is in '${taskRow.status}' status and no longer executing; outcome publication is rejected`,
-        );
       }
 
       // 4. Lock the Run and let PostgreSQL decide the whole fencing verdict. Worker ownership,
@@ -909,6 +878,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
           r.status AS run_status,
           (r.worker_id = $4) AS is_worker_match,
           (r.lease_epoch = $5::bigint) AS is_epoch_match,
+          (r.attempt = $6::int) AS is_attempt_match,
           (r.leased_until IS NOT NULL AND r.leased_until > clock_timestamp()) AS is_lease_active
         FROM runs r
         WHERE r.tenant_id = $1 AND r.task_id = $2 AND r.id = $3
@@ -919,6 +889,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         run_status: string;
         is_worker_match: boolean;
         is_epoch_match: boolean;
+        is_attempt_match: boolean;
         is_lease_active: boolean;
       }>(leaseCheckSql, [
         grant.tenantId,
@@ -926,6 +897,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         grant.runId,
         grant.workerId,
         grant.leaseEpoch,
+        grant.attempt,
       ]);
 
       const runRow = leaseRes.rows[0];
@@ -940,10 +912,10 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         );
       }
 
-      if (!runRow.is_worker_match || !runRow.is_epoch_match) {
+      if (!runRow.is_worker_match || !runRow.is_epoch_match || !runRow.is_attempt_match) {
         throw new DomainError(
           'STALE_LEASE',
-          'Worker or lease epoch does not match current run owner',
+          'Worker, lease epoch or run attempt does not match current run owner',
         );
       }
 
@@ -954,24 +926,79 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         );
       }
 
-      // 5. Authorization fence (P0-C3D). Lock the source profile's consent grant and require it
-      //    to still authorise publication *at the version that authorised the dispatch*.
-      //
-      //    The lock is taken after the commitment/occurrence/task/run locks, matching the shared
-      //    order (Commitment -> Occurrence -> Task -> Run -> Consent), so a concurrent
-      //    revocation (which locks only the consent row) can never deadlock against publication:
-      //    whoever commits first decides, and PostgreSQL re-evaluates the consent row for the
-      //    waiter, which then fails closed.
-      const consentRes = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
-        grant.tenantId,
-        commitRow.source_profile_id,
-      ]);
-      const consentDecision = evaluateConsentRow(
-        consentRes.rows[0],
-        'publish_outcome',
-        occRow.consent_version,
+      if (taskRow.cancel_requested_at !== null) {
+        throw new DomainError('CANCELLED', 'Task cancellation was requested before publication');
+      }
+
+      // 5. Idempotent replay, decided only after the caller proved it is the current lease owner
+      //    of this Task. A stale worker therefore learns nothing and can write nothing. A one-shot
+      //    commitment becomes `completed` inside the transaction that published its outcome, so a
+      //    replay of that occurrence is still recognized as "already published" rather than as a
+      //    publication against a non-active commitment.
+      const existingOutcome = await client.query<{ task_id: string }>(
+        `
+          SELECT task_id
+            FROM commitment_outcomes
+           WHERE tenant_id = $1 AND occurrence_id = $2
+        `,
+        [grant.tenantId, cmd.occurrenceId],
       );
-      assertConsentAllowed(consentDecision, 'publish_outcome');
+
+      const existingRow = existingOutcome.rows[0];
+
+      if (existingRow !== undefined) {
+        if (existingRow.task_id !== cmd.taskId) {
+          throw new DomainError(
+            'POLICY_DENIED',
+            'Outcome of this occurrence belongs to a different Task',
+          );
+        }
+
+        return false;
+      }
+
+      if (occRow.status === 'cancelled') {
+        throw new DomainError('POLICY_DENIED', 'Cannot publish outcome for cancelled occurrence');
+      }
+
+      if (occRow.status === 'completed') {
+        // A previously committed Outcome must never be re-published or duplicated, and a
+        // second append for the same occurrence is an idempotent replay.
+        return false;
+      }
+
+      if (occRow.status === 'failed') {
+        // The occurrence already reached a permanent terminal state; a late success may not
+        // resurrect it.
+        throw new DomainError(
+          'INVALID_STATE_TRANSITION',
+          'Cannot publish outcome for a failed occurrence',
+        );
+      }
+
+      if (taskRow.status !== 'running') {
+        throw new DomainError(
+          'INVALID_STATE_TRANSITION',
+          `Task is in '${taskRow.status}' status and no longer executing; outcome publication is rejected`,
+        );
+      }
+
+      if (commitRow.status !== 'active') {
+        throw new DomainError(
+          'POLICY_DENIED',
+          `Cannot publish outcome for commitment in '${commitRow.status}' status`,
+        );
+      }
+
+      // 5. Consent authority (P0C3-C §5.2 Pre-Publish Check).
+      //
+      // The Source Profile comes from the locked commitment row, never from the caller, so a
+      // Worker cannot choose which consent record authorizes its own outcome. The lock is taken
+      // last; a revocation that committed before this statement is therefore always observed.
+      await this.consentPublicationGuard.assertActive(client, {
+        tenantId: grant.tenantId,
+        sourceProfileId: commitRow.source_profile_id,
+      });
 
       // 6. Insert outcome
       const outcomeId = randomUUID();
@@ -999,16 +1026,146 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         return false;
       }
 
-      // 7. Update occurrence status
+      // 7. Update occurrence status and terminalize a one-shot commitment in the *same*
+      //    transaction, so a published Outcome can never leave the Occurrence `dispatched` or a
+      //    one-shot Commitment `active` with no future execution.
       const terminalOccStatus =
         cmd.resultStatus === 'failed' || cmd.resultStatus === 'denied' ? 'failed' : 'completed';
 
       await client.query(
-        `UPDATE commitment_occurrences SET status = $1, updated_at = clock_timestamp() WHERE id = $2`,
+        `UPDATE commitment_occurrences
+            SET status = $1, updated_at = clock_timestamp()
+          WHERE id = $2`,
         [terminalOccStatus, cmd.occurrenceId],
       );
 
+      if (commitRow.schedule_kind === 'once') {
+        await client.query(
+          `UPDATE commitments
+              SET status = 'completed',
+                  next_due_at = NULL,
+                  version = version + 1,
+                  updated_at = clock_timestamp()
+            WHERE tenant_id = $1 AND id = $2 AND status = 'active'`,
+          [grant.tenantId, cmd.commitmentId],
+        );
+      }
+
       return true;
+    });
+  }
+
+  /**
+   * Authoritative replay lookup.
+   *
+   * Returns the stored summary only after the *current* request has been authenticated against
+   * the same state publication requires: tenant, commitment/occurrence/task lineage, live
+   * lease fencing and active consent. A stale worker can therefore never read an outcome it
+   * would not have been allowed to publish.
+   */
+  async findAuthoritativeOutcome(
+    grant: WorkerLeaseGrant,
+    query: AuthoritativeOutcomeQuery,
+  ): Promise<AuthoritativeOutcome | null> {
+    return withTransaction(this.pool, async (client) => {
+      const lookup = await client.query<{
+        commitment_status: string;
+        source_profile_id: string;
+        occurrence_status: string;
+        occurrence_task_id: string | null;
+        task_status: string | null;
+        task_cancel_requested_at: Date | string | null;
+        run_status: string | null;
+        is_worker_match: boolean | null;
+        is_epoch_match: boolean | null;
+        is_attempt_match: boolean | null;
+        is_lease_active: boolean | null;
+        outcome_summary: string | null;
+        outcome_result_status: string | null;
+      }>(
+        `
+          SELECT c.status            AS commitment_status,
+                 c.source_profile_id AS source_profile_id,
+                 o.status            AS occurrence_status,
+                 o.task_id           AS occurrence_task_id,
+                 t.status            AS task_status,
+                 t.cancel_requested_at AS task_cancel_requested_at,
+                 r.status            AS run_status,
+                 (r.worker_id = $4)                       AS is_worker_match,
+                 (r.lease_epoch = $5::bigint)             AS is_epoch_match,
+                 (r.attempt = $6::int)                    AS is_attempt_match,
+                 (r.leased_until IS NOT NULL AND r.leased_until > clock_timestamp())
+                                                          AS is_lease_active,
+                 out.summary         AS outcome_summary,
+                 out.result_status   AS outcome_result_status
+            FROM commitments c
+            JOIN commitment_occurrences o
+              ON o.tenant_id = c.tenant_id AND o.commitment_id = c.id
+            LEFT JOIN tasks t
+              ON t.tenant_id = c.tenant_id AND t.id = o.task_id
+            LEFT JOIN runs r
+              ON r.tenant_id = t.tenant_id AND r.task_id = t.id AND r.id = $3
+            LEFT JOIN commitment_outcomes out
+              ON out.tenant_id = c.tenant_id AND out.occurrence_id = o.id
+           WHERE c.tenant_id = $1 AND c.id = $2 AND o.id = $7
+        `,
+        [
+          grant.tenantId,
+          query.commitmentId,
+          grant.runId,
+          grant.workerId,
+          grant.leaseEpoch,
+          grant.attempt,
+          query.occurrenceId,
+        ],
+      );
+
+      const row = lookup.rows[0];
+      if (row === undefined) {
+        throw new DomainError('NOT_FOUND', 'Occurrence not found in this tenant');
+      }
+
+      if (row.commitment_status !== 'active') {
+        throw new DomainError(
+          'POLICY_DENIED',
+          `Commitment is '${row.commitment_status}' and cannot produce an outcome`,
+        );
+      }
+
+      if (row.occurrence_task_id !== grant.taskId) {
+        throw new DomainError('POLICY_DENIED', 'Occurrence is not bound to this Task');
+      }
+
+      if (row.task_status !== 'running' || row.run_status !== 'running') {
+        throw new DomainError('STALE_LEASE', 'Task or Run is no longer executing');
+      }
+
+      if (
+        row.is_worker_match !== true ||
+        row.is_epoch_match !== true ||
+        row.is_attempt_match !== true ||
+        row.is_lease_active !== true
+      ) {
+        throw new DomainError('STALE_LEASE', 'Worker lease no longer owns this Run');
+      }
+
+      if (row.task_cancel_requested_at !== null) {
+        throw new DomainError('CANCELLED', 'Task cancellation was requested during execution');
+      }
+
+      await this.consentPublicationGuard.assertActive(client, {
+        tenantId: grant.tenantId,
+        sourceProfileId: row.source_profile_id,
+      });
+
+      if (row.outcome_summary === null || row.outcome_result_status === null) {
+        return null;
+      }
+
+      return Object.freeze({
+        resultStatus: row.outcome_result_status as OutcomeResultStatus,
+        summary: row.outcome_summary,
+      });
     });
   }
 
@@ -1074,27 +1231,351 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   }
 
   async reconcilePendingOccurrence(occurrenceId: Id, taskId: Id): Promise<boolean> {
-    // Scheduler reconciliation performs the same pending -> dispatched transition as
-    // `markDispatched`, so it runs the same consent fence and records the same authorization
-    // version. Any occurrence it binds is therefore publishable only while that consent holds.
-    return withTransaction(this.pool, async (client) => {
-      const outcome = await dispatchOccurrence(client, occurrenceId, taskId);
-
-      return outcome === 'dispatched';
-    });
-  }
-
-  async markOccurrenceFailed(occurrenceId: Id, _reasonCode: string): Promise<void> {
     const sql = `
       UPDATE commitment_occurrences
-      SET status = 'failed', updated_at = clock_timestamp()
+      SET task_id = $2, status = 'dispatched', updated_at = clock_timestamp()
       WHERE id = $1 AND status = 'pending'
+      RETURNING id
     `;
 
     try {
-      await this.pool.query(sql, [occurrenceId]);
+      const res = await this.pool.query(sql, [occurrenceId, taskId]);
+      return (res.rowCount ?? 0) > 0;
     } catch (error) {
       throw asDomainError(error);
     }
+  }
+
+  /**
+   * Authoritative identity of the Occurrence bound to this Worker's Task.
+   *
+   * Tenant isolation and Task lineage are enforced in SQL; a Task that is not bound to an
+   * Occurrence of the grant's tenant is indistinguishable from a missing one.
+   */
+  async findOccurrenceExecutionIdentity(
+    grant: WorkerLeaseGrant,
+    occurrenceId: Id,
+  ): Promise<OccurrenceExecutionIdentity | null> {
+    const sql = `
+      SELECT o.id            AS occurrence_id,
+             o.commitment_id,
+             o.status        AS occurrence_status,
+             o.task_id,
+             c.tenant_id,
+             c.agent_id,
+             c.source_profile_id,
+             c.schedule_kind,
+             c.status        AS commitment_status,
+             dispatched_task.idempotency_key AS task_idempotency_key
+        FROM commitment_occurrences o
+        JOIN commitments c
+          ON c.tenant_id = o.tenant_id AND c.id = o.commitment_id
+        LEFT JOIN tasks dispatched_task
+          ON dispatched_task.tenant_id = o.tenant_id AND dispatched_task.id = $3
+       WHERE o.tenant_id = $1 AND o.id = $2
+    `;
+
+    try {
+      const result = await this.pool.query<{
+        occurrence_id: string;
+        commitment_id: string;
+        occurrence_status: string;
+        task_id: string | null;
+        tenant_id: string;
+        agent_id: string;
+        source_profile_id: string;
+        schedule_kind: string;
+        commitment_status: string;
+        task_idempotency_key: string | null;
+      }>(sql, [grant.tenantId, occurrenceId, grant.taskId]);
+
+      const row = result.rows[0];
+      if (row === undefined) {
+        return null;
+      }
+
+      if (row.task_id !== grant.taskId) {
+        if (
+          row.task_id === null &&
+          row.occurrence_status === 'pending' &&
+          row.task_idempotency_key === deriveTaskCreationIdempotencyKey(occurrenceId)
+        ) {
+          // The Task repository committed its idempotent insert, but the Scheduler has not yet
+          // bound task_id to the Occurrence. That short window is retryable for this exact
+          // deterministic dispatch key; all other mismatches remain a hard denial.
+          throw new DomainError(
+            'INVALID_STATE_TRANSITION',
+            'Occurrence dispatch has not been bound to its Task yet',
+          );
+        }
+
+        // The Task this Worker holds is not the Task the Occurrence was dispatched to.
+        throw new DomainError('POLICY_DENIED', 'Occurrence is not bound to this Task');
+      }
+
+      return Object.freeze({
+        tenantId: row.tenant_id,
+        commitmentId: row.commitment_id,
+        occurrenceId: row.occurrence_id,
+        agentId: row.agent_id,
+        taskId: row.task_id,
+        sourceProfileId: row.source_profile_id,
+        scheduleKind: row.schedule_kind as ScheduleKind,
+        occurrenceStatus: row.occurrence_status as OccurrenceExecutionIdentity['occurrenceStatus'],
+        commitmentStatus: row.commitment_status as CommitmentStatus,
+      });
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
+  /**
+   * Terminalize an Occurrence whose Task/Run already reached a terminal state.
+   *
+   * The full grant authenticates the exact Run owner, lease epoch and attempt that finished.
+   * The Run must already be terminal (`failed_terminal`/`cancelled`); a retryable Run never
+   * qualifies, so an old Worker cannot mark the Occurrence after lease takeover.
+   */
+  async finalizeOccurrenceFromTask(
+    grant: WorkerLeaseGrant,
+    cmd: FinalizeOccurrenceCommand,
+  ): Promise<boolean> {
+    // Every lock is taken by the shared helper in the repository's canonical order
+    // (commitments -> occurrences -> tasks -> runs). Taking the Run lock first here would invert
+    // that order against `appendOutcomeIfAbsent`/`cancel()` and could deadlock.
+    return withTransaction(this.pool, async (client) =>
+      this.finalizeOccurrenceLocked(client, {
+        tenantId: grant.tenantId,
+        commitmentId: cmd.commitmentId,
+        occurrenceId: cmd.occurrenceId,
+        taskId: grant.taskId,
+        desiredStatus: cmd.terminalStatus,
+        runFence: {
+          runId: grant.runId,
+          attempt: grant.attempt,
+          leaseEpoch: grant.leaseEpoch,
+          workerId: grant.workerId,
+        },
+      }),
+    );
+  }
+
+  /**
+   * Crash-safe sweep: `dispatched` occurrences whose Task is already `failed`/`cancelled`.
+   *
+   * It is the safety net for a Worker that died between `finish()` and the Occurrence
+   * transition, and it derives everything from persisted Task state, so it can never revive a
+   * retry or overwrite a completed occurrence.
+   */
+  async reconcileTerminalOccurrences(limit: number): Promise<number> {
+    const cappedLimit = Math.min(Math.max(limit, 1), 200);
+    const candidates = await this.pool.query<{
+      tenant_id: string;
+      commitment_id: string;
+      occurrence_id: string;
+      task_id: string;
+      task_status: string;
+    }>(
+      `
+        SELECT o.tenant_id, o.commitment_id, o.id AS occurrence_id, o.task_id,
+               t.status AS task_status
+          FROM commitment_occurrences o
+          JOIN tasks t ON t.tenant_id = o.tenant_id AND t.id = o.task_id
+         WHERE o.status = 'dispatched'
+           AND t.status IN ('failed', 'cancelled')
+         ORDER BY o.updated_at ASC
+         LIMIT $1
+      `,
+      [cappedLimit],
+    );
+
+    let reconciled = 0;
+
+    for (const candidate of candidates.rows) {
+      const changed = await withTransaction(this.pool, async (client) =>
+        this.finalizeOccurrenceLocked(client, {
+          tenantId: candidate.tenant_id,
+          commitmentId: candidate.commitment_id,
+          occurrenceId: candidate.occurrence_id,
+          taskId: candidate.task_id,
+          desiredStatus: candidate.task_status === 'cancelled' ? 'cancelled' : 'failed',
+        }),
+      );
+
+      if (changed) {
+        reconciled += 1;
+      }
+    }
+
+    return reconciled;
+  }
+  /**
+   * Shared, lock-ordered terminal transition.
+   *
+   * Lock order: commitments -> commitment_occurrences -> tasks (-> runs, taken by the caller).
+   * The desired status is only a hint: the *persisted* Task status decides whether anything may
+   * change, and an explicit commitment cancellation always wins over an execution failure.
+   */
+  private async finalizeOccurrenceLocked(
+    client: pg.PoolClient,
+    params: {
+      readonly tenantId: Id;
+      readonly commitmentId: Id;
+      readonly occurrenceId: Id;
+      readonly taskId: Id;
+      readonly desiredStatus: 'failed' | 'cancelled';
+      /**
+       * Worker-attempt lineage. When present, the Run is locked (after the Task, preserving lock
+       * order) and its persisted state decides whether this attempt may terminalize anything.
+       */
+      readonly runFence?: {
+        readonly runId: Id;
+        readonly attempt: number;
+        readonly leaseEpoch: number;
+        readonly workerId: string;
+      };
+    },
+  ): Promise<boolean> {
+    const commit = await client.query<{ status: string; schedule_kind: string }>(
+      `
+        SELECT status, schedule_kind
+          FROM commitments
+         WHERE tenant_id = $1 AND id = $2
+         FOR UPDATE
+      `,
+      [params.tenantId, params.commitmentId],
+    );
+
+    const commitRow = commit.rows[0];
+    if (commitRow === undefined) {
+      throw new DomainError('NOT_FOUND', 'Commitment not found');
+    }
+
+    const occurrence = await client.query<{ status: string; task_id: string | null }>(
+      `
+        SELECT status, task_id
+          FROM commitment_occurrences
+         WHERE tenant_id = $1 AND commitment_id = $2 AND id = $3
+         FOR UPDATE
+      `,
+      [params.tenantId, params.commitmentId, params.occurrenceId],
+    );
+
+    const occurrenceRow = occurrence.rows[0];
+    if (occurrenceRow === undefined) {
+      throw new DomainError('NOT_FOUND', 'Occurrence not found');
+    }
+
+    if (occurrenceRow.task_id !== params.taskId) {
+      throw new DomainError('INVALID_ARGUMENT', 'Occurrence is not bound to this Task');
+    }
+
+    if (
+      occurrenceRow.status === 'completed' ||
+      occurrenceRow.status === 'failed' ||
+      occurrenceRow.status === 'cancelled'
+    ) {
+      // Idempotent: a terminal occurrence is never re-terminalized.
+      return false;
+    }
+
+    const task = await client.query<{ status: string }>(
+      `
+        SELECT status
+          FROM tasks
+         WHERE tenant_id = $1 AND id = $2
+         FOR UPDATE
+      `,
+      [params.tenantId, params.taskId],
+    );
+
+    const taskRow = task.rows[0];
+    if (taskRow === undefined) {
+      throw new DomainError('NOT_FOUND', 'Task not found in this tenant');
+    }
+
+    if (params.runFence !== undefined) {
+      // Locked after the Task on purpose: `appendOutcomeIfAbsent` locks tasks -> runs as well,
+      // so a terminal transition can never form a wait cycle with a publication.
+      const run = await client.query<{
+        status: string;
+        attempt: number;
+        worker_id: string | null;
+        lease_epoch: string;
+      }>(
+        `
+          SELECT status, attempt, worker_id, lease_epoch::text AS lease_epoch
+            FROM runs
+           WHERE tenant_id = $1 AND task_id = $2 AND id = $3
+           FOR UPDATE
+        `,
+        [params.tenantId, params.taskId, params.runFence.runId],
+      );
+
+      const runRow = run.rows[0];
+
+      if (
+        runRow === undefined ||
+        runRow.attempt !== params.runFence.attempt ||
+        runRow.worker_id !== params.runFence.workerId ||
+        runRow.lease_epoch !== String(params.runFence.leaseEpoch)
+      ) {
+        // The attempt that produced this command does not own the Run lineage any more.
+        throw new DomainError(
+          'STALE_LEASE',
+          'Run worker, lease epoch or attempt does not belong to this Worker grant',
+        );
+      }
+
+      if (runRow.status !== 'failed_terminal' && runRow.status !== 'cancelled') {
+        // The retry path or the success path owns the Occurrence; nothing may be finalized.
+        return false;
+      }
+    }
+
+    if (taskRow.status !== 'failed' && taskRow.status !== 'cancelled') {
+      // Still running, waiting on approval, or scheduled for a retry: the Task owns the
+      // Occurrence and no terminal transition is authorized yet.
+      return false;
+    }
+
+    const targetStatus: 'failed' | 'cancelled' =
+      commitRow.status === 'cancelled'
+        ? 'cancelled'
+        : taskRow.status === 'cancelled'
+          ? 'cancelled'
+          : 'failed';
+
+    await client.query(
+      `
+        UPDATE commitment_occurrences
+           SET status = $1, updated_at = clock_timestamp()
+         WHERE tenant_id = $2 AND commitment_id = $3 AND id = $4
+           AND status IN ('pending', 'dispatched')
+      `,
+      [targetStatus, params.tenantId, params.commitmentId, params.occurrenceId],
+    );
+
+    // One-shot promises have no future execution: a permanently failed or cancelled occurrence
+    // is their terminal state. Interval commitments stay active for their next slot.
+    if (commitRow.status === 'active' && commitRow.schedule_kind === 'once') {
+      await client.query(
+        `
+          UPDATE commitments
+             SET status = $1,
+                 next_due_at = NULL,
+                 version = version + 1,
+                 updated_at = clock_timestamp()
+           WHERE tenant_id = $2 AND id = $3 AND status = 'active'
+        `,
+        [
+          targetStatus === 'cancelled' ? 'cancelled' : 'completed',
+          params.tenantId,
+          params.commitmentId,
+        ],
+      );
+    }
+
+    return true;
   }
 }

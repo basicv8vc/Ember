@@ -370,10 +370,19 @@ export interface CommitmentRepository {
   } | null>;
 }
 
+/**
+ * Server-derived execution lease authority for one Worker attempt.
+ *
+ * This is the single canonical definition: `@ember/execution`, `@ember/postgres` and the
+ * Worker runtime all import it from here. `attempt` is part of the lease identity because a
+ * retried Task reuses the same `taskId`/`runId` lineage while a *different* Run attempt owns
+ * the lease; an outcome or terminal transition that ignores it cannot be fenced.
+ */
 export interface WorkerLeaseGrant {
   readonly tenantId: Id;
   readonly taskId: Id;
   readonly runId: Id;
+  readonly attempt: number;
   readonly leaseEpoch: number;
   readonly workerId: string;
 }
@@ -388,6 +397,12 @@ export interface DueCommitment {
   readonly intervalSeconds: number | null;
   readonly nextDueAt: Date;
   readonly version: number;
+  /**
+   * Current commitment status. Due discovery only returns `active` rows, so this value is
+   * redundant for scheduling but is part of the canonical row projection: a caller that
+   * re-validates a stale discovery result must not have to assume it.
+   */
+  readonly status: CommitmentStatus;
 }
 
 export interface ReservedSlot {
@@ -418,6 +433,120 @@ export interface StalledPendingOccurrence {
   readonly taskCreationIdempotencyKey: string;
 }
 
+/**
+ * Authoritative business identity of one reserved Occurrence, resolved from the persisted
+ * `commitments` / `commitment_occurrences` rows (never from Task input).
+ *
+ * The Worker uses it to obtain `tenantId`, `agentId`, `sourceProfileId` and `scheduleKind`
+ * before any source read, budget reservation or outcome write, so a Task payload can never
+ * substitute those values.
+ */
+export interface OccurrenceExecutionIdentity {
+  readonly tenantId: Id;
+  readonly commitmentId: Id;
+  readonly occurrenceId: Id;
+  readonly agentId: Id;
+  readonly taskId: Id;
+  readonly sourceProfileId: SourceProfileId;
+  readonly scheduleKind: ScheduleKind;
+  readonly occurrenceStatus: OccurrenceStatus;
+  readonly commitmentStatus: CommitmentStatus;
+}
+
+/** Terminal Occurrence states. `pending`/`dispatched` are the only non-terminal states. */
+export const OCCURRENCE_TERMINAL_STATUSES = ['completed', 'failed', 'cancelled'] as const;
+export type OccurrenceTerminalStatus = (typeof OCCURRENCE_TERMINAL_STATUSES)[number];
+
+/** Closed vocabulary for *why* an Occurrence reached a non-success terminal state. */
+export const OCCURRENCE_TERMINAL_REASON_CODES = [
+  'sentinel_denied',
+  'budget_exceeded',
+  'execution_failed',
+  'execution_cancelled',
+  'commitment_cancelled',
+] as const;
+export type OccurrenceTerminalReasonCode = (typeof OCCURRENCE_TERMINAL_REASON_CODES)[number];
+
+/**
+ * A permanent (non-retryable) terminal transition of one Occurrence.
+ *
+ * It is *derived*: the authoritative trigger is the already-terminal Task/Run pair written by
+ * the fenced `finish()`. Publishing this command can therefore never overtake a retry.
+ */
+export interface FinalizeOccurrenceCommand {
+  readonly commitmentId: Id;
+  readonly occurrenceId: Id;
+  readonly terminalStatus: Extract<OccurrenceTerminalStatus, 'failed' | 'cancelled'>;
+  readonly reasonCode: OccurrenceTerminalReasonCode;
+}
+
+/** Replay query for an already-published Outcome. */
+export interface AuthoritativeOutcomeQuery {
+  readonly occurrenceId: Id;
+  readonly commitmentId: Id;
+}
+
+export interface AuthoritativeOutcome {
+  readonly resultStatus: OutcomeResultStatus;
+  readonly summary: string;
+}
+
+/**
+ * Guarded execution store consumed by `@ember/execution`'s `CommitmentOrchestrator`.
+ *
+ * Both methods MUST authenticate the caller against authoritative state inside PostgreSQL
+ * (tenant, commitment/occurrence/task/run lineage, lease fencing and consent) before they
+ * disclose or write anything.
+ */
+export interface CommitmentExecutionStore {
+  findAuthoritativeOutcome(
+    grant: WorkerLeaseGrant,
+    query: AuthoritativeOutcomeQuery,
+  ): Promise<AuthoritativeOutcome | null>;
+
+  appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;
+}
+
+export interface DispatchTaskCommand {
+  readonly tenantId: Id;
+  readonly agentId: Id;
+  readonly commitmentId: Id;
+  readonly occurrenceId: Id;
+  readonly idempotencyKey: string;
+  readonly kind: 'mock.compute';
+  readonly input: CommitmentTaskInput;
+  readonly deadlineAt?: string;
+}
+
+/** Canonical Task payload of a commitment occurrence dispatch. */
+export interface CommitmentTaskInput {
+  readonly operation: 'sha256';
+  readonly text: string;
+}
+
+export interface DispatchTaskReceipt {
+  readonly taskId: Id;
+  readonly replayed: boolean;
+}
+
+/**
+ * Displays durable Tasks through Ember's existing Task repository and its
+ * `(tenant_id, idempotency_key)` uniqueness. There is deliberately no second Task store.
+ */
+export interface ExistingTaskDispatcher {
+  dispatchTask(cmd: DispatchTaskCommand): Promise<DispatchTaskReceipt>;
+}
+
+/**
+ * Async pre-read consent dependency for the Worker. Lane C currently exports only its
+ * process-local FakeConsentRegistry; the durable implementation must be wired before P0-C3B
+ * can publish Outcomes. The PostgreSQL publication gate is a separate transaction-scoped
+ * dependency and must consume the same upstream persistence contract.
+ */
+export interface ConsentAuthority {
+  assertActive(tenantId: Id, sourceProfileId: SourceProfileId): Promise<void>;
+}
+
 export interface DueCommitmentStore {
   findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]>;
 
@@ -440,7 +569,38 @@ export interface DueCommitmentStore {
 
   reconcilePendingOccurrence(occurrenceId: Id, taskId: Id): Promise<boolean>;
 
-  markOccurrenceFailed(occurrenceId: Id, reasonCode: string): Promise<void>;
+  /**
+   * Authoritative identity lookup for the Task this Worker is executing.
+   *
+   * Returns `null` when the Task is not bound to an occurrence of this tenant. Implementations
+   * MUST verify tenant isolation and Task lineage; a caller that receives a value may treat
+   * every field as persisted truth.
+   */
+  findOccurrenceExecutionIdentity(
+    grant: WorkerLeaseGrant,
+    occurrenceId: Id,
+  ): Promise<OccurrenceExecutionIdentity | null>;
+
+  /**
+   * Permanently terminalize an Occurrence after its Task/Run already reached a terminal state.
+   *
+   * Idempotent: a second call for an already-terminal Occurrence returns `false` and changes
+   * nothing. A call for a Task that is still retryable returns `false` (the retry owns the
+   * Occurrence). Stale attempts are rejected from persisted state, not from caller claims.
+   */
+  finalizeOccurrenceFromTask(
+    grant: WorkerLeaseGrant,
+    cmd: FinalizeOccurrenceCommand,
+  ): Promise<boolean>;
+
+  /**
+   * Sweep `dispatched` occurrences whose Task already reached a terminal state and apply the
+   * corresponding terminal transition. Returns the number of occurrences that changed state.
+   *
+   * This is the crash-safe safety net for a Worker that died between `finish()` and
+   * `finalizeOccurrenceFromTask()`; it is driven by persisted Task/Run state only.
+   */
+  reconcileTerminalOccurrences(limit: number): Promise<number>;
 }
 
 export interface TrustedSourceAccessContext {

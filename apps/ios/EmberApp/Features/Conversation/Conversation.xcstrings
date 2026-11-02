@@ -1,0 +1,150 @@
+{
+  "sourceLanguage" : "en",
+  "strings" : {
+    "conversation.composer.accessibility" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Message Ember" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送消息给 Ember" } }
+      }
+    },
+    "conversation.composer.local_note" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your message stays in this local demo." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "消息仅保留在本地演示中。" } }
+      }
+    },
+    "conversation.composer.placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Message Ember…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "给 Ember 发消息…" } }
+      }
+    },
+    "conversation.composer.send" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
+      }
+    },
+    "conversation.composer.send_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send this message to Ember." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "将这条消息发送给 Ember。" } }
+      }
+    },
+    "conversation.empty.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Bring a question, a thought, or something you want to work through. You can keep the conversation going here." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "带来一个问题、一点想法，或正在思考的事情。你可以在这里继续聊下去。" } }
+      }
+    },
+    "conversation.empty.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "I’m here with you." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "我在这里陪你聊。" } }
+      }
+    },
+    "conversation.error.recoverable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "The MOCK reply could not be prepared. Your message is still here; you can try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这条模拟回复暂时无法准备。你的消息仍在，可以重试。" } }
+      }
+    },
+    "conversation.header.subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your personal AI partner" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你的个人 AI 伙伴" } }
+      }
+    },
+    "conversation.message.ember_mock" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember · MOCK" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember · 模拟回复" } }
+      }
+    },
+    "conversation.message.you" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "You" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你" } }
+      }
+    },
+    "conversation.mock_reply.default" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: We can take this one step at a time. What feels most useful to start with?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：我们可以一步一步来。你觉得从哪里开始最有帮助？" } }
+      }
+    },
+    "conversation.mock_reply.notes" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: I can help shape those notes into a clear next step, then we can refine it together." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：我可以帮你把这些笔记整理成清晰的下一步，然后我们再一起完善。" } }
+      }
+    },
+    "conversation.mock_reply.plan" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: Let’s make the plan manageable: choose one outcome, one small next step, and when you want to revisit it." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：让计划轻一些：先选定一个结果、一个小步骤，以及你想回头检查的时间。" } }
+      }
+    },
+    "conversation.prompt.hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Fills the message box. It will not send until you choose Send." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入输入框；只有你点击发送后才会发出。" } }
+      }
+    },
+    "conversation.prompt.notes" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me turn a note into a clear next step." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "帮我把一段笔记整理成清晰的下一步。" } }
+      }
+    },
+    "conversation.prompt.plan" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me make a simple plan for my day." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "帮我为今天安排一个简单的计划。" } }
+      }
+    },
+    "conversation.prompt.reflect" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me think something through." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "陪我把一件事想清楚。" } }
+      }
+    },
+    "conversation.reply.preparing" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing a MOCK reply" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备模拟回复" } }
+      }
+    },
+    "conversation.reply.retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
+    },
+    "conversation.reply.stop" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop reply" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止回复" } }
+      }
+    },
+    "conversation.reply.stop_detail" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Only this local MOCK reply stopped. No Ember task was cancelled." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅停止了这条本地模拟回复，没有取消任何 Ember 任务。" } }
+      }
+    },
+    "conversation.reply.stopped" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply stopped" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复已停止" } }
+      }
+    },
+    "conversation.suggestions.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start anywhere" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以从这里开始" } }
+      }
+    }
+  },
+  "version" : "1.0"
+}

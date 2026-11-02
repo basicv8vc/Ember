@@ -13,6 +13,7 @@ import {
   type AuthorizedConsentGenerationView,
   type ConsentAuthorizationFence,
   type ConsentFenceAuthority,
+  type ConsentReadAuthorization,
   type OutcomeResultStatus,
   type SourceSnapshot,
   type WorkerLeaseGrant,
@@ -77,6 +78,10 @@ class ScriptedConsent implements ConsentFenceAuthority {
   public active = true;
   public authorizeCalls = 0;
   public assertFenceCurrentCalls = 0;
+  /** Operations the durable grant approves. Read access requires `read_snapshot`. */
+  public allowedOperations: readonly string[] = ['read_snapshot'];
+  /** Scopes the durable grant approves. Mirrored verbatim, never defaulted by the Worker. */
+  public scopes: readonly string[] = ['source.readonly'];
   /** Number of `assertFenceCurrent` calls that may succeed before the grant is reported stale. */
   public fenceCurrentSucceeds = Number.POSITIVE_INFINITY;
 
@@ -106,7 +111,7 @@ class ScriptedConsent implements ConsentFenceAuthority {
     return Promise.resolve({ ...this.grantFence(sourceProfileId), tenantId });
   }
 
-  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
+  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<ConsentReadAuthorization> {
     this.assertFenceCurrentCalls++;
     this.recorder.events.push('consent.assertFenceCurrent');
 
@@ -124,7 +129,10 @@ class ScriptedConsent implements ConsentFenceAuthority {
       return Promise.reject(new DomainError('POLICY_DENIED', 'Source Consent was re-granted'));
     }
 
-    return Promise.resolve();
+    return Promise.resolve({
+      allowedOperations: [...this.allowedOperations],
+      scopes: [...this.scopes],
+    });
   }
 
   assertActive(): Promise<void> {
@@ -406,18 +414,58 @@ describe('P0-C3B: fence re-verification inside the source reader', () => {
     expect(consent.assertFenceCurrentCalls).toBe(2);
   });
 
-  it('still reads under a verdict-only authority when no fence is supplied (legacy path)', async () => {
+  it('refuses a read without a fence instead of inventing the grant scope', async () => {
+    // Verdict-only authorities cannot say *what* the grant authorizes. Mirroring a default would
+    // grant `read_snapshot` to a grant that never included it, so the read must fail closed.
     const assertActive = vi.fn((): Promise<void> => Promise.resolve());
     const reader = new CommitmentSourceReader({ consent: { assertActive } });
+
+    await expect(
+      reader.readSnapshot(SOURCE_PROFILE_ID, trustedContext(TENANT_ID), LIVE_SIGNAL),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+
+    expect(assertActive).not.toHaveBeenCalled();
+  });
+
+  it('denies a read the durable grant does not authorize, without fabricating the operation', async () => {
+    const recorder: Recorder = { events: [] };
+    const consent = new ScriptedConsent(recorder);
+    // The grant is active for this profile, but it authorizes metadata only. The previous mirror
+    // granted `read_snapshot` by default, so this read used to succeed.
+    consent.allowedOperations = ['read_metadata'];
+
+    const reader = new CommitmentSourceReader({ consent });
+
+    await expect(
+      reader.readSnapshot(
+        SOURCE_PROFILE_ID,
+        trustedContext(TENANT_ID),
+        LIVE_SIGNAL,
+        consent.grantFence(SOURCE_PROFILE_ID),
+      ),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+
+    // Pre-read gate only: the connector is never reached, so nothing is read under the grant.
+    expect(consent.assertFenceCurrentCalls).toBe(1);
+  });
+
+  it('reads when the durable grant authorizes read_snapshot', async () => {
+    const recorder: Recorder = { events: [] };
+    const consent = new ScriptedConsent(recorder);
+    consent.allowedOperations = ['read_snapshot', 'read_metadata'];
+    consent.scopes = ['source.readonly', 'source.metadata'];
+
+    const reader = new CommitmentSourceReader({ consent });
 
     const snapshot = await reader.readSnapshot(
       SOURCE_PROFILE_ID,
       trustedContext(TENANT_ID),
       LIVE_SIGNAL,
+      consent.grantFence(SOURCE_PROFILE_ID),
     );
 
     expect(snapshot.sourceProfileId).toBe(SOURCE_PROFILE_ID);
-    expect(assertActive).toHaveBeenCalled();
+    expect(consent.assertFenceCurrentCalls).toBe(2);
   });
 });
 
@@ -597,6 +645,8 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       sourceProfileId: SOURCE_PROFILE_ID,
       status: 'active',
       expiresAt: null,
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readonly'],
     };
 
     public reads = 0;
@@ -643,7 +693,53 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       issuedAt: '2026-11-02T12:00:00.000Z',
     });
 
-    await expect(authority.assertFenceCurrent(fence)).resolves.toBeUndefined();
+    await expect(authority.assertFenceCurrent(fence)).resolves.toEqual({
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readonly'],
+    });
+  });
+
+  it('denies instead of inventing the authorized operations when the store omits them', async () => {
+    const store = new ScriptedGenerationStore();
+    // A durable view that reports the generation but not what it authorizes cannot authorize a
+    // read: the Worker would have to assume `read_snapshot`, which is exactly the laundering the
+    // connector boundary would then spend.
+    store.generation = {
+      grantId: 'grant-a',
+      version: 1,
+      tenantId: TENANT_ID,
+      sourceProfileId: SOURCE_PROFILE_ID,
+      status: 'active',
+      expiresAt: null,
+    };
+
+    const authority = fromResolvedGenerationConsent(store);
+    const fence = await authority.authorizeFence(TENANT_ID, SOURCE_PROFILE_ID);
+
+    await expect(authority.assertFenceCurrent(fence)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+  });
+
+  it('rejects a resolved generation that reports a non-string operation', async () => {
+    const store = new ScriptedGenerationStore();
+    store.generation = {
+      grantId: 'grant-a',
+      version: 1,
+      tenantId: TENANT_ID,
+      sourceProfileId: SOURCE_PROFILE_ID,
+      status: 'active',
+      expiresAt: null,
+      allowedOperations: ['read_snapshot', 7 as unknown as string],
+      scopes: ['source.readonly'],
+    };
+
+    const authority = fromResolvedGenerationConsent(store);
+    const fence = await authority.authorizeFence(TENANT_ID, SOURCE_PROFILE_ID);
+
+    await expect(authority.assertFenceCurrent(fence)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
   });
 
   it('rejects a fence whose generation was replaced even when the version restarted', async () => {
@@ -660,6 +756,8 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       sourceProfileId: SOURCE_PROFILE_ID,
       status: 'active',
       expiresAt: null,
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readonly'],
     };
 
     await expect(authority.assertFenceCurrent(fence)).rejects.toThrowError(
@@ -683,6 +781,8 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       sourceProfileId: SOURCE_PROFILE_ID,
       status: 'revoked',
       expiresAt: null,
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readonly'],
     };
     await expect(authority.authorizeFence(TENANT_ID, SOURCE_PROFILE_ID)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
@@ -695,6 +795,8 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       sourceProfileId: SOURCE_PROFILE_ID,
       status: 'expired',
       expiresAt: '2026-11-01T00:00:00.000Z',
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readonly'],
     };
     await expect(authority.assertActive(TENANT_ID, SOURCE_PROFILE_ID)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),

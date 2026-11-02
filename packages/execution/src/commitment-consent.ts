@@ -28,6 +28,15 @@ import { DomainError, type Id } from '@ember/domain';
  * Per P0C3-C §3 the `digest` is an integrity check, never proof of authorization: authority for
  * a read comes only from the authority confirming `grantId` + `grantVersion` is still current.
  * P0-C3B therefore treats `digest` as opaque and never trusts it.
+ *
+ * ## Why the fence also carries the authorized scope
+ *
+ * A fence that only answers "still active?" cannot authorize a read, because the connector
+ * boundary decides read access from `grant.allowedOperations`. The Worker therefore resolves the
+ * *authorized operations* together with the generation check
+ * ({@link ConsentFenceAuthority.assertFenceCurrent}) and mirrors exactly those into the connector
+ * registry. Nothing is defaulted: an authority that cannot report them denies the read, so
+ * "granted for something else" can never be spent as "granted for `read_snapshot`".
  */
 
 /** Mirrors P0-C3C `CONSENT_GRANT_ID_MAX_CHARS`. */
@@ -57,6 +66,19 @@ export interface ConsentAuthorizationFence {
 }
 
 /**
+ * What the authority confirms about the read it just authorized.
+ *
+ * These are the operations and scopes of the *durable* Consent record, never a Worker default.
+ * The Worker mirrors them verbatim into the connector boundary because `evaluateSourceAccess`
+ * decides read access from `grant.allowedOperations`: substituting a default there would silently
+ * upgrade a grant that never included `read_snapshot`.
+ */
+export interface ConsentReadAuthorization {
+  readonly allowedOperations: readonly string[];
+  readonly scopes: readonly string[];
+}
+
+/**
  * Consent authority that can issue and re-verify a versioned authorization fence.
  *
  * `ConsentAuthority` (in `@ember/contracts`) remains the minimal async verdict port; this extended
@@ -68,12 +90,15 @@ export interface ConsentFenceAuthority extends ConsentAuthority {
   authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence>;
 
   /**
-   * Resolves only while `fence` still describes the active generation.
+   * Resolves only while `fence` still describes the active generation, and reports what that
+   * generation authorizes.
    *
    * A store whose generation moved (revocation, expiry, re-grant, approval invalidation) MUST
-   * reject, and the caller MUST NOT publish anything after a rejection.
+   * reject, and the caller MUST NOT publish anything after a rejection. An authority that cannot
+   * report the authorized operations MUST reject as well: a read authorized without a scope is
+   * indistinguishable from a read authorized for everything.
    */
-  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void>;
+  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<ConsentReadAuthorization>;
 }
 
 /**
@@ -110,6 +135,16 @@ export interface AuthorizedConsentGenerationView {
   readonly sourceProfileId: string;
   readonly status: 'active' | 'revoked' | 'expired';
   readonly expiresAt: string | null;
+  /**
+   * Operations and scopes the persisted grant approved (P0-C3C `ConsentGrant.allowedOperations`
+   * and `.scopes`).
+   *
+   * Optional only because the frozen `AuthorizedConsentGeneration` view does not surface them yet.
+   * When they are absent the Worker denies the read instead of assuming `read_snapshot`, so making
+   * them available is an explicit acceptance criterion for the durable store.
+   */
+  readonly allowedOperations?: readonly string[];
+  readonly scopes?: readonly string[];
 }
 
 /**
@@ -208,7 +243,7 @@ export function fromResolvedGenerationConsent(
       });
     },
 
-    async assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
+    async assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<ConsentReadAuthorization> {
       const parsed = parseConsentFence(fence);
       const generation = await resolveActive(parsed.tenantId, parsed.sourceProfileId);
 
@@ -219,8 +254,55 @@ export function fromResolvedGenerationConsent(
           'Source Consent was re-granted or revoked after the read was authorized',
         );
       }
+
+      return readAuthorizationOf(generation);
     },
   };
+}
+
+/**
+ * Extracts the operations and scopes a resolved generation authorizes, refusing to invent them.
+ *
+ * The generation view is the only place these can come from: the fence deliberately carries no
+ * scopes (P0C3-C §3) and the Worker must not derive permissions from the request. A store that
+ * reports no operations therefore authorizes nothing, which is the correct direction to fail.
+ */
+function readAuthorizationOf(
+  generation: AuthorizedConsentGenerationView,
+): ConsentReadAuthorization {
+  const operations = generation.allowedOperations;
+
+  if (!Array.isArray(operations) || operations.length === 0) {
+    throw consentDenied('Consent store did not report the operations authorized for this read');
+  }
+
+  const allowedOperations = operations.filter(
+    (value): value is string => typeof value === 'string',
+  );
+
+  if (allowedOperations.length !== operations.length || allowedOperations.length === 0) {
+    throw consentDenied('Consent store reported malformed authorized operations');
+  }
+
+  const reportedScopes = generation.scopes;
+
+  // Scopes are not consulted by the connector policy today, so an absent list is mirrored as an
+  // empty one: the read stays authorized, and any future scope check denies by default.
+  if (reportedScopes === undefined) {
+    return { allowedOperations, scopes: [] };
+  }
+
+  if (!Array.isArray(reportedScopes)) {
+    throw consentDenied('Consent store reported malformed consent scopes');
+  }
+
+  const scopes = reportedScopes.filter((value): value is string => typeof value === 'string');
+
+  if (scopes.length !== reportedScopes.length) {
+    throw consentDenied('Consent store reported malformed consent scopes');
+  }
+
+  return { allowedOperations, scopes };
 }
 
 /**

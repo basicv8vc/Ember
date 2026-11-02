@@ -144,6 +144,7 @@ export {
   type AuthorizedConsentGenerationView,
   type ConsentAuthorizationFence,
   type ConsentFenceAuthority,
+  type ConsentReadAuthorization,
   type ResolvedGenerationAdapterOptions,
   type ResolvedGenerationConsentAuthority,
 } from './commitment-consent.js';

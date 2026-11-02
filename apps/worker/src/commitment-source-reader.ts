@@ -26,9 +26,18 @@ import {
   toConsentDenied,
   type ConsentAuthorizationFence,
   type ConsentFenceAuthority,
+  type ConsentReadAuthorization,
   type SourceReaderPort,
 } from '@ember/execution';
 import type { WorkerLogger } from './logger.js';
+
+/**
+ * The only operation this Worker performs against a Source Profile.
+ *
+ * `evaluateSourceAccess` authorizes a read from `grant.allowedOperations`, so the operation the
+ * Worker asks for and the operation it mirrors into the registry have to be the same constant.
+ */
+const SOURCE_READ_OPERATION = 'read_snapshot';
 
 /**
  * Marker for the fail-closed placeholder authority.
@@ -103,10 +112,12 @@ interface TenantReader {
  *
  * Lane C's `GuardedSourceReader` is per-tenant by construction (`tenantId` on the profile and
  * the policy), while a Worker serves many tenants. This adapter builds one guarded reader per
- * tenant from Lane C's deterministic fixtures and mirrors the injected consent verdict into
- * Lane C's process-local registry, so:
+ * tenant from Lane C's deterministic fixtures and mirrors the *authorized operations* of the
+ * resolved consent generation into Lane C's process-local registry, so:
  *
  * - the injected authority is checked before and after every read;
+ * - the mirrored grant carries exactly the operations the durable Consent record approved, never
+ *   a Worker default (a read the grant does not cover is refused before the connector is called);
  * - Lane C's `FakeConsentRegistry` remains only the connector boundary adapter;
  * - the pre-read and post-read gates of P0C3-C §5.2 both run;
  * - zero network access is possible (Lane C fixtures only, no real connectors).
@@ -131,10 +142,19 @@ export class CommitmentSourceReader implements SourceReaderPort {
   ): Promise<SourceSnapshot> {
     this.throwIfAborted(signal, 'before consent verification');
 
-    await this.verifyConsent(profileId, trustedContext, fence);
+    const authorization = await this.verifyConsent(profileId, trustedContext, fence);
+
+    // The connector boundary authorizes a read from `grant.allowedOperations`, so an authorization
+    // that does not cover this operation must stop here instead of being mirrored and retried by
+    // the policy engine with a fabricated default.
+    if (!authorization.allowedOperations.includes(SOURCE_READ_OPERATION)) {
+      throw consentDenied(
+        'Consent grant does not authorize a source snapshot read for this source profile',
+      );
+    }
 
     const tenant = this.readerFor(trustedContext.tenantId);
-    this.mirrorConsent(tenant.registry, trustedContext.tenantId, profileId, true);
+    this.mirrorAuthorization(tenant.registry, trustedContext.tenantId, profileId, authorization);
 
     this.throwIfAborted(signal, 'after consent verification');
 
@@ -144,10 +164,19 @@ export class CommitmentSourceReader implements SourceReaderPort {
 
     try {
       // Re-verify the *same* authorization after the read. Passing the fence down keeps a
-      // re-granted profile from validating a snapshot that was read under the old grant.
-      await this.verifyConsent(profileId, trustedContext, fence);
+      // re-granted profile from validating a snapshot that was read under the old grant, and the
+      // returned operations keep the mirror honest if the grant was replaced mid-read.
+      const latest = await this.verifyConsent(profileId, trustedContext, fence);
+
+      if (!latest.allowedOperations.includes(SOURCE_READ_OPERATION)) {
+        throw consentDenied(
+          'Consent grant no longer authorizes a source snapshot read for this source profile',
+        );
+      }
+
+      this.mirrorAuthorization(tenant.registry, trustedContext.tenantId, profileId, latest);
     } catch (error) {
-      this.mirrorConsent(tenant.registry, trustedContext.tenantId, profileId, false);
+      this.revokeMirror(tenant.registry, trustedContext.tenantId, profileId);
       this.logger?.warn?.('Consent revoked while the source snapshot was in flight', {
         tenantId: trustedContext.tenantId,
         sourceProfileId: profileId,
@@ -166,36 +195,39 @@ export class CommitmentSourceReader implements SourceReaderPort {
   /**
    * Consent verification at one read boundary.
    *
-   * With a fence, the check is a *versioned* comparison: the reader must be able to ask the
-   * authority whether the exact grant version that authorized this read is still current. A
-   * reader wired to an authority that cannot do that fails closed instead of downgrading to a
-   * boolean verdict.
+   * The check is a *versioned* comparison: the reader asks the authority whether the exact grant
+   * generation that authorized this read is still current, and gets back the operations that
+   * generation approves. A reader wired to an authority that cannot do that fails closed instead
+   * of downgrading to a boolean verdict.
    */
   private async verifyConsent(
     profileId: string,
     trustedContext: TrustedSourceAccessContext,
     fence: ConsentAuthorizationFence | undefined,
-  ): Promise<void> {
+  ): Promise<ConsentReadAuthorization> {
     try {
-      if (fence !== undefined) {
-        if (!isConsentFenceAuthority(this.consent)) {
-          throw consentDenied(
-            'Consent authority cannot verify the versioned authorization fence of this read',
-          );
-        }
-
-        const parsed = parseConsentFence(fence);
-
-        assertFenceMatches(parsed, {
-          tenantId: trustedContext.tenantId,
-          sourceProfileId: profileId,
-        });
-
-        await this.consent.assertFenceCurrent(parsed);
-        return;
+      if (fence === undefined) {
+        // A verdict-only authority cannot say what the grant authorizes, and mirroring a default
+        // would grant `read_snapshot` to a grant that never included it. Refuse the read instead.
+        throw consentDenied(
+          'Consent authority cannot report the operations authorized for this read',
+        );
       }
 
-      await this.consent.assertActive(trustedContext.tenantId, profileId);
+      if (!isConsentFenceAuthority(this.consent)) {
+        throw consentDenied(
+          'Consent authority cannot verify the versioned authorization fence of this read',
+        );
+      }
+
+      const parsed = parseConsentFence(fence);
+
+      assertFenceMatches(parsed, {
+        tenantId: trustedContext.tenantId,
+        sourceProfileId: profileId,
+      });
+
+      return await this.consent.assertFenceCurrent(parsed);
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent is not active for this source profile');
     }
@@ -235,21 +267,39 @@ export class CommitmentSourceReader implements SourceReaderPort {
     return tenant;
   }
 
-  /** Mirror the durable consent verdict into Lane C's process-local registry. */
-  private mirrorConsent(
+  /**
+   * Mirror the *authorized* operations into Lane C's process-local registry.
+   *
+   * The mirrored record must describe what the durable Consent record approved. Granting with
+   * defaults here would fabricate `read_snapshot` / `source.readonly` for a grant that never
+   * included them, and `evaluateSourceAccess` reads exactly those arrays to decide the read.
+   */
+  private mirrorAuthorization(
     registry: ConsentRegistry,
     tenantId: string,
     sourceProfileId: string,
-    active: boolean,
+    authorization: ConsentReadAuthorization,
   ): void {
     try {
-      if (active) {
-        registry.grant({ tenantId, sourceProfileId });
-      } else {
-        registry.revoke(tenantId, sourceProfileId);
-      }
+      registry.grant({
+        tenantId,
+        sourceProfileId,
+        allowedOperations: [...authorization.allowedOperations],
+        scopes: [...authorization.scopes],
+      });
     } catch {
-      // The mirror is best-effort: the database remains the authority for every read.
+      // The mirror is best-effort: the durable authority remains the authority for every read.
+      // A failing mirror cannot widen access, because the read has already been checked against
+      // `authorization.allowedOperations` and the connector gate re-evaluates the registry.
+    }
+  }
+
+  /** Withdraw the mirror so a stale local grant cannot authorize a later read. */
+  private revokeMirror(registry: ConsentRegistry, tenantId: string, sourceProfileId: string): void {
+    try {
+      registry.revoke(tenantId, sourceProfileId);
+    } catch {
+      // Best-effort: an unmirrorable revocation still fails the read closed above.
     }
   }
 

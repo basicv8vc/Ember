@@ -40,8 +40,9 @@ import {
  *   -> PostgresCommitmentRepository.appendOutcomeIfAbsent -> Occurrence completion
  *
  * Commitment, Task, Run, Outcome and Occurrence assertions read PostgreSQL rows. The consent
- * verifier/publication guard is an explicit process-local test fixture; this suite does not
- * satisfy Lane C's missing transaction-level consent acceptance gate.
+ * authority/publication guard is an explicit process-local *fenced* fixture, so the suite proves
+ * the Worker-side binding (fence -> read -> re-verify -> publish); it does not prove Lane C's
+ * still-missing transaction-level consent acceptance gate.
  */
 const WORKER_ID = 'worker-e2e';
 const logger = createWorkerLogger({ level: 'error' });
@@ -83,6 +84,10 @@ function createRuntime(harness: CommitmentHarness, options: RuntimeOptions = {})
       appendOutcomeIfAbsent: (grant, cmd) => harness.commitments.appendOutcomeIfAbsent(grant, cmd),
     },
     sourceReader: options.sourceReader ?? new CommitmentSourceReader({ consent: harness.consent }),
+    // The Worker orchestrator re-verifies the versioned fence before publication, so the fixture
+    // has to be the same fenced authority the reader uses. Wiring only the repository guard would
+    // exercise the pre-P0-C3B chain, not the contract this suite is meant to accept.
+    consent: harness.consent,
     budget: new PostgresBudgetLedger(harness.db.pool, {
       policy: options.budget ?? GENEROUS_BUDGET,
     }),
@@ -438,6 +443,28 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     await harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
 
     const result = await runOnce(runtime, run);
+    expect(result.outcome).toBe('failed_terminal');
+    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
+    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+  });
+
+  it('9b. a grant that does not authorize read_snapshot cannot read a snapshot', async () => {
+    // Narrower re-grant: the lineage is active, but only for metadata. Before the mirror stopped
+    // defaulting to `read_snapshot`, this read succeeded on a fabricated local grant.
+    await harness.consent.grant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_SOURCE_PROFILE,
+      allowedOperations: ['read_metadata'],
+      scopes: ['source.metadata'],
+    });
+
+    const runtime = createRuntime(harness);
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
+    const run = await claimNextRun(harness, WORKER_ID);
+
+    const result = await runOnce(runtime, run);
+
     expect(result.outcome).toBe('failed_terminal');
     expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
     expect(await readOutcomeCount(db, occurrenceId)).toBe(0);

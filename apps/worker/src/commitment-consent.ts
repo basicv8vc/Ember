@@ -92,9 +92,11 @@ export function requireCommitmentConsentAuthority(
  * enable Outcome publication, and it enables it only for the authority it is given. A denial or
  * an unreadable Consent store rejects the append and leaves the occurrence unpublished.
  *
- * Note: the durable adapter must later use the supplied `client` so the check is part of the
- * same transaction (row lock / snapshot). The current port takes the client positionally, so
- * wiring that is additive and does not change this call site.
+ * P0-C3D (#84) requirement — the check is NOT yet transaction-scoped: the `client` the repository
+ * runs inside its append transaction is currently unused, so a revocation committed between this
+ * check and the Outcome INSERT can still slip through. The durable guard must verify through
+ * `_client` (row lock or a `REPEATABLE READ` snapshot) before this seam may be described as
+ * atomic. Wiring it is additive and changes no call site.
  */
 export function createCommitmentConsentPublicationGuard(
   authority: ConsentAuthority | ConsentFenceAuthority,
@@ -102,6 +104,8 @@ export function createCommitmentConsentPublicationGuard(
   return {
     async assertActive(_client: unknown, params: ConsentGuardParams): Promise<void> {
       try {
+        // `_client` is deliberately unused until the durable guard can verify inside the append
+        // transaction; see the P0-C3D requirement above.
         await authority.assertActive(params.tenantId, params.sourceProfileId);
       } catch (error) {
         throw toConsentDenied(error, 'Source Consent is not active for this outcome');

@@ -41,6 +41,11 @@ struct ConversationTimelineView: View {
                 .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
+            .onAppear {
+                DispatchQueue.main.async {
+                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                }
+            }
             .onChange(of: state.timeline.count) { _, _ in
                 withAnimation(.easeOut(duration: 0.18)) {
                     proxy.scrollTo(bottomAnchor, anchor: .bottom)

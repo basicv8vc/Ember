@@ -6,7 +6,6 @@ import {
   PostgresBudgetLedger,
   PostgresCheckpointStore,
   PostgresCommitmentRepository,
-  PostgresCommitmentTaskDispatcher,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
@@ -29,10 +28,14 @@ import {
   InMemoryCredentialRegistry,
   SYNTHETIC_EGRESS_POLICY,
 } from '@ember/credentials';
-import { loadWorkerConfig, type WorkerConfig } from './config.js';
+import { loadWorkerConfig } from './config.js';
+import {
+  createCommitmentConsentPublicationGuard,
+  evaluateSchedulerConsentGate,
+} from './commitment-consent.js';
 import { createCommitmentRunHandler } from './commitment-handler.js';
 import { createCommitmentRouteAwareRunHandler } from './commitment-run-router.js';
-import { CommitmentScheduler, DEFAULT_MAX_ERROR_BACKOFF_MS } from './commitment-scheduler.js';
+import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
 import {
   CommitmentSourceReader,
   createUnavailableConsentAuthority,
@@ -63,68 +66,6 @@ function registerShutdown(controller: AbortController, logger: WorkerLogger): vo
   });
 }
 
-interface SchedulerRuntimeOptions {
-  readonly config: WorkerConfig;
-  readonly pool: ReturnType<typeof createPool>;
-  readonly logger: WorkerLogger;
-  readonly signal: AbortSignal;
-}
-
-/**
- * Start the P0-C3B Commitment Scheduler inside the Worker process lifecycle.
- *
- * - Disabled by default; `EMBER_SCHEDULER_ENABLED=true` is the only way to switch it on.
- * - It shares the Worker's `AbortController`, so SIGINT/SIGTERM drain it with the poll loop.
- * - `runLoop()` never rejects: failures are logged and retried with bounded exponential
- *   backoff, so a scheduler fault cannot take the Worker down.
- * - The loop is *not* awaited here; callers include it in the same `Promise.all` as the other
- *   loops so shutdown ordering is explicit.
- */
-function startCommitmentScheduler(options: SchedulerRuntimeOptions): Promise<void> {
-  const { config, logger, signal } = options;
-  const pool = options.pool;
-
-  if (!config.scheduler.enabled) {
-    logger.info('commitment scheduler disabled', {
-      hint: 'set EMBER_SCHEDULER_ENABLED=true to enable autonomous commitment scheduling',
-    });
-    return Promise.resolve();
-  }
-
-  if (config.mode !== 'poll') {
-    logger.warn('commitment scheduler is enabled without a poll loop; occurrences will queue up', {
-      mode: config.mode,
-    });
-  }
-
-  const store = new PostgresCommitmentRepository(pool);
-  const dispatcher = new PostgresCommitmentTaskDispatcher(pool);
-  const scheduler = new CommitmentScheduler(store, dispatcher, {
-    enabled: true,
-    pollIntervalMs: config.scheduler.intervalMs,
-    batchSize: config.scheduler.batchSize,
-    concurrency: config.scheduler.concurrency,
-    stalledTimeoutSeconds: config.scheduler.stalledTimeoutSeconds,
-    errorBackoffMs: config.errorBackoffMs,
-    maxErrorBackoffMs: DEFAULT_MAX_ERROR_BACKOFF_MS,
-    clock: systemClock,
-    logger,
-  });
-
-  logger.info('commitment scheduler enabled', {
-    intervalMs: config.scheduler.intervalMs,
-    batchSize: config.scheduler.batchSize,
-    stalledTimeoutSeconds: config.scheduler.stalledTimeoutSeconds,
-  });
-
-  return scheduler.runLoop(signal).catch((error: unknown) => {
-    // Defensive: `runLoop` is internally guarded, but the Worker must never die of a scheduler.
-    logger.error('commitment scheduler loop failed unexpectedly', {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  });
-}
-
 async function main(): Promise<void> {
   const config = loadWorkerConfig();
   const databaseConfig = loadDatabaseConfig();
@@ -146,6 +87,19 @@ async function main(): Promise<void> {
   });
   const controller = new AbortController();
 
+  // P0-C3B Consent integration seam (single object, four gates).
+  //
+  // The authority wired here simultaneously arms: the orchestrator's versioned pre-read fence,
+  // the reader's pre- and post-read fence re-verification, the transaction-scoped publication
+  // guard inside `PostgresCommitmentRepository`, and the scheduler startup gate. Lane C has not
+  // landed durable Consent persistence yet, so this is the deny-all placeholder and every one of
+  // those gates fails closed.
+  //
+  // The whole integration is replacing this one binding with a P0-C3C `resolveGeneration`
+  // authority wrapped in `fromResolvedGenerationConsent(...)`; no gate changes when it lands.
+  const consentAuthority = createUnavailableConsentAuthority();
+  const consentGate = evaluateSchedulerConsentGate(consentAuthority);
+
   registerShutdown(controller, logger);
 
   logger.info('worker starting', {
@@ -165,6 +119,8 @@ async function main(): Promise<void> {
     sentinelPolicyVersion: config.sentinel.policyVersion,
     credentialBrokerBound: true,
     schedulerEnabled: config.scheduler.enabled,
+    consentReady: consentGate.ready,
+    consentReadiness: consentGate.reason,
     ...(config.mode === 'poll' ? { claimableKinds } : {}),
   });
 
@@ -177,6 +133,7 @@ async function main(): Promise<void> {
       pool,
       logger,
       signal: controller.signal,
+      consent: consentAuthority,
     });
 
     const reaper = runReaperLoop({
@@ -268,8 +225,12 @@ async function main(): Promise<void> {
           });
 
     // P0-C3B execution runtime: authoritative PostgreSQL commitment store, consent-gated source
-    // reader, guarded orchestrator and the occurrence-aware run handler.
-    const commitmentStore = new PostgresCommitmentRepository(pool);
+    // reader, guarded orchestrator and the occurrence-aware run handler. The store carries the
+    // transaction-scoped Consent publication guard, so an Outcome can only be appended while the
+    // same authority reports active Consent.
+    const commitmentStore = new PostgresCommitmentRepository(pool, {
+      consentPublicationGuard: createCommitmentConsentPublicationGuard(consentAuthority),
+    });
 
     const commitmentHandler = createCommitmentRunHandler({
       contextReader,
@@ -280,11 +241,12 @@ async function main(): Promise<void> {
             commitmentStore.findAuthoritativeOutcome(grant, query),
           appendOutcomeIfAbsent: (grant, cmd) => commitmentStore.appendOutcomeIfAbsent(grant, cmd),
         },
-        // Lane C's merged code has only an in-memory FakeConsentRegistry. Until its durable
-        // authority and revocation transaction arrive, source reads and Outcome publication both
-        // fail closed (the Postgres repository has a deny-all default publication guard).
+        // Consumed exactly like Lane C's durable authority will be: the orchestrator captures a
+        // versioned fence before the read and re-verifies it immediately before publication. The
+        // placeholder rejects both calls, so nothing is read and nothing is published.
+        consent: consentAuthority,
         sourceReader: new CommitmentSourceReader({
-          consent: createUnavailableConsentAuthority(),
+          consent: consentAuthority,
           logger,
         }),
         budget: budgetLedger,

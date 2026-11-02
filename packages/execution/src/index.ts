@@ -131,3 +131,19 @@ export {
   type TrustedSourceAccessContext,
   type WorkerLeaseGrant,
 } from './commitment-orchestrator.js';
+export {
+  assertFenceMatches,
+  CONSENT_FENCE_DIGEST_REGEX,
+  CONSENT_GRANT_ID_MAX_CHARS,
+  consentDenied,
+  fromResolvedGenerationConsent,
+  isConsentFenceAuthority,
+  isResolvedGenerationConsentAuthority,
+  parseConsentFence,
+  toConsentDenied,
+  type AuthorizedConsentGenerationView,
+  type ConsentAuthorizationFence,
+  type ConsentFenceAuthority,
+  type ResolvedGenerationAdapterOptions,
+  type ResolvedGenerationConsentAuthority,
+} from './commitment-consent.js';

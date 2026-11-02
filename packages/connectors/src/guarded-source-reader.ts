@@ -12,7 +12,15 @@
  * - Privacy-preserving audit logging with zero network calls asserted.
  */
 
-import { createSourceAuditRecord } from './audit.js';
+import { createSourceAuditRecord, SAFE_DENIAL_DESCRIPTIONS } from './audit.js';
+import {
+  deriveConsentStatus,
+  isConsentAuthority,
+  SOURCE_READ_OPERATION,
+  SOURCE_READ_SCOPE,
+  validateConsentAuthorizationFence,
+  type ConsentFenceValidation,
+} from './consent.js';
 import {
   createCancelledError,
   createInvalidArgumentError,
@@ -28,9 +36,12 @@ import {
 import { evaluateSourceAccess } from './source-policy.js';
 import {
   SOURCE_PROFILE_ID_REGEX,
+  type AuthorizedConsentGeneration,
+  type ConsentAuthority,
   type ConsentRegistry,
   type SourceAccessPolicy,
   type SourceAuditSink,
+  type SourceDenialCode,
   type SourceProfile,
   type SourceReader,
   type SourceSnapshot,
@@ -44,7 +55,30 @@ export interface GuardedSourceReaderOptions {
   readonly policy: SourceAccessPolicy;
   readonly auditSink?: SourceAuditSink;
   readonly nowProvider?: () => Date;
+  /**
+   * Optional authoritative generation source used to verify authorization fences. Defaults to the
+   * registry when it implements `ConsentAuthority` (the fake registry does). Production wiring MUST
+   * pass the durable consent repository here.
+   */
+  readonly authority?: ConsentAuthority;
+  /**
+   * When true, a read without an authorization fence is denied. Default false to preserve the
+   * pre-fence contract; production should enable it once the scheduler always attaches a fence.
+   */
+  readonly requireAuthorizationFence?: boolean;
 }
+
+const MISSING_FENCE: ConsentFenceValidation = Object.freeze({
+  valid: false,
+  code: 'CONSENT_FENCE_MISSING',
+  denialCode: 'CONSENT_FENCE_MISSING',
+});
+
+const NO_FENCE_REQUIRED: ConsentFenceValidation = Object.freeze({
+  valid: true,
+  code: 'VALID',
+  denialCode: null,
+});
 
 export class GuardedSourceReader implements SourceReader {
   private readonly reader: SourceReader;
@@ -53,6 +87,8 @@ export class GuardedSourceReader implements SourceReader {
   private readonly policy: SourceAccessPolicy;
   private readonly auditSink?: SourceAuditSink;
   private readonly nowProvider: () => Date;
+  private readonly authority: ConsentAuthority | null;
+  private readonly requireAuthorizationFence: boolean;
 
   constructor(options: GuardedSourceReaderOptions) {
     if (!options || !options.reader || !options.registry || !options.policy || !options.profiles) {
@@ -66,6 +102,68 @@ export class GuardedSourceReader implements SourceReader {
     this.policy = options.policy;
     this.auditSink = options.auditSink;
     this.nowProvider = options.nowProvider ?? (() => new Date());
+    this.authority =
+      options.authority ?? (isConsentAuthority(options.registry) ? options.registry : null);
+    this.requireAuthorizationFence = options.requireAuthorizationFence === true;
+  }
+
+  /**
+   * Resolves the authoritative consent generation for the caller's lineage.
+   * Fails closed: an unavailable or throwing authority yields `null` (never a grant).
+   */
+  private async resolveAuthoritativeGeneration(
+    tenantId: string,
+    sourceProfileId: string,
+    now: Date,
+  ): Promise<AuthorizedConsentGeneration | null> {
+    if (this.authority === null) {
+      return null;
+    }
+    try {
+      const generation = await this.authority.resolveGeneration(tenantId, sourceProfileId, now);
+      if (generation === null || typeof generation !== 'object') {
+        return null;
+      }
+      return generation;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Verifies the caller's authorization fence against AUTHORITATIVE consent state.
+   *
+   * A fence is never proof of authorization on its own: the referenced `grantId` + `grantVersion`
+   * must still be the current, active generation for the bound tenant and source profile. Optional
+   * fences are therefore only skipped when the caller supplied none and the fence is not required.
+   */
+  private async verifyAuthorizationFence(
+    sourceProfileId: string,
+    context: TrustedSourceAccessContext,
+    now: Date,
+  ): Promise<ConsentFenceValidation> {
+    const fence = context.authorizationFence;
+    if (fence === undefined || fence === null) {
+      return this.requireAuthorizationFence ? MISSING_FENCE : NO_FENCE_REQUIRED;
+    }
+    if (this.authority === null) {
+      // Unverifiable fence: fail closed rather than trusting caller-supplied state.
+      return MISSING_FENCE;
+    }
+
+    const authoritative = await this.resolveAuthoritativeGeneration(
+      context.tenantId,
+      sourceProfileId,
+      now,
+    );
+
+    return validateConsentAuthorizationFence({
+      fence,
+      tenantId: context.tenantId,
+      sourceProfileId,
+      authoritative,
+      now,
+    });
   }
 
   private validateContext(context: TrustedSourceAccessContext): void {
@@ -206,7 +304,8 @@ export class GuardedSourceReader implements SourceReader {
       context,
       grant,
       policy: this.policy,
-      operation: 'read_snapshot',
+      operation: SOURCE_READ_OPERATION,
+      requiredScopes: [SOURCE_READ_SCOPE],
       now,
     });
 
@@ -226,6 +325,30 @@ export class GuardedSourceReader implements SourceReader {
       }
       // Fail closed immediately. The underlying reader is NEVER invoked.
       throw createPolicyDeniedError(decision.reason, decision.denialCode);
+    }
+
+    // 3.5 Authorization fence verification against AUTHORITATIVE consent state.
+    // A worker-supplied fence is untrusted input: the referenced generation must still be the
+    // current, active generation for this tenant and source profile.
+    if (context.authorizationFence !== undefined || this.requireAuthorizationFence) {
+      const fenceResult = await this.verifyAuthorizationFence(sourceProfileId, context, now);
+      if (!fenceResult.valid) {
+        const denialCode: SourceDenialCode = fenceResult.denialCode ?? 'CONSENT_FENCE_INVALID';
+        if (this.auditSink) {
+          this.auditSink.record(
+            createSourceAuditRecord({
+              tenantId: context.tenantId,
+              commitmentId: context.commitmentId,
+              taskId: context.taskId,
+              sourceProfileId,
+              decision: 'DENIED',
+              denialCode,
+              now,
+            }),
+          );
+        }
+        throw createPolicyDeniedError(SAFE_DENIAL_DESCRIPTIONS[denialCode], denialCode);
+      }
     }
 
     // 4. Cancellation check prior to dispatch
@@ -319,12 +442,13 @@ export class GuardedSourceReader implements SourceReader {
 
     // Re-verify that the consent grant was not revoked or expired while the read was running
     const postGrant = this.registry.get(context.tenantId, sourceProfileId, postNow);
-    if (
-      !postGrant ||
-      postGrant.status !== 'active' ||
-      postGrant.revokedAt !== null ||
-      (postGrant.expiresAt !== null && new Date(postGrant.expiresAt) <= postNow)
-    ) {
+    const postStatus = postGrant === null ? null : deriveConsentStatus(postGrant, postNow);
+
+    // Re-verify the authorization generation too: a revoke followed by a re-grant during the read
+    // must still discard this snapshot, because the fenced generation is no longer authoritative.
+    const postFence = await this.verifyAuthorizationFence(sourceProfileId, context, postNow);
+
+    if (postStatus !== 'active' || !postFence.valid) {
       // Consent was revoked or expired mid-read! Discard the snapshot immediately.
       if (this.auditSink) {
         this.auditSink.record(

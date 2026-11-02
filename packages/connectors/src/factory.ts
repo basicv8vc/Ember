@@ -10,6 +10,7 @@ import { FakeSourceReader } from './fake-source-reader.js';
 import { FIXTURE_PROFILE_ALERTS, FIXTURE_PROFILE_RELEASES } from './fixtures.js';
 import { GuardedSourceReader } from './guarded-source-reader.js';
 import type {
+  ConsentAuthority,
   ConsentRegistry,
   SourceAccessPolicy,
   SourceAuditSink,
@@ -25,6 +26,10 @@ export interface CreateFakeGuardedSourceReaderOptions {
   readonly fixtureMap?: Map<string, readonly SourceSnapshotItem[]>;
   readonly simulatedLatencyMs?: number;
   readonly nowProvider?: () => Date;
+  /** Optional authoritative generation source for authorization fence verification. */
+  readonly authority?: ConsentAuthority;
+  /** When true, reads without an authorization fence are denied (production posture). */
+  readonly requireAuthorizationFence?: boolean;
 }
 
 export interface FakeGuardedSourceReaderBundle {
@@ -73,6 +78,8 @@ export function createFakeGuardedSourceReader(
     policy,
     auditSink,
     nowProvider: options.nowProvider,
+    authority: options.authority,
+    requireAuthorizationFence: options.requireAuthorizationFence,
   });
 
   return {

@@ -6,8 +6,12 @@ struct ConversationComposer: View {
     let isGenerating: Bool
     let onSend: (String) -> Void
 
+    private var submission: ConversationComposerSubmission? {
+        ConversationInteractionRules.submission(for: draft, isGenerating: isGenerating)
+    }
+
     private var canSend: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isGenerating
+        submission != nil
     }
 
     var body: some View {
@@ -70,8 +74,9 @@ struct ConversationComposer: View {
     }
 
     private func sendIfPossible() {
-        guard canSend else { return }
-        focused.wrappedValue = false
-        onSend(draft)
+        guard let submission else { return }
+        draft = submission.draftAfterSubmission
+        focused.wrappedValue = submission.composerShouldFocusAfterSubmission
+        onSend(submission.message)
     }
 }

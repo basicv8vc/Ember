@@ -453,16 +453,19 @@ Round-3 evidence: the two new grant cases and the two read-gate cases were run a
 CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`, 10 steps: Lint, Check formatting,
 Typecheck, Unit, Build, Migrate ×2, Integration, Chaos, E2E, Demo CLI smoke):
 
-| Field        | Value                                                                                          |
-| ------------ | ---------------------------------------------------------------------------------------------- |
-| Code commit  | `514cd151dfa5d31f6f40f95bcbcffbea1332718a` (implementation + this report + migration comments) |
-| Base SHA     | `14a3f30fd2e48501dfe941747b9ab5b916878932` (`main`, PR #83)                                    |
-| Run 1 (code) | [`41442921738`](https://github.com/basicv8vc/Ember/actions/runs/41442921738) — **PASS**        |
-| Run 2 (docs) | [`41443602008`](https://github.com/basicv8vc/Ember/actions/runs/41443602008) — **PASS**        |
-| Run 3 (docs) | [`41444213883`](https://github.com/basicv8vc/Ember/actions/runs/41444213883) — **PASS**        |
+| Field           | Value                                                                                                                                         |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| Code commit     | `514cd151dfa5d31f6f40f95bcbcffbea1332718a` (implementation + this report + migration comments)                                                |
+| Base SHA        | `14a3f30fd2e48501dfe941747b9ab5b916878932` (`main`, PR #83)                                                                                   |
+| Run 1 (code)    | [`41442921738`](https://github.com/basicv8vc/Ember/actions/runs/41442921738) — **PASS**                                                       |
+| Run 2 (docs)    | [`41443602008`](https://github.com/basicv8vc/Ember/actions/runs/41443602008) — **PASS**                                                       |
+| Run 3 (docs)    | [`41444213883`](https://github.com/basicv8vc/Ember/actions/runs/41444213883) — **PASS**                                                       |
+| Run 4 (docs)    | [`41444960256`](https://github.com/basicv8vc/Ember/actions/runs/41444960256) — **PASS**                                                       |
+| Run 5 (round 3) | [`41452775221`](https://github.com/basicv8vc/Ember/actions/runs/41452775221) — **PASS** on `2d46c93` (replay fix, read gate, #62 integration) |
 
-Every local gate above ran on the code commit. Runs 2 and 3 cover commits that change documentation
-and SQL comments only (`0cb03d6`, `8dd0459`). Live status is `gh pr checks 84`.
+Every local gate above ran on the code commit. Runs 2–4 cover commits that change documentation and SQL
+comments only (`0cb03d6`, `8dd0459`, `7f0d6be`); run 5 covers the Round-3 code and integration changes.
+Live status is `gh pr checks 84`.
 
 ---
 

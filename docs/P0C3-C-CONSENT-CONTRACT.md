@@ -626,13 +626,28 @@ the test, so the invariant cannot silently regress.
 
 ### 10.4 CI evidence (CTO round 2, generation binding)
 
-| Field    | Value                                                                                                                  |
-| -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| Head SHA | `b7353cbb0aefebd5937a8d95d599800f5c9d2ada` (PR #83 head)                                                               |
-| Base SHA | `a7842f2b2d6fde09ceb27d8dae41d7c2d8ac67bb` (`main`)                                                                    |
-| Workflow | `Verify (Node 24 LTS + PostgreSQL 17)`                                                                                 |
-| Run 1    | [`41413396816`](https://github.com/basicv8vc/Ember/actions/runs/41413396816) — code commit `f62b864`, **PASS** (2m12s) |
-| Run 2    | [`41413883848`](https://github.com/basicv8vc/Ember/actions/runs/41413883848) — docs commit `b7353cb`, **PASS** (3m11s) |
+Every gate and CI run below was executed on the **code** commit; the commits that follow it on
+`feature/p0c-3c-consent-security` change only this document.
+
+| Field       | Value                                                                                                       |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| Code commit | `f62b86491f5a01bb6411fd0f5f4fd9f973cf1ff3` (validator + reader gates + tests + kit case C-13)               |
+| Base SHA    | `a7842f2b2d6fde09ceb27d8dae41d7c2d8ac67bb` (`main`)                                                         |
+| Workflow    | `Verify (Node 24 LTS + PostgreSQL 17)`                                                                      |
+| Run 1       | [`41413396816`](https://github.com/basicv8vc/Ember/actions/runs/41413396816) — `f62b864` — **PASS** (2m12s) |
+| Run 2       | [`41413883848`](https://github.com/basicv8vc/Ember/actions/runs/41413883848) — `b7353cb` — **PASS** (3m11s) |
+| Run 3       | [`41414426116`](https://github.com/basicv8vc/Ember/actions/runs/41414426116) — `9335bf7` — **PASS**         |
+
+Each run executed: Lint, Check formatting, Typecheck (strict), Unit tests, Build, Migrate database
+(first run + idempotent re-run), Integration tests (real PostgreSQL), Chaos tests, End-to-end tests
+(real HTTP + PostgreSQL), Demo CLI smoke. Live status: `gh pr checks 83`.
+
+-------- | ---------------------------------------------------------------------------------------------------------------------- |
+| Head SHA | `b7353cbb0aefebd5937a8d95d599800f5c9d2ada` (PR #83 head) |
+| Base SHA | `a7842f2b2d6fde09ceb27d8dae41d7c2d8ac67bb` (`main`) |
+| Workflow | `Verify (Node 24 LTS + PostgreSQL 17)` |
+| Run 1 | [`41413396816`](https://github.com/basicv8vc/Ember/actions/runs/41413396816) — code commit `f62b864`, **PASS** (2m12s) |
+| Run 2 | [`41413883848`](https://github.com/basicv8vc/Ember/actions/runs/41413883848) — docs commit `b7353cb`, **PASS** (3m11s) |
 
 Both runs executed: Lint, Check formatting, Typecheck (strict), Unit tests, Build, Migrate database
 (first run + idempotent re-run), Integration tests (real PostgreSQL), Chaos tests, End-to-end tests

@@ -39,7 +39,7 @@
 		666666666666666666666666 /* EmberUITests */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
 			exceptions = (
-				B00000000000000000000005 /* Exclude UI test documentation resources */,
+				B00000000000000000000005 /* Exclude duplicate UI test README resources */,
 			);
 			path = EmberUITests;
 			sourceTree = "<group>";
@@ -62,7 +62,7 @@
 			);
 			target = 777777777777777777777777 /* Ember */;
 		};
-		B00000000000000000000005 /* Exclude UI test documentation resources */ = {
+		B00000000000000000000005 /* Exclude duplicate UI test README resources */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				"DesignSystem/Evidence/README.md",

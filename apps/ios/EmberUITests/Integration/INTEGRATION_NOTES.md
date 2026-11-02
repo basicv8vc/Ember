@@ -15,7 +15,7 @@ The Task Journey keeps its `MOCK ONLY` disclosure visible in Compose, Inbox and 
 
 ## UI automation entry
 
-`MockTaskJourneyLaunchUITests` covers the forced onboarding path, direct Task Journey entry and the English receipt-to-session-Inbox path. These tests are compiled by `build-for-testing`; this integration pass does not execute XCTest or launch a Simulator.
+`MockTaskJourneyLaunchUITests` covers the forced onboarding path, direct Task Journey entry, the English receipt-to-session-Inbox path and Unknown ACK replay without creating a second session task. These tests are compiled by `build-for-testing`; this integration pass does not execute XCTest or launch a Simulator.
 
 ## Localization
 

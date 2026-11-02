@@ -1,5 +1,11 @@
 import SwiftUI
 
+private struct MockReceiptPresentation: Identifiable {
+    let taskID: UUID
+
+    var id: UUID { taskID }
+}
+
 @MainActor
 enum AppCompositionRoot {
     static func makeRootView() -> some View {
@@ -13,8 +19,7 @@ private struct IntegratedAppRootView: View {
     @State private var session = TaskJourneySession()
     @State private var enteredFromOnboarding = false
     @State private var shownReceiptTaskIDs: Set<UUID> = []
-    @State private var receiptTaskID: UUID?
-    @State private var isShowingReceipt = false
+    @State private var receiptPresentation: MockReceiptPresentation?
 
     private let forceOnboarding: Bool
     private let startInTaskFlow: Bool
@@ -46,13 +51,9 @@ private struct IntegratedAppRootView: View {
         .onChange(of: session.records.map(\.id)) { _, _ in
             presentReceiptForNewSessionTask()
         }
-        .sheet(isPresented: $isShowingReceipt, onDismiss: {
-            receiptTaskID = nil
-        }) {
-            if let receiptTaskID {
-                MockReceiptAcknowledgementView(taskID: receiptTaskID) {
-                    isShowingReceipt = false
-                }
+        .sheet(item: $receiptPresentation, onDismiss: presentReceiptForNewSessionTask) { presentation in
+            MockReceiptAcknowledgementView(taskID: presentation.taskID) {
+                receiptPresentation = nil
             }
         }
     }
@@ -63,13 +64,14 @@ private struct IntegratedAppRootView: View {
     }
 
     private func presentReceiptForNewSessionTask() {
+        guard receiptPresentation == nil else { return }
+
         guard let record = session.records.first(where: { record in
             guard case .createdInThisSession = record.origin else { return false }
             return !shownReceiptTaskIDs.contains(record.id)
         }) else { return }
 
         shownReceiptTaskIDs.insert(record.id)
-        receiptTaskID = record.id
-        isShowingReceipt = true
+        receiptPresentation = MockReceiptPresentation(taskID: record.id)
     }
 }

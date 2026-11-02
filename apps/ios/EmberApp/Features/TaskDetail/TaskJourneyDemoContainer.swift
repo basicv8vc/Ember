@@ -15,8 +15,10 @@ struct TaskJourneyDemoContainer: View {
             mockOnlyBanner
             TabView(selection: $selectedTab) {
                 NavigationStack {
-                    TaskComposeView(session: session) { _ in
-                        selectedTab = .inbox
+                    TaskComposeView(session: session) { receipt in
+                        if session.records.contains(where: { $0.id == receipt.taskID }) {
+                            selectedTab = .inbox
+                        }
                     }
                 }
                 .tabItem { Label("新任务", systemImage: "square.and.pencil") }

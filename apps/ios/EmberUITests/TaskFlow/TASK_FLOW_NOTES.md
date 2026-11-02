@@ -2,7 +2,14 @@
 
 This directory is reserved for Task Flow UI automation. The feature is currently exposed as the self-contained `TaskJourneyDemoContainer` SwiftUI preview because the App composition root is Lead-owned and this task does not modify it. The running app therefore does not launch this flow yet.
 
-Open `TaskJourneyDemoContainer.swift` in Xcode and select either **Task Flow · Light** or **Task Flow · Dark · Large Text** in the preview canvas. The container injects `FakeTaskRepository` and the bundled `MockScenarioProvider`; it has no production transport or account.
+## Compose acknowledgement behavior
+
+- A valid receipt moves the compose flow to **已接收**. A new 202-style receipt and a 200-style replay stay distinct, and neither means the task is complete.
+- A lost or invalid receipt shows **尚未确认**, keeps the submitted note and idempotency key frozen in memory, and offers an exact same-key retry. Transport errors, timeouts, 5xx responses, and unclassified errors are treated as ambiguous.
+- Only local preflight failures and explicit server rejections are definite failures. They keep the note editable; a retry allocates a fresh key, including after an idempotency conflict. User-facing errors use fixed copy and never include a repository error description or note text.
+- A valid create receipt remains accepted if the follow-up task snapshot/event read fails; the flow stays on Compose when no Inbox record could be hydrated, so it does not invite a duplicate POST.
+
+Open `TaskJourneyDemoContainer.swift` in Xcode and select either **Task Flow · Light** or **Task Flow · Dark · Large Text** in the preview canvas. The container injects the local mock repository and the bundled `MockScenarioProvider`; it has no production transport or account.
 
 ## Manual preview walkthrough
 
@@ -24,3 +31,5 @@ Open `TaskJourneyDemoContainer.swift` in Xcode and select either **Task Flow · 
 ## Current validation boundary
 
 The view and its light/dark/large-text previews compile in the shared `Ember` scheme. Visual screenshots, dynamic-type inspection, and UI automation of this container require the Lead-owned route above; until then, record them as **NOT RUN**. The existing `LaunchSmokeUITests` only covers the current Foundation launch screen.
+
+Focused `EmberTests/TaskExperience/TaskComposeSubmissionModelTests.swift` covers accepted receipts, transport and 5xx failures after possible acceptance, malformed-receipt recovery, exact same-key replay, definite conflict recovery with a fresh key, duplicate-submit prevention, follow-up-read failure after receipt, and error-text redaction.

@@ -538,14 +538,15 @@ export interface ExistingTaskDispatcher {
 }
 
 /**
- * Async pre-read consent dependency for the Worker. Lane C currently exports only its
- * process-local FakeConsentRegistry; the durable implementation must be wired before P0-C3B
- * can publish Outcomes. The PostgreSQL publication gate is a separate transaction-scoped
- * dependency and must consume the same upstream persistence contract.
+ * Async pre-read consent dependency for the Worker.
+ *
+ * This is `ConsentReadGate` — a boolean verdict, deliberately NOT the canonical
+ * `ConsentAuthority`: it can authorize a source read but can never prove which generation did,
+ * so it can never satisfy a publication fence. The authoritative generation port lives in
+ * `./consent.js` (`ConsentAuthority.resolveGeneration`) and is implemented by the durable
+ * PostgreSQL consent repository.
  */
-export interface ConsentAuthority {
-  assertActive(tenantId: Id, sourceProfileId: SourceProfileId): Promise<void>;
-}
+export type { ConsentReadGate, ConsentAuthority } from './consent.js';
 
 export interface DueCommitmentStore {
   findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]>;
@@ -603,14 +604,11 @@ export interface DueCommitmentStore {
   reconcileTerminalOccurrences(limit: number): Promise<number>;
 }
 
-export interface TrustedSourceAccessContext {
-  readonly tenantId: Id;
-  readonly commitmentId: Id;
-  readonly taskId: Id;
-  readonly runId: Id;
-  readonly leaseEpoch: number;
-  readonly authorizedAt: string;
-}
+/**
+ * Re-exported from the canonical Consent contract so every consumer (connectors, execution,
+ * worker, postgres) shares ONE definition, including the optional `authorizationFence`.
+ */
+export type { TrustedSourceAccessContext } from './consent.js';
 
 export interface SourceReader {
   readSnapshot(

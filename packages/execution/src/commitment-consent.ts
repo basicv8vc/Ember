@@ -1,4 +1,13 @@
-import type { ConsentAuthority } from '@ember/contracts';
+import {
+  computeConsentFenceDigest,
+  CONSENT_FENCE_DIGEST_REGEX,
+  CONSENT_GRANT_ID_MAX_CHARS,
+  isConsentAuthority,
+  type AuthorizedConsentGeneration,
+  type ConsentAuthority,
+  type ConsentAuthorizationFence,
+  type ConsentReadGate,
+} from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 
 /**
@@ -6,13 +15,12 @@ import { DomainError, type Id } from '@ember/domain';
  *
  * ## Contract ownership
  *
- * The Consent contract is owned by P0-C3C (`docs/P0C3-C-CONSENT-CONTRACT.md`,
- * `@ember/connectors`). This module deliberately does **not** define a competing contract: the
- * fence below is a field-for-field structural mirror of `@ember/connectors`'
- * `ConsentAuthorizationFence`, the `resolveGeneration`-shaped authority view mirrors
- * `AuthorizedConsentGeneration`, and {@link fromResolvedGenerationConsent} is the single adapter
- * that binds a P0-C3C `ConsentAuthority` to the Worker's gates. When P0-C3C lands on this branch
- * these local declarations are replaced by imports with no call-site change.
+ * The Consent contract is owned by P0-C3C (`docs/P0C3-C-CONSENT-CONTRACT.md`) and is now defined
+ * ONCE in `@ember/contracts` (`consent.ts`): `ConsentGrant`, `AuthorizedConsentGeneration`,
+ * `ConsentAuthorizationFence`, `ConsentAuthority.resolveGeneration` and
+ * `TrustedSourceAccessContext.authorizationFence`. This module imports those definitions instead of
+ * mirroring them, so a fence minted here is byte-identical to one minted by the connector perimeter
+ * and comparable to the generation the durable store persists.
  *
  * ## Why a fence and not a boolean
  *
@@ -30,40 +38,15 @@ import { DomainError, type Id } from '@ember/domain';
  * P0-C3B therefore treats `digest` as opaque and never trusts it.
  */
 
-/** Mirrors P0-C3C `CONSENT_GRANT_ID_MAX_CHARS`. */
-export const CONSENT_GRANT_ID_MAX_CHARS = 128;
-
-/** Mirrors P0-C3C `CONSENT_FENCE_DIGEST_REGEX` (SHA-256 hex over the canonical fence body). */
-export const CONSENT_FENCE_DIGEST_REGEX = /^[0-9a-f]{64}$/;
-
-/**
- * Versioned proof that a Source Profile Consent generation authorized a read.
- *
- * Structural twin of P0-C3C `ConsentAuthorizationFence`. `grantVersion` is opaque to the Worker
- * except for equality: it is whatever the durable Consent store emits, and the Worker never
- * derives it.
- */
-export interface ConsentAuthorizationFence {
-  readonly tenantId: Id;
-  readonly sourceProfileId: string;
-  /** Identity of the authorization unit (P0-C3C generation). Distinguishes re-grant cycles. */
-  readonly grantId: string;
-  /** Monotonic generation version. Must be a positive integer. */
-  readonly grantVersion: number;
-  /** RFC 3339 timestamp of the authorization decision (audit metadata, not a freshness gate). */
-  readonly issuedAt: string;
-  /** SHA-256 hex integrity digest. Optional here: P0-C3C always mints it, and it never authorizes. */
-  readonly digest?: string;
-}
-
 /**
  * Consent authority that can issue and re-verify a versioned authorization fence.
  *
- * `ConsentAuthority` (in `@ember/contracts`) remains the minimal async verdict port; this extended
- * port is what the orchestrator needs in order to bind a read to one generation. Every method
- * MUST fail closed with `POLICY_DENIED` when Consent is missing, revoked, expired, or unreadable.
+ * `ConsentReadGate` (in `@ember/contracts`) remains the minimal pre-read verdict port; this
+ * extended port is what the orchestrator needs in order to bind a read to one generation. Every
+ * method MUST fail closed with `POLICY_DENIED` when Consent is missing, revoked, expired, or
+ * unreadable.
  */
-export interface ConsentFenceAuthority extends ConsentAuthority {
+export interface ConsentFenceAuthority extends ConsentReadGate {
   /** Returns the fence of the currently active generation, or rejects with `POLICY_DENIED`. */
   authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence>;
 
@@ -100,42 +83,25 @@ export function isConsentFenceAuthority(value: unknown): value is ConsentFenceAu
 /**
  * Authoritative view of the CURRENT consent generation for a lineage.
  *
- * Structural twin of P0-C3C `AuthorizedConsentGeneration`. `status` is the EFFECTIVE status: an
- * active record whose `expiresAt` has passed reports `expired` without the row being rewritten.
+ * Alias of the canonical `AuthorizedConsentGeneration` from `@ember/contracts`, kept so existing
+ * call sites keep compiling while there is exactly one definition in the codebase.
  */
-export interface AuthorizedConsentGenerationView {
-  readonly grantId: string;
-  readonly version: number;
-  readonly tenantId: string;
-  readonly sourceProfileId: string;
-  readonly status: 'active' | 'revoked' | 'expired';
-  readonly expiresAt: string | null;
-}
+export type AuthorizedConsentGenerationView = AuthorizedConsentGeneration;
 
 /**
- * Read-only authority over persisted consent generations (P0-C3C shape).
+ * Read-only authority over persisted consent generations.
  *
- * This is the port Agent A's durable PostgreSQL store implements and `FakeConsentRegistry`
- * implements for tests. Resolving synchronously or asynchronously is allowed so an authoritative
- * database read can be awaited without weakening the generation check.
+ * Alias of the canonical `ConsentAuthority`. Agent A's durable PostgreSQL store implements it and
+ * `FakeConsentRegistry` implements it for tests. Resolving synchronously or asynchronously is
+ * allowed so an authoritative database read can be awaited without weakening the check.
  */
-export interface ResolvedGenerationConsentAuthority {
-  resolveGeneration(
-    tenantId: string,
-    sourceProfileId: string,
-    now?: Date,
-  ): AuthorizedConsentGenerationView | null | Promise<AuthorizedConsentGenerationView | null>;
-}
+export type ResolvedGenerationConsentAuthority = ConsentAuthority;
 
-/** True when the value exposes P0-C3C's `resolveGeneration` read port. */
+/** True when the value exposes the canonical `resolveGeneration` read port. */
 export function isResolvedGenerationConsentAuthority(
   value: unknown,
 ): value is ResolvedGenerationConsentAuthority {
-  return (
-    value !== null &&
-    typeof value === 'object' &&
-    typeof (value as Record<string, unknown>).resolveGeneration === 'function'
-  );
+  return isConsentAuthority(value);
 }
 
 /** Options for {@link fromResolvedGenerationConsent}. */
@@ -199,13 +165,17 @@ export function fromResolvedGenerationConsent(
     ): Promise<ConsentAuthorizationFence> {
       const generation = await resolveActive(tenantId, sourceProfileId);
 
-      return parseConsentFence({
+      // Minted with the canonical digest, so a fence produced here is byte-identical to one
+      // produced by the connector perimeter for the same generation.
+      const body = {
         tenantId,
         sourceProfileId,
         grantId: generation.grantId,
         grantVersion: generation.version,
         issuedAt: now().toISOString(),
-      });
+      };
+
+      return parseConsentFence({ ...body, digest: computeConsentFenceDigest(body) });
     },
 
     async assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
@@ -267,21 +237,13 @@ export function parseConsentFence(value: unknown): ConsentAuthorizationFence {
     throw consentDenied('Consent authorization fence has no authorization timestamp');
   }
 
-  // A digest that is present must be well formed, but it is never an authorization input.
-  if (digest !== undefined) {
-    if (typeof digest !== 'string' || !CONSENT_FENCE_DIGEST_REGEX.test(digest)) {
-      throw consentDenied('Consent authorization fence carries a malformed integrity digest');
-    }
+  // The canonical fence always carries a digest. A fence without one is not a fence: it cannot
+  // even prove it was minted by an authority, so it is refused rather than repaired.
+  if (typeof digest !== 'string' || !CONSENT_FENCE_DIGEST_REGEX.test(digest)) {
+    throw consentDenied('Consent authorization fence carries a malformed integrity digest');
   }
 
-  return {
-    tenantId,
-    sourceProfileId,
-    grantId,
-    grantVersion,
-    issuedAt,
-    ...(digest === undefined ? {} : { digest }),
-  };
+  return { tenantId, sourceProfileId, grantId, grantVersion, issuedAt, digest };
 }
 
 /**

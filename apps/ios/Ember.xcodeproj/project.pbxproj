@@ -62,11 +62,12 @@
 			);
 			target = 777777777777777777777777 /* Ember */;
 		};
-		B00000000000000000000005 /* Exclude duplicate UI test README resources */ = {
+		B00000000000000000000005 /* Exclude UI test documentation resources */ = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				"DesignSystem/Evidence/README.md",
 				"TaskFlow/README.md",
+				"TaskFlow/TASK_FLOW_NOTES.md",
 				"Integration/INTEGRATION_NOTES.md",
 			);
 			target = 999999999999999999999999 /* EmberUITests */;

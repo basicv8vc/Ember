@@ -67,7 +67,7 @@ final class TaskJourneySession {
             selectedTaskID = records.first?.id
         } catch {
             self.repository = nil
-            startupError = "模拟资料暂不可用。此演示没有连接服务端。"
+            startupError = "演示资料暂不可用。此页面没有连接云端服务。"
         }
     }
 
@@ -275,14 +275,14 @@ final class TaskJourneySession {
 
     private static func scenarioTitle(_ scenarioID: MockScenarioID) -> String {
         switch scenarioID {
-        case .receipt: "接收回执 fixture"
-        case .queued: "排队中 fixture"
-        case .running: "处理中 fixture"
-        case .completed: "完成与样例成果 fixture"
-        case .missingResult: "完成但无成果 fixture"
-        case .disconnectedReconnected: "连接恢复 fixture"
-        case .cancelRace: "取消竞态 fixture"
-        case .approvalUnavailable: "审批不可用 fixture"
+        case .receipt: "接收回执 · 演示"
+        case .queued: "等待处理 · 演示"
+        case .running: "处理中 · 演示"
+        case .completed: "完成与结果样例 · 演示"
+        case .missingResult: "完成但无结果 · 演示"
+        case .disconnectedReconnected: "连接恢复 · 演示"
+        case .cancelRace: "取消状态 · 演示"
+        case .approvalUnavailable: "等待确认 · 演示"
         }
     }
 }

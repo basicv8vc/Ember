@@ -39,20 +39,20 @@ struct TaskInboxView: View {
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
                 Menu {
-                    Button("演示空历史", systemImage: "tray") { session.showInboxMode(.noHistory) }
-                    Button("演示 401 · 需要认证", systemImage: "person.crop.circle.badge.exclamationmark") {
+                    Button("显示空历史", systemImage: "tray") { session.showInboxMode(.noHistory) }
+                    Button("显示需要登录状态", systemImage: "person.crop.circle.badge.exclamationmark") {
                         session.showInboxMode(.unauthorized)
                     }
-                    Button("演示 404 · 任务不可见", systemImage: "questionmark.folder") {
+                    Button("显示任务不可见状态", systemImage: "questionmark.folder") {
                         session.showInboxMode(.notFound)
                     }
-                    Button("演示离线", systemImage: "wifi.slash") { session.showInboxMode(.offline) }
-                    Button("返回本地演示列表", systemImage: "arrow.uturn.backward") {
+                    Button("显示离线状态", systemImage: "wifi.slash") { session.showInboxMode(.offline) }
+                    Button("返回演示列表", systemImage: "arrow.uturn.backward") {
                         session.showInboxMode(.localSession)
                     }
                 } label: {
                     Image(systemName: "ellipsis.circle")
-                        .accessibilityLabel("演示异常状态")
+                        .accessibilityLabel("更多演示状态")
                 }
                 .accessibilityIdentifier("inbox-demo-states-menu")
             }
@@ -61,9 +61,9 @@ struct TaskInboxView: View {
 
     private var header: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("当前安装 / 演示会话")
+            Text("本次演示会话")
                 .font(.title2.weight(.semibold))
-            Text("这里不是云端完整 Inbox，也不跨设备同步。新建任务只保存在本次内存会话；下方状态样例是各自独立的模拟 fixture。")
+            Text("任务只保存在本机内存中，不会同步到云端或其他设备。下方是互不关联的固定演示样例。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -78,7 +78,7 @@ struct TaskInboxView: View {
             if sessionRecords.isEmpty {
                 contentNotice(
                     title: "本次会话还没有新任务",
-                    message: "可以从“新任务”提交一个本地 mock 回执，或选择下面独立的状态 fixture。",
+                    message: "可以从“新任务”提交笔记，或查看下方独立的演示样例。",
                     symbol: "tray"
                 )
                 .accessibilityIdentifier("inbox-empty-state")
@@ -94,21 +94,21 @@ struct TaskInboxView: View {
         case .noHistory:
             contentNotice(
                 title: "没有可恢复的历史任务",
-                message: "这个演示没有云端 Inbox 或持久化记录。返回后可查看本机 fixture 样例。",
+                message: "本机演示没有云端历史记录或持久化记录。返回后可查看固定样例。",
                 symbol: "tray"
             )
             .accessibilityIdentifier("inbox-empty-state")
         case .unauthorized:
             contentNotice(
-                title: "401 · 需要重新认证",
-                message: "这是 UI 状态演示，没有发出认证请求。当前 mock 合同不包含登录或刷新会话能力。",
+                title: "此状态需要登录",
+                message: "这里只展示提示样式，没有发出登录或认证请求。",
                 symbol: "person.crop.circle.badge.exclamationmark"
             )
             .accessibilityIdentifier("inbox-401-state")
         case .notFound:
             contentNotice(
-                title: "404 · 任务不可见或已失效",
-                message: "演示不推断其他用户或租户是否存在该任务，也没有真实查询请求。",
+                title: "任务当前不可见",
+                message: "本机演示没有查询其他用户的任务，也没有发出查询请求。",
                 symbol: "questionmark.folder"
             )
             .accessibilityIdentifier("inbox-404-state")
@@ -124,20 +124,20 @@ struct TaskInboxView: View {
 
     private var fixtureSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("独立状态 fixture")
+            Text("独立演示样例")
                 .font(.headline)
-            Text("每一行都是单独的固定样例，不代表同一个新任务自动推进。")
+            Text("每一项都是单独的固定情景，不代表你提交的任务会自动进入这些状态。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             ForEach(fixtureRecords) { record in
-                taskRow(record, sourceLabel: "模拟 fixture")
+                taskRow(record, sourceLabel: "固定演示样例")
             }
         }
     }
 
     private var demoStateControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("异常状态演示")
+            Text("其他状态示例")
                 .font(.headline)
             ViewThatFits(in: .horizontal) {
                 HStack(spacing: 8) { stateButtons }
@@ -152,9 +152,9 @@ struct TaskInboxView: View {
     private var stateButtons: some View {
         Button("空历史") { session.showInboxMode(.noHistory) }
             .buttonStyle(.bordered)
-        Button("401") { session.showInboxMode(.unauthorized) }
+        Button("需要登录") { session.showInboxMode(.unauthorized) }
             .buttonStyle(.bordered)
-        Button("404") { session.showInboxMode(.notFound) }
+        Button("任务不可见") { session.showInboxMode(.notFound) }
             .buttonStyle(.bordered)
         Button("离线") { session.showInboxMode(.offline) }
             .buttonStyle(.bordered)
@@ -198,7 +198,7 @@ struct TaskInboxView: View {
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("inbox-task-\(record.id.uuidString)")
-        .accessibilityHint("打开模拟任务详情")
+        .accessibilityHint("查看任务详情")
     }
 
     private func contentNotice(title: String, message: String, symbol: String) -> some View {
@@ -210,7 +210,7 @@ struct TaskInboxView: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             if session.inboxMode != .localSession {
-                Button("返回本地演示列表") { session.showInboxMode(.localSession) }
+                Button("返回演示列表") { session.showInboxMode(.localSession) }
                     .font(.subheadline.weight(.semibold))
                     .padding(.top, 2)
             }

@@ -21,7 +21,7 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
         }
         submitButton.tap()
 
-        XCTAssertTrue(app.staticTexts["Local mock receipt"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Local demo receipt"].waitForExistence(timeout: 10))
         app.buttons["mock-receipt-continue"].tap()
         XCTAssertTrue(app.staticTexts["本机会话任务"].waitForExistence(timeout: 10))
     }

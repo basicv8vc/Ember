@@ -25,7 +25,7 @@ struct MockReceiptAcknowledgementView: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                Text("Task ID · \(taskID.uuidString)")
+                Text("任务编号 · \(taskID.uuidString)")
                     .font(.caption.monospaced())
                     .textSelection(.enabled)
                     .accessibilityIdentifier("mock-receipt-task-id")
@@ -52,13 +52,13 @@ struct MockReceiptAcknowledgementView: View {
     }
 
     private var title: String {
-        usesSimplifiedChinese ? "本机模拟回执" : "Local mock receipt"
+        usesSimplifiedChinese ? "本机演示回执" : "Local demo receipt"
     }
 
     private var message: String {
         usesSimplifiedChinese
-            ? "FakeTaskRepository 已在本机返回这项模拟任务的回执。这不代表任务已完成，也没有上传笔记或调用 AI 服务。"
-            : "FakeTaskRepository returned a receipt for this local mock task. The task is not complete, and no note was uploaded or sent to an AI service."
+            ? "本机演示已收到你的提交。任务尚未完成；笔记没有上传，也没有调用云端 AI。"
+            : "The local demo received your submission. The task is not complete; your note was not uploaded or sent to cloud AI."
     }
 
     private var continueTitle: String {

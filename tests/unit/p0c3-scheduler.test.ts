@@ -675,4 +675,94 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
     expect(taskB!.cmd.tenantId).not.toBe(tenantA);
     expect(taskB!.cmd.agentId).not.toBe(agentA);
   });
+
+  // Every business identity field is validated independently at runtime: a single invalid field
+  // must fail closed for that record (even when the adapter typed it as non-nullable), must not
+  // throw mid-loop, and must not stop the remaining occurrences from being reconciled.
+  const invalidIdentityCases: Array<[label: string, override: Record<string, unknown>]> = [
+    ['tenantId is undefined', { tenantId: undefined }],
+    ['agentId is undefined', { agentId: undefined }],
+    ['sourceProfileId is undefined', { sourceProfileId: undefined }],
+    ['sourceProfileId is blank', { sourceProfileId: '   ' }],
+    ['scheduleKind is unknown', { scheduleKind: 'daily' }],
+  ];
+
+  it.each(invalidIdentityCases)(
+    'P1-1 Fail-Closed: stalled occurrence is never dispatched when %s',
+    async (_label, override) => {
+      const store = new InMemoryDueCommitmentStore();
+      const dispatcher = new InMemoryTaskDispatcher();
+      const scheduler = new CommitmentScheduler(store, dispatcher, {
+        enabled: true,
+        stalledTimeoutSeconds: 60,
+      });
+
+      const oldTime = new Date(Date.now() - 240 * 1000);
+      const malformedOccId = `occ-invalid-${randomUUID()}`;
+      const validOccId = `occ-valid-${randomUUID()}`;
+
+      store.occurrences.set(malformedOccId, {
+        occurrenceId: malformedOccId,
+        commitmentId: 'c-invalid',
+        scheduledFor: oldTime,
+        status: 'pending',
+        taskId: null,
+        createdAt: oldTime,
+      });
+
+      store.occurrences.set(validOccId, {
+        occurrenceId: validOccId,
+        commitmentId: 'c-valid',
+        scheduledFor: oldTime,
+        status: 'pending',
+        taskId: null,
+        createdAt: oldTime,
+      });
+
+      const validOccurrence: StalledPendingOccurrence = {
+        occurrenceId: validOccId,
+        commitmentId: 'c-valid',
+        tenantId: 'tenant-valid',
+        agentId: 'agent-valid',
+        sourceProfileId: 'profile-valid',
+        scheduleKind: 'once',
+        scheduledFor: oldTime,
+        createdAt: oldTime,
+        taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(validOccId),
+      };
+
+      // Non-conforming adapter: exactly one identity field is unusable at runtime.
+      const malformedOccurrence = {
+        occurrenceId: malformedOccId,
+        commitmentId: 'c-invalid',
+        tenantId: 'tenant-invalid',
+        agentId: 'agent-invalid',
+        sourceProfileId: 'profile-invalid',
+        scheduleKind: 'once',
+        scheduledFor: oldTime,
+        createdAt: oldTime,
+        taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(malformedOccId),
+        ...override,
+      } as unknown as StalledPendingOccurrence;
+
+      store.findStalledPendingOccurrences = () =>
+        Promise.resolve([malformedOccurrence, validOccurrence]);
+
+      // Must not throw and must keep reconciling the remaining (valid) record.
+      const reconciledCount = await scheduler.reconcileStalled();
+
+      expect(reconciledCount).toBe(1);
+      expect(dispatcher.dispatchCount).toBe(1);
+      expect(dispatcher.dispatchedTasks.has(deriveTaskCreationIdempotencyKey(malformedOccId))).toBe(
+        false,
+      );
+      expect(dispatcher.dispatchedTasks.has(deriveTaskCreationIdempotencyKey(validOccId))).toBe(
+        true,
+      );
+
+      const malformed = store.occurrences.get(malformedOccId)!;
+      expect(malformed.status).toBe('pending');
+      expect(malformed.taskId).toBeNull();
+    },
+  );
 });

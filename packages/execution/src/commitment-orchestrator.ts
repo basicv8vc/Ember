@@ -37,6 +37,12 @@ export interface CommitmentOrchestrationContext {
   readonly occurrenceId: Id;
   readonly sourceProfileId: string;
   readonly scheduleKind: 'once' | 'interval';
+  /**
+   * Sentinel policy version.
+   *
+   * Optional in the type only so that legacy/unversioned callers are rejected **fail-closed** at
+   * runtime (`DENY_INVALID_INTENT` -> `POLICY_DENIED`) instead of silently defaulting to `1`.
+   */
   readonly policyVersion?: number;
   readonly consentStatus?: 'active' | 'revoked';
 }

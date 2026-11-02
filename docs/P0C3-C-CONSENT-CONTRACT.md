@@ -624,6 +624,15 @@ suite re-run:
 A "zero reader invocations" assertion plus an exact denial code means no other code path can satisfy
 the test, so the invariant cannot silently regress.
 
+### 10.4 CI evidence (CTO round 2, generation binding)
+
+| Field    | Value                                                                                                                                                                                                 |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Commit   | `f62b86491f5a01bb6411fd0f5f4fd9f973cf1ff3` (head of PR #83)                                                                                                                                           |
+| Workflow | `Verify (Node 24 LTS + PostgreSQL 17)`                                                                                                                                                                |
+| Run      | [`41413396816`](https://github.com/basicv8vc/Ember/actions/runs/41413396816)                                                                                                                          |
+| Result   | **PASS** in 2m12s (Lint, Check formatting, Typecheck (strict), Unit tests, Build, Migrate database (first run + idempotent re-run), Integration tests, Chaos tests, End-to-end tests, Demo CLI smoke) |
+
 ---
 
 ## 11. Limitations and Security Notes

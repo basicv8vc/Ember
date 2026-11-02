@@ -77,6 +77,27 @@ export function deriveTaskCreationIdempotencyKey(occurrenceId: Id): string {
 }
 
 /**
+ * Runtime validation of a recovered occurrence identity.
+ *
+ * Recovery is only allowed when ALL FOUR business identity fields were actually reconstructed
+ * from the trusted persistent layer. Values are validated at runtime (not just by type) so a
+ * non-conforming adapter returning `undefined`, blank strings or an unknown `scheduleKind`
+ * cannot cause a fabricated dispatch — or a `.trim()` TypeError mid-loop.
+ */
+export function hasRecoverableOccurrenceIdentity(occurrence: StalledPendingOccurrence): boolean {
+  return (
+    isNonBlankString(occurrence.tenantId) &&
+    isNonBlankString(occurrence.agentId) &&
+    isNonBlankString(occurrence.sourceProfileId) &&
+    (occurrence.scheduleKind === 'once' || occurrence.scheduleKind === 'interval')
+  );
+}
+
+function isNonBlankString(value: unknown): value is string {
+  return typeof value === 'string' && value.trim().length > 0;
+}
+
+/**
  * Builds canonical commitment task input with semantic parity between regular dispatch
  * and crash recovery.
  */
@@ -191,11 +212,14 @@ export interface TrustedSourceAccessContext {
 
 /**
  * Read-only SourceReader port consumed by Lane B from Lane C.
+ *
+ * `signal` is mandatory to match the merged `@ember/connectors` contract: cancellation must be
+ * observable by every reader, so it is never optional.
  */
 export interface SourceReader {
   readSnapshot(
     profileId: string,
     trustedContext: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot>;
 }

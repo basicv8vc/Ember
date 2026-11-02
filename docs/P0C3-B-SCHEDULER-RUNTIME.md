@@ -18,10 +18,11 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
    - Stalled pending occurrences recover original `tenantId`, `agentId`, `sourceProfileId`, and `scheduleKind` from persistent storage.
    - Dispatch and recovery share identical canonical task payloads (`buildCommitmentTaskInput`) with deterministic idempotency keys (`commitment-occ:${occurrenceId}`).
    - Cross-tenant isolation is strictly preserved across crash recoveries.
-   - Fail-closed identity recovery: if the trusted layer cannot reconstruct the original identities, the occurrence is never dispatched under a synthetic tenant/agent; it stays `pending` for operator attention.
+   - Fail-closed identity recovery: **all four** business identity fields (`tenantId`, `agentId`, `sourceProfileId`, `scheduleKind`) are validated at runtime before dispatch. A missing/blank/unknown value (including `undefined` that would otherwise throw on `.trim()`) skips that record, leaves it `pending`, and reconciliation continues with the remaining occurrences.
 2. **P1-2: Sentinel Gate Fails Closed**:
    - Removed permissive bypass when `sentinelPolicy` was omitted.
    - Unconfigured, invalid, version-mismatched, or tenant-mismatched Sentinel policies reject with `POLICY_DENIED`.
+   - A missing or malformed `context.policyVersion` is itself a denial (`DENY_INVALID_INTENT`); the previous `?? 1` fallback (which could accidentally match a version-1 policy) is gone.
    - Denied requests guarantee strictly: **0 source callbacks, 0 budget reservations, and 0 outcome writes**.
 3. **P1-3: Outcome Replay Authorization Enforced**:
    - Eliminated unauthenticated `store.findOutcome(occurrenceId)` pre-execution shortcut.
@@ -32,6 +33,9 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
 4. **Additional Fixes**:
    - Removed hardcoded `attempt: 1` in `RunGrant`; `attempt` is now dynamically propagated from `WorkerLeaseGrant.attempt` (sourced from authoritative `LeasedRun.attempt`).
    - Clarified test documentation regarding PostgreSQL lease queue/budget ledger testing vs. structural store contract validation.
+5. **Round 2 Follow-up (Lane C alignment)**:
+   - `AbortSignal` is now **mandatory** end-to-end: `SourceReaderPort.readSnapshot(profileId, trustedContext, signal: AbortSignal)` and `CommitmentOrchestrator.execute(grant, context, signal: AbortSignal)` match the merged `@ember/connectors` contract.
+   - `execute()` rejects a missing/invalid signal with `INVALID_ARGUMENT` **before** any source read, budget reservation or outcome write; an already-aborted signal yields `CANCELLED` with the same zero-side-effect guarantee.
 
 ---
 
@@ -48,6 +52,8 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
   - Guarded occurrence orchestrator.
   - Fail-closed Sentinel admission gate evaluated before any side effects or lookups.
   - Authoritative replay check (`findAuthoritativeOutcome`) validating tenant, task, lease epoch, commitment state, and consent.
+  - Mandatory cooperative cancellation: `execute(grant, context, signal: AbortSignal)`; a missing signal is rejected (`INVALID_ARGUMENT`) before any side effect.
+  - Fail-closed Sentinel version handling: a missing/invalid `policyVersion` is denied instead of defaulting to `1`.
   - Transactional budget reservation (`budget.reserve`), execution, lease-fenced outcome append (`appendOutcomeIfAbsent`), and budget settlement (`budget.settle`).
   - Terminal completion marking for one-shot schedules (`scheduleKind === 'once'`).
 - [`packages/execution/src/index.ts`](file:///Users/lj/Downloads/Ember/worktrees.local/feature-p0c-3b-promise-runtime/packages/execution/src/index.ts):
@@ -83,7 +89,7 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
 | **Typecheck**         | `pnpm typecheck`        | **PASS (0)** | `tsc -p tsconfig.json` exit 0                                                                    |
 | **Build**             | `pnpm build`            | **PASS (0)** | `tsc -b tsconfig.build.json` exit 0                                                              |
 | **Format**            | `pnpm format:check`     | **PASS (0)** | Prettier checked, all files match code style                                                     |
-| **Unit Tests**        | `pnpm test:unit`        | **PASS (0)** | **55/55 test files passed, 957/957 tests passed**                                                |
+| **Unit Tests**        | `pnpm test:unit`        | **PASS (0)** | **55/55 test files passed, 960/960 tests passed**                                                |
 | **Integration Tests** | `pnpm test:integration` | **PASS (0)** | **30/30 test files passed, 295/295 tests passed** (real PostgreSQL)                              |
 | **Chaos Tests**       | `pnpm test:chaos`       | **PASS (0)** | **6/6 test files passed, 30/30 tests passed** (real SIGKILL & lease fencing)                     |
 | **E2E Tests**         | `pnpm test:e2e`         | **PASS (0)** | **8/8 test files passed, 13/13 tests passed**                                                    |
@@ -91,20 +97,23 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
 
 ### 3.2 Specific P0-C3 Test Coverage & P1 Regressions
 
-1. **Unit: Scheduler Logic (`tests/unit/p0c3-scheduler.test.ts` - 7 tests)**
+1. **Unit: Scheduler Logic (`tests/unit/p0c3-scheduler.test.ts` - 8 tests)**
    - Polls due commitments and dispatches tasks with stable idempotency keys.
    - Dual-scheduler tick race: only one scheduler reserves each occurrence slot; second scheduler safely skips.
    - Stalled occurrence crash recovery: reconciles pending slots without duplicating task dispatches.
    - **P1-1 Regression**: Verified `reconcileStalled()` restores original `tenantId` and `agentId` (no `'system'`), enforces semantic payload parity with `buildCommitmentTaskInput`, and strictly maintains cross-tenant isolation.
    - **P1-1 Regression (fail-closed)**: an occurrence whose original identity cannot be recovered from the trusted layer is never dispatched; 0 task dispatches and the occurrence remains `pending`.
+   - **P1-1 Regression (runtime validation)**: a record with missing `sourceProfileId` / unknown `scheduleKind` (including `undefined`, which would previously throw on `.trim()`) is skipped without aborting the loop, while the valid record in the same batch is still dispatched with the fully-validated identity.
 
-2. **Unit: Guarded Runtime (`tests/unit/p0c3-commitment-runtime.test.ts` - 16 tests)**
+2. **Unit: Guarded Runtime (`tests/unit/p0c3-commitment-runtime.test.ts` - 18 tests)**
    - **C3-T05 Sentinel Deny Invariant**: Explicit deny policy results in strictly 0 budget reservations, 0 source callbacks, 0 outcome writes.
    - **P1-2 Sentinel Fail-Closed**:
      - Unconfigured Sentinel policy -> throws `POLICY_DENIED`, 0 side effects.
      - Invalid/malformed policy (schema violation) -> throws `POLICY_DENIED`, 0 side effects.
+     - **Missing `policyVersion`** (even against a valid version-1 policy) -> throws `POLICY_DENIED`, 0 side effects.
      - Policy version mismatch -> throws `POLICY_DENIED`, 0 side effects.
      - Tenant ID mismatch -> throws `POLICY_DENIED`, 0 side effects.
+   - **AbortSignal Contract**: missing signal -> `INVALID_ARGUMENT` before any source read; already-aborted signal -> `CANCELLED`; both with 0 source reads, 0 budget reservations, 0 outcome writes.
    - **Prompt Injection Defense**: Adversarial prompt injection payloads in source items are parsed strictly as passive string data, length-bounded to 2000 chars, with zero command execution.
    - **P1-3 Outcome Replay Authorization**:
      - Stale worker lease epoch on replay -> throws `STALE_LEASE`.
@@ -122,7 +131,7 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
    - **Scope limit**: occurrence/outcome persistence is exercised through a structural contract double. PostgreSQL-level outcome fencing is therefore **not** asserted by Lane B; it is implemented and must be verified inside Lane A's `CommitmentStorePort` (PR #56).
 
 4. **Chaos: Fault Injection & Process Crashes (`tests/chaos/p0c3-worker.test.ts` - 3 tests)**
-   - **Chaos 1 (Worker Crash After Slot Reservation)**: Process crash simulated before task dispatch; recovering scheduler heals the pending slot using original tenant/agent context without duplicate tasks.
+   - **Chaos 1 (Worker Crash After Slot Reservation)**: Process crash simulated before task dispatch; recovering scheduler heals the pending slot using the original `tenantId` / `agentId` / `sourceProfileId` / `scheduleKind` without duplicate tasks.
    - **Chaos 2 (Lease Fencing Takeover)**: Worker 1 lease expires; Worker 2 takes over and commits epoch 2. Worker 1 wakes up and attempts late write; rejected with `STALE_LEASE`.
    - **Chaos 3 (Transient Database Outage)**: Simulated DB drop during scheduler tick triggers exponential backoff without crashing the worker process or corrupting scheduler state.
 
@@ -179,6 +188,9 @@ Lane B structural ports are finalized and require Lane A to provide the followin
      - returns `NULL` when no outcome row exists so execution proceeds.
    - A lookup keyed only on `occurrence_id` is explicitly rejected: it would leak a stored summary across tenants/tasks/leases.
    - The port method is optional. If Lane A cannot satisfy this contract in PR #56, Lane B simply omits it and relies on the transactional `appendOutcomeIfAbsent` fencing above (no pre-execution replay shortcut exists).
+6. **Lane C (`@ember/connectors`) Reader Contract**:
+   - `SourceReader.readSnapshot(profileId, trustedContext, signal: AbortSignal)` is now mandatory-signal on both sides (Lane B port and orchestrator), matching the merged connectors package. Lane C implementations must honor the signal (abort promptly) and never accept an omitted signal argument.
+   - Lane B rejects a missing/invalid signal with `INVALID_ARGUMENT` before any source read, so contract drift fails closed instead of silently degrading cancellation.
 
 ---
 

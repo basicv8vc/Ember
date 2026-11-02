@@ -163,15 +163,21 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
       workerId: WORKER_ID,
     };
 
-    const executionResult = await orchestrator.execute(grant, {
-      tenantId: tenant.tenantId,
-      agentId: agent.agentId,
-      commitmentId,
-      occurrenceId,
-      sourceProfileId: 'profile-public-tech',
-      scheduleKind: 'once',
-      policyVersion: 1,
-    });
+    const signal = new AbortController().signal;
+
+    const executionResult = await orchestrator.execute(
+      grant,
+      {
+        tenantId: tenant.tenantId,
+        agentId: agent.agentId,
+        commitmentId,
+        occurrenceId,
+        sourceProfileId: 'profile-public-tech',
+        scheduleKind: 'once',
+        policyVersion: 1,
+      },
+      signal,
+    );
 
     expect(executionResult.outcomeCommitted).toBe(true);
     expect(executionResult.replayed).toBe(false);
@@ -180,15 +186,19 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
     expect(commitmentMarkedCompleted).toBe(true);
 
     // Replay attempt returns replayed: true and doesn't duplicate outcome
-    const replayResult = await orchestrator.execute(grant, {
-      tenantId: tenant.tenantId,
-      agentId: agent.agentId,
-      commitmentId,
-      occurrenceId,
-      sourceProfileId: 'profile-public-tech',
-      scheduleKind: 'once',
-      policyVersion: 1,
-    });
+    const replayResult = await orchestrator.execute(
+      grant,
+      {
+        tenantId: tenant.tenantId,
+        agentId: agent.agentId,
+        commitmentId,
+        occurrenceId,
+        sourceProfileId: 'profile-public-tech',
+        scheduleKind: 'once',
+        policyVersion: 1,
+      },
+      signal,
+    );
 
     expect(replayResult.outcomeCommitted).toBe(false);
     expect(replayResult.replayed).toBe(true);

@@ -24,6 +24,9 @@ import { createTestDatabase, type TestDatabase } from '../integration/support/da
 import { createTenantFixture, type TenantFixture } from '../integration/support/fixtures.js';
 import { createChaosPrng, dumpFailureDiagnostics, globalFaultRecorder } from './harness/index.js';
 
+/** Mandatory cooperative-cancellation signal (aligned with `@ember/connectors`). */
+const chaosSignal = new AbortController().signal;
+
 interface LocalOccurrence {
   occurrenceId: string;
   commitmentId: string;
@@ -278,28 +281,38 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
     };
 
     // Worker 2 finishes first and commits
-    const worker2Result = await orchestrator.execute(worker2Grant, {
-      tenantId: tenant.tenantId,
-      agentId: tenant.principalId,
-      commitmentId,
-      occurrenceId,
-      sourceProfileId: 'profile-fencing',
-      scheduleKind: 'interval',
-    });
-
-    expect(worker2Result.outcomeCommitted).toBe(true);
-    expect(committedOutcomes.size).toBe(1);
-
-    // Stale Worker 1 wakes up and attempts to commit -> MUST THROW STALE_LEASE!
-    await expect(
-      orchestrator.execute(worker1Grant, {
+    const worker2Result = await orchestrator.execute(
+      worker2Grant,
+      {
         tenantId: tenant.tenantId,
         agentId: tenant.principalId,
         commitmentId,
         occurrenceId,
         sourceProfileId: 'profile-fencing',
         scheduleKind: 'interval',
-      }),
+        policyVersion: 1,
+      },
+      chaosSignal,
+    );
+
+    expect(worker2Result.outcomeCommitted).toBe(true);
+    expect(committedOutcomes.size).toBe(1);
+
+    // Stale Worker 1 wakes up and attempts to commit -> MUST THROW STALE_LEASE!
+    await expect(
+      orchestrator.execute(
+        worker1Grant,
+        {
+          tenantId: tenant.tenantId,
+          agentId: tenant.principalId,
+          commitmentId,
+          occurrenceId,
+          sourceProfileId: 'profile-fencing',
+          scheduleKind: 'interval',
+          policyVersion: 1,
+        },
+        chaosSignal,
+      ),
     ).rejects.toThrowError(expect.objectContaining({ code: 'STALE_LEASE' }));
 
     // Verify still exactly 1 visible outcome

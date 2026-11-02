@@ -83,10 +83,17 @@ export interface CommitmentStorePort {
 }
 
 export interface SourceReaderPort {
+  /**
+   * Reads a bounded source snapshot under a trusted, server-derived access context.
+   *
+   * Aligned with Lane C `@ember/connectors`: `signal` is **mandatory** so cooperative
+   * cancellation always reaches the reader. The orchestrator refuses to call this without a
+   * live `AbortSignal`.
+   */
   readSnapshot(
     profileId: string,
     trustedContext: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot>;
 }
 
@@ -139,9 +146,18 @@ export class CommitmentOrchestrator {
   public async execute(
     grant: WorkerLeaseGrant,
     context: CommitmentOrchestrationContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<OrchestrationResult> {
-    if (signal?.aborted) {
+    // Fail-closed on a missing/invalid AbortSignal: never reach a source read, budget
+    // reservation or outcome write without cooperative cancellation wired end-to-end.
+    if (!isAbortSignal(signal)) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'Occurrence execution requires a live AbortSignal before any side effect',
+      );
+    }
+
+    if (signal.aborted) {
       throw new DomainError('CANCELLED', 'Occurrence execution was aborted before start');
     }
 
@@ -181,14 +197,14 @@ export class CommitmentOrchestrator {
     const cost = { steps: 1, units: 1, elapsedMs: 20, concurrencySlots: 0 };
 
     if (this.budget) {
-      if (signal?.aborted) {
+      if (signal.aborted) {
         throw new DomainError('CANCELLED', 'Execution aborted before budget reservation');
       }
       await this.budget.reserve(runGrant, { operationId, cost });
     }
 
     try {
-      if (signal?.aborted) {
+      if (signal.aborted) {
         if (this.budget) {
           await this.budget.release(runGrant, { operationId }).catch(() => undefined);
         }
@@ -270,12 +286,24 @@ export class CommitmentOrchestrator {
     grant: WorkerLeaseGrant,
     context: CommitmentOrchestrationContext,
   ): void {
+    // A missing or malformed policy version is itself a denial: defaulting to 1 could
+    // accidentally match a version-1 policy and let an unversioned request through.
+    const policyVersion = resolvePolicyVersion(context.policyVersion);
+    if (policyVersion === null) {
+      throw toSentinelDeniedError({
+        verdict: 'deny',
+        reasonCode: 'DENY_INVALID_INTENT',
+        actionCategory: 'mock.compute',
+        policyVersion: 0,
+      });
+    }
+
     if (!this.sentinelPolicyResolver) {
       throw toSentinelDeniedError({
         verdict: 'deny',
-        reason: 'DENY_INVALID_POLICY',
+        reasonCode: 'DENY_INVALID_POLICY',
         actionCategory: 'mock.compute',
-        policyVersion: context.policyVersion ?? 1,
+        policyVersion,
       });
     }
 
@@ -287,9 +315,9 @@ export class CommitmentOrchestrator {
     if (!policy) {
       throw toSentinelDeniedError({
         verdict: 'deny',
-        reason: 'DENY_INVALID_POLICY',
+        reasonCode: 'DENY_INVALID_POLICY',
         actionCategory: 'mock.compute',
-        policyVersion: context.policyVersion ?? 1,
+        policyVersion,
       });
     }
 
@@ -298,7 +326,7 @@ export class CommitmentOrchestrator {
       runId: grant.runId,
       taskId: grant.taskId,
       actionCategory: 'mock.compute' as const,
-      policyVersion: context.policyVersion ?? 1,
+      policyVersion,
     };
 
     const decision = evaluateSentinelPolicy(policy, intent);
@@ -306,4 +334,31 @@ export class CommitmentOrchestrator {
       throw toSentinelDeniedError(decision);
     }
   }
+}
+
+/**
+ * Normalizes an untrusted policy version. Missing, non-integer, or out-of-range values are
+ * rejected (`null`) so they cannot silently match a default policy version.
+ */
+function resolvePolicyVersion(value: unknown): number | null {
+  if (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= 1 &&
+    value <= Number.MAX_SAFE_INTEGER
+  ) {
+    return value;
+  }
+  return null;
+}
+
+/**
+ * Runtime shape check for the mandatory cooperative-cancellation signal.
+ */
+function isAbortSignal(value: unknown): value is AbortSignal {
+  if (value === null || typeof value !== 'object') {
+    return false;
+  }
+  const candidate = value as { aborted?: unknown; addEventListener?: unknown };
+  return typeof candidate.aborted === 'boolean' && typeof candidate.addEventListener === 'function';
 }

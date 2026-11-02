@@ -488,6 +488,82 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
     expect(occ.taskId).toBeNull();
   });
 
+  it('P1-1 Fail-Closed: malformed identity is rejected at runtime while valid records still reconcile', async () => {
+    const store = new InMemoryDueCommitmentStore();
+    const dispatcher = new InMemoryTaskDispatcher();
+    const scheduler = new CommitmentScheduler(store, dispatcher, {
+      enabled: true,
+      stalledTimeoutSeconds: 60,
+    });
+
+    const oldTime = new Date(Date.now() - 300 * 1000);
+    const validOccId = 'occ-valid';
+    const malformedOccId = 'occ-malformed';
+
+    const validOccurrence: StalledPendingOccurrence = {
+      occurrenceId: validOccId,
+      commitmentId: 'c-valid',
+      tenantId: 'tenant-valid',
+      agentId: 'agent-valid',
+      sourceProfileId: 'profile-valid',
+      scheduleKind: 'interval',
+      scheduledFor: oldTime,
+      createdAt: oldTime,
+      taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(validOccId),
+    };
+
+    // Non-conforming adapter: sourceProfileId missing entirely and scheduleKind unknown.
+    // Both are typed as non-nullable, so this must be caught by runtime validation.
+    const malformedOccurrence = {
+      occurrenceId: malformedOccId,
+      commitmentId: 'c-malformed',
+      tenantId: 'tenant-malformed',
+      agentId: 'agent-malformed',
+      sourceProfileId: undefined,
+      scheduleKind: 'daily',
+      scheduledFor: oldTime,
+      createdAt: oldTime,
+      taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(malformedOccId),
+    } as unknown as StalledPendingOccurrence;
+
+    store.occurrences.set(validOccId, {
+      occurrenceId: validOccId,
+      commitmentId: 'c-valid',
+      scheduledFor: oldTime,
+      status: 'pending',
+      taskId: null,
+      createdAt: oldTime,
+    });
+
+    store.findStalledPendingOccurrences = () =>
+      Promise.resolve([malformedOccurrence, validOccurrence]);
+
+    // Must not throw (no `.trim()` on undefined) and must keep processing valid records.
+    const reconciledCount = await scheduler.reconcileStalled();
+
+    expect(reconciledCount).toBe(1);
+    expect(dispatcher.dispatchCount).toBe(1);
+    expect(dispatcher.dispatchedTasks.has(deriveTaskCreationIdempotencyKey(validOccId))).toBe(true);
+    expect(dispatcher.dispatchedTasks.has(deriveTaskCreationIdempotencyKey(malformedOccId))).toBe(
+      false,
+    );
+
+    // The dispatched payload only ever contains the trusted, fully-validated identity.
+    const dispatched = dispatcher.dispatchedTasks.get(
+      deriveTaskCreationIdempotencyKey(validOccId),
+    )!;
+    expect(dispatched.cmd.tenantId).toBe('tenant-valid');
+    expect(dispatched.cmd.agentId).toBe('agent-valid');
+    expect(dispatched.cmd.input).toEqual(
+      buildCommitmentTaskInput({
+        commitmentId: 'c-valid',
+        occurrenceId: validOccId,
+        sourceProfileId: 'profile-valid',
+        scheduleKind: 'interval',
+      }),
+    );
+  });
+
   it('P1-1: Crash recovery preserves original tenantId, agentId, payload semantic parity and cross-tenant isolation', async () => {
     const store = new InMemoryDueCommitmentStore();
     const dispatcher = new InMemoryTaskDispatcher();

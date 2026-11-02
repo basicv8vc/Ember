@@ -22,6 +22,12 @@ import type {
   RunGrant,
 } from '@ember/contracts';
 
+/**
+ * Live (never aborted) cooperative-cancellation signal. `execute()` now requires the signal,
+ * matching the merged `@ember/connectors` `readSnapshot(..., signal: AbortSignal)` contract.
+ */
+const TEST_SIGNAL = new AbortController().signal;
+
 class MockCommitmentStore {
   public outcomes = new Map<
     string,
@@ -134,10 +140,10 @@ class MockSourceReader {
   readSnapshot(
     _profileId: string,
     _trustedContext: unknown,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot> {
     this.readCallCount++;
-    if (signal?.aborted) {
+    if (signal.aborted) {
       return Promise.reject(new DomainError('CANCELLED', 'Read snapshot aborted'));
     }
     return Promise.resolve(this.fixtureSnapshot);
@@ -259,7 +265,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
@@ -302,7 +308,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
@@ -352,7 +358,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
@@ -360,6 +366,134 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     expect(sourceReader.readCallCount).toBe(0);
     expect(budget.reserveCallCount).toBe(0);
     expect(store.appendCallCount).toBe(0);
+  });
+
+  it('P1-2 Fail-Closed: Missing policyVersion rejects with 0 side effects', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    // A perfectly valid version-1 policy: the missing context version must still be denied,
+    // otherwise `?? 1` would silently match this policy and let an unversioned request through.
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      // policyVersion intentionally omitted -> MUST FAIL CLOSED!
+    };
+
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    // Assert: zero side effects when the policy version is missing
+    expect(sourceReader.readCallCount).toBe(0);
+    expect(budget.reserveCallCount).toBe(0);
+    expect(store.appendCallCount).toBe(0);
+  });
+
+  it('AbortSignal contract: missing or aborted signal is rejected before any source read', async () => {
+    const tenantId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      policyVersion: 1,
+    };
+
+    // 1. Missing signal (e.g. a JS caller that ignored the mandatory contract)
+    {
+      const store = new MockCommitmentStore();
+      const sourceReader = new MockSourceReader();
+      const budget = new MockBudgetLedger();
+      const orchestrator = new CommitmentOrchestrator({
+        store,
+        sourceReader,
+        budget,
+        sentinelPolicy,
+      });
+
+      const missingSignal = undefined as unknown as AbortSignal;
+
+      await expect(orchestrator.execute(grant, context, missingSignal)).rejects.toThrowError(
+        expect.objectContaining({ code: 'INVALID_ARGUMENT' }),
+      );
+
+      expect(sourceReader.readCallCount).toBe(0);
+      expect(budget.reserveCallCount).toBe(0);
+      expect(store.appendCallCount).toBe(0);
+    }
+
+    // 2. Already-aborted signal
+    {
+      const store = new MockCommitmentStore();
+      const sourceReader = new MockSourceReader();
+      const budget = new MockBudgetLedger();
+      const orchestrator = new CommitmentOrchestrator({
+        store,
+        sourceReader,
+        budget,
+        sentinelPolicy,
+      });
+
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(orchestrator.execute(grant, context, controller.signal)).rejects.toThrowError(
+        expect.objectContaining({ code: 'CANCELLED' }),
+      );
+
+      expect(sourceReader.readCallCount).toBe(0);
+      expect(budget.reserveCallCount).toBe(0);
+      expect(store.appendCallCount).toBe(0);
+    }
   });
 
   it('P1-2 Fail-Closed: Sentinel version mismatch rejects with 0 side effects', async () => {
@@ -401,7 +535,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1, // Mismatch (Version 1 vs 2)!
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
@@ -450,7 +584,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
@@ -499,7 +633,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    const result = await orchestrator.execute(grant, context);
+    const result = await orchestrator.execute(grant, context, TEST_SIGNAL);
 
     expect(result.outcomeCommitted).toBe(true);
     expect(result.replayed).toBe(false);
@@ -598,7 +732,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(staleGrant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(staleGrant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'STALE_LEASE' }),
     );
   });
@@ -644,7 +778,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
     expect(store.outcomes.size).toBe(0);
@@ -690,14 +824,14 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       sentinelPolicy,
     });
 
-    const firstResult = await orchestrator.execute(validGrant, context);
+    const firstResult = await orchestrator.execute(validGrant, context, TEST_SIGNAL);
     expect(firstResult.outcomeCommitted).toBe(true);
 
     // Active lease epoch on task is bumped to 2 (Worker 2 lease takeover)
     store.activeLeaseEpochs.set(taskId, 2);
 
     // Worker 1 wakes up and attempts to replay outcome using old leaseEpoch 1 -> MUST BE REJECTED!
-    await expect(orchestrator.execute(validGrant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(validGrant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'STALE_LEASE' }),
     );
   });
@@ -750,7 +884,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    await orchestratorA.execute(grantA, contextA);
+    await orchestratorA.execute(grantA, contextA, TEST_SIGNAL);
 
     // Tenant B attempts to read/replay Tenant A's outcome using Tenant B's grant
     const orchestratorB = new CommitmentOrchestrator({
@@ -769,7 +903,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     };
 
     // Passing Tenant A context with Tenant B grant
-    await expect(orchestratorB.execute(grantB, contextA)).rejects.toThrowError(
+    await expect(orchestratorB.execute(grantB, contextA, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
   });
@@ -814,13 +948,13 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     };
 
     // First run completes
-    await orchestrator.execute(grant, context);
+    await orchestrator.execute(grant, context, TEST_SIGNAL);
 
     // Commitment is now cancelled
     store.cancelledCommitments.add(commitmentId);
 
     // Replay attempt must fail closed!
-    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
   });
@@ -866,7 +1000,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     };
 
     // First run completes
-    await orchestrator.execute(grant, context);
+    await orchestrator.execute(grant, context, TEST_SIGNAL);
 
     // Consent is subsequently revoked
     const revokedContext = {
@@ -875,7 +1009,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     };
 
     // Replay attempt must fail closed!
-    await expect(orchestrator.execute(grant, revokedContext)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, revokedContext, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
   });
@@ -926,10 +1060,10 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       policyVersion: 1,
     };
 
-    const firstResult = await orchestrator.execute(grant, context);
+    const firstResult = await orchestrator.execute(grant, context, TEST_SIGNAL);
     expect(firstResult.outcomeCommitted).toBe(true);
 
-    const secondResult = await orchestrator.execute(grant, context);
+    const secondResult = await orchestrator.execute(grant, context, TEST_SIGNAL);
     expect(secondResult.outcomeCommitted).toBe(false);
     expect(secondResult.replayed).toBe(true);
 
@@ -980,13 +1114,13 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     };
 
     // First execution
-    const firstResult = await orchestrator.execute(grant, context);
+    const firstResult = await orchestrator.execute(grant, context, TEST_SIGNAL);
     expect(firstResult.outcomeCommitted).toBe(true);
     expect(firstResult.replayed).toBe(false);
     expect(store.outcomes.size).toBe(1);
 
     // Second execution (replayed attempt, e.g. retry after network ACK loss)
-    const secondResult = await orchestrator.execute(grant, context);
+    const secondResult = await orchestrator.execute(grant, context, TEST_SIGNAL);
     expect(secondResult.outcomeCommitted).toBe(false);
     expect(secondResult.replayed).toBe(true);
     expect(store.outcomes.size).toBe(1); // STILL EXACTLY 1 OUTCOME!

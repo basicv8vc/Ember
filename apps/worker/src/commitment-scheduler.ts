@@ -7,6 +7,7 @@ import {
 import {
   buildCommitmentTaskInput,
   deriveTaskCreationIdempotencyKey,
+  hasRecoverableOccurrenceIdentity,
   type DueCommitmentStore,
   type ExistingTaskDispatcher,
 } from './commitment-ports.js';
@@ -166,16 +167,21 @@ export class CommitmentScheduler {
     let reconciledCount = 0;
 
     for (const occurrence of stalled) {
-      // Fail-closed: recovery must never fabricate tenant/agent identity. The persistent
-      // store is the only trustworthy source for the original identities; if it could not
-      // reconstruct them, the occurrence stays pending (visible to operators) rather than
-      // being dispatched under a synthetic or cross-tenant identity.
-      if (occurrence.tenantId.trim().length === 0 || occurrence.agentId.trim().length === 0) {
+      // Fail-closed: recovery must never fabricate identity. All four business identity fields
+      // must be present and valid at runtime; otherwise the occurrence stays pending (visible to
+      // operators) and reconciliation continues with the remaining records.
+      if (!hasRecoverableOccurrenceIdentity(occurrence)) {
         this.logger?.warn?.(
           'Skipping stalled occurrence without recoverable authoritative identity',
           {
             occurrenceId: occurrence.occurrenceId,
             commitmentId: occurrence.commitmentId,
+            hasTenantId: typeof occurrence.tenantId === 'string' && occurrence.tenantId.length > 0,
+            hasAgentId: typeof occurrence.agentId === 'string' && occurrence.agentId.length > 0,
+            hasSourceProfileId:
+              typeof occurrence.sourceProfileId === 'string' &&
+              occurrence.sourceProfileId.length > 0,
+            scheduleKind: occurrence.scheduleKind,
           },
         );
         continue;

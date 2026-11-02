@@ -12,6 +12,7 @@ import {
   SOURCE_SNAPSHOT_LIMITS,
   TEST_TENANT_A,
   TEST_TENANT_B,
+  validateReaderReturnedSnapshot,
   type SourceReader,
   type SourceSnapshot,
   type SourceSnapshotItem,
@@ -29,6 +30,43 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
   };
 
   const defaultSignal = new AbortController().signal;
+
+  /**
+   * Wires a GuardedSourceReader around `reader` with an active consent grant and a fresh audit
+   * sink, so hardening tests can assert on the thrown error and the audit trail together.
+   */
+  const buildHardenedReader = (
+    reader: SourceReader,
+  ): { guarded: GuardedSourceReader; auditSink: InMemorySourceAuditSink } => {
+    const auditSink = new InMemorySourceAuditSink();
+    const registry = new FakeConsentRegistry();
+    registry.grant({ tenantId: TEST_TENANT_A, sourceProfileId: 'sp_ember_releases' });
+
+    const guarded = new GuardedSourceReader({
+      reader,
+      registry,
+      profiles: new Map([[FIXTURE_PROFILE_RELEASES.sourceProfileId, FIXTURE_PROFILE_RELEASES]]),
+      policy: {
+        version: 1,
+        allowedSourceProfileIds: ['sp_ember_releases'],
+        allowedOperations: ['read_snapshot'],
+        defaultAction: 'deny',
+      },
+      auditSink,
+    });
+
+    return { guarded, auditSink };
+  };
+
+  /** Resolves to the rejection reason of `promise`, so tests can inspect error and diagnostic. */
+  const captureRejection = async (promise: Promise<unknown>): Promise<unknown> => {
+    try {
+      await promise;
+    } catch (err) {
+      return err;
+    }
+    return undefined;
+  };
 
   it('proves exactly ZERO reader callbacks on unauthorized or denied attempts', async () => {
     const bundle = createFakeGuardedSourceReader();
@@ -342,55 +380,75 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     expect(auditString).not.toContain('s.987654321xyz');
   });
 
-  it('P1-1 (Round 2): catches DomainError("CANCELLED") with untrusted diagnostic from reader and sanitizes it without leakage', async () => {
-    const leakingCancelledReader: SourceReader = {
+  it('P1-1 (Round 2): derives cancellation only from the trusted AbortSignal and never re-throws an untrusted CANCELLED diagnostic', async () => {
+    const leakedToken = 's.secret_cancel_token';
+
+    // Case A: the trusted, server-owned signal really is aborted while the read is in flight.
+    const abortedCtrl = new AbortController();
+    const genuinelyCancelledReader: SourceReader = {
       readSnapshot(): Promise<SourceSnapshot> {
+        abortedCtrl.abort();
         return Promise.reject(
           new DomainError(
             'CANCELLED',
-            'Sensitive internal diagnostic: token=s.secret_cancel_token in memory',
+            `Sensitive internal diagnostic: token=${leakedToken} in memory`,
           ),
         );
       },
     };
 
-    const auditSink = new InMemorySourceAuditSink();
-    const registry = new FakeConsentRegistry();
-    registry.grant({ tenantId: TEST_TENANT_A, sourceProfileId: 'sp_ember_releases' });
+    const cancelledCase = buildHardenedReader(genuinelyCancelledReader);
+    const cancelledError = await captureRejection(
+      cancelledCase.guarded.readSnapshot('sp_ember_releases', validContext, abortedCtrl.signal),
+    );
 
-    const guarded = new GuardedSourceReader({
-      reader: leakingCancelledReader,
-      registry,
-      profiles: new Map([[FIXTURE_PROFILE_RELEASES.sourceProfileId, FIXTURE_PROFILE_RELEASES]]),
-      policy: {
-        version: 1,
-        allowedSourceProfileIds: ['sp_ember_releases'],
-        allowedOperations: ['read_snapshot'],
-        defaultAction: 'deny',
+    expect(cancelledError).toBeInstanceOf(DomainError);
+    expect((cancelledError as Error).message).toBe('Operation was cancelled');
+
+    // The untrusted diagnostic from the inner reader must NOT be re-thrown or reflected.
+    const cancelledDiag = (cancelledError as DomainError).diagnostic;
+    expect(cancelledDiag).toBe('Snapshot read was aborted during execution');
+    expect(cancelledDiag).not.toContain(leakedToken);
+    expect((cancelledError as Error).stack ?? '').not.toContain(leakedToken);
+
+    const cancelledAudit = cancelledCase.auditSink.getRecords();
+    expect(cancelledAudit).toHaveLength(1);
+    expect(cancelledAudit[0]?.decision).toBe('DENIED');
+    expect(cancelledAudit[0]?.denialCode).toBe('READ_ABORTED');
+    expect(JSON.stringify(cancelledAudit)).not.toContain(leakedToken);
+
+    // Case B: the reader merely *claims* CANCELLED while the trusted signal is still live. Its
+    // `code`, `name`, `message`, and `diagnostic` are adversarial, so cancellation must not be
+    // inferred from them: the read is a sanitized provider failure and no token may leak.
+    const liveCtrl = new AbortController();
+    const spoofingCancelledReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        return Promise.reject(
+          new DomainError('CANCELLED', `Spoofed cancellation: token=${leakedToken} in memory`),
+        );
       },
-      auditSink,
-    });
+    };
 
-    let caughtError: unknown;
-    try {
-      await guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal);
-    } catch (err) {
-      caughtError = err;
-    }
+    const spoofedCase = buildHardenedReader(spoofingCancelledReader);
+    const spoofedError = await captureRejection(
+      spoofedCase.guarded.readSnapshot('sp_ember_releases', validContext, liveCtrl.signal),
+    );
 
-    expect(caughtError).toBeDefined();
-    expect((caughtError as Error).message).toBe('Operation was cancelled');
+    expect(spoofedError).toBeInstanceOf(DomainError);
+    expect((spoofedError as Error).message).toBe('Operation denied by policy');
+    expect(liveCtrl.signal.aborted).toBe(false);
 
-    // Untrusted diagnostic from inner reader must NOT be re-thrown
-    const diag = (caughtError as DomainError).diagnostic;
-    expect(diag).toBe('Snapshot read was aborted during execution');
-    expect(diag).not.toContain('s.secret_cancel_token');
+    const spoofedDiag = (spoofedError as DomainError).diagnostic;
+    expect(spoofedDiag).toBe(
+      'Source reader execution failed; untrusted exception sanitized [code: POLICY_DENIED]',
+    );
+    expect(spoofedDiag).not.toContain(leakedToken);
 
-    // Audit record must be safe
-    const records = auditSink.getRecords();
-    expect(records).toHaveLength(1);
-    expect(records[0]?.decision).toBe('DENIED');
-    expect(records[0]?.denialCode).toBe('READ_ABORTED');
+    const spoofedAudit = spoofedCase.auditSink.getRecords();
+    expect(spoofedAudit).toHaveLength(1);
+    expect(spoofedAudit[0]?.decision).toBe('DENIED');
+    expect(spoofedAudit[0]?.denialCode).toBe('POLICY_DENIED');
+    expect(JSON.stringify(spoofedAudit)).not.toContain(leakedToken);
   });
 
   it('P1-2 (Round 2): does not reflect malicious provider returned sourceProfileId or raw strings in diagnostic or audit', async () => {
@@ -437,9 +495,7 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     // Assert the malicious injection URL is NOT reflected in the diagnostic
     expect(diag).not.toContain('malicious-tracker');
     expect(diag).not.toContain('super_confidential');
-    expect(diag).toBe(
-      'Source reader returned mismatched sourceProfileId [code: UNTRUSTED_CONTENT_DETECTED]',
-    );
+    expect(diag).toBe('Source reader returned invalid snapshot [code: UNTRUSTED_CONTENT_DETECTED]');
 
     // Assert the malicious injection URL is NOT reflected anywhere in the audit sink
     const auditRecords = auditSink.getRecords();
@@ -594,5 +650,187 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     await expect(
       guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
     ).rejects.toThrowError(/Operation denied by policy/i);
+  });
+  // =========================================================================
+  // FINAL SECURITY HARDENING TESTS (THROWING GETTERS & HOSTILE PROXIES)
+  // =========================================================================
+
+  it('Final Hardening: converts throwing snapshot getters, including spoofed DomainError codes and diagnostics, into a fixed safe error without leaking the token', async () => {
+    const leakedToken = 's.getter_leak_secret_token_99999';
+    const expectedUntrustedDiagnostic =
+      'Source reader returned invalid snapshot [code: UNTRUSTED_CONTENT_DETECTED]';
+    let getterInvocations = 0;
+
+    // Case A: a snapshot getter throws a plain Error whose message embeds a secret.
+    const evilPlainSnapshot = {
+      get sourceProfileId(): string {
+        getterInvocations += 1;
+        throw new Error(`Fatal getter failure with vault token ${leakedToken}`);
+      },
+      observedAt: '2026-11-01T12:00:00.000Z',
+      digest: '0000000000000000000000000000000000000000000000000000000000000000',
+      boundedSafeItems: [],
+    } as unknown as SourceSnapshot;
+
+    const plainGetterReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        return Promise.resolve(evilPlainSnapshot);
+      },
+    };
+
+    const plainCase = buildHardenedReader(plainGetterReader);
+    const plainError = await captureRejection(
+      plainCase.guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    );
+
+    expect(plainError).toBeInstanceOf(DomainError);
+    expect((plainError as Error).message).toBe('Operation denied by policy');
+
+    const plainDiag = (plainError as DomainError).diagnostic;
+    expect(plainDiag).toBe(expectedUntrustedDiagnostic);
+    expect(plainDiag).not.toContain(leakedToken);
+    expect(plainDiag).not.toContain('Fatal getter failure');
+    expect((plainError as Error).stack ?? '').not.toContain(leakedToken);
+
+    const plainAudit = plainCase.auditSink.getRecords();
+    expect(plainAudit).toHaveLength(1);
+    expect(plainAudit[0]?.decision).toBe('DENIED');
+    expect(plainAudit[0]?.denialCode).toBe('UNTRUSTED_CONTENT_DETECTED');
+    expect(JSON.stringify(plainAudit)).not.toContain(leakedToken);
+    expect(JSON.stringify(plainAudit[0])).not.toContain('Fatal getter failure');
+
+    // Each untrusted property is read at most once: no time-of-check/time-of-use re-read.
+    expect(getterInvocations).toBe(1);
+
+    // The public throwing façade must not pass the getter exception through either.
+    let facadeError: unknown;
+    try {
+      validateReaderReturnedSnapshot(evilPlainSnapshot, 'sp_ember_releases');
+    } catch (err) {
+      facadeError = err;
+    }
+
+    expect(facadeError).toBeInstanceOf(DomainError);
+    expect((facadeError as DomainError).diagnostic).toBe(expectedUntrustedDiagnostic);
+    expect((facadeError as DomainError).diagnostic).not.toContain(leakedToken);
+    expect(getterInvocations).toBe(2);
+
+    // Case B: the getter throws a DomainError whose diagnostic both embeds the secret and claims
+    // PAYLOAD_LIMIT_EXCEEDED. Believing error.code or scanning error.diagnostic would let the
+    // reader spoof the audit denial code and reflect its own text, so both must be ignored.
+    const spoofedGetterReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        const evilSnapshot = {
+          sourceProfileId: 'sp_ember_releases',
+          observedAt: '2026-11-01T12:00:00.000Z',
+          digest: 'a'.repeat(64),
+          get boundedSafeItems(): readonly SourceSnapshotItem[] {
+            throw new DomainError(
+              'POLICY_DENIED',
+              `Forged diagnostic PAYLOAD_LIMIT_EXCEEDED with vault token ${leakedToken}`,
+            );
+          },
+        } as unknown as SourceSnapshot;
+        return Promise.resolve(evilSnapshot);
+      },
+    };
+
+    const spoofedCase = buildHardenedReader(spoofedGetterReader);
+    const spoofedError = await captureRejection(
+      spoofedCase.guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    );
+
+    expect(spoofedError).toBeInstanceOf(DomainError);
+    expect((spoofedError as Error).message).toBe('Operation denied by policy');
+
+    const spoofedDiag = (spoofedError as DomainError).diagnostic;
+    expect(spoofedDiag).toBe(expectedUntrustedDiagnostic);
+    expect(spoofedDiag).not.toContain('PAYLOAD_LIMIT_EXCEEDED');
+    expect(spoofedDiag).not.toContain('Forged diagnostic');
+    expect(spoofedDiag).not.toContain(leakedToken);
+    expect((spoofedError as Error).stack ?? '').not.toContain(leakedToken);
+
+    const spoofedAudit = spoofedCase.auditSink.getRecords();
+    expect(spoofedAudit).toHaveLength(1);
+    expect(spoofedAudit[0]?.decision).toBe('DENIED');
+    expect(spoofedAudit[0]?.denialCode).toBe('UNTRUSTED_CONTENT_DETECTED');
+    expect(JSON.stringify(spoofedAudit)).not.toContain(leakedToken);
+    expect(JSON.stringify(spoofedAudit[0])).not.toContain('Forged diagnostic');
+  });
+
+  it('Final Hardening: converts an adversarial Error Proxy whose traps throw secrets on any property or prototype access into a fixed safe error', async () => {
+    const leakedToken = 's.proxy_trap_leak_secret_token_88888';
+    const trapInvocations: string[] = [];
+
+    const hostileProxyReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        // Every introspection path a naive sanitizer might use — property read, `in`,
+        // `instanceof` (getPrototypeOf), key enumeration, and descriptor lookup — throws a
+        // token-bearing error.
+        const hostileError = new Proxy(new DomainError('CANCELLED', `token ${leakedToken}`), {
+          get(_target, prop) {
+            trapInvocations.push(`get:${String(prop)}`);
+            throw new Error(
+              `Adversarial proxy trap on get(${String(prop)}) leaking token ${leakedToken}`,
+            );
+          },
+          has(_target, prop) {
+            trapInvocations.push(`has:${String(prop)}`);
+            throw new Error(
+              `Adversarial proxy trap on has(${String(prop)}) leaking token ${leakedToken}`,
+            );
+          },
+          getPrototypeOf() {
+            trapInvocations.push('getPrototypeOf');
+            throw new Error(
+              `Adversarial proxy trap on getPrototypeOf leaking token ${leakedToken}`,
+            );
+          },
+          getOwnPropertyDescriptor(_target, prop) {
+            trapInvocations.push(`getOwnPropertyDescriptor:${String(prop)}`);
+            throw new Error(
+              `Adversarial proxy trap on getOwnPropertyDescriptor(${String(prop)}) leaking token ${leakedToken}`,
+            );
+          },
+          ownKeys() {
+            trapInvocations.push('ownKeys');
+            throw new Error(`Adversarial proxy trap on ownKeys leaking token ${leakedToken}`);
+          },
+        });
+
+        return Promise.reject(hostileError);
+      },
+    };
+
+    const proxiedCase = buildHardenedReader(hostileProxyReader);
+    const caughtError = await captureRejection(
+      proxiedCase.guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    );
+
+    expect(caughtError).toBeInstanceOf(DomainError);
+    expect((caughtError as Error).message).toBe('Operation denied by policy');
+
+    // The trusted signal was never aborted, so a spoofed CANCELLED code must not be believed.
+    expect((caughtError as DomainError).code).toBe('POLICY_DENIED');
+
+    const diag = (caughtError as DomainError).diagnostic;
+    expect(diag).toBe(
+      'Source reader execution failed; untrusted exception sanitized [code: POLICY_DENIED]',
+    );
+    expect(diag).not.toContain(leakedToken);
+    expect(diag).not.toContain('Adversarial proxy trap');
+    expect((caughtError as Error).stack ?? '').not.toContain(leakedToken);
+    expect(JSON.stringify(caughtError)).not.toContain(leakedToken);
+
+    const auditRecords = proxiedCase.auditSink.getRecords();
+    expect(auditRecords).toHaveLength(1);
+    expect(auditRecords[0]?.decision).toBe('DENIED');
+    expect(auditRecords[0]?.denialCode).toBe('POLICY_DENIED');
+    expect(JSON.stringify(auditRecords)).not.toContain(leakedToken);
+    expect(JSON.stringify(auditRecords[0])).not.toContain('Adversarial proxy trap');
+
+    // Proof of the trust boundary: not a single Proxy trap fired, so no property of the thrown
+    // value (code, name, message, diagnostic, prototype, keys) was ever read.
+    expect(trapInvocations).toEqual([]);
   });
 });

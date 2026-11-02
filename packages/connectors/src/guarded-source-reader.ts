@@ -3,8 +3,11 @@
  *
  * Implements the P0-C3C Security & Trust Boundary:
  * - Fail-closed Pre-Read consent and policy authorization gate (0 reader calls on deny).
- * - Untrusted provider exception sanitization (never leak raw error messages, stacks, or URLs).
- * - Rigorous validation of returned snapshots (bounds checking, digest verification, deep immutability).
+ * - Untrusted provider exception sanitization: no error property (`code`, `name`, `message`,
+ *   `stack`, `diagnostic`) is ever read, and true caller cancellation is derived only from the
+ *   trusted server-owned `AbortSignal`.
+ * - Exception-safe validation of returned snapshots (bounds checking, digest verification, deep
+ *   immutability): throwing getters and hostile Proxies become fixed safe errors.
  * - Post-Read double-check consent validation to eliminate mid-read revocation leaks.
  * - Privacy-preserving audit logging with zero network calls asserted.
  */
@@ -15,9 +18,13 @@ import {
   createInvalidArgumentError,
   createNotFoundError,
   createPolicyDeniedError,
-  isDomainError,
 } from './errors.js';
-import { validateReaderReturnedSnapshot } from './sanitizer.js';
+import {
+  inspectReaderReturnedSnapshot,
+  SAFE_SNAPSHOT_REJECTION_DIAGNOSTICS,
+  type ReaderSnapshotInspection,
+  type ReaderSnapshotRejectionCode,
+} from './sanitizer.js';
 import { evaluateSourceAccess } from './source-policy.js';
 import {
   SOURCE_PROFILE_ID_REGEX,
@@ -105,6 +112,59 @@ export class GuardedSourceReader implements SourceReader {
     }
   }
 
+  /**
+   * Inspects the untrusted snapshot returned by the inner reader and either returns a trusted,
+   * deeply frozen snapshot or throws a fixed safe `POLICY_DENIED` error.
+   *
+   * Nothing supplied by the reader is trusted here. Hostile getters and Proxy traps may throw
+   * while the object is inspected, so the thrown value is never read. The rejection code comes
+   * exclusively from the trusted {@link ReaderSnapshotInspection} result, so a spoofed
+   * `DomainError` diagnostic cannot influence the error text or the audit trail.
+   */
+  private inspectSnapshotOrDeny(
+    rawSnapshot: unknown,
+    sourceProfileId: string,
+    profile: SourceProfile,
+    context: TrustedSourceAccessContext,
+  ): SourceSnapshot {
+    let inspection: ReaderSnapshotInspection | null = null;
+    try {
+      inspection = inspectReaderReturnedSnapshot(
+        rawSnapshot,
+        sourceProfileId,
+        profile.maxItems,
+        profile.maxPayloadBytes,
+      );
+    } catch {
+      // Defensive: the inspector is contractually non-throwing. If a hostile getter somehow
+      // escapes it, the thrown value is still never bound or inspected.
+      inspection = null;
+    }
+
+    if (inspection !== null && inspection.ok) {
+      return inspection.snapshot;
+    }
+
+    const denialCode: ReaderSnapshotRejectionCode =
+      inspection === null ? 'UNTRUSTED_CONTENT_DETECTED' : inspection.denialCode;
+
+    if (this.auditSink) {
+      this.auditSink.record(
+        createSourceAuditRecord({
+          tenantId: context.tenantId,
+          commitmentId: context.commitmentId,
+          taskId: context.taskId,
+          sourceProfileId,
+          decision: 'DENIED',
+          denialCode,
+          now: this.nowProvider(),
+        }),
+      );
+    }
+
+    throw createPolicyDeniedError(SAFE_SNAPSHOT_REJECTION_DIAGNOSTICS[denialCode], denialCode);
+  }
+
   async readSnapshot(
     sourceProfileId: string,
     context: TrustedSourceAccessContext,
@@ -190,13 +250,13 @@ export class GuardedSourceReader implements SourceReader {
     let rawSnapshot: unknown;
     try {
       rawSnapshot = await this.reader.readSnapshot(sourceProfileId, context, signal);
-    } catch (error) {
+    } catch {
       const postNow = this.nowProvider();
-      if (
-        signal.aborted ||
-        (isDomainError(error) && error.code === 'CANCELLED') ||
-        (error instanceof Error && error.name === 'AbortError')
-      ) {
+      // CTO Security Hardening Requirement 2:
+      // Do NOT touch error.code, error.name, error.message, error.diagnostic, or ANY property on error!
+      // An adversarial Error Proxy or getter can throw or spoof state.
+      // ONLY the authoritative, server-owned signal.aborted decides true caller cancellation.
+      if (signal.aborted) {
         if (this.auditSink) {
           this.auditSink.record(
             createSourceAuditRecord({
@@ -210,12 +270,11 @@ export class GuardedSourceReader implements SourceReader {
             }),
           );
         }
-        // P1 Item 1: Uniformly convert to safe CANCELLED error, never re-throw untrusted reader diagnostic
         throw createCancelledError('Snapshot read was aborted during execution');
       }
 
-      // Untrusted exception sanitization:
-      // Never leak raw exception messages, stacks, URLs, or internal details from the inner reader.
+      // If signal was NOT aborted, this was a provider execution failure.
+      // Record audit and throw safe, sanitized POLICY_DENIED error without inspecting error properties.
       if (this.auditSink) {
         this.auditSink.record(
           createSourceAuditRecord({
@@ -235,38 +294,9 @@ export class GuardedSourceReader implements SourceReader {
       );
     }
 
-    // 6. Enforce strict schema, bounds, and digest verification on returned snapshot
-    let snapshot: SourceSnapshot;
-    try {
-      snapshot = validateReaderReturnedSnapshot(
-        rawSnapshot,
-        sourceProfileId,
-        profile.maxItems,
-        profile.maxPayloadBytes,
-      );
-    } catch (validationError) {
-      const postNow = this.nowProvider();
-      const denialCode =
-        isDomainError(validationError) &&
-        validationError.diagnostic?.includes('PAYLOAD_LIMIT_EXCEEDED')
-          ? 'PAYLOAD_LIMIT_EXCEEDED'
-          : 'UNTRUSTED_CONTENT_DETECTED';
-
-      if (this.auditSink) {
-        this.auditSink.record(
-          createSourceAuditRecord({
-            tenantId: context.tenantId,
-            commitmentId: context.commitmentId,
-            taskId: context.taskId,
-            sourceProfileId,
-            decision: 'DENIED',
-            denialCode,
-            now: postNow,
-          }),
-        );
-      }
-      throw validationError;
-    }
+    // 6. Enforce strict schema, bounds, and digest verification on the returned snapshot.
+    // The snapshot is UNTRUSTED: reading its properties can execute hostile getter or Proxy code.
+    const snapshot = this.inspectSnapshotOrDeny(rawSnapshot, sourceProfileId, profile, context);
 
     // 7. CHECK 2: Post-Read Consent Re-Verification (Double-Check Invariant)
     const postNow = this.nowProvider();

@@ -58,15 +58,15 @@ The existing **Notes → Action Items** path remains the first bounded delegated
 
 The main conversation is a heterogeneous, ordered timeline. It may contain:
 
-| Timeline item | Meaning |
-|---|---|
-| User message | Text or context submitted by the user |
-| Ember message | A persisted assistant response |
-| Activity update | A concise, user-readable event grounded in actual execution state |
-| Task card | A link to a durable Task and its authoritative status |
-| Commitment card | A link to a durable ongoing Commitment |
-| Approval card | A structured authorization request, only after the ActionIntent/security contract is approved |
-| Outcome / Artifact card | A link to a readable, durable result |
+| Timeline item           | Meaning                                                                                       |
+| ----------------------- | --------------------------------------------------------------------------------------------- |
+| User message            | Text or context submitted by the user                                                         |
+| Ember message           | A persisted assistant response                                                                |
+| Activity update         | A concise, user-readable event grounded in actual execution state                             |
+| Task card               | A link to a durable Task and its authoritative status                                         |
+| Commitment card         | A link to a durable ongoing Commitment                                                        |
+| Approval card           | A structured authorization request, only after the ActionIntent/security contract is approved |
+| Outcome / Artifact card | A link to a readable, durable result                                                          |
 
 Do not flatten Tasks or Commitments into chat text. A message can reference a Task, but it is not the source of truth for that Task's status.
 
@@ -123,19 +123,19 @@ Use these labels in product specs, UI, PRs and API proposals:
 - **APPROVED** — explicitly approved by CTO for implementation within a defined scope.
 - **BLOCKED** — cannot proceed until a named dependency or approval is satisfied.
 
-| Capability | Baseline assessment | Important boundary |
-|---|---|---|
-| Task create/detail/events/SSE/cancel | EXISTING API surface | Existing request kinds and current UX are not yet the complete real consumer task experience |
-| Task list / consumer inbox | GAP / PROPOSED | Do not invent a production endpoint from the iOS UI |
-| Commitment lifecycle and outcomes | EXISTING API surface | Not equivalent to general conversation or assistant memory |
-| Commitment scheduler/runtime | Separate implementation/approval track | A scheduler is not a general-purpose Agent runtime |
-| Consumer identity and mobile session | GAP / BLOCKED | Development bearer-token configuration is not production consumer authentication |
-| Conversation/thread/message persistence | GAP / PROPOSED | No production conversation contract may be assumed |
-| Model gateway and real assistant turn | GAP / CTO GATE | No unapproved provider key, spend or model endpoint |
-| Local conversation prototype | MOCK | Must remain visibly identified as demo/mock |
-| Task/Outcome inline cards | MOCK until backed by real readable entities | UI must never imply fixture results came from a live model |
-| Push notifications / APNs | BLOCKED / later gate | No production notification claim or integration without approval |
-| User-controlled long-term memory | PROPOSED | Must have explicit controls, retention and deletion semantics |
+| Capability                              | Baseline assessment                         | Important boundary                                                                           |
+| --------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| Task create/detail/events/SSE/cancel    | EXISTING API surface                        | Existing request kinds and current UX are not yet the complete real consumer task experience |
+| Task list / consumer inbox              | GAP / PROPOSED                              | Do not invent a production endpoint from the iOS UI                                          |
+| Commitment lifecycle and outcomes       | EXISTING API surface                        | Not equivalent to general conversation or assistant memory                                   |
+| Commitment scheduler/runtime            | Separate implementation/approval track      | A scheduler is not a general-purpose Agent runtime                                           |
+| Consumer identity and mobile session    | GAP / BLOCKED                               | Development bearer-token configuration is not production consumer authentication             |
+| Conversation/thread/message persistence | GAP / PROPOSED                              | No production conversation contract may be assumed                                           |
+| Model gateway and real assistant turn   | GAP / CTO GATE                              | No unapproved provider key, spend or model endpoint                                          |
+| Local conversation prototype            | MOCK                                        | Must remain visibly identified as demo/mock                                                  |
+| Task/Outcome inline cards               | MOCK until backed by real readable entities | UI must never imply fixture results came from a live model                                   |
+| Push notifications / APNs               | BLOCKED / later gate                        | No production notification claim or integration without approval                             |
+| User-controlled long-term memory        | PROPOSED                                    | Must have explicit controls, retention and deletion semantics                                |
 
 The current Task API, Commitment API, development auth and Worker implementation must be re-audited against source before B1 contract approval. This table is a planning ledger, not a substitute for the CTO's technical review.
 
@@ -314,12 +314,12 @@ Cosmetic P2 issues, including extreme Dynamic Type refinements, should not block
 
 Run at most three iOS Coding Agents concurrently. Keep file ownership disjoint.
 
-| Lane | Ownership | Deliverable |
-|---|---|---|
-| **iOS A** | Conversation shell, transcript, composer, welcome/empty states | Conversation-first UI |
-| **iOS B** | Conversation state model, in-memory repository, fixtures, API gap proposal | Deterministic state + Platform contract input |
-| **iOS C** | Task/Commitment/Activity/Outcome cards | Reusable structured timeline components |
-| **iOS Lead** | App Root, Xcode project, shared interfaces, integration, roadmap and PR decisions | Integrated iOS app |
+| Lane         | Ownership                                                                         | Deliverable                                   |
+| ------------ | --------------------------------------------------------------------------------- | --------------------------------------------- |
+| **iOS A**    | Conversation shell, transcript, composer, welcome/empty states                    | Conversation-first UI                         |
+| **iOS B**    | Conversation state model, in-memory repository, fixtures, API gap proposal        | Deterministic state + Platform contract input |
+| **iOS C**    | Task/Commitment/Activity/Outcome cards                                            | Reusable structured timeline components       |
+| **iOS Lead** | App Root, Xcode project, shared interfaces, integration, roadmap and PR decisions | Integrated iOS app                            |
 
 iOS Lead owns shared-file changes and App Root integration. Agents must not independently edit the Xcode project, frozen contracts or shared integration surfaces without coordination.
 
@@ -327,11 +327,11 @@ iOS Lead owns shared-file changes and App Root integration. Agents must not inde
 
 Platform design can proceed in parallel with B0. Implementation must respect the CTO-approved contract and shared schema ownership.
 
-| Lane | Ownership | Deliverable |
-|---|---|---|
+| Lane            | Ownership                                                                                | Deliverable                                   |
+| --------------- | ---------------------------------------------------------------------------------------- | --------------------------------------------- |
 | **Platform P1** | Consumer identity/session, default Agent, tenant-scoped conversation/message persistence | Authenticated durable conversation foundation |
-| **Platform P2** | Model Gateway, assistant turn lifecycle, streaming/reconnect, quotas/cost | Real assistant responses with bounded spend |
-| **Platform P3** | Task orchestration linkage, durable events, readable outcomes, recovery | Real delegated-work loop |
+| **Platform P2** | Model Gateway, assistant turn lifecycle, streaming/reconnect, quotas/cost                | Real assistant responses with bounded spend   |
+| **Platform P3** | Task orchestration linkage, durable events, readable outcomes, recovery                  | Real delegated-work loop                      |
 
 P1/P2/P3 may conduct discovery and design concurrently. Do not allow concurrent backend agents to independently change shared schemas, auth, migrations or API contracts before a single owner and CTO-approved interface are established.
 

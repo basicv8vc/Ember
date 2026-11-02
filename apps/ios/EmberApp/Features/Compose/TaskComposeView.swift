@@ -35,39 +35,57 @@ struct TaskComposeView: View {
                 if case let .accepted(receipt) = submission.state {
                     receiptCard(receipt)
                 }
-
-                Button(action: submit) {
-                    HStack(spacing: 9) {
-                        if submission.isSubmitting {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(
-                                systemName: submission.isAwaitingReceipt || submission.hasDefiniteFailure
-                                    ? "arrow.clockwise"
-                                    : "paperplane.fill"
-                            )
-                        }
-                        Text(submission.submitButtonTitle)
-                            .font(.headline)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 15)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(
-                    submission.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                        || submission.isSubmitting
-                        || session.isCreating
-                )
-                .accessibilityIdentifier("compose-submit")
             }
             .padding(20)
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            submitButton
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
+                .background(.regularMaterial)
+                .overlay(alignment: .top) {
+                    Color.primary.opacity(0.08)
+                        .frame(height: 1)
+                }
+        }
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle("新任务")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var submitButton: some View {
+        Button(action: submit) {
+            HStack(spacing: 9) {
+                if submission.isSubmitting {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(
+                        systemName: submission.isAwaitingReceipt || submission.hasDefiniteFailure
+                            ? "arrow.clockwise"
+                            : "paperplane.fill"
+                    )
+                }
+                Text(submission.submitButtonTitle)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 15)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(
+            submission.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || submission.isSubmitting
+                || session.isCreating
+        )
+        .accessibilityIdentifier("compose-submit")
     }
 
     private var introduction: some View {
@@ -180,4 +198,12 @@ struct TaskComposeView: View {
             }
         }
     }
+}
+
+#Preview("Compose · Accessibility size") {
+    NavigationStack {
+        TaskComposeView(session: TaskJourneySession(), onReceipt: { _ in })
+    }
+    .environment(\.dynamicTypeSize, .accessibility3)
+    .frame(width: 390, height: 844)
 }

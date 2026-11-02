@@ -1,5 +1,6 @@
 import {
   CommitmentStatusSchema,
+  CONSENT_GRANT_ID_MAX_CHARS,
   IdSchema,
   OccurrenceStatusSchema,
   ScheduleKindSchema,
@@ -76,6 +77,31 @@ function hasValidOccurrenceIdentity(identity: OccurrenceExecutionIdentity): bool
     ScheduleKindSchema.safeParse(identity.scheduleKind).success &&
     OccurrenceStatusSchema.safeParse(identity.occurrenceStatus).success &&
     CommitmentStatusSchema.safeParse(identity.commitmentStatus).success
+  );
+}
+
+/**
+ * Structural validation of the Consent generation DISPATCH persisted (P0-C3D).
+ *
+ * Both halves must be present and usable, because execution is authorized for that exact generation
+ * or not at all. A missing or partial generation is not a legacy path to be tolerated: the Worker
+ * refuses before any source read, and never substitutes the generation that happens to be current.
+ */
+function hasValidDispatchGeneration(identity: OccurrenceExecutionIdentity): boolean {
+  const generation = identity.consentGeneration;
+
+  if (generation === null || typeof generation !== 'object') {
+    return false;
+  }
+
+  return (
+    typeof generation.grantId === 'string' &&
+    generation.grantId.length > 0 &&
+    generation.grantId.length <= CONSENT_GRANT_ID_MAX_CHARS &&
+    typeof generation.version === 'number' &&
+    Number.isInteger(generation.version) &&
+    generation.version >= 1 &&
+    generation.version <= Number.MAX_SAFE_INTEGER
   );
 }
 
@@ -247,6 +273,17 @@ export function createCommitmentRunHandler(deps: CommitmentRunHandlerDependencie
         return { type: 'finish', outcome: 'failed_terminal' };
       }
 
+      // P0-C3D: the generation DISPATCH recorded is the ONLY one this Occurrence may execute under.
+      // Refusing here — before the orchestrator, before any budget reservation, before any source
+      // read — is what keeps an occurrence dispatched under G1 from running under G2's terms.
+      if (!hasValidDispatchGeneration(identity)) {
+        logger.error('Persisted Occurrence records no usable Consent generation; refusing', {
+          ...baseLog,
+          occurrenceId: identity.occurrenceId,
+        });
+        return { type: 'finish', outcome: 'failed_terminal' };
+      }
+
       const authenticated = identity;
 
       if (authenticated.commitmentId !== marker.commitmentId) {
@@ -359,6 +396,9 @@ export function createCommitmentRunHandler(deps: CommitmentRunHandlerDependencie
             sourceProfileId: authenticated.sourceProfileId,
             scheduleKind: authenticated.scheduleKind,
             policyVersion: context.policyVersion,
+            // The generation DISPATCH persisted, passed through unchanged. The orchestrator proves it
+            // is still authoritative before the read and refuses to substitute a newer one.
+            consentGeneration: authenticated.consentGeneration,
           },
           signal,
         );

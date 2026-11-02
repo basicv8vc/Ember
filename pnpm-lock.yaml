@@ -336,6 +336,9 @@ importers:
 
   packages/execution:
     dependencies:
+      '@ember/connectors':
+        specifier: workspace:*
+        version: link:../connectors
       '@ember/contracts':
         specifier: workspace:*
         version: link:../contracts

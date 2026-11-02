@@ -2,18 +2,16 @@ import type {
   AppendOutcomeCommand,
   BudgetLedger,
   CommitmentExecutionStore,
+  ConsentGeneration,
   OutcomeResultStatus,
   RunGrant,
-  SourceSnapshot,
-  TrustedSourceAccessContext,
   WorkerLeaseGrant,
 } from '@ember/contracts';
+import type { SourceSnapshot, TrustedSourceAccessContext } from '@ember/connectors';
 import { DomainError, type Id } from '@ember/domain';
 import {
-  assertFenceMatches,
   consentDenied,
   isConsentFenceAuthority,
-  parseConsentFence,
   toConsentDenied,
   type ConsentAuthorizationFence,
   type ConsentFenceAuthority,
@@ -30,16 +28,12 @@ import { FakeSummaryEngine } from './commitment-summary-engine.js';
  * Re-exported canonical contracts.
  *
  * `@ember/execution` used to declare private copies of these types; they are now the single
- * definitions from `@ember/contracts`, so the Worker port and the PostgreSQL repository cannot
- * drift apart.
+ * definitions from `@ember/contracts` (execution records) and `@ember/connectors` (the source port
+ * and its trusted context), so the Worker, the connector boundary and the PostgreSQL repository
+ * cannot drift apart.
  */
-export type {
-  AppendOutcomeCommand,
-  OutcomeResultStatus,
-  SourceSnapshot,
-  TrustedSourceAccessContext,
-  WorkerLeaseGrant,
-};
+export type { AppendOutcomeCommand, OutcomeResultStatus, WorkerLeaseGrant };
+export type { SourceSnapshot, TrustedSourceAccessContext };
 
 export interface CommitmentOrchestrationContext {
   readonly tenantId: Id;
@@ -59,6 +53,19 @@ export interface CommitmentOrchestrationContext {
    * runtime (`DENY_INVALID_INTENT` -> `POLICY_DENIED`) instead of silently defaulting to `1`.
    */
   readonly policyVersion?: number;
+  /**
+   * Consent generation persisted by DISPATCH for this Occurrence (P0-C3D).
+   *
+   * Execution is authorized for THIS generation or for none: the orchestrator refuses to mint a
+   * fence for a newer generation and execute an Occurrence that was dispatched under an older one.
+   * Re-authorizing against "whatever is active now" would silently upgrade the terms of work that
+   * already exists, which is precisely the dispatch-to-execution gap.
+   *
+   * Optional in the type only for the same reason `policyVersion` is: a caller that cannot name the
+   * persisted generation is rejected fail-closed at runtime instead of defaulting to the current
+   * one.
+   */
+  readonly consentGeneration?: ConsentGeneration | null;
 }
 
 export interface OrchestrationResult {
@@ -74,12 +81,15 @@ export interface SourceReaderPort {
   /**
    * Reads a bounded source snapshot under a trusted, server-derived access context.
    *
-   * Aligned with Lane C `@ember/connectors`: `signal` is **mandatory** so cooperative
-   * cancellation always reaches the reader. The orchestrator refuses to call this without a
-   * live `AbortSignal`.
+   * This is the canonical Lane C port: `readSnapshot(profileId, trustedContext, signal)`. The
+   * versioned Consent authorization travels INSIDE `trustedContext.authorizationFence`, so the
+   * connector boundary validates exactly the generation the orchestrator captured — there is no
+   * second, competing context type and no extra argument.
    *
-   * `fence` is the versioned Consent authorization the orchestrator captured for this
-   * Occurrence. A consent-aware reader MUST verify it before and after the read; a reader that
+   * `signal` is **mandatory** so cooperative cancellation always reaches the reader. The
+   * orchestrator refuses to call this without a live `AbortSignal`.
+   *
+   * A consent-aware reader MUST validate the fence before and after the read; a reader that
    * ignores it still cannot publish, because the orchestrator re-verifies the same fence before
    * the Outcome append.
    */
@@ -87,7 +97,6 @@ export interface SourceReaderPort {
     profileId: string,
     trustedContext: TrustedSourceAccessContext,
     signal: AbortSignal,
-    fence?: ConsentAuthorizationFence,
   ): Promise<SourceSnapshot>;
 }
 
@@ -198,11 +207,13 @@ export class CommitmentOrchestrator {
       };
     }
 
-    // 3. Consent authorization (P0-C3B Lane C seam): capture the versioned fence of the active
-    //    grant *before* any budget or source side effect. A denial here means zero source
-    //    callbacks and zero budget consumption.
+    // 3. Consent authorization (P0-C3D dispatch binding): capture a fence for the generation that
+    //    DISPATCH recorded and prove that generation is still the authoritative one *before* any
+    //    budget or source side effect. A denial here means zero source callbacks and zero budget
+    //    consumption, so an Occurrence dispatched under G1 can never run under G2's terms.
     this.throwIfAborted(signal, 'before consent authorization');
-    const fence = await this.authorizeConsent(grant, context);
+    const persistedGeneration = resolvePersistedConsentGeneration(context.consentGeneration);
+    const fence = await this.authorizeConsent(grant, context, persistedGeneration);
 
     // 4. Budget reservation (if configured)
     const runGrant: RunGrant = {
@@ -227,7 +238,9 @@ export class CommitmentOrchestrator {
     try {
       this.throwIfAborted(signal, 'after the budget reservation');
 
-      // 5. Source snapshot read, bound to the Consent fence captured above
+      // 5. Source snapshot read, bound to the Consent fence captured for THIS attempt.
+      //    The fence travels inside the trusted context (canonical Lane C shape) and is never
+      //    cached across attempts: a retry or lease takeover mints a fresh one at step 3.
       this.throwIfAborted(signal, 'before the source read');
       const trustedContext: TrustedSourceAccessContext = {
         tenantId: grant.tenantId,
@@ -236,13 +249,13 @@ export class CommitmentOrchestrator {
         runId: grant.runId,
         leaseEpoch: grant.leaseEpoch,
         authorizedAt: this.clock.now().toISOString(),
+        ...(fence === null ? {} : { authorizationFence: fence }),
       };
 
       const snapshot = await this.sourceReader.readSnapshot(
         context.sourceProfileId,
         trustedContext,
         signal,
-        fence ?? undefined,
       );
 
       // A cancellation that arrived while the reader was in flight discards the snapshot: a
@@ -256,7 +269,7 @@ export class CommitmentOrchestrator {
       // 7. Re-verify the Consent fence immediately before publication. A revocation that landed
       //    while the read/summary was in flight must reject the Outcome, never publish it.
       this.throwIfAborted(signal, 'before the consent re-verification');
-      await this.assertConsentFenceCurrent(fence);
+      await this.assertConsentFenceCurrent(fence, grant, context);
 
       // 8. Durably append the Outcome with lease + consent fencing
       this.throwIfAborted(signal, 'before the outcome publication');
@@ -313,34 +326,53 @@ export class CommitmentOrchestrator {
   }
 
   /**
-   * Captures the versioned Consent authorization for this Occurrence's Source Profile.
+   * Mints the versioned Consent authorization for this Occurrence, bound to the generation that
+   * DISPATCH persisted.
    *
-   * Returns `null` only when no consent authority is wired at all (legacy fake-store suites);
-   * in that case publication is still gated by the PostgreSQL repository's transaction-scoped
+   * The authority can only mint a fence for the generation that is CURRENT right now, so the two are
+   * compared before the fence is used:
+   *
+   * - the current generation moved (revoke, expiry, changed-terms re-grant, explicit re-grant) ->
+   *   `POLICY_DENIED`, no source read, no Outcome. The Occurrence is not reinterpreted under the new
+   *   grant;
+   * - they match -> the minted fence IS the dispatch generation, so the read, the connector
+   *   re-validation and the publication guard all speak about the same authorization.
+   *
+   * Returns `null` only when no consent authority is wired at all (legacy fake-store suites); in
+   * that case publication is still gated by the PostgreSQL repository's transaction-scoped
    * publication guard, which denies every Outcome by default.
    */
   private async authorizeConsent(
     grant: WorkerLeaseGrant,
     context: CommitmentOrchestrationContext,
+    persisted: ConsentGeneration | null,
   ): Promise<ConsentAuthorizationFence | null> {
     if (this.consent === undefined) {
       return null;
     }
 
+    // An Occurrence without a recorded generation cannot prove which consent authorized it. It is
+    // refused rather than re-authorized under today's grant.
+    if (persisted === null) {
+      throw consentDenied('Occurrence records no Consent generation; refusing to execute it');
+    }
+
     let fence: ConsentAuthorizationFence;
 
     try {
-      fence = parseConsentFence(
-        await this.consent.authorizeFence(grant.tenantId, context.sourceProfileId),
-      );
+      fence = await this.consent.authorizeFence(grant.tenantId, context.sourceProfileId);
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent is not active for this occurrence');
     }
 
-    assertFenceMatches(fence, {
-      tenantId: grant.tenantId,
-      sourceProfileId: context.sourceProfileId,
-    });
+    // Both halves, always: a re-grant mints a new `grantId`, so comparing only the version would
+    // accept an authorization minted under a different consent record whose counter happened to
+    // line up.
+    if (fence.grantId !== persisted.grantId || fence.grantVersion !== persisted.version) {
+      throw consentDenied(
+        'Consent changed after this occurrence was dispatched; refusing to execute it',
+      );
+    }
 
     return fence;
   }
@@ -349,9 +381,15 @@ export class CommitmentOrchestrator {
    * Re-verifies the fence immediately before the Outcome append.
    *
    * This is the last Worker-side gate before the transactional publication guard runs; a
-   * revocation, re-grant, or unreadable Consent store fails the occurrence closed.
+   * revocation, re-grant, or unreadable Consent store fails the occurrence closed. The expected
+   * lineage comes from persisted state (the lease grant and the resolved Occurrence), never from
+   * the fence itself.
    */
-  private async assertConsentFenceCurrent(fence: ConsentAuthorizationFence | null): Promise<void> {
+  private async assertConsentFenceCurrent(
+    fence: ConsentAuthorizationFence | null,
+    grant: WorkerLeaseGrant,
+    context: CommitmentOrchestrationContext,
+  ): Promise<void> {
     if (fence === null) {
       return;
     }
@@ -361,7 +399,10 @@ export class CommitmentOrchestrator {
     }
 
     try {
-      await this.consent.assertFenceCurrent(fence);
+      await this.consent.assertFenceCurrent(fence, {
+        tenantId: grant.tenantId,
+        sourceProfileId: context.sourceProfileId,
+      });
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent changed before the outcome was published');
     }
@@ -435,6 +476,37 @@ function resolvePolicyVersion(value: unknown): number | null {
     return value;
   }
   return null;
+}
+
+/**
+ * Normalizes the Consent generation persisted by DISPATCH.
+ *
+ * Missing, malformed, or partially recorded generations are rejected (`null`) rather than repaired
+ * or defaulted: an Occurrence that cannot name the authorization it was created under is
+ * unexecutable, not "unconstrained".
+ */
+function resolvePersistedConsentGeneration(value: unknown): ConsentGeneration | null {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return null;
+  }
+
+  const generation = value as { readonly grantId?: unknown; readonly version?: unknown };
+  const { grantId, version } = generation;
+
+  if (typeof grantId !== 'string' || grantId.length === 0 || grantId.length > 128) {
+    return null;
+  }
+
+  if (
+    typeof version !== 'number' ||
+    !Number.isInteger(version) ||
+    version < 1 ||
+    version > Number.MAX_SAFE_INTEGER
+  ) {
+    return null;
+  }
+
+  return { grantId, version };
 }
 
 /**

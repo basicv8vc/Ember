@@ -28,6 +28,12 @@ import { createWorkerLogger } from '../../apps/worker/src/logger.js';
 const logger = createWorkerLogger({ level: 'error' });
 const liveSignal = new AbortController().signal;
 
+/** Consent generation the fixture Occurrence was dispatched under (P0-C3D). */
+const TEST_DISPATCH_GENERATION = Object.freeze({
+  grantId: '11111111-1111-4111-8111-111111111111',
+  version: 1,
+});
+
 interface Calls {
   reads: number;
   identityReads: number;
@@ -117,6 +123,10 @@ function buildHarness(options: HarnessOptions = {}): Harness {
           scheduleKind: 'interval',
           occurrenceStatus: 'dispatched',
           commitmentStatus: 'active',
+          // The generation DISPATCH persisted. Present by default so the boundary suite keeps
+          // testing the boundaries it is about; cases that want "no recorded generation" patch it
+          // to `null` explicitly.
+          consentGeneration: TEST_DISPATCH_GENERATION,
           ...options.identityPatch,
         }
       : options.identity;

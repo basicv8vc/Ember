@@ -257,6 +257,9 @@ class InMemoryDueCommitmentStore implements DueCommitmentStore {
       scheduleKind: commitment.scheduleKind,
       occurrenceStatus: occ.status,
       commitmentStatus: commitment.status,
+      // The scheduler fixture dispatches every occurrence under one stable generation; the Worker
+      // refuses to execute anything whose dispatched generation is absent.
+      consentGeneration: { grantId: 'scheduler-fixture-grant', version: 1 },
     });
   }
 

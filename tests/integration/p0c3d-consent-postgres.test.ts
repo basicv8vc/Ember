@@ -429,7 +429,7 @@ describe('P0-C3D: concurrent grant replay (two connections)', () => {
 
     const widened = await harness.consent.grant(harness.ctx, {
       sourceProfileId: CONCURRENT_PROFILE,
-      allowedOperations: ['read_snapshot', 'read_metadata'],
+      scopes: ['source.readonly', 'source.readwrite'],
     });
 
     expect(widened.replayed).toBe(false);
@@ -439,7 +439,7 @@ describe('P0-C3D: concurrent grant replay (two connections)', () => {
     // A pure replay of the widened terms is a replay again, and advances nothing.
     const replayed = await harness.consent.grant(harness.ctx, {
       sourceProfileId: CONCURRENT_PROFILE,
-      allowedOperations: ['read_metadata', 'read_snapshot'],
+      scopes: ['source.readwrite', 'source.readonly'],
     });
 
     expect(replayed.replayed).toBe(true);

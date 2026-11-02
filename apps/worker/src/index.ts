@@ -1,4 +1,4 @@
-import type { RunExecutionContext } from '@ember/contracts';
+import type { RunExecutionContext, SourceProfileId } from '@ember/contracts';
 import {
   LocalBlobStore,
   PostgresApprovalRepository,
@@ -101,7 +101,16 @@ async function main(): Promise<void> {
   //
   // There is no deny-all placeholder and no active-only fallback: an outcome whose occurrence
   // records no generation is refused.
-  const consentAuthority = fromResolvedGenerationConsent(new PostgresConsentRepository(pool));
+  const consentStore = new PostgresConsentRepository(pool);
+  // `grants` is the SAME persistence the generations are resolved from, so the connector boundary
+  // evaluates `allowedOperations`/`scopes` against the durable record. A Worker-side copy of those
+  // terms would be exactly the scope laundering P0-C3B removed: the boundary could then authorize a
+  // read from terms no grant ever approved.
+  const consentGrants = {
+    get: (tenantId: string, sourceProfileId: SourceProfileId, now?: Date) =>
+      consentStore.getForTenant(tenantId, sourceProfileId, now),
+  };
+  const consentAuthority = fromResolvedGenerationConsent(consentStore, { grants: consentGrants });
   const consentPublicationGuard = new PostgresConsentPublicationGuard();
   const consentGate = evaluateSchedulerConsentGate(consentAuthority);
 
@@ -252,6 +261,7 @@ async function main(): Promise<void> {
         consent: consentAuthority,
         sourceReader: new CommitmentSourceReader({
           consent: consentAuthority,
+          grants: consentGrants,
           logger,
         }),
         budget: budgetLedger,

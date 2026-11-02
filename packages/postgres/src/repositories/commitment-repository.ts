@@ -1455,6 +1455,8 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
              o.commitment_id,
              o.status        AS occurrence_status,
              o.task_id,
+             o.consent_grant_id,
+             o.consent_version,
              c.tenant_id,
              c.agent_id,
              c.source_profile_id,
@@ -1475,6 +1477,8 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         commitment_id: string;
         occurrence_status: string;
         task_id: string | null;
+        consent_grant_id: string | null;
+        consent_version: number | null;
         tenant_id: string;
         agent_id: string;
         source_profile_id: string;
@@ -1517,6 +1521,10 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         scheduleKind: row.schedule_kind as ScheduleKind,
         occurrenceStatus: row.occurrence_status as OccurrenceExecutionIdentity['occurrenceStatus'],
         commitmentStatus: row.commitment_status as CommitmentStatus,
+        // The generation DISPATCH recorded, read from the same row and with the same helper the
+        // publication guard uses. `null` means the occurrence cannot prove its authorization, which
+        // the Worker treats as a refusal — never as "consent was not required".
+        consentGeneration: readConsentFence(row),
       });
     } catch (error) {
       throw asDomainError(error);

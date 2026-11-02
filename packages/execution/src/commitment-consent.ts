@@ -1,72 +1,138 @@
 import {
-  computeConsentFenceDigest,
-  CONSENT_FENCE_DIGEST_REGEX,
-  CONSENT_GRANT_ID_MAX_CHARS,
-  isConsentAuthority,
+  createConsentAuthorizationFence,
+  validateConsentAuthorizationFence,
+  validateConsentGenerationBinding,
   type AuthorizedConsentGeneration,
   type ConsentAuthority,
   type ConsentAuthorizationFence,
-  type ConsentReadGate,
-} from '@ember/contracts';
+  type ConsentGrant,
+} from '@ember/connectors';
 import { DomainError, type Id } from '@ember/domain';
-
-/** Re-exported so the execution boundary exposes the canonical fence vocabulary. */
-export { CONSENT_FENCE_DIGEST_REGEX, CONSENT_GRANT_ID_MAX_CHARS };
-export type { ConsentAuthorizationFence };
 
 /**
  * P0-C3B Consent authorization seam.
  *
  * ## Contract ownership
  *
- * The Consent contract is owned by P0-C3C (`docs/P0C3-C-CONSENT-CONTRACT.md`) and is now defined
- * ONCE in `@ember/contracts` (`consent.ts`): `ConsentGrant`, `AuthorizedConsentGeneration`,
- * `ConsentAuthorizationFence`, `ConsentAuthority.resolveGeneration` and
- * `TrustedSourceAccessContext.authorizationFence`. This module imports those definitions instead of
- * mirroring them, so a fence minted here is byte-identical to one minted by the connector perimeter
- * and comparable to the generation the durable store persists.
+ * The Consent contract is owned by P0-C3C and lives in `@ember/connectors`
+ * (`docs/P0C3-C-CONSENT-CONTRACT.md`). This module declares **no** Consent vocabulary of its own:
+ * the fence, the generation view, the authority port, the digest and both validators are imported
+ * from the canonical package. What P0-C3B adds is only the Worker-facing shape:
+ *
+ * - {@link ConsentFenceAuthority} — the authority plus the two fence operations the Worker needs;
+ * - {@link ConsentReadAuthorization} — what a *verified* generation authorizes, which the connector
+ *   boundary needs in order to authorize the read itself;
+ * - {@link fromResolvedGenerationConsent} — the single adapter from a canonical `ConsentAuthority`
+ *   to those gates.
+ *
+ * Nothing here re-implements C3C validation: fence shape, digest, tenant/profile binding, status
+ * precedence and staleness are decided by `validateConsentAuthorizationFence`, and the
+ * "the policy-evaluated grant must BE the fenced generation" invariant by
+ * `validateConsentGenerationBinding`.
  *
  * ## Why a fence and not a boolean
  *
- * A boolean verdict cannot tell "Consent was active for this occurrence" from "Consent was
- * active, then revoked, then re-granted for a different approval". The Worker authorizes a read,
- * the read takes time, and an Outcome is published afterwards, so authorization must be bound to
- * the exact generation that authorized the read:
+ * A boolean verdict cannot tell "Consent was active for this occurrence" from "Consent was active,
+ * then revoked, then re-granted for a different approval". The Worker authorizes a read, the read
+ * takes time, and an Outcome is published afterwards, so authorization must be bound to the exact
+ * generation that authorized the read:
  *
- * - {@link ConsentFenceAuthority.authorizeFence} captures the generation before the read;
- * - the fence travels with the source read (Lane C boundary);
- * - {@link ConsentFenceAuthority.assertFenceCurrent} re-checks it immediately before publication.
+ * - `authorizeFence` captures the generation before the read;
+ * - the fence travels inside `TrustedSourceAccessContext.authorizationFence` (Lane C boundary);
+ * - `assertFenceCurrent` re-checks it immediately before publication.
  *
- * Per P0C3-C §3 the `digest` is an integrity check, never proof of authorization: authority for
- * a read comes only from the authority confirming `grantId` + `grantVersion` is still current.
- * P0-C3B therefore treats `digest` as opaque and never trusts it.
+ * ## Why the verified generation also reports its scope
+ *
+ * A fence that only answers "still active?" cannot authorize a read, because the connector
+ * boundary decides read access from `grant.allowedOperations`. The Worker therefore resolves the
+ * authorized operations together with the generation check and mirrors exactly those into the
+ * connector registry. Nothing is defaulted: a store that cannot report them denies the read, so
+ * "granted for something else" can never be spent as "granted for `read_snapshot`".
  */
+
+/**
+ * Re-exported canonical C3C vocabulary.
+ *
+ * `@ember/execution` previously declared field-for-field mirrors of these types. They are now the
+ * single definitions from `@ember/connectors`, so the Worker, the connector boundary and (once
+ * merged) the PostgreSQL authority cannot drift apart.
+ */
+export type {
+  AuthorizedConsentGeneration,
+  ConsentAuthority,
+  ConsentAuthorizationFence,
+  ConsentGrant,
+};
+
+/**
+ * The read-only grant lookup a fence-aware Worker needs in order to learn *what* the resolved
+ * generation authorizes.
+ *
+ * Canonical C3C `AuthorizedConsentGeneration` carries identity and status only (operations are
+ * deliberately not part of that view), so a Worker that has to mirror the authorized scope reads
+ * the grant record itself. `ConsentRegistry.get` is the canonical shape; the return type is
+ * widened to a promise because the durable PostgreSQL store reads asynchronously.
+ */
+export interface ConsentGrantSource {
+  get(
+    tenantId: string,
+    sourceProfileId: string,
+    now?: Date,
+  ): ConsentGrant | null | Promise<ConsentGrant | null>;
+}
+
+/** The lineage a fence is expected to describe. Comes from persisted state, never from the fence. */
+export interface ConsentFenceExpectation {
+  readonly tenantId: Id;
+  readonly sourceProfileId: string;
+}
+
+/**
+ * What the authority confirms about the read it just authorized.
+ *
+ * These are the operations and scopes of the *durable* Consent record, never a Worker default.
+ * The Worker mirrors them verbatim into the connector boundary because `evaluateSourceAccess`
+ * decides read access from `grant.allowedOperations`: substituting a default there would silently
+ * upgrade a grant that never included `read_snapshot`.
+ */
+export interface ConsentReadAuthorization {
+  readonly allowedOperations: readonly string[];
+  readonly scopes: readonly string[];
+}
 
 /**
  * Consent authority that can issue and re-verify a versioned authorization fence.
  *
- * `ConsentReadGate` (in `@ember/contracts`) remains the minimal pre-read verdict port; this
- * extended port is what the orchestrator needs in order to bind a read to one generation. Every
- * method MUST fail closed with `POLICY_DENIED` when Consent is missing, revoked, expired, or
- * unreadable.
+ * Extends the canonical C3C `ConsentAuthority` (`resolveGeneration`), so an object of this shape is
+ * always usable at the connector boundary as well. Every method MUST fail closed with
+ * `POLICY_DENIED` when Consent is missing, revoked, expired, or unreadable.
  */
-export interface ConsentFenceAuthority extends ConsentReadGate {
-  /** Returns the fence of the currently active generation, or rejects with `POLICY_DENIED`. */
+export interface ConsentFenceAuthority extends ConsentAuthority {
+  /** Resolves only while the lineage has an effectively active generation. */
+  assertActive(tenantId: Id, sourceProfileId: string): Promise<void>;
+
+  /** Returns the canonical fence of the currently active generation, or rejects `POLICY_DENIED`. */
   authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence>;
 
   /**
-   * Resolves only while `fence` still describes the active generation.
+   * Resolves only while `fence` still describes the active generation of `expected`, and reports
+   * what that generation authorizes.
    *
    * A store whose generation moved (revocation, expiry, re-grant, approval invalidation) MUST
-   * reject, and the caller MUST NOT publish anything after a rejection.
+   * reject, and the caller MUST NOT publish anything after a rejection. An authority that cannot
+   * report the authorized operations MUST reject as well: a read authorized without a scope is
+   * indistinguishable from a read authorized for everything.
    */
-  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void>;
+  assertFenceCurrent(
+    fence: ConsentAuthorizationFence,
+    expected: ConsentFenceExpectation,
+  ): Promise<ConsentReadAuthorization>;
 }
 
 /**
  * Structural check used at every seam that must not trust a caller-supplied object.
  *
- * A plain `ConsentAuthority` (verdict only) is *not* fence-capable: it cannot prove which
+ * A plain `ConsentAuthority` (generation read only) is *not* fence-capable: it cannot prove which
  * generation authorized a read, so an execution configured with one fails closed instead of
  * publishing an unattributable Outcome.
  */
@@ -78,6 +144,7 @@ export function isConsentFenceAuthority(value: unknown): value is ConsentFenceAu
   const candidate = value as Record<string, unknown>;
 
   return (
+    typeof candidate.resolveGeneration === 'function' &&
     typeof candidate.assertActive === 'function' &&
     typeof candidate.authorizeFence === 'function' &&
     typeof candidate.assertFenceCurrent === 'function'
@@ -85,70 +152,98 @@ export function isConsentFenceAuthority(value: unknown): value is ConsentFenceAu
 }
 
 /**
- * Authoritative view of the CURRENT consent generation for a lineage.
+ * Structural check for the canonical C3C `ConsentAuthority` port (`resolveGeneration`).
  *
- * Alias of the canonical `AuthorizedConsentGeneration` from `@ember/contracts`, kept so existing
- * call sites keep compiling while there is exactly one definition in the codebase.
+ * The Worker uses it to decide whether an injected object may be handed to the connector boundary
+ * as the authoritative generation source.
  */
-export type AuthorizedConsentGenerationView = AuthorizedConsentGeneration;
-
-/**
- * Read-only authority over persisted consent generations.
- *
- * Alias of the canonical `ConsentAuthority`. Agent A's durable PostgreSQL store implements it and
- * `FakeConsentRegistry` implements it for tests. Resolving synchronously or asynchronously is
- * allowed so an authoritative database read can be awaited without weakening the check.
- */
-export type ResolvedGenerationConsentAuthority = ConsentAuthority;
-
-/** True when the value exposes the canonical `resolveGeneration` read port. */
-export function isResolvedGenerationConsentAuthority(
-  value: unknown,
-): value is ResolvedGenerationConsentAuthority {
-  return isConsentAuthority(value);
+export function isConsentAuthority(value: unknown): value is ConsentAuthority {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    typeof (value as { resolveGeneration?: unknown }).resolveGeneration === 'function'
+  );
 }
 
 /** Options for {@link fromResolvedGenerationConsent}. */
 export interface ResolvedGenerationAdapterOptions {
-  /** Clock used to stamp `issuedAt`. Injectable so audit ordering is deterministic in tests. */
+  /**
+   * Optional, DETERMINISTIC clock.
+   *
+   * Production must NOT set this. The durable PostgreSQL authority evaluates `expires_at` against
+   * `clock_timestamp()`, so omitting the clock is what makes a Worker whose own clock is behind the
+   * database unable to extend a grant that has already expired. Supplying a clock replaces the
+   * database clock entirely (it is not combined with it), which is only correct when a test pins
+   * both sides deliberately.
+   */
   readonly now?: () => Date;
+  /**
+   * Authoritative grant lookup used to obtain the operations/scopes the resolved generation
+   * authorizes. When omitted, every read is denied: the Worker will not invent a scope.
+   */
+  readonly grants?: ConsentGrantSource;
 }
 
 /**
- * Binds a P0-C3C `resolveGeneration` authority to the Worker's fence gates.
+ * Binds a canonical C3C `ConsentAuthority` to the Worker's fence gates.
  *
- * This is the single integration point for Lane C / Agent A. A durable authority implements only
+ * This is the single integration point for the durable store. The durable authority implements
  * `resolveGeneration`; this adapter derives all three gate methods from it, so no gate ever runs
  * against a verdict-only object and no caller has to re-implement generation comparison:
  *
  * - `assertActive` — resolves the generation and requires effective status `active`;
- * - `authorizeFence` — mints the fence from the resolved generation;
- * - `assertFenceCurrent` — re-resolves and requires the SAME `grantId` + `version`.
+ * - `authorizeFence` — mints the canonical fence (with digest) for the grant that IS that
+ *   generation, then re-validates it with the canonical validators;
+ * - `assertFenceCurrent` — re-resolves and re-validates the SAME `grantId` + `version`.
  *
- * When the P0-C3C module lands on this branch, fence minting is delegated to
- * `createConsentAuthorizationFence` (which adds the canonical `digest`); the comparison logic here
- * already matches its semantics.
+ * The generation is re-resolved on every call and never cached, so a fence captured for one
+ * Task/Run attempt cannot authorize a later attempt or a new lease epoch: the next attempt mints
+ * its own fence, and a stale one fails `CONSENT_FENCE_STALE`.
  */
 export function fromResolvedGenerationConsent(
-  authority: ResolvedGenerationConsentAuthority,
+  authority: ConsentAuthority,
   options: ResolvedGenerationAdapterOptions = {},
 ): ConsentFenceAuthority {
-  const now = options.now ?? ((): Date => new Date());
+  const clock = options.now;
+  const grants = options.grants;
+
+  /**
+   * The clock handed to the AUTHORITY, or `undefined` in production.
+   *
+   * `undefined` is not "use the default": it means "do not answer that question here", so the
+   * durable store decides expiry with `clock_timestamp()`. A host whose clock lags the database can
+   * then never present an expired grant as active.
+   */
+  const evaluationAt = (): Date | undefined => (clock === undefined ? undefined : clock());
+
+  /** Wall-clock stamp for fence ordering and local skew checks. Never an authorization input. */
+  const stampAt = (): Date => clock?.() ?? new Date();
 
   const resolveActive = async (
     tenantId: string,
     sourceProfileId: string,
-  ): Promise<AuthorizedConsentGenerationView> => {
-    let generation: AuthorizedConsentGenerationView | null;
+    at: Date | undefined,
+  ): Promise<AuthorizedConsentGeneration> => {
+    let generation: AuthorizedConsentGeneration | null;
 
     try {
-      generation = await authority.resolveGeneration(tenantId, sourceProfileId, now());
+      // Called with two arguments when no clock was injected: the third parameter is the
+      // *evaluator's* clock, and production must not supply one.
+      generation =
+        at === undefined
+          ? await authority.resolveGeneration(tenantId, sourceProfileId)
+          : await authority.resolveGeneration(tenantId, sourceProfileId, at);
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent could not be resolved');
     }
 
     if (generation === null || typeof generation !== 'object') {
       throw consentDenied('Source Consent is not active for this source profile');
+    }
+
+    // A store answering for another lineage is not this lineage's authority.
+    if (generation.tenantId !== tenantId || generation.sourceProfileId !== sourceProfileId) {
+      throw consentDenied('Source Consent was resolved for another source profile');
     }
 
     if (generation.status !== 'active') {
@@ -158,115 +253,185 @@ export function fromResolvedGenerationConsent(
     return generation;
   };
 
+  const readGrant = async (
+    tenantId: string,
+    sourceProfileId: string,
+    at: Date | undefined,
+  ): Promise<ConsentGrant> => {
+    if (grants === undefined) {
+      throw consentDenied(
+        'Consent store cannot report the operations authorized for this source profile',
+      );
+    }
+
+    let grant: ConsentGrant | null;
+
+    try {
+      // Same rule as `resolveActive`: no clock is passed unless one was deliberately injected, so
+      // the durable record's effective status stays the database's decision.
+      grant =
+        at === undefined
+          ? await grants.get(tenantId, sourceProfileId)
+          : await grants.get(tenantId, sourceProfileId, at);
+    } catch (error) {
+      throw toConsentDenied(error, 'Source Consent grant could not be read');
+    }
+
+    if (grant === null || typeof grant !== 'object') {
+      throw consentDenied('Source Consent is not active for this source profile');
+    }
+
+    return grant;
+  };
+
+  /**
+   * Re-validates a fence against the authoritative generation and proves the grant the Worker is
+   * about to mirror IS that generation. Both checks are canonical C3C helpers; neither is
+   * reproduced here.
+   */
+  const assertFenceIsTheGeneration = (
+    fence: ConsentAuthorizationFence,
+    generation: AuthorizedConsentGeneration,
+    grant: ConsentGrant,
+    at: Date,
+  ): void => {
+    const expectation: ConsentFenceExpectation = {
+      tenantId: generation.tenantId,
+      sourceProfileId: generation.sourceProfileId,
+    };
+
+    const fenceValidation = validateConsentAuthorizationFence({
+      fence,
+      tenantId: expectation.tenantId,
+      sourceProfileId: expectation.sourceProfileId,
+      authoritative: generation,
+      now: at,
+    });
+
+    if (!fenceValidation.valid) {
+      throw consentDenied(
+        `Consent authorization fence is not usable: ${fenceValidation.code.toLowerCase()}`,
+      );
+    }
+
+    const binding = validateConsentGenerationBinding({
+      grant,
+      fence,
+      tenantId: expectation.tenantId,
+      sourceProfileId: expectation.sourceProfileId,
+    });
+
+    if (!binding.consistent) {
+      throw consentDenied(
+        `Consent authorization fence is not bound to the resolved grant: ${binding.code.toLowerCase()}`,
+      );
+    }
+  };
+
   return {
+    // Canonical C3C generation read, forwarded largely unchanged. Gates use the methods below; this
+    // exists so the adapter is usable anywhere a `ConsentAuthority` is expected (e.g. the connector
+    // boundary), without a second wrapper object.
+    //
+    // An explicit `at` from a caller is honoured (a caller that names a clock is deliberately
+    // overriding the evaluator); otherwise the injected test clock is used, and in production
+    // nothing is passed and PostgreSQL decides.
+    resolveGeneration(
+      tenantId: string,
+      sourceProfileId: string,
+      at?: Date,
+    ): ReturnType<ConsentAuthority['resolveGeneration']> {
+      const evaluationTime = at ?? evaluationAt();
+
+      return evaluationTime === undefined
+        ? authority.resolveGeneration(tenantId, sourceProfileId)
+        : authority.resolveGeneration(tenantId, sourceProfileId, evaluationTime);
+    },
+
     async assertActive(tenantId: Id, sourceProfileId: string): Promise<void> {
-      await resolveActive(tenantId, sourceProfileId);
+      await resolveActive(tenantId, sourceProfileId, evaluationAt());
     },
 
     async authorizeFence(
       tenantId: Id,
       sourceProfileId: string,
     ): Promise<ConsentAuthorizationFence> {
-      const generation = await resolveActive(tenantId, sourceProfileId);
+      const evaluationTime = evaluationAt();
+      const stamp = stampAt();
+      const generation = await resolveActive(tenantId, sourceProfileId, evaluationTime);
+      const grant = await readGrant(tenantId, sourceProfileId, evaluationTime);
 
-      // Minted with the canonical digest, so a fence produced here is byte-identical to one
-      // produced by the connector perimeter for the same generation.
-      const body = {
-        tenantId,
-        sourceProfileId,
-        grantId: generation.grantId,
-        grantVersion: generation.version,
-        issuedAt: now().toISOString(),
-      };
+      // Canonical minting: `createConsentAuthorizationFence` derives the digest and refuses a
+      // generation that is not effectively active at `stamp`. The authority has already decided
+      // `active` (with the database clock in production), so this local check can only tighten.
+      let fence: ConsentAuthorizationFence;
 
-      return parseConsentFence({ ...body, digest: computeConsentFenceDigest(body) });
+      try {
+        fence = createConsentAuthorizationFence(grant, stamp);
+      } catch (error) {
+        throw toConsentDenied(error, 'Source Consent cannot be fenced for this source profile');
+      }
+
+      assertFenceIsTheGeneration(fence, generation, grant, stamp);
+
+      return fence;
     },
 
-    async assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
-      const parsed = parseConsentFence(fence);
-      const generation = await resolveActive(parsed.tenantId, parsed.sourceProfileId);
+    async assertFenceCurrent(
+      fence: ConsentAuthorizationFence,
+      expected: ConsentFenceExpectation,
+    ): Promise<ConsentReadAuthorization> {
+      const evaluationTime = evaluationAt();
+      const stamp = stampAt();
+      const generation = await resolveActive(
+        expected.tenantId,
+        expected.sourceProfileId,
+        evaluationTime,
+      );
+      const grant = await readGrant(expected.tenantId, expected.sourceProfileId, evaluationTime);
 
-      // Generation identity, not just the version number: a lineage whose versions restart on
-      // re-grant would otherwise accept an authorization minted before the re-grant.
-      if (generation.grantId !== parsed.grantId || generation.version !== parsed.grantVersion) {
-        throw consentDenied(
-          'Source Consent was re-granted or revoked after the read was authorized',
-        );
-      }
+      assertFenceIsTheGeneration(fence, generation, grant, stamp);
+
+      return readAuthorizationOf(grant);
     },
   };
 }
 
 /**
- * Validates an untrusted fence value at a trust boundary.
+ * Extracts the operations and scopes a consent grant authorizes, refusing to invent them.
  *
- * The fence may come from a durable Consent store or from a test double, so its shape is
- * re-verified instead of being assumed from the TypeScript type. Every rejection is a terminal,
- * content-free `POLICY_DENIED`.
+ * The grant is the only place these can come from: the fence deliberately carries no scopes
+ * (P0C3-C §3) and the Worker must not derive permissions from the request. A grant that reports no
+ * operations therefore authorizes nothing, which is the correct direction to fail.
  */
-export function parseConsentFence(value: unknown): ConsentAuthorizationFence {
-  if (value === null || typeof value !== 'object') {
-    throw consentDenied('Consent authorization fence is missing');
+function readAuthorizationOf(grant: ConsentGrant): ConsentReadAuthorization {
+  const operations = grant.allowedOperations;
+
+  if (!Array.isArray(operations) || operations.length === 0) {
+    throw consentDenied('Consent store did not report the operations authorized for this read');
   }
 
-  const candidate = value as Record<string, unknown>;
-  const { tenantId, sourceProfileId, grantId, grantVersion, issuedAt, digest } = candidate;
+  const allowedOperations = operations.filter(
+    (value): value is string => typeof value === 'string',
+  );
 
-  if (typeof tenantId !== 'string' || tenantId.length === 0) {
-    throw consentDenied('Consent authorization fence has no tenant');
+  if (allowedOperations.length !== operations.length || allowedOperations.length === 0) {
+    throw consentDenied('Consent store reported malformed authorized operations');
   }
 
-  if (typeof sourceProfileId !== 'string' || sourceProfileId.length === 0) {
-    throw consentDenied('Consent authorization fence has no source profile');
+  const reportedScopes = grant.scopes;
+
+  if (!Array.isArray(reportedScopes)) {
+    throw consentDenied('Consent store reported malformed consent scopes');
   }
 
-  if (
-    typeof grantId !== 'string' ||
-    grantId.length === 0 ||
-    grantId.length > CONSENT_GRANT_ID_MAX_CHARS
-  ) {
-    throw consentDenied('Consent authorization fence has no usable grant identity');
+  const scopes = reportedScopes.filter((value): value is string => typeof value === 'string');
+
+  if (scopes.length !== reportedScopes.length) {
+    throw consentDenied('Consent store reported malformed consent scopes');
   }
 
-  if (
-    typeof grantVersion !== 'number' ||
-    !Number.isInteger(grantVersion) ||
-    grantVersion < 1 ||
-    grantVersion > Number.MAX_SAFE_INTEGER
-  ) {
-    throw consentDenied('Consent authorization fence has no usable grant version');
-  }
-
-  if (typeof issuedAt !== 'string' || Number.isNaN(Date.parse(issuedAt))) {
-    throw consentDenied('Consent authorization fence has no authorization timestamp');
-  }
-
-  // The canonical fence always carries a digest. A fence without one is not a fence: it cannot
-  // even prove it was minted by an authority, so it is refused rather than repaired.
-  if (typeof digest !== 'string' || !CONSENT_FENCE_DIGEST_REGEX.test(digest)) {
-    throw consentDenied('Consent authorization fence carries a malformed integrity digest');
-  }
-
-  return { tenantId, sourceProfileId, grantId, grantVersion, issuedAt, digest };
-}
-
-/**
- * Rejects a fence that belongs to another tenant or another Source Profile.
- *
- * A fence is only meaningful for the exact Occurrence identity the Worker resolved from
- * persisted state; reusing one across tenants or profiles would launder an authorization.
- */
-export function assertFenceMatches(
-  fence: ConsentAuthorizationFence,
-  expected: { readonly tenantId: Id; readonly sourceProfileId: string },
-): void {
-  if (fence.tenantId !== expected.tenantId) {
-    throw consentDenied('Consent authorization fence belongs to another tenant');
-  }
-
-  if (fence.sourceProfileId !== expected.sourceProfileId) {
-    throw consentDenied('Consent authorization fence belongs to another source profile');
-  }
+  return { allowedOperations, scopes };
 }
 
 /**

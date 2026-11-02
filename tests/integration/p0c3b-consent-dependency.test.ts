@@ -38,7 +38,9 @@ describe('P0-C3B/P0-C3D: missing durable consent dependency fails closed', () =>
     const harness = await createCommitmentHarness(db);
     const repositoryWithoutConsent = new PostgresCommitmentRepository(db.pool);
 
-    await harness.consent.grant({
+    // The in-memory fixture store is synchronous, like `ConsentRegistry.grant`; the authority
+    // adapter is what adds asynchrony. Awaiting it would imply a durable write that does not happen.
+    harness.consent.grant({
       tenantId: harness.ctx.tenantId,
       sourceProfileId: FIXTURE_SOURCE_PROFILE,
     });

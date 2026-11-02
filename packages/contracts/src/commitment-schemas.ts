@@ -1,5 +1,5 @@
 import type { AuthContext, Id } from '@ember/domain';
-import type { TrustedSourceAccessContext } from './consent.js';
+import type { ConsentGeneration, TrustedSourceAccessContext } from './consent.js';
 import { z } from 'zod';
 import { IdSchema, IsoDateTimeSchema } from './task-schemas.js';
 
@@ -452,6 +452,19 @@ export interface OccurrenceExecutionIdentity {
   readonly scheduleKind: ScheduleKind;
   readonly occurrenceStatus: OccurrenceStatus;
   readonly commitmentStatus: CommitmentStatus;
+  /**
+   * Consent generation recorded by DISPATCH (P0-C3D), or `null` when the occurrence records none.
+   *
+   * This is the authorization the work was created under, not the authorization that happens to be
+   * current when a Worker picks the Task up. A Worker that re-authorized against "whatever is active
+   * now" would execute work dispatched under G1 under G2's terms — a different grant, possibly a
+   * different scope — which is exactly the dispatch-to-execution gap this field closes.
+   *
+   * `null` is not "no consent required": an occurrence whose generation was never recorded cannot
+   * prove which consent authorized it, so every consumer MUST fail closed on it. The two halves are
+   * always written together, so a partially recorded generation is read back as `null`.
+   */
+  readonly consentGeneration: ConsentGeneration | null;
 }
 
 /** Terminal Occurrence states. `pending`/`dispatched` are the only non-terminal states. */

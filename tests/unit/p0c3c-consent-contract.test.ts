@@ -36,7 +36,7 @@ function createAdapter(): ConsentConformanceAdapter {
 
 describe('P0-C3C: frozen Consent contract conformance suite', () => {
   it('publishes a complete, immutable requirement matrix', () => {
-    expect(CONSENT_CONFORMANCE_CASES).toHaveLength(12);
+    expect(CONSENT_CONFORMANCE_CASES).toHaveLength(13);
     expect(Object.isFrozen(CONSENT_CONFORMANCE_CASES)).toBe(true);
 
     const ids = CONSENT_CONFORMANCE_CASES.map((testCase) => testCase.id);
@@ -53,6 +53,7 @@ describe('P0-C3C: frozen Consent contract conformance suite', () => {
       'C-10',
       'C-11',
       'C-12',
+      'C-13',
     ]);
 
     const requirements = CONSENT_CONFORMANCE_CASES.map((testCase) => testCase.requirement);

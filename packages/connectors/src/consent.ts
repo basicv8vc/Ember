@@ -11,13 +11,12 @@
  * current, which is exactly the failure this consolidation removes.
  */
 
-import { deriveConsentStatus, type ConsentGrant } from '@ember/contracts';
-
 export {
   CONSENT_FENCE_DIGEST_DOMAIN,
   CONSENT_FENCE_DIGEST_REGEX,
   CONSENT_FENCE_MAX_CLOCK_SKEW_MS,
   CONSENT_FENCE_VALIDATION_CODES,
+  CONSENT_GENERATION_BINDING_CODES,
   CONSENT_GRANT_ID_MAX_CHARS,
   CONSENT_LIFECYCLE_REVISION,
   SOURCE_READ_OPERATION,
@@ -25,6 +24,7 @@ export {
   computeConsentFenceDigest,
   createConsentAuthorizationFence,
   deriveConsentStatus,
+  describeConsentDenialCode,
   isConsentAuthority,
   isConsentGrantActive,
   isValidConsentGrantRecord,
@@ -40,18 +40,3 @@ export {
   type ValidateConsentAuthorizationFenceParams,
   type ValidateConsentGenerationBindingParams,
 } from '@ember/contracts';
-
-/**
- * Maps a grant to the safe consent denial code implied by its effective status, or `null` when the
- * grant is active. Never returns caller-supplied text.
- */
-export function describeConsentDenialCode(
-  grant: Pick<ConsentGrant, 'status' | 'revokedAt' | 'expiresAt'>,
-  now: Date,
-): 'CONSENT_REVOKED' | 'CONSENT_EXPIRED' | null {
-  const status = deriveConsentStatus(grant, now);
-  if (status === 'active') {
-    return null;
-  }
-  return status === 'revoked' ? 'CONSENT_REVOKED' : 'CONSENT_EXPIRED';
-}

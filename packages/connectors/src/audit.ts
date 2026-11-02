@@ -22,6 +22,8 @@ export const SAFE_DENIAL_DESCRIPTIONS: Readonly<Record<SourceDenialCode, string>
   CONSENT_FENCE_MISSING: 'Authorization fence missing or unverifiable',
   CONSENT_FENCE_INVALID: 'Authorization fence is malformed or tampered',
   CONSENT_FENCE_STALE: 'Authorization fence refers to a superseded consent generation',
+  CONSENT_GENERATION_MISMATCH:
+    'Consent generation used for authorization is not the fenced generation',
   OPERATION_NOT_ALLOWED: 'Operation is not permitted by policy or grant',
   SCOPE_NOT_GRANTED: 'Required scope is not granted',
   PAYLOAD_LIMIT_EXCEEDED: 'Snapshot payload size or item count exceeded limits',

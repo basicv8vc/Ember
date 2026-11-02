@@ -9,6 +9,9 @@
  * - Exception-safe validation of returned snapshots (bounds checking, digest verification, deep
  *   immutability): throwing getters and hostile Proxies become fixed safe errors.
  * - Post-Read double-check consent validation to eliminate mid-read revocation leaks.
+ * - GENERATION BINDING (P0-C3C CTO round 2): the grant the perimeter evaluates policy against must
+ *   BE the fenced generation (`grantId` AND `version`), before dispatch and again after the read, so a
+ *   fence can never rubber-stamp permissions taken from a different consent generation.
  * - Privacy-preserving audit logging with zero network calls asserted.
  */
 
@@ -19,7 +22,9 @@ import {
   SOURCE_READ_OPERATION,
   SOURCE_READ_SCOPE,
   validateConsentAuthorizationFence,
+  validateConsentGenerationBinding,
   type ConsentFenceValidation,
+  type ConsentGenerationBindingValidation,
 } from './consent.js';
 import {
   createCancelledError,
@@ -38,6 +43,7 @@ import {
   SOURCE_PROFILE_ID_REGEX,
   type AuthorizedConsentGeneration,
   type ConsentAuthority,
+  type ConsentGrant,
   type ConsentRegistry,
   type SourceAccessPolicy,
   type SourceAuditSink,
@@ -164,6 +170,50 @@ export class GuardedSourceReader implements SourceReader {
       authoritative,
       now,
     });
+  }
+
+  /**
+   * Verifies the GENERATION BINDING invariant: the grant just read from the registry (and therefore
+   * the exact record whose `allowedOperations` / `scopes` policy was evaluated against) must be the
+   * generation named by the caller's authorization fence.
+   *
+   * A verified fence plus a divergent registry read is a split brain: the fence would attest G2 while
+   * the read is authorized by G1's terms. Both directions are fatal, so any mismatch denies.
+   */
+  private verifyGenerationBinding(
+    sourceProfileId: string,
+    context: TrustedSourceAccessContext,
+    grant: ConsentGrant | null,
+  ): ConsentGenerationBindingValidation {
+    return validateConsentGenerationBinding({
+      grant,
+      fence: context.authorizationFence,
+      tenantId: context.tenantId,
+      sourceProfileId,
+    });
+  }
+
+  /** Records a DENIED audit entry with a static reason and throws the matching safe policy denial. */
+  private denyRead(
+    sourceProfileId: string,
+    context: TrustedSourceAccessContext,
+    now: Date,
+    denialCode: SourceDenialCode,
+  ): never {
+    if (this.auditSink) {
+      this.auditSink.record(
+        createSourceAuditRecord({
+          tenantId: context.tenantId,
+          commitmentId: context.commitmentId,
+          taskId: context.taskId,
+          sourceProfileId,
+          decision: 'DENIED',
+          denialCode,
+          now,
+        }),
+      );
+    }
+    throw createPolicyDeniedError(SAFE_DENIAL_DESCRIPTIONS[denialCode], denialCode);
   }
 
   private validateContext(context: TrustedSourceAccessContext): void {
@@ -334,20 +384,15 @@ export class GuardedSourceReader implements SourceReader {
       const fenceResult = await this.verifyAuthorizationFence(sourceProfileId, context, now);
       if (!fenceResult.valid) {
         const denialCode: SourceDenialCode = fenceResult.denialCode ?? 'CONSENT_FENCE_INVALID';
-        if (this.auditSink) {
-          this.auditSink.record(
-            createSourceAuditRecord({
-              tenantId: context.tenantId,
-              commitmentId: context.commitmentId,
-              taskId: context.taskId,
-              sourceProfileId,
-              decision: 'DENIED',
-              denialCode,
-              now,
-            }),
-          );
-        }
-        throw createPolicyDeniedError(SAFE_DENIAL_DESCRIPTIONS[denialCode], denialCode);
+        this.denyRead(sourceProfileId, context, now, denialCode);
+      }
+
+      // 3.6 GENERATION BINDING: the grant whose terms policy just evaluated must BE the fenced
+      // generation. Without this, a fence for G2 could authorize a read whose scopes came from G1.
+      const binding = this.verifyGenerationBinding(sourceProfileId, context, grant);
+      if (!binding.consistent) {
+        const denialCode: SourceDenialCode = binding.denialCode ?? 'CONSENT_GENERATION_MISMATCH';
+        this.denyRead(sourceProfileId, context, now, denialCode);
       }
     }
 
@@ -448,7 +493,11 @@ export class GuardedSourceReader implements SourceReader {
     // must still discard this snapshot, because the fenced generation is no longer authoritative.
     const postFence = await this.verifyAuthorizationFence(sourceProfileId, context, postNow);
 
-    if (postStatus !== 'active' || !postFence.valid) {
+    // Re-verify the GENERATION BINDING as well: if the registry and the fence diverge while the read
+    // was in flight, the snapshot was authorized by terms the fence never described. Discard it.
+    const postBinding = this.verifyGenerationBinding(sourceProfileId, context, postGrant);
+
+    if (postStatus !== 'active' || !postFence.valid || !postBinding.consistent) {
       // Consent was revoked or expired mid-read! Discard the snapshot immediately.
       if (this.auditSink) {
         this.auditSink.record(

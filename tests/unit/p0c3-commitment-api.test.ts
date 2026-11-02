@@ -194,6 +194,12 @@ class FakeCommitmentStore implements CommitmentRepository {
     if (commitment.status === 'cancelled') {
       return commitment;
     }
+    if (commitment.status === 'completed') {
+      throw new DomainError(
+        'INVALID_STATE_TRANSITION',
+        'Cannot cancel a commitment in completed status',
+      );
+    }
 
     const updated: CommitmentDto = {
       ...commitment,
@@ -219,6 +225,24 @@ class FakeCommitmentStore implements CommitmentRepository {
       return null;
     }
     return { outcomes: this.outcomes.get(commitmentId) ?? [] };
+  }
+
+  markCommitmentCompleted(commitmentId: Id, expectedVersion?: number): Promise<boolean> {
+    const commitment = this.commitments.get(commitmentId);
+    if (!commitment || commitment.status !== 'active') {
+      return Promise.resolve(false);
+    }
+    if (expectedVersion !== undefined && commitment.version !== expectedVersion) {
+      return Promise.resolve(false);
+    }
+    this.commitments.set(commitmentId, {
+      ...commitment,
+      status: 'completed',
+      next_due_at: null,
+      version: commitment.version + 1,
+      updated_at: new Date().toISOString(),
+    });
+    return Promise.resolve(true);
   }
 }
 
@@ -525,6 +549,33 @@ describe('P0-C3A Commitment HTTP API', () => {
       });
       expect(pauseRes.status).toBe(409);
       const json = (await pauseRes.json()) as { error: { code: string } };
+      expect(json.error.code).toBe('INVALID_STATE_TRANSITION');
+    });
+
+    it('rejects cancellation of a completed commitment with 409 INVALID_STATE_TRANSITION', async () => {
+      const { app, store } = setupTestApp();
+      const ctxA: AuthContext = { tenantId: TENANT_A, principalId: PRINCIPAL_A, policyVersion: 1 };
+      const { commitment } = await store.create(ctxA, {
+        idempotencyKey: 'completed-cancel-01',
+        agentId: AGENT_A,
+        title: 'Completed Commitment Test',
+        scheduleKind: 'once',
+        sourceProfileId: 'fixture.github-release',
+      });
+
+      // Mark commitment completed
+      await store.markCommitmentCompleted(commitment.commitment_id);
+
+      // Attempting to cancel a completed commitment must fail with 409
+      const cancelRes = await app.request(
+        `${COMMITMENTS_PATH}/${commitment.commitment_id}/cancel`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${TOKEN_A}` },
+        },
+      );
+      expect(cancelRes.status).toBe(409);
+      const json = (await cancelRes.json()) as { error: { code: string } };
       expect(json.error.code).toBe('INVALID_STATE_TRANSITION');
     });
   });

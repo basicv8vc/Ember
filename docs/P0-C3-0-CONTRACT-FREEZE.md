@@ -339,11 +339,11 @@ export interface CommitmentRepository {
    `findDueCommitments` queries `WHERE next_due_at <= clock_timestamp()`.
    `reserveOccurrence` locks the commitment row via `SELECT ... FOR UPDATE`, validates `next_due_at <= clock_timestamp()`, and takes the persisted `next_due_at` as the authoritative `scheduled_for` timestamp. (Test time override parameters are strictly for test harnesses and must not be accessible in production invocation paths).
    **Schedule Compensation Invariant:** To prevent task storms when the system recovers after downtime, the scheduler compensates **at most one historical interval** per run. The subsequent `next_due_at` is advanced past any skipped intervals (i.e. `GREATEST(scheduled_for + interval, clock_timestamp() + interval)`).
-2. **Authoritative Lease & Active Status Verification on Outcome Append:**
-   `appendOutcomeIfAbsent` requires a verified `WorkerLeaseGrant`. In the database transaction, it verifies:
-   - Valid lease on `runs`: matches `runs.worker_id = grant.workerId`, `runs.lease_epoch = grant.leaseEpoch`, and `runs.leased_until > clock_timestamp()` (using the real column `runs.leased_until`).
-   - Valid lease on `tasks`: confirms the underlying task is in a valid execution state (`running` or `queued`).
-   - The occurrence's `task_id` matches `grant.taskId`.
+2. **Authoritative Lease & Execution Verification on Outcome Append:**
+   `appendOutcomeIfAbsent` requires a verified `WorkerLeaseGrant`, and verifies inside one transaction that locks the commitment row first (serialising against `pause`/`cancel`), then the occurrence, the task and the run:
+   - Valid lease on `runs`: `runs.worker_id = grant.workerId`, `runs.lease_epoch = grant.leaseEpoch`, and `runs.leased_until > clock_timestamp()`. Worker ownership, epoch and expiry are compared **inside PostgreSQL**; the application clock is never consulted.
+   - The `runs.status` must be `running`, and the underlying `tasks.status` must also be `running`. A `queued` Task has no executing lease, and a `cancelled` / `failed` / `completed` Task can never publish an outcome.
+   - The occurrence's `task_id` matches `grant.taskId` and the occurrence is not `cancelled`.
    - The commitment's status must still be strictly `active`. If paused or cancelled, outcome write is rejected fail-closed.
    - Note on Consent: Before publication, consent is re-evaluated; in-memory `FakeConsentRegistry` does not provide cross-process atomicity guarantees, so persistent database guards serve as the authoritative gate.
    - Old/stale workers cannot bypass checks via idempotent replays.
@@ -352,6 +352,7 @@ export interface CommitmentRepository {
 4. **Interrupted Dispatch Recovery & Reconciliation:**
    - **Stable Task Idempotency Key:** `deriveTaskCreationIdempotencyKey(occurrenceId)` produces `commitment-occ:${occurrenceId}` so crashing before binding `taskId` never creates duplicate Tasks on retry.
    - **Reconciliation Sweep:** `findStalledPendingOccurrences` identifies orphan pending occurrences that exceeded the dispatch deadline.
+   - **Database-Authoritative Recovery Context:** Each `StalledPendingOccurrence` carries `tenantId`, `agentId`, `sourceProfileId`, `scheduleKind`, `intervalSeconds`, `scheduledFor`, `createdAt` and `taskCreationIdempotencyKey`, all read from the occurrence/commitment rows. Lane B must rebuild the dispatch from those values; substituting a synthetic "system" tenant/agent is forbidden.
    - **Re-binding:** `reconcilePendingOccurrence` atomically binds `task_id` and transitions status to `dispatched`.
 
 ### 4.2 TypeScript Port Definition
@@ -394,7 +395,12 @@ export interface AppendOutcomeCommand {
 
 export interface StalledPendingOccurrence {
   readonly occurrenceId: Id;
+  readonly tenantId: Id;
   readonly commitmentId: Id;
+  readonly agentId: Id;
+  readonly sourceProfileId: SourceProfileId;
+  readonly scheduleKind: ScheduleKind;
+  readonly intervalSeconds: number | null;
   readonly scheduledFor: Date;
   readonly createdAt: Date;
   readonly taskCreationIdempotencyKey: string;
@@ -430,13 +436,17 @@ export interface DueCommitmentStore {
 
   /**
    * Durably append an outcome for an occurrence with authoritative lease verification.
-   * In a single transaction:
-   * 1. Verifies runs table: worker_id, lease_epoch, lease_expires_at > now().
-   * 2. Verifies occurrence matches grant.taskId.
-   * 3. Verifies commitment is NOT cancelled.
-   * 4. Inserts outcome row (unique on occurrence_id).
-   * 5. Advances occurrence status to 'completed' (or 'failed' if result_status is failed/denied).
-   * Throws STALE_LEASE if worker lease expired or is stale.
+   * In a single transaction that locks commitment -> occurrence -> task -> run:
+   * 1. Verifies the commitment is still `active` (a winning cancel is always observed).
+   * 2. Verifies the occurrence is not `cancelled` and matches grant.taskId.
+   * 3. Verifies tasks.status = 'running'.
+   * 4. Verifies runs.status = 'running', runs.worker_id / runs.lease_epoch match the grant,
+   *    and runs.leased_until > clock_timestamp() (all compared inside PostgreSQL).
+   * 5. Inserts outcome row (unique on occurrence_id).
+   * 6. Advances occurrence status to 'completed' (or 'failed' if result_status is failed/denied).
+   * Throws STALE_LEASE if the run is not running or the lease expired/is stale.
+   * Throws INVALID_STATE_TRANSITION if the task is no longer running.
+   * Throws POLICY_DENIED if the commitment or occurrence was cancelled.
    * Returns false if outcome was already committed.
    */
   appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;

@@ -6,7 +6,7 @@ import {
   PostgresCommitmentRepository,
   PostgresTaskRepository,
 } from '@ember/postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import { createTenantFixture, type TenantFixture } from './support/fixtures.js';
 
@@ -195,6 +195,102 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         /The requested state transition is not allowed/,
       );
     });
+
+    it('strictly forbids completed -> cancelled transition and throws INVALID_STATE_TRANSITION', async () => {
+      const { commitment } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `completed-cancel-test-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'Completed Terminal Test',
+        scheduleKind: 'once',
+        dueAt: new Date(Date.now() - 5000),
+        sourceProfileId: 'fixture.github-release',
+      });
+
+      // Mark completed
+      const marked = await commitmentRepo.markCommitmentCompleted(commitment.commitment_id);
+      expect(marked).toBe(true);
+
+      const fetched = await commitmentRepo.get(ctxA, commitment.commitment_id);
+      expect(fetched?.status).toBe('completed');
+
+      // Attempt to cancel must be rejected with INVALID_STATE_TRANSITION
+      await expect(commitmentRepo.cancel(ctxA, commitment.commitment_id)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+      await expect(commitmentRepo.pause(ctxA, commitment.commitment_id)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+      await expect(commitmentRepo.resume(ctxA, commitment.commitment_id)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+
+      // `completed` is terminal: re-completing is a no-op, never a second transition.
+      expect(await commitmentRepo.markCommitmentCompleted(commitment.commitment_id)).toBe(false);
+      const unchanged = await commitmentRepo.get(ctxA, commitment.commitment_id);
+      expect(unchanged?.status).toBe('completed');
+      expect(unchanged?.version).toBe(fetched?.version);
+    });
+
+    it('enforces the full transition table and idempotent terminal semantics', async () => {
+      // active -> paused -> active, with idempotent repeats that never bump the version.
+      const { commitment } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `sm-active-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'State Machine Active',
+        scheduleKind: 'interval',
+        intervalSeconds: 900,
+        sourceProfileId: 'fixture.github-release',
+      });
+
+      const paused = await commitmentRepo.pause(ctxA, commitment.commitment_id);
+      expect(paused.status).toBe('paused');
+      expect(paused.version).toBe(commitment.version + 1);
+
+      const pausedAgain = await commitmentRepo.pause(ctxA, commitment.commitment_id);
+      expect(pausedAgain.status).toBe('paused');
+      expect(pausedAgain.version).toBe(paused.version);
+
+      const resumed = await commitmentRepo.resume(ctxA, commitment.commitment_id);
+      expect(resumed.status).toBe('active');
+      expect(resumed.version).toBe(paused.version + 1);
+
+      const resumedAgain = await commitmentRepo.resume(ctxA, commitment.commitment_id);
+      expect(resumedAgain.status).toBe('active');
+      expect(resumedAgain.version).toBe(resumed.version);
+
+      // cancelled is terminal and idempotent for cancel; pause/resume are rejected.
+      const cancelled = await commitmentRepo.cancel(ctxA, commitment.commitment_id);
+      expect(cancelled.status).toBe('cancelled');
+      expect(cancelled.version).toBe(resumed.version + 1);
+
+      const cancelledAgain = await commitmentRepo.cancel(ctxA, commitment.commitment_id);
+      expect(cancelledAgain.status).toBe('cancelled');
+      expect(cancelledAgain.version).toBe(cancelled.version);
+
+      await expect(commitmentRepo.pause(ctxA, commitment.commitment_id)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+      await expect(commitmentRepo.resume(ctxA, commitment.commitment_id)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+      expect(await commitmentRepo.markCommitmentCompleted(commitment.commitment_id)).toBe(false);
+
+      // CAS: a stale expected_version is rejected and leaves the row untouched.
+      const { commitment: fresh } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `sm-cas-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'State Machine CAS',
+        scheduleKind: 'interval',
+        intervalSeconds: 900,
+        sourceProfileId: 'fixture.github-release',
+      });
+      await expect(
+        commitmentRepo.pause(ctxA, fresh.commitment_id, { expectedVersion: fresh.version + 1 }),
+      ).rejects.toThrowError(/The requested state transition is not allowed/);
+      const stillActive = await commitmentRepo.get(ctxA, fresh.commitment_id);
+      expect(stillActive?.status).toBe('active');
+      expect(stillActive?.version).toBe(fresh.version);
+    });
   });
 
   describe('4. DueWork Discovery & Concurrent Slot Reservation Race', () => {
@@ -293,7 +389,13 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
       taskId = receipt.taskId;
       runId = randomUUID();
 
-      // 2. Insert a running run with active lease in runs table
+      // 2. A dispatched occurrence always belongs to a Task that is actually executing.
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, taskId],
+      );
+
+      // 3. Insert a running run with active lease in runs table
       const leaseUntil = new Date(Date.now() + 60_000); // 1 minute in future
       await db.pool.query(
         `INSERT INTO runs (
@@ -302,7 +404,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         [runId, tenantA.tenantId, taskId, validEpoch, workerId, leaseUntil],
       );
 
-      // 3. Create commitment and reserve occurrence
+      // 4. Create commitment and reserve occurrence
       const pastDue = new Date(Date.now() - 10_000);
       const { commitment } = await commitmentRepo.create(ctxA, {
         idempotencyKey: `key-${randomUUID()}`,
@@ -433,6 +535,329 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         /Operation denied by policy/,
       );
     });
+
+    it('determines lease validity entirely via PostgreSQL clock_timestamp() even under extreme application time skew', async () => {
+      // Case A: valid lease in PostgreSQL, but the application clock is skewed 10 years forward.
+      // A JavaScript-clock comparison would declare the lease expired; PostgreSQL must not.
+      const receiptA = await taskRepo.create(ctxA, {
+        agentId: agentAId,
+        idempotencyKey: `skew-task-a-${randomUUID()}`,
+        kind: 'mock.chat',
+        input: { prompt: 'Skew task A' },
+      });
+      const tIdA = receiptA.taskId;
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tIdA],
+      );
+
+      const rIdA = randomUUID();
+      await db.pool.query(
+        `INSERT INTO runs (
+          id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until, started_at
+        ) VALUES ($1, $2, $3, 1, 1, 'running', $4, clock_timestamp() + interval '60 seconds', clock_timestamp())`,
+        [rIdA, tenantA.tenantId, tIdA, workerId],
+      );
+
+      const { commitment: commA } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `skew-comm-a-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'Clock Skew Test A',
+        scheduleKind: 'once',
+        dueAt: new Date(Date.now() - 5000),
+        sourceProfileId: 'fixture.github-release',
+      });
+      const slotA = await commitmentRepo.reserveOccurrence(commA.commitment_id, commA.version);
+      await commitmentRepo.markDispatched(slotA!.occurrenceId, tIdA);
+
+      const grantA: WorkerLeaseGrant = {
+        tenantId: tenantA.tenantId,
+        taskId: tIdA,
+        runId: rIdA,
+        leaseEpoch: 1,
+        workerId,
+      };
+
+      const cmdA: AppendOutcomeCommand = {
+        occurrenceId: slotA!.occurrenceId,
+        commitmentId: commA.commitment_id,
+        taskId: tIdA,
+        summary: 'Clock skew outcome A',
+        resultStatus: 'meaningful_change',
+      };
+
+      // Only `Date` is faked; timers stay real so the pg driver keeps its own scheduling.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(new Date('2036-01-01T00:00:00Z'));
+        await expect(commitmentRepo.appendOutcomeIfAbsent(grantA, cmdA)).resolves.toBe(true);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // Case B: expired lease in PostgreSQL, but the application clock is skewed back to 1990.
+      // A JavaScript-clock comparison would accept the write; PostgreSQL must reject it.
+      const receiptB = await taskRepo.create(ctxA, {
+        agentId: agentAId,
+        idempotencyKey: `skew-task-b-${randomUUID()}`,
+        kind: 'mock.chat',
+        input: { prompt: 'Skew task B' },
+      });
+      const tIdB = receiptB.taskId;
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tIdB],
+      );
+
+      const rIdB = randomUUID();
+      await db.pool.query(
+        `INSERT INTO runs (
+          id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until, started_at
+        ) VALUES ($1, $2, $3, 1, 1, 'running', $4, clock_timestamp() - interval '10 seconds', clock_timestamp() - interval '60 seconds')`,
+        [rIdB, tenantA.tenantId, tIdB, workerId],
+      );
+
+      const { commitment: commB } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `skew-comm-b-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'Clock Skew Test B',
+        scheduleKind: 'once',
+        dueAt: new Date(Date.now() - 5000),
+        sourceProfileId: 'fixture.github-release',
+      });
+      const slotB = await commitmentRepo.reserveOccurrence(commB.commitment_id, commB.version);
+      await commitmentRepo.markDispatched(slotB!.occurrenceId, tIdB);
+
+      const grantB: WorkerLeaseGrant = {
+        tenantId: tenantA.tenantId,
+        taskId: tIdB,
+        runId: rIdB,
+        leaseEpoch: 1,
+        workerId,
+      };
+
+      const cmdB: AppendOutcomeCommand = {
+        occurrenceId: slotB!.occurrenceId,
+        commitmentId: commB.commitment_id,
+        taskId: tIdB,
+        summary: 'Expired lease outcome B',
+        resultStatus: 'meaningful_change',
+      };
+
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.setSystemTime(new Date('1990-01-01T00:00:00Z'));
+        await expect(commitmentRepo.appendOutcomeIfAbsent(grantB, cmdB)).rejects.toThrowError(
+          /Lease is stale or no longer owned by this worker/,
+        );
+      } finally {
+        vi.useRealTimers();
+      }
+
+      // The rejected write must not have produced an outcome row.
+      const leaked = await db.pool.query<{ id: string }>(
+        `SELECT id FROM commitment_outcomes WHERE tenant_id = $1 AND commitment_id = $2`,
+        [tenantA.tenantId, commB.commitment_id],
+      );
+      expect(leaked.rowCount).toBe(0);
+    });
+
+    it('rejects outcome append if Task is cancelled or Run is not running', async () => {
+      const receipt = await taskRepo.create(ctxA, {
+        agentId: agentAId,
+        idempotencyKey: `term-task-${randomUUID()}`,
+        kind: 'mock.chat',
+        input: { prompt: 'Task terminating test' },
+      });
+      const tId = receipt.taskId;
+      const rId = randomUUID();
+
+      // The Task really is executing when its Run is leased.
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tId],
+      );
+
+      await db.pool.query(
+        `INSERT INTO runs (
+          id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until, started_at
+        ) VALUES ($1, $2, $3, 1, 1, 'running', $4, clock_timestamp() + interval '60 seconds', clock_timestamp())`,
+        [rId, tenantA.tenantId, tId, workerId],
+      );
+
+      const { commitment } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `term-comm-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'Terminal Task Test',
+        scheduleKind: 'once',
+        dueAt: new Date(Date.now() - 5000),
+        sourceProfileId: 'fixture.github-release',
+      });
+      const slot = await commitmentRepo.reserveOccurrence(
+        commitment.commitment_id,
+        commitment.version,
+      );
+      await commitmentRepo.markDispatched(slot!.occurrenceId, tId);
+
+      const grant: WorkerLeaseGrant = {
+        tenantId: tenantA.tenantId,
+        taskId: tId,
+        runId: rId,
+        leaseEpoch: 1,
+        workerId,
+      };
+
+      const cmd: AppendOutcomeCommand = {
+        occurrenceId: slot!.occurrenceId,
+        commitmentId: commitment.commitment_id,
+        taskId: tId,
+        summary: 'Terminal task outcome',
+        resultStatus: 'meaningful_change',
+      };
+
+      // Case A: Task cancelled while its Run still looks live -> fail closed.
+      await db.pool.query(
+        `UPDATE tasks SET status = 'cancelled', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tId],
+      );
+      await expect(commitmentRepo.appendOutcomeIfAbsent(grant, cmd)).rejects.toThrowError(
+        /The requested state transition is not allowed/,
+      );
+
+      // Case B: Task running, but Run is succeeded (already finished)
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tId],
+      );
+      await db.pool.query(
+        `UPDATE runs SET status = 'succeeded', finished_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, rId],
+      );
+      await expect(commitmentRepo.appendOutcomeIfAbsent(grant, cmd)).rejects.toThrowError(
+        /Lease is stale or no longer owned by this worker/,
+      );
+
+      // Both rejections rolled back cleanly: no outcome row may exist for the occurrence.
+      const leaked = await db.pool.query<{ id: string }>(
+        `SELECT id FROM commitment_outcomes WHERE tenant_id = $1 AND occurrence_id = $2`,
+        [tenantA.tenantId, slot!.occurrenceId],
+      );
+      expect(leaked.rowCount).toBe(0);
+    });
+
+    it('serialises outcome publication behind a concurrent cancellation and never writes after it', async () => {
+      const receipt = await taskRepo.create(ctxA, {
+        agentId: agentAId,
+        idempotencyKey: `race-task-${randomUUID()}`,
+        kind: 'mock.chat',
+        input: { prompt: 'Cancel race task' },
+      });
+      const tId = receipt.taskId;
+      const rId = randomUUID();
+
+      await db.pool.query(
+        `UPDATE tasks SET status = 'running', updated_at = clock_timestamp() WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, tId],
+      );
+      await db.pool.query(
+        `INSERT INTO runs (
+          id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until, started_at
+        ) VALUES ($1, $2, $3, 1, 1, 'running', $4, clock_timestamp() + interval '60 seconds', clock_timestamp())`,
+        [rId, tenantA.tenantId, tId, workerId],
+      );
+
+      const { commitment } = await commitmentRepo.create(ctxA, {
+        idempotencyKey: `race-comm-${randomUUID()}`,
+        agentId: agentAId,
+        title: 'Cancel Race Commitment',
+        scheduleKind: 'once',
+        dueAt: new Date(Date.now() - 5000),
+        sourceProfileId: 'fixture.github-release',
+      });
+      const slot = await commitmentRepo.reserveOccurrence(
+        commitment.commitment_id,
+        commitment.version,
+      );
+      await commitmentRepo.markDispatched(slot!.occurrenceId, tId);
+
+      const grant: WorkerLeaseGrant = {
+        tenantId: tenantA.tenantId,
+        taskId: tId,
+        runId: rId,
+        leaseEpoch: 1,
+        workerId,
+      };
+      const cmd: AppendOutcomeCommand = {
+        occurrenceId: slot!.occurrenceId,
+        commitmentId: commitment.commitment_id,
+        taskId: tId,
+        summary: 'Outcome that races a cancellation',
+        resultStatus: 'meaningful_change',
+      };
+
+      // A separate session emulates the winning cancel transaction: it takes the commitment row
+      // lock first, exactly like `cancel()`, and only then flips the status.
+      const canceller = await db.pool.connect();
+      try {
+        await canceller.query('BEGIN');
+        await canceller.query(
+          `SELECT status FROM commitments WHERE tenant_id = $1 AND id = $2 FOR UPDATE`,
+          [tenantA.tenantId, commitment.commitment_id],
+        );
+
+        // The publisher is started only after the lock is held, so the cancellation is
+        // guaranteed to be the transaction that wins.
+        const publish = commitmentRepo.appendOutcomeIfAbsent(grant, cmd).then(
+          () => ({ ok: true as const }),
+          (error: unknown) => ({ ok: false as const, error }),
+        );
+        let completed = false;
+        void publish.then(() => {
+          completed = true;
+        });
+
+        // Still blocked on the row lock: publication cannot slip in between the cancel
+        // transaction's status check and its commit.
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        expect(completed).toBe(false);
+
+        await canceller.query(
+          `UPDATE commitments
+             SET status = 'cancelled', next_due_at = NULL, version = version + 1,
+                 updated_at = clock_timestamp()
+           WHERE tenant_id = $1 AND id = $2`,
+          [tenantA.tenantId, commitment.commitment_id],
+        );
+        await canceller.query(
+          `UPDATE commitment_occurrences
+             SET status = 'cancelled', updated_at = clock_timestamp()
+           WHERE tenant_id = $1 AND commitment_id = $2 AND status = 'pending'`,
+          [tenantA.tenantId, commitment.commitment_id],
+        );
+        await canceller.query('COMMIT');
+
+        // PostgreSQL re-evaluates the publisher's locked row after the commit, so it observes
+        // the committed `cancelled` status and fails closed.
+        const outcome = await publish;
+        expect(outcome.ok).toBe(false);
+        if (!outcome.ok) {
+          expect((outcome.error as Error).message).toMatch(/Operation denied by policy/);
+        }
+      } finally {
+        await canceller.query('ROLLBACK').catch(() => undefined);
+        canceller.release();
+      }
+
+      // The losing publisher must not have written an outcome.
+      const leaked = await db.pool.query<{ id: string }>(
+        `SELECT id FROM commitment_outcomes WHERE tenant_id = $1 AND commitment_id = $2`,
+        [tenantA.tenantId, commitment.commitment_id],
+      );
+      expect(leaked.rowCount).toBe(0);
+
+      const stored = await commitmentRepo.get(ctxA, commitment.commitment_id);
+      expect(stored?.status).toBe('cancelled');
+    });
   });
 
   describe('6. Interrupted Dispatch & Crash Recovery', () => {
@@ -442,7 +867,8 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         idempotencyKey: `key-${randomUUID()}`,
         agentId: agentAId,
         title: 'Stalled Dispatch Task',
-        scheduleKind: 'once',
+        scheduleKind: 'interval',
+        intervalSeconds: 900,
         dueAt: pastDue,
         sourceProfileId: 'fixture.github-release',
       });
@@ -463,6 +889,11 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
       const stalled = await commitmentRepo.findStalledPendingOccurrences(60, 10);
       const target = stalled.find((s) => s.occurrenceId === slot!.occurrenceId);
       expect(target).toBeDefined();
+      expect(target!.tenantId).toBe(tenantA.tenantId);
+      expect(target!.agentId).toBe(agentAId);
+      expect(target!.sourceProfileId).toBe('fixture.github-release');
+      expect(target!.scheduleKind).toBe('interval');
+      expect(target!.intervalSeconds).toBe(900);
       expect(target!.taskCreationIdempotencyKey).toBe(`commitment-occ:${slot!.occurrenceId}`);
 
       // Create a real task in DB to satisfy foreign key constraint on reconcile

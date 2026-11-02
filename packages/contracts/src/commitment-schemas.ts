@@ -407,7 +407,12 @@ export interface AppendOutcomeCommand {
 
 export interface StalledPendingOccurrence {
   readonly occurrenceId: Id;
+  readonly tenantId: Id;
   readonly commitmentId: Id;
+  readonly agentId: Id;
+  readonly sourceProfileId: SourceProfileId;
+  readonly scheduleKind: ScheduleKind;
+  readonly intervalSeconds: number | null;
   readonly scheduledFor: Date;
   readonly createdAt: Date;
   readonly taskCreationIdempotencyKey: string;

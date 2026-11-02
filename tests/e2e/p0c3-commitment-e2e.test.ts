@@ -193,6 +193,38 @@ describe('P0-C3A E2E Commitment HTTP API & Real PostgreSQL', () => {
     expect(illegalPause.status).toBe(409);
     const illegalErr = (await illegalPause.json()) as { error: { code: string } };
     expect(illegalErr.error.code).toBe('INVALID_STATE_TRANSITION');
+
+    // Verify completed -> cancelled is strictly rejected with 409 INVALID_STATE_TRANSITION
+    const compKey = `e2e-comp-${randomUUID()}`;
+    const compCreateRes = await cluster.fetch('/v1/commitments', {
+      method: 'POST',
+      token: cluster.tenantA.token,
+      headers: { 'Idempotency-Key': compKey },
+      body: {
+        agent_id: agentId,
+        title: 'Completed transition test',
+        schedule_kind: 'interval',
+        interval_seconds: 900,
+        source_profile_id: 'acc-cas-test',
+      },
+    });
+    expect(compCreateRes.status).toBe(201);
+    const compReceipt = (await compCreateRes.json()) as CommitmentReceiptDto;
+
+    // Mark completed via repository
+    await cluster.commitments.markCommitmentCompleted(compReceipt.commitment_id);
+
+    // Cancel on completed commitment must fail with 409 INVALID_STATE_TRANSITION
+    const compCancelRes = await cluster.fetch(
+      `/v1/commitments/${compReceipt.commitment_id}/cancel`,
+      {
+        method: 'POST',
+        token: cluster.tenantA.token,
+      },
+    );
+    expect(compCancelRes.status).toBe(409);
+    const compCancelErr = (await compCancelRes.json()) as { error: { code: string } };
+    expect(compCancelErr.error.code).toBe('INVALID_STATE_TRANSITION');
   });
 
   it('guarantees tenant isolation: Tenant B cannot access or mutate Tenant A commitments', async () => {

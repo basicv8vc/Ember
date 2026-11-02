@@ -52,9 +52,14 @@ interface OutcomeRow {
 
 interface StalledOccurrenceRow {
   id: string;
+  tenant_id: string;
   commitment_id: string;
   scheduled_for: Date | string;
   created_at: Date | string;
+  agent_id: string;
+  source_profile_id: string;
+  schedule_kind: string;
+  interval_seconds: number | null;
 }
 
 const COMMITMENT_COLUMNS = `
@@ -154,7 +159,9 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   ): Promise<{ readonly commitment: CommitmentDto; readonly replayed: boolean }> {
     const fingerprint = computeCommitmentFingerprint(cmd);
     const commitmentId = randomUUID();
-    const initialDueAt = cmd.dueAt ? cmd.dueAt.toISOString() : new Date().toISOString();
+    // `null` defers the initial due instant to PostgreSQL's `clock_timestamp()`; the
+    // application clock is never the scheduling authority.
+    const initialDueAt = cmd.dueAt ? cmd.dueAt.toISOString() : null;
 
     const insertSql = `
       INSERT INTO commitments (
@@ -162,7 +169,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         next_due_at, source_profile_id, version, idempotency_key, request_fingerprint,
         created_at, updated_at
       )
-      VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, $8, 1, $9, $10, clock_timestamp(), clock_timestamp())
+      VALUES ($1, $2, $3, $4, 'active', $5, $6, COALESCE($7::timestamptz, clock_timestamp()), $8, 1, $9, $10, clock_timestamp(), clock_timestamp())
       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
       RETURNING ${COMMITMENT_COLUMNS}
     `;
@@ -431,6 +438,13 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         return mapCommitmentRow(row);
       }
 
+      if (row.status === 'completed') {
+        throw new DomainError(
+          'INVALID_STATE_TRANSITION',
+          'Cannot cancel a commitment in completed status',
+        );
+      }
+
       // Cancellation is irreversible: clears next_due_at immediately
       const updateSql = `
         UPDATE commitments
@@ -443,6 +457,15 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
       if (updatedRow === undefined) {
         throw new DomainError('DB_UNAVAILABLE', 'Failed to update commitment status');
       }
+
+      // Cancel any in-flight pending occurrences for this commitment
+      await client.query(
+        `UPDATE commitment_occurrences
+         SET status = 'cancelled', updated_at = clock_timestamp()
+         WHERE tenant_id = $1 AND commitment_id = $2 AND status = 'pending'`,
+        [ctx.tenantId, commitmentId],
+      );
+
       return mapCommitmentRow(updatedRow);
     });
   }
@@ -697,67 +720,16 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
     cmd: AppendOutcomeCommand,
   ): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
-      // 1. Authoritative lease verification on runs and tasks
-      const leaseCheckSql = `
-        SELECT r.worker_id, r.lease_epoch, r.leased_until, r.status AS run_status, t.status AS task_status
-        FROM runs r
-        JOIN tasks t ON t.id = r.task_id AND t.tenant_id = r.tenant_id
-        WHERE r.tenant_id = $1 AND r.task_id = $2 AND r.id = $3
-        FOR UPDATE OF r
-      `;
-
-      const leaseRes = await client.query<{
-        worker_id: string | null;
-        lease_epoch: string;
-        leased_until: Date | string | null;
-        run_status: string;
-        task_status: string;
-      }>(leaseCheckSql, [grant.tenantId, grant.taskId, grant.runId]);
-
-      const runRow = leaseRes.rows[0];
-      if (runRow === undefined) {
-        throw new DomainError('STALE_LEASE', 'Task run not found or does not belong to tenant');
-      }
-
-      if (
-        runRow.worker_id !== grant.workerId ||
-        BigInt(runRow.lease_epoch) !== BigInt(grant.leaseEpoch) ||
-        runRow.leased_until === null ||
-        new Date(runRow.leased_until) <= new Date() ||
-        runRow.run_status !== 'running'
-      ) {
-        throw new DomainError(
-          'STALE_LEASE',
-          'Worker lease is expired, fenced, or not owned by caller',
-        );
-      }
-
-      // 2. Verify occurrence matches task and commitment
-      const occSql = `
-        SELECT id, status, task_id
-        FROM commitment_occurrences
-        WHERE tenant_id = $1 AND commitment_id = $2 AND id = $3
-        FOR UPDATE
-      `;
-      const occRes = await client.query<{
-        id: string;
-        status: string;
-        task_id: string | null;
-      }>(occSql, [grant.tenantId, cmd.commitmentId, cmd.occurrenceId]);
-
-      const occRow = occRes.rows[0];
-      if (occRow === undefined) {
-        throw new DomainError('NOT_FOUND', 'Occurrence not found');
-      }
-
-      if (occRow.task_id !== grant.taskId) {
-        throw new DomainError(
-          'INVALID_ARGUMENT',
-          'Occurrence task_id does not match grant task_id',
-        );
-      }
-
-      // 3. Re-verify commitment is STILL active (CTO mandate: publishing requires active status)
+      // Lock order for every commitment writer in this repository:
+      //   commitments -> commitment_occurrences -> tasks -> runs
+      //
+      // Taking the commitment row lock FIRST serialises publication against `cancel()` and
+      // `pause()` (which acquire the same lock), so a cancellation that wins the lock is
+      // always observed by the publisher instead of being raced past. Task -> run matches the
+      // order used by `ResultCommitter` and `PostgresLeaseQueue`, so no two writers can form a
+      // wait cycle.
+      //
+      // 1. Lock the commitment and require it to still accept outcomes.
       const commitSql = `
         SELECT status
         FROM commitments
@@ -781,7 +753,115 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         );
       }
 
-      // 4. Insert outcome
+      // 2. Lock and verify occurrence
+      const occSql = `
+        SELECT id, status, task_id
+        FROM commitment_occurrences
+        WHERE tenant_id = $1 AND commitment_id = $2 AND id = $3
+        FOR UPDATE
+      `;
+      const occRes = await client.query<{
+        id: string;
+        status: string;
+        task_id: string | null;
+      }>(occSql, [grant.tenantId, cmd.commitmentId, cmd.occurrenceId]);
+
+      const occRow = occRes.rows[0];
+      if (occRow === undefined) {
+        throw new DomainError('NOT_FOUND', 'Occurrence not found');
+      }
+
+      if (occRow.status === 'cancelled') {
+        throw new DomainError('POLICY_DENIED', 'Cannot publish outcome for cancelled occurrence');
+      }
+
+      if (occRow.task_id !== grant.taskId) {
+        throw new DomainError(
+          'INVALID_ARGUMENT',
+          'Occurrence task_id does not match grant task_id',
+        );
+      }
+
+      // 3. Lock the Task and require it to still be executing. A cancelled, failed or
+      //    completed Task can never publish an outcome, even if its Run row still looks live.
+      const taskSql = `
+        SELECT status
+        FROM tasks
+        WHERE tenant_id = $1 AND id = $2
+        FOR UPDATE
+      `;
+      const taskRes = await client.query<{ status: string }>(taskSql, [
+        grant.tenantId,
+        grant.taskId,
+      ]);
+
+      const taskRow = taskRes.rows[0];
+      if (taskRow === undefined) {
+        throw new DomainError('NOT_FOUND', 'Task not found in this tenant');
+      }
+
+      if (taskRow.status !== 'running') {
+        throw new DomainError(
+          'INVALID_STATE_TRANSITION',
+          `Task is in '${taskRow.status}' status and no longer executing; outcome publication is rejected`,
+        );
+      }
+
+      // 4. Lock the Run and let PostgreSQL decide the whole fencing verdict. Worker ownership,
+      //    the lease epoch and lease expiry are all compared in SQL; freshness uses
+      //    clock_timestamp(), so a skewed application clock can neither extend nor shorten a
+      //    lease.
+      const leaseCheckSql = `
+        SELECT
+          r.status AS run_status,
+          (r.worker_id = $4) AS is_worker_match,
+          (r.lease_epoch = $5::bigint) AS is_epoch_match,
+          (r.leased_until IS NOT NULL AND r.leased_until > clock_timestamp()) AS is_lease_active
+        FROM runs r
+        WHERE r.tenant_id = $1 AND r.task_id = $2 AND r.id = $3
+        FOR UPDATE
+      `;
+
+      const leaseRes = await client.query<{
+        run_status: string;
+        is_worker_match: boolean;
+        is_epoch_match: boolean;
+        is_lease_active: boolean;
+      }>(leaseCheckSql, [
+        grant.tenantId,
+        grant.taskId,
+        grant.runId,
+        grant.workerId,
+        grant.leaseEpoch,
+      ]);
+
+      const runRow = leaseRes.rows[0];
+      if (runRow === undefined) {
+        throw new DomainError('STALE_LEASE', 'Task run not found or does not belong to tenant');
+      }
+
+      if (runRow.run_status !== 'running') {
+        throw new DomainError(
+          'STALE_LEASE',
+          `Run is in '${runRow.run_status}' status and not running`,
+        );
+      }
+
+      if (!runRow.is_worker_match || !runRow.is_epoch_match) {
+        throw new DomainError(
+          'STALE_LEASE',
+          'Worker or lease epoch does not match current run owner',
+        );
+      }
+
+      if (!runRow.is_lease_active) {
+        throw new DomainError(
+          'STALE_LEASE',
+          'Worker lease is expired according to PostgreSQL clock_timestamp()',
+        );
+      }
+
+      // 5. Insert outcome
       const outcomeId = randomUUID();
       const insertOutcomeSql = `
         INSERT INTO commitment_outcomes (
@@ -807,7 +887,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         return false;
       }
 
-      // 5. Update occurrence status
+      // 6. Update occurrence status
       const terminalOccStatus =
         cmd.resultStatus === 'failed' || cmd.resultStatus === 'denied' ? 'failed' : 'completed';
 
@@ -848,11 +928,13 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   ): Promise<readonly StalledPendingOccurrence[]> {
     const cappedLimit = Math.min(Math.max(limit, 1), 100);
     const sql = `
-      SELECT id, commitment_id, scheduled_for, created_at
-      FROM commitment_occurrences
-      WHERE status = 'pending'
-        AND created_at <= clock_timestamp() - ($1 || ' seconds')::interval
-      ORDER BY created_at ASC
+      SELECT o.id, o.tenant_id, o.commitment_id, o.scheduled_for, o.created_at,
+             c.agent_id, c.source_profile_id, c.schedule_kind, c.interval_seconds
+      FROM commitment_occurrences o
+      JOIN commitments c ON c.tenant_id = o.tenant_id AND c.id = o.commitment_id
+      WHERE o.status = 'pending'
+        AND o.created_at <= clock_timestamp() - ($1 || ' seconds')::interval
+      ORDER BY o.created_at ASC
       LIMIT $2
     `;
 
@@ -864,7 +946,12 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
 
       return result.rows.map((row) => ({
         occurrenceId: row.id,
+        tenantId: row.tenant_id,
         commitmentId: row.commitment_id,
+        agentId: row.agent_id,
+        sourceProfileId: row.source_profile_id,
+        scheduleKind: row.schedule_kind as ScheduleKind,
+        intervalSeconds: row.interval_seconds,
         scheduledFor: new Date(row.scheduled_for),
         createdAt: new Date(row.created_at),
         taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(row.id),

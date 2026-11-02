@@ -29,6 +29,7 @@ import {
   SOURCE_READ_SCOPE,
   toAuthorizedConsentGeneration,
   validateConsentAuthorizationFence,
+  validateConsentGenerationBinding,
 } from './consent.js';
 import { FIXTURE_PROFILE_RELEASES, TEST_TENANT_A, TEST_TENANT_B } from './fixtures.js';
 import { evaluateSourceAccess } from './source-policy.js';
@@ -784,6 +785,89 @@ CONSENT_CONFORMANCE_CASE_LIST.push({
 
     const listB = await adapter.list(TEST_TENANT_B, CONSENT_CONFORMANCE_CLOCK);
     check(listB.length === 1, `expected 1 grant for tenant B, got ${listB.length}`);
+  },
+});
+
+CONSENT_CONFORMANCE_CASE_LIST.push({
+  id: 'C-13',
+  requirement: 'R13-policy-grant-is-the-fenced-generation',
+  title: 'The grant policy evaluates is the fenced generation (generation binding)',
+  async run(adapter, check) {
+    await adapter.reset();
+    const granted = await adapter.grant(grantParams(), CONSENT_CONFORMANCE_CLOCK);
+    const fence = createConsentAuthorizationFence(granted, CONSENT_CONFORMANCE_CLOCK);
+
+    const current = await adapter.get(
+      TEST_TENANT_A,
+      CONFORMANCE_PROFILE_ID,
+      CONSENT_CONFORMANCE_CLOCK,
+    );
+    const bound = validateConsentGenerationBinding({
+      grant: current,
+      fence,
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: CONFORMANCE_PROFILE_ID,
+    });
+    check(
+      bound.consistent && bound.code === 'VALID',
+      `expected the current generation to bind to its own fence, got ${bound.code}`,
+    );
+
+    // A well-formed fence naming any OTHER generation must never bind, even if that generation is
+    // structurally valid: the perimeter would otherwise authorize G1's terms under G2's fence.
+    const foreignFence = createConsentAuthorizationFence(
+      { ...granted, grantId: `${granted.grantId}-foreign`, version: granted.version + 1 },
+      CONSENT_CONFORMANCE_CLOCK,
+    );
+    const mismatched = validateConsentGenerationBinding({
+      grant: current,
+      fence: foreignFence,
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: CONFORMANCE_PROFILE_ID,
+    });
+    check(
+      !mismatched.consistent && mismatched.denialCode === 'CONSENT_GENERATION_MISMATCH',
+      `expected deny(CONSENT_GENERATION_MISMATCH) for a fence naming another generation, got ${mismatched.code}`,
+    );
+
+    // Tenant binding is checked independently of fence validity.
+    const crossTenant = validateConsentGenerationBinding({
+      grant: current,
+      fence: { ...fence, tenantId: TEST_TENANT_B },
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: CONFORMANCE_PROFILE_ID,
+    });
+    check(
+      !crossTenant.consistent && crossTenant.denialCode === 'TENANT_MISMATCH',
+      `expected deny(TENANT_MISMATCH) for a cross-tenant fence, got ${crossTenant.code}`,
+    );
+
+    // Revocation bumps the generation, so a fence minted before it must stop binding.
+    const revokedAt = addMinutes(CONSENT_CONFORMANCE_CLOCK, 1);
+    await adapter.revoke(TEST_TENANT_A, CONFORMANCE_PROFILE_ID, revokedAt);
+    const afterRevoke = await adapter.get(TEST_TENANT_A, CONFORMANCE_PROFILE_ID, revokedAt);
+    const staleBinding = validateConsentGenerationBinding({
+      grant: afterRevoke,
+      fence,
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: CONFORMANCE_PROFILE_ID,
+    });
+    check(
+      !staleBinding.consistent && staleBinding.denialCode === 'CONSENT_GENERATION_MISMATCH',
+      `expected deny(CONSENT_GENERATION_MISMATCH) for a superseded generation, got ${staleBinding.code}`,
+    );
+
+    // An absent grant can never bind: unprovable is unbound.
+    const unbindable = validateConsentGenerationBinding({
+      grant: null,
+      fence,
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: CONFORMANCE_PROFILE_ID,
+    });
+    check(
+      !unbindable.consistent && unbindable.denialCode === 'CONSENT_NOT_FOUND',
+      `expected deny(CONSENT_NOT_FOUND) with no grant, got ${unbindable.code}`,
+    );
   },
 });
 

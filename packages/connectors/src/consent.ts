@@ -400,6 +400,128 @@ export function validateConsentAuthorizationFence(
   return Object.freeze({ valid: true, code: 'VALID', denialCode: null });
 }
 
+export const CONSENT_GENERATION_BINDING_CODES = [
+  'VALID',
+  'TENANT_MISMATCH',
+  'CONSENT_NOT_FOUND',
+  'CONSENT_FENCE_INVALID',
+  'CONSENT_GENERATION_MISMATCH',
+] as const;
+
+export type ConsentGenerationBindingCode = (typeof CONSENT_GENERATION_BINDING_CODES)[number];
+
+export interface ConsentGenerationBindingValidation {
+  readonly consistent: boolean;
+  readonly code: ConsentGenerationBindingCode;
+  readonly denialCode: SourceDenialCode | null;
+}
+
+export interface ValidateConsentGenerationBindingParams {
+  /** Grant the perimeter read from the registry and evaluated policy against. */
+  readonly grant: ConsentGrant | null;
+  /** Fence supplied by the worker, or `undefined` / `null` when none was supplied. */
+  readonly fence: unknown;
+  readonly tenantId: string;
+  readonly sourceProfileId: SourceProfileId;
+}
+
+const CONSISTENT_BINDING: ConsentGenerationBindingValidation = Object.freeze({
+  consistent: true,
+  code: 'VALID',
+  denialCode: null,
+});
+
+const UNBINDABLE_GRANT_BINDING: ConsentGenerationBindingValidation = Object.freeze({
+  consistent: false,
+  code: 'CONSENT_NOT_FOUND',
+  denialCode: 'CONSENT_NOT_FOUND',
+});
+
+const MISMATCHED_BINDING: ConsentGenerationBindingValidation = Object.freeze({
+  consistent: false,
+  code: 'CONSENT_GENERATION_MISMATCH',
+  denialCode: 'CONSENT_GENERATION_MISMATCH',
+});
+
+const INVALID_FENCE_BINDING: ConsentGenerationBindingValidation = Object.freeze({
+  consistent: false,
+  code: 'CONSENT_FENCE_INVALID',
+  denialCode: 'CONSENT_FENCE_INVALID',
+});
+
+const TENANT_MISMATCH_BINDING: ConsentGenerationBindingValidation = Object.freeze({
+  consistent: false,
+  code: 'TENANT_MISMATCH',
+  denialCode: 'TENANT_MISMATCH',
+});
+
+/**
+ * Validates the GENERATION BINDING invariant of the perimeter (P0-C3C, CTO round 2).
+ *
+ * Verifying a fence against the authority is not sufficient on its own: the perimeter also evaluates
+ * policy (`allowedOperations`, `scopes`, tenant, status) against the grant returned by
+ * `ConsentRegistry.get()`. If those two sources disagree, a fence for generation G2 could authorize a
+ * read whose permissions were taken from generation G1 — i.e. the fence would be a rubber stamp on
+ * terms it never described. This function closes that gap by requiring the policy-evaluated grant to
+ * BE the fenced generation:
+ *
+ * 1. No fence supplied → nothing to bind (`VALID`); legacy fence-less reads are unaffected.
+ * 2. An unreadable fence is `CONSENT_FENCE_INVALID` (never coerced, never trusted).
+ * 3. The fence must name the caller's tenant and source profile → else `TENANT_MISMATCH`.
+ * 4. A missing / unreadable grant is `CONSENT_NOT_FOUND` (indistinguishable from "no consent").
+ * 5. The grant must belong to the caller's lineage → else `TENANT_MISMATCH`.
+ * 6. `grantId` AND `version` must equal the fence generation → else `CONSENT_GENERATION_MISMATCH`.
+ *
+ * Every branch fails closed; a hostile getter or Proxy thrown while the grant is read is reported as
+ * `CONSENT_GENERATION_MISMATCH` and the thrown value is never inspected.
+ */
+export function validateConsentGenerationBinding(
+  params: ValidateConsentGenerationBindingParams,
+): ConsentGenerationBindingValidation {
+  if (params === null || typeof params !== 'object') {
+    return MISMATCHED_BINDING;
+  }
+  const { grant, fence, tenantId, sourceProfileId } = params;
+  if (fence === undefined || fence === null) {
+    return CONSISTENT_BINDING;
+  }
+  try {
+    const parsed = readFence(fence);
+    if (parsed === null) {
+      return INVALID_FENCE_BINDING;
+    }
+    if (typeof tenantId !== 'string' || tenantId.length === 0) {
+      return INVALID_FENCE_BINDING;
+    }
+    if (parsed.tenantId !== tenantId || parsed.sourceProfileId !== sourceProfileId) {
+      return TENANT_MISMATCH_BINDING;
+    }
+    if (grant === null || typeof grant !== 'object') {
+      return UNBINDABLE_GRANT_BINDING;
+    }
+
+    const record = grant as unknown as Record<string, unknown>;
+    const grantId = record.grantId;
+    const version = record.version;
+    if (typeof grantId !== 'string' || grantId.length === 0) {
+      return UNBINDABLE_GRANT_BINDING;
+    }
+    if (typeof version !== 'number' || !Number.isSafeInteger(version) || version < 1) {
+      return UNBINDABLE_GRANT_BINDING;
+    }
+    if (record.tenantId !== tenantId || record.sourceProfileId !== sourceProfileId) {
+      return TENANT_MISMATCH_BINDING;
+    }
+    if (parsed.grantId !== grantId || parsed.grantVersion !== version) {
+      return MISMATCHED_BINDING;
+    }
+    return CONSISTENT_BINDING;
+  } catch {
+    // A thrown getter / Proxy can never authorize: unprovable binding fails closed.
+    return MISMATCHED_BINDING;
+  }
+}
+
 /**
  * Duck-types a consent registry (or any object) as an authoritative generation source, so a
  * composition root can pass a durable authority explicitly and fall back to the registry.

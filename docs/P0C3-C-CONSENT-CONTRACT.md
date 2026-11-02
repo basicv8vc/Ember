@@ -14,14 +14,16 @@
   2. Versioned **authorization fence** (`tenantId`, `sourceProfileId`, `grantId`, `grantVersion`,
      `issuedAt`, `digest`) with an authority-backed validator.
   3. `GuardedSourceReader` fence enforcement on **both** sides of the read (pre-read gate + post-read
-     re-verification), fail-closed on any unverifiable input.
+     re-verification), fail-closed on any unverifiable input, plus **generation binding** (§4.5):
+     the grant whose `allowedOperations` / `scopes` policy evaluates must **be** the fenced
+     generation — checked before dispatch and again after the read.
   4. Rewritten `FakeConsentRegistry` implementing the frozen contract as an explicitly test-only
      double.
-  5. A framework-free, I/O-free **conformance kit** (`consent-conformance.ts`) with 12 cases
-     (`C-01` … `C-12`) that any implementation — including Agent A's durable PostgreSQL
+  5. A framework-free, I/O-free **conformance kit** (`consent-conformance.ts`) with 13 cases
+     (`C-01` … `C-13`) that any implementation — including Agent A's durable PostgreSQL
      repository — can run from its own package.
   6. Security/contract unit tests: `tests/unit/p0c3c-consent-contract.test.ts` (5 tests) and
-     `tests/unit/p0c3c-consent-security.test.ts` (17 tests).
+     `tests/unit/p0c3c-consent-security.test.ts` (25 tests).
 
 - **Acceptance summary**:
 
@@ -34,8 +36,9 @@
   | Versioned authorization fence minted, validated, and audited                    | PASS                                    |
   | Fence enforced pre-read (reader never invoked on deny)                          | PASS                                    |
   | Fence re-enforced post-read (mid-read revoke **and** re-grant discard snapshot) | PASS                                    |
+  | Policy-evaluated grant **is** the fenced generation (pre- and post-read)        | PASS                                    |
   | Fail-closed on malformed / tampered / unverifiable fences                       | PASS                                    |
-  | `FakeConsentRegistry` conforms to all 12 conformance cases                      | PASS                                    |
+  | `FakeConsentRegistry` conforms to all 13 conformance cases                      | PASS                                    |
   | Conformance kit has a negative control (mutant implementations fail)            | PASS                                    |
   | Durable PostgreSQL implementation certified by this kit                         | Handed to Agent A (port + kit provided) |
   | Real public-source / live HTTP connectors                                       | NOT IMPLEMENTED / NOT AUTHORIZED        |
@@ -222,6 +225,53 @@ _absence_ of a fence:
 - A throwing authority is treated as "no authoritative state" (`null` → `CONSENT_NOT_FOUND`); the
   thrown value is never inspected or surfaced.
 
+### 4.5 Generation binding (normative) — CTO round 2, P1 closure
+
+**Invariant GB:** the grant the perimeter evaluates policy against **must be** the generation named
+by the caller's authorization fence — same `grantId` **and** same `version`.
+
+Verifying a fence is not sufficient on its own. `GuardedSourceReader` performs two independent reads:
+`ConsentRegistry.get()` supplies the record whose `allowedOperations`, `scopes`, tenant, and status the
+policy gate evaluates, while `ConsentAuthority.resolveGeneration()` supplies the generation the fence
+is compared against. If those two sources disagree, a fence for **G2** would rubber-stamp a read whose
+permissions were taken from **G1** — the fence would attest terms it never described. Without a
+binding check this is exploitable wherever the registry read is stale or served from a lagging
+replica, and it also silently survives a cross-wired tenant read.
+
+`validateConsentGenerationBinding({ grant, fence, tenantId, sourceProfileId })` is the pure validator
+(exported from `@ember/connectors`) and fails closed at the first failing step:
+
+| #   | Check                                                       | Result on failure             | Audited denial code           |
+| --- | ----------------------------------------------------------- | ----------------------------- | ----------------------------- |
+| 1   | A fence was supplied at all                                 | `VALID` (nothing to bind)     | — (legacy fence-less path)    |
+| 2   | Fence is structurally readable (`readFence`)                | `CONSENT_FENCE_INVALID`       | `CONSENT_FENCE_INVALID`       |
+| 3   | Fence names the caller's `tenantId` / `sourceProfileId`     | `TENANT_MISMATCH`             | `TENANT_MISMATCH`             |
+| 4   | A grant exists and carries a readable `grantId` / `version` | `CONSENT_NOT_FOUND`           | `CONSENT_NOT_FOUND`           |
+| 5   | Grant belongs to the caller's lineage                       | `TENANT_MISMATCH`             | `TENANT_MISMATCH`             |
+| 6   | `grant.grantId === fence.grantId` **and** `version` equal   | `CONSENT_GENERATION_MISMATCH` | `CONSENT_GENERATION_MISMATCH` |
+| 7   | Otherwise                                                   | `VALID`                       | — (read proceeds)             |
+
+Enforcement points (both are mandatory and independent):
+
+1. **Pre-read (§6.1 step 3.6)**, immediately after the fence validates and before the inner
+   `SourceReader` is invoked, using the exact `grant` object the policy gate consumed. A denied read
+   records one `DENIED` audit entry with `CONSENT_GENERATION_MISMATCH` and the reader invocation count
+   stays **0**.
+2. **Post-read (§6.1 step 7)**, using the freshly re-read grant. Divergence that appears while the
+   read is in flight discards the snapshot with `REVOKED_DURING_EXECUTION`.
+
+Binding is enforced **whenever a fence is present**, including when
+`requireAuthorizationFence === false`: a supplied-but-unbindable fence is never silently ignored. A
+read with **no** fence keeps the pre-fence behaviour, which is what preserves backward compatibility.
+
+A hostile grant object (throwing getter / Proxy) cannot escape the validator as an exception; the
+unreadable case is reported as `CONSENT_GENERATION_MISMATCH`, and the thrown value is never inspected.
+
+> **Deployment consequence for Agent A/B:** `get()` and `resolveGeneration()` must be answered from the
+> same authoritative state (same transaction snapshot, primary reads — no asynchronous read replica).
+> Replica lag between the two reads is exactly the split brain this invariant rejects, and it fails
+> **closed**: reads deny with `CONSENT_GENERATION_MISMATCH` until the replica catches up.
+
 ---
 
 ## 5. Expiry, Clocks, and Tenant Isolation
@@ -283,13 +333,15 @@ sequenceDiagram
     A-->>G: authoritative generation
     G->>G: validateConsentAuthorizationFence(...)
     Note over G: invalid/missing/stale → audit DENIED + throw before dispatch
+    G->>G: 3.6 generation binding: policy grant == fenced generation?
+    Note over G: mismatch → audit CONSENT_GENERATION_MISMATCH + throw (0 reader calls)
     G->>G: 4. cancellation check
     G->>R: 5. readSnapshot(...)
     R-->>G: untrusted snapshot (or throws)
     G->>G: 6. schema/bounds/digest inspection + sanitization
-    G->>A: 7. re-resolve generation (post-read)
-    G->>G: deriveConsentStatus(postGrant, now) AND postFence.valid
-    Note over G: either failing → audit REVOKED_DURING_EXECUTION, snapshot discarded
+    G->>A: 7. re-resolve generation + re-read grant (post-read)
+    G->>G: deriveConsentStatus(postGrant, now) AND postFence.valid AND postBinding
+    Note over G: any failing → audit REVOKED_DURING_EXECUTION, snapshot discarded
     G-->>S: 8. frozen snapshot + audit ALLOWED
 ```
 
@@ -298,11 +350,20 @@ sequenceDiagram
 A snapshot may only leave the perimeter if, **after** the read completes:
 
 1. the current grant's effective status is still `active` (`deriveConsentStatus`), **and**
-2. the fenced generation is **still the authoritative generation** (`postFence.valid`).
+2. the fenced generation is **still the authoritative generation** (`postFence.valid`), **and**
+3. the grant just re-read from the registry is **still the fenced generation**
+   (`postBinding.consistent`, §4.5).
 
 Condition 2 is what makes `revoke()` immediately followed by `grant()` inside the read window safe:
 status alone would be `active` again (the "resurrect under the running read" hole), but the fenced
 generation is stale, so the snapshot is discarded with `REVOKED_DURING_EXECUTION`.
+
+Condition 3 is what makes a registry that diverges from the authority safe: status may still read
+`active` and the fence may still be valid for the authoritative generation, yet the snapshot was
+authorized by terms the fence never described — so it is discarded too.
+
+All three conditions are re-evaluated against freshly read state; nothing from the pre-read gate is
+reused.
 
 ### 6.3 Audit trail
 
@@ -314,6 +375,7 @@ Every decision writes one `SourceAuditRecord` (tenant hashed with SHA-256/16 hex
 | Profile missing or foreign tenant                     | `DENIED`   | `SOURCE_PROFILE_NOT_FOUND`                                                  |
 | Policy/consent/scope/operation denial                 | `DENIED`   | from `SourceAccessDecision`                                                 |
 | Fence missing / invalid / stale / revoked / expired   | `DENIED`   | fence denial code (§4.3)                                                    |
+| Policy grant is not the fenced generation             | `DENIED`   | `CONSENT_GENERATION_MISMATCH` (or `TENANT_MISMATCH`, §4.5)                  |
 | Aborted before or after dispatch, or reader cancelled | `DENIED`   | `READ_ABORTED`                                                              |
 | Reader threw (untrusted)                              | `DENIED`   | `POLICY_DENIED` (fixed text, no reflection)                                 |
 | Snapshot failed inspection                            | `DENIED`   | inspection code (`UNTRUSTED_CONTENT_DETECTED`, `PAYLOAD_LIMIT_EXCEEDED`, …) |
@@ -326,6 +388,7 @@ New static reasons added by this task:
 CONSENT_FENCE_MISSING: 'Authorization fence missing or unverifiable'
 CONSENT_FENCE_INVALID: 'Authorization fence is malformed or tampered'
 CONSENT_FENCE_STALE: 'Authorization fence refers to a superseded consent generation'
+CONSENT_GENERATION_MISMATCH: 'Consent generation used for authorization is not the fenced generation'
 ```
 
 ---
@@ -364,20 +427,21 @@ implementation can be reported case by case.
 
 ### 7.2 Requirement matrix
 
-| Case | Requirement id                     | Frozen requirement                                                                                                   | Certified by                                                                                    |
-| ---- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| C-01 | `R1-missing-grant-denies`          | A lineage with no grant is denied (fail closed)                                                                      | `get` → `null`, `resolveGeneration` → `null`, decision `CONSENT_NOT_FOUND`                      |
-| C-02 | `R2-revocation-is-terminal`        | Revocation denies reads, is terminal, bumps version exactly once, repeat revoke is a no-op                           | `revoke`, `get`, `resolveGeneration`                                                            |
-| C-03 | `R3-expiry-is-derived`             | Expiry derived at read time from `expiresAt`, record never re-written                                                | `get` at `expiresAt − 1ms`, at `expiresAt`, and record equality                                 |
-| C-04 | `R4-tenant-isolation`              | Grants are tenant-scoped: no cross-tenant read, list, or revoke                                                      | `get`, `list`, `revoke` under tenant B                                                          |
-| C-05 | `R5-scope-and-operation-binding`   | A grant for other operations or scopes does not authorize a read                                                     | `evaluateSourceAccess` with `requiredScopes: ['source.readonly']`, `operation: 'read_snapshot'` |
-| C-06 | `R6-regrant-mints-new-generation`  | Re-grant after revocation mints a new `grantId` and strictly greater `version`                                       | `grant` after `revoke`                                                                          |
-| C-07 | `R7-generation-fence-binding`      | A fence authorizes only for the current authoritative generation (valid / revoked / stale / tampered / cross-tenant) | `createConsentAuthorizationFence` + `validateConsentAuthorizationFence`                         |
-| C-08 | `R8-version-monotonicity`          | Versions increase strictly across repeated grant/revoke cycles                                                       | 3 cycles asserting `1 < 2 < 3`                                                                  |
-| C-09 | `R9-reaffirmation-is-idempotent`   | Identical terms on an active generation return the **same** generation (no version inflation)                        | `grant` twice, compare `grantId`, `version`, `grantedAt`                                        |
-| C-10 | `R10-fail-closed-on-invalid-input` | Invalid input is rejected on writes (`INVALID_ARGUMENT`) and denied — never granted — on reads (`null` / `[]`)       | `grant`/`revoke` with URL profile ids, empty terms, non-`Date` clocks                           |
-| C-11 | `R11-records-are-immutable`        | Returned and stored records cannot be mutated by callers                                                             | `Object.isFrozen`, mutation attempts leave stored state unchanged                               |
-| C-12 | `R12-list-scope-and-determinism`   | Listing is tenant-scoped, duplicate-free, and deterministically ordered                                              | `list` under two tenants + repeated-call ordering equality                                      |
+| Case | Requirement id                              | Frozen requirement                                                                                                                | Certified by                                                                                    |
+| ---- | ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- |
+| C-01 | `R1-missing-grant-denies`                   | A lineage with no grant is denied (fail closed)                                                                                   | `get` → `null`, `resolveGeneration` → `null`, decision `CONSENT_NOT_FOUND`                      |
+| C-02 | `R2-revocation-is-terminal`                 | Revocation denies reads, is terminal, bumps version exactly once, repeat revoke is a no-op                                        | `revoke`, `get`, `resolveGeneration`                                                            |
+| C-03 | `R3-expiry-is-derived`                      | Expiry derived at read time from `expiresAt`, record never re-written                                                             | `get` at `expiresAt − 1ms`, at `expiresAt`, and record equality                                 |
+| C-04 | `R4-tenant-isolation`                       | Grants are tenant-scoped: no cross-tenant read, list, or revoke                                                                   | `get`, `list`, `revoke` under tenant B                                                          |
+| C-05 | `R5-scope-and-operation-binding`            | A grant for other operations or scopes does not authorize a read                                                                  | `evaluateSourceAccess` with `requiredScopes: ['source.readonly']`, `operation: 'read_snapshot'` |
+| C-06 | `R6-regrant-mints-new-generation`           | Re-grant after revocation mints a new `grantId` and strictly greater `version`                                                    | `grant` after `revoke`                                                                          |
+| C-07 | `R7-generation-fence-binding`               | A fence authorizes only for the current authoritative generation (valid / revoked / stale / tampered / cross-tenant)              | `createConsentAuthorizationFence` + `validateConsentAuthorizationFence`                         |
+| C-08 | `R8-version-monotonicity`                   | Versions increase strictly across repeated grant/revoke cycles                                                                    | 3 cycles asserting `1 < 2 < 3`                                                                  |
+| C-09 | `R9-reaffirmation-is-idempotent`            | Identical terms on an active generation return the **same** generation (no version inflation)                                     | `grant` twice, compare `grantId`, `version`, `grantedAt`                                        |
+| C-10 | `R10-fail-closed-on-invalid-input`          | Invalid input is rejected on writes (`INVALID_ARGUMENT`) and denied — never granted — on reads (`null` / `[]`)                    | `grant`/`revoke` with URL profile ids, empty terms, non-`Date` clocks                           |
+| C-11 | `R11-records-are-immutable`                 | Returned and stored records cannot be mutated by callers                                                                          | `Object.isFrozen`, mutation attempts leave stored state unchanged                               |
+| C-12 | `R12-list-scope-and-determinism`            | Listing is tenant-scoped, duplicate-free, and deterministically ordered                                                           | `list` under two tenants + repeated-call ordering equality                                      |
+| C-13 | `R13-policy-grant-is-the-fenced-generation` | The grant policy evaluates **is** the fenced generation (`grantId` + `version`); foreign / stale / cross-tenant fences never bind | `validateConsentGenerationBinding` against the adapter's own `get` output                       |
 
 ### 7.3 Negative controls
 
@@ -438,6 +502,12 @@ CREATE TABLE source_consent_grants (
 - Serialize per `(tenant_id, source_profile_id)` if grant and revoke may race.
 - **Never** store a derived `expired` status: persist `expires_at` and derive on read
   (`status = 'active' AND (expires_at IS NULL OR expires_at > $now)`).
+- **Generation binding (§4.5) requires a single authoritative read path.** `get()` and
+  `resolveGeneration()` must be served by the same primary and, ideally, from the same transaction /
+  repeatable-read snapshot. Do not route either call through an asynchronous replica or a cache: lag
+  between the two reads is indistinguishable from a stale-replica attack and fails **closed**.
+  `resolveGeneration()` should be a projection of the row `get()` returns
+  (`toAuthorizedConsentGeneration`), never a second independent query with its own WHERE clause.
 
 ### 8.3 Certification
 
@@ -446,7 +516,7 @@ CREATE TABLE source_consent_grants (
 await assertConsentConformance(postgresAdapter);
 ```
 
-Expected: all 12 cases pass. Any failure names the case id and the violated invariant; never weaken
+Expected: all 13 cases pass. Any failure names the case id and the violated invariant; never weaken
 the case to make a repository pass.
 
 ### 8.4 Scheduler obligations (Agent B)
@@ -455,6 +525,10 @@ the case to make a repository pass.
   same generation (C-09), otherwise schedulers inflate versions and invalidate every in-flight fence.
 - Mint the fence at **dispatch time** from the grant just persisted; never cache or reuse a fence
   across task attempts or retries.
+- Mint the fence from the **same generation the perimeter will read**: if the scheduler mints from a
+  write-path copy while the reader reads a lagging replica, the read fails closed with
+  `CONSENT_GENERATION_MISMATCH` (§4.5). Treat that code as "re-resolve consent and retry once", never
+  as a reason to disable the fence check.
 - Pass `requireAuthorizationFence: true` in production wiring so an unfenced worker payload cannot
   reach a reader.
 
@@ -462,14 +536,20 @@ the case to make a repository pass.
 
 ## 9. Backward Compatibility
 
-| Surface                                                | Change                                                                                                                 | Compatibility                                                                               |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `ConsentRegistry` (`grant`/`get`/`revoke`/`list`)      | `now` already optional; semantics tightened (derived expiry, idempotent re-affirmation, single version bump on revoke) | Source compatible. Behavioural change: repeated identical `grant` no longer bumps `version` |
-| `TrustedSourceAccessContext.authorizationFence`        | New optional field                                                                                                     | Additive; existing contexts parse unchanged                                                 |
-| `GuardedSourceReaderOptions.authority`                 | New optional; defaults to the configured `registry`                                                                    | Additive                                                                                    |
-| `GuardedSourceReaderOptions.requireAuthorizationFence` | New optional; defaults `false`                                                                                         | Additive; default preserves all pre-existing behaviour                                      |
-| `SourceDenialCode`                                     | Three new members (`CONSENT_FENCE_MISSING/INVALID/STALE`)                                                              | Additive; exhaustive `switch` statements over the union must add branches                   |
-| `@ember/connectors` exports                            | `consent.js`, `consent-conformance.js` added                                                                           | Additive                                                                                    |
+| Surface                                                | Change                                                                                                                         | Compatibility                                                                               |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------- |
+| `ConsentRegistry` (`grant`/`get`/`revoke`/`list`)      | `now` already optional; semantics tightened (derived expiry, idempotent re-affirmation, single version bump on revoke)         | Source compatible. Behavioural change: repeated identical `grant` no longer bumps `version` |
+| `TrustedSourceAccessContext.authorizationFence`        | New optional field                                                                                                             | Additive; existing contexts parse unchanged                                                 |
+| `GuardedSourceReaderOptions.authority`                 | New optional; defaults to the configured `registry`                                                                            | Additive                                                                                    |
+| `GuardedSourceReaderOptions.requireAuthorizationFence` | New optional; defaults `false`                                                                                                 | Additive; default preserves all pre-existing behaviour                                      |
+| `SourceDenialCode`                                     | Four new members (`CONSENT_FENCE_MISSING/INVALID/STALE`, `CONSENT_GENERATION_MISMATCH`)                                        | Additive; exhaustive `switch` statements over the union must add branches                   |
+| `@ember/connectors` exports                            | `consent.js`, `consent-conformance.js` added; `validateConsentGenerationBinding` + `CONSENT_GENERATION_BINDING_CODES` exported | Additive                                                                                    |
+
+Behavioural change to call out for integrators: a read that **supplies** a fence whose generation does
+not match the grant the registry returns is now denied (`CONSENT_GENERATION_MISMATCH`). Fence-less
+reads are untouched. Any pre-existing caller that attached a fence minted from a different generation
+than the one it authorized with was previously authorized by the wrong generation's terms, so this is
+a security fix rather than a compatibility regression.
 
 Pre-existing tests continue to pass unmodified, which is the intended evidence that the fence is
 additive: `p0c3-source-consent-registry` (7), `p0c3-source-policy-evaluation` (11),
@@ -485,43 +565,64 @@ All gates run from `/Users/a1-6/Downloads/Ember-p0c3c` on 2026-11-02.
 | Gate            | Command                                                                                                                             | Result                                       |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------- |
 | Typecheck       | `pnpm run typecheck` (`tsc -p tsconfig.json`)                                                                                       | PASS — no diagnostics                        |
-| Targeted unit   | `npx vitest run --config vitest.unit.config.ts tests/unit/p0c3c-consent-security.test.ts tests/unit/p0c3c-consent-contract.test.ts` | PASS — 2 files, **22 tests**                 |
-| Full unit suite | `pnpm run test:unit`                                                                                                                | PASS — **63 files / 1030 tests**, 0 failures |
+| Targeted unit   | `npx vitest run --config vitest.unit.config.ts tests/unit/p0c3c-consent-security.test.ts tests/unit/p0c3c-consent-contract.test.ts` | PASS — 2 files, **30 tests**                 |
+| Full unit suite | `pnpm run test:unit`                                                                                                                | PASS — **63 files / 1038 tests**, 0 failures |
 | Lint            | `pnpm run lint` (`eslint .`)                                                                                                        | PASS — 0 problems                            |
-| Format          | `pnpm run format:check` (`prettier --check .`)                                                                                      | PASS (after formatting 4 files)              |
+| Format          | `pnpm run format:check` (`prettier --check .`)                                                                                      | PASS                                         |
 | Build           | `pnpm run build`                                                                                                                    | PASS                                         |
-| CI              | GitHub Actions `Verify (Node 24 LTS + PostgreSQL 17)` on PR #83                                                                     | PASS (2m41s)                                 |
+| CI              | GitHub Actions `Verify (Node 24 LTS + PostgreSQL 17)` on PR #83                                                                     | PASS (see §10.4)                             |
 
 ### 10.1 `tests/unit/p0c3c-consent-contract.test.ts` (5 tests)
 
-1. The frozen requirement matrix is immutable, has exactly 12 cases in `C-01`…`C-12` order, and
+1. The frozen requirement matrix is immutable, has exactly 13 cases in `C-01`…`C-13` order, and
    assigns each requirement id exactly once.
-2. `FakeConsentRegistry` is certified against all 12 cases through the adapter port.
+2. `FakeConsentRegistry` is certified against all 13 cases through the adapter port.
 3. Negative control: a non-revoking registry fails `C-02` (and the violation names it).
 4. Negative control: a version-inflating registry fails `C-09`.
 5. Every result reports `id`, `requirement`, `title`, `passed`, with `error === null` on success.
 
-### 10.2 `tests/unit/p0c3c-consent-security.test.ts` (17 tests)
+### 10.2 `tests/unit/p0c3c-consent-security.test.ts` (25 tests)
 
-| #   | Attack / invariant                                 | Expected outcome                                                                               |
-| --- | -------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| 1   | Valid fence for the current generation             | Read succeeds, audit `ALLOWED`                                                                 |
-| 2   | `requireAuthorizationFence: true` with no fence    | `POLICY_DENIED` / `CONSENT_FENCE_MISSING`; reader never called                                 |
-| 3   | Default wiring (fence not required) with no fence  | Legacy behaviour preserved                                                                     |
-| 4   | Fence whose `grantVersion` was edited              | `CONSENT_FENCE_INVALID` (tampered); reader never called                                        |
-| 5   | Fence for a revoked-then-re-granted generation     | `CONSENT_FENCE_STALE`                                                                          |
-| 6   | Fence naming another tenant                        | `TENANT_MISMATCH`, uniform denial                                                              |
-| 7   | Authority returns `null`                           | `CONSENT_NOT_FOUND` (indistinguishable from missing consent)                                   |
-| 8   | Authority throws an error containing a token       | `CONSENT_NOT_FOUND`; token never appears in error or audit                                     |
-| 9   | Consent revoked before the read                    | Denied pre-dispatch; reader not invoked                                                        |
-| 10  | Consent revoked **during** the read                | `REVOKED_DURING_EXECUTION`; snapshot discarded                                                 |
-| 11  | Consent expires **during** the read                | `REVOKED_DURING_EXECUTION`; snapshot discarded                                                 |
-| 12  | Revoked **then re-granted** during the read        | `REVOKED_DURING_EXECUTION` — status alone would read `active`, generation staleness catches it |
-| 13  | Grant lacks the required scope / operation         | `SCOPE_NOT_GRANTED` / `OPERATION_NOT_ALLOWED`                                                  |
-| 14  | Reader throws a sensitive-message error            | Sanitized `POLICY_DENIED`, no reflection                                                       |
-| 15  | Signal aborted before / after dispatch             | `READ_ABORTED`; reader not called when pre-aborted                                             |
-| 16  | Prompt-injection payload inside a fixture snapshot | Inert: carried as data, never interpreted                                                      |
-| 17  | Every scenario above                               | `networkCallsMade: 0` — no sockets, DNS, or `fetch`                                            |
+| #   | Attack / invariant                                                                                       | Expected outcome                                                                                  |
+| --- | -------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| 1   | Valid fence for the current generation                                                                   | Read succeeds, audit `ALLOWED`                                                                    |
+| 2   | `requireAuthorizationFence: true` with no fence                                                          | `POLICY_DENIED` / `CONSENT_FENCE_MISSING`; reader never called                                    |
+| 3   | Default wiring (fence not required) with no fence                                                        | Legacy behaviour preserved                                                                        |
+| 4   | Fence whose `grantVersion` was edited                                                                    | `CONSENT_FENCE_INVALID` (tampered); reader never called                                           |
+| 5   | Fence for a revoked-then-re-granted generation                                                           | `CONSENT_FENCE_STALE`                                                                             |
+| 6   | Fence naming another tenant                                                                              | `TENANT_MISMATCH`, uniform denial                                                                 |
+| 7   | Authority returns `null`                                                                                 | `CONSENT_NOT_FOUND` (indistinguishable from missing consent)                                      |
+| 8   | Authority throws an error containing a token                                                             | `CONSENT_NOT_FOUND`; token never appears in error or audit                                        |
+| 9   | Consent revoked before the read                                                                          | Denied pre-dispatch; reader not invoked                                                           |
+| 10  | Consent revoked **during** the read                                                                      | `REVOKED_DURING_EXECUTION`; snapshot discarded                                                    |
+| 11  | Consent expires **during** the read                                                                      | `REVOKED_DURING_EXECUTION`; snapshot discarded                                                    |
+| 12  | Revoked **then re-granted** during the read                                                              | `REVOKED_DURING_EXECUTION` — status alone would read `active`, generation staleness catches it    |
+| 13  | Grant lacks the required scope / operation                                                               | `SCOPE_NOT_GRANTED` / `OPERATION_NOT_ALLOWED`                                                     |
+| 14  | Reader throws a sensitive-message error                                                                  | Sanitized `POLICY_DENIED`, no reflection                                                          |
+| 15  | Signal aborted before / after dispatch                                                                   | `READ_ABORTED`; reader not called when pre-aborted                                                |
+| 16  | Prompt-injection payload inside a fixture snapshot                                                       | Inert: carried as data, never interpreted                                                         |
+| 17  | Registry serves **G1** while fence + authority name **G2**                                               | `CONSENT_GENERATION_MISMATCH`; reader never called (CTO round 2 adversarial case, §4.5)           |
+| 18  | Stale read replica still serving the superseded generation                                               | `CONSENT_GENERATION_MISMATCH`; reader never called                                                |
+| 19  | Mismatched generation while `requireAuthorizationFence` is `false`                                       | Denied — the binding check never fails open                                                       |
+| 20  | Registry serves a foreign-tenant generation for the caller context                                       | `TENANT_MISMATCH`; reader never called                                                            |
+| 21  | Registry diverges from the fence **during** the read                                                     | `REVOKED_DURING_EXECUTION`; status active + fence valid, so binding alone catches it              |
+| 22  | Validator: re-versioned / re-keyed / foreign-tenant grant, cross-tenant fence, malformed fence, no grant | `CONSENT_GENERATION_MISMATCH` / `TENANT_MISMATCH` / `CONSENT_FENCE_INVALID` / `CONSENT_NOT_FOUND` |
+| 23  | Validator: fence-less read                                                                               | Unbound (`VALID`) — backward compatibility                                                        |
+| 24  | Validator: hostile `Proxy` grant                                                                         | `CONSENT_GENERATION_MISMATCH`, never throws, throw value never inspected                          |
+| 25  | Every scenario above                                                                                     | `networkCallsMade: 0` — no sockets, DNS, or `fetch`                                               |
+
+### 10.3 Mutation sensitivity of the binding tests
+
+The new tests were proven **sensitive**, not merely green. Each gate was disabled in isolation and the
+suite re-run:
+
+| Mutation (temporary, reverted)                         | Resulting failures                                                    |
+| ------------------------------------------------------ | --------------------------------------------------------------------- |
+| Pre-read binding gate replaced with `if (false)`       | 3 failures — the split-brain, stale-replica, and optional-fence tests |
+| Post-read `postBinding.consistent` removed from step 7 | 1 failure — the mid-read divergence test                              |
+
+A "zero reader invocations" assertion plus an exact denial code means no other code path can satisfy
+the test, so the invariant cannot silently regress.
 
 ---
 
@@ -535,13 +636,21 @@ All gates run from `/Users/a1-6/Downloads/Ember-p0c3c` on 2026-11-02.
    replication, or cross-process visibility. Wiring it in production means a restart wipes consent
    state (fail closed — reads deny, never allow — but still an outage).
 3. **TOCTOU is narrowed, not eliminated.** Post-read re-verification shrinks the window to the
-   authority's own read latency and covers revoke, re-grant, and expiry. A revoke that lands _after_
-   the post-read check but _before_ the caller consumes the snapshot is outside this package's
-   control; consumers must treat a snapshot as authorized at `authorizedAt`, not at consumption time.
-4. **Clock trust.** Expiry and fence skew both depend on the injected clock. A skewed worker clock can
+   authority's own read latency and covers revoke, re-grant, expiry, and registry/authority
+   divergence. A revoke that lands _after_ the post-read check but _before_ the caller consumes the
+   snapshot is outside this package's control; consumers must treat a snapshot as authorized at
+   `authorizedAt`, not at consumption time.
+4. **Split brain is detected, not repaired.** Generation binding (§4.5) rejects any read whose
+   policy-evaluated grant is not the fenced generation, but it cannot tell a stale replica from an
+   attack. Both fail closed. The fix is operational: one authoritative read path for `get()` and
+   `resolveGeneration()` (§8.2), fences minted from the generation the perimeter will read (§8.4).
+5. **Clock trust.** Expiry and fence skew both depend on the injected clock. A skewed worker clock can
    authorize an elapsed grant until the boundary — keep schedulers NTP-synced and use one clock per
    decision.
-5. **Denial uniformity is intentional.** `CONSENT_NOT_FOUND` is returned for missing, malformed, and
+6. **Generation binding is structural, not cryptographic.** It compares two self-reported generations;
+   it does not sign them. An attacker who can write both the registry and the authority row has
+   already compromised consent storage, which is outside this perimeter.
+7. **Denial uniformity is intentional.** `CONSENT_NOT_FOUND` is returned for missing, malformed, and
    foreign-tenant lineages so the perimeter is not an existence oracle. Do not "improve" the message.
-6. **Real connectors remain out of scope.** No provider adapters, credentials, or egress are added by
+8. **Real connectors remain out of scope.** No provider adapters, credentials, or egress are added by
    this task; the zero-network guarantee is enforced and tested.

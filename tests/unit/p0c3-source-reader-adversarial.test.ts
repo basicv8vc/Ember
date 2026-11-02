@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   createFakeGuardedSourceReader,
+  DomainError,
   FakeConsentRegistry,
   FakeSourceReader,
   FIXTURE_INJECTION_ITEMS,
@@ -27,13 +28,15 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     authorizedAt: '2026-11-01T12:00:00.000Z',
   };
 
+  const defaultSignal = new AbortController().signal;
+
   it('proves exactly ZERO reader callbacks on unauthorized or denied attempts', async () => {
     const bundle = createFakeGuardedSourceReader();
     const readSpy = vi.spyOn(bundle.innerReader, 'readSnapshot');
 
     // Attempt 1: No consent granted
     await expect(
-      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, defaultSignal),
     ).rejects.toThrowError(/Operation denied by policy/);
     expect(readSpy).toHaveBeenCalledTimes(0);
 
@@ -49,7 +52,7 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     };
 
     await expect(
-      bundle.guardedReader.readSnapshot('sp_ember_releases', crossTenantContext),
+      bundle.guardedReader.readSnapshot('sp_ember_releases', crossTenantContext, defaultSignal),
     ).rejects.toThrowError(/Resource not found/);
     expect(readSpy).toHaveBeenCalledTimes(0);
 
@@ -75,7 +78,11 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     });
 
     await expect(
-      disabledGuarded.readSnapshot(FIXTURE_PROFILE_DISABLED.sourceProfileId, validContext),
+      disabledGuarded.readSnapshot(
+        FIXTURE_PROFILE_DISABLED.sourceProfileId,
+        validContext,
+        defaultSignal,
+      ),
     ).rejects.toThrowError(/Operation denied by policy/);
     expect(readSpy).toHaveBeenCalledTimes(0);
   });
@@ -99,11 +106,24 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     ];
 
     for (const badId of maliciousIdentifiers) {
-      await expect(bundle.guardedReader.readSnapshot(badId, validContext)).rejects.toThrowError(
-        /Invalid request input/i,
-      );
+      await expect(
+        bundle.guardedReader.readSnapshot(badId, validContext, defaultSignal),
+      ).rejects.toThrowError(/Invalid request input/i);
       expect(readSpy).toHaveBeenCalledTimes(0);
     }
+  });
+
+  it('rejects calls where AbortSignal is missing', async () => {
+    const bundle = createFakeGuardedSourceReader();
+    bundle.registry.grant({
+      tenantId: TEST_TENANT_A,
+      sourceProfileId: 'sp_ember_releases',
+    });
+
+    await expect(
+      // @ts-expect-error testing missing required signal
+      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+    ).rejects.toThrowError(/Invalid request input/i);
   });
 
   it('handles prompt injection in fixture text as inert data without permission escalation', async () => {
@@ -117,7 +137,11 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       sourceProfileId: FIXTURE_PROFILE_RELEASES.sourceProfileId,
     });
 
-    const snapshot = await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    const snapshot = await bundle.guardedReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      defaultSignal,
+    );
     expect(snapshot.boundedSafeItems).toHaveLength(1);
 
     const item = snapshot.boundedSafeItems[0]!;
@@ -144,7 +168,11 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       fixtureMap: new Map([['sp_ember_releases', maliciousItems]]),
     });
 
-    const snapshot = await innerReader.readSnapshot('sp_ember_releases', validContext);
+    const snapshot = await innerReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      defaultSignal,
+    );
     const item = snapshot.boundedSafeItems[0]!;
 
     expect(item.title).toBe('Title with Red ANSI and null byte');
@@ -165,9 +193,9 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       maxPayloadBytes: SOURCE_SNAPSHOT_LIMITS.maxPayloadBytes,
     });
 
-    await expect(innerReader.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      innerReader.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
   it('enforces maximum item count ceiling', async () => {
@@ -182,9 +210,9 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       fixtureMap: new Map([['sp_ember_releases', tooManyItems]]),
     });
 
-    await expect(innerReader.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      innerReader.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
   it('computes deterministic SHA-256 digest regardless of object key order', async () => {
@@ -216,8 +244,8 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       fixedObservedAt: '2026-11-01T12:00:00.000Z',
     });
 
-    const snap1 = await reader1.readSnapshot('sp_ember_releases', validContext);
-    const snap2 = await reader2.readSnapshot('sp_ember_releases', validContext);
+    const snap1 = await reader1.readSnapshot('sp_ember_releases', validContext, defaultSignal);
+    const snap2 = await reader2.readSnapshot('sp_ember_releases', validContext, defaultSignal);
 
     expect(snap1.digest).toBe(snap2.digest);
     expect(snap1.digest).toMatch(/^[0-9a-f]{64}$/);
@@ -230,7 +258,11 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       sourceProfileId: 'sp_ember_releases',
     });
 
-    const snapshot = await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    const snapshot = await bundle.guardedReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      defaultSignal,
+    );
 
     expect(Object.isFrozen(snapshot)).toBe(true);
     expect(Object.isFrozen(snapshot.boundedSafeItems)).toBe(true);
@@ -282,7 +314,7 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
 
     let caughtError: unknown;
     try {
-      await guarded.readSnapshot('sp_ember_releases', validContext);
+      await guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal);
     } catch (err) {
       caughtError = err;
     }
@@ -308,6 +340,113 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
     const auditString = JSON.stringify(audit);
     expect(auditString).not.toContain('internal-vault.svc');
     expect(auditString).not.toContain('s.987654321xyz');
+  });
+
+  it('P1-1 (Round 2): catches DomainError("CANCELLED") with untrusted diagnostic from reader and sanitizes it without leakage', async () => {
+    const leakingCancelledReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        return Promise.reject(
+          new DomainError(
+            'CANCELLED',
+            'Sensitive internal diagnostic: token=s.secret_cancel_token in memory',
+          ),
+        );
+      },
+    };
+
+    const auditSink = new InMemorySourceAuditSink();
+    const registry = new FakeConsentRegistry();
+    registry.grant({ tenantId: TEST_TENANT_A, sourceProfileId: 'sp_ember_releases' });
+
+    const guarded = new GuardedSourceReader({
+      reader: leakingCancelledReader,
+      registry,
+      profiles: new Map([[FIXTURE_PROFILE_RELEASES.sourceProfileId, FIXTURE_PROFILE_RELEASES]]),
+      policy: {
+        version: 1,
+        allowedSourceProfileIds: ['sp_ember_releases'],
+        allowedOperations: ['read_snapshot'],
+        defaultAction: 'deny',
+      },
+      auditSink,
+    });
+
+    let caughtError: unknown;
+    try {
+      await guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal);
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeDefined();
+    expect((caughtError as Error).message).toBe('Operation was cancelled');
+
+    // Untrusted diagnostic from inner reader must NOT be re-thrown
+    const diag = (caughtError as DomainError).diagnostic;
+    expect(diag).toBe('Snapshot read was aborted during execution');
+    expect(diag).not.toContain('s.secret_cancel_token');
+
+    // Audit record must be safe
+    const records = auditSink.getRecords();
+    expect(records).toHaveLength(1);
+    expect(records[0]?.decision).toBe('DENIED');
+    expect(records[0]?.denialCode).toBe('READ_ABORTED');
+  });
+
+  it('P1-2 (Round 2): does not reflect malicious provider returned sourceProfileId or raw strings in diagnostic or audit', async () => {
+    const injectionUrl =
+      'https://malicious-tracker.attacker.com/telemetry?secret_leak=super_confidential';
+    const reflectionReader: SourceReader = {
+      readSnapshot(): Promise<SourceSnapshot> {
+        return Promise.resolve({
+          sourceProfileId: injectionUrl,
+          observedAt: '2026-11-01T12:00:00.000Z',
+          digest: '0000000000000000000000000000000000000000000000000000000000000000',
+          boundedSafeItems: [],
+        });
+      },
+    };
+
+    const auditSink = new InMemorySourceAuditSink();
+    const registry = new FakeConsentRegistry();
+    registry.grant({ tenantId: TEST_TENANT_A, sourceProfileId: 'sp_ember_releases' });
+
+    const guarded = new GuardedSourceReader({
+      reader: reflectionReader,
+      registry,
+      profiles: new Map([[FIXTURE_PROFILE_RELEASES.sourceProfileId, FIXTURE_PROFILE_RELEASES]]),
+      policy: {
+        version: 1,
+        allowedSourceProfileIds: ['sp_ember_releases'],
+        allowedOperations: ['read_snapshot'],
+        defaultAction: 'deny',
+      },
+      auditSink,
+    });
+
+    let caughtError: unknown;
+    try {
+      await guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal);
+    } catch (err) {
+      caughtError = err;
+    }
+
+    expect(caughtError).toBeDefined();
+    expect((caughtError as Error).message).toBe('Operation denied by policy');
+    const diag = (caughtError as DomainError).diagnostic;
+    // Assert the malicious injection URL is NOT reflected in the diagnostic
+    expect(diag).not.toContain('malicious-tracker');
+    expect(diag).not.toContain('super_confidential');
+    expect(diag).toBe(
+      'Source reader returned mismatched sourceProfileId [code: UNTRUSTED_CONTENT_DETECTED]',
+    );
+
+    // Assert the malicious injection URL is NOT reflected anywhere in the audit sink
+    const auditRecords = auditSink.getRecords();
+    expect(auditRecords).toHaveLength(1);
+    const serializedAudit = JSON.stringify(auditRecords[0]);
+    expect(serializedAudit).not.toContain('malicious-tracker');
+    expect(serializedAudit).not.toContain('super_confidential');
   });
 
   it('P1-2: rejects malicious reader returning mismatched sourceProfileId', async () => {
@@ -337,9 +476,9 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       },
     });
 
-    await expect(guarded.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
   it('P1-2: rejects malicious reader returning forged or invalid SHA-256 digest', async () => {
@@ -376,9 +515,9 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       },
     });
 
-    await expect(guarded.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
   it('P1-2: rejects malicious reader returning oversized contentSnippet (> 1,000 chars)', async () => {
@@ -415,9 +554,9 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       },
     });
 
-    await expect(guarded.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
   it('P1-2: rejects malicious reader returning > 50 boundedSafeItems', async () => {
@@ -452,8 +591,8 @@ describe('P0-C3C: Guarded Source Reader Adversarial Defense Matrix', () => {
       },
     });
 
-    await expect(guarded.readSnapshot('sp_ember_releases', validContext)).rejects.toThrowError(
-      /Operation denied by policy/i,
-    );
+    await expect(
+      guarded.readSnapshot('sp_ember_releases', validContext, defaultSignal),
+    ).rejects.toThrowError(/Operation denied by policy/i);
   });
 });

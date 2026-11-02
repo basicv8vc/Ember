@@ -108,11 +108,14 @@ export class GuardedSourceReader implements SourceReader {
   async readSnapshot(
     sourceProfileId: string,
     context: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot> {
     const now = this.nowProvider();
 
     // 1. Authoritative perimeter context validation
+    if (!signal) {
+      throw createInvalidArgumentError('AbortSignal is required');
+    }
     this.validateContext(context);
     this.validateSourceProfileId(sourceProfileId);
 
@@ -166,7 +169,7 @@ export class GuardedSourceReader implements SourceReader {
     }
 
     // 4. Cancellation check prior to dispatch
-    if (signal?.aborted) {
+    if (signal.aborted) {
       if (this.auditSink) {
         this.auditSink.record(
           createSourceAuditRecord({
@@ -190,7 +193,7 @@ export class GuardedSourceReader implements SourceReader {
     } catch (error) {
       const postNow = this.nowProvider();
       if (
-        signal?.aborted ||
+        signal.aborted ||
         (isDomainError(error) && error.code === 'CANCELLED') ||
         (error instanceof Error && error.name === 'AbortError')
       ) {
@@ -207,9 +210,7 @@ export class GuardedSourceReader implements SourceReader {
             }),
           );
         }
-        if (isDomainError(error) && error.code === 'CANCELLED') {
-          throw error;
-        }
+        // P1 Item 1: Uniformly convert to safe CANCELLED error, never re-throw untrusted reader diagnostic
         throw createCancelledError('Snapshot read was aborted during execution');
       }
 
@@ -269,7 +270,7 @@ export class GuardedSourceReader implements SourceReader {
 
     // 7. CHECK 2: Post-Read Consent Re-Verification (Double-Check Invariant)
     const postNow = this.nowProvider();
-    if (signal?.aborted) {
+    if (signal.aborted) {
       if (this.auditSink) {
         this.auditSink.record(
           createSourceAuditRecord({

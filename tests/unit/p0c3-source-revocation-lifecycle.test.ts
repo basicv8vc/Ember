@@ -25,7 +25,12 @@ describe('P0-C3C: Consent Revocation & In-Flight Lifecycle Matrix', () => {
       sourceProfileId: 'sp_ember_releases',
     });
 
-    const snapshot = await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    const signal = new AbortController().signal;
+    const snapshot = await bundle.guardedReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      signal,
+    );
     expect(snapshot).toBeDefined();
     expect(snapshot.sourceProfileId).toBe('sp_ember_releases');
 
@@ -46,8 +51,14 @@ describe('P0-C3C: Consent Revocation & In-Flight Lifecycle Matrix', () => {
       sourceProfileId: 'sp_ember_releases',
     });
 
+    const signal = new AbortController().signal;
+
     // Start snapshot read in background
-    const readPromise = bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    const readPromise = bundle.guardedReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      signal,
+    );
 
     // Revoke consent while reader is in-flight (at 15ms)
     setTimeout(() => {
@@ -65,7 +76,7 @@ describe('P0-C3C: Consent Revocation & In-Flight Lifecycle Matrix', () => {
 
     // Immediate subsequent read fails at Check 1 (pre-read)
     await expect(
-      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, signal),
     ).rejects.toThrowError(/Operation denied by policy/i);
   });
 
@@ -87,8 +98,14 @@ describe('P0-C3C: Consent Revocation & In-Flight Lifecycle Matrix', () => {
       mockCurrentTime,
     );
 
+    const signal = new AbortController().signal;
+
     // Start read at 12:00:00 (Check 1 passes)
-    const readPromise = bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    const readPromise = bundle.guardedReader.readSnapshot(
+      'sp_ember_releases',
+      validContext,
+      signal,
+    );
 
     // Advance clock past expiration at 15ms
     setTimeout(() => {

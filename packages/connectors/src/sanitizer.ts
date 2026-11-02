@@ -162,7 +162,7 @@ export function validateReaderReturnedSnapshot(
 
   if (obj.sourceProfileId !== expectedProfileId) {
     throw createPolicyDeniedError(
-      `Source reader returned mismatched sourceProfileId: expected ${expectedProfileId}, received ${String(obj.sourceProfileId)}`,
+      'Source reader returned mismatched sourceProfileId',
       'UNTRUSTED_CONTENT_DETECTED',
     );
   }

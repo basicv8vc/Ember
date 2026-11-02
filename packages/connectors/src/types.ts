@@ -168,7 +168,7 @@ export interface SourceReader {
   readSnapshot(
     profileId: SourceProfileId,
     trustedContext: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot>;
 }
 

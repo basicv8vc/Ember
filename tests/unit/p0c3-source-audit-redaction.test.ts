@@ -19,6 +19,8 @@ describe('P0-C3C: Source Audit Sanitization and Redaction', () => {
     authorizedAt: '2026-11-01T12:00:00.000Z',
   };
 
+  const signal = new AbortController().signal;
+
   it('hashes tenantId using SHA-256 and never leaks raw tenantId string in audit records', async () => {
     const bundle = createFakeGuardedSourceReader();
     bundle.registry.grant({
@@ -26,7 +28,7 @@ describe('P0-C3C: Source Audit Sanitization and Redaction', () => {
       sourceProfileId: 'sp_ember_releases',
     });
 
-    await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+    await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, signal);
 
     const records = bundle.auditSink.getRecords();
     expect(records).toHaveLength(1);
@@ -46,7 +48,7 @@ describe('P0-C3C: Source Audit Sanitization and Redaction', () => {
 
     // Denied attempt
     await expect(
-      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+      bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, signal),
     ).rejects.toThrow();
 
     const records = bundle.auditSink.getRecords();

@@ -10,7 +10,7 @@
  */
 
 import { computeCanonicalDigest, deepFreeze } from './canonical.js';
-import { createCancelledError, createNotFoundError } from './errors.js';
+import { createCancelledError, createInvalidArgumentError, createNotFoundError } from './errors.js';
 import {
   FIXTURE_ALERTS_ITEMS,
   FIXTURE_PROFILE_ALERTS,
@@ -67,18 +67,20 @@ export class FakeSourceReader implements SourceReader {
   async readSnapshot(
     sourceProfileId: string,
     _context: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot> {
-    if (signal?.aborted) {
+    if (!signal) {
+      throw createInvalidArgumentError('AbortSignal is required');
+    }
+
+    if (signal.aborted) {
       throw createCancelledError('Snapshot read was aborted prior to execution');
     }
 
     if (this.simulatedLatencyMs > 0) {
       await new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
-          if (signal) {
-            signal.removeEventListener('abort', onAbort);
-          }
+          signal.removeEventListener('abort', onAbort);
           resolve();
         }, this.simulatedLatencyMs);
 
@@ -87,19 +89,17 @@ export class FakeSourceReader implements SourceReader {
           reject(createCancelledError('Snapshot read was aborted during simulated latency'));
         };
 
-        if (signal) {
-          signal.addEventListener('abort', onAbort, { once: true });
-        }
+        signal.addEventListener('abort', onAbort, { once: true });
       });
     }
 
-    if (signal?.aborted) {
+    if (signal.aborted) {
       throw createCancelledError('Snapshot read was aborted after execution');
     }
 
     const rawItems = this.fixtures.get(sourceProfileId);
     if (!rawItems) {
-      throw createNotFoundError(`No fixture found for sourceProfileId: ${sourceProfileId}`);
+      throw createNotFoundError('Source profile fixture not found');
     }
 
     // Sanitize and validate every item

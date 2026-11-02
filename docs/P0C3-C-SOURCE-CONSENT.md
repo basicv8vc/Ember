@@ -19,7 +19,7 @@
   - `Distinction between In-Memory Post-Read and DB-Level Pre-Publish: DOCUMENTED`
   - `Ephemeral In-Memory FakeConsentRegistry: PASS`
   - `Prompt Injection Inert Data Defense: PASS`
-  - `Adversarial Inner Reader Security Matrix: PASS (13 tests)`
+  - `Adversarial Inner Reader Security Matrix: PASS (16 tests)`
   - `Zero Outbound Network Sockets / HTTP / DNS Assertions: PASS (0 calls)`
   - `Real Public-Source / Live HTTP Connectors: NOT IMPLEMENTED / NOT AUTHORIZED`
   - `Production OAuth Token Persistence / Secrets Vault: NOT IMPLEMENTED`
@@ -158,7 +158,7 @@ export interface SourceReader {
   readSnapshot(
     profileId: SourceProfileId,
     trustedContext: TrustedSourceAccessContext,
-    signal?: AbortSignal,
+    signal: AbortSignal,
   ): Promise<SourceSnapshot>;
 }
 ```
@@ -254,11 +254,11 @@ All quality gates were verified in the isolated worktree `feature/p0c-3c-readonl
 | `pnpm lint`                                                     |    `0`    | ESLint passed with 0 errors and 0 warnings.                                |
 | `pnpm typecheck`                                                |    `0`    | TypeScript `tsc -p tsconfig.json` passed with 0 errors.                    |
 | `pnpm build`                                                    |    `0`    | Project-reference build `tsc -b tsconfig.build.json` passed with 0 errors. |
-| `pnpm vitest run --config vitest.unit.config.ts --maxWorkers 4` |    `0`    | **59 test files passed, 975 total tests passed (41 P0-C3C tests).**        |
-| `p0c3-source-*.test.ts`                                         |    `0`    | **6 test files passed, 41 tests passed (100% pass rate).**                 |
+| `pnpm vitest run --config vitest.unit.config.ts --maxWorkers 4` |    `0`    | **59 test files passed, 978 total tests passed (44 P0-C3C tests).**        |
+| `p0c3-source-*.test.ts`                                         |    `0`    | **6 test files passed, 44 tests passed (100% pass rate).**                 |
 | `git diff --check`                                              |    `0`    | Clean diff, no trailing whitespace, no merge markers.                      |
 
-### Unit Test Breakdown for P0-C3C (41 Tests across 6 Files)
+### Unit Test Breakdown for P0-C3C (44 Tests across 6 Files)
 
 1. `tests/unit/p0c3-source-consent-registry.test.ts` (7 tests):
    - Tenant isolation & uniform agnosticism (cross-tenant get/revoke returns null / 404).
@@ -271,15 +271,18 @@ All quality gates were verified in the isolated worktree `feature/p0c-3c-readonl
    - Missing profile, disabled profile, tenant mismatch denials.
    - Strict policy tenant binding enforcement.
    - Missing, expired, revoked grant rejection with safe denial codes.
-3. `tests/unit/p0c3-source-reader-adversarial.test.ts` (13 tests):
+3. `tests/unit/p0c3-source-reader-adversarial.test.ts` (16 tests):
    - Proof of **0 reader callbacks** on unauthorized or denied attempts.
    - Perimeter rejection of caller-supplied URLs (`https://`, `http://`, `file://`, userinfo `@`, path traversal `..`).
+   - Perimeter rejection when mandatory `AbortSignal` is missing.
    - Prompt injection handled strictly as inert data without permission escalation.
    - Sanitization of null bytes, ANSI escapes, and Unicode BiDi overrides.
    - Payload UTF-8 byte ceilings (32 KiB) and item count caps (50 items).
    - Canonical SHA-256 digest computation (sorted-key deterministic hash).
    - Deep immutability of returned snapshots.
    - **P1-2: Untrusted reader exception sanitization** (never leaking raw URLs, secrets, or stack traces).
+   - **P1-1 (Round 2): Sanitization of `DomainError('CANCELLED')`** without pass-through of untrusted diagnostics.
+   - **P1-2 (Round 2): Zero reflection of provider returned `sourceProfileId`** or arbitrary strings in diagnostics or audit logs.
    - **P1-2: Rejection of mismatched `sourceProfileId`**.
    - **P1-2: Rejection of forged or corrupted SHA-256 digest**.
    - **P1-2: Rejection of oversized `contentSnippet` (> 1,000 chars)**.

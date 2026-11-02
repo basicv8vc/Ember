@@ -27,6 +27,8 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
     authorizedAt: '2026-11-01T12:00:00.000Z',
   };
 
+  const signal = new AbortController().signal;
+
   it('strictly verifies ZERO outbound sockets, HTTP, HTTPS, fetch, or DNS calls across all operations', async () => {
     // 1. Spy on all Node.js networking and DNS primitives
     const httpSpy = vi.spyOn(http, 'request');
@@ -42,7 +44,7 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
 
       // Operation 1: Denied without consent (Check 1)
       await expect(
-        bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+        bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, signal),
       ).rejects.toThrow();
 
       // Operation 2: Granted consent, successful read
@@ -51,7 +53,11 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
         sourceProfileId: 'sp_ember_releases',
       });
 
-      const snapshot = await bundle.guardedReader.readSnapshot('sp_ember_releases', validContext);
+      const snapshot = await bundle.guardedReader.readSnapshot(
+        'sp_ember_releases',
+        validContext,
+        signal,
+      );
       expect(snapshot.sourceProfileId).toBe('sp_ember_releases');
       expect(snapshot.boundedSafeItems.length).toBeGreaterThan(0);
 
@@ -60,6 +66,7 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
       const injectionSnapshot = await bundle.guardedReader.readSnapshot(
         'sp_ember_releases',
         validContext,
+        signal,
       );
       expect(injectionSnapshot.boundedSafeItems[0]?.contentSnippet).toContain(
         'Ignore all previous instructions',
@@ -67,19 +74,23 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
 
       // Operation 4: Malicious URL injection attempt
       await expect(
-        bundle.guardedReader.readSnapshot('https://evil.attacker.com/releases', validContext),
+        bundle.guardedReader.readSnapshot(
+          'https://evil.attacker.com/releases',
+          validContext,
+          signal,
+        ),
       ).rejects.toThrow();
 
       // Operation 5: Cross-tenant denied attempt
       const crossTenantContext = { ...validContext, tenantId: TEST_TENANT_B };
       await expect(
-        bundle.guardedReader.readSnapshot('sp_ember_releases', crossTenantContext),
+        bundle.guardedReader.readSnapshot('sp_ember_releases', crossTenantContext, signal),
       ).rejects.toThrow();
 
       // Operation 6: Revoked consent attempt
       bundle.registry.revoke(TEST_TENANT_A, 'sp_ember_releases');
       await expect(
-        bundle.guardedReader.readSnapshot('sp_ember_releases', validContext),
+        bundle.guardedReader.readSnapshot('sp_ember_releases', validContext, signal),
       ).rejects.toThrow();
 
       // 2. Strict Zero-Network Assertions
@@ -138,7 +149,7 @@ describe('P0-C3C: Zero-Network Outbound Call Verification', () => {
         auditSink,
       });
 
-      const snapshot = await guarded.readSnapshot('sp_system_alerts', validContext);
+      const snapshot = await guarded.readSnapshot('sp_system_alerts', validContext, signal);
       expect(snapshot.sourceProfileId).toBe('sp_system_alerts');
 
       expect(httpSpy).not.toHaveBeenCalled();

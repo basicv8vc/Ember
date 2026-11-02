@@ -88,6 +88,28 @@ final class ConversationCardsTests: XCTestCase {
         XCTAssertFalse(facts.cancellationPending)
     }
 
+    func testTerminalTaskSnapshotSuppressesStalePendingCancellationResponse() {
+        for status in [TaskStatus.completed, .failed, .cancelled] {
+            let task = makeTask(status: status)
+            let stalePendingResponse = TaskCancelDTO(
+                taskID: task.taskID,
+                status: .running,
+                cancelRequested: true,
+                cancelRequestedAt: "2026-11-02T01:00:00Z",
+                terminal: false,
+                updatedAt: "2026-11-02T01:00:00Z"
+            )
+
+            let facts = TaskActivityCard.facts(
+                for: task,
+                presentation: makePresentation(connection: .connected),
+                cancelResponse: stalePendingResponse
+            )
+
+            XCTAssertFalse(facts.cancellationPending, "\(status.rawValue) Tasks must not show cancellation pending")
+        }
+    }
+
     func testConnectionLossAndCancelRequestDoNotRewriteTaskStatus() {
         let task = makeTask(status: .running)
         let cancellation = TaskCancelDTO(

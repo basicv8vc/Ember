@@ -33,60 +33,59 @@ The migration creates three durable tables and associated indexes:
 
 ### 2.1 Table Definitions
 
+Every table is keyed by a surrogate `id` and additionally carries `UNIQUE (tenant_id, id)`, which is the target of every child table's composite `(tenant_id, …)` foreign key. That is what makes cross-tenant references structurally impossible while keeping `id` usable as a plain row identifier.
+
 1. **`commitments`**
-   - `tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE`
-   - `id UUID NOT NULL`
+   - `id UUID PRIMARY KEY`
+   - `tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT`
    - `agent_id UUID NOT NULL`
-   - `title VARCHAR(140) NOT NULL`
-   - `status VARCHAR(32) NOT NULL CHECK (status IN ('active', 'paused', 'cancelled', 'completed'))`
-   - `schedule_kind VARCHAR(32) NOT NULL CHECK (schedule_kind IN ('once', 'interval'))`
-   - `interval_seconds INTEGER CHECK (interval_seconds IS NULL OR interval_seconds BETWEEN 900 AND 2592000)`
-   - `next_due_at TIMESTAMPTZ`
-   - `source_profile_id VARCHAR(64) NOT NULL`
-   - `version INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1)`
-   - `idempotency_key VARCHAR(128) NOT NULL`
-   - `fingerprint CHAR(64) NOT NULL`
-   - `created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP`
-   - `updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP`
-   - `PRIMARY KEY (tenant_id, id)`
-   - `UNIQUE (tenant_id, idempotency_key)`
+   - `title TEXT NOT NULL` with `char_length(title) BETWEEN 1 AND 140`
+   - `status TEXT NOT NULL DEFAULT 'active'` with `status IN ('active', 'paused', 'completed', 'cancelled')`
+   - `schedule_kind TEXT NOT NULL` with `schedule_kind IN ('once', 'interval')`
+   - `interval_seconds INTEGER` — `NULL` for `once`, `BETWEEN 900 AND 2592000` for `interval`
+   - `next_due_at TIMESTAMPTZ` — authoritative due instant, always written from `clock_timestamp()`
+   - `source_profile_id TEXT NOT NULL` with `source_profile_id ~ '^[a-z0-9][a-z0-9._-]{2,63}$'`
+   - `version INTEGER NOT NULL DEFAULT 1` with `version >= 1`
+   - `idempotency_key TEXT` / `request_fingerprint TEXT` — both `NULL` for non-idempotent internal rows
+   - `created_at` / `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - `UNIQUE (tenant_id, id)`, `UNIQUE (tenant_id, idempotency_key)`
+   - `FOREIGN KEY (tenant_id, agent_id) REFERENCES agents(tenant_id, id) ON DELETE RESTRICT`
 
 2. **`commitment_occurrences`**
+   - `id UUID PRIMARY KEY`
    - `tenant_id UUID NOT NULL`
-   - `id UUID NOT NULL`
    - `commitment_id UUID NOT NULL`
    - `scheduled_for TIMESTAMPTZ NOT NULL`
-   - `task_id UUID`
-   - `status VARCHAR(32) NOT NULL CHECK (status IN ('pending', 'dispatched', 'completed', 'failed', 'cancelled'))`
-   - `created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP`
-   - `updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP`
-   - `PRIMARY KEY (tenant_id, id)`
-   - `FOREIGN KEY (tenant_id, commitment_id) REFERENCES commitments(tenant_id, id) ON DELETE CASCADE`
-   - `FOREIGN KEY (tenant_id, task_id) REFERENCES tasks(tenant_id, id) ON DELETE SET NULL`
-   - `UNIQUE (tenant_id, commitment_id, scheduled_for)`
+   - `task_id UUID` — `NULL` until `markDispatched` / `reconcilePendingOccurrence` binds the durable Task
+   - `status TEXT NOT NULL DEFAULT 'pending'` with `status IN ('pending', 'dispatched', 'completed', 'failed', 'cancelled')`
+   - `created_at` / `updated_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - `UNIQUE (tenant_id, id)`
+   - `FOREIGN KEY (tenant_id, commitment_id) REFERENCES commitments(tenant_id, id) ON DELETE RESTRICT`
+   - `FOREIGN KEY (tenant_id, task_id) REFERENCES tasks(tenant_id, id) ON DELETE RESTRICT`
+   - `UNIQUE (commitment_id, scheduled_for)` — the idempotent scheduling slot
 
 3. **`commitment_outcomes`**
+   - `id UUID PRIMARY KEY`
    - `tenant_id UUID NOT NULL`
-   - `id UUID NOT NULL`
    - `commitment_id UUID NOT NULL`
    - `occurrence_id UUID NOT NULL`
    - `task_id UUID NOT NULL`
-   - `summary VARCHAR(2000) NOT NULL`
-   - `result_status VARCHAR(32) NOT NULL CHECK (result_status IN ('meaningful_change', 'no_change', 'failed', 'denied'))`
-   - `snapshot JSONB`
-   - `created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP`
-   - `PRIMARY KEY (tenant_id, id)`
-   - `FOREIGN KEY (tenant_id, commitment_id) REFERENCES commitments(tenant_id, id) ON DELETE CASCADE`
-   - `FOREIGN KEY (tenant_id, occurrence_id) REFERENCES commitment_occurrences(tenant_id, id) ON DELETE CASCADE`
-   - `FOREIGN KEY (tenant_id, task_id) REFERENCES tasks(tenant_id, id) ON DELETE CASCADE`
-   - `UNIQUE (tenant_id, occurrence_id)`
+   - `summary TEXT NOT NULL` with `char_length(summary) BETWEEN 1 AND 2000`
+   - `result_status TEXT NOT NULL` with `result_status IN ('meaningful_change', 'no_change', 'failed', 'denied')`
+   - `created_at TIMESTAMPTZ NOT NULL DEFAULT now()`
+   - `UNIQUE (tenant_id, id)`
+   - `FOREIGN KEY (tenant_id, commitment_id) REFERENCES commitments(tenant_id, id) ON DELETE RESTRICT`
+   - `FOREIGN KEY (tenant_id, occurrence_id) REFERENCES commitment_occurrences(tenant_id, id) ON DELETE RESTRICT`
+   - `FOREIGN KEY (tenant_id, task_id) REFERENCES tasks(tenant_id, id) ON DELETE RESTRICT`
+   - `UNIQUE (occurrence_id)` — one outcome per occurrence, enforced by the database, not by the caller
 
 ### 2.2 Strategic Indexes
 
-- `idx_commitments_scheduler_due`: `(status, next_due_at) WHERE status = 'active'` for zero-allocation due work polling.
-- `idx_commitments_tenant_status_created`: `(tenant_id, status, created_at DESC)` for cursor-based listing.
-- `idx_occurrences_stalled_recovery`: `(status, created_at) WHERE status = 'pending'` for crash reconciliation.
-- `idx_outcomes_commitment_created`: `(tenant_id, commitment_id, created_at DESC)` for paginated outcome feeds.
+- `commitments_due_scheduling_idx`: `(next_due_at) WHERE status = 'active' AND next_due_at IS NOT NULL` for due work polling.
+- `commitments_tenant_listing_idx`: `(tenant_id, created_at DESC, id DESC)` for cursor-based listing.
+- `occurrences_commitment_order_idx`: `(commitment_id, scheduled_for DESC)` for the occurrence history of one commitment.
+- `occurrences_pending_reap_idx`: `(created_at) WHERE status = 'pending'` for crash-recovery sweeps.
+- `outcomes_commitment_order_idx`: `(commitment_id, created_at DESC, id DESC)` for paginated outcome feeds.
 
 ---
 
@@ -158,7 +157,7 @@ This guarantees that **at most one** historical execution slot is produced, and 
 ## 5. Multi-Tenant Isolation
 
 - All SQL statements contain strict `tenant_id = $1` filters.
-- Composite primary keys `(tenant_id, id)` and composite foreign keys ensure relational integrity is bounded within the tenant.
+- Composite identity `UNIQUE (tenant_id, id)` is the parent key for every composite `(tenant_id, …)` foreign key, so relational integrity is bounded within the tenant.
 - Attempting to inspect or mutate another tenant's commitment produces an invariant `404 Not Found` (`NOT_FOUND`), preventing tenant resource enumeration.
 
 ---

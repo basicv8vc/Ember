@@ -580,14 +580,14 @@ All errors conform to Ember's frozen `ErrorResponseSchema`:
 }
 ```
 
-| Domain Error Code          | HTTP Status | Trigger Condition in Commitment API                                                                |
-| :------------------------- | :---------- | :------------------------------------------------------------------------------------------------- |
-| `INVALID_ARGUMENT`         | 400         | Malformed JSON, title > 140 chars, interval < 900s, malformed UUID, missing Idempotency-Key header |
-| `UNAUTHENTICATED`          | 401         | Missing, malformed, or invalid bearer token                                                        |
-| `NOT_FOUND`                | 404         | Commitment does not exist OR belongs to another tenant (uniform error, no existence leak)          |
-| `IDEMPOTENCY_CONFLICT`     | 409         | Same Idempotency-Key with different payload parameters                                             |
-| `INVALID_STATE_TRANSITION` | 409         | Attempting to pause/resume a cancelled or completed commitment; or `expected_version` CAS mismatch |
-| `DB_UNAVAILABLE`           | 503         | PostgreSQL pool timeout, disconnection, or serialization failure                                   |
+| Domain Error Code          | HTTP Status | Trigger Condition in Commitment API                                                                                                                                 |
+| :------------------------- | :---------- | :------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `INVALID_ARGUMENT`         | 400         | Malformed JSON, title > 140 chars, interval < 900s, malformed UUID, missing Idempotency-Key header                                                                  |
+| `UNAUTHENTICATED`          | 401         | Missing, malformed, or invalid bearer token                                                                                                                         |
+| `NOT_FOUND`                | 404         | Commitment does not exist OR belongs to another tenant (uniform error, no existence leak)                                                                           |
+| `IDEMPOTENCY_CONFLICT`     | 409         | Same Idempotency-Key with different payload parameters                                                                                                              |
+| `INVALID_STATE_TRANSITION` | 409         | Illegal transition edge (`pause`/`resume` on `completed` or `cancelled`, `cancel` on `completed`, i.e. `completed → cancelled`); or `expected_version` CAS mismatch |
+| `DB_UNAVAILABLE`           | 503         | PostgreSQL pool timeout, disconnection, or serialization failure                                                                                                    |
 
 ### 6.3 Idempotency Semantics
 
@@ -635,7 +635,8 @@ All errors conform to Ember's frozen `ErrorResponseSchema`:
 
 ### 7.3 Concurrency & Version Rules
 
-- **Optimistic Concurrency (CAS):** If `expected_version` is provided in the request body, the database update checks `WHERE version = expected_version`. If the row has been modified in the interim, update affects 0 rows and returns `409 INVALID_STATE_TRANSITION`.
+- **Optimistic Concurrency (CAS):** `pause`, `resume` and `cancel` each run inside a single transaction that first takes the commitment row lock (`SELECT … FOR UPDATE`), then compares the locked row's `version` with the caller-supplied `expected_version`. A mismatch raises `INVALID_STATE_TRANSITION` → `409 Conflict` and the transaction writes nothing. The mutation and the `version = version + 1` bump happen in that same transaction, and `updated_at` comes from `clock_timestamp()`, so two concurrent transitions can never both succeed: the loser waits on the row lock, re-reads the version committed by the winner, and is rejected.
+  This is deliberately a **version compare under a row lock**, not a bare `UPDATE … WHERE version = $n`: the transition also has to read the current `status` to decide whether the edge is legal at all (`completed → cancelled` must fail with `INVALID_STATE_TRANSITION`, not silently affect 0 rows), and an idempotent no-op must return the unchanged row with `200 OK`.
 - **Cancellation Guarantee:** Once `cancelled` is committed, `next_due_at` is set to `NULL`. The scheduler will never select this commitment. Any in-flight execution checking the commitment status will abort publication.
 - **History Preservation:** Cancelling a commitment **never** deletes historical occurrences, completed tasks, or recorded outcomes.
 
@@ -662,6 +663,8 @@ CREATE TABLE IF NOT EXISTS commitments (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT commitments_tenant_id_id_unique UNIQUE (tenant_id, id),
   CONSTRAINT commitments_tenant_idempotency_unique UNIQUE (tenant_id, idempotency_key),
+  CONSTRAINT commitments_agent_tenant_fk FOREIGN KEY (tenant_id, agent_id)
+    REFERENCES agents (tenant_id, id) ON DELETE RESTRICT,
   CONSTRAINT commitments_title_length_check CHECK (char_length(title) >= 1 AND char_length(title) <= 140),
   CONSTRAINT commitments_status_check CHECK (status IN ('active', 'paused', 'completed', 'cancelled')),
   CONSTRAINT commitments_schedule_kind_check CHECK (schedule_kind IN ('once', 'interval')),
@@ -692,10 +695,13 @@ CREATE TABLE IF NOT EXISTS commitment_occurrences (
   status text NOT NULL DEFAULT 'pending',
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT occurrences_tenant_id_id_unique UNIQUE (tenant_id, id),
   CONSTRAINT occurrences_tenant_commitment_fk FOREIGN KEY (tenant_id, commitment_id)
     REFERENCES commitments (tenant_id, id) ON DELETE RESTRICT,
   CONSTRAINT occurrences_unique_slot UNIQUE (commitment_id, scheduled_for),
-  CONSTRAINT occurrences_status_check CHECK (status IN ('pending', 'dispatched', 'completed', 'failed', 'cancelled'))
+  CONSTRAINT occurrences_status_check CHECK (status IN ('pending', 'dispatched', 'completed', 'failed', 'cancelled')),
+  CONSTRAINT occurrences_task_tenant_fk FOREIGN KEY (tenant_id, task_id)
+    REFERENCES tasks (tenant_id, id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS occurrences_commitment_order_idx
@@ -716,8 +722,13 @@ CREATE TABLE IF NOT EXISTS commitment_outcomes (
   summary text NOT NULL,
   result_status text NOT NULL,
   created_at timestamptz NOT NULL DEFAULT now(),
+  CONSTRAINT outcomes_tenant_id_id_unique UNIQUE (tenant_id, id),
   CONSTRAINT outcomes_tenant_commitment_fk FOREIGN KEY (tenant_id, commitment_id)
     REFERENCES commitments (tenant_id, id) ON DELETE RESTRICT,
+  CONSTRAINT outcomes_tenant_occurrence_fk FOREIGN KEY (tenant_id, occurrence_id)
+    REFERENCES commitment_occurrences (tenant_id, id) ON DELETE RESTRICT,
+  CONSTRAINT outcomes_tenant_task_fk FOREIGN KEY (tenant_id, task_id)
+    REFERENCES tasks (tenant_id, id) ON DELETE RESTRICT,
   CONSTRAINT outcomes_occurrence_unique UNIQUE (occurrence_id),
   CONSTRAINT outcomes_summary_length_check CHECK (char_length(summary) >= 1 AND char_length(summary) <= 2000),
   CONSTRAINT outcomes_result_status_check CHECK (result_status IN ('meaningful_change', 'no_change', 'failed', 'denied'))

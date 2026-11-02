@@ -855,6 +855,14 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
       );
       expect(leaked.rowCount).toBe(0);
 
+      // ...and it must not have applied its terminal occurrence update either: the occurrence is
+      // still `dispatched`, not `completed`, so no partial publish escaped the rollback.
+      const occAfter = await db.pool.query<{ status: string }>(
+        `SELECT status FROM commitment_occurrences WHERE tenant_id = $1 AND id = $2`,
+        [tenantA.tenantId, slot!.occurrenceId],
+      );
+      expect(occAfter.rows[0]?.status).toBe('dispatched');
+
       const stored = await commitmentRepo.get(ctxA, commitment.commitment_id);
       expect(stored?.status).toBe('cancelled');
     });

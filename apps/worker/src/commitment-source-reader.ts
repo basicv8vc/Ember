@@ -179,11 +179,11 @@ export class CommitmentSourceReader implements SourceReaderPort {
     }
 
     const grant = await this.readGrant(profileId, trustedContext);
-    const tenant = this.readerFor(trustedContext.tenantId, grant);
+    const reader = this.readerFor(trustedContext.tenantId, grant);
 
     this.throwIfAborted(signal, 'after consent verification');
 
-    const snapshot = await tenant.readSnapshot(profileId, trustedContext, signal);
+    const snapshot = await reader.readSnapshot(profileId, trustedContext, signal);
 
     this.throwIfAborted(signal, 'after the source read');
 

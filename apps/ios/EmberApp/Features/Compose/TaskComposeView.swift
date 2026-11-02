@@ -4,12 +4,8 @@ struct TaskComposeView: View {
     @Bindable var session: TaskJourneySession
     let onReceipt: (TaskReceiptDTO) -> Void
 
-    @State private var draft = ""
-    @State private var idempotencyKey = UUID().uuidString
+    @State private var submission = TaskComposeSubmissionModel()
     @State private var simulateLostReceipt = false
-    @State private var awaitingReceipt = false
-    @State private var receipt: TaskReceiptDTO?
-    @State private var message: String?
 
     private let exampleNote = "\"新 onboarding 先让用户完成一件小事，再解释权限。\n\n周五前和设计确认首屏文案。\n\n数据留存和删除规则还没定，需要 CTO review。\""
 
@@ -20,44 +16,76 @@ struct TaskComposeView: View {
                 inputCard
                 simulationCard
 
-                if let message {
-                    Label(message, systemImage: awaitingReceipt ? "questionmark.circle" : "info.circle")
+                if let message = submission.statusMessage {
+                    Label(
+                        message,
+                        systemImage: submission.isAwaitingReceipt ? "questionmark.circle" : "exclamationmark.triangle"
+                    )
                         .font(.subheadline)
-                        .foregroundStyle(awaitingReceipt ? .orange : .secondary)
+                        .foregroundStyle(submission.isAwaitingReceipt ? .orange : .red)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(14)
-                        .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+                        .background(
+                            (submission.isAwaitingReceipt ? Color.orange : Color.red).opacity(0.10),
+                            in: RoundedRectangle(cornerRadius: 14)
+                        )
                         .accessibilityIdentifier("compose-status-message")
                 }
 
-                if let receipt {
+                if case let .accepted(receipt) = submission.state {
                     receiptCard(receipt)
                 }
-
-                Button(action: submit) {
-                    HStack(spacing: 9) {
-                        if session.isCreating {
-                            ProgressView().tint(.white)
-                        } else {
-                            Image(systemName: awaitingReceipt ? "arrow.clockwise" : "paperplane.fill")
-                        }
-                        Text(session.isCreating ? "正在提交" : awaitingReceipt ? "用相同内容和键重试" : "提交模拟任务")
-                            .font(.headline)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 15)
-                }
-                .buttonStyle(.borderedProminent)
-                .disabled(draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || session.isCreating)
-                .accessibilityIdentifier("compose-submit")
             }
             .padding(20)
             .frame(maxWidth: 720)
             .frame(maxWidth: .infinity)
         }
+        .scrollDismissesKeyboard(.interactively)
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            submitButton
+                .padding(.horizontal, 20)
+                .padding(.top, 12)
+                .padding(.bottom, 8)
+                .frame(maxWidth: 720)
+                .frame(maxWidth: .infinity)
+                .background(.regularMaterial)
+                .overlay(alignment: .top) {
+                    Color.primary.opacity(0.08)
+                        .frame(height: 1)
+                }
+        }
         .background(Color(uiColor: .systemGroupedBackground))
         .navigationTitle("新任务")
         .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var submitButton: some View {
+        Button(action: submit) {
+            HStack(spacing: 9) {
+                if submission.isSubmitting {
+                    ProgressView().tint(.white)
+                } else {
+                    Image(
+                        systemName: submission.isAwaitingReceipt || submission.hasDefiniteFailure
+                            ? "arrow.clockwise"
+                            : "paperplane.fill"
+                    )
+                }
+                Text(submission.submitButtonTitle)
+                    .font(.headline)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 15)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderedProminent)
+        .disabled(
+            submission.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || submission.isSubmitting
+                || session.isCreating
+        )
+        .accessibilityIdentifier("compose-submit")
     }
 
     private var introduction: some View {
@@ -65,7 +93,7 @@ struct TaskComposeView: View {
             Text("把零散笔记整理成行动清单")
                 .font(.title2.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("这是本机交互演示。当前合同没有 notes-to-actions 任务类型，也没有真实执行能力。")
+            Text("这是本机演示，尚未连接云端 AI。提交不会处理笔记或生成行动清单。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -80,20 +108,20 @@ struct TaskComposeView: View {
                     .font(.headline)
                 Spacer(minLength: 8)
                 Button("填入示例") {
-                    draft = exampleNote
+                    submission.draft = exampleNote
                 }
                 .font(.subheadline.weight(.semibold))
-                .disabled(awaitingReceipt)
+                .disabled(!submission.canEditDraft)
             }
 
-            TextEditor(text: $draft)
+            TextEditor(text: $submission.draft)
                 .font(.body)
                 .scrollContentBackground(.hidden)
                 .padding(8)
                 .frame(minHeight: 190)
                 .background(Color(uiColor: .secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 12))
                 .overlay(alignment: .topLeading) {
-                    if draft.isEmpty {
+                    if submission.draft.isEmpty {
                         Text("粘贴会议记录、学习笔记或工作想法…")
                             .font(.body)
                             .foregroundStyle(.tertiary)
@@ -102,11 +130,11 @@ struct TaskComposeView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                .disabled(awaitingReceipt || session.isCreating)
+                .disabled(!submission.canEditDraft || session.isCreating)
                 .accessibilityLabel("笔记内容")
                 .accessibilityIdentifier("compose-note-input")
 
-            Text("空白内容不能提交。笔记只在内存中用于这次模拟；FakeTaskRepository 不联网，也不保留原文。")
+            Text("空白内容不能提交。笔记只在内存中用于这次模拟；本机演示不会联网，也不会保留原文。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -119,7 +147,7 @@ struct TaskComposeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("提交前说明", systemImage: "lock.shield")
                 .font(.headline)
-            Text("未来如果笔记要送到云端处理，Ember 必须先明确说明处理方式与留存边界。本演示不会上传笔记，也不会生成真实行动清单。")
+            Text("云端处理功能尚未开放。当前不会上传笔记或生成行动清单；结果页展示的是固定演示样例，并非根据这次提交的笔记生成。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -128,13 +156,13 @@ struct TaskComposeView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("演示回执丢失")
                         .font(.subheadline.weight(.medium))
-                    Text("本机已接收，但界面暂时显示“尚未确认”；可用同一内容与幂等键重试。")
+                    Text("模拟回执暂时未能确认；重试会沿用本次提交。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
             }
-            .disabled(awaitingReceipt || session.isCreating)
+            .disabled(!submission.canEditDraft || session.isCreating)
             .accessibilityIdentifier("compose-simulate-unknown-receipt")
         }
         .padding(16)
@@ -143,13 +171,13 @@ struct TaskComposeView: View {
 
     private func receiptCard(_ receipt: TaskReceiptDTO) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("已接收 · \(receipt.replayed ? "幂等重放 200" : "新建 202")", systemImage: "checkmark.circle.fill")
+            Label(receipt.replayed ? "已接收 · 已确认之前的提交" : "已接收 · 本次提交", systemImage: "checkmark.circle.fill")
                 .font(.headline)
                 .foregroundStyle(.green)
-            Text("这只表示 FakeTaskRepository 接收了本机模拟请求，不表示任务已经完成。")
+            Text("这只表示本机演示已收到提交，不表示任务已经完成。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("Task ID · \(receipt.taskID.uuidString)")
+            Text("任务编号 · \(receipt.taskID.uuidString)")
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
         }
@@ -160,33 +188,22 @@ struct TaskComposeView: View {
     }
 
     private func submit() {
-        let note = draft
-        let key = idempotencyKey
         let loseReceipt = simulateLostReceipt
         simulateLostReceipt = false
+        guard let attempt = submission.beginSubmission(simulateUnknownReceipt: loseReceipt) else { return }
 
         Task {
-            do {
-                let accepted = try await session.createNoteTask(
-                    note: note,
-                    idempotencyKey: key,
-                    simulateUnknownReceipt: loseReceipt
-                )
-                receipt = accepted
-                message = nil
-                awaitingReceipt = false
-                draft = ""
-                idempotencyKey = UUID().uuidString
-                onReceipt(accepted)
-            } catch TaskJourneyDemoError.receiptUnknown {
-                awaitingReceipt = true
-                receipt = nil
-                message = "尚未确认：本机模拟已接收，但回执未显示。草稿与重试键已保留；请用相同内容重试。"
-            } catch {
-                awaitingReceipt = true
-                receipt = nil
-                message = "提交失败或尚未确认。草稿与重试键已保留；请用相同内容重试。"
+            await submission.finishSubmission(attempt, in: session) { receipt in
+                onReceipt(receipt)
             }
         }
     }
+}
+
+#Preview("Compose · Accessibility size") {
+    NavigationStack {
+        TaskComposeView(session: TaskJourneySession(), onReceipt: { _ in })
+    }
+    .environment(\.dynamicTypeSize, .accessibility3)
+    .frame(width: 390, height: 844)
 }

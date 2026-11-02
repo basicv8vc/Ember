@@ -71,6 +71,34 @@ final class TaskContractsTests: XCTestCase {
         XCTAssertNil(approvalUnavailable.outcomeFixture)
     }
 
+    func testCompletedChecklistFixtureIsReadableDeterministicAndExplicitlySimulated() throws {
+        let first = try XCTUnwrap(provider.load(.completed).outcomeFixture)
+        let second = try XCTUnwrap(provider.load(.completed).outcomeFixture)
+        let content = first.content
+        let actionPrefixes = ["1.", "2.", "3.", "4.", "5."]
+        let actionLines = content
+            .split(whereSeparator: \.isNewline)
+            .filter { line in actionPrefixes.contains { line.hasPrefix($0) } }
+
+        XCTAssertEqual(first, second)
+        XCTAssertTrue(first.label.contains("固定演示清单"))
+        XCTAssertTrue(first.label.contains("并非本次笔记生成"))
+        XCTAssertTrue(content.contains("并非根据你刚提交的笔记实时生成"))
+        XCTAssertTrue(content.contains("也不是服务端返回"))
+        XCTAssertEqual(actionLines.count, 4)
+        XCTAssertTrue(content.contains("[高]"))
+        XCTAssertTrue(content.contains("[中]"))
+        XCTAssertTrue(content.contains("负责人：陈立"))
+        XCTAssertTrue(content.contains("负责人：林悦"))
+        XCTAssertTrue(content.contains("负责人：赵敏"))
+        XCTAssertTrue(content.contains("负责人：待确认"))
+        XCTAssertTrue(content.contains("截止：2026-11-03"))
+        XCTAssertTrue(content.contains("截止：2026-11-04"))
+        XCTAssertTrue(content.contains("截止：待确认"))
+        XCTAssertTrue(content.contains("### 仍需补充"))
+        XCTAssertTrue(content.contains("预算上限及币种"))
+    }
+
     func testPresentationStateKeepsServerAndLocalDimensionsIndependent() {
         let state = TaskPresentationState(
             taskStatus: .running,

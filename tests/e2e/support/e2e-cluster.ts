@@ -22,6 +22,7 @@ import {
   PostgresBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
+  PostgresCommitmentRepository,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
@@ -169,6 +170,7 @@ export class E2eCluster {
   readonly appPool: ReturnType<typeof createPool>;
   readonly workerPool: ReturnType<typeof createPool>;
   readonly queue: PostgresLeaseQueue;
+  readonly commitments: PostgresCommitmentRepository;
 
   private server?: ServerType;
   private workerAbort?: AbortController;
@@ -195,6 +197,7 @@ export class E2eCluster {
     workerPool: ReturnType<typeof createPool>,
     baseConfig: DatabaseConfig,
     queue: PostgresLeaseQueue,
+    commitments: PostgresCommitmentRepository,
   ) {
     this.schema = schema;
     this.apiUrl = apiUrl;
@@ -207,6 +210,7 @@ export class E2eCluster {
     this.workerPool = workerPool;
     this.baseConfig = baseConfig;
     this.queue = queue;
+    this.commitments = commitments;
   }
 
   static async start(options: E2eClusterOptions = {}): Promise<E2eCluster> {
@@ -302,6 +306,7 @@ export class E2eCluster {
       const artifactStore = new PostgresArtifactStore(appPool, blobStore);
 
       const logger = createWorkerLogger({ level: 'error', sink: () => undefined });
+      const commitmentRepo = new PostgresCommitmentRepository(appPool);
       const app = createApp({
         readiness: createDatabaseReadiness(appPool),
         serviceVersion: '0.0.0-e2e',
@@ -311,6 +316,7 @@ export class E2eCluster {
         taskStore: new PostgresTaskRepository(appPool),
         approvalStore: new PostgresApprovalRepository(appPool),
         artifactStore,
+        commitmentStore: commitmentRepo,
       });
 
       let serverPort = 0;
@@ -345,6 +351,7 @@ export class E2eCluster {
         workerPool,
         baseConfig,
         queue,
+        commitmentRepo,
       );
       cluster.server = server;
 

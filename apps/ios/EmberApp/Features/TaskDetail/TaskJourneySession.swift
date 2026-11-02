@@ -67,7 +67,7 @@ final class TaskJourneySession {
             selectedTaskID = records.first?.id
         } catch {
             self.repository = nil
-            startupError = "模拟资料暂不可用。此演示没有连接服务端。"
+            startupError = "演示资料暂不可用。此页面没有连接云端服务。"
         }
     }
 
@@ -90,6 +90,9 @@ final class TaskJourneySession {
             deadlineAt: nil
         )
         let receipt = try await repository.createTask(request, idempotencyKey: idempotencyKey)
+        guard Self.isValidCreateReceipt(receipt) else {
+            throw TaskJourneyDemoError.receiptUnknown
+        }
 
         // Simulate a lost acknowledgement after the local fake accepted the request. Retrying
         // the unchanged draft and key returns the same receipt with replayed=true.
@@ -97,26 +100,40 @@ final class TaskJourneySession {
             throw TaskJourneyDemoError.receiptUnknown
         }
 
-        let task = try await repository.fetchTask(id: receipt.taskID)
-        let eventPage = try await repository.fetchEvents(taskID: receipt.taskID, after: nil)
-        let record = TaskJourneyRecord(
-            title: "笔记整理 · 本机会话",
-            task: task,
-            events: eventPage.events,
-            presentation: TaskPresentationState(
-                taskStatus: task.status,
-                connectionPhase: .connected,
-                commandInFlight: nil,
-                capability: .mockOnly
-            ),
-            origin: .createdInThisSession,
-            outcomeFixture: nil,
-            approvalAvailability: .notApplicable
-        )
-        records.insert(record, at: 0)
-        selectedTaskID = task.taskID
-        cancelMessageByTaskID[task.taskID] = nil
+        do {
+            let task = try await repository.fetchTask(id: receipt.taskID)
+            let eventPage = try await repository.fetchEvents(taskID: receipt.taskID, after: nil)
+            let record = TaskJourneyRecord(
+                title: "笔记整理 · 本机会话",
+                task: task,
+                events: eventPage.events,
+                presentation: TaskPresentationState(
+                    taskStatus: task.status,
+                    connectionPhase: .connected,
+                    commandInFlight: nil,
+                    capability: .mockOnly
+                ),
+                origin: .createdInThisSession,
+                outcomeFixture: nil,
+                approvalAvailability: .notApplicable
+            )
+            records.insert(record, at: 0)
+            selectedTaskID = task.taskID
+            cancelMessageByTaskID[task.taskID] = nil
+        } catch {
+            // Follow-up display reads cannot undo a valid create receipt or trigger a new POST.
+        }
         return receipt
+    }
+
+    private static func isValidCreateReceipt(_ receipt: TaskReceiptDTO) -> Bool {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        if formatter.date(from: receipt.acceptedAt) != nil {
+            return true
+        }
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter.date(from: receipt.acceptedAt) != nil
     }
 
     func select(taskID: UUID) {
@@ -258,14 +275,14 @@ final class TaskJourneySession {
 
     private static func scenarioTitle(_ scenarioID: MockScenarioID) -> String {
         switch scenarioID {
-        case .receipt: "接收回执 fixture"
-        case .queued: "排队中 fixture"
-        case .running: "处理中 fixture"
-        case .completed: "完成与样例成果 fixture"
-        case .missingResult: "完成但无成果 fixture"
-        case .disconnectedReconnected: "连接恢复 fixture"
-        case .cancelRace: "取消竞态 fixture"
-        case .approvalUnavailable: "审批不可用 fixture"
+        case .receipt: "接收回执 · 演示"
+        case .queued: "等待处理 · 演示"
+        case .running: "处理中 · 演示"
+        case .completed: "完成与结果样例 · 演示"
+        case .missingResult: "完成但无结果 · 演示"
+        case .disconnectedReconnected: "连接恢复 · 演示"
+        case .cancelRace: "取消状态 · 演示"
+        case .approvalUnavailable: "等待确认 · 演示"
         }
     }
 }

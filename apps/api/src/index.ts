@@ -7,6 +7,7 @@ import {
   PostgresApprovalRepository,
   PostgresArtifactStore,
   PostgresBlobStore,
+  PostgresCommitmentRepository,
   PostgresTaskRepository,
   createPool,
   describeDatabaseTarget,
@@ -104,6 +105,7 @@ function main(): void {
     agentStore: new PostgresAgentRepository(pool),
     taskStore: new PostgresTaskRepository(pool),
     approvalStore: new PostgresApprovalRepository(pool),
+    commitmentStore: new PostgresCommitmentRepository(pool),
     ...(apiConfig.blobRoot === null
       ? {}
       : {

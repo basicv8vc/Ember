@@ -23,7 +23,7 @@ struct TaskDetailView: View {
                 ContentUnavailableView(
                     "还没有选中的任务",
                     systemImage: "tray",
-                    description: Text("从“我的承诺”选择一个本地任务或 fixture。")
+                    description: Text("从“我的承诺”选择一项任务。")
                 )
                 .padding(24)
             }
@@ -34,7 +34,7 @@ struct TaskDetailView: View {
         .alert("样例已复制", isPresented: $copiedOutcome) {
             Button("好", role: .cancel) {}
         } message: {
-            Text("复制的是独立的模拟 fixture 文本，不是服务端结果。")
+            Text("复制的是预先准备的演示样例，并非根据本次提交的笔记生成。")
         }
     }
 
@@ -54,15 +54,13 @@ struct TaskDetailView: View {
                 }
             }
 
-            Text("状态只来自 TaskDTO / 固定 fixture；连接状态和取消命令单独显示。")
+            Text("任务状态来自本机演示数据；连接状态和取消请求分别显示。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            LabeledContent("任务类型", value: record.task.kind.rawValue)
-            LabeledContent("尝试次数", value: String(record.task.attemptCount))
             LabeledContent("创建时间", value: record.task.createdAt)
-            LabeledContent("Task ID", value: record.task.taskID.uuidString)
+            LabeledContent("任务编号", value: record.task.taskID.uuidString)
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
         }
@@ -120,7 +118,7 @@ struct TaskDetailView: View {
             Text("活动时间线")
                 .font(.headline)
             if record.events.isEmpty {
-                Text("此 fixture 没有可显示的事件。")
+                Text("暂无活动记录。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
             } else {
@@ -138,7 +136,7 @@ struct TaskDetailView: View {
                                 .font(.caption.monospaced())
                                 .foregroundStyle(.secondary)
                             if event.payload.simulated == true {
-                                Text("fixture 标记：simulated")
+                                Text("固定演示记录")
                                     .font(.caption)
                                     .foregroundStyle(.secondary)
                             }
@@ -161,7 +159,7 @@ struct TaskDetailView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Label("等待审批", systemImage: "hand.raised")
                     .font(.headline)
-                Text("当前 ApprovalDTO 只有摘要哈希，缺少可读的动作与影响范围。详情不足，无法批准。")
+                Text("这条示例没有提供可供审核的操作详情，因此无法进行确认。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -169,7 +167,7 @@ struct TaskDetailView: View {
                     .buttonStyle(.borderedProminent)
                     .disabled(true)
                     .accessibilityIdentifier("approval-disabled")
-                Text("此按钮永久禁用；演示不会提交批准或拒绝操作。")
+                Text("本机演示不会发送批准或拒绝请求。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -183,7 +181,7 @@ struct TaskDetailView: View {
     private func outcomeCard(_ record: TaskJourneyRecord) -> some View {
         if record.task.status == .completed {
             VStack(alignment: .leading, spacing: 12) {
-                Label("Outcome · 仅显示独立 fixture", systemImage: "doc.text")
+                Label("结果 · 固定演示样例", systemImage: "doc.text")
                     .font(.headline)
 
                 if let outcome = record.outcomeFixture {
@@ -211,7 +209,7 @@ struct TaskDetailView: View {
                         .buttonStyle(.bordered)
                     }
                 } else {
-                    Text("任务已完成，但成果暂不可读取。当前合同没有 Task Result API，因此这里不填入其他内容。")
+                    Text("此示例显示任务已完成，但没有可查看的结果。")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -227,7 +225,7 @@ struct TaskDetailView: View {
 
     private func commandCard(_ record: TaskJourneyRecord) -> some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("本地命令", systemImage: "arrow.uturn.backward.circle")
+            Label("取消任务", systemImage: "arrow.uturn.backward.circle")
                 .font(.headline)
             if let message = session.cancelMessageByTaskID[record.id] {
                 Text(message)
@@ -236,7 +234,7 @@ struct TaskDetailView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .accessibilityIdentifier("task-cancel-status")
             } else {
-                Text("取消请求与最终任务状态分开。返回结果仍在 queued/running 时，只显示待确认，不提前标记已取消。")
+                Text("收到取消请求不代表任务已取消；任务仍在等待或处理中时，会继续显示当前状态。")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -250,7 +248,7 @@ struct TaskDetailView: View {
                         ProgressView()
                             .frame(maxWidth: .infinity)
                     } else {
-                        Label("演示请求取消", systemImage: "stop.circle")
+                        Label("模拟取消任务", systemImage: "stop.circle")
                             .frame(maxWidth: .infinity)
                     }
                 }
@@ -284,9 +282,9 @@ struct TaskDetailView: View {
 
     private func connectionMessage(_ record: TaskJourneyRecord) -> String {
         switch record.presentation.connectionPhase {
-        case .idle: "连接尚未开始；这不是任务状态。"
-        case .connecting: "正在演示本地重连状态；没有计时器，也没有真实网络请求。"
-        case .connected: "这是本地 UI 状态。任务状态仍以固定 TaskDTO / fixture 为准。"
+        case .idle: "连接状态尚未开始；它与任务进度分开显示。"
+        case .connecting: "正在模拟重新连接；没有真实网络请求。"
+        case .connected: "这是本机演示状态，不代表正在连接云端服务。"
         case .disconnected: "连接中断，任务可能仍在进行。任务状态保持“\(TaskJourneySession.statusTitle(record.task.status))”。"
         }
     }
@@ -294,9 +292,9 @@ struct TaskDetailView: View {
     private func eventTitle(_ phase: TaskEventPhase) -> String {
         switch phase {
         case .accepted: "已接收"
-        case .leased: "已分配执行槽位"
+        case .leased: "已安排处理"
         case .started: "已开始"
-        case .progress: "进度事件"
+        case .progress: "进度已更新"
         case .waitingApproval: "等待确认"
         case .approvalGranted: "确认已通过"
         case .approvalDenied: "确认被拒绝"

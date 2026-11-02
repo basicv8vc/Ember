@@ -15,8 +15,10 @@ struct TaskJourneyDemoContainer: View {
             mockOnlyBanner
             TabView(selection: $selectedTab) {
                 NavigationStack {
-                    TaskComposeView(session: session) { _ in
-                        selectedTab = .inbox
+                    TaskComposeView(session: session) { receipt in
+                        if session.records.contains(where: { $0.id == receipt.taskID }) {
+                            selectedTab = .inbox
+                        }
                     }
                 }
                 .tabItem { Label("新任务", systemImage: "square.and.pencil") }
@@ -51,7 +53,7 @@ struct TaskJourneyDemoContainer: View {
         HStack(spacing: 8) {
             Image(systemName: "flask.fill")
                 .accessibilityHidden(true)
-            Text("MOCK ONLY · No real AI execution")
+            Text("MOCK ONLY · 本机演示，不执行云端 AI")
                 .font(.footnote.weight(.bold))
                 .multilineTextAlignment(.center)
                 .accessibilityIdentifier("task-flow-mock-only-label")

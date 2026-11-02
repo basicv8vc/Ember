@@ -3,13 +3,11 @@ import type { ConsentFenceAuthority } from '@ember/execution';
 import {
   PostgresCommitmentRepository,
   PostgresCommitmentTaskDispatcher,
+  PostgresConsentPublicationGuard,
   systemClock,
 } from '@ember/postgres';
 import type { createPool } from '@ember/postgres';
-import {
-  evaluateSchedulerConsentGate,
-  createCommitmentConsentPublicationGuard,
-} from './commitment-consent.js';
+import { evaluateSchedulerConsentGate } from './commitment-consent.js';
 import { CommitmentScheduler, DEFAULT_MAX_ERROR_BACKOFF_MS } from './commitment-scheduler.js';
 import type { WorkerConfig } from './config.js';
 import type { WorkerLogger } from './logger.js';
@@ -77,7 +75,7 @@ export function startCommitmentScheduler(
   // The scheduler's own store uses the same publication guard as the runtime, so reconciliation
   // paths cannot bypass the transaction-scoped Consent check either.
   const store = new PostgresCommitmentRepository(pool, {
-    consentPublicationGuard: createCommitmentConsentPublicationGuard(consentAuthority),
+    consentPublicationGuard: new PostgresConsentPublicationGuard(),
   });
   const dispatcher = new PostgresCommitmentTaskDispatcher(pool);
   const scheduler = new CommitmentScheduler(store, dispatcher, {

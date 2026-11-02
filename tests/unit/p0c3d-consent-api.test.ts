@@ -1,9 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import {
   DEFAULT_CONSENT_OPERATIONS,
-  type ConsentGrant,
   type ConsentOperation,
   type ConsentRepository,
+  type PersistedConsentGrant,
   type GrantConsentCommand,
   type RevokeConsentOptions,
   type SourceProfileId,
@@ -32,7 +32,7 @@ const PROFILE = 'fixture.github-release';
  * transactional behaviour is covered by the PostgreSQL integration suite.
  */
 class FakeConsentStore implements ConsentRepository {
-  readonly grants = new Map<string, ConsentGrant>();
+  readonly grants = new Map<string, PersistedConsentGrant>();
   readonly grantRequests: { readonly tenantId: string; readonly cmd: GrantConsentCommand }[] = [];
   readonly revokeRequests: {
     readonly tenantId: string;
@@ -55,11 +55,11 @@ class FakeConsentStore implements ConsentRepository {
   seed(
     tenantId: string,
     sourceProfileId: string,
-    overrides: Partial<ConsentGrant> = {},
-  ): ConsentGrant {
+    overrides: Partial<PersistedConsentGrant> = {},
+  ): PersistedConsentGrant {
     const now = this.nextTimestamp();
-    const grant: ConsentGrant = {
-      consentId: randomUUID(),
+    const grant: PersistedConsentGrant = {
+      grantId: randomUUID(),
       tenantId,
       sourceProfileId,
       status: 'active',
@@ -78,23 +78,20 @@ class FakeConsentStore implements ConsentRepository {
     return grant;
   }
 
-  private sameOperations(
-    left: readonly ConsentOperation[],
-    right: readonly ConsentOperation[],
-  ): boolean {
+  private sameOperations(left: readonly string[], right: readonly string[]): boolean {
     return left.length === right.length && left.every((operation) => right.includes(operation));
   }
 
   async grant(
     ctx: AuthContext,
     cmd: GrantConsentCommand,
-  ): Promise<{ readonly consent: ConsentGrant; readonly replayed: boolean }> {
+  ): Promise<{ readonly consent: PersistedConsentGrant; readonly replayed: boolean }> {
     await Promise.resolve();
     this.grantRequests.push({ tenantId: ctx.tenantId, cmd });
 
     const key = this.keyOf(ctx.tenantId, cmd.sourceProfileId);
     const existing = this.grants.get(key);
-    const operations = cmd.allowedOperations ?? DEFAULT_CONSENT_OPERATIONS;
+    const operations: readonly string[] = cmd.allowedOperations ?? DEFAULT_CONSENT_OPERATIONS;
     const scopes = cmd.scopes ?? [];
     const expiresAt = cmd.expiresAt ?? null;
 
@@ -110,8 +107,8 @@ class FakeConsentStore implements ConsentRepository {
     }
 
     const now = this.nextTimestamp();
-    const grant: ConsentGrant = {
-      consentId: existing?.consentId ?? randomUUID(),
+    const grant: PersistedConsentGrant = {
+      grantId: existing?.grantId ?? randomUUID(),
       tenantId: ctx.tenantId,
       sourceProfileId: cmd.sourceProfileId,
       status: 'active',
@@ -133,7 +130,7 @@ class FakeConsentStore implements ConsentRepository {
     ctx: AuthContext,
     sourceProfileId: SourceProfileId,
     options?: RevokeConsentOptions,
-  ): Promise<ConsentGrant> {
+  ): Promise<PersistedConsentGrant> {
     await Promise.resolve();
     this.revokeRequests.push({ tenantId: ctx.tenantId, sourceProfileId, options });
 
@@ -152,7 +149,7 @@ class FakeConsentStore implements ConsentRepository {
     }
 
     const now = this.nextTimestamp();
-    const revoked: ConsentGrant = {
+    const revoked: PersistedConsentGrant = {
       ...existing,
       status: 'revoked',
       revokedAt: now,
@@ -164,12 +161,15 @@ class FakeConsentStore implements ConsentRepository {
     return revoked;
   }
 
-  async get(ctx: AuthContext, sourceProfileId: SourceProfileId): Promise<ConsentGrant | null> {
+  async get(
+    ctx: AuthContext,
+    sourceProfileId: SourceProfileId,
+  ): Promise<PersistedConsentGrant | null> {
     await Promise.resolve();
     return this.grants.get(this.keyOf(ctx.tenantId, sourceProfileId)) ?? null;
   }
 
-  async list(ctx: AuthContext): Promise<readonly ConsentGrant[]> {
+  async list(ctx: AuthContext): Promise<readonly PersistedConsentGrant[]> {
     await Promise.resolve();
     return [...this.grants.values()]
       .filter((grant) => grant.tenantId === ctx.tenantId)
@@ -281,7 +281,7 @@ describe('P0-C3D Consent HTTP API', () => {
       expect(store.grantRequests[0]?.cmd.allowedOperations).toBeUndefined();
 
       const body = (await response.json()) as { consent: { allowed_operations: string[] } };
-      expect(body.consent.allowed_operations).toStrictEqual(['read_snapshot', 'publish_outcome']);
+      expect(body.consent.allowed_operations).toStrictEqual(['read_snapshot']);
     });
 
     it('replays an identical grant as 200 without advancing the version', async () => {
@@ -310,16 +310,17 @@ describe('P0-C3D Consent HTTP API', () => {
       await app.request(CONSENTS_PATH, {
         method: 'POST',
         headers: bearer(TOKEN_A, { 'Content-Type': 'application/json' }),
-        body: JSON.stringify({
-          source_profile_id: PROFILE,
-          allowed_operations: ['read_snapshot'],
-        }),
+        body: JSON.stringify({ source_profile_id: PROFILE }),
       });
 
+      // Widening the SCOPE set is a new authorization, not a reaffirmation.
       const widened = await app.request(CONSENTS_PATH, {
         method: 'POST',
         headers: bearer(TOKEN_A, { 'Content-Type': 'application/json' }),
-        body: JSON.stringify({ source_profile_id: PROFILE }),
+        body: JSON.stringify({
+          source_profile_id: PROFILE,
+          scopes: ['source.readonly', 'source.metadata'],
+        }),
       });
 
       expect(widened.status).toBe(201);

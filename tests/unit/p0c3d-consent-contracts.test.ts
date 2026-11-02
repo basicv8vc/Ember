@@ -13,7 +13,7 @@ import {
   toConsentGrantDto,
   toConsentGrantListDto,
   toConsentGrantReceiptDto,
-  type ConsentGrant,
+  type PersistedConsentGrant,
 } from '@ember/contracts';
 import { InvalidArgumentError } from '@ember/domain';
 import { describe, expect, it } from 'vitest';
@@ -23,13 +23,13 @@ const CONSENT_ID = '22222222-2222-4222-8222-222222222222';
 const PROFILE = 'fixture.github-release';
 const GRANTED_AT = '2026-01-01T00:00:00.000Z';
 
-function sampleGrant(overrides: Partial<ConsentGrant> = {}): ConsentGrant {
+function sampleGrant(overrides: Partial<PersistedConsentGrant> = {}): PersistedConsentGrant {
   return {
-    consentId: CONSENT_ID,
+    grantId: CONSENT_ID,
     tenantId: TENANT_ID,
     sourceProfileId: PROFILE,
     status: 'active',
-    allowedOperations: ['read_snapshot', 'publish_outcome'],
+    allowedOperations: ['read_snapshot'],
     scopes: ['repo:read'],
     grantedAt: GRANTED_AT,
     expiresAt: null,
@@ -60,11 +60,12 @@ describe('P0-C3D consent vocabulary', () => {
     expect(CONSENT_STATUSES).toStrictEqual(['active', 'revoked', 'expired']);
   });
 
-  it('keeps the operation list closed and defaulted to everything', () => {
-    expect(CONSENT_OPERATIONS).toStrictEqual(['read_snapshot', 'publish_outcome']);
-    expect(DEFAULT_CONSENT_OPERATIONS).toStrictEqual(['read_snapshot', 'publish_outcome']);
+  it('keeps the request operation vocabulary closed to the connector contract', () => {
+    // P0-C3C defines exactly one source capability; a grant can never name another one through
+    // the API, so the closed vocabulary and the default are the same single value.
+    expect(CONSENT_OPERATIONS).toStrictEqual(['read_snapshot']);
+    expect(DEFAULT_CONSENT_OPERATIONS).toStrictEqual(['read_snapshot']);
     expect(Object.isFrozen(DEFAULT_CONSENT_OPERATIONS)).toBe(true);
-    expect(CONSENT_LIMITS.maxOperations).toBe(CONSENT_OPERATIONS.length);
   });
 
   it('exposes denial codes that are distinct from HTTP text', () => {
@@ -72,8 +73,11 @@ describe('P0-C3D consent vocabulary', () => {
       'CONSENT_NOT_FOUND',
       'CONSENT_REVOKED',
       'CONSENT_EXPIRED',
+      'CONSENT_FENCE_MISSING',
+      'CONSENT_FENCE_STALE',
+      'CONSENT_GENERATION_MISMATCH',
       'OPERATION_NOT_ALLOWED',
-      'CONSENT_VERSION_STALE',
+      'SCOPE_NOT_GRANTED',
     ]);
   });
 });
@@ -130,7 +134,7 @@ describe('GrantConsentRequestSchema', () => {
 
     expect(parse([])).toBe(false);
     expect(parse(['read_snapshot', 'delete_everything'])).toBe(false);
-    expect(parse(['read_snapshot', 'publish_outcome', 'read_snapshot'])).toBe(false);
+    expect(parse(['read_snapshot', 'read_snapshot'])).toBe(false);
   });
 
   it('rejects scopes that are not bounded lower-case token labels', () => {
@@ -204,11 +208,11 @@ describe('ConsentGrantDtoSchema and DTO mappers', () => {
     const dto = toConsentGrantDto(sampleGrant());
 
     expect(dto).toStrictEqual({
-      consent_id: CONSENT_ID,
+      grant_id: CONSENT_ID,
       tenant_id: TENANT_ID,
       source_profile_id: PROFILE,
       status: 'active',
-      allowed_operations: ['read_snapshot', 'publish_outcome'],
+      allowed_operations: ['read_snapshot'],
       scopes: ['repo:read'],
       granted_at: GRANTED_AT,
       expires_at: null,

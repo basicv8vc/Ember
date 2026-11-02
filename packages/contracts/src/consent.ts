@@ -180,7 +180,6 @@ export interface TrustedSourceAccessContext {
   readonly authorizationFence?: ConsentAuthorizationFence;
 }
 
-
 /** Identifier of the frozen Consent lifecycle this package implements. */
 export const CONSENT_LIFECYCLE_REVISION = 'p0c3c-consent-v1';
 

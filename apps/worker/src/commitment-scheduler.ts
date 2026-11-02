@@ -240,6 +240,17 @@ export class CommitmentScheduler {
    * `dispatched` (Worker crashed between `finish()` and the occurrence transition).
    */
   public async reconcileTerminal(): Promise<number> {
+    // Authorization recovery runs first: an occurrence that can never prove which consent
+    // authorized its read must not linger in `dispatched` waiting for an Outcome that the
+    // publication gate will refuse forever.
+    const unverifiable = (await this.store.failUnverifiableOccurrences?.(this.batchSize)) ?? 0;
+
+    if (unverifiable > 0) {
+      this.logger?.warn?.('Terminalized occurrences without a consent generation fence', {
+        unverifiable,
+      });
+    }
+
     const finalized = await this.store.reconcileTerminalOccurrences(this.batchSize);
 
     if (finalized > 0) {

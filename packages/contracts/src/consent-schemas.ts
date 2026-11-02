@@ -4,7 +4,10 @@ import { SourceProfileIdSchema, type SourceProfileId } from './commitment-schema
 import {
   SOURCE_READ_OPERATION,
   SOURCE_READ_SCOPE,
+  type ConsentGeneration,
   type ConsentGrant,
+  type ConsentGrantId,
+  type ConsentStatus,
   type SourceDenialCode,
 } from './consent.js';
 import { IdSchema, IsoDateTimeSchema } from './task-schemas.js';
@@ -96,11 +99,22 @@ export const DEFAULT_CONSENT_OPERATIONS: readonly ConsentOperation[] = Object.fr
 export const DEFAULT_CONSENT_SCOPES: readonly string[] = Object.freeze([SOURCE_READ_SCOPE]);
 
 export const CONSENT_LIMITS = Object.freeze({
-  maxOperations: CONSENT_OPERATIONS.length,
+  maxOperations: 4,
   maxScopes: 16,
   scopeMinChars: 1,
   scopeMaxChars: 64,
 });
+
+/**
+ * A stored operation label. The API only ever writes `CONSENT_OPERATIONS`, but a durable grant MAY
+ * carry another label (the frozen contract requires such a grant to exist and to deny a read), so
+ * the wire schema accepts any bounded label and the closed enum is enforced on request input.
+ */
+export const ConsentOperationLabelSchema = z
+  .string()
+  .min(1)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_]*$/, 'operation must be a lower-case label');
 
 /** A grant scope is a bounded, lower-case token label. It is never a URL or a query string. */
 export const ConsentScopeSchema = z
@@ -127,7 +141,6 @@ export const CONSENT_DENIAL_CODES = [
 
 export type ConsentDenialCode = (typeof CONSENT_DENIAL_CODES)[number];
 
-
 /** Public consent record (wire format uses snake_case, like every other Ember DTO). */
 export interface ConsentGrantDto {
   /** Generation identity (`grantId`). Changes on every explicit re-grant. */
@@ -135,7 +148,7 @@ export interface ConsentGrantDto {
   readonly tenant_id: Id;
   readonly source_profile_id: SourceProfileId;
   readonly status: ConsentStatus;
-  readonly allowed_operations: readonly ConsentOperation[];
+  readonly allowed_operations: readonly string[];
   readonly scopes: readonly string[];
   readonly granted_at: string;
   readonly expires_at: string | null;
@@ -150,7 +163,7 @@ export const ConsentGrantDtoSchema: z.ZodType<ConsentGrantDto> = z.strictObject(
   tenant_id: IdSchema,
   source_profile_id: SourceProfileIdSchema,
   status: ConsentStatusSchema,
-  allowed_operations: z.array(ConsentOperationSchema).min(1).max(CONSENT_LIMITS.maxOperations),
+  allowed_operations: z.array(ConsentOperationLabelSchema).min(1).max(CONSENT_LIMITS.maxOperations),
   scopes: z.array(ConsentScopeSchema).max(CONSENT_LIMITS.maxScopes),
   granted_at: IsoDateTimeSchema,
   expires_at: IsoDateTimeSchema.nullable(),
@@ -179,7 +192,11 @@ export const GrantConsentRequestSchema = z.strictObject({
   allowed_operations: z
     .array(ConsentOperationSchema)
     .min(1)
-    .max(CONSENT_LIMITS.maxOperations)
+    .max(CONSENT_OPERATIONS.length)
+    .refine(
+      (operations) => new Set(operations).size === operations.length,
+      'allowed_operations must not repeat an operation',
+    )
     .optional(),
   scopes: z.array(ConsentScopeSchema).max(CONSENT_LIMITS.maxScopes).optional(),
   expires_at: IsoDateTimeSchema.nullable().optional(),
@@ -312,9 +329,7 @@ export function toConsentGrantDto(grant: PersistedConsentGrant): ConsentGrantDto
     tenant_id: grant.tenantId,
     source_profile_id: grant.sourceProfileId,
     status: grant.status,
-    allowed_operations: grant.allowedOperations.filter((operation): operation is ConsentOperation =>
-      CONSENT_OPERATIONS.includes(operation as ConsentOperation),
-    ),
+    allowed_operations: [...grant.allowedOperations],
     scopes: grant.scopes,
     granted_at: grant.grantedAt,
     expires_at: grant.expiresAt,
@@ -337,4 +352,3 @@ export function toConsentGrantReceiptDto(
 ): ConsentGrantReceiptDto {
   return { consent: toConsentGrantDto(grant), replayed };
 }
-

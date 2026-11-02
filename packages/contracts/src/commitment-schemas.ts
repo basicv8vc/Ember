@@ -1,4 +1,5 @@
 import type { AuthContext, Id } from '@ember/domain';
+import type { TrustedSourceAccessContext } from './consent.js';
 import { z } from 'zod';
 import { IdSchema, IsoDateTimeSchema } from './task-schemas.js';
 
@@ -602,6 +603,19 @@ export interface DueCommitmentStore {
    * `finalizeOccurrenceFromTask()`; it is driven by persisted Task/Run state only.
    */
   reconcileTerminalOccurrences(limit: number): Promise<number>;
+
+  /**
+   * Terminalize occurrences that cannot prove their authorization (P0-C3D).
+   *
+   * Work dispatched before the authorization fence existed records no consent generation. It can
+   * neither be published (nothing proves which consent authorized the read) nor silently
+   * re-dispatched under today's consent, so the sweep marks it `failed` and returns how many rows it
+   * changed. Implementations MUST re-check for a published Outcome under the row lock.
+   *
+   * Optional so a non-durable test double does not have to model the recovery path; the durable
+   * PostgreSQL implementation provides it and the scheduler invokes it when present.
+   */
+  failUnverifiableOccurrences?(limit: number): Promise<number>;
 }
 
 /**

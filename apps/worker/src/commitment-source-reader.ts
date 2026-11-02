@@ -12,11 +12,7 @@ import {
   type SourceProfile,
   type SourceSnapshotItem,
 } from '@ember/connectors';
-import type {
-  ConsentAuthority,
-  SourceSnapshot,
-  TrustedSourceAccessContext,
-} from '@ember/contracts';
+import type { ConsentReadGate, SourceSnapshot, TrustedSourceAccessContext } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
 import {
   assertFenceMatches,
@@ -48,7 +44,7 @@ export interface CommitmentSourceReaderOptions {
    * Authoritative async consent verifier. Production must supply Lane C's durable implementation;
    * until it exists, the Worker composition root injects a deny-all authority.
    */
-  readonly consent: ConsentAuthority | ConsentFenceAuthority;
+  readonly consent: ConsentReadGate | ConsentFenceAuthority;
   readonly logger?: WorkerLogger;
 }
 
@@ -112,7 +108,7 @@ interface TenantReader {
  * - zero network access is possible (Lane C fixtures only, no real connectors).
  */
 export class CommitmentSourceReader implements SourceReaderPort {
-  private readonly consent: ConsentAuthority | ConsentFenceAuthority;
+  private readonly consent: ConsentReadGate | ConsentFenceAuthority;
   private readonly logger?: WorkerLogger;
   private readonly inner: FakeSourceReader;
   private readonly tenants = new Map<string, TenantReader>();

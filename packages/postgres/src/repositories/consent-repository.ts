@@ -3,24 +3,34 @@ import {
   AuthContextSchema,
   CONSENT_OPERATIONS,
   DEFAULT_CONSENT_OPERATIONS,
+  DEFAULT_CONSENT_SCOPES,
+  SOURCE_READ_OPERATION,
+  SourceProfileIdSchema,
+  deriveConsentStatus,
+  toInvalidArgumentError,
+  type AuthorizedConsentGeneration,
+  type ConsentAuthority,
   type ConsentDecision,
   type ConsentEvaluator,
+  type ConsentGeneration,
   type ConsentGrant,
   type ConsentOperation,
   type ConsentRepository,
-  type ConsentStatus,
   type GrantConsentCommand,
+  type GrantConsentParams,
+  type PersistedConsentGrant,
   type RevokeConsentOptions,
   type SourceProfileId,
-  SourceProfileIdSchema,
-  toInvalidArgumentError,
 } from '@ember/contracts';
 import { DomainError, InvalidArgumentError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import {
   CONSENT_COLUMNS_SQL,
+  READ_SNAPSHOT_REQUIREMENTS,
   SELECT_CONSENT_FOR_UPDATE_SQL,
   SELECT_CONSENT_SQL,
+  assertKnownStatus,
+  deriveRowStatus,
   evaluateConsentRow,
   type ConsentGrantRow,
 } from './consent-fence.js';
@@ -29,25 +39,32 @@ import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 /**
  * Authoritative PostgreSQL consent persistence (P0-C3D).
  *
+ * The durable store implements BOTH faces of the frozen contract:
+ *
+ * - {@link ConsentAuthority} (`resolveGeneration`) for the Worker and the dispatch/publication
+ *   gates, which only ever need the current generation of one lineage;
+ * - {@link ConsentRepository} (tenant-scoped admin port) for the HTTP surface, where the tenant
+ *   always comes from the verified `AuthContext`.
+ *
  * Guarantees this class is responsible for:
  *
- * - **Tenant isolation twice over.** Every statement is scoped by `tenant_id` from the verified
- *   `AuthContext`, and the table itself is keyed by `(tenant_id, source_profile_id)`. Another
- *   tenant's grant is reported exactly like a missing one.
- * - **No credentials.** Only authorization facts are written. There is no column, parameter or
- *   log line for a token, cookie or key.
- * - **Versioned fence.** `version` advances on every effective mutation. Callers that observed
- *   an older version fail rather than silently overwriting newer authorization
- *   (`INVALID_STATE_TRANSITION`), and publication compares the dispatched version with the
- *   current one.
- * - **Database-clock expiry.** `expires_at` is validated and evaluated with
- *   `clock_timestamp()`, so host clock skew cannot extend a grant.
+ * - **Tenant isolation twice over.** Every statement is scoped by `tenant_id`, and the table is
+ *   keyed by `(tenant_id, source_profile_id)`. Another tenant's grant is reported exactly like a
+ *   missing one.
+ * - **No credentials.** Only authorization facts are written. There is no column, parameter or log
+ *   line for a token, cookie or key.
+ * - **Generations, not just versions.** Every explicit re-grant mints a NEW `grantId` and a strictly
+ *   greater `version` (P0-C3C C-06). Only an identical reaffirmation of a still-effective grant
+ *   replays without a new generation (C-09), and only revocation advances the version in place
+ *   (C-02). Publication therefore compares BOTH identity and version.
+ * - **Database-clock expiry.** `expires_at` is evaluated with `clock_timestamp()` in SQL, so host
+ *   clock skew cannot extend a grant.
  */
 
 const PRINCIPAL_EXISTS_SQL = `
 SELECT 1
   FROM principals
- WHERE tenant_id = $1 AND id = $2
+  WHERE tenant_id = $1 AND id = $2
 `;
 
 const INSERT_CONSENT_SQL = `
@@ -55,23 +72,29 @@ const INSERT_CONSENT_SQL = `
     id, tenant_id, source_profile_id, status, allowed_operations, scopes,
     granted_by_principal_id, granted_at, expires_at, version, created_at, updated_at
   )
-  VALUES ($1, $2, $3, 'active', $4::text[], $5::text[], $6, clock_timestamp(),
-          $7::timestamptz, 1, clock_timestamp(), clock_timestamp())
+  VALUES ($1, $2, $3, 'active', $4::text[], $5::text[], $6,
+          COALESCE($8::timestamptz, clock_timestamp()), $7::timestamptz, 1,
+          clock_timestamp(), clock_timestamp())
   RETURNING ${CONSENT_COLUMNS_SQL}
 `;
 
 /**
- * Re-grant / mutation. Revocation is cleared because an effective grant is being restored, and
- * `version` advances so every fence comparing against the previous version becomes stale.
+ * Explicit re-grant: mints a NEW generation.
+ *
+ * `id` is regenerated because the previous generation is dead (revoked, expired or superseded).
+ * Keeping the old id while bumping only `version` would let a caller that compares grant identity
+ * (P0-C3C C-06) believe a dead generation came back to life. `version` still increases monotonically
+ * across the lineage (C-08), and the row keeps its lineage key `(tenant_id, source_profile_id)`.
  */
 const UPDATE_CONSENT_SQL = `
   UPDATE consent_grants
-     SET status = 'active',
-         allowed_operations = $3::text[],
-         scopes = $4::text[],
-         granted_by_principal_id = $5,
-         granted_at = clock_timestamp(),
-         expires_at = $6::timestamptz,
+     SET id = $3,
+         status = 'active',
+         allowed_operations = $4::text[],
+         scopes = $5::text[],
+         granted_by_principal_id = $6,
+         granted_at = COALESCE($8::timestamptz, clock_timestamp()),
+         expires_at = $7::timestamptz,
          revoked_at = NULL,
          revoked_by_principal_id = NULL,
          version = version + 1,
@@ -83,7 +106,7 @@ const UPDATE_CONSENT_SQL = `
 const REVOKE_CONSENT_SQL = `
   UPDATE consent_grants
      SET status = 'revoked',
-         revoked_at = clock_timestamp(),
+         revoked_at = COALESCE($4::timestamptz, clock_timestamp()),
          revoked_by_principal_id = $3,
          version = version + 1,
          updated_at = clock_timestamp()
@@ -95,34 +118,16 @@ const SELECT_CONSENT_LIST_SQL = `
   SELECT ${CONSENT_COLUMNS_SQL}
   FROM consent_grants
   WHERE tenant_id = $1
-  ORDER BY created_at DESC, id DESC
+  ORDER BY source_profile_id ASC
 `;
 
-function toPersistedConsentStatus(value: string): ConsentStatus {
-  if (value === 'active' || value === 'revoked' || value === 'expired') {
-    return value;
-  }
-
-  throw new DomainError('DB_UNAVAILABLE', 'persisted consent status is invalid');
-}
-
-function toConsentOperation(value: string): ConsentOperation {
-  const match = CONSENT_OPERATIONS.find((operation) => operation === value);
-
-  if (match === undefined) {
-    throw new DomainError('DB_UNAVAILABLE', 'persisted consent operation is invalid');
-  }
-
-  return match;
-}
-
-function toConsentGrant(row: ConsentGrantRow): ConsentGrant {
+function toPersistedGrant(row: ConsentGrantRow, now?: Date | null): PersistedConsentGrant {
   return {
-    consentId: row.id,
+    grantId: row.id,
     tenantId: row.tenant_id,
     sourceProfileId: row.source_profile_id,
-    status: toPersistedConsentStatus(row.effective_status),
-    allowedOperations: row.allowed_operations.map(toConsentOperation),
+    status: assertKnownStatus(deriveRowStatus(row, now)),
+    allowedOperations: [...row.allowed_operations],
     scopes: [...row.scopes],
     grantedAt: toIsoTimestamp(row.granted_at),
     expiresAt: row.expires_at === null ? null : toIsoTimestamp(row.expires_at),
@@ -143,17 +148,37 @@ function parseAuthContext(ctx: AuthContext): AuthContext {
   return parsed.data;
 }
 
-/** Canonical, duplicate-free operation list so an identical re-grant replays instead of bumping. */
-function normalizeOperations(
-  operations: readonly ConsentOperation[] | undefined,
-): readonly ConsentOperation[] {
+/**
+ * Canonical, duplicate-free operation list so an identical re-grant replays instead of bumping.
+ *
+ * A caller MAY name an operation Ember does not implement (the contract requires such a grant to
+ * exist and to deny a read), so labels are validated and bounded rather than filtered against a
+ * closed set. Filtering would turn "grant for something else" into "grant for everything".
+ */
+function normalizeOperations(operations: readonly string[] | undefined): readonly string[] {
   const requested = operations ?? DEFAULT_CONSENT_OPERATIONS;
 
-  return CONSENT_OPERATIONS.filter((operation) => requested.includes(operation));
+  if (requested.length === 0 || requested.length > 4) {
+    throw new InvalidArgumentError([{ path: 'allowed_operations', code: 'invalid_length' }]);
+  }
+
+  for (const operation of requested) {
+    if (typeof operation !== 'string' || !/^[a-z][a-z0-9_]{0,31}$/.test(operation)) {
+      throw new InvalidArgumentError([
+        { path: 'allowed_operations', code: 'invalid_operation_label' },
+      ]);
+    }
+  }
+
+  return [...new Set(requested)].sort();
 }
 
+/**
+ * Canonical, sorted scope list. An explicit empty list stays empty (fail closed); only an absent
+ * list falls back to the connector contract's `source.readonly`.
+ */
 function normalizeScopes(scopes: readonly string[] | undefined): readonly string[] {
-  return scopes === undefined ? [] : [...new Set(scopes)].sort();
+  return scopes === undefined ? [...DEFAULT_CONSENT_SCOPES] : [...new Set(scopes)].sort();
 }
 
 function sameTimestamp(left: string | null, right: string | null): boolean {
@@ -181,10 +206,6 @@ function parseSourceProfileId(value: SourceProfileId): SourceProfileId {
   return parsed.data;
 }
 
-function randomConsentId(): Id {
-  return randomUUID();
-}
-
 function requireRow(row: ConsentGrantRow | undefined): ConsentGrantRow {
   if (row === undefined) {
     throw new DomainError('DB_UNAVAILABLE', 'consent write returned no row');
@@ -193,47 +214,90 @@ function requireRow(row: ConsentGrantRow | undefined): ConsentGrantRow {
   return row;
 }
 
-export class PostgresConsentRepository implements ConsentRepository, ConsentEvaluator {
+function requireValidClock(now: Date | undefined): Date | undefined {
+  if (now === undefined) {
+    return undefined;
+  }
+
+  if (!(now instanceof Date) || Number.isNaN(now.getTime())) {
+    throw new InvalidArgumentError([{ path: 'now', code: 'invalid_date' }]);
+  }
+
+  return now;
+}
+
+export class PostgresConsentRepository
+  implements ConsentRepository, ConsentEvaluator, ConsentAuthority
+{
   constructor(private readonly pool: pg.Pool) {}
 
-  /**
-   * Grant or re-grant consent for one source profile.
-   *
-   * The whole operation runs in one transaction holding the grant row lock, so two concurrent
-   * grants serialise and cannot both start from the same `version`. Re-granting an identical,
-   * still-effective grant replays (`replayed: true`, version unchanged); anything else — a
-   * changed operation set, changed scopes, changed expiry, or restoring a revoked/expired
-   * grant — advances `version`.
-   */
-  async grant(
-    ctx: AuthContext,
-    cmd: GrantConsentCommand,
-  ): Promise<{ readonly consent: ConsentGrant; readonly replayed: boolean }> {
-    const scoped = parseAuthContext(ctx);
-    const sourceProfileId = parseSourceProfileId(cmd.sourceProfileId);
-    const operations = normalizeOperations(cmd.allowedOperations);
-    const scopes = normalizeScopes(cmd.scopes);
-    const expiresAt = cmd.expiresAt ?? null;
+  // ---------------------------------------------------------------------------------------------
+  // Canonical, tenant-explicit surface (Worker gates, conformance suite, CLI).
+  //
+  // Every method takes `tenantId` explicitly because the caller has already resolved it from
+  // authoritative state (a persisted Run, or a test fixture). The HTTP surface uses the
+  // `AuthContext` overloads below and never accepts a tenant from a request.
+  // ---------------------------------------------------------------------------------------------
 
-    return withTransaction(this.pool, async (client) => {
-      // The principal must exist inside this tenant before it can authorise anything, so a
-      // forged or stale credential can never create an orphan grant.
-      const principal = await client.query(PRINCIPAL_EXISTS_SQL, [
-        scoped.tenantId,
-        scoped.principalId,
-      ]);
+  /** Grant or re-grant consent for one source profile. */
+  async grantForTenant(
+    params: GrantConsentParams,
+    now?: Date,
+    actor?: { readonly principalId: Id },
+  ): Promise<PersistedConsentGrant> {
+    const clock = requireValidClock(now);
+    const sourceProfileId = parseSourceProfileId(params.sourceProfileId);
 
-      if ((principal.rowCount ?? 0) === 0) {
-        throw new DomainError('UNAUTHENTICATED', 'principal is not provisioned in this tenant');
+    if (typeof params.tenantId !== 'string' || params.tenantId.length === 0) {
+      throw new InvalidArgumentError([{ path: 'tenant_id', code: 'too_small' }]);
+    }
+
+    const operations = normalizeOperations(params.allowedOperations);
+    const scopes = normalizeScopes(params.scopes);
+    const expiresAt = params.expiresAt ?? null;
+
+    if (operations.length === 0) {
+      throw new InvalidArgumentError([{ path: 'allowed_operations', code: 'too_small' }]);
+    }
+
+    if (expiresAt !== null) {
+      const requestedMs = Date.parse(String(expiresAt));
+
+      if (!Number.isFinite(requestedMs)) {
+        throw new InvalidArgumentError([{ path: 'expires_at', code: 'invalid_date' }]);
       }
 
-      if (expiresAt !== null) {
-        // Expiry sanity is decided by the database clock inside the same transaction that
-        // writes it; the application clock is never trusted for an authorization boundary.
-        const now = await client.query<{ now: Date | string }>('SELECT clock_timestamp() AS now');
-        const nowMs = new Date(now.rows[0]?.now ?? Number.NaN).getTime();
+      // Already-expired grants are rejected at write time, never persisted as dead authorization.
+      if (clock !== undefined) {
+        if (requestedMs <= clock.getTime()) {
+          throw new DomainError('INVALID_ARGUMENT', 'expires_at must be in the future');
+        }
+      }
+    }
 
-        if (!(Date.parse(expiresAt) > nowMs)) {
+    return withTransaction(this.pool, async (client) => {
+      if (actor !== undefined) {
+        // The principal must exist inside this tenant before it can authorise anything, so a forged
+        // or stale credential can never create an orphan grant.
+        const principal = await client.query(PRINCIPAL_EXISTS_SQL, [
+          params.tenantId,
+          actor.principalId,
+        ]);
+
+        if ((principal.rowCount ?? 0) === 0) {
+          throw new DomainError('UNAUTHENTICATED', 'principal is not provisioned in this tenant');
+        }
+      }
+
+      if (expiresAt !== null && clock === undefined) {
+        // Expiry sanity is decided by the database clock inside the same transaction that writes
+        // it; the application clock is never trusted for an authorization boundary.
+        const nowRow = await client.query<{ now: Date | string }>(
+          'SELECT clock_timestamp() AS now',
+        );
+        const nowMs = new Date(nowRow.rows[0]?.now ?? Number.NaN).getTime();
+
+        if (!(Date.parse(String(expiresAt)) > nowMs)) {
           throw new DomainError(
             'INVALID_ARGUMENT',
             'expires_at must be in the future according to the database clock',
@@ -242,67 +306,100 @@ export class PostgresConsentRepository implements ConsentRepository, ConsentEval
       }
 
       const existing = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
-        scoped.tenantId,
+        params.tenantId,
         sourceProfileId,
       ]);
       const row = existing.rows[0];
 
       if (row === undefined) {
         const inserted = await client.query<ConsentGrantRow>(INSERT_CONSENT_SQL, [
-          randomConsentId(),
-          scoped.tenantId,
+          randomUUID(),
+          params.tenantId,
           sourceProfileId,
           operations,
           scopes,
-          scoped.principalId,
+          actor?.principalId ?? null,
           expiresAt,
+          clock ?? null,
         ]);
 
-        return { consent: toConsentGrant(requireRow(inserted.rows[0])), replayed: false };
+        return toPersistedGrant(requireRow(inserted.rows[0]), clock);
       }
 
       const isIdentical =
-        row.effective_status === 'active' &&
-        row.is_effective &&
+        deriveRowStatus(row, clock) === 'active' &&
         sameList(row.allowed_operations, operations) &&
         sameList(row.scopes, scopes) &&
         sameTimestamp(row.expires_at === null ? null : toIsoTimestamp(row.expires_at), expiresAt);
 
       if (isIdentical) {
-        return { consent: toConsentGrant(row), replayed: true };
+        return toPersistedGrant(row, clock);
       }
 
       const updated = await client.query<ConsentGrantRow>(UPDATE_CONSENT_SQL, [
-        scoped.tenantId,
+        params.tenantId,
         sourceProfileId,
+        randomUUID(),
         operations,
         scopes,
-        scoped.principalId,
+        actor?.principalId ?? null,
         expiresAt,
+        clock ?? null,
       ]);
 
-      return { consent: toConsentGrant(requireRow(updated.rows[0])), replayed: false };
+      return toPersistedGrant(requireRow(updated.rows[0]), clock);
     });
   }
 
-  /**
-   * Revoke one grant.
-   *
-   * Revocation is idempotent for an already-revoked grant (no version bump, so a retried
-   * revocation cannot invalidate fences a second time), but honours `expectedVersion` when the
-   * caller supplied it: a stale compare-and-set fails instead of revoking newer authorization.
-   */
-  async revoke(
-    ctx: AuthContext,
+  /** Read one grant. `null` covers both "missing" and "owned by another tenant". */
+  async getForTenant(
+    tenantId: Id,
     sourceProfileId: SourceProfileId,
+    now?: Date,
+  ): Promise<PersistedConsentGrant | null> {
+    // Malformed identifiers OR a malformed clock fail closed with `null` on read: a read must never
+    // throw a shape error that distinguishes "invalid" from "absent".
+    let clock: Date | undefined;
+
+    try {
+      clock = requireValidClock(now);
+    } catch {
+      return null;
+    }
+
+    const parsedProfile = SourceProfileIdSchema.safeParse(sourceProfileId);
+
+    if (!parsedProfile.success || typeof tenantId !== 'string' || tenantId.length === 0) {
+      return null;
+    }
+
+    try {
+      const result = await this.pool.query<ConsentGrantRow>(SELECT_CONSENT_SQL, [
+        tenantId,
+        parsedProfile.data,
+      ]);
+      const row = result.rows[0];
+
+      return row === undefined ? null : toPersistedGrant(row, clock);
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
+  /** Revoke one grant. Revoking an already-revoked grant replays and never bumps twice. */
+  async revokeForTenant(
+    tenantId: Id,
+    sourceProfileId: SourceProfileId,
+    now?: Date,
+    actor?: { readonly principalId: Id },
     options?: RevokeConsentOptions,
-  ): Promise<ConsentGrant> {
-    const scoped = parseAuthContext(ctx);
+  ): Promise<PersistedConsentGrant> {
+    const clock = requireValidClock(now);
     const profileId = parseSourceProfileId(sourceProfileId);
 
     return withTransaction(this.pool, async (client) => {
       const existing = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
-        scoped.tenantId,
+        tenantId,
         profileId,
       ]);
       const row = existing.rows[0];
@@ -320,64 +417,83 @@ export class PostgresConsentRepository implements ConsentRepository, ConsentEval
       }
 
       if (row.status === 'revoked') {
-        return toConsentGrant(row);
+        return toPersistedGrant(row, clock);
       }
 
       const revoked = await client.query<ConsentGrantRow>(REVOKE_CONSENT_SQL, [
-        scoped.tenantId,
+        tenantId,
         profileId,
-        scoped.principalId,
+        actor?.principalId ?? null,
+        now ?? null,
       ]);
 
-      return toConsentGrant(requireRow(revoked.rows[0]));
+      return toPersistedGrant(requireRow(revoked.rows[0]), clock);
     });
   }
 
-  /** Read one grant; `null` covers both "missing" and "owned by another tenant". */
-  async get(ctx: AuthContext, sourceProfileId: SourceProfileId): Promise<ConsentGrant | null> {
-    const scoped = parseAuthContext(ctx);
-    const profileId = parseSourceProfileId(sourceProfileId);
-
-    try {
-      const result = await this.pool.query<ConsentGrantRow>(SELECT_CONSENT_SQL, [
-        scoped.tenantId,
-        profileId,
-      ]);
-      const row = result.rows[0];
-
-      return row === undefined ? null : toConsentGrant(row);
-    } catch (error) {
-      throw asDomainError(error);
+  /** Tenant-scoped listing, deterministically ordered by source profile (P0-C3C C-12). */
+  async listForTenant(tenantId: Id, now?: Date): Promise<readonly PersistedConsentGrant[]> {
+    if (typeof tenantId !== 'string' || tenantId.length === 0) {
+      return [];
     }
-  }
 
-  /** Tenant-scoped listing, newest first. */
-  async list(ctx: AuthContext): Promise<readonly ConsentGrant[]> {
-    const scoped = parseAuthContext(ctx);
+    let clock: Date | undefined;
 
     try {
-      const result = await this.pool.query<ConsentGrantRow>(SELECT_CONSENT_LIST_SQL, [
-        scoped.tenantId,
-      ]);
+      clock = requireValidClock(now);
+    } catch {
+      return [];
+    }
 
-      return result.rows.map(toConsentGrant);
+    try {
+      const result = await this.pool.query<ConsentGrantRow>(SELECT_CONSENT_LIST_SQL, [tenantId]);
+
+      return result.rows.map((row) => toPersistedGrant(row, clock));
     } catch (error) {
       throw asDomainError(error);
     }
   }
 
   /**
+   * Authoritative generation view (P0-C3C `ConsentAuthority`).
+   *
+   * This is the single read the Worker, the dispatch gate and the publication gate resolve
+   * against. It returns the EFFECTIVE status, so an elapsed `expires_at` reports `expired`
+   * without the row being rewritten.
+   */
+  async resolveGeneration(
+    tenantId: Id,
+    sourceProfileId: SourceProfileId,
+    now?: Date,
+  ): Promise<AuthorizedConsentGeneration | null> {
+    const grant = await this.getForTenant(tenantId, sourceProfileId, now);
+
+    if (grant === null) {
+      return null;
+    }
+
+    return {
+      tenantId: grant.tenantId,
+      sourceProfileId: grant.sourceProfileId,
+      grantId: grant.grantId,
+      version: grant.version,
+      status: grant.status,
+      expiresAt: grant.expiresAt,
+    };
+  }
+
+  /**
    * Server-side consent evaluation for the worker path.
    *
-   * The worker's tenant comes from the persisted Run, so this takes a `tenantId` rather than an
-   * `AuthContext`. Read-only: the publication guard performs its own `FOR UPDATE` read inside
-   * the publishing transaction and evaluates it with `evaluateConsentRow`.
+   * Read-only. The publication guard performs its own `FOR UPDATE` read inside the publishing
+   * transaction and evaluates it with `evaluateConsentRow`, so this method is for pre-read checks
+   * and diagnostics only.
    */
   async evaluateConsent(
-    tenantId: string,
+    tenantId: Id,
     sourceProfileId: SourceProfileId,
     operation: ConsentOperation,
-    requiredVersion?: number | null,
+    fence?: ConsentGeneration | null,
   ): Promise<ConsentDecision> {
     const profileId = parseSourceProfileId(sourceProfileId);
 
@@ -387,9 +503,92 @@ export class PostgresConsentRepository implements ConsentRepository, ConsentEval
         profileId,
       ]);
 
-      return evaluateConsentRow(result.rows[0], operation, requiredVersion ?? null);
+      return evaluateConsentRow(result.rows[0], {
+        operation,
+        requiredScopes:
+          operation === SOURCE_READ_OPERATION ? READ_SNAPSHOT_REQUIREMENTS.requiredScopes : [],
+        fence: fence ?? null,
+      });
     } catch (error) {
       throw asDomainError(error);
     }
+  }
+
+  /** True when the grant currently authorises a snapshot read (operation AND scope). */
+  async isReadAuthorized(
+    tenantId: Id,
+    sourceProfileId: SourceProfileId,
+    now?: Date,
+  ): Promise<boolean> {
+    const grant = await this.getForTenant(tenantId, sourceProfileId, now);
+
+    if (grant === null) {
+      return false;
+    }
+
+    return deriveConsentStatus(grant, now ?? new Date()) === 'active';
+  }
+
+  // ---------------------------------------------------------------------------------------------
+  // Tenant-scoped admin surface (`ConsentRepository`): the tenant comes from the verified ctx.
+  // ---------------------------------------------------------------------------------------------
+
+  async grant(
+    ctx: AuthContext,
+    cmd: GrantConsentCommand,
+  ): Promise<{ readonly consent: PersistedConsentGrant; readonly replayed: boolean }> {
+    const scoped = parseAuthContext(ctx);
+    const before = await this.getForTenant(scoped.tenantId, cmd.sourceProfileId);
+
+    const consent = await this.grantForTenant(
+      {
+        tenantId: scoped.tenantId,
+        sourceProfileId: cmd.sourceProfileId,
+        ...(cmd.allowedOperations === undefined
+          ? {}
+          : { allowedOperations: cmd.allowedOperations }),
+        ...(cmd.scopes === undefined ? {} : { scopes: cmd.scopes }),
+        expiresAt: cmd.expiresAt ?? null,
+      },
+      undefined,
+      { principalId: scoped.principalId },
+    );
+
+    // A replay is exactly "the same generation came back", never "a version stayed put".
+    const replayed =
+      before !== null && before.grantId === consent.grantId && before.version === consent.version;
+
+    return { consent, replayed };
+  }
+
+  async revoke(
+    ctx: AuthContext,
+    sourceProfileId: SourceProfileId,
+    options?: RevokeConsentOptions,
+  ): Promise<PersistedConsentGrant> {
+    const scoped = parseAuthContext(ctx);
+
+    return this.revokeForTenant(
+      scoped.tenantId,
+      sourceProfileId,
+      undefined,
+      { principalId: scoped.principalId },
+      options,
+    );
+  }
+
+  async get(
+    ctx: AuthContext,
+    sourceProfileId: SourceProfileId,
+  ): Promise<PersistedConsentGrant | null> {
+    const scoped = parseAuthContext(ctx);
+
+    return this.getForTenant(scoped.tenantId, sourceProfileId);
+  }
+
+  async list(ctx: AuthContext): Promise<readonly PersistedConsentGrant[]> {
+    const scoped = parseAuthContext(ctx);
+
+    return this.listForTenant(scoped.tenantId);
   }
 }

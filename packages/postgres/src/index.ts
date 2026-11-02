@@ -142,6 +142,8 @@ export { PostgresConsentRepository } from './repositories/consent-repository.js'
 export {
   assertConsentAllowed,
   CONSENT_COLUMNS_SQL,
+  READ_SNAPSHOT_REQUIREMENTS,
+  deriveRowStatus,
   evaluateConsentRow,
   SELECT_CONSENT_FOR_UPDATE_SQL,
   SELECT_CONSENT_SQL,

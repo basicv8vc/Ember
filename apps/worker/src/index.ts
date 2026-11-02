@@ -6,6 +6,8 @@ import {
   PostgresBudgetLedger,
   PostgresCheckpointStore,
   PostgresCommitmentRepository,
+  PostgresConsentPublicationGuard,
+  PostgresConsentRepository,
   PostgresLeaseQueue,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
@@ -21,6 +23,7 @@ import {
   DeterministicExecutionRouter,
   DeterministicExecutor,
   EXECUTABLE_TASK_KINDS,
+  fromResolvedGenerationConsent,
   type SentinelPolicy,
 } from '@ember/execution';
 import {
@@ -29,17 +32,11 @@ import {
   SYNTHETIC_EGRESS_POLICY,
 } from '@ember/credentials';
 import { loadWorkerConfig } from './config.js';
-import {
-  createCommitmentConsentPublicationGuard,
-  evaluateSchedulerConsentGate,
-} from './commitment-consent.js';
+import { evaluateSchedulerConsentGate } from './commitment-consent.js';
 import { createCommitmentRunHandler } from './commitment-handler.js';
 import { createCommitmentRouteAwareRunHandler } from './commitment-run-router.js';
 import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
-import {
-  CommitmentSourceReader,
-  createUnavailableConsentAuthority,
-} from './commitment-source-reader.js';
+import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, type WorkerLogger } from './logger.js';
 import { runPollLoop } from './poll-loop.js';
@@ -87,17 +84,25 @@ async function main(): Promise<void> {
   });
   const controller = new AbortController();
 
-  // P0-C3B Consent integration seam (single object, four gates).
+  // P0-C3D Consent integration (single durable authority, four gates).
   //
-  // The authority wired here simultaneously arms: the orchestrator's versioned pre-read fence,
-  // the reader's pre- and post-read fence re-verification, the transaction-scoped publication
-  // guard inside `PostgresCommitmentRepository`, and the scheduler startup gate. Lane C has not
-  // landed durable Consent persistence yet, so this is the deny-all placeholder and every one of
-  // those gates fails closed.
+  // `PostgresConsentRepository` is the authoritative store: it implements the frozen P0-C3C
+  // `ConsentAuthority.resolveGeneration` and returns the effective (`active` | `revoked` |
+  // `expired`) status of the current generation, derived from `expires_at` against the database
+  // clock. `fromResolvedGenerationConsent` adapts it to the Worker's fence gates, so one binding
+  // simultaneously arms:
   //
-  // The whole integration is replacing this one binding with a P0-C3C `resolveGeneration`
-  // authority wrapped in `fromResolvedGenerationConsent(...)`; no gate changes when it lands.
-  const consentAuthority = createUnavailableConsentAuthority();
+  //   1. the orchestrator's versioned pre-read fence,
+  //   2. the reader's pre- and post-read fence re-verification,
+  //   3. the scheduler startup gate,
+  //   4. and, in the PostgreSQL repository, the transaction-scoped dispatch + publication guard
+  //      (`PostgresConsentPublicationGuard`), which locks the consent row on the publishing
+  //      transaction's own connection.
+  //
+  // There is no deny-all placeholder and no active-only fallback: an outcome whose occurrence
+  // records no generation is refused.
+  const consentAuthority = fromResolvedGenerationConsent(new PostgresConsentRepository(pool));
+  const consentPublicationGuard = new PostgresConsentPublicationGuard();
   const consentGate = evaluateSchedulerConsentGate(consentAuthority);
 
   registerShutdown(controller, logger);
@@ -229,7 +234,7 @@ async function main(): Promise<void> {
     // transaction-scoped Consent publication guard, so an Outcome can only be appended while the
     // same authority reports active Consent.
     const commitmentStore = new PostgresCommitmentRepository(pool, {
-      consentPublicationGuard: createCommitmentConsentPublicationGuard(consentAuthority),
+      consentPublicationGuard,
     });
 
     const commitmentHandler = createCommitmentRunHandler({

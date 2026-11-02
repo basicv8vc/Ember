@@ -10,8 +10,11 @@ import { createDatabaseReadiness } from '../../apps/api/src/readiness.js';
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const schemaPattern = /^ember_it_[a-f0-9]{12}$/;
 
-let adminPool: ReturnType<typeof createPool> | undefined;
-let pool: ReturnType<typeof createPool> | undefined;
+let adminPool: TestPool | undefined;
+let baseConfig: ReturnType<typeof loadDatabaseConfig> | undefined;
+let pool: TestPool | undefined;
+
+type TestPool = ReturnType<typeof createPool>;
 let schema = '';
 
 function requirePool(): NonNullable<typeof pool> {
@@ -31,7 +34,7 @@ beforeAll(async () => {
     );
   }
 
-  const baseConfig = loadDatabaseConfig({ DATABASE_URL: testDatabaseUrl });
+  baseConfig = loadDatabaseConfig({ DATABASE_URL: testDatabaseUrl });
   adminPool = createPool({ ...baseConfig, maxConnections: 2 });
 
   schema = `ember_it_${randomBytes(6).toString('hex')}`;
@@ -53,6 +56,59 @@ afterAll(async () => {
   }
 });
 
+/**
+ * Runs `fn` against a brand-new schema so a migration history can be staged from scratch.
+ * The schema is dropped afterwards; nothing leaks into the shared test schema.
+ */
+async function withFreshSchema(fn: (isolatedPool: TestPool) => Promise<void>): Promise<void> {
+  if (baseConfig === undefined || adminPool === undefined) {
+    throw new Error('migration test fixtures were not initialised');
+  }
+
+  const isolated = `ember_it_${randomBytes(6).toString('hex')}`;
+  await adminPool.query(`CREATE SCHEMA "${isolated}"`);
+
+  const pool = createPool({ ...baseConfig, maxConnections: 2, searchPath: isolated });
+
+  try {
+    await fn(pool);
+  } finally {
+    await pool.end();
+
+    if (schemaPattern.test(isolated)) {
+      await adminPool.query(`DROP SCHEMA IF EXISTS "${isolated}" CASCADE`);
+    }
+  }
+}
+
+/** Copies the named migration files from the repository into a fresh temp directory. */
+async function stageMigrations(names: readonly string[]): Promise<string> {
+  const dir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-history-'));
+
+  for (const name of names) {
+    await writeFile(
+      path.join(dir, name),
+      await readFile(path.join(migrationsDir, name), 'utf8'),
+      'utf8',
+    );
+  }
+
+  return dir;
+}
+
+const MIGRATION_FILES = [
+  '0001_platform_metadata.sql',
+  '0002_durable_task_inbox.sql',
+  '0003_tasks_current_run_tenant_fk.sql',
+  '0004_lease_fencing_and_retry.sql',
+  '0005_p0b06_artifacts_workspace_checkpoint.sql',
+  '0006_p0b08b_persistent_budget.sql',
+  '0007_p0b08d_persistent_mock_approval.sql',
+  '0008_p0c3_commitments.sql',
+  '0009_p0c3b_runtime_closure.sql',
+  '0010_p0c3d_consent.sql',
+] as const;
+
 describe('PostgreSQL migrations (real database)', () => {
   it('connects to an isolated test schema', async () => {
     const result = await requirePool().query<{ current_schema: string }>('SELECT current_schema()');
@@ -64,7 +120,7 @@ describe('PostgreSQL migrations (real database)', () => {
   it('applies migrations from an empty schema and records the version', async () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(9);
+    expect(result.applied).toHaveLength(10);
     expect(result.applied.map((migration) => migration.id)).toEqual([
       '0001',
       '0002',
@@ -75,6 +131,7 @@ describe('PostgreSQL migrations (real database)', () => {
       '0007',
       '0008',
       '0009',
+      '0010',
     ]);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
@@ -84,6 +141,7 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(result.applied[6]?.name).toBe('0007_p0b08d_persistent_mock_approval.sql');
     expect(result.applied[7]?.name).toBe('0008_p0c3_commitments.sql');
     expect(result.applied[8]?.name).toBe('0009_p0c3b_runtime_closure.sql');
+    expect(result.applied[9]?.name).toBe('0010_p0c3d_consent.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -93,7 +151,7 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(9);
+    expect(versions.rows).toHaveLength(10);
     expect(versions.rows.map((row) => row.id)).toEqual([
       '0001',
       '0002',
@@ -104,6 +162,7 @@ describe('PostgreSQL migrations (real database)', () => {
       '0007',
       '0008',
       '0009',
+      '0010',
     ]);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
@@ -147,12 +206,12 @@ describe('PostgreSQL migrations (real database)', () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(9);
+    expect(result.alreadyApplied).toBe(10);
 
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('9');
+    expect(versions.rows[0]?.count).toBe('10');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -213,10 +272,147 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('9');
+      expect(versions.rows[0]?.count).toBe('10');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
+  });
+
+  it('applies 0009 before 0010 when both are available (normal history)', async () => {
+    await withFreshSchema(async (isolatedPool) => {
+      const first = await runMigrations(
+        isolatedPool,
+        await stageMigrations(MIGRATION_FILES.filter((name) => !name.startsWith('0010'))),
+      );
+
+      // A database that stopped at P0-C3B: 0009 is the head.
+      expect(first.applied.map((migration) => migration.id)).toEqual([
+        '0001',
+        '0002',
+        '0003',
+        '0004',
+        '0005',
+        '0006',
+        '0007',
+        '0008',
+        '0009',
+      ]);
+
+      const dir = await stageMigrations(MIGRATION_FILES);
+
+      try {
+        const second = await runMigrations(isolatedPool, dir);
+
+        expect(second.applied.map((migration) => migration.id)).toEqual(['0010']);
+
+        const applied = await isolatedPool.query<{ id: string }>(
+          'SELECT id FROM schema_migrations ORDER BY id',
+        );
+
+        expect(applied.rows.map((row) => row.id)).toEqual([
+          '0001',
+          '0002',
+          '0003',
+          '0004',
+          '0005',
+          '0006',
+          '0007',
+          '0008',
+          '0009',
+          '0010',
+        ]);
+
+        const columns = await isolatedPool.query<{ column_name: string }>(
+          `SELECT column_name
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'commitment_occurrences'
+              AND column_name IN ('consent_grant_id', 'consent_version')
+            ORDER BY column_name`,
+        );
+
+        expect(columns.rows.map((row) => row.column_name)).toEqual([
+          'consent_grant_id',
+          'consent_version',
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  it('backfills 0009 after 0010 was already applied (out-of-order history)', async () => {
+    await withFreshSchema(async (isolatedPool) => {
+      // 0010 is available but 0009 is not: the state of a branch that merged P0-C3D first.
+      const firstDir = await stageMigrations(
+        MIGRATION_FILES.filter((name) => !name.startsWith('0009')),
+      );
+
+      try {
+        const first = await runMigrations(isolatedPool, firstDir);
+
+        expect(first.applied.map((migration) => migration.id)).toEqual([
+          '0001',
+          '0002',
+          '0003',
+          '0004',
+          '0005',
+          '0006',
+          '0007',
+          '0008',
+          '0010',
+        ]);
+
+        const beforeBackfill = await isolatedPool.query<{ id: string }>(
+          'SELECT id FROM schema_migrations ORDER BY id',
+        );
+
+        expect(beforeBackfill.rows.map((row) => row.id)).not.toContain('0009');
+      } finally {
+        await rm(firstDir, { recursive: true, force: true });
+      }
+
+      // 0009 finally becomes available: the runner applies the missing id without re-running 0010.
+      const secondDir = await stageMigrations(MIGRATION_FILES);
+
+      try {
+        const second = await runMigrations(isolatedPool, secondDir);
+
+        expect(second.applied.map((migration) => migration.id)).toEqual(['0009']);
+
+        const applied = await isolatedPool.query<{ id: string }>(
+          'SELECT id FROM schema_migrations ORDER BY id',
+        );
+
+        expect(applied.rows.map((row) => row.id)).toEqual([
+          '0001',
+          '0002',
+          '0003',
+          '0004',
+          '0005',
+          '0006',
+          '0007',
+          '0008',
+          '0009',
+          '0010',
+        ]);
+
+        // Both migrations remain effective: the consent fence AND the runtime-closure indexes.
+        const indexes = await isolatedPool.query<{ indexname: string }>(
+          `SELECT indexname FROM pg_indexes
+            WHERE schemaname = current_schema()
+              AND indexname IN ('occurrences_dispatched_reap_idx', 'occurrences_tenant_task_idx')
+            ORDER BY indexname`,
+        );
+
+        expect(indexes.rows.map((row) => row.indexname)).toEqual([
+          'occurrences_dispatched_reap_idx',
+          'occurrences_tenant_task_idx',
+        ]);
+      } finally {
+        await rm(secondDir, { recursive: true, force: true });
+      }
+    });
   });
 
   it('reports ready against the migrated schema', async () => {
@@ -289,7 +485,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('9');
+      expect(versions.rows[0]?.count).toBe('10');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

@@ -92,6 +92,8 @@ class ScriptedConsent implements ConsentFenceAuthority {
       grantId: this.grantId,
       grantVersion: this.version,
       issuedAt: '2026-11-02T11:59:00.000Z',
+      // Well-formed but unsigned: the digest is an integrity check, never an authorization input.
+      digest: '0'.repeat(64),
     };
   }
 
@@ -229,6 +231,7 @@ function placeholderFence(): ConsentAuthorizationFence {
     grantId: 'grant-primary',
     grantVersion: 1,
     issuedAt: '2026-11-02T12:00:00.000Z',
+    digest: '0'.repeat(64),
   };
 }
 
@@ -473,7 +476,10 @@ describe('P0-C3B: transaction-scoped Consent publication guard', () => {
     const guard = createCommitmentConsentPublicationGuard(consent);
 
     await expect(
-      guard.assertActive({} as never, { tenantId: TENANT_ID, sourceProfileId: SOURCE_PROFILE_ID }),
+      guard.authorizeFence({} as never, {
+        tenantId: TENANT_ID,
+        sourceProfileId: SOURCE_PROFILE_ID,
+      }),
     ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
   });
 
@@ -482,10 +488,16 @@ describe('P0-C3B: transaction-scoped Consent publication guard', () => {
       assertActive(): Promise<void> {
         return Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:5432'));
       },
+      authorizeFence(): Promise<never> {
+        return Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:5432'));
+      },
+      assertFenceCurrent(): Promise<void> {
+        return Promise.reject(new Error('connect ECONNREFUSED 127.0.0.1:5432'));
+      },
     });
 
     const rejection = await guard
-      .assertActive({} as never, { tenantId: TENANT_ID, sourceProfileId: SOURCE_PROFILE_ID })
+      .authorizeFence({} as never, { tenantId: TENANT_ID, sourceProfileId: SOURCE_PROFILE_ID })
       .catch((error: unknown) => error);
 
     expect(rejection).toBeInstanceOf(DomainError);
@@ -493,13 +505,30 @@ describe('P0-C3B: transaction-scoped Consent publication guard', () => {
     expect((rejection as DomainError).message).not.toContain('ECONNREFUSED');
   });
 
-  it('allows publication when the wired authority reports active consent', async () => {
+  it('records the active generation as the dispatch fence', async () => {
+    const recorder: Recorder = { events: [] };
+    const consent = new ScriptedConsent(recorder);
+    const guard = createCommitmentConsentPublicationGuard(consent);
+
+    await expect(
+      guard.authorizeFence({} as never, {
+        tenantId: TENANT_ID,
+        sourceProfileId: SOURCE_PROFILE_ID,
+      }),
+    ).resolves.toEqual({ grantId: consent.grantId, version: consent.version });
+  });
+
+  it('denies publication when the occurrence recorded no generation fence', async () => {
     const recorder: Recorder = { events: [] };
     const guard = createCommitmentConsentPublicationGuard(new ScriptedConsent(recorder));
 
     await expect(
-      guard.assertActive({} as never, { tenantId: TENANT_ID, sourceProfileId: SOURCE_PROFILE_ID }),
-    ).resolves.toBeUndefined();
+      guard.assertFenceCurrent({} as never, {
+        tenantId: TENANT_ID,
+        sourceProfileId: SOURCE_PROFILE_ID,
+        fence: null,
+      }),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
   });
 });
 
@@ -641,6 +670,8 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       grantId: 'grant-a',
       grantVersion: 1,
       issuedAt: '2026-11-02T12:00:00.000Z',
+      // The canonical contract always mints the integrity digest; it is never authorization.
+      digest: expect.stringMatching(/^[0-9a-f]{64}$/),
     });
 
     await expect(authority.assertFenceCurrent(fence)).resolves.toBeUndefined();
@@ -718,8 +749,11 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
 
     const guard = createCommitmentConsentPublicationGuard(authority);
     await expect(
-      guard.assertActive({} as never, { tenantId: TENANT_ID, sourceProfileId: SOURCE_PROFILE_ID }),
-    ).resolves.toBeUndefined();
+      guard.authorizeFence({} as never, {
+        tenantId: TENANT_ID,
+        sourceProfileId: SOURCE_PROFILE_ID,
+      }),
+    ).resolves.toEqual(expect.objectContaining({ grantId: expect.any(String), version: 1 }));
   });
 
   it('normalizes a store failure into a terminal, content-free POLICY_DENIED', async () => {

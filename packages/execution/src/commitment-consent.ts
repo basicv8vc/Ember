@@ -10,6 +10,10 @@ import {
 } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 
+/** Re-exported so the execution boundary exposes the canonical fence vocabulary. */
+export { CONSENT_FENCE_DIGEST_REGEX, CONSENT_GRANT_ID_MAX_CHARS };
+export type { ConsentAuthorizationFence };
+
 /**
  * P0-C3B Consent authorization seam.
  *

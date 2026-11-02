@@ -1,11 +1,11 @@
-import type { ConsentAuthority } from '@ember/contracts';
+import type { ConsentReadGate } from '@ember/contracts';
 import type { Id } from '@ember/domain';
 import {
   isConsentFenceAuthority,
   toConsentDenied,
   type ConsentFenceAuthority,
 } from '@ember/execution';
-import type { ConsentPublicationGuard } from '@ember/postgres';
+import type { ConsentDispatchFence, ConsentPublicationGuard } from '@ember/postgres';
 import { isUnavailableConsentAuthority } from './commitment-source-reader.js';
 
 /**
@@ -69,7 +69,7 @@ export function evaluateSchedulerConsentGate(authority: unknown): ConsentReadine
  * per-occurrence failures discovered in production traffic.
  */
 export function requireCommitmentConsentAuthority(
-  authority: ConsentAuthority | ConsentFenceAuthority | undefined,
+  authority: ConsentReadGate | ConsentFenceAuthority | undefined,
   context: string,
 ): ConsentFenceAuthority {
   const gate = evaluateSchedulerConsentGate(authority);
@@ -85,26 +85,50 @@ export function requireCommitmentConsentAuthority(
 }
 
 /**
- * Builds the `ConsentPublicationGuard` the PostgreSQL commitment repository runs *inside* the
- * transaction that appends an Outcome.
+ * Adapts a fence-capable authority to the PostgreSQL repository's transaction-scoped guard.
  *
- * The repository's default guard denies every publication, so this factory is the only way to
- * enable Outcome publication, and it enables it only for the authority it is given. A denial or
- * an unreadable Consent store rejects the append and leaves the occurrence unpublished.
+ * Production uses `PostgresConsentPublicationGuard` instead: it reads and locks the consent row on
+ * the repository's own connection, so the check is part of the publishing transaction. This adapter
+ * exists for tests and for wiring an authority that is not DB-backed, and it deliberately performs
+ * the comparison through the SAME methods the orchestrator uses (`authorizeFence` +
+ * `assertFenceCurrent`), so no gate can be satisfied by a boolean verdict.
  *
- * Note: the durable adapter must later use the supplied `client` so the check is part of the
- * same transaction (row lock / snapshot). The current port takes the client positionally, so
- * wiring that is additive and does not change this call site.
+ * A `null` fence is denied: an occurrence without a recorded generation cannot prove which consent
+ * authorized its read.
  */
 export function createCommitmentConsentPublicationGuard(
-  authority: ConsentAuthority | ConsentFenceAuthority,
+  authority: ConsentFenceAuthority,
 ): ConsentPublicationGuard {
   return {
-    async assertActive(_client: unknown, params: ConsentGuardParams): Promise<void> {
+    async authorizeFence(_client, params): Promise<ConsentDispatchFence> {
       try {
-        await authority.assertActive(params.tenantId, params.sourceProfileId);
+        const fence = await authority.authorizeFence(params.tenantId, params.sourceProfileId);
+
+        return { grantId: fence.grantId, version: fence.grantVersion };
       } catch (error) {
-        throw toConsentDenied(error, 'Source Consent is not active for this outcome');
+        throw toConsentDenied(error, 'Source Consent does not authorize this dispatch');
+      }
+    },
+
+    async assertFenceCurrent(_client, params): Promise<void> {
+      if (params.fence === null) {
+        throw toConsentDenied(undefined, 'Occurrence has no recorded consent generation fence');
+      }
+
+      try {
+        const current = await authority.authorizeFence(params.tenantId, params.sourceProfileId);
+
+        if (
+          current.grantId !== params.fence.grantId ||
+          current.grantVersion !== params.fence.version
+        ) {
+          throw toConsentDenied(
+            undefined,
+            'Source Consent was re-granted or revoked after this work was authorized',
+          );
+        }
+      } catch (error) {
+        throw toConsentDenied(error, 'Source Consent does not authorize this outcome');
       }
     },
   };

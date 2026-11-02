@@ -86,6 +86,13 @@ export interface SourceSnapshot {
  * guarded source reader re-validates it against the authoritative authority before and after every
  * read.
  */
+import type {
+  ConsentGrant,
+  GrantConsentParams,
+  SourceDenialCode,
+  TrustedSourceAccessContext,
+} from '@ember/contracts';
+
 export type {
   AuthorizedConsentGeneration,
   ConsentAuthority,

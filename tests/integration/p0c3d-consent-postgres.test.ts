@@ -1,795 +1,725 @@
 import { randomUUID } from 'node:crypto';
-import type { AppendOutcomeCommand, WorkerLeaseGrant } from '@ember/contracts';
-import { type AuthContext, type DomainError, type Id } from '@ember/domain';
+import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import {
+  TEST_TENANT_A,
+  TEST_TENANT_B,
+  assertConsentConformance,
+  type ConsentConformanceAdapter,
+} from '@ember/connectors';
+import {
+  deriveTaskCreationIdempotencyKey,
+  type AppendOutcomeCommand,
+  type PersistedConsentGrant,
+  type WorkerLeaseGrant,
+} from '@ember/contracts';
+import { DomainError, type AuthContext, type LeasedRun } from '@ember/domain';
 import {
   PostgresAgentRepository,
   PostgresCommitmentRepository,
+  PostgresCommitmentTaskDispatcher,
+  PostgresConsentPublicationGuard,
   PostgresConsentRepository,
+  PostgresLeaseQueue,
   PostgresTaskRepository,
+  systemClock,
 } from '@ember/postgres';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import { createTenantFixture, type TenantFixture } from './support/fixtures.js';
 
-const PROFILE = 'fixture.github-release';
+/**
+ * P0-C3D acceptance: authoritative PostgreSQL consent persistence plus the versioned
+ * authorization fence that dispatch and publication run on.
+ *
+ * Everything here talks to a real PostgreSQL: real migrations, real row locks, real concurrent
+ * transactions. The only translation is at the conformance boundary, where the frozen P0-C3C
+ * suite addresses synthetic lineage ids (`tenant_1111...`) that the durable table stores as real
+ * `uuid` tenant keys with a foreign key. That translation is confined to `createConformanceAdapter`
+ * and is fully reversible, so every semantic assertion still runs against the database.
+ */
 
-const delay = (ms: number): Promise<void> =>
-  new Promise((resolve) => {
-    setTimeout(resolve, ms);
+const FIXTURE_PROFILE = 'sp_ember_releases';
+
+let db: TestDatabase;
+
+interface Harness {
+  readonly tenant: TenantFixture;
+  readonly ctx: AuthContext;
+  readonly agentId: string;
+  readonly consent: PostgresConsentRepository;
+  readonly commitments: PostgresCommitmentRepository;
+  readonly dispatcher: PostgresCommitmentTaskDispatcher;
+  readonly queue: PostgresLeaseQueue;
+}
+
+async function createHarness(db: TestDatabase, name: string): Promise<Harness> {
+  const tenant = await createTenantFixture(db.pool, name);
+  const ctx: AuthContext = {
+    tenantId: tenant.tenantId,
+    principalId: tenant.principalId,
+    policyVersion: 1,
+  };
+
+  const agents = new PostgresAgentRepository(db.pool);
+  const agent = await agents.create(ctx, { name: `${name} agent`, policyVersion: 1 });
+  const tasks = new PostgresTaskRepository(db.pool);
+
+  return {
+    tenant,
+    ctx,
+    agentId: agent.agentId,
+    consent: new PostgresConsentRepository(db.pool),
+    // The REAL publication guard: it locks the consent row inside the publishing transaction.
+    commitments: new PostgresCommitmentRepository(db.pool, {
+      consentPublicationGuard: new PostgresConsentPublicationGuard(),
+    }),
+    dispatcher: new PostgresCommitmentTaskDispatcher(db.pool, tasks),
+    queue: new PostgresLeaseQueue(db.pool, {
+      leaseDurationMs: 30_000,
+      heartbeatIntervalMs: 10_000,
+      baseDelayMs: 1_000,
+      capDelayMs: 30_000,
+      reaperBatchSize: 10,
+      clock: systemClock,
+    }),
+  };
+}
+
+async function createCommitment(
+  harness: Harness,
+  sourceProfileId = FIXTURE_PROFILE,
+): Promise<{ commitmentId: string; version: number }> {
+  const { commitment } = await harness.commitments.create(harness.ctx, {
+    idempotencyKey: `p0c3d-${randomUUID()}`,
+    agentId: harness.agentId,
+    title: 'P0-C3D consent commitment',
+    scheduleKind: 'once',
+    dueAt: new Date(Date.now() - 60_000),
+    sourceProfileId,
   });
+
+  return { commitmentId: commitment.commitment_id, version: commitment.version };
+}
+
+async function reserveAndDispatch(
+  harness: Harness,
+  commitmentId: string,
+  version: number,
+): Promise<{ occurrenceId: string; taskId: string }> {
+  const slot = await harness.commitments.reserveOccurrence(commitmentId, version);
+
+  if (slot === null) {
+    throw new Error('occurrence slot was not reserved');
+  }
+
+  const receipt = await harness.dispatcher.dispatchTask({
+    tenantId: harness.ctx.tenantId,
+    agentId: harness.agentId,
+    commitmentId,
+    occurrenceId: slot.occurrenceId,
+    idempotencyKey: deriveTaskCreationIdempotencyKey(slot.occurrenceId),
+    kind: 'mock.compute',
+    input: { operation: 'sha256', text: JSON.stringify({ commitmentId }) },
+  });
+
+  await harness.commitments.markDispatched(slot.occurrenceId, receipt.taskId);
+
+  return { occurrenceId: slot.occurrenceId, taskId: receipt.taskId };
+}
 
 /**
- * P0-C3D: authoritative consent persistence against a real PostgreSQL instance.
+ * Claims the Run for THIS test's Task.
  *
- * The suite is deliberately about the facts only PostgreSQL can decide: row versions, the
- * database clock, row-lock ordering, and the dispatch/publication fences. Host-clock
- * behaviour and the pure decision matrix are unit-tested elsewhere.
+ * The queue is shared by every case in this file, so `claimNext` may legitimately hand back work
+ * belonging to an earlier case. Those Runs stay leased (their cases are already finished) and the
+ * loop keeps claiming until the expected Task appears, which keeps each assertion scoped to the
+ * occurrence it created.
  */
-describe('P0-C3D PostgreSQL Consent Persistence', () => {
-  let db: TestDatabase;
-  let consentRepo: PostgresConsentRepository;
-  let commitmentRepo: PostgresCommitmentRepository;
-  let agentRepo: PostgresAgentRepository;
-  let taskRepo: PostgresTaskRepository;
+async function claimRun(
+  harness: Harness,
+  workerId: string,
+  expectedTaskId: string,
+): Promise<WorkerLeaseGrant> {
+  let run: LeasedRun | null = null;
 
-  let tenantA: TenantFixture;
-  let tenantB: TenantFixture;
-  let ctxA: AuthContext;
-  let ctxB: AuthContext;
-  let agentAId: Id;
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    run = await harness.queue.claimNext(workerId, systemClock.now());
 
-  beforeAll(async () => {
-    db = await createTestDatabase();
-    consentRepo = new PostgresConsentRepository(db.pool);
-    commitmentRepo = new PostgresCommitmentRepository(db.pool);
-    agentRepo = new PostgresAgentRepository(db.pool);
-    taskRepo = new PostgresTaskRepository(db.pool);
-
-    tenantA = await createTenantFixture(db.pool, 'Consent Tenant A');
-    tenantB = await createTenantFixture(db.pool, 'Consent Tenant B');
-
-    ctxA = { tenantId: tenantA.tenantId, principalId: tenantA.principalId, policyVersion: 1 };
-    ctxB = { tenantId: tenantB.tenantId, principalId: tenantB.principalId, policyVersion: 1 };
-
-    const agent = await agentRepo.create(ctxA, { name: 'Consent Agent', policyVersion: 1 });
-    agentAId = agent.agentId;
-  });
-
-  afterAll(async () => {
-    if (db) {
-      await db.close();
-    }
-  });
-
-  /** Read the raw row so the test asserts what PostgreSQL stored, not what the mapper returned. */
-  async function readRawRow(
-    tenantId: string,
-    sourceProfileId = PROFILE,
-  ): Promise<
-    | {
-        status: string;
-        version: number;
-        revoked_at: Date | null;
-        expires_at: Date | null;
-        allowed_operations: string[];
-      }
-    | undefined
-  > {
-    const result = await db.pool.query<{
-      status: string;
-      version: number;
-      revoked_at: Date | null;
-      expires_at: Date | null;
-      allowed_operations: string[];
-    }>(
-      `SELECT status, version, revoked_at, expires_at, allowed_operations
-         FROM consent_grants
-        WHERE tenant_id = $1 AND source_profile_id = $2`,
-      [tenantId, sourceProfileId],
-    );
-
-    return result.rows[0];
-  }
-
-  async function countGrants(tenantId: string): Promise<number> {
-    const result = await db.pool.query<{ count: string }>(
-      'SELECT count(*)::text AS count FROM consent_grants WHERE tenant_id = $1',
-      [tenantId],
-    );
-
-    return Number(result.rows[0]?.count ?? '0');
-  }
-
-  const WORKER_ID = 'worker-p0c3d-consent';
-
-  /** Create a commitment that is already due and reserve one pending occurrence for it. */
-  async function createDueOccurrence(
-    title: string,
-  ): Promise<{ readonly occurrenceId: Id; readonly commitmentId: Id }> {
-    const { commitment } = await commitmentRepo.create(ctxA, {
-      idempotencyKey: `key-${randomUUID()}`,
-      agentId: agentAId,
-      title,
-      scheduleKind: 'once',
-      dueAt: new Date(Date.now() - 5_000),
-      sourceProfileId: PROFILE,
-    });
-
-    const slot = await commitmentRepo.reserveOccurrence(
-      commitment.commitment_id,
-      commitment.version,
-    );
-
-    if (slot === null) {
-      throw new Error('expected a reserved occurrence slot');
+    if (run === null) {
+      throw new Error('expected a claimable run');
     }
 
-    return { occurrenceId: slot.occurrenceId, commitmentId: commitment.commitment_id };
+    if (run.taskId === expectedTaskId) {
+      break;
+    }
+
+    run = null;
   }
 
-  async function createTask(prompt: string): Promise<Id> {
-    const receipt = await taskRepo.create(ctxA, {
-      agentId: agentAId,
-      idempotencyKey: `task-${randomUUID()}`,
-      kind: 'mock.chat',
-      input: { prompt },
+  if (run === null) {
+    throw new Error('expected a claimable run for the dispatched Task');
+  }
+
+  return {
+    tenantId: run.tenantId,
+    taskId: run.taskId,
+    runId: run.runId,
+    attempt: run.attempt,
+    leaseEpoch: run.leaseEpoch,
+    workerId,
+  };
+}
+
+function outcomeCommand(params: {
+  occurrenceId: string;
+  commitmentId: string;
+  taskId: string;
+  summary?: string;
+}): AppendOutcomeCommand {
+  return {
+    occurrenceId: params.occurrenceId,
+    commitmentId: params.commitmentId,
+    taskId: params.taskId,
+    summary: params.summary ?? 'published under a consent generation',
+    resultStatus: 'meaningful_change',
+  };
+}
+
+async function readOccurrenceFence(
+  occurrenceId: string,
+): Promise<{ grantId: string | null; version: number | null; status: string }> {
+  const result = await db.pool.query<{
+    consent_grant_id: string | null;
+    consent_version: number | null;
+    status: string;
+  }>('SELECT consent_grant_id, consent_version, status FROM commitment_occurrences WHERE id = $1', [
+    occurrenceId,
+  ]);
+  const row = result.rows[0];
+
+  if (row === undefined) {
+    throw new Error('occurrence disappeared');
+  }
+
+  return { grantId: row.consent_grant_id, version: row.consent_version, status: row.status };
+}
+
+async function countOutcomes(occurrenceId: string): Promise<number> {
+  const result = await db.pool.query<{ count: string }>(
+    'SELECT count(*)::text AS count FROM commitment_outcomes WHERE occurrence_id = $1',
+    [occurrenceId],
+  );
+
+  return Number(result.rows[0]?.count ?? '0');
+}
+
+beforeAll(async () => {
+  db = await createTestDatabase();
+});
+
+afterAll(async () => {
+  await db?.close();
+});
+
+describe('P0-C3D: PostgreSQL consent conformance (C-01..C-13)', () => {
+  it('certifies the durable store against the frozen P0-C3C contract', async () => {
+    // The suite addresses two synthetic tenant lineages; the durable table keys tenants as real
+    // uuid rows with a foreign key, so the adapter translates identity (and nothing else).
+    const tenantA = await createTenantFixture(db.pool, 'P0-C3D conformance tenant A');
+    const tenantB = await createTenantFixture(db.pool, 'P0-C3D conformance tenant B');
+    const repo = new PostgresConsentRepository(db.pool);
+
+    const toDb = new Map<string, string>([
+      [TEST_TENANT_A, tenantA.tenantId],
+      [TEST_TENANT_B, tenantB.tenantId],
+    ]);
+    const fromDb = new Map<string, string>([
+      [tenantA.tenantId, TEST_TENANT_A],
+      [tenantB.tenantId, TEST_TENANT_B],
+    ]);
+
+    const project = (grant: PersistedConsentGrant): PersistedConsentGrant => ({
+      ...grant,
+      tenantId: fromDb.get(grant.tenantId) ?? grant.tenantId,
     });
 
-    return receipt.taskId;
-  }
+    const adapter: ConsentConformanceAdapter = {
+      name: 'PostgresConsentRepository',
+      reset: async () => {
+        await db.pool.query('DELETE FROM consent_grants WHERE tenant_id = ANY($1::uuid[])', [
+          [tenantA.tenantId, tenantB.tenantId],
+        ]);
+      },
+      grant: async (params, now) => {
+        const tenantId = toDb.get(params.tenantId);
 
-  /** A Task in `running` with a live Run lease, i.e. a worker that may publish an outcome. */
-  async function createRunningTask(
-    prompt: string,
-  ): Promise<{ readonly taskId: Id; readonly grant: WorkerLeaseGrant }> {
-    const taskId = await createTask(prompt);
-    const runId = randomUUID();
+        if (tenantId === undefined) {
+          throw new Error('unsupported tenant in conformance grant');
+        }
 
-    await db.pool.query(
-      `UPDATE tasks SET status = 'running', updated_at = clock_timestamp()
-        WHERE tenant_id = $1 AND id = $2`,
-      [tenantA.tenantId, taskId],
-    );
-    await db.pool.query(
-      `INSERT INTO runs (
-         id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, leased_until, started_at
-       ) VALUES ($1, $2, $3, 1, 1, 'running', $4, $5, clock_timestamp())`,
-      [runId, tenantA.tenantId, taskId, WORKER_ID, new Date(Date.now() + 60_000)],
-    );
+        return project(
+          await repo.grantForTenant(
+            {
+              tenantId,
+              sourceProfileId: params.sourceProfileId,
+              ...(params.allowedOperations === undefined
+                ? {}
+                : { allowedOperations: params.allowedOperations }),
+              ...(params.scopes === undefined ? {} : { scopes: params.scopes }),
+              expiresAt: params.expiresAt ?? null,
+            },
+            now,
+          ),
+        );
+      },
+      get: async (tenantId, sourceProfileId, now) => {
+        const mapped = toDb.get(tenantId);
 
-    return {
-      taskId,
-      grant: { tenantId: tenantA.tenantId, taskId, runId, leaseEpoch: 1, workerId: WORKER_ID },
+        // An unknown/malformed tenant must fail closed with `null`, never reach the driver.
+        if (mapped === undefined) {
+          return null;
+        }
+
+        const grant = await repo.getForTenant(mapped, sourceProfileId, now);
+
+        return grant === null ? null : project(grant);
+      },
+      revoke: async (tenantId, sourceProfileId, now) => {
+        const mapped = toDb.get(tenantId);
+
+        if (mapped === undefined) {
+          throw new Error('consent grant not found');
+        }
+
+        return project(await repo.revokeForTenant(mapped, sourceProfileId, now));
+      },
+      list: async (tenantId, now) => {
+        const mapped = toDb.get(tenantId);
+
+        if (mapped === undefined) {
+          return [];
+        }
+
+        return (await repo.listForTenant(mapped, now)).map(project);
+      },
+      resolveGeneration: async (tenantId, sourceProfileId, now) => {
+        const mapped = toDb.get(tenantId);
+
+        if (mapped === undefined) {
+          return null;
+        }
+
+        const generation = await repo.resolveGeneration(mapped, sourceProfileId, now);
+
+        return generation === null
+          ? null
+          : { ...generation, tenantId: fromDb.get(generation.tenantId) ?? generation.tenantId };
+      },
     };
-  }
 
-  async function readOccurrence(
-    occurrenceId: Id,
-  ): Promise<{ status: string; task_id: string | null; consent_version: number | null }> {
-    const result = await db.pool.query<{
-      status: string;
-      task_id: string | null;
-      consent_version: number | null;
-    }>(
-      `SELECT status, task_id, consent_version
-         FROM commitment_occurrences
-        WHERE tenant_id = $1 AND id = $2`,
-      [tenantA.tenantId, occurrenceId],
+    const results = await assertConsentConformance(adapter);
+
+    expect(results.map((result) => result.id)).toEqual([
+      'C-01',
+      'C-02',
+      'C-03',
+      'C-04',
+      'C-05',
+      'C-06',
+      'C-07',
+      'C-08',
+      'C-09',
+      'C-10',
+      'C-11',
+      'C-12',
+      'C-13',
+    ]);
+    expect(results.every((result) => result.passed)).toBe(true);
+  });
+});
+
+describe('P0-C3D: scope enforcement (P0-C3C R5)', () => {
+  it('denies a read whose grant omits the source.readonly scope', async () => {
+    const harness = await createHarness(db, 'P0-C3D scope tenant');
+
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readwrite'],
+    });
+
+    const decision = await harness.consent.evaluateConsent(
+      harness.ctx.tenantId,
+      FIXTURE_PROFILE,
+      'read_snapshot',
     );
 
-    const row = result.rows[0];
+    expect(decision).toMatchObject({ allowed: false, denialCode: 'SCOPE_NOT_GRANTED' });
+  });
 
-    if (row === undefined) {
-      throw new Error('occurrence disappeared');
-    }
+  it('denies a read when the grant only authorizes an unrelated operation', async () => {
+    const harness = await createHarness(db, 'P0-C3D operation tenant');
 
-    return row;
-  }
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      allowedOperations: ['read_metadata'],
+      scopes: ['source.readonly'],
+    });
 
-  async function countOutcomes(commitmentId: Id): Promise<number> {
-    const result = await db.pool.query<{ count: string }>(
-      'SELECT count(*)::text AS count FROM commitment_outcomes WHERE tenant_id = $1 AND commitment_id = $2',
-      [tenantA.tenantId, commitmentId],
+    const decision = await harness.consent.evaluateConsent(
+      harness.ctx.tenantId,
+      FIXTURE_PROFILE,
+      'read_snapshot',
     );
 
-    return Number(result.rows[0]?.count ?? '0');
-  }
+    expect(decision).toMatchObject({ allowed: false, denialCode: 'OPERATION_NOT_ALLOWED' });
+  });
 
-  /**
-   * Assert that a publication was refused by the consent fence, and that the internal
-   * diagnostic names the reason. The client-facing message stays the fixed `POLICY_DENIED`
-   * text, so the reason is only ever observable here.
-   */
-  async function expectPolicyDenied(action: () => Promise<unknown>, reason: string): Promise<void> {
-    const caught = await action().then(
-      () => null,
-      (error: DomainError) => error,
+  it('defaults a grant to the connector contract scopes and authorizes the read', async () => {
+    const harness = await createHarness(db, 'P0-C3D default grant tenant');
+
+    const grant = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    expect(grant.scopes).toEqual(['source.readonly']);
+    expect(grant.allowedOperations).toEqual(['read_snapshot']);
+
+    const decision = await harness.consent.evaluateConsent(
+      harness.ctx.tenantId,
+      FIXTURE_PROFILE,
+      'read_snapshot',
     );
 
-    expect(caught?.code).toBe('POLICY_DENIED');
-    expect(caught?.diagnostic).toContain(reason);
-  }
+    expect(decision).toMatchObject({ allowed: true, grantId: grant.grantId });
+  });
 
-  describe('1. Grant lifecycle', () => {
-    it('creates an active, version-1 grant with the default operation set', async () => {
-      const { consent, replayed } = await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
+  it('refuses to dispatch an occurrence when the grant lacks the read scope', async () => {
+    const harness = await createHarness(db, 'P0-C3D scoped dispatch tenant');
 
-      expect(replayed).toBe(false);
-      expect(consent.tenantId).toBe(tenantA.tenantId);
-      expect(consent.sourceProfileId).toBe(PROFILE);
-      expect(consent.status).toBe('active');
-      expect(consent.version).toBe(1);
-      expect(consent.revokedAt).toBeNull();
-      expect(consent.expiresAt).toBeNull();
-      expect([...consent.allowedOperations].sort()).toStrictEqual([
-        'publish_outcome',
-        'read_snapshot',
-      ]);
-
-      const raw = await readRawRow(tenantA.tenantId);
-      expect(raw?.status).toBe('active');
-      expect(raw?.version).toBe(1);
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      allowedOperations: ['read_snapshot'],
+      scopes: [],
     });
 
-    it('replays an identical re-grant without advancing the version', async () => {
-      const cmd = { sourceProfileId: PROFILE, allowedOperations: ['read_snapshot'] as const };
-      const first = await consentRepo.grant(ctxA, cmd);
-      const second = await consentRepo.grant(ctxA, cmd);
+    const { commitmentId, version } = await createCommitment(harness);
 
-      expect(second.replayed).toBe(true);
-      expect(second.consent.version).toBe(first.consent.version);
-      expect(second.consent.consentId).toBe(first.consent.consentId);
+    await expect(reserveAndDispatch(harness, commitmentId, version)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+  });
+});
+
+describe('P0-C3D: generation identity (P0-C3C R6)', () => {
+  it('records the generation on the occurrence at dispatch', async () => {
+    const harness = await createHarness(db, 'P0-C3D fence record tenant');
+    const grant = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
     });
 
-    it('advances the version when the grant changes', async () => {
-      const before = await consentRepo.grant(ctxA, {
-        sourceProfileId: PROFILE,
-        allowedOperations: ['read_snapshot'],
-      });
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
 
-      const widened = await consentRepo.grant(ctxA, {
-        sourceProfileId: PROFILE,
-        allowedOperations: ['read_snapshot', 'publish_outcome'],
-      });
-
-      expect(widened.replayed).toBe(false);
-      expect(widened.consent.version).toBe(before.consent.version + 1);
-    });
-
-    it('normalises operations and scopes so order and duplicates cannot bump the version', async () => {
-      const first = await consentRepo.grant(ctxA, {
-        sourceProfileId: 'fixture.linear-issues',
-        allowedOperations: ['read_snapshot', 'publish_outcome'],
-        scopes: ['b', 'a', 'a'],
-      });
-      const second = await consentRepo.grant(ctxA, {
-        sourceProfileId: 'fixture.linear-issues',
-        allowedOperations: ['publish_outcome', 'read_snapshot', 'publish_outcome'],
-        scopes: ['a', 'b'],
-      });
-
-      expect(second.replayed).toBe(true);
-      expect(second.consent.version).toBe(first.consent.version);
-      expect(first.consent.scopes).toStrictEqual(['a', 'b']);
-    });
-
-    it('rejects an expiry the database clock already considers past', async () => {
-      await expect(
-        consentRepo.grant(ctxA, {
-          sourceProfileId: PROFILE,
-          expiresAt: new Date(Date.now() - 60_000).toISOString(),
-        }),
-      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
-    });
-
-    it('rejects a grant whose principal is not provisioned in the tenant', async () => {
-      const forged: AuthContext = {
-        tenantId: tenantA.tenantId,
-        principalId: randomUUID(),
-        policyVersion: 1,
-      };
-      const before = await countGrants(tenantA.tenantId);
-
-      await expect(
-        consentRepo.grant(forged, { sourceProfileId: 'fixture.support-inbox' }),
-      ).rejects.toMatchObject({ code: 'UNAUTHENTICATED' });
-
-      expect(await countGrants(tenantA.tenantId)).toBe(before);
-    });
-
-    it('rejects a source profile outside the closed vocabulary', async () => {
-      await expect(
-        consentRepo.grant(ctxA, { sourceProfileId: 'Fixture Unknown' }),
-      ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+    await expect(readOccurrenceFence(occurrenceId)).resolves.toEqual({
+      grantId: grant.grantId,
+      version: grant.version,
+      status: 'dispatched',
     });
   });
 
-  describe('2. Database-clock expiry', () => {
-    const profile = 'fixture.support-inbox';
+  it('mints a new grantId and a greater version on an explicit re-grant', async () => {
+    const harness = await createHarness(db, 'P0-C3D regrant tenant');
 
-    it('reports an expired grant as expired even though the stored status stays active', async () => {
-      const granted = await consentRepo.grant(ctxA, {
-        sourceProfileId: profile,
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-      });
-      expect(granted.consent.status).toBe('active');
-      expect(granted.consent.expiresAt).not.toBeNull();
+    const first = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+    await harness.consent.revokeForTenant(harness.ctx.tenantId, FIXTURE_PROFILE);
+    const second = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
 
-      // Move the expiry into the past: the stored status is untouched, so only the derived
-      // status proves that expiry is decided by PostgreSQL, not by the row's `status`.
-      // `granted_at` moves with it because the table enforces `expires_at > granted_at`.
-      await db.pool.query(
+    expect(second.grantId).not.toBe(first.grantId);
+    expect(second.version).toBeGreaterThan(first.version);
+
+    const generation = await harness.consent.resolveGeneration(
+      harness.ctx.tenantId,
+      FIXTURE_PROFILE,
+    );
+
+    expect(generation).toMatchObject({ grantId: second.grantId, status: 'active' });
+  });
+
+  it('replays an identical reaffirmation without minting a generation', async () => {
+    const harness = await createHarness(db, 'P0-C3D reaffirmation tenant');
+
+    const first = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+    const second = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    expect(second.grantId).toBe(first.grantId);
+    expect(second.version).toBe(first.version);
+    expect(second.grantedAt).toBe(first.grantedAt);
+  });
+});
+
+describe('P0-C3D: publication requires a provable generation', () => {
+  it('publishes an outcome that carries the current generation fence', async () => {
+    const harness = await createHarness(db, 'P0-C3D publish tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
+
+    await expect(
+      harness.commitments.appendOutcomeIfAbsent(
+        grant,
+        outcomeCommand({ occurrenceId, commitmentId, taskId }),
+      ),
+    ).resolves.toBe(true);
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(1);
+  });
+
+  it('refuses and terminalizes an occurrence with no recorded generation', async () => {
+    const harness = await createHarness(db, 'P0-C3D legacy occurrence tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+
+    // Simulate work dispatched before the fence existed: no generation is recorded at all.
+    await db.pool.query(
+      `UPDATE commitment_occurrences
+          SET consent_grant_id = NULL, consent_version = NULL
+        WHERE id = $1`,
+      [occurrenceId],
+    );
+
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
+
+    await expect(
+      harness.commitments.appendOutcomeIfAbsent(
+        grant,
+        outcomeCommand({ occurrenceId, commitmentId, taskId }),
+      ),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(0);
+
+    // Re-dispatching it would launder a read across generations, so it is refused too.
+    await expect(harness.commitments.markDispatched(occurrenceId, taskId)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    // The safe recovery path terminalizes it instead of leaving it stuck forever.
+    await expect(
+      harness.commitments.failUnverifiableOccurrences(50),
+    ).resolves.toBeGreaterThanOrEqual(1);
+    await expect(readOccurrenceFence(occurrenceId)).resolves.toMatchObject({ status: 'failed' });
+
+    // Terminal and idempotent: the sweep never touches it twice.
+    await harness.commitments.failUnverifiableOccurrences(50);
+    await expect(readOccurrenceFence(occurrenceId)).resolves.toMatchObject({ status: 'failed' });
+  });
+
+  it('refuses publication under a superseded generation after revoke + re-grant', async () => {
+    const harness = await createHarness(db, 'P0-C3D superseded generation tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
+
+    await harness.consent.revokeForTenant(harness.ctx.tenantId, FIXTURE_PROFILE);
+    const regranted = await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    // Consent is ACTIVE again, but it is a different approval: the fence must not bind to it.
+    await expect(
+      harness.commitments.appendOutcomeIfAbsent(
+        grant,
+        outcomeCommand({ occurrenceId, commitmentId, taskId }),
+      ),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(0);
+
+    const current = await harness.consent.resolveGeneration(harness.ctx.tenantId, FIXTURE_PROFILE);
+    expect(current?.grantId).toBe(regranted.grantId);
+  });
+});
+
+interface PublishResult {
+  readonly kind: 'published' | 'denied' | 'other';
+  readonly code?: string;
+  readonly detail?: unknown;
+}
+
+/**
+ * Starts a publication and converts it into an inspectable result without ever leaving a dangling
+ * rejected promise: the race assertions wait on `settled()`, not on a rejection handler.
+ */
+function settlePublish(promise: Promise<boolean>): {
+  readonly outcome: Promise<PublishResult>;
+  readonly settled: () => boolean;
+} {
+  let done = false;
+
+  const outcome = promise.then(
+    (): PublishResult => {
+      done = true;
+      return { kind: 'published' };
+    },
+    (error: unknown): PublishResult => {
+      done = true;
+      const code = error instanceof DomainError ? error.code : undefined;
+
+      return code === 'POLICY_DENIED' ? { kind: 'denied', code } : { kind: 'other', detail: error };
+    },
+  );
+
+  return { outcome, settled: () => done };
+}
+
+describe('P0-C3D: consent races against real row locks', () => {
+  it('denies publication when the revocation commits first', async () => {
+    const harness = await createHarness(db, 'P0-C3D revoke-first tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
+
+    const lock = await db.pool.connect();
+    let publish: ReturnType<typeof settlePublish>;
+
+    try {
+      await lock.query('BEGIN');
+      // A concurrent revocation takes the consent row lock first and parks it.
+      await lock.query(
         `UPDATE consent_grants
-            SET granted_at = clock_timestamp() - interval '2 hours',
-                expires_at = clock_timestamp() - interval '1 second'
+            SET status = 'revoked',
+                revoked_at = clock_timestamp(),
+                version = version + 1,
+                updated_at = clock_timestamp()
           WHERE tenant_id = $1 AND source_profile_id = $2`,
-        [tenantA.tenantId, profile],
+        [harness.ctx.tenantId, FIXTURE_PROFILE],
       );
 
-      const raw = await readRawRow(tenantA.tenantId, profile);
-      expect(raw?.status).toBe('active');
-
-      const expired = await consentRepo.get(ctxA, profile);
-      expect(expired?.status).toBe('expired');
-
-      const decision = await consentRepo.evaluateConsent(
-        tenantA.tenantId,
-        profile,
-        'read_snapshot',
-      );
-      expect(decision).toStrictEqual({
-        allowed: false,
-        denialCode: 'CONSENT_EXPIRED',
-        consentVersion: null,
-      });
-    });
-
-    it('treats a re-grant with a fresh expiry as a new authorization', async () => {
-      const stale = await consentRepo.get(ctxA, profile);
-      const refreshed = await consentRepo.grant(ctxA, {
-        sourceProfileId: profile,
-        expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
-      });
-
-      expect(refreshed.replayed).toBe(false);
-      expect(refreshed.consent.status).toBe('active');
-      expect(refreshed.consent.version).toBe((stale?.version ?? 0) + 1);
-    });
-  });
-
-  describe('3. Revocation', () => {
-    const profile = 'fixture.calendar-events';
-
-    it('revokes an active grant and records the revocation metadata', async () => {
-      const granted = await consentRepo.grant(ctxA, { sourceProfileId: profile });
-
-      const revoked = await consentRepo.revoke(ctxA, profile);
-
-      expect(revoked.status).toBe('revoked');
-      expect(revoked.revokedAt).not.toBeNull();
-      expect(revoked.version).toBe(granted.consent.version + 1);
-
-      const raw = await readRawRow(tenantA.tenantId, profile);
-      expect(raw?.status).toBe('revoked');
-      expect(raw?.revoked_at).toBeInstanceOf(Date);
-    });
-
-    it('is idempotent: a retried revocation does not advance the version again', async () => {
-      const before = await consentRepo.get(ctxA, profile);
-      const again = await consentRepo.revoke(ctxA, profile);
-
-      expect(again.status).toBe('revoked');
-      expect(again.version).toBe(before?.version);
-    });
-
-    it('rejects a stale expected_version and leaves the row untouched', async () => {
-      const current = await consentRepo.get(ctxA, profile);
-
-      await expect(
-        consentRepo.revoke(ctxA, profile, { expectedVersion: (current?.version ?? 0) - 1 }),
-      ).rejects.toMatchObject({ code: 'INVALID_STATE_TRANSITION' });
-
-      const after = await consentRepo.get(ctxA, profile);
-      expect(after?.version).toBe(current?.version);
-      expect(after?.revokedAt).toBe(current?.revokedAt);
-    });
-
-    it('honours a matching expected_version', async () => {
-      const restored = await consentRepo.grant(ctxA, { sourceProfileId: profile });
-      expect(restored.consent.status).toBe('active');
-
-      const revoked = await consentRepo.revoke(ctxA, profile, {
-        expectedVersion: restored.consent.version,
-      });
-
-      expect(revoked.status).toBe('revoked');
-      expect(revoked.version).toBe(restored.consent.version + 1);
-    });
-
-    it('reports a missing grant as NOT_FOUND', async () => {
-      await expect(consentRepo.revoke(ctxA, 'fixture.never-granted')).rejects.toMatchObject({
-        code: 'NOT_FOUND',
-      });
-    });
-
-    it('clears the revocation when the grant is restored', async () => {
-      const restored = await consentRepo.grant(ctxA, { sourceProfileId: profile });
-
-      expect(restored.consent.status).toBe('active');
-      expect(restored.consent.revokedAt).toBeNull();
-      expect(restored.replayed).toBe(false);
-
-      const raw = await readRawRow(tenantA.tenantId, profile);
-      expect(raw?.status).toBe('active');
-      expect(raw?.revoked_at).toBeNull();
-    });
-  });
-
-  describe('4. Tenant isolation', () => {
-    it('keeps two tenants’ grants for the same profile independent', async () => {
-      const grantedA = await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const grantedB = await consentRepo.grant(ctxB, { sourceProfileId: PROFILE });
-
-      expect(grantedA.consent.tenantId).toBe(tenantA.tenantId);
-      expect(grantedB.consent.tenantId).toBe(tenantB.tenantId);
-      expect(grantedA.consent.consentId).not.toBe(grantedB.consent.consentId);
-
-      const readA = await consentRepo.get(ctxA, PROFILE);
-      const readB = await consentRepo.get(ctxB, PROFILE);
-
-      expect(readA?.tenantId).toBe(tenantA.tenantId);
-      expect(readA?.version).toBe(grantedA.consent.version);
-      expect(readB?.tenantId).toBe(tenantB.tenantId);
-      expect(readB?.version).toBe(grantedB.consent.version);
-    });
-
-    it('reports another tenant’s grant exactly like a missing one', async () => {
-      await consentRepo.grant(ctxB, { sourceProfileId: 'fixture.audit-log' });
-
-      const crossTenant = await consentRepo.get(ctxA, 'fixture.audit-log');
-      const missing = await consentRepo.get(ctxA, 'fixture.never-granted-anywhere');
-
-      expect(crossTenant).toBeNull();
-      expect(missing).toBeNull();
-    });
-
-    it('lists only the authenticated tenant’s grants, newest first', async () => {
-      const listA = await consentRepo.list(ctxA);
-
-      expect(listA.length).toBe(await countGrants(tenantA.tenantId));
-      expect(listA.every((grant) => grant.tenantId === tenantA.tenantId)).toBe(true);
-      expect(listA.map((grant) => grant.sourceProfileId)).not.toContain('fixture.audit-log');
-
-      const timestamps = listA.map((grant) => Date.parse(grant.createdAt));
-      expect([...timestamps].sort((left, right) => right - left)).toStrictEqual(timestamps);
-    });
-
-    it('cannot revoke another tenant’s grant', async () => {
-      await expect(consentRepo.revoke(ctxA, 'fixture.audit-log')).rejects.toMatchObject({
-        code: 'NOT_FOUND',
-      });
-
-      const stillActive = await consentRepo.get(ctxB, 'fixture.audit-log');
-      expect(stillActive?.status).toBe('active');
-    });
-  });
-
-  describe('5. Consent evaluation and version fence', () => {
-    const profile = 'fixture.incident-feed';
-
-    beforeAll(async () => {
-      await consentRepo.grant(ctxA, {
-        sourceProfileId: profile,
-        allowedOperations: ['read_snapshot'],
-      });
-    });
-
-    it('allows the granted operation at the recorded version', async () => {
-      const current = await consentRepo.get(ctxA, profile);
-
-      const decision = await consentRepo.evaluateConsent(
-        tenantA.tenantId,
-        profile,
-        'read_snapshot',
-        current?.version,
+      publish = settlePublish(
+        harness.commitments.appendOutcomeIfAbsent(
+          grant,
+          outcomeCommand({ occurrenceId, commitmentId, taskId }),
+        ),
       );
 
-      expect(decision).toStrictEqual({
-        allowed: true,
-        denialCode: null,
-        consentVersion: current?.version,
-      });
-    });
+      // The publisher must WAIT for the consent row rather than read a stale snapshot.
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(publish.settled()).toBe(false);
 
-    it('denies an operation the grant does not list', async () => {
-      const decision = await consentRepo.evaluateConsent(
-        tenantA.tenantId,
-        profile,
-        'publish_outcome',
-      );
-
-      expect(decision.allowed).toBe(false);
-      expect(decision.denialCode).toBe('OPERATION_NOT_ALLOWED');
-      expect(decision.consentVersion).toBeNull();
-    });
-
-    it('denies a stale fence and reports the current version', async () => {
-      const current = await consentRepo.get(ctxA, profile);
-      const staleVersion = (current?.version ?? 1) - 1;
-
-      const decision = await consentRepo.evaluateConsent(
-        tenantA.tenantId,
-        profile,
-        'read_snapshot',
-        staleVersion,
-      );
-
-      expect(decision).toStrictEqual({
-        allowed: false,
-        denialCode: 'CONSENT_VERSION_STALE',
-        consentVersion: current?.version,
-      });
-    });
-
-    it('treats a missing grant as not found rather than allowed', async () => {
-      const decision = await consentRepo.evaluateConsent(
-        tenantA.tenantId,
-        'fixture.never-granted-anywhere',
-        'read_snapshot',
-      );
-
-      expect(decision).toStrictEqual({
-        allowed: false,
-        denialCode: 'CONSENT_NOT_FOUND',
-        consentVersion: null,
-      });
-    });
-  });
-
-  describe('6. Dispatch and publication fences', () => {
-    it('refuses to dispatch when the grant has been revoked', async () => {
-      await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      await consentRepo.revoke(ctxA, PROFILE);
-
-      const { occurrenceId } = await createDueOccurrence('Dispatch without consent');
-      const taskId = await createTask('consent gate');
-
-      await expect(commitmentRepo.markDispatched(occurrenceId, taskId)).rejects.toMatchObject({
-        code: 'POLICY_DENIED',
-      });
-
-      // Fail-closed: nothing was bound and no fence was recorded.
-      expect(await readOccurrence(occurrenceId)).toStrictEqual({
-        status: 'pending',
-        task_id: null,
-        consent_version: null,
-      });
-    });
-
-    it('records the authorising consent version when it dispatches', async () => {
-      const granted = await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const { occurrenceId } = await createDueOccurrence('Dispatch with consent');
-      const taskId = await createTask('consent gate');
-
-      await commitmentRepo.markDispatched(occurrenceId, taskId);
-
-      expect(await readOccurrence(occurrenceId)).toStrictEqual({
-        status: 'dispatched',
-        task_id: taskId,
-        consent_version: granted.consent.version,
-      });
-    });
-  });
-
-  describe('7. Publication fence', () => {
-    async function publishUnder(profile: 'granted' | 'revoked' | 'version-moved'): Promise<{
-      readonly taskId: Id;
-      readonly commitmentId: Id;
-      readonly occurrenceId: Id;
-      readonly publish: () => Promise<boolean>;
-    }> {
-      const granted = await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const { taskId, grant } = await createRunningTask('consent fence publisher');
-      const { occurrenceId, commitmentId } = await createDueOccurrence(`Publish ${profile}`);
-
-      await commitmentRepo.markDispatched(occurrenceId, taskId);
-
-      if (profile === 'revoked') {
-        await consentRepo.revoke(ctxA, PROFILE);
-      }
-
-      if (profile === 'version-moved') {
-        // Still active and still allowing `publish_outcome`, but no longer the version that
-        // authorised the dispatch: the fence alone must reject the publication.
-        const moved = await consentRepo.grant(ctxA, {
-          sourceProfileId: PROFILE,
-          scopes: [`dispatch-${grant.runId}`],
-        });
-        expect(moved.consent.status).toBe('active');
-        expect(moved.consent.version).toBe(granted.consent.version + 1);
-      }
-
-      const cmd: AppendOutcomeCommand = {
-        occurrenceId,
-        commitmentId,
-        taskId,
-        summary: `Outcome published under ${profile} consent.`,
-        resultStatus: 'meaningful_change',
-      };
-
-      return {
-        taskId,
-        commitmentId,
-        occurrenceId,
-        publish: () => commitmentRepo.appendOutcomeIfAbsent(grant, cmd),
-      };
+      await lock.query('COMMIT');
+    } finally {
+      lock.release();
     }
 
-    it('publishes while the authorising consent is still current', async () => {
-      const { commitmentId, occurrenceId, publish } = await publishUnder('granted');
-
-      await expect(publish()).resolves.toBe(true);
-
-      expect(await countOutcomes(commitmentId)).toBe(1);
-      expect((await readOccurrence(occurrenceId)).status).toBe('completed');
-    });
-
-    it('refuses to publish after the grant was revoked', async () => {
-      const { commitmentId, publish } = await publishUnder('revoked');
-
-      await expectPolicyDenied(publish, 'CONSENT_REVOKED');
-
-      expect(await countOutcomes(commitmentId)).toBe(0);
-    });
-
-    it('refuses to publish when the consent version moved after dispatch', async () => {
-      const { commitmentId, publish } = await publishUnder('version-moved');
-
-      await expectPolicyDenied(publish, 'CONSENT_VERSION_STALE');
-
-      expect(await countOutcomes(commitmentId)).toBe(0);
-    });
-
-    it('publishes a legacy occurrence without a recorded fence only while consent is effective', async () => {
-      const { commitmentId, occurrenceId, publish } = await publishUnder('granted');
-
-      // Simulate an occurrence dispatched before the fence column existed.
-      await db.pool.query(
-        `UPDATE commitment_occurrences SET consent_version = NULL
-          WHERE tenant_id = $1 AND id = $2`,
-        [tenantA.tenantId, occurrenceId],
-      );
-
-      expect((await readOccurrence(occurrenceId)).consent_version).toBeNull();
-      await expect(publish()).resolves.toBe(true);
-      expect(await countOutcomes(commitmentId)).toBe(1);
-
-      // The same legacy shape is still refused once consent is gone.
-      const second = await publishUnder('granted');
-      await db.pool.query(
-        `UPDATE commitment_occurrences SET consent_version = NULL
-          WHERE tenant_id = $1 AND id = $2`,
-        [tenantA.tenantId, second.occurrenceId],
-      );
-      await consentRepo.revoke(ctxA, PROFILE);
-
-      await expectPolicyDenied(second.publish, 'CONSENT_REVOKED');
-      expect(await countOutcomes(second.commitmentId)).toBe(0);
-    });
+    await expect(publish.outcome).resolves.toMatchObject({ kind: 'denied', code: 'POLICY_DENIED' });
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(0);
   });
 
-  describe('8. Locking and races', () => {
-    it('lets a revocation that holds the consent lock force an in-flight publication to fail closed', async () => {
-      await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const { taskId, grant } = await createRunningTask('racing publisher');
-      const { occurrenceId, commitmentId } = await createDueOccurrence('Race with revocation');
-      await commitmentRepo.markDispatched(occurrenceId, taskId);
-
-      const cmd: AppendOutcomeCommand = {
-        occurrenceId,
-        commitmentId,
-        taskId,
-        summary: 'Racing publication outcome.',
-        resultStatus: 'meaningful_change',
-      };
-
-      // Hold the consent row so the publication blocks exactly where the fence is evaluated.
-      const holder = await db.pool.connect();
-      let settled = false;
-
-      try {
-        await holder.query('BEGIN');
-        await holder.query(
-          `SELECT version FROM consent_grants
-            WHERE tenant_id = $1 AND source_profile_id = $2
-            FOR UPDATE`,
-          [tenantA.tenantId, PROFILE],
-        );
-
-        const publication = commitmentRepo.appendOutcomeIfAbsent(grant, cmd).then(
-          () => {
-            settled = true;
-            return { ok: true, code: undefined, diagnostic: '' };
-          },
-          (error: { code?: string; diagnostic?: string }) => {
-            settled = true;
-            return { ok: false, code: error.code, diagnostic: error.diagnostic ?? '' };
-          },
-        );
-
-        await delay(250);
-        // The publisher reached the fence and is waiting for the lock we hold, so it cannot
-        // have observed pre-revocation consent.
-        expect(settled).toBe(false);
-
-        await holder.query(
-          `UPDATE consent_grants
-              SET status = 'revoked',
-                  revoked_at = clock_timestamp(),
-                  version = version + 1,
-                  updated_at = clock_timestamp()
-            WHERE tenant_id = $1 AND source_profile_id = $2`,
-          [tenantA.tenantId, PROFILE],
-        );
-        await holder.query('COMMIT');
-
-        const result = await publication;
-
-        expect(result.ok).toBe(false);
-        expect(result.code).toBe('POLICY_DENIED');
-        expect(result.diagnostic).toContain('CONSENT_REVOKED');
-        expect(await countOutcomes(commitmentId)).toBe(0);
-      } finally {
-        holder.release();
-      }
+  it('publishes when the authorization wins the row lock, and a later revoke does not undo it', async () => {
+    const harness = await createHarness(db, 'P0-C3D publish-first tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
     });
 
-    it('does not undo a publication that committed before the revocation', async () => {
-      await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const { taskId, grant } = await createRunningTask('early publisher');
-      const { occurrenceId, commitmentId } = await createDueOccurrence('Publish before revoke');
-      await commitmentRepo.markDispatched(occurrenceId, taskId);
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
 
-      const published = await commitmentRepo.appendOutcomeIfAbsent(grant, {
-        occurrenceId,
-        commitmentId,
-        taskId,
-        summary: 'Committed before the revocation.',
-        resultStatus: 'meaningful_change',
-      });
-      expect(published).toBe(true);
+    const lock = await db.pool.connect();
+    let publish: ReturnType<typeof settlePublish>;
 
-      await consentRepo.revoke(ctxA, PROFILE);
+    try {
+      await lock.query('BEGIN');
+      // Hold the consent row (a revoke that has not committed yet) and start the publication.
+      await lock.query(
+        `SELECT 1 FROM consent_grants
+          WHERE tenant_id = $1 AND source_profile_id = $2
+          FOR UPDATE`,
+        [harness.ctx.tenantId, FIXTURE_PROFILE],
+      );
 
-      // Revocation is forward-looking: the already-committed outcome stays readable.
-      expect(await countOutcomes(commitmentId)).toBe(1);
-      const outcomes = await commitmentRepo.listOutcomes(ctxA, commitmentId);
-      expect(outcomes?.outcomes).toHaveLength(1);
+      publish = settlePublish(
+        harness.commitments.appendOutcomeIfAbsent(
+          grant,
+          outcomeCommand({ occurrenceId, commitmentId, taskId }),
+        ),
+      );
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(publish.settled()).toBe(false);
+
+      // The competing transaction gives up: the generation was unchanged, so publication proceeds.
+      await lock.query('ROLLBACK');
+    } finally {
+      lock.release();
+    }
+
+    await expect(publish.outcome).resolves.toMatchObject({ kind: 'published' });
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(1);
+
+    // A revocation that lands afterwards is real, but it cannot retract an already-authorized write.
+    await harness.consent.revokeForTenant(harness.ctx.tenantId, FIXTURE_PROFILE);
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(1);
+    await expect(
+      harness.consent.resolveGeneration(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toMatchObject({ status: 'revoked' });
+  });
+
+  it('denies publication after a committed revocation (ordered case)', async () => {
+    const harness = await createHarness(db, 'P0-C3D revoke-then-publish tenant');
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
     });
 
-    it('serialises concurrent publications of the same occurrence into exactly one outcome', async () => {
-      await consentRepo.grant(ctxA, { sourceProfileId: PROFILE });
-      const { taskId, grant } = await createRunningTask('duplicate publisher');
-      const { occurrenceId, commitmentId } = await createDueOccurrence('Concurrent publication');
-      await commitmentRepo.markDispatched(occurrenceId, taskId);
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);
+    const grant = await claimRun(harness, `worker-${randomUUID()}`, taskId);
 
-      const cmd: AppendOutcomeCommand = {
-        occurrenceId,
-        commitmentId,
-        taskId,
-        summary: 'Concurrent publication outcome.',
-        resultStatus: 'meaningful_change',
-      };
+    await harness.consent.revokeForTenant(harness.ctx.tenantId, FIXTURE_PROFILE);
 
-      const [first, second] = await Promise.all([
-        commitmentRepo.appendOutcomeIfAbsent(grant, cmd),
-        commitmentRepo.appendOutcomeIfAbsent(grant, cmd),
-      ]);
-
-      // One publisher inserts the outcome; the other observes it and reports the idempotent
-      // no-op, so a retried publication can never duplicate the fact.
-      expect([first, second].filter((appended) => appended)).toHaveLength(1);
-      expect(await countOutcomes(commitmentId)).toBe(1);
-    });
+    await expect(
+      harness.commitments.appendOutcomeIfAbsent(
+        grant,
+        outcomeCommand({ occurrenceId, commitmentId, taskId }),
+      ),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+    await expect(countOutcomes(occurrenceId)).resolves.toBe(0);
   });
 });

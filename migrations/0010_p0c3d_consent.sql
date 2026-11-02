@@ -4,16 +4,17 @@
 --
 -- Additive migration only. Existing migrations 0001-0009 are immutable.
 --
--- MERGE ORDER (agreed with the CTO):
---   1. PR #84 (this migration) lands as `0010`.
---   2. PR #62 (P0-C3B runtime closure) lands afterwards. If its `0009_p0c3b_runtime_closure.sql`
---      has not been applied yet, Agent B renumbers that file to `0011`.
+-- MERGE ORDER:
+--   1. PR #84 (this PR) lands first. It ships BOTH `0009_p0c3b_runtime_closure.sql` (P0-C3B, carried
+--      here because this branch integrates PR #62's runtime-closure work) and this migration.
+--   2. PR #62 then rebases onto a main that ALREADY contains its migration. Its planned renumber
+--      0009 -> 0011 is therefore unnecessary and must be dropped: renumbering would add the same
+--      index-only DDL a second time under a new id. No duplicate migration id exists in either path.
 --
--- Nothing here depends on which of the two lands first. This migration never assumes that
--- `0009_p0c3b_runtime_closure.sql` is already applied: 0009 is index-only, and this file touches
--- only its own objects. The runner requires unique, strictly increasing ids and tolerates an
--- out-of-order backfill, so a database that already applied `0010` can still apply `0009` (or the
--- renumbered `0011`) afterwards -- both orders are exercised by
+-- If instead #62 lands first (keeping `0009`), this migration is unaffected: it never assumes
+-- `0009` is already applied, because it touches only its own objects. The runner requires unique,
+-- strictly increasing ids and tolerates an out-of-order backfill, so a database that already applied
+-- `0010` can still apply `0009` afterwards. Both orders are exercised by
 -- `tests/integration/migrations.test.ts`.
 --
 -- Design notes:

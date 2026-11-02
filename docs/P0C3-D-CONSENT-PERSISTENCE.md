@@ -324,15 +324,23 @@ Additional adversarial coverage in the same file:
 
 ## 8. Migration coordination
 
-| PR            | Migration                                              | Note                                                                   |
-| ------------- | ------------------------------------------------------ | ---------------------------------------------------------------------- |
-| #84 (this PR) | `0010_p0c3d_consent.sql`                               | lands first; creates `consent_grants` and the occurrence fence columns |
-| #62 (Agent B) | `0009_p0c3b_runtime_closure.sql`, renumbered to `0011` | lands second; index-only, so the renumber is safe                      |
+| PR            | Migration                                                              | Order                                                    |
+| ------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- |
+| #84 (this PR) | `0009_p0c3b_runtime_closure.sql` (from #62) + `0010_p0c3d_consent.sql` | lands first                                              |
+| #62 (Agent B) | the same `0009` file                                                   | lands second; its renumber to `0011` must be **dropped** |
 
-`0010` does not assume `0009` is already applied: it touches only its own objects, and the runner
-requires unique, strictly increasing ids while tolerating an out-of-order backfill. Both orders are
-exercised by `tests/integration/migrations.test.ts`, which asserts 10 applied migrations, the
-`schema_migrations` version count, and the replay behaviour.
+This PR already carries PR #62's runtime-closure migration, because the branch integrates that work as
+a dependency. Consequence for the agreed merge order:
+
+1. #84 lands with `0009` + `0010`; main then contains the P0-C3B indexes.
+2. #62 rebases onto that main and lands **without** renumbering, because its migration diff is empty
+   at that point. Renumbering `0009` to `0011` would add the same index-only DDL a second time under a
+   new id — exactly the duplicate the plan forbids.
+
+`0010` is order-independent regardless: it never assumes `0009` is applied, and the runner requires
+unique, strictly increasing ids while tolerating an out-of-order backfill.
+`tests/integration/migrations.test.ts` covers 10 applied migrations, the `schema_migrations` version
+count and the idempotent replay.
 
 ---
 

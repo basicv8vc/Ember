@@ -21,9 +21,63 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
         }
         submitButton.tap()
 
-        XCTAssertTrue(app.staticTexts["Local demo receipt"].waitForExistence(timeout: 10))
-        app.buttons["mock-receipt-continue"].tap()
+        let receiptTitle = app.staticTexts["Local demo receipt"]
+        XCTAssertTrue(receiptTitle.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["mock-receipt-task-id"].exists)
+        XCTAssertTrue(
+            app.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "task is not complete")).firstMatch.exists
+        )
+        let continueButton = app.buttons["mock-receipt-continue"]
+        XCTAssertTrue(continueButton.isHittable)
+        continueButton.tap()
         XCTAssertTrue(app.staticTexts["本机会话任务"].waitForExistence(timeout: 10))
+    }
+
+    func testUnknownAcknowledgementReplayPresentsReceiptAndOneSessionTask() {
+        let app = XCUIApplication()
+        launch(app, arguments: ["--ember-start-task-flow"], locale: "en")
+
+        app.buttons["填入示例"].tap()
+        let noteInput = app.textViews["compose-note-input"]
+        XCTAssertTrue(noteInput.waitForExistence(timeout: 10))
+
+        let lostReceiptToggle = app.switches["compose-simulate-unknown-receipt"]
+        XCTAssertTrue(lostReceiptToggle.waitForExistence(timeout: 10))
+        if !lostReceiptToggle.isHittable {
+            app.swipeUp()
+        }
+        lostReceiptToggle.tap()
+
+        let submitButton = app.buttons["compose-submit"]
+        if !submitButton.isHittable {
+            app.swipeUp()
+        }
+        submitButton.tap()
+
+        let unknownStatus = app.descendants(matching: .any)["compose-status-message"]
+        XCTAssertTrue(unknownStatus.waitForExistence(timeout: 10))
+        XCTAssertTrue(unknownStatus.label.contains("尚未确认"))
+        XCTAssertFalse(noteInput.isEnabled)
+        XCTAssertTrue((noteInput.value as? String)?.contains("新 onboarding") == true)
+        XCTAssertFalse(app.descendants(matching: .any)["compose-receipt"].exists)
+        XCTAssertFalse(app.staticTexts["Local demo receipt"].exists)
+
+        submitButton.tap()
+
+        let receiptTitle = app.staticTexts["Local demo receipt"]
+        XCTAssertTrue(receiptTitle.waitForExistence(timeout: 10))
+        let continueButton = app.buttons["mock-receipt-continue"]
+        XCTAssertTrue(continueButton.isHittable)
+        continueButton.tap()
+
+        XCTAssertTrue(app.staticTexts["本机会话任务"].waitForExistence(timeout: 10))
+        let createdTask = app.staticTexts.matching(NSPredicate(format: "label == %@", "笔记整理 · 本机会话")).firstMatch
+        XCTAssertTrue(createdTask.waitForExistence(timeout: 10))
+        XCTAssertEqual(
+            app.staticTexts.matching(NSPredicate(format: "label == %@", "笔记整理 · 本机会话")).count,
+            1
+        )
+        XCTAssertFalse(receiptTitle.exists)
     }
 
     func testSimplifiedChineseOnboardingAndDirectTaskFlowEntry() {

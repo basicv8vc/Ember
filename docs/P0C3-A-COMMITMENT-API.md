@@ -2,11 +2,12 @@
 
 ## Commitment Persistence & HTTP API
 
-**Version:** 1.0.0 FROZEN  
+**Version:** 1.1.0 FROZEN  
 **Author:** Ember P0-C3A Coding Agent (Commitment Persistence & HTTP API)  
-**Status:** Completed & Verified  
+**Status:** Completed & Verified (CTO review fixes applied: P0-C3A-1 … P0-C3A-4)  
 **Branch:** `feature/p0c-3a-commitment-api`  
 **Base Commit:** `bbcad275418cd59c29b742cd2cc6e3bd825c6054`  
+**Implementation Head Commit:** `16c7cac1805f55bbdb1bf979f0e341c2fd6e328c` — the SHA that the quality gates, PostgreSQL integration, E2E and GitHub CI below were executed against.  
 **Contract Reference:** `docs/P0-C3-0-CONTRACT-FREEZE.md` (v1.2 FROZEN APPROVED)
 
 ---
@@ -17,11 +18,11 @@ Ember P0-C3A implements the durable persistence, tenant isolation, concurrency f
 
 ### Core Architecture Responsibilities
 
-1. **Authoritative State Persistence:** PostgreSQL 17 serves as the single authority for commitments, occurrences, and outcomes. The database clock (`clock_timestamp()` / `CURRENT_TIMESTAMP`) acts as the single authoritative timekeeper to eliminate clock skew between distributed schedulers and workers.
+1. **Authoritative State Persistence:** PostgreSQL 17 serves as the single authority for commitments, occurrences, and outcomes. The database clock (`clock_timestamp()`) is the only authoritative timekeeper: scheduling, lease freshness, version bumps and occurrence timestamps are all produced in SQL, so clock skew between schedulers, workers and the API cannot change a decision.
 2. **RESTful HTTP API (`/v1/commitments`):** Fast, bounded endpoints adhering to RFC 7807 problem details, strict input validation, and header-based `Idempotency-Key` replay fencing.
-3. **Optimistic Concurrency Control (CAS):** State transitions (`pause`, `resume`, `cancel`) use monotonic integer version counters to reject stale or conflicting updates with `409 Conflict`.
-4. **Authoritative Worker Lease Verification:** `appendOutcomeIfAbsent` enforces that only the worker holding a valid, unexpired lease on the associated task and run (`runs.leased_until > clock_timestamp()`) can append an outcome. Furthermore, the commitment must be in `active` state at publish time.
-5. **Scheduler Work Discovery & Occurrence Reservation (`DueCommitmentStore`):** Designed for Agent B (Scheduler Runtime) with single-interval schedule compensation (at most one historical interval when overdue to prevent task storms) and transactional concurrency slot reservation (`SKIP LOCKED`).
+3. **Optimistic Concurrency Control (CAS):** `pause`, `resume` and `cancel` run inside one transaction that takes a row-level lock on the commitment (`SELECT … FOR UPDATE`), compares the caller's `expected_version` against the locked row, validates the state machine and only then mutates. A stale version or an illegal edge raises `INVALID_STATE_TRANSITION` → `409 Conflict` and writes nothing. `completed` and `cancelled` are terminal, repeated `pause`/`resume`/`cancel` on the state they already produced are idempotent no-ops that do not bump `version`, and `completed → cancelled` is **forbidden**.
+4. **Authoritative Worker Lease & Execution Verification:** `appendOutcomeIfAbsent` locks, in order, the commitment, the occurrence, the task and the run. The commitment must be `active`, the occurrence must not be cancelled, the task must be `running`, and the run must be `running` with `worker_id` / `lease_epoch` matching the grant and `leased_until > clock_timestamp()`. Worker ownership, epoch and expiry are all compared inside SQL, so the application clock can neither extend nor shorten a lease.
+5. **Scheduler Work Discovery & Occurrence Reservation (`DueCommitmentStore`):** Designed for Agent B (Scheduler Runtime) with single-interval schedule compensation (at most one historical interval when overdue, preventing task storms) and transactional concurrency slot reservation (`ON CONFLICT (commitment_id, scheduled_for) DO NOTHING`).
 6. **Zero-Trust Tenant Isolation:** Every table features a composite primary/foreign key scoped by `tenant_id`, guaranteeing cross-tenant data leakage is structurally impossible.
 
 ---
@@ -116,10 +117,28 @@ All endpoints are mounted under `/v1/commitments` and require Bearer token authe
 
 ### 4.2 State Machine CAS
 
-- State transitions require `expected_version` for optimistic locking.
-- Transition SQL enforces `WHERE tenant_id = $1 AND id = $2 AND status = $3 AND version = $4`.
-- If another process updated the record concurrently, zero rows are modified, resulting in `409 Conflict` (`VERSION_CONFLICT`).
-- Once in `cancelled` state, all subsequent transition attempts fail with `409 Conflict` (`INVALID_STATE_TRANSITION`).
+Every transition is applied in one database transaction, in this order:
+
+1. `SELECT … FROM commitments WHERE tenant_id = $1 AND id = $2 FOR UPDATE` — the row lock serialises all concurrent writers of that commitment.
+2. Validate the state machine edge **and** the caller's `expected_version` against the locked row.
+3. `UPDATE … SET status = …, version = version + 1, updated_at = clock_timestamp()` for a real transition.
+
+Consequences that the implementation guarantees (and the test suite proves):
+
+- The version comparison is a **compare inside the locked transaction**. It is not a bare `WHERE version = $n` predicate that could silently update zero rows and be mistaken for a missing resource.
+- A stale `expected_version` or an illegal edge raises `INVALID_STATE_TRANSITION`, which the HTTP layer maps to `409 Conflict`. There is **no** separate `VERSION_CONFLICT` error code in the HTTP error table (an earlier revision of this document claimed one).
+- Transition table:
+
+  | From        | `pause`                    | `resume`                   | `cancel`                   |
+  | ----------- | -------------------------- | -------------------------- | -------------------------- |
+  | `active`    | → `paused` (v+1)           | no-op `active`             | → `cancelled` (v+1)        |
+  | `paused`    | no-op `paused`             | → `active` (v+1)           | → `cancelled` (v+1)        |
+  | `completed` | `INVALID_STATE_TRANSITION` | `INVALID_STATE_TRANSITION` | `INVALID_STATE_TRANSITION` |
+  | `cancelled` | `INVALID_STATE_TRANSITION` | `INVALID_STATE_TRANSITION` | no-op `cancelled`          |
+
+- `completed` and `cancelled` are terminal. In particular **`completed → cancelled` is forbidden**: a commitment that already produced its final result can never be retroactively cancelled.
+- Idempotent no-ops (`pause` on `paused`, `resume` on `active`, `cancel` on `cancelled`) return the current row unchanged and do **not** increment `version`.
+- `cancel` additionally marks the commitment's `pending` occurrences as `cancelled` in the same transaction, so a reconciliation sweep cannot revive them.
 
 ### 4.3 Single-Interval Schedule Compensation (Anti-Storm)
 
@@ -146,43 +165,87 @@ This guarantees that **at most one** historical execution slot is produced, and 
 
 ## 6. Handoff to Agent B (Scheduler Runtime)
 
-Agent B should consume `PostgresCommitmentRepository` implementing `DueCommitmentStore`:
+Agent B consumes `PostgresCommitmentRepository`, which implements the frozen `DueCommitmentStore`:
 
 ```typescript
 export interface DueCommitmentStore {
-  // 1. Authoritative due work polling using PostgreSQL clock
-  findDueCommitments(limit: number): Promise<readonly DueCommitment[]>;
+  // 1. Authoritative due-work polling, ordered by next_due_at (PostgreSQL clock).
+  findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]>;
 
-  // 2. Transactional single-slot reservation with anti-storm compensation
-  reserveOccurrence(commitmentId: Id, scheduledFor: Date): Promise<OccurrenceSlot | null>;
+  // 2. Transactional single-slot reservation with anti-storm compensation. `expectedVersion`
+  //    is the CAS token; `slotTimeOverride` exists only for virtual-clock tests.
+  reserveOccurrence(
+    commitmentId: Id,
+    expectedVersion: number,
+    slotTimeOverride?: Date,
+  ): Promise<ReservedSlot | null>;
 
-  // 3. Mark occurrence dispatched once durable task is created
-  markDispatched(occurrenceId: Id, taskId: Id): Promise<boolean>;
+  // 3. Bind the durable Task to the occurrence (throws INVALID_STATE_TRANSITION otherwise).
+  markDispatched(occurrenceId: Id, taskId: Id): Promise<void>;
 
-  // 4. Crash recovery: find occurrences stalled in 'pending' status
+  // 4. Publish an outcome behind authoritative lease fencing.
+  appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;
+
+  // 5. Advance a one-shot commitment to `completed` (0 rows if it is no longer active).
+  markCommitmentCompleted(commitmentId: Id, expectedVersion?: number): Promise<boolean>;
+
+  // 6. Crash recovery: pending occurrences older than `timeoutSeconds`.
   findStalledPendingOccurrences(
-    olderThanSeconds: number,
+    timeoutSeconds: number,
     limit: number,
-  ): Promise<readonly StalledOccurrence[]>;
+  ): Promise<readonly StalledPendingOccurrence[]>;
 
-  // 5. Reconcile stalled occurrence with real Task ID
+  // 7. Re-bind a stalled occurrence to the durable Task that already exists.
   reconcilePendingOccurrence(occurrenceId: Id, taskId: Id): Promise<boolean>;
 
-  // 6. Mark occurrence failed on unrecoverable dispatch error
-  markOccurrenceFailed(occurrenceId: Id, reason: string): Promise<boolean>;
+  // 8. Fail an occurrence whose dispatch is permanently unrecoverable.
+  markOccurrenceFailed(occurrenceId: Id, reasonCode: string): Promise<void>;
 }
 ```
 
-### Deterministic Task Idempotency Key Formula
+### 6.1 `StalledPendingOccurrence` is database-authoritative
+
+`findStalledPendingOccurrences` joins each stalled `pending` occurrence to its commitment and
+returns everything the scheduler runtime needs to rebuild the dispatch context:
+
+```typescript
+export interface StalledPendingOccurrence {
+  readonly occurrenceId: Id;
+  /** From commitment_occurrences.tenant_id — the real owning tenant. */
+  readonly tenantId: Id;
+  readonly commitmentId: Id;
+  /** From commitments.agent_id — the real target agent. */
+  readonly agentId: Id;
+  /** From commitments.source_profile_id — the consent/profile scope of the run. */
+  readonly sourceProfileId: SourceProfileId;
+  /** From commitments.schedule_kind / interval_seconds — needed to re-arm the schedule. */
+  readonly scheduleKind: ScheduleKind;
+  readonly intervalSeconds: number | null;
+  readonly scheduledFor: Date;
+  readonly createdAt: Date;
+  readonly taskCreationIdempotencyKey: string;
+}
+```
+
+The scheduler **must** use these returned values verbatim. It must not substitute a synthetic or
+"system" tenant/agent for a recovered occurrence: doing so would break tenant isolation, attribute
+the recovered Task to the wrong agent, and evaluate consent against the wrong source profile. Rows
+without a resolvable commitment cannot appear in this list at all, because the query joins
+`commitments` on `(tenant_id, commitment_id)`.
+
+### 6.2 Deterministic Task Idempotency Key Formula
 
 When dispatching a task to the Ember task runner, Agent B must derive the idempotency key using the shared helper:
 
 ```typescript
 import { deriveTaskCreationIdempotencyKey } from '@ember/contracts';
 
-const taskKey = deriveTaskCreationIdempotencyKey(commitmentId, occurrenceId);
-// Returns: "task-comm-<commitmentId>-<occurrenceId>"
+const taskKey = deriveTaskCreationIdempotencyKey(occurrenceId);
+// Returns: "commitment-occ:<occurrenceId>"
 ```
+
+The key depends only on the occurrence, so a crash between reservation and `markDispatched`
+can never produce a second Task for the same slot.
 
 ---
 
@@ -192,28 +255,48 @@ Agent C's `FakeSourceReader` and consent evaluation integrate via the frozen con
 
 - `SourceProfileId`: matches `^[a-z0-9][a-z0-9._-]{2,63}$`.
 - `SourceSnapshot`: strict Zod schema with `sourceProfileId`, `observedAt`, `digest` (64-char sha256), and `boundedSafeItems` (max 50 items, payload <= 32 KiB).
-- `appendOutcomeIfAbsent` verifies:
-  1. Worker lease grant matches an active task run where `leased_until > clock_timestamp()`.
-  2. The parent commitment remains `active` (not paused or cancelled before publication).
-  3. Strict unique occurrence outcome idempotency.
+- `appendOutcomeIfAbsent` verifies, inside one transaction:
+  1. The commitment row is still `active` (locked first, so a concurrent `cancel` is either
+     observed here or happens after the outcome is committed).
+  2. The occurrence exists, is not `cancelled`, and is bound to the granted `taskId`.
+  3. The task is still `running` — a cancelled/failed/completed task can never publish.
+  4. The run is `running` and the grant owns it: `worker_id` and `lease_epoch` match, and
+     `leased_until > clock_timestamp()` (evaluated by PostgreSQL, never by the app clock).
+  5. Strict unique occurrence outcome idempotency (`UNIQUE (tenant_id, occurrence_id)`).
 
 ---
 
 ## 8. Verification & Quality Gates
 
-All checks and tests were executed against real PostgreSQL 17 in the isolated worktree:
+All checks and tests were executed against real PostgreSQL 17 in the isolated worktree, on the
+`Implementation Head Commit` recorded at the top of this document:
 
-| Gate                               | Status | Command                                                         | Result                                      |
-| ---------------------------------- | ------ | --------------------------------------------------------------- | ------------------------------------------- |
-| **Format**                         | PASS   | `pnpm format:check`                                             | Exit code 0 (All files conform to Prettier) |
-| **Lint**                           | PASS   | `pnpm lint`                                                     | Exit code 0 (Zero warnings, zero errors)    |
-| **Typecheck**                      | PASS   | `pnpm typecheck`                                                | Exit code 0 (`tsc -p tsconfig.json`)        |
-| **Build**                          | PASS   | `pnpm build`                                                    | Exit code 0 (`tsc -b tsconfig.build.json`)  |
-| **Unit Tests (Contracts)**         | PASS   | `vitest run tests/unit/p0c3-commitment-contracts.test.ts`       | 16/16 passed                                |
-| **Unit Tests (HTTP API)**          | PASS   | `vitest run tests/unit/p0c3-commitment-api.test.ts`             | 11/11 passed                                |
-| **Integration Tests (Postgres)**   | PASS   | `vitest run tests/integration/p0c3-commitment-postgres.test.ts` | 12/12 passed                                |
-| **Integration Tests (Migrations)** | PASS   | `vitest run tests/integration/migrations.test.ts`               | 7/7 passed                                  |
-| **E2E Tests (HTTP + Postgres)**    | PASS   | `vitest run tests/e2e/p0c3-commitment-e2e.test.ts`              | 5/5 passed                                  |
-| **Full Unit Suite**                | PASS   | `pnpm test:unit`                                                | 55/55 files passed (961/961 tests)          |
+| Gate                                   | Status | Command                                                         | Result                                        |
+| -------------------------------------- | ------ | --------------------------------------------------------------- | --------------------------------------------- |
+| **Format**                             | PASS   | `pnpm format:check`                                             | Exit code 0 (All files conform to Prettier)   |
+| **Lint**                               | PASS   | `pnpm lint`                                                     | Exit code 0 (Zero warnings, zero errors)      |
+| **Typecheck**                          | PASS   | `pnpm typecheck`                                                | Exit code 0 (`tsc -p tsconfig.json`)          |
+| **Build**                              | PASS   | `pnpm build`                                                    | Exit code 0 (`tsc -b tsconfig.build.json`)    |
+| **Migrations (first + repeat run)**    | PASS   | `pnpm db:migrate` twice                                         | 8 idempotent migrations, second run applies 0 |
+| **Unit Tests (Contracts)**             | PASS   | `vitest run tests/unit/p0c3-commitment-contracts.test.ts`       | 16/16 passed                                  |
+| **Unit Tests (HTTP API)**              | PASS   | `vitest run tests/unit/p0c3-commitment-api.test.ts`             | 12/12 passed                                  |
+| **Integration Tests (P0-C3A)**         | PASS   | `vitest run tests/integration/p0c3-commitment-postgres.test.ts` | 17/17 passed                                  |
+| **Integration Tests (Migrations)**     | PASS   | `vitest run tests/integration/migrations.test.ts`               | 7/7 passed                                    |
+| **Full Integration Suite**             | PASS   | `pnpm test:integration`                                         | 30 files passed (311/311 tests)               |
+| **E2E Tests (P0-C3A HTTP + Postgres)** | PASS   | `vitest run tests/e2e/p0c3-commitment-e2e.test.ts`              | 5/5 passed                                    |
+| **Full E2E Suite**                     | PASS   | `pnpm test:e2e`                                                 | 9 files passed (18/18 tests)                  |
+| **Chaos Suite**                        | PASS   | `pnpm test:chaos`                                               | 5 files passed (27/27 tests)                  |
+| **Full Unit Suite**                    | PASS   | `pnpm test:unit`                                                | 55 files passed (962/962 tests)               |
+| **GitHub CI**                          | PASS   | `.github/workflows/ci.yml` on the PR head                       | `Verify (Node 24 LTS + PostgreSQL 17)` green  |
 
-**Total new P0-C3A tests passed:** 44/44 tests + 7/7 migration verification tests.
+**Total new P0-C3A tests passed:** 50/50 (16 contracts + 12 API + 17 integration + 5 E2E) +
+7/7 migration verification tests.
+
+### 8.1 CTO Review Fixes and the Tests That Prove Them
+
+| Item  | Fix                                                                                                                                                                                | Regression proof                                                                                                                                                                                                                                                                               |
+| ----- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| C3A-1 | Lease validity (worker, epoch, expiry) is decided entirely by SQL; expiry uses `clock_timestamp()`; initial `next_due_at` also comes from the DB clock                             | `determines lease validity entirely via PostgreSQL clock_timestamp() even under extreme application time skew` (DB-valid lease accepted with the app clock at 2036; DB-expired lease rejected with the app clock at 1990)                                                                      |
+| C3A-2 | Publish requires `commitments.status = 'active'`, `tasks.status = 'running'`, `runs.status = 'running'` and a valid lease; locks are taken as commitment → occurrence → task → run | `serialises outcome publication behind a concurrent cancellation and never writes after it` (real second session holds the commitment lock, publisher blocks, then fails closed with `POLICY_DENIED` and 0 outcome rows) + `rejects outcome append if Task is cancelled or Run is not running` |
+| C3A-3 | `completed → cancelled` is rejected with `INVALID_STATE_TRANSITION`; terminal no-ops never bump `version`                                                                          | `strictly forbids completed -> cancelled transition…`, `enforces the full transition table and idempotent terminal semantics`, API unit test and E2E `409 INVALID_STATE_TRANSITION`                                                                                                            |
+| C3A-4 | `StalledPendingOccurrence` returns `tenantId` / `agentId` / `sourceProfileId` / `scheduleKind` / `intervalSeconds` from the DB join; no synthetic tenant                           | `finds stalled occurrences and reconciles task dispatch` asserts every field equals the seeded tenant/agent/profile/schedule values                                                                                                                                                            |

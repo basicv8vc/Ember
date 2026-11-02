@@ -156,6 +156,8 @@ Following CTO Round 1 Review, three P1 adjustments and two additional correction
 - [x] **Old Worker Cannot Bypass Lease Fencing**: Guaranteed by lease epoch checks in `appendOutcomeIfAbsent` and `PostgresBudgetLedger`.
 - [x] **Sentinel Denial Zero Side-Effects**: Guaranteed by fail-closed gate evaluation before any source read, budget reservation, or outcome check.
 - [x] **Worker Crash/Resume Autonomous Healing**: Verified by `reconcileStalled()` chaos tests and real process SIGKILL tests.
+- [x] **Recovered Identity Fully Validated**: `reconcileStalled()` runtime-validates `tenantId`, `agentId`, `sourceProfileId`, and `scheduleKind`; incomplete records are skipped (stay `pending`) without aborting the batch.
+- [x] **Mandatory Cancellation Signal**: `execute()` and `readSnapshot()` require `AbortSignal`; a missing signal is rejected (`INVALID_ARGUMENT`) before any side effect, an aborted one yields `CANCELLED`.
 - [x] **Authoritative Attempt Propagation**: Verified `grant.attempt` dynamically reflects `run.attempt`.
 - [x] **Production Scheduler Default Disabled**: `EMBER_SCHEDULER_ENABLED=false` verified in `apps/worker/src/config.ts`.
 - [x] **Zero Real Network Egress & Zero External Paid Credentials**: Deterministic mock engine and fake reader only; zero external network requests.

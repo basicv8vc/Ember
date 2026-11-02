@@ -5,6 +5,7 @@ import {
   type Sleeper,
 } from '@ember/execution';
 import {
+  buildCommitmentTaskInput,
   deriveTaskCreationIdempotencyKey,
   type DueCommitmentStore,
   type ExistingTaskDispatcher,
@@ -118,15 +119,12 @@ export class CommitmentScheduler {
           occurrenceId: slot.occurrenceId,
           idempotencyKey,
           kind: 'mock.compute',
-          input: {
-            operation: 'sha256',
-            text: JSON.stringify({
-              commitmentId: commitment.commitmentId,
-              occurrenceId: slot.occurrenceId,
-              sourceProfileId: commitment.sourceProfileId,
-              scheduleKind: commitment.scheduleKind,
-            }),
-          },
+          input: buildCommitmentTaskInput({
+            commitmentId: commitment.commitmentId,
+            occurrenceId: slot.occurrenceId,
+            sourceProfileId: commitment.sourceProfileId,
+            scheduleKind: commitment.scheduleKind,
+          }),
         });
 
         // Step 3: Bind task_id to occurrence
@@ -168,21 +166,35 @@ export class CommitmentScheduler {
     let reconciledCount = 0;
 
     for (const occurrence of stalled) {
+      // Fail-closed: recovery must never fabricate tenant/agent identity. The persistent
+      // store is the only trustworthy source for the original identities; if it could not
+      // reconstruct them, the occurrence stays pending (visible to operators) rather than
+      // being dispatched under a synthetic or cross-tenant identity.
+      if (occurrence.tenantId.trim().length === 0 || occurrence.agentId.trim().length === 0) {
+        this.logger?.warn?.(
+          'Skipping stalled occurrence without recoverable authoritative identity',
+          {
+            occurrenceId: occurrence.occurrenceId,
+            commitmentId: occurrence.commitmentId,
+          },
+        );
+        continue;
+      }
+
       try {
         const receipt = await this.dispatcher.dispatchTask({
-          tenantId: 'system', // Handled under existing task idempotency
-          agentId: 'system',
+          tenantId: occurrence.tenantId,
+          agentId: occurrence.agentId,
           commitmentId: occurrence.commitmentId,
           occurrenceId: occurrence.occurrenceId,
           idempotencyKey: occurrence.taskCreationIdempotencyKey,
           kind: 'mock.compute',
-          input: {
-            operation: 'sha256',
-            text: JSON.stringify({
-              commitmentId: occurrence.commitmentId,
-              occurrenceId: occurrence.occurrenceId,
-            }),
-          },
+          input: buildCommitmentTaskInput({
+            commitmentId: occurrence.commitmentId,
+            occurrenceId: occurrence.occurrenceId,
+            sourceProfileId: occurrence.sourceProfileId,
+            scheduleKind: occurrence.scheduleKind,
+          }),
         });
 
         const reconciled = await this.store.reconcilePendingOccurrence(

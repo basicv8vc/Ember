@@ -5,7 +5,9 @@ import { DomainError } from '@ember/domain';
 import { PostgresAgentRepository, PostgresTaskRepository } from '@ember/postgres';
 import {
   CommitmentOrchestrator,
+  createDefaultSentinelPolicy,
   type AppendOutcomeCommand,
+  type OutcomeResultStatus,
   type SourceSnapshot,
   type WorkerLeaseGrant,
 } from '@ember/execution';
@@ -108,6 +110,10 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
             res.push({
               occurrenceId: occ.occurrenceId,
               commitmentId: occ.commitmentId,
+              tenantId: ctx.tenantId,
+              agentId: agent.agentId,
+              sourceProfileId: 'chaos-profile',
+              scheduleKind: 'once',
               scheduledFor: occ.scheduledFor ?? new Date(),
               createdAt: occ.createdAt,
               taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(occ.occurrenceId),
@@ -189,6 +195,23 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
     const committedOutcomes = new Map<string, AppendOutcomeCommand>();
 
     const store = {
+      findAuthoritativeOutcome(
+        grant: WorkerLeaseGrant,
+        context: { occurrenceId: string },
+      ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null> {
+        if (grant.leaseEpoch < authoritativeEpoch) {
+          return Promise.reject(
+            new DomainError(
+              'STALE_LEASE',
+              `Worker epoch ${grant.leaseEpoch} is fenced by ${authoritativeEpoch}`,
+            ),
+          );
+        }
+        const found = committedOutcomes.get(context.occurrenceId);
+        return Promise.resolve(
+          found ? { resultStatus: found.resultStatus, summary: found.summary } : null,
+        );
+      },
       appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean> {
         if (grant.leaseEpoch < authoritativeEpoch) {
           return Promise.reject(
@@ -220,9 +243,17 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
       },
     };
 
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'chaos-fencing-policy',
+      policyVersion: 1,
+      tenantId: tenant.tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
     const orchestrator = new CommitmentOrchestrator({
       store,
       sourceReader,
+      sentinelPolicy,
     });
 
     // Worker 1 starts with Epoch 1
@@ -230,6 +261,7 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
       tenantId: tenant.tenantId,
       taskId,
       runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1,
       workerId: 'worker-stale',
     };
@@ -240,6 +272,7 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
       tenantId: tenant.tenantId,
       taskId,
       runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 2,
       workerId: 'worker-active',
     };

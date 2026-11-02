@@ -13,6 +13,7 @@ export interface WorkerLeaseGrant {
   readonly tenantId: Id;
   readonly taskId: Id;
   readonly runId: Id;
+  readonly attempt: number;
   readonly leaseEpoch: number;
   readonly workerId: string;
 }
@@ -45,9 +46,23 @@ export interface AppendOutcomeCommand {
   readonly resultStatus: OutcomeResultStatus;
 }
 
+/**
+ * A pending occurrence whose dispatch never completed (worker crash between slot reservation
+ * and task binding).
+ *
+ * Every business identity here MUST be recovered from the trusted persistent layer (the
+ * commitment / occurrence rows), never synthesized by the scheduler or the worker. Implementations
+ * that cannot resolve the original `tenantId` / `agentId` / `sourceProfileId` / `scheduleKind`
+ * must leave the occurrence untouched instead of returning placeholder identities; the scheduler
+ * additionally refuses to dispatch an occurrence whose identity is blank.
+ */
 export interface StalledPendingOccurrence {
   readonly occurrenceId: Id;
   readonly commitmentId: Id;
+  readonly tenantId: Id;
+  readonly agentId: Id;
+  readonly sourceProfileId: string;
+  readonly scheduleKind: ScheduleKind;
   readonly scheduledFor: Date;
   readonly createdAt: Date;
   readonly taskCreationIdempotencyKey: string;
@@ -59,6 +74,27 @@ export interface StalledPendingOccurrence {
  */
 export function deriveTaskCreationIdempotencyKey(occurrenceId: Id): string {
   return `commitment-occ:${occurrenceId}`;
+}
+
+/**
+ * Builds canonical commitment task input with semantic parity between regular dispatch
+ * and crash recovery.
+ */
+export function buildCommitmentTaskInput(params: {
+  readonly commitmentId: Id;
+  readonly occurrenceId: Id;
+  readonly sourceProfileId: string;
+  readonly scheduleKind: ScheduleKind;
+}): { readonly operation: 'sha256'; readonly text: string } {
+  return {
+    operation: 'sha256',
+    text: JSON.stringify({
+      commitmentId: params.commitmentId,
+      occurrenceId: params.occurrenceId,
+      sourceProfileId: params.sourceProfileId,
+      scheduleKind: params.scheduleKind,
+    }),
+  };
 }
 
 /**

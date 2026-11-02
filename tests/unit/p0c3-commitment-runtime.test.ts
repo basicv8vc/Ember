@@ -7,6 +7,9 @@ import {
   FakeSummaryEngine,
   MAX_SUMMARY_LENGTH,
   type AppendOutcomeCommand,
+  type CommitmentOrchestrationContext,
+  type OutcomeResultStatus,
+  type SentinelPolicy,
   type SourceSnapshot,
   type WorkerLeaseGrant,
 } from '@ember/execution';
@@ -27,7 +30,52 @@ class MockCommitmentStore {
   public completedCommitments = new Set<string>();
   public cancelledCommitments = new Set<string>();
   public activeLeaseEpochs = new Map<string, number>(); // taskId -> valid leaseEpoch
+  public revokedConsentProfiles = new Set<string>();
   public appendCallCount = 0;
+
+  findAuthoritativeOutcome(
+    grant: WorkerLeaseGrant,
+    context: CommitmentOrchestrationContext,
+  ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null> {
+    // 1. Authoritative Tenant check
+    if (grant.tenantId !== context.tenantId) {
+      throw new DomainError('POLICY_DENIED', 'Cross-tenant outcome access prohibited');
+    }
+
+    // 2. Active lease epoch check
+    const validEpoch = this.activeLeaseEpochs.get(grant.taskId);
+    if (validEpoch !== undefined && grant.leaseEpoch < validEpoch) {
+      throw new DomainError('STALE_LEASE', `Worker lease epoch ${grant.leaseEpoch} is stale`);
+    }
+
+    // 3. Commitment cancellation check
+    if (this.cancelledCommitments.has(context.commitmentId)) {
+      throw new DomainError('POLICY_DENIED', 'Commitment was cancelled; cannot replay outcome');
+    }
+
+    // 4. Consent check
+    if (
+      this.revokedConsentProfiles.has(context.sourceProfileId) ||
+      context.consentStatus === 'revoked'
+    ) {
+      throw new DomainError('POLICY_DENIED', 'Source consent has been revoked');
+    }
+
+    const found = this.outcomes.get(context.occurrenceId);
+    if (!found) {
+      return Promise.resolve(null);
+    }
+
+    // 5. Task lineage check: ensure outcome belongs to the same task
+    if (found.taskId !== grant.taskId) {
+      throw new DomainError('POLICY_DENIED', 'Task ID mismatch on occurrence outcome');
+    }
+
+    return Promise.resolve({
+      resultStatus: found.resultStatus,
+      summary: found.summary,
+    });
+  }
 
   appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean> {
     this.appendCallCount++;
@@ -45,6 +93,10 @@ class MockCommitmentStore {
 
     // Idempotent duplicate check: UNIQUE (occurrence_id)
     if (this.outcomes.has(cmd.occurrenceId)) {
+      const existing = this.outcomes.get(cmd.occurrenceId)!;
+      if (existing.taskId !== grant.taskId) {
+        throw new DomainError('POLICY_DENIED', 'Task lineage conflict on occurrence');
+      }
       return Promise.resolve(false); // Replayed
     }
 
@@ -167,7 +219,7 @@ class MockBudgetLedger implements BudgetLedger {
 }
 
 describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
-  it('C3-T05: Sentinel deny results in 0 budget reservation and 0 source callback', async () => {
+  it('C3-T05: Sentinel deny results in 0 budget reservation, 0 source callback, 0 outcome append', async () => {
     const store = new MockCommitmentStore();
     const sourceReader = new MockSourceReader();
     const budget = new MockBudgetLedger();
@@ -192,6 +244,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       tenantId,
       taskId: randomUUID(),
       runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1,
       workerId: 'worker-1',
     };
@@ -210,9 +263,199 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
 
-    // CRITICAL INVARIANT: Zero budget reservation, Zero source callback
+    // CRITICAL INVARIANT: Zero budget reservation, Zero source callback, Zero outcome write
     expect(budget.reserveCallCount).toBe(0);
     expect(sourceReader.readCallCount).toBe(0);
+    expect(store.appendCallCount).toBe(0);
+  });
+
+  it('P1-2 Fail-Closed: Unconfigured Sentinel policy rejects with 0 side effects', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    // Orchestrator without sentinelPolicy configured
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      // sentinelPolicy intentionally omitted -> MUST FAIL CLOSED!
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      policyVersion: 1,
+    };
+
+    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    // Assert: zero side effects on deny
+    expect(sourceReader.readCallCount).toBe(0);
+    expect(budget.reserveCallCount).toBe(0);
+    expect(store.appendCallCount).toBe(0);
+  });
+
+  it('P1-2 Fail-Closed: Invalid Sentinel policy rejects with 0 side effects', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    // Malformed policy: fails the strict Sentinel policy schema during evaluation
+    const invalidPolicy = {
+      policyId: 'broken-policy',
+      policyVersion: 'not-a-number',
+      tenantId,
+      allowedActions: ['mock.compute'],
+    } as unknown as SentinelPolicy;
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      sentinelPolicy: invalidPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      policyVersion: 1,
+    };
+
+    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    // Assert: zero side effects on an invalid policy
+    expect(sourceReader.readCallCount).toBe(0);
+    expect(budget.reserveCallCount).toBe(0);
+    expect(store.appendCallCount).toBe(0);
+  });
+
+  it('P1-2 Fail-Closed: Sentinel version mismatch rejects with 0 side effects', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 2, // Version 2
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      policyVersion: 1, // Mismatch (Version 1 vs 2)!
+    };
+
+    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    expect(sourceReader.readCallCount).toBe(0);
+    expect(budget.reserveCallCount).toBe(0);
+    expect(store.appendCallCount).toBe(0);
+  });
+
+  it('P1-2 Fail-Closed: Sentinel tenant mismatch rejects with 0 side effects', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId: tenantA, // Bound to Tenant A
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId: tenantB, // Tenant B attempting to execute under Tenant A's policy
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId: tenantB,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'once' as const,
+      policyVersion: 1,
+    };
+
+    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+
+    expect(sourceReader.readCallCount).toBe(0);
+    expect(budget.reserveCallCount).toBe(0);
     expect(store.appendCallCount).toBe(0);
   });
 
@@ -241,6 +484,7 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       tenantId,
       taskId: randomUUID(),
       runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1,
       workerId: 'worker-1',
     };
@@ -315,31 +559,43 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
   it('lease fencing: stale worker cannot append outcome', async () => {
     const store = new MockCommitmentStore();
     const sourceReader = new MockSourceReader();
+    const tenantId = randomUUID();
+    const taskId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-fencing-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
 
     // Active lease epoch on this task is 2 (e.g. new worker took over after crash)
-    store.activeLeaseEpochs.set('task-fenced', 2);
+    store.activeLeaseEpochs.set(taskId, 2);
 
     const orchestrator = new CommitmentOrchestrator({
       store,
       sourceReader,
+      sentinelPolicy,
     });
 
     // Old worker attempts to write with leaseEpoch 1
     const staleGrant: WorkerLeaseGrant = {
-      tenantId: 'tenant-test',
-      taskId: 'task-fenced',
-      runId: 'run-old',
+      tenantId,
+      taskId,
+      runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1, // Stale!
       workerId: 'worker-old',
     };
 
     const context = {
-      tenantId: 'tenant-test',
-      agentId: 'agent-1',
-      commitmentId: 'commit-1',
-      occurrenceId: 'occ-1',
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
       sourceProfileId: 'profile-finance',
       scheduleKind: 'interval' as const,
+      policyVersion: 1,
     };
 
     await expect(orchestrator.execute(staleGrant, context)).rejects.toThrowError(
@@ -350,30 +606,42 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
   it('cancel check: commitment cancelled during execution fails closed at publication', async () => {
     const store = new MockCommitmentStore();
     const sourceReader = new MockSourceReader();
+    const tenantId = randomUUID();
+    const commitmentId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-cancel-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
 
     // Commitment was cancelled
-    store.cancelledCommitments.add('commit-cancelled');
+    store.cancelledCommitments.add(commitmentId);
 
     const orchestrator = new CommitmentOrchestrator({
       store,
       sourceReader,
+      sentinelPolicy,
     });
 
     const grant: WorkerLeaseGrant = {
-      tenantId: 'tenant-test',
-      taskId: 'task-1',
-      runId: 'run-1',
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1,
       workerId: 'worker-1',
     };
 
     const context = {
-      tenantId: 'tenant-test',
-      agentId: 'agent-1',
-      commitmentId: 'commit-cancelled',
-      occurrenceId: 'occ-1',
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId,
+      occurrenceId: randomUUID(),
       sourceProfileId: 'profile-finance',
       scheduleKind: 'interval' as const,
+      policyVersion: 1,
     };
 
     await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
@@ -382,32 +650,333 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     expect(store.outcomes.size).toBe(0);
   });
 
-  it('duplicate execution reuses already committed outcome without duplicate rows', async () => {
+  it('P1-3: Outcome Replay Authorization: Stale lease replay attempt is rejected with STALE_LEASE', async () => {
     const store = new MockCommitmentStore();
     const sourceReader = new MockSourceReader();
-    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+    const taskId = randomUUID();
+    const occurrenceId = randomUUID();
 
-    const orchestrator = new CommitmentOrchestrator({
-      store,
-      sourceReader,
-      budget,
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
     });
 
-    const grant: WorkerLeaseGrant = {
-      tenantId: 'tenant-test',
-      taskId: 'task-1',
-      runId: 'run-1',
+    // First execution: commits outcome with leaseEpoch 1
+    const validGrant: WorkerLeaseGrant = {
+      tenantId,
+      taskId,
+      runId: randomUUID(),
+      attempt: 1,
       leaseEpoch: 1,
       workerId: 'worker-1',
     };
 
     const context = {
-      tenantId: 'tenant-test',
-      agentId: 'agent-1',
-      commitmentId: 'commit-1',
-      occurrenceId: 'occ-replay',
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId,
       sourceProfileId: 'profile-finance',
       scheduleKind: 'interval' as const,
+      policyVersion: 1,
+    };
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      sentinelPolicy,
+    });
+
+    const firstResult = await orchestrator.execute(validGrant, context);
+    expect(firstResult.outcomeCommitted).toBe(true);
+
+    // Active lease epoch on task is bumped to 2 (Worker 2 lease takeover)
+    store.activeLeaseEpochs.set(taskId, 2);
+
+    // Worker 1 wakes up and attempts to replay outcome using old leaseEpoch 1 -> MUST BE REJECTED!
+    await expect(orchestrator.execute(validGrant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'STALE_LEASE' }),
+    );
+  });
+
+  it('P1-3: Outcome Replay Authorization: Cross-tenant replay attempt is rejected with POLICY_DENIED', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const tenantA = randomUUID();
+    const tenantB = randomUUID();
+    const taskId = randomUUID();
+    const occurrenceId = randomUUID();
+
+    const policyA = createDefaultSentinelPolicy({
+      policyId: 'policy-a',
+      policyVersion: 1,
+      tenantId: tenantA,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const policyB = createDefaultSentinelPolicy({
+      policyId: 'policy-b',
+      policyVersion: 1,
+      tenantId: tenantB,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestratorA = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      sentinelPolicy: policyA,
+    });
+
+    // Tenant A executes occurrence
+    const grantA: WorkerLeaseGrant = {
+      tenantId: tenantA,
+      taskId,
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-a',
+    };
+
+    const contextA = {
+      tenantId: tenantA,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId,
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'interval' as const,
+      policyVersion: 1,
+    };
+
+    await orchestratorA.execute(grantA, contextA);
+
+    // Tenant B attempts to read/replay Tenant A's outcome using Tenant B's grant
+    const orchestratorB = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      sentinelPolicy: policyB,
+    });
+
+    const grantB: WorkerLeaseGrant = {
+      tenantId: tenantB,
+      taskId,
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-b',
+    };
+
+    // Passing Tenant A context with Tenant B grant
+    await expect(orchestratorB.execute(grantB, contextA)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+  });
+
+  it('P1-3: Outcome Replay Authorization: Cancelled commitment replay attempt is rejected with POLICY_DENIED', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const tenantId = randomUUID();
+    const commitmentId = randomUUID();
+    const occurrenceId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId,
+      occurrenceId,
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'interval' as const,
+      policyVersion: 1,
+    };
+
+    // First run completes
+    await orchestrator.execute(grant, context);
+
+    // Commitment is now cancelled
+    store.cancelledCommitments.add(commitmentId);
+
+    // Replay attempt must fail closed!
+    await expect(orchestrator.execute(grant, context)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+  });
+
+  it('P1-3: Outcome Replay Authorization: Revoked consent replay attempt is rejected with POLICY_DENIED', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const tenantId = randomUUID();
+    const commitmentId = randomUUID();
+    const occurrenceId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId,
+      occurrenceId,
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'interval' as const,
+      policyVersion: 1,
+      consentStatus: 'active' as const,
+    };
+
+    // First run completes
+    await orchestrator.execute(grant, context);
+
+    // Consent is subsequently revoked
+    const revokedContext = {
+      ...context,
+      consentStatus: 'revoked' as const,
+    };
+
+    // Replay attempt must fail closed!
+    await expect(orchestrator.execute(grant, revokedContext)).rejects.toThrowError(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
+  });
+
+  it('P1-3: Without an authoritative replay lookup the transactional append still yields exactly one outcome', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    // Store without `findAuthoritativeOutcome`: no pre-execution replay shortcut exists,
+    // so idempotency must come from the durable, lease-fenced append.
+    const storeWithoutReplayLookup = {
+      appendOutcomeIfAbsent: store.appendOutcomeIfAbsent.bind(store),
+      markCommitmentCompleted: store.markCommitmentCompleted.bind(store),
+    };
+
+    const orchestrator = new CommitmentOrchestrator({
+      store: storeWithoutReplayLookup,
+      sourceReader,
+      budget,
+      sentinelPolicy,
+    });
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId: randomUUID(),
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId: randomUUID(),
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'interval' as const,
+      policyVersion: 1,
+    };
+
+    const firstResult = await orchestrator.execute(grant, context);
+    expect(firstResult.outcomeCommitted).toBe(true);
+
+    const secondResult = await orchestrator.execute(grant, context);
+    expect(secondResult.outcomeCommitted).toBe(false);
+    expect(secondResult.replayed).toBe(true);
+
+    // The durable append is the single source of truth: exactly one visible outcome.
+    expect(store.outcomes.size).toBe(1);
+  });
+
+  it('P1-3: Legitimate replay in same lineage returns replayed outcome without duplicate rows or extra budget', async () => {
+    const store = new MockCommitmentStore();
+    const sourceReader = new MockSourceReader();
+    const budget = new MockBudgetLedger();
+    const tenantId = randomUUID();
+
+    const sentinelPolicy = createDefaultSentinelPolicy({
+      policyId: 'test-policy',
+      policyVersion: 1,
+      tenantId,
+      allowedActions: ['mock.read', 'mock.compute'],
+    });
+
+    const orchestrator = new CommitmentOrchestrator({
+      store,
+      sourceReader,
+      budget,
+      sentinelPolicy,
+    });
+
+    const taskId = randomUUID();
+    const occurrenceId = randomUUID();
+
+    const grant: WorkerLeaseGrant = {
+      tenantId,
+      taskId,
+      runId: randomUUID(),
+      attempt: 1,
+      leaseEpoch: 1,
+      workerId: 'worker-1',
+    };
+
+    const context = {
+      tenantId,
+      agentId: randomUUID(),
+      commitmentId: randomUUID(),
+      occurrenceId,
+      sourceProfileId: 'profile-finance',
+      scheduleKind: 'interval' as const,
+      policyVersion: 1,
     };
 
     // First execution
@@ -422,7 +991,8 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     expect(secondResult.replayed).toBe(true);
     expect(store.outcomes.size).toBe(1); // STILL EXACTLY 1 OUTCOME!
 
-    // Replay releases the second budget reservation instead of charging twice
-    expect(budget.releaseCallCount).toBe(1);
+    // Second call returned authoritative outcome without re-reserving budget
+    expect(budget.reserveCallCount).toBe(1);
+    expect(budget.settleCallCount).toBe(1);
   });
 });

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { AuthContext } from '@ember/domain';
+import { DomainError } from '@ember/domain';
 import {
   PostgresAgentRepository,
   PostgresBudgetLedger,
@@ -90,10 +91,14 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
     let commitmentMarkedCompleted = false;
 
     const storePort = {
-      findOutcome(
-        occId: string,
+      findAuthoritativeOutcome(
+        grant: WorkerLeaseGrant,
+        context: { occurrenceId: string; tenantId: string },
       ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null> {
-        const found = committedOutcomes.get(occId);
+        if (grant.tenantId !== context.tenantId) {
+          return Promise.reject(new DomainError('POLICY_DENIED', 'Cross-tenant access prohibited'));
+        }
+        const found = committedOutcomes.get(context.occurrenceId);
         return Promise.resolve(
           found ? { resultStatus: found.resultStatus, summary: found.summary } : null,
         );
@@ -153,6 +158,7 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
       tenantId: leasedRun!.tenantId,
       taskId: leasedRun!.taskId,
       runId: leasedRun!.runId,
+      attempt: leasedRun!.attempt,
       leaseEpoch: leasedRun!.leaseEpoch,
       workerId: WORKER_ID,
     };

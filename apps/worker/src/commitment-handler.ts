@@ -84,6 +84,7 @@ export function createCommitmentRunHandler(deps: CommitmentRunHandlerDependencie
         tenantId: context.tenantId,
         taskId: context.taskId,
         runId: context.runId,
+        attempt: run.attempt,
         leaseEpoch: context.leaseEpoch,
         workerId: context.workerId ?? 'worker-unknown',
       };

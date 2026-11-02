@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import { CommitmentScheduler } from '../../apps/worker/src/commitment-scheduler.js';
 import {
+  buildCommitmentTaskInput,
   deriveTaskCreationIdempotencyKey,
   type AppendOutcomeCommand,
   type CommitmentStatus,
@@ -183,9 +184,16 @@ class InMemoryDueCommitmentStore implements DueCommitmentStore {
         now - occ.createdAt.getTime() >= timeoutSeconds * 1000 &&
         occ.taskId === null
       ) {
+        const commitment = this.commitments.get(occ.commitmentId);
+        // Identity is only recoverable from the trusted commitment row. When it is missing we
+        // emit blank identities (never a synthetic tenant/agent) so the scheduler fails closed.
         result.push({
           occurrenceId: occ.occurrenceId,
           commitmentId: occ.commitmentId,
+          tenantId: commitment?.tenantId ?? '',
+          agentId: commitment?.agentId ?? '',
+          sourceProfileId: commitment?.sourceProfileId ?? '',
+          scheduleKind: commitment?.scheduleKind ?? 'once',
           scheduledFor: occ.scheduledFor,
           createdAt: occ.createdAt,
           taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(occ.occurrenceId),
@@ -405,6 +413,20 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
     const occId = 'stalled-occ-1';
     const oldTime = new Date(Date.now() - 120 * 1000); // 120 seconds ago
 
+    // The commitment row is the trusted source of the occurrence's business identity
+    store.commitments.set('c-stalled', {
+      commitmentId: 'c-stalled',
+      tenantId: 'tenant-stalled',
+      agentId: 'agent-stalled',
+      title: 'Stalled Commitment',
+      sourceProfileId: 'profile-alpha',
+      scheduleKind: 'interval',
+      intervalSeconds: 3600,
+      nextDueAt: oldTime,
+      version: 1,
+      status: 'active',
+    });
+
     // Simulate an occurrence created before a worker process crashed
     store.occurrences.set(occId, {
       occurrenceId: occId,
@@ -429,5 +451,152 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
     // Running reconcile again should find 0 stalled
     const reconciledCount2 = await scheduler.reconcileStalled();
     expect(reconciledCount2).toBe(0);
+  });
+
+  it('P1-1 Fail-Closed: stalled occurrence without recoverable identity is never dispatched', async () => {
+    const store = new InMemoryDueCommitmentStore();
+    const dispatcher = new InMemoryTaskDispatcher();
+    const scheduler = new CommitmentScheduler(store, dispatcher, {
+      enabled: true,
+      stalledTimeoutSeconds: 60,
+    });
+
+    const occId = 'stalled-occ-orphan';
+    const oldTime = new Date(Date.now() - 180 * 1000);
+
+    // The commitment row is gone, so the trusted layer cannot reconstruct the original
+    // tenantId / agentId / sourceProfileId / scheduleKind for this occurrence.
+    store.occurrences.set(occId, {
+      occurrenceId: occId,
+      commitmentId: 'c-missing',
+      scheduledFor: oldTime,
+      status: 'pending',
+      taskId: null,
+      createdAt: oldTime,
+    });
+
+    const reconciledCount = await scheduler.reconcileStalled();
+
+    // Nothing is dispatched: the scheduler refuses to invent an identity.
+    expect(reconciledCount).toBe(0);
+    expect(dispatcher.dispatchCount).toBe(0);
+    expect(dispatcher.dispatchedTasks.size).toBe(0);
+
+    // The occurrence is left pending for operator attention, not silently consumed.
+    const occ = store.occurrences.get(occId)!;
+    expect(occ.status).toBe('pending');
+    expect(occ.taskId).toBeNull();
+  });
+
+  it('P1-1: Crash recovery preserves original tenantId, agentId, payload semantic parity and cross-tenant isolation', async () => {
+    const store = new InMemoryDueCommitmentStore();
+    const dispatcher = new InMemoryTaskDispatcher();
+    const scheduler = new CommitmentScheduler(store, dispatcher, {
+      enabled: true,
+      stalledTimeoutSeconds: 60,
+    });
+
+    const tenantA = randomUUID();
+    const agentA = randomUUID();
+    const commitmentA = randomUUID();
+    const occIdA = randomUUID();
+
+    const tenantB = randomUUID();
+    const agentB = randomUUID();
+    const commitmentB = randomUUID();
+    const occIdB = randomUUID();
+
+    const oldTime = new Date(Date.now() - 180 * 1000); // 3 minutes ago
+
+    // Register Tenant A and Tenant B commitments in store
+    store.commitments.set(commitmentA, {
+      commitmentId: commitmentA,
+      tenantId: tenantA,
+      agentId: agentA,
+      title: 'Tenant A Commitment',
+      sourceProfileId: 'profile-finance-a',
+      scheduleKind: 'interval',
+      intervalSeconds: 3600,
+      nextDueAt: oldTime,
+      version: 1,
+      status: 'active',
+    });
+
+    store.commitments.set(commitmentB, {
+      commitmentId: commitmentB,
+      tenantId: tenantB,
+      agentId: agentB,
+      title: 'Tenant B Commitment',
+      sourceProfileId: 'profile-marketing-b',
+      scheduleKind: 'once',
+      intervalSeconds: null,
+      nextDueAt: oldTime,
+      version: 1,
+      status: 'active',
+    });
+
+    // Simulate stalled pending occurrences following worker crash
+    store.occurrences.set(occIdA, {
+      occurrenceId: occIdA,
+      commitmentId: commitmentA,
+      scheduledFor: oldTime,
+      status: 'pending',
+      taskId: null,
+      createdAt: oldTime,
+    });
+
+    store.occurrences.set(occIdB, {
+      occurrenceId: occIdB,
+      commitmentId: commitmentB,
+      scheduledFor: oldTime,
+      status: 'pending',
+      taskId: null,
+      createdAt: oldTime,
+    });
+
+    // Reconcile stalled occurrences
+    const count = await scheduler.reconcileStalled();
+    expect(count).toBe(2);
+
+    // Verify Tenant A task
+    const keyA = deriveTaskCreationIdempotencyKey(occIdA);
+    const taskA = dispatcher.dispatchedTasks.get(keyA);
+    expect(taskA).toBeDefined();
+    expect(taskA!.cmd.tenantId).toBe(tenantA);
+    expect(taskA!.cmd.tenantId).not.toBe('system');
+    expect(taskA!.cmd.agentId).toBe(agentA);
+    expect(taskA!.cmd.agentId).not.toBe('system');
+
+    // Semantic parity: verify payload matches buildCommitmentTaskInput
+    const expectedInputA = buildCommitmentTaskInput({
+      commitmentId: commitmentA,
+      occurrenceId: occIdA,
+      sourceProfileId: 'profile-finance-a',
+      scheduleKind: 'interval',
+    });
+    expect(taskA!.cmd.input).toEqual(expectedInputA);
+
+    // Verify Tenant B task
+    const keyB = deriveTaskCreationIdempotencyKey(occIdB);
+    const taskB = dispatcher.dispatchedTasks.get(keyB);
+    expect(taskB).toBeDefined();
+    expect(taskB!.cmd.tenantId).toBe(tenantB);
+    expect(taskB!.cmd.tenantId).not.toBe('system');
+    expect(taskB!.cmd.agentId).toBe(agentB);
+    expect(taskB!.cmd.agentId).not.toBe('system');
+
+    const expectedInputB = buildCommitmentTaskInput({
+      commitmentId: commitmentB,
+      occurrenceId: occIdB,
+      sourceProfileId: 'profile-marketing-b',
+      scheduleKind: 'once',
+    });
+    expect(taskB!.cmd.input).toEqual(expectedInputB);
+
+    // Cross-tenant isolation check: Tenant A task NEVER leaks Tenant B data
+    expect(taskA!.cmd.tenantId).not.toBe(tenantB);
+    expect(taskA!.cmd.agentId).not.toBe(agentB);
+    expect(taskB!.cmd.tenantId).not.toBe(tenantA);
+    expect(taskB!.cmd.agentId).not.toBe(agentA);
   });
 });

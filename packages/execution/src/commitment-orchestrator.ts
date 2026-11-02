@@ -16,6 +16,7 @@ export interface WorkerLeaseGrant {
   readonly tenantId: Id;
   readonly taskId: Id;
   readonly runId: Id;
+  readonly attempt: number;
   readonly leaseEpoch: number;
   readonly workerId: string;
 }
@@ -37,6 +38,7 @@ export interface CommitmentOrchestrationContext {
   readonly sourceProfileId: string;
   readonly scheduleKind: 'once' | 'interval';
   readonly policyVersion?: number;
+  readonly consentStatus?: 'active' | 'revoked';
 }
 
 export interface OrchestrationResult {
@@ -55,8 +57,24 @@ export interface AppendOutcomeCommand {
 }
 
 export interface CommitmentStorePort {
-  findOutcome?(
-    occurrenceId: Id,
+  /**
+   * OPTIONAL authoritative replay lookup.
+   *
+   * Implementations MUST authenticate the *current* request before returning any stored
+   * summary. A lookup keyed solely on `occurrenceId` is forbidden: the implementation must
+   * verify, against authoritative state (preferably inside a single PostgreSQL transaction):
+   * - `grant.tenantId === context.tenantId` (cross-tenant access throws `POLICY_DENIED`),
+   * - the occurrence belongs to `grant.taskId` (task lineage),
+   * - `grant.leaseEpoch` is the active lease epoch for the task (stale lease throws `STALE_LEASE`),
+   * - the commitment is not cancelled/completed-invalid (throws `POLICY_DENIED`),
+   * - consent for `context.sourceProfileId` is still active (throws `POLICY_DENIED`).
+   *
+   * When this method is absent, the orchestrator performs no pre-execution replay shortcut and
+   * relies exclusively on the transactional `appendOutcomeIfAbsent` fencing below.
+   */
+  findAuthoritativeOutcome?(
+    grant: WorkerLeaseGrant,
+    context: CommitmentOrchestrationContext,
   ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null>;
 
   appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;
@@ -127,9 +145,17 @@ export class CommitmentOrchestrator {
       throw new DomainError('CANCELLED', 'Occurrence execution was aborted before start');
     }
 
-    // 0. Pre-execution replay check: if outcome was already committed, do not re-run or re-charge
-    if (typeof this.store.findOutcome === 'function') {
-      const existing = await this.store.findOutcome(context.occurrenceId);
+    // 1. Sentinel Admission Gate: Evaluated first before any source read, budget reservation, or outcome check
+    this.enforceSentinelAdmission(grant, context);
+
+    // 2. Consent check: if revoked, fail-closed immediately
+    if (context.consentStatus === 'revoked') {
+      throw new DomainError('POLICY_DENIED', 'Consent has been revoked for this source profile');
+    }
+
+    // 3. Authoritative replay check: validates tenant, task, lease, commitment status, and consent
+    if (typeof this.store.findAuthoritativeOutcome === 'function') {
+      const existing = await this.store.findAuthoritativeOutcome(grant, context);
       if (existing) {
         return {
           outcomeCommitted: false,
@@ -140,16 +166,13 @@ export class CommitmentOrchestrator {
       }
     }
 
-    // 1. Sentinel Admission Gate (Evaluated before any side effects)
-    this.enforceSentinelAdmission(grant, context);
-
-    // 2. Budget Reservation (If configured)
+    // 4. Budget Reservation (If configured)
     const runGrant: RunGrant = {
       tenantId: grant.tenantId,
       taskId: grant.taskId,
       runId: grant.runId,
       agentId: context.agentId,
-      attempt: 1,
+      attempt: grant.attempt,
       leaseEpoch: grant.leaseEpoch,
       workerId: grant.workerId,
     };
@@ -172,7 +195,7 @@ export class CommitmentOrchestrator {
         throw new DomainError('CANCELLED', 'Execution aborted after budget reservation');
       }
 
-      // 3. Source Snapshot Read
+      // 5. Source Snapshot Read
       const trustedContext: TrustedSourceAccessContext = {
         tenantId: grant.tenantId,
         commitmentId: context.commitmentId,
@@ -188,10 +211,10 @@ export class CommitmentOrchestrator {
         signal,
       );
 
-      // 4. Deterministic Summary Generation
+      // 6. Deterministic Summary Generation
       const summaryResult = this.summaryEngine.generate(snapshot);
 
-      // 5. Durably Append Outcome with Lease Fencing
+      // 7. Durably Append Outcome with Lease Fencing
       const appended = await this.store.appendOutcomeIfAbsent(grant, {
         occurrenceId: context.occurrenceId,
         commitmentId: context.commitmentId,
@@ -200,7 +223,7 @@ export class CommitmentOrchestrator {
         resultStatus: summaryResult.resultStatus,
       });
 
-      // 6. Complete One-Shot Commitment if Applicable
+      // 8. Complete One-Shot Commitment if Applicable
       if (context.scheduleKind === 'once' && appended) {
         await this.store.markCommitmentCompleted(context.commitmentId).catch((err) => {
           this.logger?.warn('Failed to mark one-shot commitment completed', {
@@ -210,7 +233,7 @@ export class CommitmentOrchestrator {
         });
       }
 
-      // 7. Settle Budget
+      // 9. Settle Budget
       if (this.budget) {
         if (!appended) {
           // Replayed operation: release reservation
@@ -248,13 +271,27 @@ export class CommitmentOrchestrator {
     context: CommitmentOrchestrationContext,
   ): void {
     if (!this.sentinelPolicyResolver) {
-      return; // Permissive if no policy supplied (e.g. basic unit test)
+      throw toSentinelDeniedError({
+        verdict: 'deny',
+        reason: 'DENY_INVALID_POLICY',
+        actionCategory: 'mock.compute',
+        policyVersion: context.policyVersion ?? 1,
+      });
     }
 
     const policy =
       typeof this.sentinelPolicyResolver === 'function'
         ? this.sentinelPolicyResolver(context)
         : this.sentinelPolicyResolver;
+
+    if (!policy) {
+      throw toSentinelDeniedError({
+        verdict: 'deny',
+        reason: 'DENY_INVALID_POLICY',
+        actionCategory: 'mock.compute',
+        policyVersion: context.policyVersion ?? 1,
+      });
+    }
 
     const intent = {
       tenantId: grant.tenantId,

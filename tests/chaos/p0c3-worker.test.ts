@@ -117,6 +117,7 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
               agentId: agent.agentId,
               sourceProfileId: 'chaos-profile',
               scheduleKind: 'once',
+              intervalSeconds: null,
               scheduledFor: occ.scheduledFor ?? new Date(),
               createdAt: occ.createdAt,
               taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(occ.occurrenceId),
@@ -134,8 +135,14 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
         }
         return Promise.resolve(false);
       },
-      markOccurrenceFailed(): Promise<void> {
-        return Promise.resolve();
+      findOccurrenceExecutionIdentity(): Promise<null> {
+        return Promise.resolve(null);
+      },
+      finalizeOccurrenceFromTask(): Promise<boolean> {
+        return Promise.resolve(false);
+      },
+      reconcileTerminalOccurrences(): Promise<number> {
+        return Promise.resolve(0);
       },
     };
 
@@ -350,8 +357,14 @@ describe('P0-C3B: Worker & Scheduler Chaos Verification', () => {
       reconcilePendingOccurrence(): Promise<boolean> {
         return Promise.resolve(false);
       },
-      markOccurrenceFailed(): Promise<void> {
-        return Promise.resolve();
+      findOccurrenceExecutionIdentity(): Promise<null> {
+        return Promise.resolve(null);
+      },
+      finalizeOccurrenceFromTask(): Promise<boolean> {
+        return Promise.resolve(false);
+      },
+      reconcileTerminalOccurrences(): Promise<number> {
+        return Promise.resolve(0);
       },
     };
 

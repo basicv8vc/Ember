@@ -7,7 +7,6 @@ import {
   FakeSummaryEngine,
   MAX_SUMMARY_LENGTH,
   type AppendOutcomeCommand,
-  type CommitmentOrchestrationContext,
   type OutcomeResultStatus,
   type SentinelPolicy,
   type SourceSnapshot,
@@ -38,13 +37,17 @@ class MockCommitmentStore {
   public activeLeaseEpochs = new Map<string, number>(); // taskId -> valid leaseEpoch
   public revokedConsentProfiles = new Set<string>();
   public appendCallCount = 0;
+  /** Persisted tenant/profile per occurrence, so replay authorization is store-derived. */
+  public outcomeTenants = new Map<string, string>();
+  public outcomeProfiles = new Map<string, string>();
 
   findAuthoritativeOutcome(
     grant: WorkerLeaseGrant,
-    context: CommitmentOrchestrationContext,
+    query: { readonly occurrenceId: string; readonly commitmentId: string },
   ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null> {
-    // 1. Authoritative Tenant check
-    if (grant.tenantId !== context.tenantId) {
+    // 1. Authoritative tenant check, derived from the persisted outcome row
+    const ownerTenant = this.outcomeTenants.get(query.occurrenceId);
+    if (ownerTenant !== undefined && ownerTenant !== grant.tenantId) {
       throw new DomainError('POLICY_DENIED', 'Cross-tenant outcome access prohibited');
     }
 
@@ -55,19 +58,17 @@ class MockCommitmentStore {
     }
 
     // 3. Commitment cancellation check
-    if (this.cancelledCommitments.has(context.commitmentId)) {
+    if (this.cancelledCommitments.has(query.commitmentId)) {
       throw new DomainError('POLICY_DENIED', 'Commitment was cancelled; cannot replay outcome');
     }
 
-    // 4. Consent check
-    if (
-      this.revokedConsentProfiles.has(context.sourceProfileId) ||
-      context.consentStatus === 'revoked'
-    ) {
+    // 4. Consent check (authoritative store state only; the caller can never supply it)
+    const profileId = this.outcomeProfiles.get(query.occurrenceId);
+    if (profileId !== undefined && this.revokedConsentProfiles.has(profileId)) {
       throw new DomainError('POLICY_DENIED', 'Source consent has been revoked');
     }
 
-    const found = this.outcomes.get(context.occurrenceId);
+    const found = this.outcomes.get(query.occurrenceId);
     if (!found) {
       return Promise.resolve(null);
     }
@@ -111,6 +112,7 @@ class MockCommitmentStore {
       grant,
       committedAt: new Date(),
     });
+    this.outcomeTenants.set(cmd.occurrenceId, grant.tenantId);
 
     return Promise.resolve(true);
   }
@@ -645,8 +647,10 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
     expect(budget.settleCallCount).toBe(1);
     expect(budget.releaseCallCount).toBe(0);
 
-    // One-shot commitment marked completed
-    expect(store.completedCommitments.has(commitmentId)).toBe(true);
+    // One-shot completion is now part of the publication transaction
+    // (`PostgresCommitmentRepository.appendOutcomeIfAbsent`), so the orchestrator must not
+    // perform a second, non-transactional write.
+    expect(store.completedCommitments.has(commitmentId)).toBe(false);
   });
 
   it('prompt injection in source items is treated strictly as unexecutable DATA', () => {
@@ -996,20 +1000,18 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       sourceProfileId: 'profile-finance',
       scheduleKind: 'interval' as const,
       policyVersion: 1,
-      consentStatus: 'active' as const,
     };
 
     // First run completes
     await orchestrator.execute(grant, context, TEST_SIGNAL);
 
-    // Consent is subsequently revoked
-    const revokedContext = {
-      ...context,
-      consentStatus: 'revoked' as const,
-    };
+    // Consent is subsequently revoked in the authoritative store. The persisted occurrence
+    // carries its Source Profile, so the replay lookup no longer needs caller input.
+    store.outcomeProfiles.set(occurrenceId, 'profile-finance');
+    store.revokedConsentProfiles.add('profile-finance');
 
     // Replay attempt must fail closed!
-    await expect(orchestrator.execute(grant, revokedContext, TEST_SIGNAL)).rejects.toThrowError(
+    await expect(orchestrator.execute(grant, context, TEST_SIGNAL)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
   });
@@ -1027,11 +1029,12 @@ describe('P0-C3B: Guarded Commitment Occurrence Execution Runtime', () => {
       allowedActions: ['mock.read', 'mock.compute'],
     });
 
-    // Store without `findAuthoritativeOutcome`: no pre-execution replay shortcut exists,
-    // so idempotency must come from the durable, lease-fenced append.
+    // A store whose replay lookup never finds a stored outcome (for example because the row is
+    // not visible yet): idempotency must then come exclusively from the durable, lease-fenced
+    // append itself.
     const storeWithoutReplayLookup = {
+      findAuthoritativeOutcome: (): Promise<null> => Promise.resolve(null),
       appendOutcomeIfAbsent: store.appendOutcomeIfAbsent.bind(store),
-      markCommitmentCompleted: store.markCommitmentCompleted.bind(store),
     };
 
     const orchestrator = new CommitmentOrchestrator({

@@ -187,6 +187,16 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const mode = parsed.data.EMBER_WORKER_MODE;
   const simulatedExecution = parsed.data.EMBER_WORKER_SIMULATED_EXECUTION;
 
+  // The Scheduler must not turn due commitments into terminal failures while the durable
+  // Lane C consent authority is still missing. Its default remains disabled; until the real
+  // transactional grant/revocation adapter is available, an explicit enable is a startup error.
+  if (parsed.data.EMBER_SCHEDULER_ENABLED) {
+    throw new WorkerConfigError(
+      'EMBER_SCHEDULER_ENABLED cannot be true until durable Source Consent persistence and ' +
+        'transaction-level Outcome publication enforcement are configured',
+    );
+  }
+
   // Claiming a Task without a durable execution result would report work as processed that a
   // restart cannot recover. Both guards are therefore hard failures, not warnings.
   if (mode === 'poll') {

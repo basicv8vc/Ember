@@ -1,28 +1,19 @@
+import {
+  OUTCOME_RESULT_STATUSES,
+  type OutcomeResultStatus,
+  type SourceSnapshot,
+  type SourceSnapshotItem,
+} from '@ember/contracts';
+
 /**
- * Outcome result status adhering to P0-C3-0 contract freeze.
+ * Re-exported canonical contract types.
+ *
+ * The Outcome vocabulary and the bounded `SourceSnapshot` shape are defined once, in
+ * `@ember/contracts`. These aliases exist only so existing execution-side imports keep
+ * resolving to the *same* declarations instead of a private copy.
  */
-export const OUTCOME_RESULT_STATUSES = [
-  'meaningful_change',
-  'no_change',
-  'failed',
-  'denied',
-] as const;
-
-export type OutcomeResultStatus = (typeof OUTCOME_RESULT_STATUSES)[number];
-
-export interface SourceSnapshotItem {
-  readonly id: string;
-  readonly title: string;
-  readonly contentSnippet: string;
-  readonly observedAt: string;
-}
-
-export interface SourceSnapshot {
-  readonly sourceProfileId: string;
-  readonly observedAt: string;
-  readonly digest: string;
-  readonly boundedSafeItems: readonly SourceSnapshotItem[];
-}
+export { OUTCOME_RESULT_STATUSES };
+export type { OutcomeResultStatus, SourceSnapshot, SourceSnapshotItem };
 
 export interface SummaryEngineResult {
   readonly resultStatus: OutcomeResultStatus;

@@ -5,12 +5,16 @@ import {
   buildCommitmentTaskInput,
   deriveTaskCreationIdempotencyKey,
   type AppendOutcomeCommand,
+  type AuthoritativeOutcome,
+  type AuthoritativeOutcomeQuery,
   type CommitmentStatus,
   type DispatchTaskCommand,
   type DispatchTaskReceipt,
   type DueCommitment,
   type DueCommitmentStore,
   type ExistingTaskDispatcher,
+  type FinalizeOccurrenceCommand,
+  type OccurrenceExecutionIdentity,
   type ReservedSlot,
   type StalledPendingOccurrence,
   type WorkerLeaseGrant,
@@ -60,6 +64,24 @@ class InMemoryDueCommitmentStore implements DueCommitmentStore {
 
   public reservationsAttempted = 0;
   public reservationsSucceeded = 0;
+
+  /** Test hook: terminal Task state per occurrence, used by the reconcile sweep. */
+  public terminalTaskStatuses: Map<string, 'failed' | 'cancelled'> = new Map();
+
+  findAuthoritativeOutcome(
+    _grant: WorkerLeaseGrant,
+    query: AuthoritativeOutcomeQuery,
+  ): Promise<AuthoritativeOutcome | null> {
+    const outcome = this.outcomes.get(query.occurrenceId);
+    return Promise.resolve(
+      outcome === undefined
+        ? null
+        : {
+            resultStatus: outcome.resultStatus as AuthoritativeOutcome['resultStatus'],
+            summary: outcome.summary,
+          },
+    );
+  }
 
   findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]> {
     const now = asOfOverride ?? new Date();
@@ -194,6 +216,7 @@ class InMemoryDueCommitmentStore implements DueCommitmentStore {
           agentId: commitment?.agentId ?? '',
           sourceProfileId: commitment?.sourceProfileId ?? '',
           scheduleKind: commitment?.scheduleKind ?? 'once',
+          intervalSeconds: commitment?.intervalSeconds ?? null,
           scheduledFor: occ.scheduledFor,
           createdAt: occ.createdAt,
           taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(occ.occurrenceId),
@@ -213,10 +236,68 @@ class InMemoryDueCommitmentStore implements DueCommitmentStore {
     return Promise.resolve(true);
   }
 
-  markOccurrenceFailed(occurrenceId: string, _reasonCode: string): Promise<void> {
+  findOccurrenceExecutionIdentity(
+    grant: WorkerLeaseGrant,
+    occurrenceId: string,
+  ): Promise<OccurrenceExecutionIdentity | null> {
     const occ = this.occurrences.get(occurrenceId);
-    if (occ) occ.status = 'failed';
-    return Promise.resolve();
+    if (!occ) return Promise.resolve(null);
+    const commitment = this.commitments.get(occ.commitmentId);
+    if (!commitment) return Promise.resolve(null);
+    if (occ.taskId !== grant.taskId) {
+      return Promise.reject(new Error('POLICY_DENIED: occurrence is not bound to this task'));
+    }
+    return Promise.resolve({
+      tenantId: commitment.tenantId,
+      commitmentId: commitment.commitmentId,
+      occurrenceId: occ.occurrenceId,
+      agentId: commitment.agentId,
+      taskId: grant.taskId,
+      sourceProfileId: commitment.sourceProfileId,
+      scheduleKind: commitment.scheduleKind,
+      occurrenceStatus: occ.status,
+      commitmentStatus: commitment.status,
+    });
+  }
+
+  finalizeOccurrenceFromTask(
+    _grant: WorkerLeaseGrant,
+    cmd: FinalizeOccurrenceCommand,
+  ): Promise<boolean> {
+    const occ = this.occurrences.get(cmd.occurrenceId);
+    if (!occ || occ.taskId === null) return Promise.resolve(false);
+    if (occ.status === 'completed' || occ.status === 'failed' || occ.status === 'cancelled') {
+      return Promise.resolve(false);
+    }
+
+    const derived = this.terminalTaskStatuses.get(cmd.occurrenceId) ?? cmd.terminalStatus;
+    const commitment = this.commitments.get(cmd.commitmentId);
+    occ.status = commitment?.status === 'cancelled' ? 'cancelled' : derived;
+
+    if (commitment && commitment.status === 'active' && commitment.scheduleKind === 'once') {
+      commitment.status = occ.status === 'cancelled' ? 'cancelled' : 'completed';
+    }
+
+    return Promise.resolve(true);
+  }
+
+  reconcileTerminalOccurrences(limit: number): Promise<number> {
+    let reconciled = 0;
+
+    for (const [occurrenceId, taskStatus] of this.terminalTaskStatuses) {
+      if (reconciled >= limit) break;
+      const occ = this.occurrences.get(occurrenceId);
+      if (!occ || occ.status !== 'dispatched' || occ.taskId === null) continue;
+
+      const commitment = this.commitments.get(occ.commitmentId);
+      occ.status = commitment?.status === 'cancelled' ? 'cancelled' : taskStatus;
+      if (commitment && commitment.status === 'active' && commitment.scheduleKind === 'once') {
+        commitment.status = occ.status === 'cancelled' ? 'cancelled' : 'completed';
+      }
+      reconciled++;
+    }
+
+    return Promise.resolve(reconciled);
   }
 }
 
@@ -507,6 +588,7 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
       agentId: 'agent-valid',
       sourceProfileId: 'profile-valid',
       scheduleKind: 'interval',
+      intervalSeconds: 3600,
       scheduledFor: oldTime,
       createdAt: oldTime,
       taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(validOccId),
@@ -726,6 +808,7 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
         agentId: 'agent-valid',
         sourceProfileId: 'profile-valid',
         scheduleKind: 'once',
+        intervalSeconds: null,
         scheduledFor: oldTime,
         createdAt: oldTime,
         taskCreationIdempotencyKey: deriveTaskCreationIdempotencyKey(validOccId),
@@ -765,4 +848,91 @@ describe('P0-C3B: Durable Commitment Scheduler Unit Tests', () => {
       expect(malformed.taskId).toBeNull();
     },
   );
+});
+
+describe('P0-C3B: scheduler terminal reconciliation and bounded backoff', () => {
+  function seedDispatchedCommitment(store: InMemoryDueCommitmentStore): {
+    commitmentId: string;
+    occurrenceId: string;
+  } {
+    const commitmentId = 'c-reconcile';
+    const occurrenceId = 'occ-reconcile';
+
+    store.commitments.set(commitmentId, {
+      commitmentId,
+      tenantId: 'tenant-1',
+      agentId: 'agent-1',
+      title: 'Reconcile me',
+      sourceProfileId: 'profile-alpha',
+      scheduleKind: 'once',
+      intervalSeconds: null,
+      nextDueAt: null,
+      version: 2,
+      status: 'active',
+    });
+    store.occurrences.set(occurrenceId, {
+      occurrenceId,
+      commitmentId,
+      scheduledFor: new Date('2026-11-01T11:55:00Z'),
+      status: 'dispatched',
+      taskId: 'task-1',
+      createdAt: new Date('2026-11-01T11:55:00Z'),
+    });
+
+    return { commitmentId, occurrenceId };
+  }
+
+  it('finalizes occurrences whose Task already terminated, idempotently', async () => {
+    const store = new InMemoryDueCommitmentStore();
+    const { commitmentId, occurrenceId } = seedDispatchedCommitment(store);
+    store.terminalTaskStatuses.set(occurrenceId, 'failed');
+
+    const scheduler = new CommitmentScheduler(store, new InMemoryTaskDispatcher(), {
+      enabled: true,
+    });
+
+    expect(await scheduler.reconcileTerminal()).toBe(1);
+    expect(store.occurrences.get(occurrenceId)?.status).toBe('failed');
+    expect(store.commitments.get(commitmentId)?.status).toBe('completed');
+
+    expect(await scheduler.reconcileTerminal()).toBe(0);
+  });
+
+  it('backs off exponentially with a hard ceiling and never rejects the loop', async () => {
+    const controller = new AbortController();
+    const delays: number[] = [];
+
+    const failingStore: DueCommitmentStore = {
+      findDueCommitments: () => Promise.reject(new Error('database unavailable')),
+      reserveOccurrence: () => Promise.resolve(null),
+      markDispatched: () => Promise.resolve(),
+      appendOutcomeIfAbsent: () => Promise.resolve(false),
+      markCommitmentCompleted: () => Promise.resolve(false),
+      findStalledPendingOccurrences: () => Promise.resolve([]),
+      reconcilePendingOccurrence: () => Promise.resolve(false),
+      findOccurrenceExecutionIdentity: () => Promise.resolve(null),
+      finalizeOccurrenceFromTask: () => Promise.resolve(false),
+      reconcileTerminalOccurrences: () => Promise.resolve(0),
+    };
+
+    const scheduler = new CommitmentScheduler(
+      failingStore,
+      { dispatchTask: () => Promise.resolve({ taskId: 't', replayed: false }) },
+      {
+        enabled: true,
+        errorBackoffMs: 1_000,
+        maxErrorBackoffMs: 5_000,
+        sleeper: (ms) => {
+          delays.push(ms);
+          if (delays.length >= 5) {
+            controller.abort();
+          }
+          return Promise.resolve();
+        },
+      },
+    );
+
+    await expect(scheduler.runLoop(controller.signal)).resolves.toBeUndefined();
+    expect(delays).toEqual([1_000, 2_000, 4_000, 5_000, 5_000]);
+  });
 });

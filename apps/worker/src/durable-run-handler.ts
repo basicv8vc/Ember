@@ -439,7 +439,11 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
   });
 
   return {
-    async handle(run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion> {
+    async handle(
+      run: LeasedRun,
+      signal: AbortSignal,
+      preloadedContext?: RunExecutionContext,
+    ): Promise<RunHandlerCompletion> {
       const startedAtHr = performance.now();
       const base = {
         taskId: run.taskId,
@@ -459,7 +463,7 @@ export function createDurableRunHandler(deps: DurableRunHandlerDependencies): Ru
       let context: RunExecutionContext;
 
       try {
-        context = await contextReader.read(run, clock.now());
+        context = preloadedContext ?? (await contextReader.read(run, clock.now()));
       } catch (error) {
         if (isDomainError(error) && (error.code === 'STALE_LEASE' || error.code === 'NOT_FOUND')) {
           // The lease is gone or belongs to someone else: never execute, never submit.

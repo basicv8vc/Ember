@@ -21,6 +21,8 @@ export interface CommitmentSchedulerOptions {
   readonly concurrency?: number;
   readonly stalledTimeoutSeconds?: number;
   readonly errorBackoffMs?: number;
+  /** Hard ceiling for the exponential error backoff (bounded retry, never an unbounded sleep). */
+  readonly maxErrorBackoffMs?: number;
   readonly clock?: ExecutionClock;
   readonly sleeper?: Sleeper;
   readonly logger?: WorkerLogger;
@@ -38,17 +40,20 @@ export const DEFAULT_SCHEDULER_BATCH_SIZE = 10;
 export const DEFAULT_SCHEDULER_CONCURRENCY = 4;
 export const DEFAULT_STALLED_TIMEOUT_SECONDS = 120;
 export const DEFAULT_ERROR_BACKOFF_MS = 1_000;
+export const DEFAULT_MAX_ERROR_BACKOFF_MS = 60_000;
 
 /**
  * Cloud-side Durable Commitment Scheduler.
  *
  * Responsibilities:
- * 1. Periodically finds due active commitments using the database authoritative clock.
- * 2. Creates a unique Occurrence slot via atomic reservation, advancing commitment next_due_at.
- * 3. Dispatches one durable Task with a deterministic idempotency key tied to occurrenceId.
- * 4. Binds task_id to the occurrence.
- * 5. Periodically reconciles orphan/stalled pending occurrences after worker crashes.
- * 6. Supports concurrent scheduler instances without duplicate occurrences or visible outcomes.
+ * 1. Periodically find due active commitments using the database authoritative clock.
+ * 2. Create a unique Occurrence slot via atomic reservation, advancing next_due_at.
+ * 3. Dispatch one durable Task with a deterministic idempotency key tied to occurrenceId.
+ * 4. Bind task_id to the occurrence.
+ * 5. Reconcile orphaned `pending` occurrences after worker crashes (dispatch never happened).
+ * 6. Reconcile `dispatched` occurrences whose Task reached a terminal state, so a permanently
+ *    failed or cancelled execution never leaves an occurrence unresolved.
+ * 7. Support concurrent scheduler instances without duplicate occurrences or duplicate Tasks.
  */
 export class CommitmentScheduler {
   private readonly store: DueCommitmentStore;
@@ -59,6 +64,7 @@ export class CommitmentScheduler {
   private readonly concurrency: number;
   private readonly stalledTimeoutSeconds: number;
   private readonly errorBackoffMs: number;
+  private readonly maxErrorBackoffMs: number;
   private readonly clock: ExecutionClock;
   private readonly sleeper: Sleeper;
   private readonly logger?: WorkerLogger;
@@ -76,6 +82,7 @@ export class CommitmentScheduler {
     this.concurrency = options.concurrency ?? DEFAULT_SCHEDULER_CONCURRENCY;
     this.stalledTimeoutSeconds = options.stalledTimeoutSeconds ?? DEFAULT_STALLED_TIMEOUT_SECONDS;
     this.errorBackoffMs = options.errorBackoffMs ?? DEFAULT_ERROR_BACKOFF_MS;
+    this.maxErrorBackoffMs = options.maxErrorBackoffMs ?? DEFAULT_MAX_ERROR_BACKOFF_MS;
     this.clock = options.clock ?? systemExecutionClock;
     this.sleeper = options.sleeper ?? realSleeper;
     this.logger = options.logger;
@@ -97,21 +104,23 @@ export class CommitmentScheduler {
 
     for (const commitment of dueCommitments) {
       try {
-        // Step 1: Atomic slot reservation in database
+        // Step 1: Atomic slot reservation in the database.
         const slot = await this.store.reserveOccurrence(
           commitment.commitmentId,
           commitment.version,
         );
 
         if (!slot) {
-          // Concurrent scheduler already won this slot or commitment changed state
+          // A concurrent scheduler already won this slot, or the commitment changed state.
           skippedOrFailed++;
           continue;
         }
 
         occurrencesReserved++;
 
-        // Step 2: Dispatch durable Task with stable idempotency key
+        // Step 2: Dispatch a durable Task with a stable idempotency key. The Task repository's
+        // `(tenant_id, idempotency_key)` uniqueness makes a re-dispatch a replay, never a second
+        // Task, so two scheduler instances can never produce two Tasks for one Occurrence.
         const idempotencyKey = deriveTaskCreationIdempotencyKey(slot.occurrenceId);
         const receipt = await this.dispatcher.dispatchTask({
           tenantId: commitment.tenantId,
@@ -128,7 +137,7 @@ export class CommitmentScheduler {
           }),
         });
 
-        // Step 3: Bind task_id to occurrence
+        // Step 3: Bind task_id to the occurrence (idempotent for the same Task).
         await this.store.markDispatched(slot.occurrenceId, receipt.taskId);
         tasksDispatched++;
 
@@ -156,8 +165,8 @@ export class CommitmentScheduler {
   }
 
   /**
-   * Reconcile occurrences stalled in 'pending' status due to crashes between slot reservation
-   * and task dispatch.
+   * Reconcile occurrences stalled in `pending` status due to a crash between slot reservation
+   * and Task dispatch.
    */
   public async reconcileStalled(): Promise<number> {
     const stalled = await this.store.findStalledPendingOccurrences(
@@ -227,7 +236,25 @@ export class CommitmentScheduler {
   }
 
   /**
+   * Finalize occurrences whose Task already terminated but whose Occurrence is still
+   * `dispatched` (Worker crashed between `finish()` and the occurrence transition).
+   */
+  public async reconcileTerminal(): Promise<number> {
+    const finalized = await this.store.reconcileTerminalOccurrences(this.batchSize);
+
+    if (finalized > 0) {
+      this.logger?.info?.('Finalized terminal commitment occurrences', { finalized });
+    }
+
+    return finalized;
+  }
+
+  /**
    * Continuous scheduling loop controlled by AbortSignal.
+   *
+   * Failure policy: every iteration is individually guarded. A failing tick is logged and
+   * retried with exponential, capped backoff; the loop never rejects, so a scheduler fault can
+   * never terminate the Worker process or stop the poll loop it shares a lifecycle with.
    */
   public async runLoop(signal: AbortSignal): Promise<void> {
     if (!this.enabled) {
@@ -238,19 +265,24 @@ export class CommitmentScheduler {
     this.logger?.info?.('Starting commitment scheduler loop', {
       intervalMs: this.pollIntervalMs,
       batchSize: this.batchSize,
-      concurrency: this.concurrency,
+      maxErrorBackoffMs: this.maxErrorBackoffMs,
     });
 
     let tickCount = 0;
+    let consecutiveFailures = 0;
 
     while (!signal.aborted) {
       try {
         await this.tick();
 
         tickCount++;
+        consecutiveFailures = 0;
+
         if (tickCount % 10 === 0) {
           await this.reconcileStalled();
         }
+
+        await this.reconcileTerminal();
 
         await this.sleeper(this.pollIntervalMs, signal);
       } catch (error) {
@@ -258,12 +290,17 @@ export class CommitmentScheduler {
           break;
         }
 
+        consecutiveFailures++;
+        const exponent = Math.min(consecutiveFailures - 1, 16);
+        const backoffMs = Math.min(this.errorBackoffMs * 2 ** exponent, this.maxErrorBackoffMs);
+
         this.logger?.warn?.('Scheduler loop encountered error; backing off', {
           error: error instanceof Error ? error.message : String(error),
-          backoffMs: this.errorBackoffMs,
+          consecutiveFailures,
+          backoffMs,
         });
 
-        await this.sleeper(this.errorBackoffMs, signal);
+        await this.sleeper(backoffMs, signal);
       }
     }
 

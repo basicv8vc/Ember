@@ -88,17 +88,16 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
 
     // 2. Set up local structural store & source reader ports
     const committedOutcomes = new Map<string, AppendOutcomeCommand>();
-    let commitmentMarkedCompleted = false;
 
     const storePort = {
       findAuthoritativeOutcome(
         grant: WorkerLeaseGrant,
-        context: { occurrenceId: string; tenantId: string },
+        query: { occurrenceId: string; commitmentId: string },
       ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null> {
-        if (grant.tenantId !== context.tenantId) {
+        if (grant.tenantId !== ctx.tenantId) {
           return Promise.reject(new DomainError('POLICY_DENIED', 'Cross-tenant access prohibited'));
         }
-        const found = committedOutcomes.get(context.occurrenceId);
+        const found = committedOutcomes.get(query.occurrenceId);
         return Promise.resolve(
           found ? { resultStatus: found.resultStatus, summary: found.summary } : null,
         );
@@ -108,10 +107,6 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
           return Promise.resolve(false);
         }
         committedOutcomes.set(cmd.occurrenceId, cmd);
-        return Promise.resolve(true);
-      },
-      markCommitmentCompleted(_id: string): Promise<boolean> {
-        commitmentMarkedCompleted = true;
         return Promise.resolve(true);
       },
     };
@@ -183,7 +178,8 @@ describe('P0-C3B: Worker Commitment Integration Tests', () => {
     expect(executionResult.replayed).toBe(false);
     expect(executionResult.resultStatus).toBe('meaningful_change');
     expect(committedOutcomes.size).toBe(1);
-    expect(commitmentMarkedCompleted).toBe(true);
+    // One-shot completion is owned by the publication transaction, not by a second orchestrator
+    // write; see PostgresCommitmentRepository.appendOutcomeIfAbsent.
 
     // Replay attempt returns replayed: true and doesn't duplicate outcome
     const replayResult = await orchestrator.execute(

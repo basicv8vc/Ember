@@ -1,40 +1,46 @@
+import type {
+  AppendOutcomeCommand,
+  BudgetLedger,
+  CommitmentExecutionStore,
+  OutcomeResultStatus,
+  RunGrant,
+  SourceSnapshot,
+  TrustedSourceAccessContext,
+  WorkerLeaseGrant,
+} from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
-import type { BudgetLedger, RunGrant } from '@ember/contracts';
 import {
   evaluateSentinelPolicy,
   toSentinelDeniedError,
   type SentinelPolicy,
 } from './sentinel-lite.js';
 import { systemExecutionClock, type ExecutionClock } from './clock.js';
-import {
-  FakeSummaryEngine,
-  type OutcomeResultStatus,
-  type SourceSnapshot,
-} from './commitment-summary-engine.js';
+import { FakeSummaryEngine } from './commitment-summary-engine.js';
 
-export interface WorkerLeaseGrant {
-  readonly tenantId: Id;
-  readonly taskId: Id;
-  readonly runId: Id;
-  readonly attempt: number;
-  readonly leaseEpoch: number;
-  readonly workerId: string;
-}
-
-export interface TrustedSourceAccessContext {
-  readonly tenantId: Id;
-  readonly commitmentId: Id;
-  readonly taskId: Id;
-  readonly runId: Id;
-  readonly leaseEpoch: number;
-  readonly authorizedAt: string;
-}
+/**
+ * Re-exported canonical contracts.
+ *
+ * `@ember/execution` used to declare private copies of these types; they are now the single
+ * definitions from `@ember/contracts`, so the Worker port and the PostgreSQL repository cannot
+ * drift apart.
+ */
+export type {
+  AppendOutcomeCommand,
+  OutcomeResultStatus,
+  SourceSnapshot,
+  TrustedSourceAccessContext,
+  WorkerLeaseGrant,
+};
 
 export interface CommitmentOrchestrationContext {
   readonly tenantId: Id;
   readonly agentId: Id;
   readonly commitmentId: Id;
   readonly occurrenceId: Id;
+  /**
+   * Trusted Source Profile of the Occurrence. It is resolved by the Worker from the persisted
+   * commitment row; there is no default and no Task-payload fallback.
+   */
   readonly sourceProfileId: string;
   readonly scheduleKind: 'once' | 'interval';
   /**
@@ -44,7 +50,6 @@ export interface CommitmentOrchestrationContext {
    * runtime (`DENY_INVALID_INTENT` -> `POLICY_DENIED`) instead of silently defaulting to `1`.
    */
   readonly policyVersion?: number;
-  readonly consentStatus?: 'active' | 'revoked';
 }
 
 export interface OrchestrationResult {
@@ -54,39 +59,7 @@ export interface OrchestrationResult {
   readonly summary: string;
 }
 
-export interface AppendOutcomeCommand {
-  readonly occurrenceId: Id;
-  readonly commitmentId: Id;
-  readonly taskId: Id;
-  readonly summary: string;
-  readonly resultStatus: OutcomeResultStatus;
-}
-
-export interface CommitmentStorePort {
-  /**
-   * OPTIONAL authoritative replay lookup.
-   *
-   * Implementations MUST authenticate the *current* request before returning any stored
-   * summary. A lookup keyed solely on `occurrenceId` is forbidden: the implementation must
-   * verify, against authoritative state (preferably inside a single PostgreSQL transaction):
-   * - `grant.tenantId === context.tenantId` (cross-tenant access throws `POLICY_DENIED`),
-   * - the occurrence belongs to `grant.taskId` (task lineage),
-   * - `grant.leaseEpoch` is the active lease epoch for the task (stale lease throws `STALE_LEASE`),
-   * - the commitment is not cancelled/completed-invalid (throws `POLICY_DENIED`),
-   * - consent for `context.sourceProfileId` is still active (throws `POLICY_DENIED`).
-   *
-   * When this method is absent, the orchestrator performs no pre-execution replay shortcut and
-   * relies exclusively on the transactional `appendOutcomeIfAbsent` fencing below.
-   */
-  findAuthoritativeOutcome?(
-    grant: WorkerLeaseGrant,
-    context: CommitmentOrchestrationContext,
-  ): Promise<{ readonly resultStatus: OutcomeResultStatus; readonly summary: string } | null>;
-
-  appendOutcomeIfAbsent(grant: WorkerLeaseGrant, cmd: AppendOutcomeCommand): Promise<boolean>;
-
-  markCommitmentCompleted(commitmentId: Id): Promise<boolean>;
-}
+export type CommitmentStorePort = CommitmentExecutionStore;
 
 export interface SourceReaderPort {
   /**
@@ -122,12 +95,15 @@ export interface CommitmentOrchestratorDependencies {
  * Guarded Commitment Occurrence Execution Orchestrator.
  *
  * Enforces the core invariants:
- * 1. Sentinel Admission: Evaluated before any budget reservation or source read.
+ * 1. Sentinel Admission: evaluated before any budget reservation or source read.
  *    If denied, 0 budget reservation and 0 source callback occur.
- * 2. Budget Guard: Transactional reservation before computation/snapshot read.
- * 3. Lease Fencing: The outcome append is authenticated against the active Worker lease.
- * 4. Idempotency: Duplicate executions cannot create duplicate visible outcomes.
- * 5. Cancellation: Cancelled commitments reject future outcome publications.
+ * 2. Budget Guard: transactional reservation before computation/snapshot read.
+ * 3. Lease Fencing + consent: the outcome append is authenticated against the active Worker
+ *    lease, and the PostgreSQL repository requires a transaction-scoped consent guard. Until
+ *    Lane C supplies durable consent persistence, that repository guard defaults to deny-all.
+ * 4. Idempotency: duplicate executions cannot create duplicate visible outcomes.
+ * 5. Cancellation: an aborted signal stops execution at every boundary, and cancelled
+ *    commitments reject outcome publication in the database.
  */
 export class CommitmentOrchestrator {
   private readonly store: CommitmentStorePort;
@@ -163,32 +139,30 @@ export class CommitmentOrchestrator {
       );
     }
 
-    if (signal.aborted) {
-      throw new DomainError('CANCELLED', 'Occurrence execution was aborted before start');
-    }
+    this.throwIfAborted(signal, 'before admission');
 
-    // 1. Sentinel Admission Gate: Evaluated first before any source read, budget reservation, or outcome check
+    // 1. Sentinel Admission Gate: evaluated first, before any source read, budget reservation
+    //    or replay lookup.
     this.enforceSentinelAdmission(grant, context);
 
-    // 2. Consent check: if revoked, fail-closed immediately
-    if (context.consentStatus === 'revoked') {
-      throw new DomainError('POLICY_DENIED', 'Consent has been revoked for this source profile');
+    // 2. Authoritative replay check: validates tenant, task lineage, lease and consent, and
+    //    returns any already-published outcome without re-executing.
+    this.throwIfAborted(signal, 'before the replay check');
+    const existing = await this.store.findAuthoritativeOutcome(grant, {
+      commitmentId: context.commitmentId,
+      occurrenceId: context.occurrenceId,
+    });
+
+    if (existing) {
+      return {
+        outcomeCommitted: false,
+        replayed: true,
+        resultStatus: existing.resultStatus,
+        summary: existing.summary,
+      };
     }
 
-    // 3. Authoritative replay check: validates tenant, task, lease, commitment status, and consent
-    if (typeof this.store.findAuthoritativeOutcome === 'function') {
-      const existing = await this.store.findAuthoritativeOutcome(grant, context);
-      if (existing) {
-        return {
-          outcomeCommitted: false,
-          replayed: true,
-          resultStatus: existing.resultStatus,
-          summary: existing.summary,
-        };
-      }
-    }
-
-    // 4. Budget Reservation (If configured)
+    // 3. Budget reservation (if configured)
     const runGrant: RunGrant = {
       tenantId: grant.tenantId,
       taskId: grant.taskId,
@@ -202,22 +176,17 @@ export class CommitmentOrchestrator {
     const operationId = `commitment:occ:${context.occurrenceId}:${grant.leaseEpoch}`;
     const cost = { steps: 1, units: 1, elapsedMs: 20, concurrencySlots: 0 };
 
+    this.throwIfAborted(signal, 'before the budget reservation');
+
     if (this.budget) {
-      if (signal.aborted) {
-        throw new DomainError('CANCELLED', 'Execution aborted before budget reservation');
-      }
       await this.budget.reserve(runGrant, { operationId, cost });
     }
 
     try {
-      if (signal.aborted) {
-        if (this.budget) {
-          await this.budget.release(runGrant, { operationId }).catch(() => undefined);
-        }
-        throw new DomainError('CANCELLED', 'Execution aborted after budget reservation');
-      }
+      this.throwIfAborted(signal, 'after the budget reservation');
 
-      // 5. Source Snapshot Read
+      // 4. Source snapshot read
+      this.throwIfAborted(signal, 'before the source read');
       const trustedContext: TrustedSourceAccessContext = {
         tenantId: grant.tenantId,
         commitmentId: context.commitmentId,
@@ -233,10 +202,16 @@ export class CommitmentOrchestrator {
         signal,
       );
 
-      // 6. Deterministic Summary Generation
+      // A cancellation that arrived while the reader was in flight discards the snapshot: a
+      // successful read is never by itself a reason to publish anything.
+      this.throwIfAborted(signal, 'after the source read');
+
+      // 5. Deterministic summary generation
+      this.throwIfAborted(signal, 'before the summary generation');
       const summaryResult = this.summaryEngine.generate(snapshot);
 
-      // 7. Durably Append Outcome with Lease Fencing
+      // 6. Durably append the Outcome with lease + consent fencing
+      this.throwIfAborted(signal, 'before the outcome publication');
       const appended = await this.store.appendOutcomeIfAbsent(grant, {
         occurrenceId: context.occurrenceId,
         commitmentId: context.commitmentId,
@@ -245,17 +220,7 @@ export class CommitmentOrchestrator {
         resultStatus: summaryResult.resultStatus,
       });
 
-      // 8. Complete One-Shot Commitment if Applicable
-      if (context.scheduleKind === 'once' && appended) {
-        await this.store.markCommitmentCompleted(context.commitmentId).catch((err) => {
-          this.logger?.warn('Failed to mark one-shot commitment completed', {
-            commitmentId: context.commitmentId,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        });
-      }
-
-      // 9. Settle Budget
+      // 7. Settle budget
       if (this.budget) {
         if (!appended) {
           // Replayed operation: release reservation
@@ -274,9 +239,8 @@ export class CommitmentOrchestrator {
         summary: summaryResult.summary,
       };
     } catch (error) {
-      // If error occurs after reservation, settle budget as expired/consumed unless cancelled pre-execution
       if (this.budget) {
-        if (signal?.aborted) {
+        if (signal.aborted) {
           await this.budget.release(runGrant, { operationId }).catch(() => undefined);
         } else {
           await this.budget
@@ -285,6 +249,18 @@ export class CommitmentOrchestrator {
         }
       }
       throw error;
+    }
+  }
+
+  /**
+   * Cooperative-cancellation checkpoint.
+   *
+   * The message is a fixed stage label, never data, so a cancelled execution cannot leak source
+   * content into an error path.
+   */
+  private throwIfAborted(signal: AbortSignal, stage: string): void {
+    if (signal.aborted) {
+      throw new DomainError('CANCELLED', `Occurrence execution was cancelled ${stage}`);
     }
   }
 

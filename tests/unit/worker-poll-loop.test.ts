@@ -455,6 +455,13 @@ describe('poll worker configuration guards', () => {
     expect(config.mode).toBe('reaper-only');
     expect(config.simulatedExecution).toBe('disabled');
     expect(config.concurrency).toBe(4);
+    expect(config.scheduler.enabled).toBe(false);
+  });
+
+  it('refuses to enable autonomous scheduling until durable consent is wired', () => {
+    expect(() => loadWorkerConfig({ EMBER_SCHEDULER_ENABLED: 'true' })).toThrow(
+      /transaction-level Outcome publication enforcement are configured/,
+    );
   });
 
   it('rejects an out-of-range concurrency', () => {

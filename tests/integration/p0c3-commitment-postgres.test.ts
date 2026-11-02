@@ -9,6 +9,7 @@ import {
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import { createTenantFixture, type TenantFixture } from './support/fixtures.js';
+import { allowTestConsentPublication } from './support/consent-test-double.js';
 
 describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => {
   let db: TestDatabase;
@@ -24,7 +25,11 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
 
   beforeAll(async () => {
     db = await createTestDatabase();
-    commitmentRepo = new PostgresCommitmentRepository(db.pool);
+    // This suite predates Lane C durable consent and focuses on Commitment persistence. Its
+    // explicit test-only gate does not prove the transaction-level consent requirement.
+    commitmentRepo = new PostgresCommitmentRepository(db.pool, {
+      consentPublicationGuard: allowTestConsentPublication,
+    });
     agentRepo = new PostgresAgentRepository(db.pool);
     taskRepo = new PostgresTaskRepository(db.pool);
 
@@ -429,6 +434,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId,
         runId,
+        attempt: 1,
         leaseEpoch: 999, // Stale epoch
         workerId,
       };
@@ -451,6 +457,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId,
         runId,
+        attempt: 1,
         leaseEpoch: validEpoch,
         workerId,
       };
@@ -519,6 +526,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId: tId,
         runId: rId,
+        attempt: 1,
         leaseEpoch: 1,
         workerId,
       };
@@ -574,6 +582,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId: tIdA,
         runId: rIdA,
+        attempt: 1,
         leaseEpoch: 1,
         workerId,
       };
@@ -632,6 +641,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId: tIdB,
         runId: rIdB,
+        attempt: 1,
         leaseEpoch: 1,
         workerId,
       };
@@ -703,6 +713,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId: tId,
         runId: rId,
+        attempt: 1,
         leaseEpoch: 1,
         workerId,
       };
@@ -784,6 +795,7 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
         tenantId: tenantA.tenantId,
         taskId: tId,
         runId: rId,
+        attempt: 1,
         leaseEpoch: 1,
         workerId,
       };

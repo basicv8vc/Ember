@@ -3,7 +3,7 @@
 **Component**: Autonomous Commitment Scheduler, Occurrence Dispatch, Guarded Execution Runtime  
 **Branch**: `feature/p0c-3b-promise-runtime`  
 **Base Commit**: `2a05fd80fc1226bef21ba813899728bdde41037f` (`origin/main`)  
-**Status**: Stage 2 Round 2 Updates Complete — Round 1 (3×P1) + Round 2 (3×P1 follow-ups) Fixed — Ready for CTO Approval and Lane A/B/C Joint Integration Acceptance
+**Status**: Stage 3 Integration & Runtime Closure — scheduler wired into the Worker composition root, terminal Occurrence lifecycle closed, transaction-level consent enforced, real-PostgreSQL end-to-end coverage added — Ready for CTO re-review
 
 ---
 
@@ -204,4 +204,123 @@ Lane B structural ports are finalized and require Lane A to provide the followin
   _Mitigation_: Managed by Ember's durable retry queue with exponential backoff and dead-letter handling.
 - **Rollback**:
   - Disable scheduler immediately: `EMBER_SCHEDULER_ENABLED=false`.
-  - Revert PR merge commit. Zero schema migrations were added in Lane B, ensuring zero risk to persistent tables.
+  - Revert the PR merge commit. Migration `0009_p0c3b_runtime_closure.sql` adds only Occurrence
+    lookup indexes; migrations 0001-0008 remain unchanged.
+
+---
+
+## 7. Stage 3 — Integration & Runtime Closure
+
+This stage closes the Commitment, Task, Run and Occurrence persistence path against real
+PostgreSQL. The transaction-level Consent gate remains blocked on Lane C's durable implementation:
+
+```text
+Commitment -> CommitmentScheduler -> Occurrence -> PostgresTaskRepository (durable inbox)
+-> PostgresLeaseQueue -> Worker poll loop -> CommitmentRunHandler -> CommitmentSourceReader
+(test consent gate) -> CommitmentOrchestrator -> PostgresCommitmentRepository.appendOutcomeIfAbsent
+-> Outcome row -> Occurrence completion
+```
+
+### 7.1 Worker composition root
+
+- `apps/worker/src/index.ts` instantiates the real `PostgresCommitmentRepository`,
+  `PostgresCommitmentTaskDispatcher`, `CommitmentSourceReader`, `CommitmentOrchestrator` and
+  `CommitmentRunHandler`. Consent is deliberately wired deny-all until Lane C provides durable
+  persistence.
+- `startCommitmentScheduler()` starts `CommitmentScheduler.runLoop()` when
+  `EMBER_SCHEDULER_ENABLED=true` (default `false`). At present `loadWorkerConfig()` rejects an
+  explicit enable because the durable consent gate is missing; this prevents dispatching Tasks
+  that could only terminate as consent-denied. Once the gate is implemented, the loop shares the
+  Worker's single `AbortController`, so SIGINT/SIGTERM drains the reaper, scheduler and poll loop.
+- Scheduler faults are logged and retried with exponential, capped backoff
+  (`errorBackoffMs * 2^n`, capped at `maxErrorBackoffMs = 60s`). `runLoop()` never rejects, so a
+  scheduler fault cannot terminate the Worker.
+- `createCommitmentRouteAwareRunHandler()` selects the commitment handler for Tasks carrying the
+  commitment marker, reusing the already lease-validated `RunExecutionContext` (no extra read).
+- `PostgresCommitmentTaskDispatcher` reuses `PostgresTaskRepository.create()` and therefore the
+  durable inbox's `(tenant_id, idempotency_key)` uniqueness: dispatching the same occurrence
+  twice is a replay, never a second Task. The tenant authority for a scheduler-dispatched Task
+  is resolved from `principals` + `agents` (never invented).
+
+### 7.2 One canonical contract
+
+The Worker no longer declares its own `DueCommitment`/`ReservedSlot`/`AppendOutcomeCommand`
+shapes. `@ember/contracts` owns them; `apps/worker/src/commitment-ports.ts` re-exports them and
+keeps only Worker-local helpers (Task input builder, marker reader, recovery validation).
+`WorkerLeaseGrant` gained `attempt` (part of the lease identity) and `DueCommitment` gained
+`status`; both are enforced by the repository, not just typed.
+
+### 7.3 Terminal Occurrence lifecycle
+
+```text
+pending --reserve--> dispatched --outcome published--> completed
+                          |--permanent failure (Task failed + Run failed_terminal)--> failed
+                          |--commitment/task cancelled--------------------------> cancelled
+                          |--retryable failure-------------------------------> stays dispatched
+```
+
+- `finalizeOccurrenceFromTask(grant, cmd)` locks `commitments -> commitment_occurrences -> tasks`
+  and re-reads the **persisted** Task/Run state. It is idempotent (a terminal occurrence is never
+  re-terminalized), it refuses a retryable Task, and it rejects an attempt that does not own the
+  Run (`STALE_LEASE`).
+- The Worker invokes it through a post-finish hook (`RunHandlerCompletion.finalize`) that the poll
+  loop calls with the verdict of the fenced `finish()`. A rejected finish writes nothing.
+- The hook revalidates the persisted worker id, lease epoch and attempt before changing the
+  Occurrence, and the repository also sweeps terminal Tasks after a Worker crash.
+- `reconcileTerminalOccurrences()` is the crash-safe sweep for a Worker that died between
+  `finish()` and the hook; it derives everything from persisted Task state.
+- Success completes the occurrence **and** a one-shot commitment in the publication transaction.
+  A permanently failed or cancelled one-shot reaches a terminal commitment state (`completed` /
+  `cancelled`) instead of staying `active` with no future execution.
+- `cancel()` now also cancels `dispatched` occurrences, so an in-flight execution cannot publish.
+
+### 7.4 Fail-closed identity and cancellation
+
+- `sourceProfileId`, `scheduleKind`, `agentId` and the commitment linkage come from
+  `findOccurrenceExecutionIdentity()` (persisted rows). The `'default'`, `'once'` and
+  `'worker-unknown'` fallbacks are gone; a mismatch is a terminal refusal before any source read,
+  budget reservation or outcome write.
+- `runs.worker_id` must equal this Worker's id; the Worker also refuses a Task without a valid
+  commitment marker or one that is not bound to an occurrence of its tenant.
+- Cancellation is checked before the identity read, before orchestration, and at every
+  orchestrator boundary: before the budget reservation, before the source read, **after** the read
+  returns (a successful read never authorizes publication), before summary generation and
+  immediately before publication. The publication transaction also checks persisted Commitment,
+  Occurrence, Task cancellation request, Task/Run lineage and lease fencing. A Commitment cancel
+  that wins during a read is reclassified as a cancelled Run instead of an execution failure.
+
+### 7.5 Transaction-level consent — blocked on Lane C
+
+The merged Lane C implementation exports a synchronous process-local `FakeConsentRegistry`; it
+has no PostgreSQL schema, grant/revoke persistence API or revocation transaction. Its prompt and
+handoff explicitly leave durable consent storage as future work. The `source_consents` migration
+and `PostgresConsentRepository` initially added on this branch were removed because they guessed an
+unverified schema.
+
+`PostgresCommitmentRepository` now requires a transaction-scoped `ConsentPublicationGuard` and
+defaults to deny-all when none is configured. The Worker source adapter also uses a deny-all
+authority. Thus no Outcome is published without an injected consent decision. The integration
+harness uses a clearly marked in-memory test gate only for unrelated persistence scenarios; that
+does not verify cross-process or transactional revocation.
+
+I requested the authoritative storage contract and revocation lock semantics on
+[Lane C PR #61](https://github.com/basicv8vc/Ember/pull/61#issuecomment-6570043917). Before this
+gate can close, Lane C must provide the actual authoritative record/schema and grant/revoke
+transaction behavior. The publication adapter can then lock consent last after
+`commitments -> occurrences -> tasks -> runs`, using the same record that revocation locks. Until
+that lands, Task 4 and the consent scenarios in the Task 5 acceptance matrix remain incomplete.
+
+### 7.6 Test coverage
+
+| Suite                 | File                                                   | Scenarios                                                                                                                                                               |
+| --------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unit                  | `tests/unit/p0c3b-handler-boundaries.test.ts`          | identity refusals, persisted profile/schedule, terminal finalize protocol, orchestrator cancellation boundaries                                                         |
+| Unit                  | `tests/unit/p0c3-scheduler.test.ts`                    | terminal reconciliation, exponential capped backoff                                                                                                                     |
+| Integration (real PG) | `tests/integration/p0c3b-consent-dependency.test.ts`   | production default rejects Outcome publication when the transaction-level consent adapter is missing; no revocation race claim                                          |
+| Integration (real PG) | `tests/integration/p0c3b-occurrence-lifecycle.test.ts` | success, permanent failure, retryable, cancellation, worker/epoch/attempt mismatch, lease takeover, sweep                                                               |
+| Integration (real PG) | `tests/integration/p0c3b-runtime-e2e.test.ts`          | scheduler concurrency, crash recovery, duplicate Task/outcome, bind race, lease takeover, cancellation, Sentinel denial, budget exhaustion, retryable/permanent failure |
+
+The E2E suite uses real PostgreSQL for Commitment, Task, Run, Outcome, lease and Occurrence
+state, but a process-local test consent gate. It does **not** satisfy Task 4's consent acceptance
+criteria. The full quality suites passed locally; PR #62 is not ready for CTO review until the
+durable Lane C contract and real PostgreSQL consent race tests are available.

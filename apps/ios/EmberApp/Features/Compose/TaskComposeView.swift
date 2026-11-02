@@ -75,7 +75,7 @@ struct TaskComposeView: View {
             Text("把零散笔记整理成行动清单")
                 .font(.title2.weight(.semibold))
                 .fixedSize(horizontal: false, vertical: true)
-            Text("这是本机交互演示。当前合同没有 notes-to-actions 任务类型，也没有真实执行能力。")
+            Text("这是本机演示，尚未连接云端 AI。提交不会处理笔记或生成行动清单。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -129,7 +129,7 @@ struct TaskComposeView: View {
         VStack(alignment: .leading, spacing: 12) {
             Label("提交前说明", systemImage: "lock.shield")
                 .font(.headline)
-            Text("未来如果笔记要送到云端处理，Ember 必须先明确说明处理方式与留存边界。本演示不会上传笔记，也不会生成真实行动清单。")
+            Text("云端处理功能尚未开放。当前不会上传笔记或生成行动清单；结果页展示的是固定演示样例，并非根据这次提交的笔记生成。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -138,7 +138,7 @@ struct TaskComposeView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("演示回执丢失")
                         .font(.subheadline.weight(.medium))
-                    Text("本机已接收，但界面暂时显示“尚未确认”；可用同一内容与幂等键重试。")
+                    Text("模拟回执暂时未能确认；重试会沿用本次提交。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -153,13 +153,13 @@ struct TaskComposeView: View {
 
     private func receiptCard(_ receipt: TaskReceiptDTO) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Label("已接收 · \(receipt.replayed ? "幂等重放 200" : "新建 202")", systemImage: "checkmark.circle.fill")
+            Label(receipt.replayed ? "已接收 · 已确认之前的提交" : "已接收 · 本次提交", systemImage: "checkmark.circle.fill")
                 .font(.headline)
                 .foregroundStyle(.green)
-            Text("这只表示本机演示已接收模拟请求，不表示任务已经完成。")
+            Text("这只表示本机演示已收到提交，不表示任务已经完成。")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
-            Text("Task ID · \(receipt.taskID.uuidString)")
+            Text("任务编号 · \(receipt.taskID.uuidString)")
                 .font(.caption.monospaced())
                 .textSelection(.enabled)
         }

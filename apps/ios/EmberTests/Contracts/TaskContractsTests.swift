@@ -81,10 +81,10 @@ final class TaskContractsTests: XCTestCase {
             .filter { line in actionPrefixes.contains { line.hasPrefix($0) } }
 
         XCTAssertEqual(first, second)
-        XCTAssertTrue(first.label.contains("固定模拟 Fixture"))
-        XCTAssertTrue(first.label.contains("非本次提交笔记的 AI 生成结果"))
-        XCTAssertTrue(content.contains("并非根据你刚提交的笔记运行 AI 生成"))
-        XCTAssertTrue(content.contains("也不是 API 返回"))
+        XCTAssertTrue(first.label.contains("固定演示清单"))
+        XCTAssertTrue(first.label.contains("并非本次笔记生成"))
+        XCTAssertTrue(content.contains("并非根据你刚提交的笔记实时生成"))
+        XCTAssertTrue(content.contains("也不是服务端返回"))
         XCTAssertEqual(actionLines.count, 4)
         XCTAssertTrue(content.contains("[高]"))
         XCTAssertTrue(content.contains("[中]"))

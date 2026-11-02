@@ -19,11 +19,11 @@ enum TaskComposeSubmissionFailure: Equatable {
     var message: String {
         switch self {
         case .idempotencyConflict:
-            "提交失败：这段内容与先前的提交冲突。笔记已保留且可编辑；检查后重新提交。"
+            "提交未成功。笔记已保留且可编辑，请检查后重试。"
         case .repositoryUnavailable:
-            "本机模拟暂不可用。笔记已保留且可编辑，请稍后重试。"
+            "本机演示暂不可用。笔记已保留且可编辑，请稍后重试。"
         case .rejected:
-            "提交失败。笔记已保留且可编辑；修改后重新提交。"
+            "提交未成功。笔记已保留且可编辑，修改后可以重试。"
         }
     }
 }
@@ -76,7 +76,7 @@ final class TaskComposeSubmissionModel {
         case .submitting:
             "正在提交"
         case .unknownAcknowledgement:
-            "用相同内容和键重试"
+            "使用本次提交重试"
         case .definiteFailure:
             "重新提交"
         case .accepted:
@@ -96,7 +96,7 @@ final class TaskComposeSubmissionModel {
     var statusMessage: String? {
         switch state {
         case .unknownAcknowledgement:
-            "尚未确认：回执未能确认请求结果。草稿与幂等键已保留；重试将使用相同内容和键。"
+            "尚未确认提交结果。笔记已保留；重试会沿用本次提交。"
         case let .definiteFailure(failure):
             failure.message
         case .idle, .submitting, .accepted:

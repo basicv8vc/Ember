@@ -284,7 +284,7 @@ private struct ConversationReplyStatusView: View {
                     .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
             }
             .accessibilityElement(children: .contain)
-        case .failed(let message, let retryable):
+        case .failed(let message, _):
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: "exclamationmark.circle.fill")
                     .foregroundStyle(.red)
@@ -296,7 +296,7 @@ private struct ConversationReplyStatusView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                if retryable {
+                if ConversationInteractionRules.retryAction(for: state) == .retryMockReply {
                     Button(action: onRetry) {
                         Label {
                             Text("conversation.reply.retry", tableName: "Conversation")

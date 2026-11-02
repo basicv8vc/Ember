@@ -67,7 +67,8 @@ struct ConversationScreen: View {
     }
 
     private func selectPrompt(_ prompt: String) {
-        actions.selectPrompt(prompt)
+        guard case .populateDraft(let draft) = ConversationInteractionRules.promptSelection(prompt) else { return }
+        actions.selectPrompt(draft)
         composerIsFocused = true
     }
 }
@@ -113,16 +114,18 @@ struct ConversationDemoHost: View {
     }
 
     private func send(_ text: String) {
-        let message = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !message.isEmpty, replyState != .generating else { return }
+        guard let submission = ConversationInteractionRules.submission(
+            for: text,
+            isGenerating: replyState == .generating
+        ) else { return }
 
-        appendUserMessage(message)
-        draft = ""
-        beginMockReply(for: message)
+        appendUserMessage(submission.message)
+        beginMockReply(for: submission.message)
     }
 
     private func retry() {
-        guard replyState != .generating, let pendingMessage else { return }
+        guard ConversationInteractionRules.retryAction(for: replyState) == .retryMockReply,
+              let pendingMessage else { return }
         beginMockReply(for: pendingMessage)
     }
 
@@ -148,7 +151,7 @@ struct ConversationDemoHost: View {
     }
 
     private func stopGenerating() {
-        guard replyState == .generating else { return }
+        guard ConversationInteractionRules.stopAction(for: replyState) == .stopMockReply else { return }
 
         mockReplyWork?.cancel()
         mockReplyWork = nil

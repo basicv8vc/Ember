@@ -490,6 +490,7 @@ All gates run from `/Users/a1-6/Downloads/Ember-p0c3c` on 2026-11-02.
 | Lint            | `pnpm run lint` (`eslint .`)                                                                                                        | PASS — 0 problems                            |
 | Format          | `pnpm run format:check` (`prettier --check .`)                                                                                      | PASS (after formatting 4 files)              |
 | Build           | `pnpm run build`                                                                                                                    | PASS                                         |
+| CI              | GitHub Actions `Verify (Node 24 LTS + PostgreSQL 17)` on PR #83                                                                     | PASS (2m41s)                                 |
 
 ### 10.1 `tests/unit/p0c3c-consent-contract.test.ts` (5 tests)
 

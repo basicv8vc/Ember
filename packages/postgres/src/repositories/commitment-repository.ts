@@ -21,6 +21,12 @@ import { deriveTaskCreationIdempotencyKey } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
+import {
+  assertConsentAllowed,
+  evaluateConsentRow,
+  SELECT_CONSENT_FOR_UPDATE_SQL,
+  type ConsentGrantRow,
+} from './consent-fence.js';
 
 interface CommitmentRow {
   id: string;
@@ -148,6 +154,88 @@ function decodeCursor(cursor: string | undefined): CursorData | undefined {
   } catch {
     return undefined;
   }
+}
+
+type DispatchTransition = 'dispatched' | 'missing' | 'not_pending';
+
+/**
+ * The one place an occurrence becomes `dispatched` (P0-C3D).
+ *
+ * Runs inside the caller's transaction and applies the shared lock order
+ * `commitments -> commitment_occurrences -> consent_grants`:
+ *
+ * 1. Resolve the occurrence's tenant and commitment, then lock the commitment row. Every
+ *    commitment writer (cancel, pause, publish, dispatch) takes this lock first, so no two
+ *    writers can form a wait cycle.
+ * 2. Lock the occurrence and require `pending`.
+ * 3. Lock the source profile's consent grant and require an effective `read_snapshot`
+ *    authorization. A revoked, expired or missing grant fails closed inside the same
+ *    transaction, so an occurrence can never be bound to a task without consent.
+ * 4. Record `consent_version`, the fence publication later compares against.
+ */
+async function dispatchOccurrence(
+  client: pg.PoolClient,
+  occurrenceId: Id,
+  taskId: Id,
+): Promise<DispatchTransition> {
+  const locate = await client.query<{ tenant_id: string; commitment_id: string }>(
+    `SELECT tenant_id, commitment_id FROM commitment_occurrences WHERE id = $1`,
+    [occurrenceId],
+  );
+  const located = locate.rows[0];
+
+  if (located === undefined) {
+    return 'missing';
+  }
+
+  const commitRes = await client.query<{ source_profile_id: string }>(
+    `SELECT source_profile_id
+       FROM commitments
+      WHERE tenant_id = $1 AND id = $2
+      FOR UPDATE`,
+    [located.tenant_id, located.commitment_id],
+  );
+  const commitmentRow = commitRes.rows[0];
+
+  if (commitmentRow === undefined) {
+    return 'missing';
+  }
+
+  const occRes = await client.query<{ status: string }>(
+    `SELECT status
+       FROM commitment_occurrences
+      WHERE tenant_id = $1 AND id = $2
+      FOR UPDATE`,
+    [located.tenant_id, occurrenceId],
+  );
+  const occurrenceRow = occRes.rows[0];
+
+  if (occurrenceRow === undefined) {
+    return 'missing';
+  }
+
+  if (occurrenceRow.status !== 'pending') {
+    return 'not_pending';
+  }
+
+  const consentRes = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
+    located.tenant_id,
+    commitmentRow.source_profile_id,
+  ]);
+  const decision = evaluateConsentRow(consentRes.rows[0], 'read_snapshot');
+  assertConsentAllowed(decision, 'read_snapshot');
+
+  await client.query(
+    `UPDATE commitment_occurrences
+        SET task_id = $2,
+            status = 'dispatched',
+            consent_version = $3,
+            updated_at = clock_timestamp()
+      WHERE tenant_id = $4 AND id = $1`,
+    [occurrenceId, taskId, decision.consentVersion, located.tenant_id],
+  );
+
+  return 'dispatched';
 }
 
 export class PostgresCommitmentRepository implements CommitmentRepository, DueCommitmentStore {
@@ -695,24 +783,28 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
     });
   }
 
+  /**
+   * Transition a pending occurrence to `dispatched`, recording the consent version that
+   * authorised the work (P0-C3D).
+   *
+   * Lock order: commitments -> commitment_occurrences -> consent_grants. Every commitment
+   * writer in this repository acquires the commitment row first, so the dispatch cannot
+   * deadlock against `cancel()`/`pause()` or against outcome publication.
+   *
+   * Dispatch without an effective `read_snapshot` grant fails closed: no task is ever bound to
+   * an occurrence, and the occurrence stays `pending` for the next scheduler pass.
+   */
   async markDispatched(occurrenceId: Id, taskId: Id): Promise<void> {
-    const sql = `
-      UPDATE commitment_occurrences
-      SET task_id = $2, status = 'dispatched', updated_at = clock_timestamp()
-      WHERE id = $1 AND status = 'pending'
-    `;
+    return withTransaction(this.pool, async (client) => {
+      const outcome = await dispatchOccurrence(client, occurrenceId, taskId);
 
-    try {
-      const res = await this.pool.query(sql, [occurrenceId, taskId]);
-      if ((res.rowCount ?? 0) === 0) {
+      if (outcome !== 'dispatched') {
         throw new DomainError(
           'INVALID_STATE_TRANSITION',
           'Occurrence was not in pending status or does not exist',
         );
       }
-    } catch (error) {
-      throw asDomainError(error);
-    }
+    });
   }
 
   async appendOutcomeIfAbsent(
@@ -721,7 +813,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   ): Promise<boolean> {
     return withTransaction(this.pool, async (client) => {
       // Lock order for every commitment writer in this repository:
-      //   commitments -> commitment_occurrences -> tasks -> runs
+      //   commitments -> commitment_occurrences -> tasks -> runs -> consent_grants
       //
       // Taking the commitment row lock FIRST serialises publication against `cancel()` and
       // `pause()` (which acquire the same lock), so a cancellation that wins the lock is
@@ -731,15 +823,15 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
       //
       // 1. Lock the commitment and require it to still accept outcomes.
       const commitSql = `
-        SELECT status
+        SELECT status, source_profile_id
         FROM commitments
         WHERE tenant_id = $1 AND id = $2
         FOR UPDATE
       `;
-      const commitRes = await client.query<{ status: string }>(commitSql, [
-        grant.tenantId,
-        cmd.commitmentId,
-      ]);
+      const commitRes = await client.query<{ status: string; source_profile_id: string }>(
+        commitSql,
+        [grant.tenantId, cmd.commitmentId],
+      );
 
       const commitRow = commitRes.rows[0];
       if (commitRow === undefined) {
@@ -755,7 +847,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
 
       // 2. Lock and verify occurrence
       const occSql = `
-        SELECT id, status, task_id
+        SELECT id, status, task_id, consent_version
         FROM commitment_occurrences
         WHERE tenant_id = $1 AND commitment_id = $2 AND id = $3
         FOR UPDATE
@@ -764,6 +856,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         id: string;
         status: string;
         task_id: string | null;
+        consent_version: number | null;
       }>(occSql, [grant.tenantId, cmd.commitmentId, cmd.occurrenceId]);
 
       const occRow = occRes.rows[0];
@@ -861,7 +954,26 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         );
       }
 
-      // 5. Insert outcome
+      // 5. Authorization fence (P0-C3D). Lock the source profile's consent grant and require it
+      //    to still authorise publication *at the version that authorised the dispatch*.
+      //
+      //    The lock is taken after the commitment/occurrence/task/run locks, matching the shared
+      //    order (Commitment -> Occurrence -> Task -> Run -> Consent), so a concurrent
+      //    revocation (which locks only the consent row) can never deadlock against publication:
+      //    whoever commits first decides, and PostgreSQL re-evaluates the consent row for the
+      //    waiter, which then fails closed.
+      const consentRes = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
+        grant.tenantId,
+        commitRow.source_profile_id,
+      ]);
+      const consentDecision = evaluateConsentRow(
+        consentRes.rows[0],
+        'publish_outcome',
+        occRow.consent_version,
+      );
+      assertConsentAllowed(consentDecision, 'publish_outcome');
+
+      // 6. Insert outcome
       const outcomeId = randomUUID();
       const insertOutcomeSql = `
         INSERT INTO commitment_outcomes (
@@ -887,7 +999,7 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
         return false;
       }
 
-      // 6. Update occurrence status
+      // 7. Update occurrence status
       const terminalOccStatus =
         cmd.resultStatus === 'failed' || cmd.resultStatus === 'denied' ? 'failed' : 'completed';
 
@@ -962,19 +1074,14 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
   }
 
   async reconcilePendingOccurrence(occurrenceId: Id, taskId: Id): Promise<boolean> {
-    const sql = `
-      UPDATE commitment_occurrences
-      SET task_id = $2, status = 'dispatched', updated_at = clock_timestamp()
-      WHERE id = $1 AND status = 'pending'
-      RETURNING id
-    `;
+    // Scheduler reconciliation performs the same pending -> dispatched transition as
+    // `markDispatched`, so it runs the same consent fence and records the same authorization
+    // version. Any occurrence it binds is therefore publishable only while that consent holds.
+    return withTransaction(this.pool, async (client) => {
+      const outcome = await dispatchOccurrence(client, occurrenceId, taskId);
 
-    try {
-      const res = await this.pool.query(sql, [occurrenceId, taskId]);
-      return (res.rowCount ?? 0) > 0;
-    } catch (error) {
-      throw asDomainError(error);
-    }
+      return outcome === 'dispatched';
+    });
   }
 
   async markOccurrenceFailed(occurrenceId: Id, _reasonCode: string): Promise<void> {

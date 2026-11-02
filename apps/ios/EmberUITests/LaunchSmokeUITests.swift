@@ -3,10 +3,12 @@ import XCTest
 final class LaunchSmokeUITests: XCTestCase {
     func testLaunchDisplaysMockOnlyNotice() {
         let app = XCUIApplication()
+        app.launchArguments = ["--ember-start-task-flow"]
         app.launch()
 
-        let notice = app.staticTexts["mock-only-label"]
+        let notice = app.staticTexts["task-flow-mock-only-label"]
         XCTAssertTrue(notice.waitForExistence(timeout: 10))
-        XCTAssertEqual(notice.label, "MOCK ONLY · No real AI execution")
+        XCTAssertTrue(notice.label.localizedCaseInsensitiveContains("MOCK ONLY"))
+        XCTAssertTrue(app.buttons["compose-submit"].waitForExistence(timeout: 10))
     }
 }

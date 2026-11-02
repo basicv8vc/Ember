@@ -8,6 +8,7 @@
  * - Safe static denial reasons and codes.
  */
 
+import { describeConsentDenialCode, deriveConsentStatus } from './consent.js';
 import type {
   ConsentGrant,
   SourceAccessDecision,
@@ -22,6 +23,8 @@ export interface EvaluateSourceAccessParams {
   readonly grant: ConsentGrant | null;
   readonly policy: SourceAccessPolicy;
   readonly operation?: string;
+  /** Scopes the caller must hold on the grant (all of them). Empty/missing means "no scope check". */
+  readonly requiredScopes?: readonly string[];
   readonly now?: Date;
 }
 
@@ -30,7 +33,15 @@ export interface EvaluateSourceAccessParams {
  * Guaranteed pure, deterministic, and free of side-effects or network calls.
  */
 export function evaluateSourceAccess(params: EvaluateSourceAccessParams): SourceAccessDecision {
-  const { profile, context, grant, policy, operation = 'read_snapshot', now = new Date() } = params;
+  const {
+    profile,
+    context,
+    grant,
+    policy,
+    operation = 'read_snapshot',
+    requiredScopes = [],
+    now = new Date(),
+  } = params;
 
   // 1. Profile existence check
   if (!profile) {
@@ -113,17 +124,17 @@ export function evaluateSourceAccess(params: EvaluateSourceAccessParams): Source
     };
   }
 
-  // 10. Consent revocation check
-  if (grant.status === 'revoked' || grant.revokedAt !== null) {
+  // 10-11. Canonical consent lifecycle check (revocation -> expiry -> non-active), shared with
+  // `deriveConsentStatus` so the policy gate and persisted authority can never disagree.
+  const consentDenial = describeConsentDenialCode(grant, now);
+  if (consentDenial === 'CONSENT_REVOKED') {
     return {
       allowed: false,
       denialCode: 'CONSENT_REVOKED',
       reason: 'User consent has been revoked',
     };
   }
-
-  // 11. Consent expiration check
-  if (grant.status === 'expired') {
+  if (consentDenial === 'CONSENT_EXPIRED') {
     return {
       allowed: false,
       denialCode: 'CONSENT_EXPIRED',
@@ -131,18 +142,7 @@ export function evaluateSourceAccess(params: EvaluateSourceAccessParams): Source
     };
   }
 
-  if (grant.expiresAt !== null) {
-    const expDate = new Date(grant.expiresAt);
-    if (expDate <= now) {
-      return {
-        allowed: false,
-        denialCode: 'CONSENT_EXPIRED',
-        reason: 'User consent grant has expired',
-      };
-    }
-  }
-
-  if (grant.status !== 'active') {
+  if (deriveConsentStatus(grant, now) !== 'active') {
     return {
       allowed: false,
       denialCode: 'POLICY_DENIED',
@@ -157,6 +157,18 @@ export function evaluateSourceAccess(params: EvaluateSourceAccessParams): Source
       denialCode: 'OPERATION_NOT_ALLOWED',
       reason: 'Operation is not permitted by user consent grant',
     };
+  }
+
+  // 13. Consent granted scopes (all required scopes must be present on the grant)
+  if (requiredScopes.length > 0) {
+    const grantedScopes = new Set(grant.scopes);
+    if (!requiredScopes.every((scope) => grantedScopes.has(scope))) {
+      return {
+        allowed: false,
+        denialCode: 'SCOPE_NOT_GRANTED',
+        reason: 'Required scope is not granted by user consent',
+      };
+    }
   }
 
   return {

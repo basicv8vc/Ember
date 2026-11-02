@@ -5,7 +5,6 @@ import {
   DEFAULT_CONSENT_SCOPES,
   SOURCE_READ_OPERATION,
   SourceProfileIdSchema,
-  deriveConsentStatus,
   toInvalidArgumentError,
   type AuthorizedConsentGeneration,
   type ConsentAuthority,
@@ -65,6 +64,16 @@ SELECT 1
   WHERE tenant_id = $1 AND id = $2
 `;
 
+/**
+ * First grant for a lineage.
+ *
+ * `ON CONFLICT DO NOTHING` rather than a bare insert: two simultaneous first grants both pass the
+ * `FOR UPDATE` read (there is no row to lock yet), so the loser must be able to observe that it
+ * lost instead of surfacing a unique-violation to the caller. A `rowCount` of 0 means "somebody
+ * else created the row"; the caller then re-reads it and takes the ordinary replay/rewrite
+ * decision, which is what makes the replay verdict a property of the transaction rather than of an
+ * earlier, already-stale read.
+ */
 const INSERT_CONSENT_SQL = `
   INSERT INTO consent_grants (
     id, tenant_id, source_profile_id, status, allowed_operations, scopes,
@@ -73,6 +82,7 @@ const INSERT_CONSENT_SQL = `
   VALUES ($1, $2, $3, 'active', $4::text[], $5::text[], $6,
           COALESCE($8::timestamptz, clock_timestamp()), $7::timestamptz, 1,
           clock_timestamp(), clock_timestamp())
+  ON CONFLICT (tenant_id, source_profile_id) DO NOTHING
   RETURNING ${CONSENT_COLUMNS_SQL}
 `;
 
@@ -191,6 +201,34 @@ function sameList(left: readonly string[], right: readonly string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index]);
 }
 
+/**
+ * True when the stored grant already says exactly what this request asks for.
+ *
+ * Only a still-EFFECTIVE grant can replay. An expired or revoked row is a dead generation, so an
+ * identical-looking request must mint a new `grantId` (C-06) instead of resurrecting it, and a
+ * revocation is never undone by a replay (C-02/C-09).
+ */
+function isIdenticalGrant(
+  row: ConsentGrantRow,
+  clock: Date | undefined,
+  operations: readonly string[],
+  scopes: readonly string[],
+  expiresAt: string | null,
+): boolean {
+  return (
+    deriveRowStatus(row, clock) === 'active' &&
+    sameList(row.allowed_operations, operations) &&
+    sameList(row.scopes, scopes) &&
+    sameTimestamp(row.expires_at === null ? null : toIsoTimestamp(row.expires_at), expiresAt)
+  );
+}
+
+/** Verdict of one grant write, decided inside the transaction that locked the row. */
+interface GrantOutcome {
+  readonly consent: PersistedConsentGrant;
+  readonly replayed: boolean;
+}
+
 /** Parse a caller-supplied source profile id into the closed grant vocabulary. */
 function parseSourceProfileId(value: SourceProfileId): SourceProfileId {
   const parsed = SourceProfileIdSchema.safeParse(value);
@@ -243,6 +281,32 @@ export class PostgresConsentRepository
     now?: Date,
     actor?: { readonly principalId: Id },
   ): Promise<PersistedConsentGrant> {
+    const outcome = await this.applyGrant(params, now, actor);
+
+    return outcome.consent;
+  }
+
+  /**
+   * The one grant write path: validate, then lock → decide → mutate inside ONE transaction.
+   *
+   * The replay verdict is computed from the row this transaction locked, not from a read taken
+   * before it. Reading "before" in a separate statement and comparing afterwards made two
+   * simultaneous identical grants both answer `replayed: false`: PostgreSQL serialised the writes,
+   * but the second caller had already observed the world without its competitor's row.
+   *
+   * Concurrency is resolved in one of two ways, and both end in the same decision procedure:
+   *
+   * 1. The row exists → `SELECT … FOR UPDATE` waits for the current holder, so the decision is
+   *    taken against the committed winner.
+   * 2. The row does not exist → the insert is `ON CONFLICT DO NOTHING`. A loser (`rowCount` 0)
+   *    re-reads the winner's now-committed row and falls through to the same decision, so it
+   *    reports the winner's generation instead of an error.
+   */
+  private async applyGrant(
+    params: GrantConsentParams,
+    now: Date | undefined,
+    actor: { readonly principalId: Id } | undefined,
+  ): Promise<GrantOutcome> {
     const clock = requireValidClock(now);
     const sourceProfileId = parseSourceProfileId(params.sourceProfileId);
 
@@ -307,7 +371,7 @@ export class PostgresConsentRepository
         params.tenantId,
         sourceProfileId,
       ]);
-      const row = existing.rows[0];
+      let row = existing.rows[0];
 
       if (row === undefined) {
         const inserted = await client.query<ConsentGrantRow>(INSERT_CONSENT_SQL, [
@@ -321,17 +385,36 @@ export class PostgresConsentRepository
           clock ?? null,
         ]);
 
-        return toPersistedGrant(requireRow(inserted.rows[0]), clock);
+        if ((inserted.rowCount ?? 0) > 0) {
+          // First effective grant of this lineage: nothing was there to replay.
+          return {
+            consent: toPersistedGrant(requireRow(inserted.rows[0]), clock),
+            replayed: false,
+          };
+        }
+
+        // Another transaction created the row first. Its commit is what released this insert, and
+        // under READ COMMITTED the row is visible now; `FOR UPDATE` also waits out any writer that
+        // is still open on it.
+        const raced = await client.query<ConsentGrantRow>(SELECT_CONSENT_FOR_UPDATE_SQL, [
+          params.tenantId,
+          sourceProfileId,
+        ]);
+        row = raced.rows[0];
+
+        if (row === undefined) {
+          // The row was created and removed between the conflict and this read: report a transient
+          // storage failure rather than inventing a generation.
+          throw new DomainError(
+            'DB_UNAVAILABLE',
+            'consent grant disappeared after an insert conflict',
+          );
+        }
       }
 
-      const isIdentical =
-        deriveRowStatus(row, clock) === 'active' &&
-        sameList(row.allowed_operations, operations) &&
-        sameList(row.scopes, scopes) &&
-        sameTimestamp(row.expires_at === null ? null : toIsoTimestamp(row.expires_at), expiresAt);
-
-      if (isIdentical) {
-        return toPersistedGrant(row, clock);
+      if (isIdenticalGrant(row, clock, operations, scopes, expiresAt)) {
+        // Same generation, unchanged terms: this call replays and advances nothing (C-09).
+        return { consent: toPersistedGrant(row, clock), replayed: true };
       }
 
       const updated = await client.query<ConsentGrantRow>(UPDATE_CONSENT_SQL, [
@@ -345,7 +428,7 @@ export class PostgresConsentRepository
         clock ?? null,
       ]);
 
-      return toPersistedGrant(requireRow(updated.rows[0]), clock);
+      return { consent: toPersistedGrant(requireRow(updated.rows[0]), clock), replayed: false };
     });
   }
 
@@ -512,19 +595,25 @@ export class PostgresConsentRepository
     }
   }
 
-  /** True when the grant currently authorises a snapshot read (operation AND scope). */
-  async isReadAuthorized(
-    tenantId: Id,
-    sourceProfileId: SourceProfileId,
-    now?: Date,
-  ): Promise<boolean> {
-    const grant = await this.getForTenant(tenantId, sourceProfileId, now);
+  /**
+   * True when the grant currently authorises a snapshot read.
+   *
+   * This delegates to {@link evaluateConsent}, so "authorized" means exactly what it means on the
+   * guarded read path: the `read_snapshot` operation is granted AND the `source.readonly` scope is
+   * present, with expiry decided by the database clock.
+   *
+   * There is deliberately no `now` parameter. The previous version compared `expires_at` against a
+   * caller-supplied clock while promising operation-and-scope verification it never performed, so
+   * its name claimed more authority than it exercised; an application clock must never be able to
+   * move an authorization boundary in either direction.
+   *
+   * A malformed source profile id raises `INVALID_ARGUMENT` (fail closed) rather than answering
+   * `false`, because "unparseable identifier" is a caller bug, not an authorization decision.
+   */
+  async isReadAuthorized(tenantId: Id, sourceProfileId: SourceProfileId): Promise<boolean> {
+    const decision = await this.evaluateConsent(tenantId, sourceProfileId, SOURCE_READ_OPERATION);
 
-    if (grant === null) {
-      return false;
-    }
-
-    return deriveConsentStatus(grant, now ?? new Date()) === 'active';
+    return decision.allowed;
   }
 
   // ---------------------------------------------------------------------------------------------
@@ -536,9 +625,10 @@ export class PostgresConsentRepository
     cmd: GrantConsentCommand,
   ): Promise<{ readonly consent: PersistedConsentGrant; readonly replayed: boolean }> {
     const scoped = parseAuthContext(ctx);
-    const before = await this.getForTenant(scoped.tenantId, cmd.sourceProfileId);
 
-    const consent = await this.grantForTenant(
+    // One transaction decides both the generation and the replay verdict, so two simultaneous
+    // identical grants can no longer both answer `replayed: false`.
+    return this.applyGrant(
       {
         tenantId: scoped.tenantId,
         sourceProfileId: cmd.sourceProfileId,
@@ -551,12 +641,6 @@ export class PostgresConsentRepository
       undefined,
       { principalId: scoped.principalId },
     );
-
-    // A replay is exactly "the same generation came back", never "a version stayed put".
-    const replayed =
-      before !== null && before.grantId === consent.grantId && before.version === consent.version;
-
-    return { consent, replayed };
   }
 
   async revoke(

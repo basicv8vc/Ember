@@ -7,6 +7,8 @@ import {
   type ConsentConformanceAdapter,
 } from '@ember/connectors';
 import {
+  DEFAULT_CONSENT_OPERATIONS,
+  DEFAULT_CONSENT_SCOPES,
   deriveTaskCreationIdempotencyKey,
   type AppendOutcomeCommand,
   type PersistedConsentGrant,
@@ -337,6 +339,115 @@ describe('P0-C3D: PostgreSQL consent conformance (C-01..C-13)', () => {
   });
 });
 
+describe('P0-C3D: concurrent grant replay (two connections)', () => {
+  const RACE_PROFILE = 'sp_p0c3d_race';
+  const CONCURRENT_PROFILE = 'sp_p0c3d_concurrent';
+
+  it('resolves a lost first-insert race as a replay instead of a duplicate-generation error', async () => {
+    const harness = await createHarness(db, 'P0-C3D grant insert race tenant');
+
+    // Connection A: create the very same row a concurrent request would create, but do not commit.
+    const writer = await db.pool.connect();
+    const blockedId = randomUUID();
+    let granted: ReturnType<typeof settleGrant>;
+
+    try {
+      await writer.query('BEGIN');
+      await writer.query(
+        `INSERT INTO consent_grants (
+           id, tenant_id, source_profile_id, status, allowed_operations, scopes,
+           granted_by_principal_id, expires_at, version
+         )
+         VALUES ($1, $2, $3, 'active', $4::text[], $5::text[], $6, NULL, 1)`,
+        [
+          blockedId,
+          harness.ctx.tenantId,
+          RACE_PROFILE,
+          [...DEFAULT_CONSENT_OPERATIONS],
+          [...DEFAULT_CONSENT_SCOPES],
+          harness.ctx.principalId,
+        ],
+      );
+
+      // Connection B: an identical grant request. Its `FOR UPDATE` read finds nothing (A has not
+      // committed), so it must block on the unique key rather than mint a second generation.
+      granted = settleGrant(harness.consent.grant(harness.ctx, { sourceProfileId: RACE_PROFILE }));
+
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      expect(granted.settled()).toBe(false);
+
+      await writer.query('COMMIT');
+    } finally {
+      writer.release();
+    }
+
+    // The loser re-reads the winner's committed row: same generation, reported as a replay.
+    await expect(granted.outcome).resolves.toEqual({
+      replayed: true,
+      grantId: blockedId,
+      version: 1,
+    });
+
+    const rows = await db.pool.query<{ count: string; version: number }>(
+      'SELECT count(*)::text AS count, min(version) AS version FROM consent_grants WHERE tenant_id = $1 AND source_profile_id = $2',
+      [harness.ctx.tenantId, RACE_PROFILE],
+    );
+
+    expect(rows.rows[0]).toEqual({ count: '1', version: 1 });
+  });
+
+  it('answers exactly one replay when two identical grants arrive at once', async () => {
+    const harness = await createHarness(db, 'P0-C3D grant concurrency tenant');
+
+    // Two independent pool clients, released together: the repository really does run two
+    // overlapping transactions, not one call that happens to start after the other.
+    const results = await Promise.all([
+      harness.consent.grant(harness.ctx, { sourceProfileId: CONCURRENT_PROFILE }),
+      harness.consent.grant(harness.ctx, { sourceProfileId: CONCURRENT_PROFILE }),
+    ]);
+
+    const firsts = results.filter((result) => !result.replayed);
+
+    expect(firsts).toHaveLength(1);
+    expect(results[0]?.consent.grantId).toBe(results[1]?.consent.grantId);
+    expect(results[0]?.consent.version).toBe(1);
+    expect(results[1]?.consent.version).toBe(1);
+
+    const rows = await db.pool.query<{ count: string; version: number }>(
+      'SELECT count(*)::text AS count, min(version) AS version FROM consent_grants WHERE tenant_id = $1 AND source_profile_id = $2',
+      [harness.ctx.tenantId, CONCURRENT_PROFILE],
+    );
+
+    expect(rows.rows[0]).toEqual({ count: '1', version: 1 });
+  });
+
+  it('still mints a new generation when the terms change, even under contention', async () => {
+    const harness = await createHarness(db, 'P0-C3D grant widening tenant');
+
+    const first = await harness.consent.grant(harness.ctx, { sourceProfileId: CONCURRENT_PROFILE });
+    expect(first.replayed).toBe(false);
+
+    const widened = await harness.consent.grant(harness.ctx, {
+      sourceProfileId: CONCURRENT_PROFILE,
+      allowedOperations: ['read_snapshot', 'read_metadata'],
+    });
+
+    expect(widened.replayed).toBe(false);
+    expect(widened.consent.grantId).not.toBe(first.consent.grantId);
+    expect(widened.consent.version).toBe(first.consent.version + 1);
+
+    // A pure replay of the widened terms is a replay again, and advances nothing.
+    const replayed = await harness.consent.grant(harness.ctx, {
+      sourceProfileId: CONCURRENT_PROFILE,
+      allowedOperations: ['read_metadata', 'read_snapshot'],
+    });
+
+    expect(replayed.replayed).toBe(true);
+    expect(replayed.consent.grantId).toBe(widened.consent.grantId);
+    expect(replayed.consent.version).toBe(widened.consent.version);
+  });
+});
+
 describe('P0-C3D: scope enforcement (P0-C3C R5)', () => {
   it('denies a read whose grant omits the source.readonly scope', async () => {
     const harness = await createHarness(db, 'P0-C3D scope tenant');
@@ -411,6 +522,82 @@ describe('P0-C3D: scope enforcement (P0-C3C R5)', () => {
     await expect(reserveAndDispatch(harness, commitmentId, version)).rejects.toThrowError(
       expect.objectContaining({ code: 'POLICY_DENIED' }),
     );
+  });
+
+  it('answers isReadAuthorized with the whole decision, not just the status', async () => {
+    const harness = await createHarness(db, 'P0-C3D read gate tenant');
+
+    // Nothing stored: no read.
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(false);
+
+    // Active, but the scope is wrong: still no read even though the status is `active`.
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      allowedOperations: ['read_snapshot'],
+      scopes: ['source.readwrite'],
+    });
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(false);
+
+    // Active, but the operation is different.
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      allowedOperations: ['read_metadata'],
+      scopes: ['source.readonly'],
+    });
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(false);
+
+    // Active, right operation, right scope.
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+    });
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(true);
+
+    // Revoked: no read.
+    await harness.consent.revokeForTenant(harness.ctx.tenantId, FIXTURE_PROFILE);
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(false);
+  });
+
+  it('derives expiry inside SQL, so no caller clock can move the boundary', async () => {
+    const harness = await createHarness(db, 'P0-C3D read gate expiry tenant');
+
+    await harness.consent.grantForTenant({
+      tenantId: harness.ctx.tenantId,
+      sourceProfileId: FIXTURE_PROFILE,
+      expiresAt: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(true);
+
+    // Elapse the row the way the database sees it. `isReadAuthorized` takes no clock argument at
+    // all: expiry comes from `is_expired`, which SQL computes against `clock_timestamp()`, so there
+    // is no code path — and no parameter — through which an application clock could either extend
+    // or shorten a grant.
+    await db.pool.query(
+      `UPDATE consent_grants
+          SET expires_at = clock_timestamp() - interval '1 second',
+              granted_at = clock_timestamp() - interval '2 minutes'
+        WHERE tenant_id = $1 AND source_profile_id = $2`,
+      [harness.ctx.tenantId, FIXTURE_PROFILE],
+    );
+
+    await expect(
+      harness.consent.isReadAuthorized(harness.ctx.tenantId, FIXTURE_PROFILE),
+    ).resolves.toBe(false);
   });
 });
 
@@ -569,6 +756,40 @@ describe('P0-C3D: publication requires a provable generation', () => {
     expect(current?.grantId).toBe(regranted.grantId);
   });
 });
+
+/**
+ * Starts a grant and converts it into an inspectable result without ever leaving a dangling
+ * rejected promise: the race assertions wait on `settled()`, not on a rejection handler.
+ */
+function settleGrant(
+  promise: Promise<{ readonly consent: PersistedConsentGrant; readonly replayed: boolean }>,
+): {
+  readonly outcome: Promise<{
+    readonly replayed: boolean;
+    readonly grantId: string;
+    readonly version: number;
+  }>;
+  readonly settled: () => boolean;
+} {
+  let done = false;
+
+  const outcome = promise.then(
+    (result) => {
+      done = true;
+      return {
+        replayed: result.replayed,
+        grantId: result.consent.grantId,
+        version: result.consent.version,
+      };
+    },
+    (error: unknown) => {
+      done = true;
+      throw error;
+    },
+  );
+
+  return { outcome, settled: () => done };
+}
 
 interface PublishResult {
   readonly kind: 'published' | 'denied' | 'other';

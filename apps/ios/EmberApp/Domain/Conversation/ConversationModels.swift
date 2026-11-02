@@ -130,14 +130,39 @@ public struct AssistantTurn: Equatable, Sendable {
     public init(
         id: AssistantTurnID,
         conversationID: ConversationID,
-        triggeringMessageID: MessageID,
+        triggeringMessage: ConversationMessage,
         createdAt: Date
-    ) {
+    ) throws {
+        if let validationError = Self.triggeringMessageValidationError(
+            triggeringMessage,
+            in: conversationID
+        ) {
+            throw validationError
+        }
+
         self.id = id
         self.conversationID = conversationID
-        self.triggeringMessageID = triggeringMessageID
+        self.triggeringMessageID = triggeringMessage.id
         self.createdAt = createdAt
     }
+
+    static func triggeringMessageValidationError(
+        _ message: ConversationMessage,
+        in conversationID: ConversationID
+    ) -> AssistantTurnValidationError? {
+        guard message.conversationID == conversationID else {
+            return .triggeringMessageBelongsToDifferentConversation
+        }
+        guard case .user = message.kind else {
+            return .triggeringMessageMustBeUser
+        }
+        return nil
+    }
+}
+
+public enum AssistantTurnValidationError: Error, Equatable, Sendable {
+    case triggeringMessageBelongsToDifferentConversation
+    case triggeringMessageMustBeUser
 }
 
 /// Read-only, in-memory view of a conversation. Ordering is normalized on construction;

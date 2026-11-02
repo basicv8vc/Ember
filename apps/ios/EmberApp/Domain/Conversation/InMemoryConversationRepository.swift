@@ -76,7 +76,10 @@ public actor InMemoryConversationRepository: ConversationRepositoryProtocol {
               let triggeringMessage = snapshot.messages.first(where: {
                   $0.id == turn.triggeringMessageID && $0.conversationID == conversationID
               }),
-              case .user = triggeringMessage.kind else {
+              AssistantTurn.triggeringMessageValidationError(
+                  triggeringMessage,
+                  in: conversationID
+              ) == nil else {
             throw ConversationRepositoryError.invalidAssistantTurn(conversationID, turn.id)
         }
 
@@ -104,6 +107,7 @@ public actor InMemoryConversationRepository: ConversationRepositoryProtocol {
         let conversationID = snapshot.conversation.id
         var messageIDs = Set<MessageID>()
         var sequences = Set<Int>()
+        var messagesByID: [MessageID: ConversationMessage] = [:]
 
         for message in snapshot.messages {
             guard message.conversationID == conversationID,
@@ -113,6 +117,7 @@ public actor InMemoryConversationRepository: ConversationRepositoryProtocol {
             guard messageIDs.insert(message.id).inserted else {
                 throw ConversationRepositoryError.duplicateMessage(message.id)
             }
+            messagesByID[message.id] = message
             guard sequences.insert(message.sequence).inserted else {
                 throw ConversationRepositoryError.duplicateMessageSequence(
                     conversationID,
@@ -124,7 +129,11 @@ public actor InMemoryConversationRepository: ConversationRepositoryProtocol {
         var turnIDs = Set<AssistantTurnID>()
         for turn in snapshot.assistantTurns {
             guard turn.conversationID == conversationID,
-                  messageIDs.contains(turn.triggeringMessageID),
+                  let triggeringMessage = messagesByID[turn.triggeringMessageID],
+                  AssistantTurn.triggeringMessageValidationError(
+                      triggeringMessage,
+                      in: conversationID
+                  ) == nil,
                   turnIDs.insert(turn.id).inserted else {
                 throw ConversationRepositoryError.invalidAssistantTurn(conversationID, turn.id)
             }

@@ -105,10 +105,10 @@ final class ConversationRepositoryTests: XCTestCase {
         let repository = try ConversationFixtures.makeRepository()
         let before = try await repository.fetchConversation(id: ConversationFixtures.mainConversationID)
         let trigger = try XCTUnwrap(before.messages.first)
-        let newTurn = AssistantTurn(
+        let newTurn = try AssistantTurn(
             id: ConversationFixtures.firstTurnID,
             conversationID: before.conversation.id,
-            triggeringMessageID: trigger.id,
+            triggeringMessage: trigger,
             createdAt: trigger.createdAt
         )
 
@@ -120,6 +120,85 @@ final class ConversationRepositoryTests: XCTestCase {
         XCTAssertEqual(updated.messages, before.messages)
         XCTAssertEqual(updated.assistantTurns.count, before.assistantTurns.count)
         XCTAssertEqual(updated.assistantTurns.first?.id, newTurn.id)
+    }
+
+    func testAssistantTurnCannotUseAssistantMessageAsTrigger() async throws {
+        let conversationID = ConversationID(
+            rawValue: UUID(uuidString: "78000000-0000-4000-8000-000000000001")!
+        )
+        let messageID = MessageID(
+            rawValue: UUID(uuidString: "77000000-0000-4000-8000-000000000099")!
+        )
+        let timestamp = Date(timeIntervalSince1970: 1_793_520_000)
+        let conversation = Conversation(
+            id: conversationID,
+            createdAt: timestamp,
+            updatedAt: timestamp
+        )
+        let assistantMessage = ConversationMessage(
+            id: messageID,
+            conversationID: conversationID,
+            sequence: 1,
+            createdAt: timestamp,
+            kind: .ember(text: "我来整理这个请求。")
+        )
+
+        XCTAssertThrowsError(
+            try AssistantTurn(
+                id: ConversationFixtures.firstTurnID,
+                conversationID: conversationID,
+                triggeringMessage: assistantMessage,
+                createdAt: timestamp
+            )
+        ) { error in
+            XCTAssertEqual(
+                error as? AssistantTurnValidationError,
+                .triggeringMessageMustBeUser
+            )
+        }
+
+        let conflictingUserMessage = ConversationMessage(
+            id: messageID,
+            conversationID: conversationID,
+            sequence: 1,
+            createdAt: timestamp,
+            kind: .user(text: "整理这个请求。")
+        )
+        let turn = try AssistantTurn(
+            id: ConversationFixtures.firstTurnID,
+            conversationID: conversationID,
+            triggeringMessage: conflictingUserMessage,
+            createdAt: timestamp
+        )
+        let invalidSnapshot = ConversationSnapshot(
+            conversation: conversation,
+            messages: [assistantMessage],
+            assistantTurns: [turn]
+        )
+
+        XCTAssertThrowsError(
+            try InMemoryConversationRepository(fixtures: [invalidSnapshot])
+        ) { error in
+            XCTAssertEqual(
+                error as? ConversationRepositoryError,
+                .invalidAssistantTurn(conversationID, turn.id)
+            )
+        }
+
+        let repository = try InMemoryConversationRepository(fixtures: [
+            ConversationSnapshot(
+                conversation: conversation,
+                messages: [assistantMessage],
+                assistantTurns: []
+            ),
+        ])
+
+        do {
+            _ = try await repository.upsertAssistantTurn(turn, in: conversationID)
+            XCTFail("Upsert must validate the canonical repository message kind.")
+        } catch let error as ConversationRepositoryError {
+            XCTAssertEqual(error, .invalidAssistantTurn(conversationID, turn.id))
+        }
     }
 
     func testTurnTaskConnectionAndCommandStatusesRemainIndependent() {

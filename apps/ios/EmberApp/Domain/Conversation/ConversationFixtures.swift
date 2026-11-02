@@ -22,7 +22,7 @@ public enum ConversationFixtures {
 
     private static let baseTime = Date(timeIntervalSince1970: 1_793_520_000)
 
-    public static let mainConversation = makeMainConversation()
+    public static let mainConversation = try! makeMainConversation()
     public static let emptyConversation = ConversationSnapshot(
         conversation: Conversation(
             id: ConversationID(rawValue: UUID(uuidString: "71000000-0000-4000-8000-000000000002")!),
@@ -37,7 +37,7 @@ public enum ConversationFixtures {
         try InMemoryConversationRepository(fixtures: [mainConversation, emptyConversation])
     }
 
-    private static func makeMainConversation() -> ConversationSnapshot {
+    private static func makeMainConversation() throws -> ConversationSnapshot {
         let conversation = Conversation(
             id: mainConversationID,
             createdAt: baseTime,
@@ -131,23 +131,23 @@ public enum ConversationFixtures {
             ),
         ]
 
-        let turns = [
+        let turns = try [
             AssistantTurn(
                 id: firstTurnID,
                 conversationID: mainConversationID,
-                triggeringMessageID: userOneID,
+                triggeringMessage: messages[0],
                 createdAt: baseTime
             ),
             AssistantTurn(
                 id: secondTurnID,
                 conversationID: mainConversationID,
-                triggeringMessageID: userTwoID,
+                triggeringMessage: messages[4],
                 createdAt: baseTime.addingTimeInterval(30)
             ),
             AssistantTurn(
                 id: thirdTurnID,
                 conversationID: mainConversationID,
-                triggeringMessageID: userThreeID,
+                triggeringMessage: messages[8],
                 createdAt: baseTime.addingTimeInterval(90)
             ),
         ]

@@ -270,6 +270,11 @@ function buildContext() {
     sourceProfileId: SOURCE_PROFILE_ID,
     scheduleKind: 'once' as const,
     policyVersion: 1,
+    // P0-C3D: the Occurrence's persisted generation is what execution is bound to. The orchestrator
+    // refuses an Occurrence that records none, and refuses one whose generation the authority no
+    // longer reports — so every fence assertion below is decided against this identity, not
+    // against today's grant.
+    consentGeneration: { grantId: 'grant-primary', version: 1 },
   };
 }
 

@@ -1,8 +1,9 @@
 # P0-C3D Durable Consent Authority — Delivery Report
 
-Status: **implementation complete, PR #84 open for CTO review.**
+Status: **implementation complete, PR #84 open for CTO review (Draft).**
 Contract: [`docs/P0C3-C-CONSENT-CONTRACT.md`](./P0C3-C-CONSENT-CONTRACT.md) (frozen, merged in PR #83).
-Migration: `migrations/0010_p0c3d_consent.sql`.
+Migrations: `migrations/0009_p0c3b_runtime_closure.sql` (P0-C3B, inherited with the Worker runtime) then
+`migrations/0010_p0c3d_consent.sql` (this PR). No renumbering.
 
 ---
 
@@ -19,7 +20,15 @@ revocation.
 | C. Persist the complete generation binding                       | `commitment_occurrences.consent_grant_id` + `consent_version` with a coherence CHECK         |
 | 3. Transaction-level publication security                        | `PostgresConsentPublicationGuard`, invoked inside the publication transaction                |
 | 4. Conformance + adversarial races                               | `assertConsentConformance(postgresAdapter)` C-01…C-13 plus two-connection race tests         |
-| 5. Migration coordination                                        | `0010` here; PR #62 renumbers its `0009` to `0011` when it lands second                      |
+| 5. Migration coordination                                        | `0009` (C3B) + `0010` (C3D) in this PR; no renumbering; #62 superseded and closed unmerged   |
+| 6. Integrated Worker runtime (PR #62)                            | #62's head is an ancestor of this branch; the durable store is wired into its gates          |
+
+Round-3 follow-ups requested by the CTO after the Round-2 review, both landed here:
+
+| Finding                                                                  | Resolution                                                                           |
+| ------------------------------------------------------------------------ | ------------------------------------------------------------------------------------ |
+| Concurrent identical `grant()` calls could both answer `replayed: false` | the replay verdict is now computed from the row the single write transaction locked  |
+| `isReadAuthorized()` promised operation+scope but only checked status    | it now delegates to `evaluateConsent()`, and its application-clock parameter is gone |
 
 The single security property this delivery buys, stated plainly:
 
@@ -71,18 +80,18 @@ distinguish "still current" from "revoked and re-granted", which is why the fenc
 
 ### 2.3 Files
 
-| File                                                              | Role                                                                               |
-| ----------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `packages/contracts/src/consent.ts`                               | the frozen contract (single source of truth)                                       |
-| `packages/contracts/src/consent-schemas.ts`                       | `ConsentAuthority`, `ConsentEvaluator`, `ConsentRepository`, DTO schemas           |
-| `packages/postgres/src/repositories/consent-repository.ts`        | durable authority: grant / revoke / get / list / `resolveGeneration`               |
-| `packages/postgres/src/repositories/consent-fence.ts`             | shared SQL projection, expiry derivation, `evaluateConsentRow`, denial diagnostics |
-| `packages/postgres/src/repositories/consent-publication-guard.ts` | transaction-scoped dispatch + publication gates (locks on the caller's client)     |
-| `packages/postgres/src/repositories/commitment-repository.ts`     | lock order, dispatch fence write, publication transaction, fence-less recovery     |
-| `apps/worker/src/commitment-consent.ts`                           | worker gate helpers (`evaluateSchedulerConsentGate`, guard factory)                |
-| `apps/worker/src/index.ts`                                        | composition root: one authority arms every gate                                    |
-| `apps/worker/src/commitment-source-reader.ts`                     | pre-read / post-read fence re-verification around the guarded read                 |
-| `migrations/0010_p0c3d_consent.sql`                               | `consent_grants` + occurrence fence columns                                        |
+| File                                                              | Role                                                                                      |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `packages/contracts/src/consent.ts`                               | the frozen contract (single source of truth)                                              |
+| `packages/contracts/src/consent-schemas.ts`                       | `ConsentAuthority`, `ConsentEvaluator`, `ConsentRepository`, DTO schemas                  |
+| `packages/postgres/src/repositories/consent-repository.ts`        | durable authority: grant / revoke / get / list / `resolveGeneration`                      |
+| `packages/postgres/src/repositories/consent-fence.ts`             | shared SQL projection, expiry derivation, `evaluateConsentRow`, denial diagnostics        |
+| `packages/postgres/src/repositories/consent-publication-guard.ts` | transaction-scoped dispatch + publication gates (locks on the caller's client)            |
+| `packages/postgres/src/repositories/commitment-repository.ts`     | lock order, dispatch fence write, publication transaction, fence-less recovery            |
+| `apps/worker/src/commitment-consent.ts`                           | worker gate helpers (`evaluateSchedulerConsentGate`, `requireCommitmentConsentAuthority`) |
+| `apps/worker/src/index.ts`                                        | composition root: one authority arms every gate                                           |
+| `apps/worker/src/commitment-source-reader.ts`                     | pre-read / post-read fence re-verification around the guarded read                        |
+| `migrations/0010_p0c3d_consent.sql`                               | `consent_grants` + occurrence fence columns                                               |
 
 ---
 
@@ -228,7 +237,39 @@ which consent authorized a read that may already have happened, so:
 "The grant happens to be active right now" is never accepted as proof that _this_ read was
 authorized by it — that shortcut is precisely how a read would be laundered across generations.
 
-`UPDATE`.
+### 4.6 Replay is decided inside the write transaction
+
+`grant()` used to read the row before the write transaction and compare it with the result afterwards.
+That read is not the decision: two simultaneous identical grants both observed "no prior grant", and
+because a missing row cannot be locked with `FOR UPDATE`, both attempted the insert. PostgreSQL
+serialised them — but the loser surfaced a unique violation as `DB_UNAVAILABLE` while the survivor
+reported a fresh generation, so `replayed` was a property of the caller's timing rather than of the
+write.
+
+The write path is now one transaction (`applyGrant`) that locks, decides and mutates:
+
+1. `SELECT … FOR UPDATE` on the lineage.
+2. If the row is absent, `INSERT … ON CONFLICT (tenant_id, source_profile_id) DO NOTHING`. A `rowCount`
+   of `0` means another transaction created it; the loser re-reads that row and continues.
+3. Identical terms on a still-effective generation → `replayed: true`, same `(grantId, version)`,
+   nothing written.
+4. Anything else (changed terms, revoked, expired, or a lost insert race that produced different
+   terms) → `UPDATE` mints a new `grantId` and `version + 1`.
+
+`tests/integration/p0c3d-consent-postgres.test.ts` → `P0-C3D: concurrent grant replay (two connections)`
+holds a first insert open on one connection and proves the other request blocks and then answers
+`replayed: true` with the winner's generation; a second case launches two identical `grant()` calls at
+once and requires exactly one non-replay, one row, `version = 1`. Against the previous implementation
+both cases fail with `DB_UNAVAILABLE` (unique violation) — the local evidence is recorded in §9.
+
+### 4.7 The read gate is the authoritative read
+
+`isReadAuthorized(tenantId, sourceProfileId)` is a convenience predicate over `evaluateConsent()`, so
+"authorized" means there what it means on the guarded read path: the `read_snapshot` operation is
+granted, the `source.readonly` scope is present, and expiry is derived from `is_expired` — computed in
+SQL against `clock_timestamp()`. The method takes **no** clock argument: an application clock may not
+extend or shrink an authorization boundary. Its previous version checked status only (answering `true`
+for an `active` grant that lacked the read scope) and compared `expires_at` against `new Date()`.
 
 ---
 
@@ -237,7 +278,14 @@ authorized by it — that shortcut is precisely how a read would be laundered ac
 `apps/worker/src/index.ts` builds **one** durable authority and hands it to every consumer:
 
 ```ts
-const consentAuthority = fromResolvedGenerationConsent(new PostgresConsentRepository(pool));
+const consentStore = new PostgresConsentRepository(pool);
+// The connector boundary evaluates `allowedOperations`/`scopes` against the SAME persistence the
+// generation was resolved from, so no Worker-side copy of the terms can authorize a read.
+const consentGrants = {
+  get: (tenantId: string, sourceProfileId: SourceProfileId, now?: Date) =>
+    consentStore.getForTenant(tenantId, sourceProfileId, now),
+};
+const consentAuthority = fromResolvedGenerationConsent(consentStore, { grants: consentGrants });
 const consentPublicationGuard = new PostgresConsentPublicationGuard();
 const consentGate = evaluateSchedulerConsentGate(consentAuthority);
 ```
@@ -258,6 +306,12 @@ repository constructed _without_ a consent authority must fail closed rather tha
 `tests/integration/p0c3b-consent-dependency.test.ts` locks that in against real PostgreSQL:
 `appendOutcomeIfAbsent` and `findAuthoritativeOutcome` reject with `POLICY_DENIED` and write no row,
 and `markDispatched` rejects while the occurrence stays `pending` with `task_id = null`.
+
+PR #62's own `createCommitmentConsentPublicationGuard` was **deleted** in this integration. It called
+`assertActive()` before the append transaction and could not see the `client` the repository hands to
+a guard, so it could not prove the generation was still current at write time; it existed only because
+#62 had no durable guard. Keeping it would have left a seam whose name suggests atomicity it did not
+have. Publication denial is covered by the durable guard's integration tests instead.
 
 ---
 
@@ -320,27 +374,56 @@ Additional adversarial coverage in the same file:
 | `mints a new grantId and a greater version on an explicit re-grant`         | new `grantId`, `version` +1                                                        |
 | `replays an identical reaffirmation without minting a generation`           | same `grantId`, same `version`                                                     |
 
+### 7.1 Concurrent grant replay (write-side race)
+
+Same file, `P0-C3D: concurrent grant replay (two connections)`. These are the CTO's Round-3 case: two
+requests that arrive together must not both believe they created the generation.
+
+| Test                                                                        | Shape                                                                                                        | Asserted outcome                                                                                                                   |
+| --------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------- |
+| `resolves a lost first-insert race as a replay …`                           | connection A inserts the lineage row and does not commit; `grant()` on connection B blocks on the unique key | B is unresolved while A holds the row; after A commits B answers `replayed: true` with A's `grantId`, `version` 1; exactly one row |
+| `answers exactly one replay when two identical grants arrive at once`       | two `grant()` calls on independent pool clients, started together                                            | exactly one `replayed: false`, identical `grantId`/`version` in both, one row, `version = 1`                                       |
+| `still mints a new generation when the terms change, even under contention` | grant, then a widened grant, then the same terms in a different order                                        | widened → new `grantId`, `version + 1`, `replayed: false`; reordered identical terms → `replayed: true`                            |
+
+Local before/after, both gates observed on this branch:
+
+| Implementation                                    | `lost first-insert race`                                    | `two identical grants at once` |
+| ------------------------------------------------- | ----------------------------------------------------------- | ------------------------------ |
+| pre-fix (`HEAD~`, pre-merge `consent-repository`) | **FAIL** — `DomainError: DB_UNAVAILABLE` (unique violation) | **FAIL** — same error          |
+| this branch                                       | **PASS**                                                    | **PASS**                       |
+
+### 7.2 Read-gate discrimination
+
+`answers isReadAuthorized with the whole decision, not just the status` fails against the previous
+implementation (`expected true to be false`: an `active` grant that carries `source.readwrite` but not
+`source.readonly` was reported as authorizing a read) and passes now. The companion case asserts the
+gate flips to `false` when the row's `expires_at` is elapsed in the database, and there is no clock
+parameter through which a caller could argue otherwise.
+
 ---
 
 ## 8. Migration coordination
 
-| PR            | Migration                                                              | Order                                                    |
-| ------------- | ---------------------------------------------------------------------- | -------------------------------------------------------- |
-| #84 (this PR) | `0009_p0c3b_runtime_closure.sql` (from #62) + `0010_p0c3d_consent.sql` | lands first                                              |
-| #62 (Agent B) | the same `0009` file                                                   | lands second; its renumber to `0011` must be **dropped** |
+| PR            | Migrations it ships                                               | Status                                            |
+| ------------- | ----------------------------------------------------------------- | ------------------------------------------------- |
+| #84 (this PR) | `0009_p0c3b_runtime_closure.sql` **and** `0010_p0c3d_consent.sql` | lands first                                       |
+| #62 (Agent B) | none of its own — its `0009` is already here                      | superseded by #84; close it instead of merging it |
 
-This PR already carries PR #62's runtime-closure migration, because the branch integrates that work as
-a dependency. Consequence for the agreed merge order:
+The agreed merge order was "#84 first, then #62 with the `0009` → `0011` renumber". That renumber is
+now **dropped**, and it has to be: `0009_p0c3b_runtime_closure.sql` in this PR and the `0011` file on
+#62's branch are byte-identical (two partial indexes on `commitment_occurrences`). Applying both would
+repeat the same index-only DDL under a new id. Since this branch contains #62's work — verified with
+`git merge-base --is-ancestor <62-head> HEAD` — there is nothing left for #62 to land.
 
-1. #84 lands with `0009` + `0010`; main then contains the P0-C3B indexes.
-2. #62 rebases onto that main and lands **without** renumbering, because its migration diff is empty
-   at that point. Renumbering `0009` to `0011` would add the same index-only DDL a second time under a
-   new id — exactly the duplicate the plan forbids.
+1. #84 lands with `0009` + `0010`; main then contains the P0-C3B indexes and the Consent schema.
+2. #62 is **closed as superseded**, not merged: merging it afterwards would either be empty or drag
+   the `0011` duplicate back in.
 
 `0010` is order-independent regardless: it never assumes `0009` is applied, and the runner requires
 unique, strictly increasing ids while tolerating an out-of-order backfill.
 `tests/integration/migrations.test.ts` covers 10 applied migrations, the `schema_migrations` version
-count and the idempotent replay.
+count, the idempotent replay, the **normal** `0009` → `0010` order, and the **out-of-order** case where
+`0010` was already applied and `0009` is backfilled behind it.
 
 ---
 
@@ -352,14 +435,20 @@ count and the idempotent replay.
 | Lint                                | `pnpm lint`                                         | **0** — no errors, no warnings        |
 | Typecheck (strict)                  | `pnpm typecheck`                                    | **0**                                 |
 | Build                               | `pnpm build`                                        | **0**                                 |
-| Unit                                | `pnpm test:unit`                                    | **0** — 70 files, 1179 tests          |
-| Integration (real PostgreSQL)       | `pnpm test:integration`                             | **0** — 35 files, 354 tests           |
+| Unit                                | `pnpm test:unit`                                    | **0** — 70 files, 1184 tests          |
+| Integration (real PostgreSQL)       | `pnpm test:integration`                             | **0** — 35 files, 364 tests           |
 | Chaos (real PostgreSQL)             | `pnpm test:chaos`                                   | **0** — 6 files, 30 tests             |
 | End-to-end (real HTTP + PostgreSQL) | `pnpm test:e2e`                                     | **0** — 9 files, 18 tests             |
 | Demo CLI smoke                      | `pnpm demo --scenario fast`                         | **0** — Fast Path PASS                |
 | Migration from a clean database     | `DATABASE_URL=<fresh> pnpm db:migrate`              | **0** — 10 applied, 0 already applied |
 | Migration idempotency (re-run)      | `DATABASE_URL=<fresh> pnpm db:migrate`              | **0** — 0 applied, 10 already applied |
-| Consent suites in isolation         | `… p0c3d-consent-postgres p0c3b-consent-dependency` | **0** — 16 tests                      |
+| Consent suites in isolation         | `… p0c3d-consent-postgres p0c3b-consent-dependency` | **0** — 21 tests                      |
+
+Round-3 evidence: the two new grant cases and the two read-gate cases were run against the _previous_
+`consent-repository.ts` (`git show HEAD~:…`) and fail there (§7.1/§7.2); they pass on this branch.
+`pnpm` is not installed in this environment, so the equivalent commands were invoked directly
+(`npx prettier --check .`, `npx eslint . --max-warnings=0`, `npx tsc -p tsconfig.json --noEmit`,
+`npx tsc -b tsconfig.build.json`, `vitest run --config vitest.<suite>.config.ts`).
 
 CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`, 10 steps: Lint, Check formatting,
 Typecheck, Unit, Build, Migrate ×2, Integration, Chaos, E2E, Demo CLI smoke):
@@ -382,13 +471,16 @@ and SQL comments only (`0cb03d6`, `8dd0459`). Live status is `gh pr checks 84`.
 1. **Fence-less occurrences are terminal.** Any occurrence dispatched before `0010` cannot be
    repaired, only failed. This is deliberate, and it means a deployment that already has dispatched
    occurrences must expect those Tasks to end `failed` rather than published.
-2. **Duplicate guard parameter shapes.** `ConsentGuardParams` is declared in both
-   `apps/worker/src/commitment-consent.ts` and `tests/integration/support/consent-test-double.ts`.
-   They are structurally identical and the test double lives outside the shipped surface, but a
-   future change should re-export the worker type instead of re-declaring it.
+2. **Duplicate guard parameter shapes — resolved.** `ConsentGuardParams` was declared both in
+   `apps/worker/src/commitment-consent.ts` and in `tests/integration/support/consent-test-double.ts`.
+   The worker declaration is gone with the deleted guard factory, so the repository's
+   `ConsentPublicationGuard` is the only shape.
 3. **The in-memory test double stays.** `InMemoryTestConsentAuthority` is used only by integration
    scenarios that are not about consent; the revocation claims in this document are backed by
-   `PostgresConsentPublicationGuard` against real row locks, never by the double.
+   `PostgresConsentPublicationGuard` against real row locks, never by the double. Its publication guard
+   now implements the same `authorizeFence` / `assertFenceCurrent` contract as the durable one (`null`
+   fence denied, generation compared), so the commitment suites cannot pass under a weaker gate than
+   production.
 4. **`evaluateConsent` is advisory.** It is a lock-free read used for pre-read decisions and
    diagnostics. The authoritative decision is always the one taken inside the publication
    transaction; nothing may treat a successful `evaluateConsent` as permission to publish.

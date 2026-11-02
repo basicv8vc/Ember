@@ -33,9 +33,9 @@ final class ConversationCardsTests: XCTestCase {
     }
 
     func testTaskCancellationIsPendingOnlyWhenRequestWasAcceptedAndNonterminal() {
-        let taskID = UUID()
+        let task = makeTask(status: .running)
         let pending = TaskCancelDTO(
-            taskID: taskID,
+            taskID: task.taskID,
             status: .running,
             cancelRequested: true,
             cancelRequestedAt: "2026-11-02T01:00:00Z",
@@ -43,7 +43,7 @@ final class ConversationCardsTests: XCTestCase {
             updatedAt: "2026-11-02T01:00:00Z"
         )
         let terminal = TaskCancelDTO(
-            taskID: taskID,
+            taskID: task.taskID,
             status: .completed,
             cancelRequested: false,
             cancelRequestedAt: nil,
@@ -52,7 +52,7 @@ final class ConversationCardsTests: XCTestCase {
         )
 
         XCTAssertTrue(TaskActivityCard.facts(
-            for: makeTask(status: .running),
+            for: task,
             presentation: makePresentation(connection: .connected),
             cancelResponse: pending
         ).cancellationPending)
@@ -66,6 +66,26 @@ final class ConversationCardsTests: XCTestCase {
             presentation: makePresentation(connection: .connected),
             cancelResponse: nil
         ).cancellationPending)
+    }
+
+    func testCancellationResponseForAnotherTaskDoesNotAppearOnThisCard() {
+        let task = makeTask(status: .running)
+        let responseForAnotherTask = TaskCancelDTO(
+            taskID: UUID(uuidString: "00000000-0000-4000-8000-000000000102")!,
+            status: .running,
+            cancelRequested: true,
+            cancelRequestedAt: "2026-11-02T01:00:00Z",
+            terminal: false,
+            updatedAt: "2026-11-02T01:00:00Z"
+        )
+
+        let facts = TaskActivityCard.facts(
+            for: task,
+            presentation: makePresentation(connection: .connected),
+            cancelResponse: responseForAnotherTask
+        )
+
+        XCTAssertFalse(facts.cancellationPending)
     }
 
     func testConnectionLossAndCancelRequestDoNotRewriteTaskStatus() {

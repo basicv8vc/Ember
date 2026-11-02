@@ -110,12 +110,12 @@ public struct TaskActivityCard: View {
             capability: presentation.capability,
             connectionPhase: presentation.connectionPhase,
             commandInFlight: presentation.commandInFlight,
-            cancellationPending: isCancellationPending(cancelResponse)
+            cancellationPending: isCancellationPending(for: task.taskID, response: cancelResponse)
         )
     }
 
-    private static func isCancellationPending(_ response: TaskCancelDTO?) -> Bool {
-        guard let response else { return false }
+    private static func isCancellationPending(for taskID: UUID, response: TaskCancelDTO?) -> Bool {
+        guard let response, response.taskID == taskID else { return false }
         return response.cancelRequested && !response.terminal
     }
 }

@@ -353,8 +353,17 @@ exercised by `tests/integration/migrations.test.ts`, which asserts 10 applied mi
 | Migration idempotency (re-run)      | `DATABASE_URL=<fresh> pnpm db:migrate`              | **0** — 0 applied, 10 already applied |
 | Consent suites in isolation         | `… p0c3d-consent-postgres p0c3b-consent-dependency` | **0** — 16 tests                      |
 
-CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`) is recorded in the PR #84 description
-and in the commit history of this branch.
+CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`, 10 steps: Lint, Check formatting,
+Typecheck, Unit, Build, Migrate ×2, Integration, Chaos, E2E, Demo CLI smoke):
+
+| Field       | Value                                                                                          |
+| ----------- | ---------------------------------------------------------------------------------------------- |
+| Code commit | `514cd151dfa5d31f6f40f95bcbcffbea1332718a` (implementation + this report + migration comments) |
+| Base SHA    | `14a3f30fd2e48501dfe941747b9ab5b916878932` (`main`, PR #83)                                    |
+| Run         | [`41442921738`](https://github.com/basicv8vc/Ember/actions/runs/41442921738) — **PASS**        |
+
+Every local gate above ran on that same commit. Commits after it change documentation only; live
+status is `gh pr checks 84`.
 
 ---
 

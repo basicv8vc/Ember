@@ -127,6 +127,10 @@ final class ConversationCardsTests: XCTestCase {
         XCTAssertNil(CommitmentCard.schedulePresentation(for: .interval(seconds: 0, nextDueAt: nil)))
     }
 
+    func testCommitmentCardSupportsEveryLifecycleStatus() {
+        XCTAssertEqual(CommitmentCard.Status.allCases, [.active, .paused, .completed, .cancelled])
+    }
+
     func testCommitmentCardRetainsOnlyTheSuppliedScheduleFacts() throws {
         let dueAt = "2026-11-03T09:00:00Z"
         let presentation = try XCTUnwrap(

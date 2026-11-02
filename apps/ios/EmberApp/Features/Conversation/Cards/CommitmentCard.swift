@@ -193,7 +193,7 @@ public struct CommitmentCard: View {
     }
 }
 
-#Preview("Commitment states · MOCK ONLY") {
+#Preview("Commitment status states · MOCK ONLY") {
     VStack(alignment: .leading, spacing: 12) {
         CommitmentCard(
             title: "Review the weekly plan",
@@ -206,6 +206,41 @@ public struct CommitmentCard: View {
             title: "Prepare a reading summary",
             status: .paused,
             schedule: .once(nextDueAt: nil),
+            isMockOnly: true,
+            onOpenDetails: {}
+        )
+        CommitmentCard(
+            title: "Organize project notes",
+            status: .completed,
+            schedule: nil,
+            isMockOnly: true,
+            onOpenDetails: {}
+        )
+        CommitmentCard(
+            title: "Send the monthly recap",
+            status: .cancelled,
+            schedule: nil,
+            isMockOnly: true,
+            onOpenDetails: {}
+        )
+    }
+    .padding()
+    .background(EmberDesignTokens.groupedBackground)
+}
+
+#Preview("Unavailable schedule data · MOCK ONLY") {
+    VStack(alignment: .leading, spacing: 12) {
+        CommitmentCard(
+            title: "Commitment without a schedule",
+            status: .active,
+            schedule: nil,
+            isMockOnly: true,
+            onOpenDetails: {}
+        )
+        CommitmentCard(
+            title: "Commitment with invalid schedule data",
+            status: .active,
+            schedule: .interval(seconds: nil, nextDueAt: "not-a-date"),
             isMockOnly: true,
             onOpenDetails: {}
         )

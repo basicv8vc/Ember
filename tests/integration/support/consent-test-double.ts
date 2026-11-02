@@ -74,7 +74,23 @@ export class InMemoryTestConsentAuthority implements ConsentAuthority {
     await this.authorizeFence(tenantId, sourceProfileId);
   }
 
-  async authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence> {
+  authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence> {
+    // Wrapped in `then` so a missing/revoked grant REJECTS, exactly like the durable authority.
+    return Promise.resolve().then(() => this.mintFence(tenantId, sourceProfileId));
+  }
+
+  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
+    return Promise.resolve().then(() => {
+      const current = this.mintFence(fence.tenantId, fence.sourceProfileId);
+
+      if (current.grantId !== fence.grantId || current.grantVersion !== fence.grantVersion) {
+        throw new DomainError('POLICY_DENIED', 'Test Source Consent generation moved');
+      }
+    });
+  }
+
+  /** Synchronous fence mint, so the async faces above need no database round trip. */
+  private mintFence(tenantId: Id, sourceProfileId: string): ConsentAuthorizationFence {
     const generation = this.resolveGeneration(tenantId, sourceProfileId);
 
     if (generation === null || generation.status !== 'active') {
@@ -89,14 +105,6 @@ export class InMemoryTestConsentAuthority implements ConsentAuthority {
       issuedAt: new Date(0).toISOString(),
       digest: '0'.repeat(64),
     };
-  }
-
-  async assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<void> {
-    const current = await this.authorizeFence(fence.tenantId, fence.sourceProfileId);
-
-    if (current.grantId !== fence.grantId || current.grantVersion !== fence.grantVersion) {
-      throw new DomainError('POLICY_DENIED', 'Test Source Consent generation moved');
-    }
   }
 
   private key(tenantId: Id, sourceProfileId: string): string {

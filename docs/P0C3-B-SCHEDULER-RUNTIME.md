@@ -289,9 +289,27 @@ pending --reserve--> dispatched --outcome published--> completed
   Occurrence, Task cancellation request, Task/Run lineage and lease fencing. A Commitment cancel
   that wins during a read is reclassified as a cancelled Run instead of an execution failure.
 
-### 7.5 Transaction-level consent — blocked on Lane C
+### 7.5 Transaction-level consent — delivered by P0-C3D (PR #84)
 
-The merged Lane C implementation exports a synchronous process-local `FakeConsentRegistry`; it
+**Resolved.** The paragraph below records the state when this report was written; PR #84
+(`feature/p0c-3d-consent-persistence`, migration `0010_p0c3d_consent.sql`) now supplies the durable
+authority this section was waiting for:
+
+- `consent_grants` is a real PostgreSQL table with tenant-scoped grant/revoke persistence.
+- `PostgresConsentRepository` implements the frozen `ConsentAuthority.resolveGeneration`, so the
+  Worker gates resolve the same row that revocation locks.
+- `PostgresConsentPublicationGuard` locks that row inside the publication transaction
+  (`commitments -> occurrences -> tasks -> runs -> consent_grants`), and refuses publication for a
+  revoked, expired or superseded generation.
+- `tests/integration/p0c3d-consent-postgres.test.ts` proves the revocation races with two independent
+  connections, and certifies C-01…C-13 against the real store.
+
+The Worker composition root wires exactly one durable authority, so the deny-all default is no longer
+what production runs. See [`P0C3-D-CONSENT-PERSISTENCE.md`](./P0C3-D-CONSENT-PERSISTENCE.md).
+
+#### Historical state (when this report was written)
+
+The merged Lane C implementation exported a synchronous process-local `FakeConsentRegistry`; it
 has no PostgreSQL schema, grant/revoke persistence API or revocation transaction. Its prompt and
 handoff explicitly leave durable consent storage as future work. The `source_consents` migration
 and `PostgresConsentRepository` initially added on this branch were removed because they guessed an
@@ -321,6 +339,6 @@ that lands, Task 4 and the consent scenarios in the Task 5 acceptance matrix rem
 | Integration (real PG) | `tests/integration/p0c3b-runtime-e2e.test.ts`          | scheduler concurrency, crash recovery, duplicate Task/outcome, bind race, lease takeover, cancellation, Sentinel denial, budget exhaustion, retryable/permanent failure |
 
 The E2E suite uses real PostgreSQL for Commitment, Task, Run, Outcome, lease and Occurrence
-state, but a process-local test consent gate. It does **not** satisfy Task 4's consent acceptance
-criteria. The full quality suites passed locally; PR #62 is not ready for CTO review until the
-durable Lane C contract and real PostgreSQL consent race tests are available.
+state, but a process-local test consent gate. The durable PostgreSQL consent matrix, including the
+revocation races, is covered by `tests/integration/p0c3d-consent-postgres.test.ts` in PR #84 (see
+§7.5).

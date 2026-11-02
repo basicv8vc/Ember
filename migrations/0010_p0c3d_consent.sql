@@ -1,13 +1,20 @@
 -- 0010_p0c3d_consent.sql
--- P0-C3D: authoritative, tenant-scoped consent persistence plus the versioned authorization
--- fence used by the commitment publication guard.
+-- P0-C3D: authoritative, tenant-scoped consent persistence plus the generation fence used by the
+-- commitment dispatch and publication gates.
 --
--- Additive migration only. Existing migrations 0001-0009 are immutable. This migration was
--- originally reserved as `0009` while the P0-C3B runtime-closure migration
--- (`0009_p0c3b_runtime_closure.sql`) was in flight; it is `0010` so both can land in either order.
--- The runner requires unique, strictly increasing ids and tolerates an out-of-order backfill, so a
--- database that already applied `0010` can still apply `0009` afterwards (see
--- `tests/integration/migrations.test.ts`).
+-- Additive migration only. Existing migrations 0001-0009 are immutable.
+--
+-- MERGE ORDER (agreed with the CTO):
+--   1. PR #84 (this migration) lands as `0010`.
+--   2. PR #62 (P0-C3B runtime closure) lands afterwards. If its `0009_p0c3b_runtime_closure.sql`
+--      has not been applied yet, Agent B renumbers that file to `0011`.
+--
+-- Nothing here depends on which of the two lands first. This migration never assumes that
+-- `0009_p0c3b_runtime_closure.sql` is already applied: 0009 is index-only, and this file touches
+-- only its own objects. The runner requires unique, strictly increasing ids and tolerates an
+-- out-of-order backfill, so a database that already applied `0010` can still apply `0009` (or the
+-- renumbered `0011`) afterwards -- both orders are exercised by
+-- `tests/integration/migrations.test.ts`.
 --
 -- Design notes:
 --   * `consent_grants` stores *authorization facts only*. No OAuth token, refresh token,

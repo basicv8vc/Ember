@@ -973,9 +973,11 @@ export class PostgresCommitmentRepository implements CommitmentRepository, DueCo
       // Taking the commitment row lock FIRST serialises publication against `cancel()` and
       // `pause()` (which acquire the same lock), so a cancellation that wins the lock is
       // always observed by the publisher instead of being raced past. Task -> run matches the
-      // order used by `ResultCommitter` and `PostgresLeaseQueue`. The future consent adapter must
-      // acquire its authoritative grant lock LAST. Lane C has not supplied that persistence or
-      // revocation implementation; the default guard therefore rejects publication.
+      // order used by `ResultCommitter` and `PostgresLeaseQueue`. The consent grant is locked LAST
+      // (step 5), by `PostgresConsentPublicationGuard`, on THIS connection and inside THIS
+      // transaction, so the consent check is part of the same atomic publication. The default
+      // deny-all guard still rejects publication for any deployment that does not configure the
+      // durable authority.
       //
       // 1. Lock the commitment and require it to still accept outcomes.
       const commitSql = `

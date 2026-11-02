@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import {
   AuthContextSchema,
-  CONSENT_OPERATIONS,
   DEFAULT_CONSENT_OPERATIONS,
   DEFAULT_CONSENT_SCOPES,
   SOURCE_READ_OPERATION,
@@ -13,7 +12,6 @@ import {
   type ConsentDecision,
   type ConsentEvaluator,
   type ConsentGeneration,
-  type ConsentGrant,
   type ConsentOperation,
   type ConsentRepository,
   type GrantConsentCommand,

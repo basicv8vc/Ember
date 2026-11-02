@@ -671,8 +671,9 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
       grantVersion: 1,
       issuedAt: '2026-11-02T12:00:00.000Z',
       // The canonical contract always mints the integrity digest; it is never authorization.
-      digest: expect.stringMatching(/^[0-9a-f]{64}$/),
+      digest: fence.digest,
     });
+    expect(fence.digest).toMatch(/^[0-9a-f]{64}$/);
 
     await expect(authority.assertFenceCurrent(fence)).resolves.toBeUndefined();
   });
@@ -748,12 +749,13 @@ describe('P0-C3B: P0-C3C resolveGeneration binding', () => {
     expect(evaluateSchedulerConsentGate(authority).ready).toBe(true);
 
     const guard = createCommitmentConsentPublicationGuard(authority);
-    await expect(
-      guard.authorizeFence({} as never, {
-        tenantId: TENANT_ID,
-        sourceProfileId: SOURCE_PROFILE_ID,
-      }),
-    ).resolves.toEqual(expect.objectContaining({ grantId: expect.any(String), version: 1 }));
+    const fence = await guard.authorizeFence({} as never, {
+      tenantId: TENANT_ID,
+      sourceProfileId: SOURCE_PROFILE_ID,
+    });
+
+    expect(fence.grantId).toEqual(expect.any(String));
+    expect(fence.version).toBe(1);
   });
 
   it('normalizes a store failure into a terminal, content-free POLICY_DENIED', async () => {

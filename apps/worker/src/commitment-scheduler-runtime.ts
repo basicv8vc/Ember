@@ -64,8 +64,6 @@ export function startCommitmentScheduler(
     return Promise.resolve();
   }
 
-  const consentAuthority = consent as ConsentFenceAuthority;
-
   if (config.mode !== 'poll') {
     logger.warn('commitment scheduler is enabled without a poll loop; occurrences will queue up', {
       mode: config.mode,

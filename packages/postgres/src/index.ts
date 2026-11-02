@@ -132,3 +132,12 @@ export {
   type PreparedTaskCommand,
 } from './task-digest.js';
 export { PostgresCommitmentRepository } from './repositories/commitment-repository.js';
+export { PostgresConsentRepository } from './repositories/consent-repository.js';
+export {
+  assertConsentAllowed,
+  CONSENT_COLUMNS_SQL,
+  evaluateConsentRow,
+  SELECT_CONSENT_FOR_UPDATE_SQL,
+  SELECT_CONSENT_SQL,
+  type ConsentGrantRow,
+} from './repositories/consent-fence.js';

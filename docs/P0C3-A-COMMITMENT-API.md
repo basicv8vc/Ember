@@ -7,8 +7,8 @@
 **Status:** Completed & Verified (CTO review fixes applied: P0-C3A-1 … P0-C3A-4)  
 **Branch:** `feature/p0c-3a-commitment-api`  
 **Base Commit:** `bbcad275418cd59c29b742cd2cc6e3bd825c6054`  
-**Implementation Head Commit:** `91e26135e3dffce9f7b51ee03e1cd4976f0a7d3a` — the exact SHA that every gate below was executed against and that GitHub CI run [`41379600792`](https://github.com/basicv8vc/Ember/actions/runs/41379600792) passed on (3m04s).  
-**PR Head SHA:** `91e26135e3dffce9f7b51ee03e1cd4976f0a7d3a` (PR #56 head at verification time). The commits pushed after it are documentation-only — this SHA record plus the CAS/schema wording corrections — and re-run the identical CI job without changing executable behaviour.  
+**Verified Head Commit:** `91e26135e3dffce9f7b51ee03e1cd4976f0a7d3a` — the exact code + contract SHA that every gate below was executed against, and that GitHub CI run [`41379600792`](https://github.com/basicv8vc/Ember/actions/runs/41379600792) passed on (Node 24 + PostgreSQL 17, 3m04s).  
+**PR Head SHA:** the head of `feature/p0c-3a-commitment-api` → PR #56. It sits directly on top of `91e2613` (verified above) with commit `5d91b46` (green in run [`41380036598`](https://github.com/basicv8vc/Ember/actions/runs/41380036598)) and this SHA-record commit, both of which change Markdown only and re-run the identical CI job — so the verified SHA above is never invalidated by a documentation edit.  
 **Contract Reference:** `docs/P0-C3-0-CONTRACT-FREEZE.md` (v1.2 FROZEN APPROVED)
 
 ---

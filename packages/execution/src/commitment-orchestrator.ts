@@ -4,16 +4,13 @@ import type {
   CommitmentExecutionStore,
   OutcomeResultStatus,
   RunGrant,
-  SourceSnapshot,
-  TrustedSourceAccessContext,
   WorkerLeaseGrant,
 } from '@ember/contracts';
+import type { SourceSnapshot, TrustedSourceAccessContext } from '@ember/connectors';
 import { DomainError, type Id } from '@ember/domain';
 import {
-  assertFenceMatches,
   consentDenied,
   isConsentFenceAuthority,
-  parseConsentFence,
   toConsentDenied,
   type ConsentAuthorizationFence,
   type ConsentFenceAuthority,
@@ -30,16 +27,12 @@ import { FakeSummaryEngine } from './commitment-summary-engine.js';
  * Re-exported canonical contracts.
  *
  * `@ember/execution` used to declare private copies of these types; they are now the single
- * definitions from `@ember/contracts`, so the Worker port and the PostgreSQL repository cannot
- * drift apart.
+ * definitions from `@ember/contracts` (execution records) and `@ember/connectors` (the source port
+ * and its trusted context), so the Worker, the connector boundary and the PostgreSQL repository
+ * cannot drift apart.
  */
-export type {
-  AppendOutcomeCommand,
-  OutcomeResultStatus,
-  SourceSnapshot,
-  TrustedSourceAccessContext,
-  WorkerLeaseGrant,
-};
+export type { AppendOutcomeCommand, OutcomeResultStatus, WorkerLeaseGrant };
+export type { SourceSnapshot, TrustedSourceAccessContext };
 
 export interface CommitmentOrchestrationContext {
   readonly tenantId: Id;
@@ -74,12 +67,15 @@ export interface SourceReaderPort {
   /**
    * Reads a bounded source snapshot under a trusted, server-derived access context.
    *
-   * Aligned with Lane C `@ember/connectors`: `signal` is **mandatory** so cooperative
-   * cancellation always reaches the reader. The orchestrator refuses to call this without a
-   * live `AbortSignal`.
+   * This is the canonical Lane C port: `readSnapshot(profileId, trustedContext, signal)`. The
+   * versioned Consent authorization travels INSIDE `trustedContext.authorizationFence`, so the
+   * connector boundary validates exactly the generation the orchestrator captured — there is no
+   * second, competing context type and no extra argument.
    *
-   * `fence` is the versioned Consent authorization the orchestrator captured for this
-   * Occurrence. A consent-aware reader MUST verify it before and after the read; a reader that
+   * `signal` is **mandatory** so cooperative cancellation always reaches the reader. The
+   * orchestrator refuses to call this without a live `AbortSignal`.
+   *
+   * A consent-aware reader MUST validate the fence before and after the read; a reader that
    * ignores it still cannot publish, because the orchestrator re-verifies the same fence before
    * the Outcome append.
    */
@@ -87,7 +83,6 @@ export interface SourceReaderPort {
     profileId: string,
     trustedContext: TrustedSourceAccessContext,
     signal: AbortSignal,
-    fence?: ConsentAuthorizationFence,
   ): Promise<SourceSnapshot>;
 }
 
@@ -227,7 +222,9 @@ export class CommitmentOrchestrator {
     try {
       this.throwIfAborted(signal, 'after the budget reservation');
 
-      // 5. Source snapshot read, bound to the Consent fence captured above
+      // 5. Source snapshot read, bound to the Consent fence captured for THIS attempt.
+      //    The fence travels inside the trusted context (canonical Lane C shape) and is never
+      //    cached across attempts: a retry or lease takeover mints a fresh one at step 3.
       this.throwIfAborted(signal, 'before the source read');
       const trustedContext: TrustedSourceAccessContext = {
         tenantId: grant.tenantId,
@@ -236,13 +233,13 @@ export class CommitmentOrchestrator {
         runId: grant.runId,
         leaseEpoch: grant.leaseEpoch,
         authorizedAt: this.clock.now().toISOString(),
+        ...(fence === null ? {} : { authorizationFence: fence }),
       };
 
       const snapshot = await this.sourceReader.readSnapshot(
         context.sourceProfileId,
         trustedContext,
         signal,
-        fence ?? undefined,
       );
 
       // A cancellation that arrived while the reader was in flight discards the snapshot: a
@@ -256,7 +253,7 @@ export class CommitmentOrchestrator {
       // 7. Re-verify the Consent fence immediately before publication. A revocation that landed
       //    while the read/summary was in flight must reject the Outcome, never publish it.
       this.throwIfAborted(signal, 'before the consent re-verification');
-      await this.assertConsentFenceCurrent(fence);
+      await this.assertConsentFenceCurrent(fence, grant, context);
 
       // 8. Durably append the Outcome with lease + consent fencing
       this.throwIfAborted(signal, 'before the outcome publication');
@@ -330,17 +327,10 @@ export class CommitmentOrchestrator {
     let fence: ConsentAuthorizationFence;
 
     try {
-      fence = parseConsentFence(
-        await this.consent.authorizeFence(grant.tenantId, context.sourceProfileId),
-      );
+      fence = await this.consent.authorizeFence(grant.tenantId, context.sourceProfileId);
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent is not active for this occurrence');
     }
-
-    assertFenceMatches(fence, {
-      tenantId: grant.tenantId,
-      sourceProfileId: context.sourceProfileId,
-    });
 
     return fence;
   }
@@ -349,9 +339,15 @@ export class CommitmentOrchestrator {
    * Re-verifies the fence immediately before the Outcome append.
    *
    * This is the last Worker-side gate before the transactional publication guard runs; a
-   * revocation, re-grant, or unreadable Consent store fails the occurrence closed.
+   * revocation, re-grant, or unreadable Consent store fails the occurrence closed. The expected
+   * lineage comes from persisted state (the lease grant and the resolved Occurrence), never from
+   * the fence itself.
    */
-  private async assertConsentFenceCurrent(fence: ConsentAuthorizationFence | null): Promise<void> {
+  private async assertConsentFenceCurrent(
+    fence: ConsentAuthorizationFence | null,
+    grant: WorkerLeaseGrant,
+    context: CommitmentOrchestrationContext,
+  ): Promise<void> {
     if (fence === null) {
       return;
     }
@@ -361,7 +357,10 @@ export class CommitmentOrchestrator {
     }
 
     try {
-      await this.consent.assertFenceCurrent(fence);
+      await this.consent.assertFenceCurrent(fence, {
+        tenantId: grant.tenantId,
+        sourceProfileId: context.sourceProfileId,
+      });
     } catch (error) {
       throw toConsentDenied(error, 'Source Consent changed before the outcome was published');
     }

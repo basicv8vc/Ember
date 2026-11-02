@@ -74,7 +74,8 @@ describe('PostgreSQL migrations (real database)', () => {
       '0006',
       '0007',
       '0008',
-      '0009',
+      // 0009 is intentionally unused: P0-C3D (PR #84) owns 0010 and merges before this branch.
+      '0011',
     ]);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
@@ -83,7 +84,7 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(result.applied[5]?.name).toBe('0006_p0b08b_persistent_budget.sql');
     expect(result.applied[6]?.name).toBe('0007_p0b08d_persistent_mock_approval.sql');
     expect(result.applied[7]?.name).toBe('0008_p0c3_commitments.sql');
-    expect(result.applied[8]?.name).toBe('0009_p0c3b_runtime_closure.sql');
+    expect(result.applied[8]?.name).toBe('0011_p0c3b_runtime_closure.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -103,7 +104,8 @@ describe('PostgreSQL migrations (real database)', () => {
       '0006',
       '0007',
       '0008',
-      '0009',
+      // 0009 is intentionally unused: P0-C3D (PR #84) owns 0010 and merges before this branch.
+      '0011',
     ]);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);

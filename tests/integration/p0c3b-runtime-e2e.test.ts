@@ -83,11 +83,16 @@ function createRuntime(harness: CommitmentHarness, options: RuntimeOptions = {})
         harness.commitments.findAuthoritativeOutcome(grant, query),
       appendOutcomeIfAbsent: (grant, cmd) => harness.commitments.appendOutcomeIfAbsent(grant, cmd),
     },
-    sourceReader: options.sourceReader ?? new CommitmentSourceReader({ consent: harness.consent }),
-    // The Worker orchestrator re-verifies the versioned fence before publication, so the fixture
-    // has to be the same fenced authority the reader uses. Wiring only the repository guard would
-    // exercise the pre-P0-C3B chain, not the contract this suite is meant to accept.
-    consent: harness.consent,
+    sourceReader:
+      options.sourceReader ??
+      new CommitmentSourceReader({
+        consent: harness.consentAuthority,
+        grants: harness.consent,
+      }),
+    // The Worker orchestrator re-verifies the versioned fence before publication, so it uses the
+    // SAME adapted authority as the reader and the PostgreSQL publication guard. Nothing in this
+    // suite hands the raw store to the Worker.
+    consent: harness.consentAuthority,
     budget: new PostgresBudgetLedger(harness.db.pool, {
       policy: options.budget ?? GENEROUS_BUDGET,
     }),
@@ -162,7 +167,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     // retryable leftover can never be claimed by a later case.
     await truncateRuntimeTables(db);
     harness = await createCommitmentHarness(db);
-    await harness.consent.grant({
+    harness.consent.grant({
       tenantId: harness.ctx.tenantId,
       sourceProfileId: FIXTURE_SOURCE_PROFILE,
     });
@@ -440,7 +445,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
     const run = await claimNextRun(harness, WORKER_ID);
 
-    await harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
 
     const result = await runOnce(runtime, run);
     expect(result.outcome).toBe('failed_terminal');
@@ -451,7 +456,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
   it('9b. a grant that does not authorize read_snapshot cannot read a snapshot', async () => {
     // Narrower re-grant: the lineage is active, but only for metadata. Before the mirror stopped
     // defaulting to `read_snapshot`, this read succeeded on a fabricated local grant.
-    await harness.consent.grant({
+    harness.consent.grant({
       tenantId: harness.ctx.tenantId,
       sourceProfileId: FIXTURE_SOURCE_PROFILE,
       allowedOperations: ['read_metadata'],
@@ -468,6 +473,131 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     expect(result.outcome).toBe('failed_terminal');
     expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
     expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+  });
+
+  it('9c. revocation before execution performs zero source reads and publishes nothing', async () => {
+    // Revoke BEFORE the Worker starts: the refusal has to happen at the authorization gate, not
+    // after a read. Counting the connector calls is the point of this case.
+    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+
+    let connectorReads = 0;
+    const inner = new CommitmentSourceReader({
+      consent: harness.consentAuthority,
+      grants: harness.consent,
+    });
+    const countingReader: SourceReaderPort = {
+      readSnapshot: async (profileId, trustedContext, signal) => {
+        connectorReads += 1;
+        return inner.readSnapshot(profileId, trustedContext, signal);
+      },
+    };
+
+    const runtime = createRuntime(harness, { sourceReader: countingReader });
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
+    const run = await claimNextRun(harness, WORKER_ID);
+
+    const result = await runOnce(runtime, run);
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect(connectorReads).toBe(0);
+    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
+    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+  });
+
+  it('9d. a snapshot read under a revoked grant is discarded before publication', async () => {
+    const inner = new CommitmentSourceReader({
+      consent: harness.consentAuthority,
+      grants: harness.consent,
+    });
+    let reads = 0;
+    const revokingReader: SourceReaderPort = {
+      readSnapshot: async (profileId, trustedContext, signal) => {
+        const snapshot = await inner.readSnapshot(profileId, trustedContext, signal);
+        reads += 1;
+        // The read succeeded under the fenced generation; the revocation lands immediately after
+        // it, i.e. while the execution is still in flight.
+        harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+        return snapshot;
+      },
+    };
+
+    const runtime = createRuntime(harness, { sourceReader: revokingReader });
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
+    const run = await claimNextRun(harness, WORKER_ID);
+
+    const result = await runOnce(runtime, run);
+
+    expect(reads).toBe(1);
+    expect(result.outcome).toBe('failed_terminal');
+    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
+    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+  });
+
+  it('9e. work fenced under generation G1 cannot publish after a revoke and re-grant to G2', async () => {
+    const tenantId = harness.ctx.tenantId;
+    const g1 = await harness.consentAuthority.authorizeFence(tenantId, FIXTURE_SOURCE_PROFILE);
+
+    const inner = new CommitmentSourceReader({
+      consent: harness.consentAuthority,
+      grants: harness.consent,
+    });
+    const regrantingReader: SourceReaderPort = {
+      readSnapshot: async (profileId, trustedContext, signal) => {
+        const snapshot = await inner.readSnapshot(profileId, trustedContext, signal);
+        // Revoke + re-grant: the lineage is active again, but under a NEW generation.
+        harness.consent.revoke(tenantId, FIXTURE_SOURCE_PROFILE);
+        harness.consent.grant({ tenantId, sourceProfileId: FIXTURE_SOURCE_PROFILE });
+        return snapshot;
+      },
+    };
+
+    const runtime = createRuntime(harness, { sourceReader: regrantingReader });
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
+    const run = await claimNextRun(harness, WORKER_ID);
+
+    const result = await runOnce(runtime, run);
+
+    // G2 is genuinely a different generation, and G1 stays dead after it.
+    const g2 = await harness.consentAuthority.authorizeFence(tenantId, FIXTURE_SOURCE_PROFILE);
+    expect(g2.grantId).not.toBe(g1.grantId);
+
+    await expect(
+      harness.consentAuthority.assertFenceCurrent(g1, {
+        tenantId,
+        sourceProfileId: FIXTURE_SOURCE_PROFILE,
+      }),
+    ).rejects.toThrowError(expect.objectContaining({ code: 'POLICY_DENIED' }));
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
+    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+  });
+
+  it('14. a revocation committed on a second connection wins over publication', async () => {
+    const runtime = createRuntime(harness);
+    const { commitmentId, version } = await createCommitment(harness);
+    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
+    const run = await claimNextRun(harness, WORKER_ID);
+
+    // A genuinely different pool/connection performs the revocation...
+    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+
+    const result = await runOnce(runtime, run);
+
+    // ...and the independent observer connection sees a fully rolled-back attempt: no Outcome, no
+    // half-written occurrence state.
+    const observed = await db.observerPool.query<{ count: string }>(
+      'SELECT count(*)::text AS count FROM commitment_outcomes WHERE occurrence_id = $1',
+      [occurrenceId],
+    );
+
+    expect(result.outcome).toBe('failed_terminal');
+    expect(Number(observed.rows[0]?.count ?? '0')).toBe(0);
+    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
   });
 
   it('10a. Sentinel denial is terminal and produces no outcome', async () => {

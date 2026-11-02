@@ -1,4 +1,4 @@
-import type { ConsentAuthority } from '@ember/contracts';
+import type { ConsentAuthority } from '@ember/connectors';
 import type { Id } from '@ember/domain';
 import {
   isConsentFenceAuthority,
@@ -99,7 +99,7 @@ export function requireCommitmentConsentAuthority(
  * atomic. Wiring it is additive and changes no call site.
  */
 export function createCommitmentConsentPublicationGuard(
-  authority: ConsentAuthority | ConsentFenceAuthority,
+  authority: PublicationConsentGate,
 ): ConsentPublicationGuard {
   return {
     async assertActive(_client: unknown, params: ConsentGuardParams): Promise<void> {
@@ -113,6 +113,14 @@ export function createCommitmentConsentPublicationGuard(
     },
   };
 }
+
+/**
+ * The only capability the publication guard needs from its authority.
+ *
+ * Narrow on purpose: the guard must not be able to issue fences, so a mis-wiring cannot turn the
+ * publication path into an authorization path.
+ */
+export type PublicationConsentGate = Pick<ConsentFenceAuthority, 'assertActive'>;
 
 /** Structural mirror of the repository's guard parameters, kept explicit for readability. */
 export interface ConsentGuardParams {

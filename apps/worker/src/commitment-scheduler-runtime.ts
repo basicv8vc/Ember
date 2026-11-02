@@ -1,4 +1,4 @@
-import type { ConsentAuthority } from '@ember/contracts';
+import type { ConsentAuthority } from '@ember/connectors';
 import type { ConsentFenceAuthority } from '@ember/execution';
 import {
   PostgresCommitmentRepository,

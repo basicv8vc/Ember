@@ -1,11 +1,15 @@
 import { randomUUID } from 'node:crypto';
-import type { ConsentAuthority } from '@ember/contracts';
-import { DomainError, type Id } from '@ember/domain';
-import type {
-  ConsentAuthorizationFence,
-  ConsentFenceAuthority,
-  ConsentReadAuthorization,
-} from '@ember/execution';
+import {
+  deriveConsentStatus,
+  type AuthorizedConsentGeneration,
+  type ConsentAuthority,
+  type ConsentGrant,
+  type ConsentRegistry,
+  type GrantConsentParams,
+  type SourceProfileId,
+} from '@ember/connectors';
+import { DomainError } from '@ember/domain';
+import type { ConsentFenceAuthority } from '@ember/execution';
 import type { ConsentPublicationGuard } from '@ember/postgres';
 
 /**
@@ -18,120 +22,167 @@ import type { ConsentPublicationGuard } from '@ember/postgres';
 export const TEST_CONSENT_OPERATIONS: readonly string[] = Object.freeze(['read_snapshot']);
 export const TEST_CONSENT_SCOPES: readonly string[] = Object.freeze(['source.readonly']);
 
-export interface TestGrantParams {
-  readonly tenantId: Id;
-  readonly sourceProfileId: string;
-  readonly allowedOperations?: readonly string[];
-  readonly scopes?: readonly string[];
-}
-
-interface TestGrant {
-  readonly grantId: string;
-  readonly version: number;
-  readonly allowedOperations: readonly string[];
-  readonly scopes: readonly string[];
-  readonly active: boolean;
-}
+/** Kept as a named alias so call sites read as "the terms of this test grant". */
+export type TestGrantParams = GrantConsentParams;
 
 /**
- * Process-local test fixture only. It is intentionally not a PostgreSQL persistence adapter and
- * cannot verify consent revocation races. The durable Lane C implementation remains a merge
- * blocker; this fixture only allows unrelated commitment/Task/Run persistence scenarios to run.
+ * Process-local test STORE, shaped exactly like the durable one the Worker expects to be wired.
  *
- * It is fence-shaped (`grantId` + `version`) because the Worker refuses to authorize a read or a
- * publication from a verdict-only authority: without a generation there is nothing to bind the
- * read to, and without the authorized operations there is no scope to mirror.
+ * It implements both canonical C3C ports:
+ *
+ * - `ConsentAuthority.resolveGeneration` — the authoritative generation read the Worker gates and
+ *   the connector boundary resolve against;
+ * - `ConsentRegistry` — the grant record, which is where the authorized operations/scopes come
+ *   from. No scope is ever defaulted by production code; a test that wants a narrow grant passes
+ *   `allowedOperations`.
+ *
+ * Generation semantics mirror the frozen contract: a first grant mints `version` 1, an identical
+ * re-affirmation keeps the generation, and any explicit re-grant (changed terms, or after
+ * revocation/expiry) mints a NEW `grantId` with an incremented `version`. Revocation is terminal
+ * and bumps the version exactly once, so a fence captured earlier can never become valid again.
+ *
+ * This is a fixture, not a persistence adapter: it cannot verify revocation races across database
+ * connections. Those remain P0-C3D's acceptance criterion (#84).
  */
-export class InMemoryTestConsentAuthority implements ConsentFenceAuthority {
-  private readonly grants = new Map<string, TestGrant>();
+export class InMemoryTestConsentStore implements ConsentAuthority, ConsentRegistry {
+  private readonly grants = new Map<string, ConsentGrant>();
 
-  grant(params: TestGrantParams): Promise<void> {
+  grant(params: GrantConsentParams, now: Date = new Date()): ConsentGrant {
     const key = this.key(params.tenantId, params.sourceProfileId);
     const existing = this.grants.get(key);
+    const operations = Object.freeze([...(params.allowedOperations ?? TEST_CONSENT_OPERATIONS)]);
+    const scopes = Object.freeze([...(params.scopes ?? TEST_CONSENT_SCOPES)]);
+    const expiresAt = params.expiresAt ?? null;
 
-    // A re-grant of a revoked lineage starts a NEW generation (new id, version restarted), which
-    // is exactly what a fence minted before the re-grant must fail against.
-    this.grants.set(key, {
-      grantId: existing !== undefined && existing.active ? existing.grantId : randomUUID(),
-      version: existing !== undefined && existing.active ? existing.version + 1 : 1,
-      allowedOperations: Object.freeze([...(params.allowedOperations ?? TEST_CONSENT_OPERATIONS)]),
-      scopes: Object.freeze([...(params.scopes ?? TEST_CONSENT_SCOPES)]),
-      active: true,
+    if (existing !== undefined && deriveConsentStatus(existing, now) === 'active') {
+      // Identical re-affirmation keeps the generation; changed terms replace it.
+      if (
+        sameList(existing.allowedOperations, operations) &&
+        sameList(existing.scopes, scopes) &&
+        existing.expiresAt === expiresAt
+      ) {
+        return existing;
+      }
+
+      return this.store(key, {
+        ...existing,
+        allowedOperations: operations,
+        scopes,
+        expiresAt,
+        grantedAt: now.toISOString(),
+        version: existing.version + 1,
+      });
+    }
+
+    return this.store(key, {
+      grantId: randomUUID(),
+      tenantId: params.tenantId,
+      sourceProfileId: params.sourceProfileId,
+      status: 'active',
+      allowedOperations: operations,
+      scopes,
+      grantedAt: now.toISOString(),
+      expiresAt,
+      revokedAt: null,
+      version: existing === undefined ? 1 : existing.version + 1,
     });
-
-    return Promise.resolve();
   }
 
-  revoke(tenantId: Id, sourceProfileId: string): Promise<void> {
+  get(tenantId: string, sourceProfileId: SourceProfileId, now: Date = new Date()): ConsentGrant {
+    const record = this.grants.get(this.key(tenantId, sourceProfileId));
+
+    if (record === undefined) {
+      throw new DomainError('NOT_FOUND', 'Test Source Consent does not exist');
+    }
+
+    return effective(record, now);
+  }
+
+  revoke(tenantId: string, sourceProfileId: SourceProfileId, now: Date = new Date()): ConsentGrant {
     const key = this.key(tenantId, sourceProfileId);
-    const existing = this.grants.get(key);
+    const record = this.grants.get(key);
 
-    if (existing !== undefined) {
-      this.grants.set(key, { ...existing, active: false });
+    if (record === undefined) {
+      throw new DomainError('NOT_FOUND', 'Test Source Consent does not exist');
     }
 
-    return Promise.resolve();
-  }
-
-  assertActive(tenantId: Id, sourceProfileId: string): Promise<void> {
-    if (this.activeGrant(tenantId, sourceProfileId) === null) {
-      return Promise.reject(new DomainError('POLICY_DENIED', 'Test Source Consent is not active'));
+    if (record.status === 'revoked') {
+      return record;
     }
 
-    return Promise.resolve();
-  }
-
-  authorizeFence(tenantId: Id, sourceProfileId: string): Promise<ConsentAuthorizationFence> {
-    const grant = this.activeGrant(tenantId, sourceProfileId);
-
-    if (grant === null) {
-      return Promise.reject(new DomainError('POLICY_DENIED', 'Test Source Consent is not active'));
-    }
-
-    return Promise.resolve({
-      tenantId,
-      sourceProfileId,
-      grantId: grant.grantId,
-      grantVersion: grant.version,
-      issuedAt: new Date().toISOString(),
+    // Terminal, and it bumps the version exactly once: the generation that was fenced is dead.
+    return this.store(key, {
+      ...record,
+      status: 'revoked',
+      revokedAt: now.toISOString(),
+      version: record.version + 1,
     });
   }
 
-  assertFenceCurrent(fence: ConsentAuthorizationFence): Promise<ConsentReadAuthorization> {
-    const grant = this.activeGrant(fence.tenantId, fence.sourceProfileId);
-
-    if (grant === null) {
-      return Promise.reject(new DomainError('POLICY_DENIED', 'Test Source Consent is not active'));
-    }
-
-    // Generation identity, not just the counter: a re-granted lineage restarts its version.
-    if (grant.grantId !== fence.grantId || grant.version !== fence.grantVersion) {
-      return Promise.reject(new DomainError('POLICY_DENIED', 'Test Source Consent was re-granted'));
-    }
-
-    return Promise.resolve({
-      allowedOperations: grant.allowedOperations,
-      scopes: grant.scopes,
-    });
+  list(tenantId: string, now: Date = new Date()): readonly ConsentGrant[] {
+    return [...this.grants.values()]
+      .filter((record) => record.tenantId === tenantId)
+      .map((record) => effective(record, now));
   }
 
-  private activeGrant(tenantId: Id, sourceProfileId: string): TestGrant | null {
-    const grant = this.grants.get(this.key(tenantId, sourceProfileId));
-
-    return grant !== undefined && grant.active ? grant : null;
+  clear(): void {
+    this.grants.clear();
   }
 
-  private key(tenantId: Id, sourceProfileId: string): string {
+  /**
+   * Authoritative generation read (P0-C3C `ConsentAuthority`).
+   *
+   * Returns `null` only when the lineage has no record at all. A revoked or elapsed record is
+   * returned with its EFFECTIVE status so the caller fails closed instead of guessing.
+   */
+  resolveGeneration(
+    tenantId: string,
+    sourceProfileId: SourceProfileId,
+    now: Date = new Date(),
+  ): AuthorizedConsentGeneration | null {
+    const record = this.grants.get(this.key(tenantId, sourceProfileId));
+
+    if (record === undefined) {
+      return null;
+    }
+
+    return {
+      tenantId: record.tenantId,
+      sourceProfileId: record.sourceProfileId,
+      grantId: record.grantId,
+      version: record.version,
+      status: deriveConsentStatus(record, now),
+      expiresAt: record.expiresAt,
+    };
+  }
+
+  private store(key: string, record: ConsentGrant): ConsentGrant {
+    this.grants.set(key, Object.freeze(record));
+    return record;
+  }
+
+  private key(tenantId: string, sourceProfileId: string): string {
     return `${tenantId}\u0000${sourceProfileId}`;
   }
 }
 
+/** Projects a stored record onto its effective, point-in-time view. */
+function effective(record: ConsentGrant, now: Date): ConsentGrant {
+  return Object.freeze({ ...record, status: deriveConsentStatus(record, now) });
+}
+
+function sameList(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 /**
- * Explicitly test-only publication gate that shares state with `InMemoryTestConsentAuthority`.
- * It runs during the PostgreSQL transaction callback but does not read or lock database rows.
+ * Explicitly test-only publication gate that shares state with the fixture store.
+ *
+ * It runs during the PostgreSQL transaction callback but does not read or lock database rows; the
+ * durable, transaction-scoped guard is P0-C3D's (#84).
  */
 export function createTestConsentPublicationGuard(
-  authority: ConsentAuthority,
+  authority: Pick<ConsentFenceAuthority, 'assertActive'>,
 ): ConsentPublicationGuard {
   return {
     async assertActive(_client, params): Promise<void> {

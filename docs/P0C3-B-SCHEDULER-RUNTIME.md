@@ -204,20 +204,27 @@ Lane B structural ports are finalized and require Lane A to provide the followin
   _Mitigation_: Managed by Ember's durable retry queue with exponential backoff and dead-letter handling.
 - **Rollback**:
   - Disable scheduler immediately: `EMBER_SCHEDULER_ENABLED=false`.
-  - Revert the PR merge commit. Migration `0009_p0c3b_runtime_closure.sql` adds only Occurrence
+  - Revert the PR merge commit. Migration `0011_p0c3b_runtime_closure.sql` adds only Occurrence
     lookup indexes; migrations 0001-0008 remain unchanged.
+  - Migration order after P0-C3D (#84) merges is `0008 -> 0010 -> 0011`. The gap at `0009` is
+    intentional: it is reserved so that the durable Consent migration always applies first.
 
 ---
 
 ## 7. Stage 3 — Integration & Runtime Closure
 
 This stage closes the Commitment, Task, Run and Occurrence persistence path against real
-PostgreSQL. The transaction-level Consent gate remains blocked on Lane C's durable implementation:
+PostgreSQL, and integrates the canonical P0-C3C Consent contract (#83). The durable Consent
+_storage_ remains owned by P0-C3D (#84) and is still not merged, so the composition root keeps a
+deny-all authority and the Scheduler refuses to start:
 
 ```text
 Commitment -> CommitmentScheduler -> Occurrence -> PostgresTaskRepository (durable inbox)
--> PostgresLeaseQueue -> Worker poll loop -> CommitmentRunHandler -> CommitmentSourceReader
-(test consent gate) -> CommitmentOrchestrator -> PostgresCommitmentRepository.appendOutcomeIfAbsent
+-> PostgresLeaseQueue -> Worker poll loop -> CommitmentRunHandler
+-> CommitmentOrchestrator (authorizeFence at the attempt boundary)
+-> CommitmentSourceReader (fence travels in TrustedSourceAccessContext) -> GuardedSourceReader
+(C3C pre/post fence + generation-binding gate) -> summary -> re-verify fence
+-> PostgresCommitmentRepository.appendOutcomeIfAbsent (transaction-scoped consent guard)
 -> Outcome row -> Occurrence completion
 ```
 
@@ -243,6 +250,20 @@ Commitment -> CommitmentScheduler -> Occurrence -> PostgresTaskRepository (durab
   is resolved from `principals` + `agents` (never invented).
 
 ### 7.2 One canonical contract
+
+**Consent (P0-C3C, merged as #83).** `@ember/execution` no longer declares mirrors of
+`ConsentAuthorizationFence`, `AuthorizedConsentGeneration` or `ConsentAuthority`. The canonical
+definitions and every validation decision (`computeConsentFenceDigest`,
+`validateConsentAuthorizationFence`, `validateConsentGenerationBinding`) come from
+`@ember/connectors`, which `@ember/execution` depends on (no cycle: connectors depends only on
+`@ember/contracts` and `@ember/domain`). The duplicate `ConsentAuthority` /
+`TrustedSourceAccessContext` / `SourceReader` declarations were also removed from
+`@ember/contracts`.
+
+`SourceReaderPort` is the canonical three-argument port — `readSnapshot(profileId, trustedContext,
+signal)` — and the authorization fence travels inside
+`TrustedSourceAccessContext.authorizationFence`. There is no fourth argument and no second trusted
+context type.
 
 The Worker no longer declares its own `DueCommitment`/`ReservedSlot`/`AppendOutcomeCommand`
 shapes. `@ember/contracts` owns them; `apps/worker/src/commitment-ports.ts` re-exports them and
@@ -289,38 +310,60 @@ pending --reserve--> dispatched --outcome published--> completed
   Occurrence, Task cancellation request, Task/Run lineage and lease fencing. A Commitment cancel
   that wins during a read is reclassified as a cancelled Run instead of an execution failure.
 
-### 7.5 Transaction-level consent — blocked on Lane C
+### 7.5 Consent integration: what closes now, what waits for #84
 
-The merged Lane C implementation exports a synchronous process-local `FakeConsentRegistry`; it
-has no PostgreSQL schema, grant/revoke persistence API or revocation transaction. Its prompt and
-handoff explicitly leave durable consent storage as future work. The `source_consents` migration
-and `PostgresConsentRepository` initially added on this branch were removed because they guessed an
-unverified schema.
+Canonical contract integration is complete on this branch. P0-C3D (#84) still owns durable
+Consent _persistence_, so the Worker composition root keeps `createUnavailableConsentAuthority()`
+(deny-all) and `EMBER_SCHEDULER_ENABLED=true` still refuses to start.
 
-`PostgresCommitmentRepository` now requires a transaction-scoped `ConsentPublicationGuard` and
-defaults to deny-all when none is configured. The Worker source adapter also uses a deny-all
-authority. Thus no Outcome is published without an injected consent decision. The integration
-harness uses a clearly marked in-memory test gate only for unrelated persistence scenarios; that
-does not verify cross-process or transactional revocation.
+**Closed here**
 
-I requested the authoritative storage contract and revocation lock semantics on
-[Lane C PR #61](https://github.com/basicv8vc/Ember/pull/61#issuecomment-6570043917). Before this
-gate can close, Lane C must provide the actual authoritative record/schema and grant/revoke
-transaction behavior. The publication adapter can then lock consent last after
-`commitments -> occurrences -> tasks -> runs`, using the same record that revocation locks. Until
-that lands, Task 4 and the consent scenarios in the Task 5 acceptance matrix remain incomplete.
+- `@ember/execution` consumes the canonical C3C types and helpers; no competing fence, digest or
+  validator exists anywhere in the branch.
+- `fromResolvedGenerationConsent(authority, { grants })` is the single adapter: it resolves the
+  authoritative generation, mints a complete fence (`tenantId`, `sourceProfileId`, `grantId`,
+  `grantVersion`, `issuedAt`, canonical `digest`), validates it with
+  `validateConsentAuthorizationFence`, proves the grant IS that generation with
+  `validateConsentGenerationBinding`, and returns the authorized operations/scopes. It re-resolves
+  on every call and never caches, so a fence cannot survive a retry, a lease takeover or a
+  re-grant.
+- The fence is minted at the execution-attempt boundary (the `WorkerLeaseGrant` the Worker already
+  holds) and only travels inside `TrustedSourceAccessContext.authorizationFence`.
+- `CommitmentSourceReader` no longer mirrors anything: the connector boundary reads the SAME
+  authoritative grant record (`grants`) the authority resolves, and `GuardedSourceReader` runs the
+  canonical pre/post fence and generation-binding gates with `requireAuthorizationFence: true`.
+  "Granted for something else" therefore cannot be spent as `read_snapshot`.
+- A missing `grants` source denies every read instead of falling back to a local copy.
+
+**Still blocked on #84 (P0-C3D)**
+
+1. Durable grant/revocation rows and `PostgresConsentRepository` implementing the canonical
+   `ConsentAuthority` (plus the grant read the adapter needs as `grants`).
+2. Persisting the fenced generation on the Occurrence at dispatch, so an already-dispatched stale
+   task can never be re-authorized under today's consent.
+3. `createCommitmentConsentPublicationGuard` still ignores the transaction `client` it is handed
+   (`_client`). The durable guard must verify through that client — a row lock or a
+   `REPEATABLE READ` snapshot inside the Outcome append transaction — before this seam can be
+   described as atomic. It is an explicit P0-C3D acceptance criterion, not a P0-C3B claim.
+
+`@ember/postgres` still defaults the publication guard to deny-all when none is configured, and the
+integration harness adapts a clearly marked in-memory STORE through the production
+`fromResolvedGenerationConsent` adapter. That proves the Worker-side contract end to end; it does
+not prove cross-connection revocation semantics, and it is not production readiness.
 
 ### 7.6 Test coverage
 
-| Suite                 | File                                                   | Scenarios                                                                                                                                                               |
-| --------------------- | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unit                  | `tests/unit/p0c3b-handler-boundaries.test.ts`          | identity refusals, persisted profile/schedule, terminal finalize protocol, orchestrator cancellation boundaries                                                         |
-| Unit                  | `tests/unit/p0c3-scheduler.test.ts`                    | terminal reconciliation, exponential capped backoff                                                                                                                     |
-| Integration (real PG) | `tests/integration/p0c3b-consent-dependency.test.ts`   | production default rejects Outcome publication when the transaction-level consent adapter is missing; no revocation race claim                                          |
-| Integration (real PG) | `tests/integration/p0c3b-occurrence-lifecycle.test.ts` | success, permanent failure, retryable, cancellation, worker/epoch/attempt mismatch, lease takeover, sweep                                                               |
-| Integration (real PG) | `tests/integration/p0c3b-runtime-e2e.test.ts`          | scheduler concurrency, crash recovery, duplicate Task/outcome, bind race, lease takeover, cancellation, Sentinel denial, budget exhaustion, retryable/permanent failure |
+| Suite                 | File                                                   | Scenarios                                                                                                                                                                                                                                                                                                                                                        |
+| --------------------- | ------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unit                  | `tests/unit/p0c3b-handler-boundaries.test.ts`          | identity refusals, persisted profile/schedule, terminal finalize protocol, orchestrator cancellation boundaries                                                                                                                                                                                                                                                  |
+| Unit                  | `tests/unit/p0c3-scheduler.test.ts`                    | terminal reconciliation, exponential capped backoff                                                                                                                                                                                                                                                                                                              |
+| Integration (real PG) | `tests/integration/p0c3b-consent-dependency.test.ts`   | production default rejects Outcome publication when the transaction-level consent adapter is missing; no revocation race claim                                                                                                                                                                                                                                   |
+| Integration (real PG) | `tests/integration/p0c3b-occurrence-lifecycle.test.ts` | success, permanent failure, retryable, cancellation, worker/epoch/attempt mismatch, lease takeover, sweep                                                                                                                                                                                                                                                        |
+| Integration (real PG) | `tests/integration/p0c3b-runtime-e2e.test.ts`          | scheduler concurrency, crash recovery, duplicate Task/outcome, bind race, lease takeover, cancellation, Sentinel denial, budget exhaustion, retryable/permanent failure, **consent revocation before/during the read, narrow (non-`read_snapshot`) grant, revoke+re-grant generation change, second-connection revocation vs publication (zero partial writes)** |
 
-The E2E suite uses real PostgreSQL for Commitment, Task, Run, Outcome, lease and Occurrence
-state, but a process-local test consent gate. It does **not** satisfy Task 4's consent acceptance
-criteria. The full quality suites passed locally; PR #62 is not ready for CTO review until the
-durable Lane C contract and real PostgreSQL consent race tests are available.
+The E2E suite uses real PostgreSQL for Commitment, Task, Run, Outcome, lease and Occurrence state.
+Consent _persistence_ is still an in-memory STORE adapted by the production
+`fromResolvedGenerationConsent`, so the Worker-side contract (fence -> read -> re-verify ->
+publish) is proven end to end while the cross-connection revocation race remains P0-C3D's
+acceptance criterion (#84). PR #62 stays open and unmerged until #84 lands and the Stage 2 wiring
+is verified against the durable repository.

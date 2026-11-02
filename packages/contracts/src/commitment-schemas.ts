@@ -538,14 +538,17 @@ export interface ExistingTaskDispatcher {
 }
 
 /**
- * Async pre-read consent dependency for the Worker. Lane C currently exports only its
- * process-local FakeConsentRegistry; the durable implementation must be wired before P0-C3B
- * can publish Outcomes. The PostgreSQL publication gate is a separate transaction-scoped
- * dependency and must consume the same upstream persistence contract.
+ * Durable Tasks are dispatched through Ember's existing Task repository and its
+ * `(tenant_id, idempotency_key)` uniqueness. There is deliberately no second Task store.
  */
-export interface ConsentAuthority {
-  assertActive(tenantId: Id, sourceProfileId: SourceProfileId): Promise<void>;
-}
+
+/**
+ * NOTE (P0-C3B / P0-C3C): this module used to declare `ConsentAuthority`,
+ * `TrustedSourceAccessContext` and `SourceReader` here as well. Those were duplicated Consent
+ * contract definitions, and they have been removed: the single canonical definitions (including
+ * the authorization fence) live in `@ember/connectors` (`docs/P0C3-C-CONSENT-CONTRACT.md`), which
+ * the Worker, the connector boundary and the PostgreSQL repositories all consume.
+ */
 
 export interface DueCommitmentStore {
   findDueCommitments(limit: number, asOfOverride?: Date): Promise<readonly DueCommitment[]>;
@@ -601,21 +604,4 @@ export interface DueCommitmentStore {
    * `finalizeOccurrenceFromTask()`; it is driven by persisted Task/Run state only.
    */
   reconcileTerminalOccurrences(limit: number): Promise<number>;
-}
-
-export interface TrustedSourceAccessContext {
-  readonly tenantId: Id;
-  readonly commitmentId: Id;
-  readonly taskId: Id;
-  readonly runId: Id;
-  readonly leaseEpoch: number;
-  readonly authorizedAt: string;
-}
-
-export interface SourceReader {
-  readSnapshot(
-    profileId: SourceProfileId,
-    trustedContext: TrustedSourceAccessContext,
-    signal: AbortSignal,
-  ): Promise<SourceSnapshot>;
 }

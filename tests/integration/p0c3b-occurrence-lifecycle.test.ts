@@ -55,7 +55,7 @@ describe('P0-C3B: terminal occurrence lifecycle', () => {
     scheduleKind: 'once' | 'interval' = 'once',
   ): Promise<Prepared> {
     const harness = await createCommitmentHarness(db);
-    await harness.consent.grant({
+    harness.consent.grant({
       tenantId: harness.ctx.tenantId,
       sourceProfileId: FIXTURE_SOURCE_PROFILE,
     });

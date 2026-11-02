@@ -91,12 +91,20 @@ async function main(): Promise<void> {
   //
   // The authority wired here simultaneously arms: the orchestrator's versioned pre-read fence,
   // the reader's pre- and post-read fence re-verification, the transaction-scoped publication
-  // guard inside `PostgresCommitmentRepository`, and the scheduler startup gate. Lane C has not
-  // landed durable Consent persistence yet, so this is the deny-all placeholder and every one of
-  // those gates fails closed.
+  // guard inside `PostgresCommitmentRepository`, and the scheduler startup gate. Durable Consent
+  // persistence is owned by P0-C3D (#84) and is NOT merged yet, so this is the deny-all
+  // placeholder: every one of those gates fails closed and the scheduler refuses to start.
   //
-  // The whole integration is replacing this one binding with a P0-C3C `resolveGeneration`
-  // authority wrapped in `fromResolvedGenerationConsent(...)`; no gate changes when it lands.
+  // Stage 2 (after #84 merges) is exactly two bindings and no gate changes:
+  //
+  //   const consentStore = new PostgresConsentRepository(pool);            // C3C ConsentAuthority
+  //   const consentAuthority = fromResolvedGenerationConsent(consentStore, { grants: consentStore });
+  //   ...
+  //   new CommitmentSourceReader({ consent: consentAuthority, grants: consentStore });
+  //
+  // `grants` is mandatory for reads: the connector boundary evaluates `allowedOperations` against
+  // the authoritative grant record, and a Worker-side copy is exactly the scope laundering this
+  // fix removed.
   const consentAuthority = createUnavailableConsentAuthority();
   const consentGate = evaluateSchedulerConsentGate(consentAuthority);
 

@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { deriveTaskCreationIdempotencyKey, type WorkerLeaseGrant } from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
+import { fromResolvedGenerationConsent, type ConsentFenceAuthority } from '@ember/execution';
 import {
   PostgresAgentRepository,
   PostgresCommitmentRepository,
@@ -13,7 +14,7 @@ import type { TestDatabase } from './database.js';
 import { createTenantFixture, type TenantFixture } from './fixtures.js';
 import {
   createTestConsentPublicationGuard,
-  InMemoryTestConsentAuthority,
+  InMemoryTestConsentStore,
 } from './consent-test-double.js';
 
 /** Deterministic fixture Source Profile exposed by Lane C's fake source reader. */
@@ -25,7 +26,10 @@ export interface CommitmentHarness {
   readonly ctx: AuthContext;
   readonly agentId: string;
   readonly commitments: PostgresCommitmentRepository;
-  readonly consent: InMemoryTestConsentAuthority;
+  /** Fixture consent STORE (grant/revoke). Never handed to the Worker as an authority. */
+  readonly consent: InMemoryTestConsentStore;
+  /** The exact object the Worker is wired with: canonical authority + fence gates. */
+  readonly consentAuthority: ConsentFenceAuthority;
   readonly tasks: PostgresTaskRepository;
   readonly dispatcher: PostgresCommitmentTaskDispatcher;
   readonly queue: PostgresLeaseQueue;
@@ -38,8 +42,11 @@ export interface CommitmentHarnessOptions {
 /**
  * PostgreSQL composition used by the P0-C3B integration suites: tenant + agent fixture, actual
  * commitment/Task repositories, the Scheduler's Task dispatcher and the real lease queue.
- * Consent is an explicit in-memory test fixture because Lane C has no durable implementation;
- * it cannot satisfy the consent transaction acceptance requirement.
+ *
+ * Consent is an in-memory STORE adapted by the production `fromResolvedGenerationConsent`, so the
+ * Worker-side contract (authority -> fence -> read -> re-verify -> publish) is exercised exactly as
+ * it will be against the durable repository. Only the *persistence* of consent is faked; that, and
+ * the transaction-scoped revocation race, remain P0-C3D's acceptance criterion (#84).
  */
 export async function createCommitmentHarness(
   db: TestDatabase,
@@ -56,7 +63,11 @@ export async function createCommitmentHarness(
   const agent = await agents.create(ctx, { name: 'P0-C3B runtime agent', policyVersion: 1 });
 
   const tasks = new PostgresTaskRepository(db.pool);
-  const consent = new InMemoryTestConsentAuthority();
+  // Same wiring the production composition root performs once the durable repository lands: the
+  // canonical authority is adapted once, and every Worker gate plus the publication guard consumes
+  // that single object.
+  const consent = new InMemoryTestConsentStore();
+  const consentAuthority = fromResolvedGenerationConsent(consent, { grants: consent });
   const queue = new PostgresLeaseQueue(db.pool, {
     leaseDurationMs: options.leaseDurationMs ?? 30_000,
     heartbeatIntervalMs: Math.max(1_000, Math.floor((options.leaseDurationMs ?? 30_000) / 3)),
@@ -72,9 +83,10 @@ export async function createCommitmentHarness(
     ctx,
     agentId: agent.agentId,
     commitments: new PostgresCommitmentRepository(db.pool, {
-      consentPublicationGuard: createTestConsentPublicationGuard(consent),
+      consentPublicationGuard: createTestConsentPublicationGuard(consentAuthority),
     }),
     consent,
+    consentAuthority,
     tasks,
     dispatcher: new PostgresCommitmentTaskDispatcher(db.pool, tasks),
     queue,

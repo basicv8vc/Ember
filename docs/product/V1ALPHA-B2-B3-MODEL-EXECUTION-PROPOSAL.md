@@ -126,57 +126,68 @@ grows in its first month, and each one re-opens a decision this proposal closes 
 
 ### 4.3 The seam: one interface, already frozen by B1
 
-B1 §7 states that a turn is completed by "the responder", and B1-5 ships that responder as a
-deterministic fake echo. B2 is therefore a **substitution**, not an addition:
+B1 §7 owns the source user message, one authoritative Assistant Turn, its terminal
+statuses and one reply. B1-5 is expected to provide a deterministic responder seam.
+B2 replaces only the responder, without adding a second Chat API or a second Turn state
+machine. **A Turn is not a Task/Run.** The ability to claim and fence asynchronous
+inference belongs to a narrowly reviewed B2 additive migration after the B1 Turn schema
+is frozen; do not hold a PostgreSQL transaction open across the provider call.
 
-```text
-                        +-----------------------------+
-POST .../messages  ---> | tx: message + turn(running) |   B1, unchanged (S-1, S-2)
-                        +--------------+--------------+
-                                       |  turn appears as claimable work
-                                       v
-                    +--------------------------------------+
-                    | worker: claim turn (lease, attempt N)|   B2, migration 0014
-                    +--------------+-----------------------+
-                                   v
-              +--------------------------------------------+
-              | gate: quota -> sentinel -> credential      |  §6.3/§6.4, before egress
-              |       -> spend reservation                 |
-              +--------------+-----------------------------+
-                             v
-                 +-------------------------------+
-                 | ModelGateway.generate(..)     |  B2, packages/model-gateway
-                 +--------------+----------------+
-                                v
-        +--------------------------------------------------+
-        | tx: ember message + turn(completed|failed) +      |  B1 §7.1 T-2, satisfied
-        |     attempt row settled with actual usage         |
-        +--------------------------------------------------+
-```
+\`\`\`text
+B1 POST message → commit user message + assistant_turn(running)
+                         ↓
+B2 short TX: claim turn, increment lease_epoch, commit/release locks
+                         ↓
+read bounded context + policy + quota + credential checks
+                         ↓
+short TX: reserve global/tenant/principal budget + persist attempt
+                         ↓
+external model call, NO database transaction held
+                         ↓
+short TX: verify same lease_epoch, nonterminal, not cancelled,
+          unexpired turn and valid policy → commit ember reply +
+          completed turn + attempt settlement atomically
+\`\`\`
 
-The API route, the message row, the sequence rule, the turn states, the polling cadence and the
-failure-reason enum are all B1's. B2 owns the middle two boxes and nothing else. That is the whole
-argument for why this can be built alongside iOS integration without a wire negotiation.
+If the worker loses its claim, cancellation wins, or the deadline expires, it
+must discard the response and must **not** publish a reply. Any unobserved provider
+charge stays reserved for reconciliation rather than being treated as free.
 
 ### 4.4 Flow, in order, with the failure branch of each step
 
-| #   | Step                                                                                                                                             | On failure                                                                            |
-| --- | ------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------- |
-| 1   | `POST .../messages` commits message + turn (`running`) — B1                                                                                      | B1 semantics; B2 not involved                                                         |
-| 2   | Worker claims the turn: `FOR UPDATE SKIP LOCKED` on `assistant_turns` where `status='running'`, plus an advisory lock per `(tenant_id, turn_id)` | claim lost → no side effect                                                           |
-| 3   | Read attempt count for this turn from `model_turn_attempts`                                                                                      | DB error → abandon claim, turn stays `running`                                        |
-| 4   | `attempt >= 2`? → finalize `failed` / `internal_error`                                                                                           | —                                                                                     |
-| 5   | Kill switch (`EMBER_MODEL_EXECUTION` ≠ `real`) → **write nothing**, release claim                                                                | turn stays `running`; T-1 sweeper closes it at 60 s                                   |
-| 6   | Per-user and per-tenant daily quota check                                                                                                        | exceeded → finalize `failed` / `internal_error`; reason stays internal                |
-| 7   | Sentinel: `model.infer` + provider id + policy version                                                                                           | deny → finalize `failed` / `internal_error`                                           |
-| 8   | Credential binding present and non-placeholder                                                                                                   | missing → finalize `failed`; **loud log**, same wire shape                            |
-| 9   | Build bounded context (same conversation, last ≤ 8 messages, ≤ 12 000 chars)                                                                     | parse error → finalize `failed`                                                       |
-| 10  | Reserve spend (`model_spend_*`, µUSD, idempotent on `(turn_id, attempt_no)`) **and** insert the attempt row, **before** the request              | unique violation → this attempt already paid; do not call again                       |
-| 11  | One model call (single attempt, 20 s deadline, abortable)                                                                                        | §4.6 mapping                                                                          |
-| 12  | Commit `ember` message + terminal turn + settled attempt cost in **one** transaction                                                             | commit fails → the attempt row still records that a call happened; retry at attempt 2 |
+The total authoritative B1 deadline is **60 seconds including queueing, both
+possible provider calls, retries, and commit**. Each provider request has a
+strict 20-second per-attempt timeout bounded by the remaining Turn deadline.
 
-Step 10 before step 11 is the whole duplicate-call mitigation (§10). Steps 5–9 precede step 11, so
-every refusal costs zero provider tokens.
+| #   | Action                                                                                                                                                                                 | Required failure behavior                                     |
+| --- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
+| 1   | B1 commits message + turn(running)                                                                                                                                                     | Return no false acknowledgement                               |
+| 2   | Short TX claims eligible turn with FOR UPDATE SKIP LOCKED; atomically increments lease_epoch, records lease owner/deadline, then commits                                               | Lost claim → zero calls                                       |
+| 3   | Validate deadline and remaining attempt budget ≤ 2                                                                                                                                     | Deadline/exhaustion → one terminal failure, guarded by claim  |
+| 4   | Verify mode: disabled means no inference; fake means explicitly simulated                                                                                                              | disabled → no gateway call or fake output                     |
+| 5   | Resolve server-owned principal/tenant/provider/policy/operation and closed Sentinel model.infer permission                                                                             | Deny → zero calls; no prompt logged                           |
+| 6   | Validate approved credential and exact provider origin                                                                                                                                 | Missing/mismatch → zero calls, observable configuration error |
+| 7   | Build same-tenant bounded context, run model-exact token preflight including system/serialization overhead                                                                             | Unverifiable/over cap → zero calls                            |
+| 8   | Short TX reserves money across GLOBAL, TENANT, PRINCIPAL, writes unique attempt, commits                                                                                               | Any bucket exceeded/DB failure → zero calls                   |
+| 9   | Release all DB locks; make one call under AbortSignal, per-call and overall deadline                                                                                                   | Failure recorded on attempt; no premature terminal Turn       |
+| 10  | Retryable timeout/5xx/429: settle/retain billed-unknown attempt conservatively, then claim new attempt under same unexpired running Turn and fence                                     | Terminal state NEVER reopens                                  |
+| 11  | Success: short TX checks lease_epoch, lease owner, status=running, cancellation and deadline using database time, then commits one ember message + completed Turn + attempt settlement | Stale/cancelled/swept → discard output; no new message        |
+| 12  | Final provider failure or exhausted/deadline: short TX terminalizes failed once and records safe failure response under B1 T-2                                                         | No third attempt and no duplicate reply                       |
+
+**Fencing protocol (B2 migration 0014, subject to B1 owner review):**
+\`assistant_turns\` gains \`lease_epoch bigint NOT NULL DEFAULT 0\`,
+\`lease_owner\`, \`lease_expires_at\` and a bounded claim/attempt counter.
+Claims and reclaims use a short transaction; publishing checks the same
+lease epoch/owner and that \`status='running'\` and \`deadline_at > clock_timestamp()\`.
+Cancellation and the deadline sweeper win by changing terminal status; any
+older claim then fails the guarded update. Do not fabricate a Run or reuse
+Task lease columns without their ownership contract.
+
+**Required adversarial tests:** simultaneous two-worker claim (one outbound call);
+cancel while provider is in flight (no response); timeout/sweeper before provider
+returns (no response); expired claim reclaimed by second worker (first cannot
+publish); crash after provider response before commit (bounded second attempt);
+first 5xx then second success (Turn never transiently failed, one final reply).
 
 ### 4.5 Bounded conversation context
 
@@ -195,22 +206,28 @@ enforced in characters before a request is built.
 
 ### 4.6 Provider outcome → turn outcome
 
-The turn's failure vocabulary is B1's closed enum `timeout | internal_error` (§7.2). **B2 adds no
-value to it.** Provider detail stays in `model_turn_attempts.outcome_code`, which is internal and
-never serialized.
+B1's Turn statuses \`running | completed | failed | cancelled\` are immutable
+once terminal. **Attempt outcome is not Turn outcome.** A retryable provider
+failure is saved on an internal attempt record while the Turn remains
+\`running\`; only a success or a final, exhausted or expired attempt
+transitions the Turn to terminal state.
 
-| Provider / gateway outcome    | `assistant_turns.status`                   | `failure_reason` | attempt `outcome_code` | retry?                         |
-| ----------------------------- | ------------------------------------------ | ---------------- | ---------------------- | ------------------------------ |
-| success                       | `completed` + one `ember` message, same tx | `null`           | `ok`                   | —                              |
-| deadline exceeded (20 s)      | `failed`                                   | `timeout`        | `model_timeout`        | one more attempt               |
-| connection reset / 5xx        | `failed`                                   | `internal_error` | `model_unavailable`    | one more attempt               |
-| 429                           | `failed`                                   | `internal_error` | `model_rate_limited`   | one more attempt               |
-| 401 / 403                     | `failed`                                   | `internal_error` | `model_auth_failed`    | **no** — operator fault, alert |
-| unparseable or refused output | `failed`                                   | `internal_error` | `model_invalid_output` | **no**                         |
-| user cancelled the turn       | `cancelled`                                | `null`           | `client_cancelled`     | no (T-4)                       |
+| Provider outcome           | Attempt outcome_code | Turn while retry eligible           | Final turn outcome                      |
+| -------------------------- | -------------------- | ----------------------------------- | --------------------------------------- |
+| Successful response        | ok                   | running until atomic commit         | completed + exactly one ember reply     |
+| 20-second attempt timeout  | model_timeout        | running if time and attempts remain | failed / timeout                        |
+| Transport reset or 5xx     | model_unavailable    | running if time and attempts remain | failed / internal_error                 |
+| Provider 429               | model_rate_limited   | running if time and attempts remain | failed / internal_error                 |
+| Provider 401/403           | model_auth_failed    | no retry                            | failed / internal_error, alert operator |
+| Malformed/refused response | model_invalid_output | no retry                            | failed / internal_error                 |
+| User cancels               | client_cancelled     | no retry                            | cancelled, discard any in-flight output |
 
-The user-visible text for `failed` is one fixed, user-safe sentence (B1 §7.1). It never contains a
-provider name, an HTTP status, a quota number or a spend figure.
+A Turn's **overall** 60-second deadline is authoritative and includes queueing,
+both attempts, and final persistence; a 20-second provider timeout does not
+extend it. A failed Turn gets B1's fixed user-safe reply, not a provider-specific
+error body. First-call 5xx followed by a successful second call must yield
+**one** completed Turn and **one** reply, never a terminal \`failed\` Turn
+that is later resurrected.
 
 ### 4.7 What the user sees
 
@@ -379,45 +396,60 @@ Three properties of this shape matter more than any field:
 
 ### 6.3 Admission: how `model.infer` enters Sentinel without breaking it
 
-`evaluateSentinelPolicy` is closed in three separate ways: the frozen category array, the
-`strictObject` intent schema, and the branch ladder that ends in `DENY_DEFAULT`. Adding a string to
-the array is therefore not enough — a new category falls past step 8 (`isSafeMockActionCategory` is
-false) into step 9 and is denied. The change is:
+The existing Sentinel is a closed v1 evaluator. It requires \`runId\` and
+hard-denies \`network.egress\`, \`host.exec\`, and \`credential.use\`. B2
+introduces one **narrow** \`model.infer\` action; it must not make old v1
+run admission silently fail or give any other action new authority.
 
-1. Add `'model.infer'` to `SENTINEL_ACTION_CATEGORIES` (still a closed, frozen array).
-2. Bump `SENTINEL_POLICY_VERSION` to `2`, so a policy written for version 1 fails
-   `DENY_POLICY_VERSION_MISMATCH` instead of silently authorizing a category it never knew about.
-3. Insert one branch **after** the step-6 hard denies and **before** step 7 (external mutation):
+**Strict intent union (normative design target):**
 
-   ```text
-   if (category === 'model.infer') {
-     if (!APPROVED_MODEL_PROVIDERS.includes(intent.providerId)) -> deny, DENY_MODEL_PROVIDER_NOT_APPROVED
-     if (policy.allowedActions.includes('model.infer'))         -> allow, ALLOWED_MODEL_INFER
-     else                                                       -> deny, DENY_MODEL_ACTION_DISALLOWED
-   }
-   ```
+\`\`\`ts
+const RunIntent = z.strictObject({
+  subjectKind: z.literal('run'),
+  tenantId: Uuid, runId: Uuid,
+  taskId: Uuid.optional(), actionId: Uuid.optional(),
+  actionCategory: Category, policyVersion: Version,
+});
 
-4. Two new reason codes, and `SentinelIntentSchema` gains **one optional** field `providerId`
-   (`max(32)`, `^[a-z][a-z0-9._-]*$`), still `strictObject`.
+const TurnIntent = z.strictObject({
+  subjectKind: z.literal('turn'),
+  tenantId: Uuid, turnId: Uuid,
+  actionCategory: z.literal('model.infer'),
+  policyVersion: z.literal(2),
+  providerId: z.literal('openai'),
+  operation: z.literal('conversation.turn'),
+});
 
-`APPROVED_MODEL_PROVIDERS` is a deep-frozen constant in code, not an environment variable. Adding a
-provider becomes a code review, a version bump and a test — not a config change at 3 a.m.
+const SentinelIntentV2 = z.discriminatedUnion('subjectKind', [
+  RunIntent, TurnIntent,
+]);
+\`\`\`
 
-**The `runId` problem (F-2), stated plainly.** `SentinelIntentSchema` requires `runId` as a UUID, and a
-conversation turn is not a Task and has no run (B1 §7.4: a turn "carries no execution semantics").
-Three ways out, and only one is acceptable:
+Keep the **legacy v1 Run validator** available for existing callers until all
+call sites are migrated, or add a lossless normalization adapter that injects
+\`subjectKind:'run'\` from trusted internal code. Do not add optional \`runId\`
+or allow both \`runId\` and \`turnId\` to be present. Existing policy-v1 mock
+and Commitment tests MUST continue to pass. v1 policies never allow
+\`model.infer\`; v2 must be explicitly provisioned by the platform.
+The default policy cannot silently upgrade to a model-enabled policy.
 
-| Option                                                                                        | Verdict                                                                                                  |
-| --------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Fabricate a run row per turn                                                                  | **Rejected** — invents execution records for a non-execution concept and pollutes every run-count metric |
-| Grant the turn `credential.use` / `network.egress`                                            | **Rejected** — that is exactly the bypass this proposal exists to prevent                                |
-| Add a turn-scoped intent variant, discriminated by a required `subjectKind` (`run` or `turn`) | **Proposed**                                                                                             |
+The trusted admission layer derives tenant, provider, operation, policy version
+and turn identity from authenticated server-side context and persisted rows.
+Neither \`providerId\` nor \`operation\` is accepted from the user's chat message.
+A candidate is permitted only when it is \`model.infer\`, policy version 2,
+the trusted provider is in the **code-owned closed allowlist**, and that
+tenant's matching current policy explicitly grants the action.
 
-The third keeps one evaluator and one policy, and the discriminator is _required_ so an intent can
-never be ambiguous. It is also the change that most needs the contract owner's review, because it
-touches the module everything else trusts. If the CTO prefers, B2 can instead be gated behind a `run`
-created solely to host the turn — but that is a worse model of the system and should be an explicit
-decision, not an implementation detail.
+This new allow branch remains **after** the three pre-existing hard denies;
+\`network.egress\`, \`host.exec\` and \`credential.use\` stay denied regardless
+of any \`model.infer\` grant. Credential retrieval and TLS egress occur only
+inside the separately reviewed pinned model adapter; they are not generic
+Sentinel permissions.
+
+Compatibility tests: every prior v1 vector unchanged; strict union rejects a
+Turn with \`runId\`, a Run with \`turnId\`, missing discriminator and unknown
+provider; v1+model.infer always denied; high-risk categories denied even under
+a v2 policy granting model.infer; mismatched tenant or policy denied.
 
 ### 6.4 Credential and egress, authorized together (not one granting the other)
 
@@ -471,11 +503,11 @@ narrower category with its own branch, and the three Round-1 denials are untouch
 | `FakeModelGateway`   | `disabled`, `fake` (default and CI) | deterministic canned reply per operation; `simulated: true`; `costMicroUsd: 0`; used by every unit, integration, chaos and e2e test |
 | `OpenAiModelGateway` | `real` only                         | one pinned model, one origin, one call, 20 s deadline                                                                               |
 
-`EMBER_MODEL_EXECUTION` is one of `disabled`, `fake`, `real`, default `disabled`. Boot rules:
+`EMBER_MODEL_EXECUTION` is one of `disabled`, `fake`, `real`, default `disabled`. In `disabled` the service may boot but **must not invoke even the fake gateway or present a canned reply**; a pending Turn closes via the bounded B1 sweeper. In `fake`, a deterministic internal responder produces only explicitly labelled `simulated: true` output. Boot rules:
 
 | Mode       | Key present | Sentinel allows `model.infer` | Result                                                                    |
 | ---------- | ----------- | ----------------------------- | ------------------------------------------------------------------------- |
-| `disabled` | any         | any                           | start; gateway is the fake; no egress path is even constructed            |
+| `disabled` | any         | any                           | start; **no responder or inference calls**; turns fail by the B1 deadline |
 | `fake`     | any         | any                           | start; fake adapter; exercises the full gate chain with zero cost         |
 | `real`     | no          | —                             | **refuse to start** (`POLICY_DENIED` at boot, with a content-free reason) |
 | `real`     | yes         | no                            | **refuse to start**                                                       |

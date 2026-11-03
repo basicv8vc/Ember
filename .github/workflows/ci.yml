@@ -64,12 +64,6 @@ jobs:
       - name: Lint
         run: pnpm lint
 
-      # Temporary formatting diagnostic; removed after the generated diff is captured.
-      - name: Print Prettier delta for B1 T-17
-        run: |
-          pnpm exec prettier --write tests/integration/b1-conversation-invariants.test.ts
-          git --no-pager diff -- tests/integration/b1-conversation-invariants.test.ts
-
       - name: Check formatting
         run: pnpm format:check
 

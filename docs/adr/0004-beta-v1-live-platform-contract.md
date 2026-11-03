@@ -135,10 +135,10 @@ versioned wire semantics only after the frozen B1 contract is merged.
 
 ## Approval record
 
-| Field          | Value                                                                                |
-| -------------- | ------------------------------------------------------------------------------------ |
-| Contract PR    | #92 (`cto/b1-platform-contract`)                                                     |
-| Annex path     | `docs/product/B1_PLATFORM_CONTRACT.md`                                               |
-| Annex blob SHA | `1eae8ec3332040b3089e62a425fde13e7590966b`                                           |
-| Approved by    | CTO (Round 2 review pending)                                                         |
-| Frozen from    | the merge commit of this ADR onward                                                  |
+| Field          | Value                                      |
+| -------------- | ------------------------------------------ |
+| Contract PR    | #92 (`cto/b1-platform-contract`)           |
+| Annex path     | `docs/product/B1_PLATFORM_CONTRACT.md`     |
+| Annex blob SHA | `1eae8ec3332040b3089e62a425fde13e7590966b` |
+| Approved by    | CTO (Round 2 review pending)               |
+| Frozen from    | the merge commit of this ADR onward        |

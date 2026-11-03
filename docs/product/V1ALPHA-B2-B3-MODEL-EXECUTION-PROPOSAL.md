@@ -113,13 +113,13 @@ response. Polling, not streaming.
 
 ### 4.2 What B2 adds, and what it refuses to add
 
-| Adds                                                   | Refuses to add                                                               |
-| ------------------------------------------------------ | ---------------------------------------------------------------------------- |
-| A responder implementation behind B1-5's seam          | A conversation route, a message table, a turn table, a sequence rule         |
-| `packages/model-gateway` (one package, two operations) | A multi-provider framework, a model registry, caller-chosen models           |
-| Migration `0014`: attempts, spend, kill switch         | Any change to `tasks`, `task_events`, or `0002`'s kind and payload allowlist |
-| Sentinel category `model.infer` + policy version 2     | Any relaxation of the `network.egress` or `credential.use` denials           |
-| One provider adapter, one hard-coded origin            | Retries, redirects, proxies, streaming, tool calls, function calling         |
+| Adds                                                                                 | Refuses to add                                                               |
+| ------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------- |
+| A responder implementation behind B1-5's seam                                        | A conversation route, a message table, a turn table, a sequence rule         |
+| `packages/model-gateway` (one package, two operations)                               | A multi-provider framework, a model registry, caller-chosen models           |
+| Migration `0014`: Turn leases, attempts, spend; runtime kill switch separately gated | Any change to `tasks`, `task_events`, or `0002`'s kind and payload allowlist |
+| Sentinel category `model.infer` + policy version 2                                   | Any relaxation of the `network.egress` or `credential.use` denials           |
+| One provider adapter, one hard-coded origin                                          | Retries, redirects, proxies, streaming, tool calls, function calling         |
 
 The refusal list is the architecture. Every item on it is something a model integration normally
 grows in its first month, and each one re-opens a decision this proposal closes on purpose.
@@ -505,15 +505,15 @@ narrower category with its own branch, and the three Round-1 denials are untouch
 
 `EMBER_MODEL_EXECUTION` is one of `disabled`, `fake`, `real`, default `disabled`. In `disabled` the service may boot but **must not invoke even the fake gateway or present a canned reply**; a pending Turn closes via the bounded B1 sweeper. In `fake`, a deterministic internal responder produces only explicitly labelled `simulated: true` output. Boot rules:
 
-| Mode       | Key present | Sentinel allows `model.infer` | Result                                                                    |
-| ---------- | ----------- | ----------------------------- | ------------------------------------------------------------------------- |
-| `disabled` | any         | any                           | start; **no responder or inference calls**; turns fail by the B1 deadline |
-| `fake`     | any         | any                           | start; fake adapter; exercises the full gate chain with zero cost         |
-| `real`     | no          | —                             | **refuse to start** (`POLICY_DENIED` at boot, with a content-free reason) |
-| `real`     | yes         | no                            | **refuse to start**                                                       |
-| `real`     | yes         | yes                           | start, and only then can a turn reach a provider                          |
+| Mode       | Key present | Sentinel allows `model.infer`           | Result                                                                      |
+| ---------- | ----------- | --------------------------------------- | --------------------------------------------------------------------------- |
+| `disabled` | any         | any                                     | start; **no responder or inference calls**; turns fail by the B1 deadline   |
+| `fake`     | any         | any                                     | start; fake adapter; exercises the full gate chain with zero cost           |
+| `real`     | no          | —                                       | **refuse to start** (`POLICY_DENIED` at boot, with a content-free reason)   |
+| `real`     | yes         | no enforceable model-policy integration | **refuse to start**; a particular tenant without a grant is denied per Turn |
+| `real`     | yes         | yes                                     | start, and only then can a turn reach a provider                            |
 
-There is no row in that table that degrades `real` into `fake`. A process that was configured for real
+The boot check validates presence of an enforceable trusted policy path, not a blanket grant to every tenant. Each Turn must separately resolve the current tenant policy and fail closed if it lacks `model.infer`. There is no row in that table that degrades `real` into `fake`. A process that was configured for real
 inference and cannot deliver it must be dead and visible, because the alternative is an assistant that
 silently answers with canned text while the UI says the model is real.
 
@@ -796,82 +796,109 @@ from this repository or this environment. Approval item B2 requires a named sour
 
 ## 10. Duplicate paid-call risk (known, bounded, priced)
 
-### 10.1 How it happens
+### 10.1 The actual failure window
 
-The window is unavoidable in any design that is not a distributed transaction with the provider: the
-provider completes the work and bills it, and the process dies before the reply is committed. A retry
-then pays twice for one user message.
+The provider can complete and bill a response while the worker dies before the
+assistant reply is committed. End-to-end exactly-once **billing** cannot be
+assumed, and the database cannot roll back an external invoice.
 
-### 10.2 What bounds it
+### 10.2 One outbound start per durable attempt
 
-| Mechanism                                                                     | Effect                                                                                      |
-| ----------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| Attempt row + spend reservation written **before** the request (§4.4 step 10) | a crash still consumes quota; the crash cannot be "free"                                    |
-| `PRIMARY KEY (tenant_id, turn_id, attempt_no)` with `attempt_no ≤ 2`          | at most two paid calls per user message, enforced by the database rather than by code paths |
-| Terminal commit in one transaction (B1 T-2)                                   | the successful attempt publishes exactly one reply; a duplicate reply is impossible         |
-| T-1 sweeper at 60 s                                                           | an orphaned `running` turn becomes `failed` / `timeout`; it never retries forever           |
-| Cost reported from **attempts**, not turns                                    | the ledger cannot under-report; a duplicate is visible as `attempt_no = 2`                  |
+An attempt identity is \`(tenant_id,turn_id,attempt_no)\`, with
+\`attempt_no IN (1,2)\`. Before any network I/O the current lease holder
+atomically changes \`send_started_at\` from NULL to a database timestamp
+using a compare-and-set that also checks the current Turn lease epoch/owner,
+nonterminal state, nonexpired deadline, active permission and reserved money.
+Only that successful CAS grants the **one outbound start** for the attempt.
+On claim expiry or process crash, another worker must **never** reuse an
+attempt whose \`send_started_at\` is non-NULL; it may start the next numbered
+attempt only if the Turn deadline and budget allow. Disable all automatic
+retries inside the HTTP provider client and redirect handling.
 
-Worst case is therefore **2× the per-turn ceiling** for one message ($0.010), which is the multiple the
-per-user-day money ceiling in §7.4 is set with.
+A crash between CAS and actual network send spends a conservative attempt
+without making a call. That is preferable to an undetectable third paid call.
 
-### 10.3 What is deliberately not done
+### 10.3 Failure handling and financial truth
 
-No idempotency key is sent to the provider. Providers do not offer a general "do not bill a duplicate"
-guarantee, so the key would create the appearance of exactly-once billing without the substance. A
-bounded duplicate that is documented, priced and observable is a better contract with the reader than a
-mechanism that does not exist.
+| Case                                            | Policy                                                                                    |
+| ----------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| Crash before the send-start CAS                 | Attempt may be released only after proving zero provider egress                           |
+| Crash after CAS, before provider reply/commit   | Attempt is billed-unknown; keep the full reservation and consume one of two attempts      |
+| Provider timeout or abort with unknown usage    | Keep reserved amount; do not record zero cost                                             |
+| Provider success and durable reply commit       | Settle observed usage and one terminal Turn atomically if the current fence still matches |
+| Stale worker returns after cancellation/sweeper | Discard text; charge/retain cost evidence; never publish                                  |
+| Provider bill exceeds our reserved estimate     | Preserve actual amount, stop new egress, alert, reconcile with invoice                    |
 
-### 10.4 The B3 form of the same risk
+**At most two outbound request starts** follows only if the send-start CAS,
+attempt uniqueness, lease check, and disabled HTTP automatic retry all hold.
+The provisional \`$0.010\` is a **maximum aggregate reserved estimate**, not
+a guarantee that an external provider cannot bill more. A proven invoice
+cap also needs provider-side billing limits and verified rates.
 
-A retried `infer` step can re-bill a provider call; the step's idempotency key protects the _artifact_,
-not the _invoice_. Same mitigation, plus `max_attempts = 2` for this kind (§5.4). The artifact write is
-idempotent and immutable, so a duplicate attempt yields the same artifact and one extra paid call —
-never two artifacts.
+### 10.4 B3 shares this guarantee
+
+B3's provider calls need an equivalent one-send-per-attempt identity tied
+to the Task/Run fence. The artifact is idempotent, but artifact idempotency
+does not protect the provider invoice. The same conservative unknown-billing
+and strict attempt limit apply. No separate user-visible mock is permitted
+when the real gateway refuses execution.
 
 ## 11. Test plan (what must be green before any `real` mode)
 
-| #   | Test                                           | Asserts                                                                                          |
-| --- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------ |
-| T1  | sentinel unit: `model.infer` matrix            | provider allowlist checked before policy; a version-1 policy is denied                           |
-| T2  | sentinel unit: no widening                     | `network.egress`, `host.exec`, `credential.use` still hard-denied under a `model.infer` grant    |
-| T3  | gateway unit: config validation                | placeholder key, empty key, unknown provider, `real` without key ⇒ constructor throws            |
-| T4  | gateway unit: origin constants                 | exactly one origin, no redirects, no proxy env, request body shape frozen                        |
-| T5  | gateway unit: error taxonomy                   | each provider response class maps to the intended closed code; no key in any message             |
-| T6  | worker integration: happy path (fake)          | turn `running` → `completed`, one `ember` message, `simulated: true`, one attempt row            |
-| T7  | worker integration: real-mode refusal          | `real` without a key ⇒ process refuses to start; no turn is ever completed by the fake           |
-| T8  | worker integration: attempt cap                | a second failure finalizes `failed`; no third call is attempted                                  |
-| T9  | worker chaos: kill between response and commit | turn stays `running`, sweeper closes it, exactly 2 attempts, spend = 2× one call                 |
-| T10 | ledger integration: ceilings                   | over-cap denies **before** any gateway call (asserted with a throwing spy gateway)               |
-| T11 | ledger integration: settle clamp               | `consumedFor` > reservation settles the reservation and flags the overflow                       |
-| T12 | privacy: content-free output                   | no log line, error or event contains message text (scan of captured output)                      |
-| T13 | truthfulness                                   | a real adapter's `model_label` never matches `/-(fake\|echo)-/`; `simulated` matches the adapter |
-| T14 | B3 migration: fail-closed                      | unknown kind, unknown payload key, unknown error code still rejected by `0002`'s function        |
-| T15 | B3 integration: artifact                       | typed JSON matches the schema, is immutable, `task_results` is `unavailable` with a reason code  |
+All provider tests use an injected, offline stub with **zero network egress**;
+the budget and lease tests use real PostgreSQL 17 and independent connections.
 
-T10 and T11 are the two that would otherwise be discovered by a bill.
+| ID  | Acceptance case                             | Required assertion                                                                             |
+| --- | ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| T1  | Legacy Sentinel compatibility               | Existing policy-v1 Run/Mock/Commitment vectors pass unchanged                                  |
+| T2  | Strict new Sentinel intent                  | Run vs Turn discriminator; no mixed IDs; v1 cannot grant model.infer                           |
+| T3  | High-risk action preservation               | network.egress / host.exec / credential.use remain DENIED in v2                                |
+| T4  | Provider and origin                         | Only code-pinned provider, TLS origin, no proxy/redirect/retry; secrets never logged           |
+| T5  | Disabled/fake/real modes                    | disabled = zero inference; fake labels simulated; invalid real refuses startup                 |
+| T6  | Two workers race for same Turn              | Exactly one committed claim and one outbound start                                             |
+| T7  | First provider 5xx, second succeeds         | Turn stays running between attempts; exactly one completed Turn + one ember reply              |
+| T8  | Cancel during provider inference            | Current fence invalidated; one possible billed attempt, zero published assistant reply         |
+| T9  | Turn deadline passes in flight              | No completion after sweeper/60 s; zero stale reply                                             |
+| T10 | Lease expiry and reclaim                    | Old worker cannot publish; at most one send per attempt via send-start CAS                     |
+| T11 | Crash after provider response before commit | No third paid start; unknown bill remains reserved; valid retry only if time remains           |
+| T12 | Global spend concurrency                    | Different tenants race on final global budget; one wins, other makes zero gateway calls        |
+| T13 | Tenant/principal independent caps           | Crossing either cap refuses before network, other tenant does not borrow quota                 |
+| T14 | Unknown usage and billing overage           | Full pessimistic reservation retained; actual invoice overage recorded and new egress disabled |
+| T15 | Tokenization worst cases                    | Unicode, system/schema overhead, model-specific tokenizer mismatch fail closed                 |
+| T16 | Transcript privacy and tenant isolation     | No other tenant history, secrets, prompts or completions in logs/events                        |
+| T17 | Provider output truthfulness                | Real label never contains fake/echo marker; simulated matches adapter                          |
+| T18 | B3 kind/event allowlist                     | Unknown kind/payload/error still fails closed after 0015                                       |
+| T19 | B3 artifact and Task result                 | Immutable typed artifact, terminal Task result unavailable, no fake success                    |
+
+A dedicated fault-injection test must assert the **atomic** publication fence:
+only the live claim owner can commit the response under a still-running,
+nonexpired, noncancelled Turn. Also test two independent tenants against the
+one genuinely global bucket; local per-tenant tests alone cannot prove it.
 
 ## 12. PR sequence
 
-Order is dependency order. Every PR is independently revertable, and **exactly one of them (B2-5) can
-spend money** — and only while `EMBER_MODEL_EXECUTION=real`, which no environment sets.
+Each implementation PR must leave main green. **No code implementation
+starts before the approved B1 ADR and its normative annex are merged.**
+The PR numbers below are work items, not existing PRs.
 
-| PR   | Scope                                                                                                                         | Depends on           | Gate                                                                         |
-| ---- | ----------------------------------------------------------------------------------------------------------------------------- | -------------------- | ---------------------------------------------------------------------------- |
-| B2-0 | this document + the audit (docs only)                                                                                         | —                    | CTO review; no code                                                          |
-| B2-1 | Sentinel: `model.infer` category, policy v2, turn-scoped intent variant, reason codes, unit tests. **Dark: no caller exists** | D-1, D-2             | T1, T2                                                                       |
-| B2-2 | `packages/model-gateway`: types, config validation, `FakeModelGateway`, error taxonomy. No HTTP client                        | B2-1                 | T3, T5, T13                                                                  |
-| B2-3 | Migration `0014` + repositories (attempts, spend days, spend operations)                                                      | B2-1, CR-2 answered  | `migrations.test.ts`, T10, T11                                               |
-| B2-4 | `ModelTurnResponder`, claim loop, boot rules, sweeper integration. `real` mode refuses to start                               | B2-2, B2-3, B1-5     | T6, T7, T8, T9, T12                                                          |
-| B2-5 | `OpenAiModelGateway` adapter: one origin, one call, 20 s deadline. Merged **dark**                                            | B2-4, approval A1–A5 | T4, T5; `model:smoke:local` refuses without an explicit acknowledgement flag |
-| B2-6 | Runtime kill switch + usage/cost report command + runbook page                                                                | B2-5                 | operator dry run                                                             |
-| B3-1 | Migration `0015`: kind + payload allowlist + two error codes, fail-closed tests                                               | B2-4, D-4            | T14                                                                          |
-| B3-2 | `extractActionItems` + `infer` step + artifact + `task_results` `unavailable` write                                           | B3-1                 | T15                                                                          |
-| B3-3 | iOS surfacing of the artifact through existing card rendering                                                                 | B3-2                 | iOS lead owns this PR                                                        |
+| Slice | Deliverable                                                                                              | Gate                                                                       |
+| ----- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| B2-0  | This design PR + preserved original audit, docs only                                                     | CTO design review                                                          |
+| B2-1  | Strict Run/Turn Sentinel intent, model.infer category, version-1 compatibility, negative tests           | B1 contract frozen; T1–T3                                                  |
+| B2-2  | Gateway types, strict config, FakeModelGateway, offline error mapping                                    | T4–T5; zero real egress                                                    |
+| B2-3  | Forward-only 0014, durable Turn claim/fence, shared global + tenant/principal money ledgers, attempt CAS | T6, T10–T15, migration replay                                              |
+| B2-4  | Worker ModelTurnResponder behind B1-5 responder seam; fenced publication; retries and sweeper            | B1-5 merged, T7–T11, T16–T17                                               |
+| B2-5  | One real provider adapter, pinned origin/model, merged dark and disabled                                 | Separate model/provider/pricing/privacy CTO gate; no paid smoke by default |
+| B2-6  | Runbook, account spend limit check, 80% warning destination, emergency stop and billing reconciliation   | Named operational owner; operator dry run                                  |
+| B3-1  | 0015 Task kind/event payload/error vocabulary, fail-closed tests                                         | B1 Task linkage/results frozen, T18                                        |
+| B3-2  | Bounded action-item extraction via same gateway, unique paid-attempt fence and immutable artifact        | T19 and safe cost accounting                                               |
+| B3-3  | iOS Task/Outcome card integrated into Conversation                                                       | iOS Lead, production truthfulness                                          |
 
-B2-1 through B2-3 change no observable behaviour on their own: no route changes, no turn completes
-differently, and `main`'s test suite is the proof. That is deliberate — the risky part (B2-4/B2-5)
-lands on top of infrastructure that is already green.
+B2-1/B2-2 cannot contact a provider and must not expose new production
+routes. B2-5 may be merged dark, but **cannot be activated** by a
+documentation merge, an environment switch alone, or a per-tenant policy
+alone; the separate provider, data-protection and billing acceptance gate
+must pass.
 
 ## 13. Explicitly out of scope
 
@@ -940,6 +967,33 @@ Everything below is a proposal. None of it is enabled, provisioned or paid for.
 3. §7.1 and §7.2 — that per-tenant and per-user are genuinely independent, and honestly labelled.
 4. §8.1 — that the prices are unverified, and that fact is visible rather than buried.
 5. §5.1 item 3 — that B3 needs no widening of `task_results`, because B1's X-4 already allows it.
+
+## 15. CTO Round 2 correction matrix (2026-11-03)
+
+This is the authoritative summary of the five corrections requested in
+the [CTO Round 1 review of PR #93](https://github.com/basicv8vc/Ember/pull/93#issuecomment-6595496208).
+These design corrections are **not** permission for production model egress.
+
+| CTO finding                                    | Correction in this proposal                                                                                   |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Terminal state cannot be retried               | §4.4/§4.6: retry failure is attempt-only; Turn remains running until definitive finalization                  |
+| Database locks cannot span provider I/O        | §4.3/§4.4: short claim TX + lease epoch + guarded publication + one-send CAS                                  |
+| Global cap missing and operation key collision | §7.3: one shared global bucket; distinct tenant/principal buckets; attempt is one canonical operation         |
+| Token heuristics and unknown invoices          | §7.3–§8, §10: verified token preflight, pessimistic unknown charges, no claim of invoice-hard cap             |
+| Sentinel compatibility and mode ambiguity      | §6.3/§6.5: strict intent union, policy-v1 tests, legacy admission preserved, disabled means no fake inference |
+
+**Cross-team resolutions:** B1 PR #92 now proposes
+\`assistant_turns UNIQUE (tenant_id,id)\`, so B2 shall use that composite
+identity after B1 merges; Alpha principal identity is server-authenticated
+and 1:1 with Consumer, but cannot be caller supplied. The B1 Turn 60-second
+deadline includes queueing and retries. B1's 200 submitted messages per
+rolling 24 h is distinct from 60 paid Turns per UTC day. B3's initial iOS
+path requires verified Conversation/Message linkage.
+
+**Still blocked:** exact pinned provider/model and official pricing,
+provider prompt retention/training terms and applicable DPA, account-level
+billing controls, operator alert destination, finished B1 implementation,
+and separate CTO authorization for any real-mode activation.
 
 ## Appendix A — file inventory per PR (none of these exist yet)
 

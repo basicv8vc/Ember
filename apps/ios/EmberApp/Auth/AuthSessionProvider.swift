@@ -1,32 +1,22 @@
 import Foundation
 
-/// An Ember consumer session returned by the approved B1 session contract.
+/// An in-memory view of the currently available Ember session credential.
 ///
-/// The access token is intentionally non-Codable and is never persisted by this type.
-/// A production provider must store it in Keychain with the B1-required accessibility class.
+/// This value is deliberately not Codable and has no persistence behavior. The provider
+/// implementation owns any future secure-storage policy; this interface makes no assumptions
+/// about Keychain, refresh, sign-in providers, or credential lifetime.
 public struct AuthSession: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
-    public let sessionID: UUID
-    public let consumerID: UUID
     public let accessToken: String
-    public let expiresAt: Date
 
-    public init?(
-        sessionID: UUID,
-        consumerID: UUID,
-        accessToken: String,
-        expiresAt: Date
-    ) {
+    public init?(accessToken: String) {
         guard !accessToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return nil
         }
-        self.sessionID = sessionID
-        self.consumerID = consumerID
         self.accessToken = accessToken
-        self.expiresAt = expiresAt
     }
 
     public var description: String {
-        "AuthSession(sessionID: \(sessionID), consumerID: \(consumerID), accessToken: <redacted>, expiresAt: \(expiresAt))"
+        "AuthSession(accessToken: <redacted>)"
     }
 
     public var debugDescription: String {
@@ -34,10 +24,10 @@ public struct AuthSession: Equatable, Sendable, CustomStringConvertible, CustomD
     }
 }
 
-/// The current state of the consumer session boundary.
+/// The provider's current knowledge of authentication state.
 ///
-/// unavailable is distinct from unauthenticated: it means the provider cannot currently
-/// determine session state and must not be treated as an instruction to sign the user out.
+/// unavailable is distinct from unauthenticated: callers must not interpret a temporary
+/// provider failure as a sign-out.
 public enum AuthSessionState: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
     case authenticated(AuthSession)
     case unauthenticated
@@ -59,15 +49,15 @@ public enum AuthSessionState: Equatable, Sendable, CustomStringConvertible, Cust
     }
 }
 
-/// Supplies the currently installed Ember consumer session to the application.
+/// Minimal, provider-neutral read interface for the current Ember session.
 ///
-/// This interface does not implement Apple sign-in, session minting/refresh/logout, Keychain
-/// storage, or any provider assertion handling. Those are separate B1 implementation slices.
+/// Login, refresh, logout, credential persistence and provider-specific assertions are
+/// intentionally outside this contract.
 public protocol AuthSessionProvider: Sendable {
     func currentSession() async -> AuthSessionState
 }
 
-/// In-memory auth provider for previews and tests only. It performs no network or disk I/O.
+/// Deterministic in-memory provider for previews and unit tests. No network or disk I/O.
 public actor MockAuthSessionProvider: AuthSessionProvider {
     private var state: AuthSessionState
 

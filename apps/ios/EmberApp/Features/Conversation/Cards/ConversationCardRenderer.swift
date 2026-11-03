@@ -115,7 +115,8 @@ enum ConversationCardRenderer {
     )
 
     static func outcomePresentation(for record: TaskJourneyRecord) -> OutcomePresentation {
-        guard let fixture = record.outcomeFixture else {
+        guard record.task.status == .completed,
+              let fixture = record.outcomeFixture else {
             return OutcomePresentation(
                 title: String(localized: "card.result", table: "ConversationCards"),
                 readableContent: nil,

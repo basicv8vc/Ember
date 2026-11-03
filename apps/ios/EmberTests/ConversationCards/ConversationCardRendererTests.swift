@@ -89,13 +89,35 @@ final class ConversationCardRendererTests: XCTestCase {
             label: "固定演示清单",
             content: "固定演示结果，不来自当前对话。"
         )
-        let record = makeRecord(taskStatus: .completed, outcomeFixture: fixture)
+        let record = makeRecord(
+            taskStatus: .completed,
+            presentationStatus: .running,
+            outcomeFixture: fixture
+        )
 
         let presentation = ConversationCardRenderer.outcomePresentation(for: record)
 
         XCTAssertEqual(presentation.title, fixture.label)
         XCTAssertEqual(presentation.readableContent, fixture.content)
         XCTAssertTrue(presentation.isMockOnly)
+    }
+
+    func testOutcomeFixtureStaysUnavailableUntilTaskIsCompleted() {
+        let staleFixture = MockOutcomeFixture(
+            label: "旧的固定演示清单",
+            content: "这份结果不能在任务完成前显示。"
+        )
+        let unavailableTitle = String(localized: "card.result", table: "ConversationCards")
+
+        for status in [TaskStatus.queued, .running] {
+            let record = makeRecord(taskStatus: status, outcomeFixture: staleFixture)
+
+            let presentation = ConversationCardRenderer.outcomePresentation(for: record)
+
+            XCTAssertEqual(presentation.title, unavailableTitle)
+            XCTAssertNil(presentation.readableContent, "A stale fixture must not appear for a \(status.rawValue) Task")
+            XCTAssertFalse(presentation.isMockOnly)
+        }
     }
 
     func testMissingOutcomeFixtureShowsUnavailableResultWithoutSyntheticContent() {

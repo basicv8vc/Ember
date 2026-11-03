@@ -111,10 +111,7 @@ export interface B1ConversationRepository {
   }): Promise<B1ConversationMessage | null>;
 
   /** Increment epoch and erase the transcript atomically, never touching tasks/results. */
-  clearTranscript(command: {
-    readonly tenantId: Id;
-    readonly conversationId: Id;
-  }): Promise<number>;
+  clearTranscript(command: { readonly tenantId: Id; readonly conversationId: Id }): Promise<number>;
 }
 
 export interface B1AssistantTurnRepository {

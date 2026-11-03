@@ -73,5 +73,8 @@ final class AuthSessionProviderTests: XCTestCase {
             XCTAssertFalse(representation.contains(secret))
             XCTAssertTrue(representation.contains("<redacted>"))
         }
+
+        let mirroredCredential = Mirror(reflecting: session).children.first?.value as? String
+        XCTAssertEqual(mirroredCredential, "<redacted>")
     }
 }

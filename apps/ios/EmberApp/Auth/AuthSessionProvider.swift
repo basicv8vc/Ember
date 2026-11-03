@@ -5,7 +5,7 @@ import Foundation
 /// This value is deliberately not Codable and has no persistence behavior. The provider
 /// implementation owns any future secure-storage policy; this interface makes no assumptions
 /// about Keychain, refresh, sign-in providers, or credential lifetime.
-public struct AuthSession: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {
+public struct AuthSession: Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible, CustomReflectable {
     public let accessToken: String
 
     public init?(accessToken: String) {
@@ -21,6 +21,10 @@ public struct AuthSession: Equatable, Sendable, CustomStringConvertible, CustomD
 
     public var debugDescription: String {
         description
+    }
+
+    public var customMirror: Mirror {
+        Mirror(self, children: [(label: "accessToken", value: "<redacted>")], displayStyle: .struct)
     }
 }
 

@@ -549,97 +549,173 @@ platform currently has, and it is labelled as such in the code and in the runboo
 
 ### 7.3 Migration `0014` (sketch, not written)
 
-Three tables, all B2-owned, none altering a B1 object.
+B1 owns \`0011\`–\`0013\`; this is a **proposed** B2-only forward migration.
+The previous sketch had two integrity failures: a platform-global budget
+did not exist, and one spend-operation key could not represent both tenant
+and principal postings. Replace it with **one canonical attempt/operation
+row plus three locked aggregate buckets**, with no duplicated operation
+row per scope:
 
-```sql
--- 0014_model_execution.sql  (PROPOSED)
-CREATE TABLE model_turn_attempts (
-  tenant_id      uuid    NOT NULL REFERENCES tenants (id) ON DELETE RESTRICT,
-  turn_id        uuid    NOT NULL,
-  attempt_no     integer NOT NULL CHECK (attempt_no BETWEEN 1 AND 2),
-  state          text    NOT NULL CHECK (state IN ('reserved', 'settled', 'released')),
-  outcome_code   text    CHECK (outcome_code IN (
-                   'ok', 'model_timeout', 'model_unavailable', 'model_rate_limited',
-                   'model_auth_failed', 'model_invalid_output', 'client_cancelled')),
-  input_tokens   integer CHECK (input_tokens  >= 0),
-  output_tokens  integer CHECK (output_tokens >= 0),
-  cost_micro_usd bigint  NOT NULL CHECK (cost_micro_usd >= 0),
-  rate_version   text    NOT NULL,
-  started_at     timestamptz NOT NULL DEFAULT now(),
-  settled_at     timestamptz,
-  PRIMARY KEY (tenant_id, turn_id, attempt_no),
-  CONSTRAINT settled_iff_timestamp CHECK ((state = 'settled') = (settled_at IS NOT NULL))
+\`\`\`sql
+-- 0014_model_execution.sql (PROPOSED; not executed or approved)
+-- Additive B2 claim fields on the B1-owned assistant_turns table.
+ALTER TABLE assistant_turns
+  ADD COLUMN lease_epoch bigint NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+  ADD COLUMN lease_owner text,
+  ADD COLUMN lease_expires_at timestamptz;
+-- A check/transaction must enforce both lease fields present or absent together.
+-- The claim transaction is committed before any network call.
+
+-- One single, shared cross-tenant platform-day spend counter.
+CREATE TABLE model_global_spend_days (
+  utc_day date PRIMARY KEY,
+  reserved_micro_usd bigint NOT NULL DEFAULT 0
+    CHECK (reserved_micro_usd BETWEEN 0 AND 5000000),
+  consumed_micro_usd bigint NOT NULL DEFAULT 0 CHECK (consumed_micro_usd >= 0),
+  CONSTRAINT global_consumption_within_reservation
+    CHECK (consumed_micro_usd <= reserved_micro_usd)
 );
 
+-- Two independent per-tenant scopes, not inferred from one another.
 CREATE TABLE model_spend_days (
-  tenant_id          uuid   NOT NULL,
-  scope_kind         text   NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
-  scope_id           uuid   NOT NULL,
-  utc_day            date   NOT NULL,
+  tenant_id uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+  scope_kind text NOT NULL CHECK (scope_kind IN ('tenant','principal')),
+  scope_id uuid NOT NULL,
+  utc_day date NOT NULL,
   reserved_micro_usd bigint NOT NULL DEFAULT 0 CHECK (reserved_micro_usd >= 0),
   consumed_micro_usd bigint NOT NULL DEFAULT 0 CHECK (consumed_micro_usd >= 0),
-  request_count      integer NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+  turns_started integer NOT NULL DEFAULT 0 CHECK (turns_started >= 0),
   PRIMARY KEY (tenant_id, scope_kind, scope_id, utc_day),
-  CONSTRAINT consumption_within_reservation CHECK (consumed_micro_usd <= reserved_micro_usd)
+  CONSTRAINT scope_consumption_within_reservation
+    CHECK (consumed_micro_usd <= reserved_micro_usd),
+  CONSTRAINT scope_reserved_max CHECK (
+    (scope_kind = 'tenant' AND reserved_micro_usd <= 1000000)
+    OR (scope_kind = 'principal' AND reserved_micro_usd <= 250000)
+  )
 );
 
-CREATE TABLE model_spend_operations (
-  tenant_id          uuid   NOT NULL,
-  operation_id       uuid   NOT NULL,   -- stable: derived from (turn_id, attempt_no)
-  scope_kind         text   NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
-  scope_id           uuid   NOT NULL,
-  utc_day            date   NOT NULL,
-  reserved_micro_usd bigint NOT NULL CHECK (reserved_micro_usd >= 0),
-  consumed_micro_usd bigint CHECK (consumed_micro_usd >= 0),
-  state              text   NOT NULL CHECK (state IN ('reserved', 'settled', 'released')),
-  expires_at         timestamptz NOT NULL,
-  PRIMARY KEY (tenant_id, operation_id),
-  CONSTRAINT settle_within_reservation CHECK (
-    consumed_micro_usd IS NULL OR consumed_micro_usd <= reserved_micro_usd)
+-- An attempt IS the canonical spend operation. No second operations
+-- table with an unworkable (tenant_id,operation_id) primary key.
+CREATE TABLE model_turn_attempts (
+  tenant_id uuid NOT NULL,
+  turn_id uuid NOT NULL,
+  attempt_no integer NOT NULL CHECK (attempt_no BETWEEN 1 AND 2),
+  operation_id uuid NOT NULL,
+  principal_id uuid NOT NULL,
+  utc_day date NOT NULL,
+  state text NOT NULL CHECK
+    (state IN ('reserved','settled','unknown_billed','released')),
+  outcome_code text,
+  reserved_micro_usd bigint NOT NULL
+    CHECK (reserved_micro_usd BETWEEN 1 AND 5000),
+  applied_cost_micro_usd bigint
+    CHECK (applied_cost_micro_usd IS NULL
+           OR applied_cost_micro_usd BETWEEN 0 AND reserved_micro_usd),
+  -- Preserve actual provider/invoice value even if above our reservation.
+  observed_cost_micro_usd bigint CHECK
+    (observed_cost_micro_usd IS NULL OR observed_cost_micro_usd >= 0),
+  input_tokens integer,
+  output_tokens integer,
+  rate_version text NOT NULL,
+  send_started_at timestamptz,
+  started_at timestamptz NOT NULL DEFAULT clock_timestamp(),
+  settled_at timestamptz,
+  PRIMARY KEY (tenant_id, turn_id, attempt_no),
+  UNIQUE (tenant_id, operation_id),
+  FOREIGN KEY (tenant_id, turn_id)
+    REFERENCES assistant_turns (tenant_id,id) ON DELETE RESTRICT,
+  FOREIGN KEY (tenant_id, principal_id)
+    REFERENCES principals (tenant_id,id) ON DELETE RESTRICT
 );
-```
+\`\`\`
 
-Locking follows `0006`'s proven order: `pg_advisory_xact_lock('ember.model_spend', tenant_id)` → turn
-row → spend rows; a settle touches one operation row and one bucket. Two constraints carry the money —
-`consumption_within_reservation` and `settle_within_reservation` — so a bug that over-settles becomes
-a constraint violation instead of an overage.
+**Atomic reservation:** within **one** short PostgreSQL transaction,
+upsert the UTC global bucket, tenant bucket and principal bucket, then lock
+in deterministic order **global day → tenant day → principal day →
+canonical attempt**. An idempotent existing attempt returns its reservation
+and never starts another provider call. New first attempts increment
+\`turns_started\` once (not twice if retried); existing attempt uniqueness
+and the bounded attempt number reject duplicates. Reject before commit
+if *any* bucket's new cumulative reserved amount exceeds its ceiling,
+or the principal's 60-turn daily count is exceeded. Roll back all buckets
+and the attempt on failure. Do not hold any budget lock across HTTP.
 
-**Coordination item CR-2.** The `model_turn_attempts` → `assistant_turns` foreign key wants
-`UNIQUE (tenant_id, id)` on a B1-owned table, which is the house style
-(`0003_tasks_current_run_tenant_fk.sql`). If B1 does not expose it, B2 uses a single-column FK plus an
-explicit tenant predicate on every query and records the weaker guarantee in the migration comment.
-Either answer is acceptable; the decision belongs to the B1 owner.
+**Settlement:** update the same three buckets and attempt atomically under
+the same lock order. \`reserved_micro_usd\` is a **monotonic pessimistic
+commitment** for calls already sent; \`consumed_micro_usd\` reflects the
+amount recognized against that reservation. If a call timed out or crashed
+with uncertain provider billing, mark \`unknown_billed\` and keep the
+reservation charged until verified reconciliation. Release only when no
+outbound request could have been sent. The provider-reported/invoiced
+actual is recorded in \`observed_cost_micro_usd\` without clamping; if it
+exceeds the reserved estimate, fail closed for further egress, trigger
+alert/reconciliation, and retain the overage evidence. A CHECK on
+\`applied_cost_micro_usd\` cannot constrain an external invoice.
+
+**Global concurrency test:** two *different* tenants, on independent
+PostgreSQL connections, both reserve the final available global budget.
+Exactly one reservation commits; the other is refused; assert **zero**
+extra gateway calls and the persisted global reserved total ≤ 5,000,000
+µUSD. Also test tenant/principal caps, first/second attempts, settlement
+replay, unknown-billed crash, and overage handling.
 
 ### 7.4 Ceilings, and which one binds first
 
-| Scope                  | Limit    | Why that number                                                          |
-| ---------------------- | -------- | ------------------------------------------------------------------------ |
-| per turn               | $0.005   | ~2.8× the worst-case turn in §8.2                                        |
-| per task (B3)          | $0.005   | ~3× the worst-case task in §8.2                                          |
-| per user, per day      | 60 turns | well under B1's 200 messages/day (S-5), so volume is capped before money |
-| per user, per day      | $0.25    | 60 × worst-case turn = $0.11, so the request cap normally binds first    |
-| per tenant, per day    | $1.00    | a four-person shared tenant at full tilt                                 |
-| global, per day        | $5.00    | the platform's actual financial stop: $150/month worst case              |
-| per user, per day (B3) | 20 tasks | a separate counter, so a note-heavy user cannot starve chat              |
+These remain **provisional internal-pilot design targets**, not permission
+to spend or proof of a provider-invoice hard cap:
 
-The intent: **volume binds before money** for a normal user, money binds for a pathological one. A user
-who hits the request cap sees a normal failure, not a surprise invoice.
+| Scope                           | Provisional limit               | Gate                                                    |
+| ------------------------------- | ------------------------------- | ------------------------------------------------------- |
+| One provider attempt            | $0.005 reserved maximum         | Provider-verified token ceiling + overhead              |
+| One Turn                        | ≤ 2 attempts; ≤ $0.010 reserved | Unique attempt_no 1 or 2                                |
+| One principal per UTC day       | $0.25 and 60 paid Turns         | Independent principal bucket, counts first attempt only |
+| One tenant per UTC day          | $1.00                           | Independent tenant bucket                               |
+| Entire platform per UTC day     | $5.00                           | ONE shared global bucket across all tenants             |
+| B3 Tasks, per principal per day | 20                              | Separate B3 counter when approved                       |
+
+All three monetary buckets must pass atomically before one provider call.
+B1's 200 **submitted chat messages** per rolling 24 hours and B2's 60
+**paid Turns** per UTC day are separate limits; iOS should explain them
+differently. They are not interchangeable and may reset on different
+calendar boundaries.
+
+The ledger enforces these amounts against **reserved rated costs**.
+A strictly bounded actual invoice additionally depends on pinned
+provider-side model/token limits, exact pricing, accurate rate rows and
+provider account spend controls; we **must not claim a $5 invoice hard cap**
+until that external enforcement is independently verified.
 
 ### 7.5 Fixing the settlement defect (F-4) rather than inheriting it
 
-`runBudgetedStep` settles the **full reservation** (`apps/worker/src/durable-run-handler.ts:352`),
-which is right for simulated work units and wrong for tokens. B2 does not change that function's
-behaviour for existing kinds; it adds an optional `consumedFor(value)` hook that the model path uses
-and every other kind ignores. The hook is clamped to the reservation so the `CHECK` cannot be
-violated, and a `consumedFor` that returns more than the reservation settles the reservation and
-records the overflow in telemetry — a bug that must be visible, not silently absorbed.
+\`runBudgetedStep\` currently settles full *simulated work units* for
+existing Task kinds. B2's ordinary Chat Turn **does not use** that ledger:
+it uses the independent model-money attempt ledger described in §7.3.
+
+When B3 adds an infer Task step, an optional \`consumedFor(result)\` may
+settle the *work-unit* reservation correctly without changing existing
+mock kinds, but it must not double-charge or replace the model-money
+ledger. The model-money source of truth is the unique provider attempt,
+not the worker step or a best-effort local estimate.
+
+Never silently clamp an external provider's observed amount. If usage
+exceeds the reserved bound, preserve the observed overage, freeze new
+paid calls and surface an operational billing discrepancy. A CHECK
+constraint protects our database accounting, not the invoice.
 
 ### 7.6 Stopping spend
 
-Four independent stops, cheapest first: per-request ceilings (§7.4) → per-scope daily counters → the
-per-tenant `model.infer` policy grant (removing it denies at L1 on the next turn) →
-`EMBER_MODEL_EXECUTION=disabled` (a restart, and the only stop needing no database access). A runtime
-flag row that stops spend **without** a deploy is proposed as PR B2-6, not assumed here.
+Before each request: token/attempt cap → global/tenant/principal budget
+reservation → current policy → scoped credential/origin gate. Any failure
+means **zero** provider calls.
+
+For an immediate operational stop, disable the model provider account's
+own spend ability and/or revoke the scoped credential; process-level
+\`EMBER_MODEL_EXECUTION=disabled\` takes effect only on restart and is
+**not** an instantaneous stop. The optional reviewed runtime kill switch
+must be tested for propagation and checked before every request if
+enabled. Stop/alert on billing discrepancy, pricing mismatch, unknown
+usage backlog or a shared global cap breach; do not silently use fake
+output in real mode.
 
 ## 8. Model cost: envelope, arithmetic, and provisional prices
 
@@ -671,7 +747,7 @@ or behaviour under a running Alpha.
 
 ### 8.2 The arithmetic, which is ours and does not depend on the rate
 
-The envelope comes from `MODEL_LIMITS` (§6.1), not from optimism. Tokens at 4 chars/token, rounded up.
+The envelope comes from `MODEL_LIMITS` (§6.1), not from optimism. Tokens at 4 chars/token, rounded up **for the illustrative cost table only**. This is NOT a maximum or an admissible security/budget preflight; Unicode, model tokenizer differences, hidden/system/schema tokens and provider billing policies can invalidate it.
 
 | Case                                       | input tokens | output tokens | cost at $0.25 / $2.00 | cost at $0.40 / $1.60 |
 | ------------------------------------------ | ------------ | ------------- | --------------------- | --------------------- |
@@ -690,8 +766,10 @@ the per-turn ceiling is ~2.8× the worst case rather than near the average.
 
 ### 8.3 What happens when the price sheet is wrong
 
-Every ceiling in §7.4 is derived as `k × worst-case unit cost`, and every stored cost is
-`(inputTokens × r_in + outputTokens × r_out) / 10^6` computed from a **versioned rate row**
+Provisional ceiling choices in §7.4 are derived from an illustrative cost envelope. Before real mode, the request must pass a **pinned-model exact tokenizer or provider-verified preflight** that counts user/context text, fixed system prompt, serialization/JSON schema overhead and any provider-billed reasoning tokens. If exact provider input usage cannot be bounded, fail closed without egress. Server-side `max_output_tokens` must be enforced and verified with the selected API. 4 chars/token is never a hard reserve bound.
+
+Every recognized model usage estimate is
+`(inputTokens × r_in + outputTokens × r_out) / 10^6` computed from a **versioned, officially verified rate row**
 (`rateVersion`, stored per attempt). A rate correction is therefore: add a new rate row with a new
 version string, re-derive the ceilings in one commit, keep historical spend attributed to the rate it
 was priced at. No schema change, no data migration, and no month in which a ceiling silently means

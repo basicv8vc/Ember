@@ -639,6 +639,16 @@ Every gate and CI run below was executed on the **code** commit; the commits tha
 | Run 3       | [`41414426116`](https://github.com/basicv8vc/Ember/actions/runs/41414426116) — `9335bf7` — **PASS** (3m6s)  |
 | Run 4       | [`41414829335`](https://github.com/basicv8vc/Ember/actions/runs/41414829335) — `de9cd99` — **PASS** (3m6s)  |
 
+### 10.5 PostgreSQL implementation (P0-C3D, PR #84)
+
+The durable authority that §8 hands off to Agent A is implemented and conformance-certified against
+this contract in PR #84. `PostgresConsentRepository` implements `ConsentAuthority`,
+`ConsentEvaluator` and `ConsentRepository`; generation identity is `(grantId, version)`; and the
+publication transaction locks the consent row on its own connection before writing an Outcome.
+
+The full implementation report — schema, lock order, denial matrix, C-01…C-13 evidence and the
+revocation-race results — is [`docs/P0C3-D-CONSENT-PERSISTENCE.md`](./P0C3-D-CONSENT-PERSISTENCE.md).
+
 Each run executed: Lint, Check formatting, Typecheck (strict), Unit tests, Build, Migrate database
 (first run + idempotent re-run), Integration tests (real PostgreSQL), Chaos tests, End-to-end tests
 (real HTTP + PostgreSQL), Demo CLI smoke. Live status: `gh pr checks 83`.

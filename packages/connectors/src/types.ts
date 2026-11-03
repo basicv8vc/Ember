@@ -76,105 +76,36 @@ export interface SourceSnapshot {
 }
 
 /**
- * Verified caller execution context constructed by the authoritative worker scheduler (P0-C3-0 §5.1).
- * Untrusted callers or LLM prompts CANNOT supply or forge this context.
+ * The Consent contract (grants, generations, the authorization fence, the authoritative port) is
+ * defined ONCE in `@ember/contracts` and re-exported here so every connector module and test keeps
+ * importing it from `@ember/connectors`.
  *
- * `authorizationFence` is an OPTIONAL, server-assembled reference to the consent generation the
- * scheduler resolved from authoritative persisted state (see `docs/P0C3-C-CONSENT-CONTRACT.md`).
- * It is never proof of authorization on its own: `GuardedSourceReader` re-validates it against the
- * authoritative {@link ConsentAuthority} before and after every read.
+ * `authorizationFence` on {@link TrustedSourceAccessContext} is an OPTIONAL, server-assembled
+ * reference to the consent generation the scheduler resolved from authoritative persisted state
+ * (see `docs/P0C3-C-CONSENT-CONTRACT.md`). It is never proof of authorization on its own: the
+ * guarded source reader re-validates it against the authoritative authority before and after every
+ * read.
  */
-export interface TrustedSourceAccessContext {
-  readonly tenantId: string;
-  readonly commitmentId: string;
-  readonly taskId: string;
-  readonly runId: string;
-  readonly leaseEpoch: number;
-  readonly authorizedAt: string; // RFC 3339
-  readonly authorizationFence?: ConsentAuthorizationFence;
-}
+import type {
+  ConsentGrant,
+  GrantConsentParams,
+  SourceDenialCode,
+  TrustedSourceAccessContext,
+} from '@ember/contracts';
 
-export type ConsentStatus = 'active' | 'revoked' | 'expired';
+export type {
+  AuthorizedConsentGeneration,
+  ConsentAuthority,
+  ConsentAuthorizationFence,
+  ConsentGeneration,
+  ConsentGrant,
+  ConsentStatus,
+  GrantConsentParams,
+  SourceDenialCode,
+  TrustedSourceAccessContext,
+} from '@ember/contracts';
 
-/**
- * Tenant-scoped permission record authorizing access to a source profile.
- */
-export interface ConsentGrant {
-  readonly grantId: string;
-  readonly tenantId: string;
-  readonly sourceProfileId: SourceProfileId;
-  readonly status: ConsentStatus;
-  readonly allowedOperations: readonly string[];
-  readonly scopes: readonly string[];
-  readonly grantedAt: string;
-  readonly expiresAt: string | null;
-  readonly revokedAt: string | null;
-  readonly version: number;
-}
-
-export interface GrantConsentParams {
-  readonly tenantId: string;
-  readonly sourceProfileId: SourceProfileId;
-  readonly allowedOperations?: readonly string[];
-  readonly scopes?: readonly string[];
-  readonly expiresAt?: string | null;
-}
-
-/**
- * Monotonic authorization generation identity of one consent lineage
- * (`tenantId` + `sourceProfileId`). A generation is immutable and single-use for authorization:
- * once it is revoked or superseded by an explicit re-grant it can never authorize again.
- */
-export interface ConsentGeneration {
-  readonly grantId: string;
-  readonly version: number;
-}
-
-/**
- * Authoritative view of the CURRENT consent generation for a lineage, as resolved from persisted
- * state at a given instant. `status` is the EFFECTIVE status: an active record whose `expiresAt`
- * has passed reports `expired` without the persisted row being rewritten.
- */
-export interface AuthorizedConsentGeneration extends ConsentGeneration {
-  readonly tenantId: string;
-  readonly sourceProfileId: SourceProfileId;
-  readonly status: ConsentStatus;
-  readonly expiresAt: string | null;
-}
-
-/**
- * Versioned authorization fence binding one worker attempt to ONE consent generation.
- *
- * Trust model (frozen in `docs/P0C3-C-CONSENT-CONTRACT.md` §3):
- * - `digest` is an integrity/self-consistency check over the fence body. It is NOT a MAC and NOT
- *   proof of authorization; any caller can compute it.
- * - The fence is only ever accepted after the authoritative {@link ConsentAuthority} confirms that
- *   `grantId` + `grantVersion` is still the current, active generation for the bound tenant and
- *   source profile.
- */
-export interface ConsentAuthorizationFence {
-  readonly tenantId: string;
-  readonly sourceProfileId: SourceProfileId;
-  readonly grantId: string;
-  readonly grantVersion: number;
-  readonly issuedAt: string; // RFC 3339
-  readonly digest: string; // SHA-256 hex (64 chars) over the canonical fence body
-}
-
-/**
- * Read-only authority over persisted consent generations.
- *
- * Implemented by the durable consent repository (Agent A, PostgreSQL) and by
- * `FakeConsentRegistry` for tests. Implementations MAY be asynchronous so an authoritative
- * database read can be awaited without weakening the generation check.
- */
-export interface ConsentAuthority {
-  resolveGeneration(
-    tenantId: string,
-    sourceProfileId: SourceProfileId,
-    now?: Date,
-  ): AuthorizedConsentGeneration | null | Promise<AuthorizedConsentGeneration | null>;
-}
+export { SOURCE_DENIAL_CODES } from '@ember/contracts';
 
 /**
  * Server-owned source access policy. Default action is always 'deny'.
@@ -188,29 +119,6 @@ export interface SourceAccessPolicy {
   readonly maxPayloadBytes?: number;
   readonly defaultAction: 'deny';
 }
-
-export const SOURCE_DENIAL_CODES = [
-  'SOURCE_PROFILE_NOT_FOUND',
-  'SOURCE_PROFILE_DISABLED',
-  'INVALID_SOURCE_PROFILE_ID',
-  'TENANT_MISMATCH',
-  'CONSENT_NOT_FOUND',
-  'CONSENT_REVOKED',
-  'CONSENT_EXPIRED',
-  'CONSENT_FENCE_MISSING',
-  'CONSENT_FENCE_INVALID',
-  'CONSENT_FENCE_STALE',
-  'CONSENT_GENERATION_MISMATCH',
-  'OPERATION_NOT_ALLOWED',
-  'SCOPE_NOT_GRANTED',
-  'PAYLOAD_LIMIT_EXCEEDED',
-  'READ_ABORTED',
-  'REVOKED_DURING_EXECUTION',
-  'UNTRUSTED_CONTENT_DETECTED',
-  'POLICY_DENIED',
-] as const;
-
-export type SourceDenialCode = (typeof SOURCE_DENIAL_CODES)[number];
 
 export interface SourceAccessDecisionAllowed {
   readonly allowed: true;

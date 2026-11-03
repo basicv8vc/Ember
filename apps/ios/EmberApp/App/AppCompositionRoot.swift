@@ -52,16 +52,25 @@ private struct IntegratedAppRootView: View {
                 // Keep the existing M2 flow available to its launch-flagged UI tests.
                 TaskJourneyDemoContainer(session: session)
             } else {
-                NavigationStack(path: $taskNavigationPath) {
-                    ConversationDemoHost(
-                        taskJourneySession: session,
-                        onOpenTaskDetail: openTaskDetail,
-                        onOpenCommitmentDetail: openCommitmentDemo
-                    )
-                    .navigationDestination(for: UUID.self) { taskID in
-                        TaskDetailView(session: session)
-                            .onAppear { session.select(taskID: taskID) }
+                VStack(spacing: 0) {
+                    MockOnlyBanner()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, 8)
+                        .background(EmberDesignTokens.groupedBackground)
+
+                    NavigationStack(path: $taskNavigationPath) {
+                        ConversationDemoHost(
+                            taskJourneySession: session,
+                            onOpenTaskDetail: openTaskDetail,
+                            onOpenCommitmentDetail: openCommitmentDemo
+                        )
+                        .navigationDestination(for: UUID.self) { taskID in
+                            TaskDetailView(session: session)
+                                .onAppear { session.select(taskID: taskID) }
+                        }
                     }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                 }
             }
         }

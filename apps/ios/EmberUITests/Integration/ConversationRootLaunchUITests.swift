@@ -51,6 +51,18 @@ final class ConversationRootLaunchUITests: XCTestCase {
         XCTAssertTrue(
             app.descendants(matching: .any)["task-detail-summary"].waitForExistence(timeout: 10)
         )
+
+        let detailDisclosure = app.descendants(matching: .any)["mock-only-banner"]
+        XCTAssertTrue(detailDisclosure.waitForExistence(timeout: 10))
+        XCTAssertTrue(detailDisclosure.isHittable, "MOCK ONLY disclosure must remain visible in Task Detail")
+
+        let backButton = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(backButton.waitForExistence(timeout: 10))
+        backButton.tap()
+
+        let conversation = app.descendants(matching: .any)["conversation-home"]
+        XCTAssertTrue(conversation.waitForExistence(timeout: 10))
+        XCTAssertTrue(detailDisclosure.isHittable, "MOCK ONLY disclosure must remain visible after returning")
     }
 
     private func launch(_ app: XCUIApplication, arguments: [String]) {

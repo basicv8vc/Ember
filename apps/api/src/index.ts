@@ -8,6 +8,7 @@ import {
   PostgresArtifactStore,
   PostgresBlobStore,
   PostgresCommitmentRepository,
+  PostgresConsentRepository,
   PostgresTaskRepository,
   createPool,
   describeDatabaseTarget,
@@ -106,6 +107,7 @@ function main(): void {
     taskStore: new PostgresTaskRepository(pool),
     approvalStore: new PostgresApprovalRepository(pool),
     commitmentStore: new PostgresCommitmentRepository(pool),
+    consentStore: new PostgresConsentRepository(pool),
     ...(apiConfig.blobRoot === null
       ? {}
       : {

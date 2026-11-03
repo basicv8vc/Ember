@@ -9,6 +9,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   resolve: {
     alias: {
+      '@ember/connectors': fileURLToPath(
+        new URL('./packages/connectors/src/index.ts', import.meta.url),
+      ),
       '@ember/contracts': fileURLToPath(
         new URL('./packages/contracts/src/index.ts', import.meta.url),
       ),

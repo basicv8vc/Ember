@@ -173,6 +173,23 @@ function quotePgIdentifier(identifier: string): string {
   return `"${identifier.replaceAll('"', '""')}"`;
 }
 
+/**
+ * Revokes everything this fixture granted to the throwaway login.
+ *
+ * `DROP OWNED BY` is not usable here: it requires membership in the target role (or superuser),
+ * which the least-privilege test admin deliberately does not have. The grantor owns the objects,
+ * so revoking as the owner is both sufficient and narrower. Best-effort, because this runs on the
+ * failure path too - the subsequent `DROP ROLE` reports anything that still depends on the role.
+ */
+async function revokeRolePrivileges(quotedRole: string, quotedSchema: string): Promise<void> {
+  await db.adminPool
+    .query(`REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA ${quotedSchema} FROM ${quotedRole}`)
+    .catch(() => undefined);
+  await db.adminPool
+    .query(`REVOKE ALL PRIVILEGES ON SCHEMA ${quotedSchema} FROM ${quotedRole}`)
+    .catch(() => undefined);
+}
+
 async function createApiDatabaseLogin(): Promise<{
   readonly connectionString: string;
   cleanup(): Promise<void>;
@@ -189,21 +206,21 @@ async function createApiDatabaseLogin(): Promise<{
   const quotedDatabase = quotePgIdentifier(databaseName);
   const quotedSchema = quotePgIdentifier(db.schema);
 
-  await db.adminPool.query(`CREATE ROLE ${quotedRole} LOGIN PASSWORD '${password}'`);
+  await db.roleAdminPool.query(`CREATE ROLE ${quotedRole} LOGIN PASSWORD '${password}'`);
   try {
-    await db.adminPool.query(`GRANT USAGE ON SCHEMA ${quotedSchema} TO ${quotedRole}`);
-    await db.adminPool.query(
+    await db.roleAdminPool.query(`GRANT USAGE ON SCHEMA ${quotedSchema} TO ${quotedRole}`);
+    await db.roleAdminPool.query(
       `GRANT SELECT ON ALL TABLES IN SCHEMA ${quotedSchema} TO ${quotedRole}`,
     );
-    await db.adminPool.query(
+    await db.roleAdminPool.query(
       `ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} SET search_path TO ${quotedSchema}`,
     );
   } catch (error) {
-    await db.adminPool
+    await db.roleAdminPool
       .query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`)
       .catch(() => undefined);
-    await db.adminPool.query(`DROP OWNED BY ${quotedRole}`).catch(() => undefined);
-    await db.adminPool.query(`DROP ROLE ${quotedRole}`).catch(() => undefined);
+    await revokeRolePrivileges(quotedRole, quotedSchema);
+    await db.roleAdminPool.query(`DROP ROLE ${quotedRole}`).catch(() => undefined);
     throw error;
   }
 
@@ -214,9 +231,11 @@ async function createApiDatabaseLogin(): Promise<{
   return {
     connectionString: connectionUrl.toString(),
     cleanup: async () => {
-      await db.adminPool.query(`ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`);
-      await db.adminPool.query(`DROP OWNED BY ${quotedRole}`);
-      await db.adminPool.query(`DROP ROLE ${quotedRole}`);
+      await db.roleAdminPool.query(
+        `ALTER ROLE ${quotedRole} IN DATABASE ${quotedDatabase} RESET ALL`,
+      );
+      await revokeRolePrivileges(quotedRole, quotedSchema);
+      await db.roleAdminPool.query(`DROP ROLE ${quotedRole}`);
     },
   };
 }

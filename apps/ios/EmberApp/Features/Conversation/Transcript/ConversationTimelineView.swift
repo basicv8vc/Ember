@@ -58,8 +58,9 @@ struct ConversationTimelineView: View {
             .onChange(of: state.replyState) { _, _ in
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("conversation-timeline")
         }
-        .accessibilityIdentifier("conversation-timeline")
     }
 
     @ViewBuilder

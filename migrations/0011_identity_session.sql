@@ -50,9 +50,11 @@ CREATE TABLE IF NOT EXISTS consumer_sessions (
   CONSTRAINT consumer_sessions_digest_unique UNIQUE (token_digest),
   CONSTRAINT consumer_sessions_consumer_fk FOREIGN KEY (tenant_id, consumer_id)
     REFERENCES consumers (tenant_id, id) ON DELETE CASCADE,
+  -- A PostgreSQL CHECK accepts UNKNOWN, so explicitly require a reason for revoked sessions.
   CONSTRAINT consumer_sessions_revocation_check CHECK (
     (revoked_at IS NULL AND revocation_reason IS NULL) OR
-    (revoked_at IS NOT NULL AND revocation_reason IN ('logout', 'rotated', 'reuse_detected'))
+    (revoked_at IS NOT NULL AND revocation_reason IS NOT NULL
+      AND revocation_reason IN ('logout', 'rotated', 'reuse_detected'))
   ),
   CONSTRAINT consumer_sessions_expiry_order_check CHECK (expires_at > issued_at)
 );

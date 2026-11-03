@@ -37,7 +37,7 @@ final class StubURLProtocol: URLProtocol {
         init(_ value: StubURLProtocol) { self.value = value }
     }
 
-    private let stoppedLock = NSLock()
+    private let stoppedLock = NSRecursiveLock()
     private var stopped = false
 
     static func setHandler(_ handler: Handler?, forHost host: String) {
@@ -97,9 +97,8 @@ final class StubURLProtocol: URLProtocol {
 
     private func deliver(_ stub: URLProtocolStubResponse) {
         stoppedLock.lock()
-        let wasStopped = stopped
-        stoppedLock.unlock()
-        guard !wasStopped else { return }
+        defer { stoppedLock.unlock() }
+        guard !stopped else { return }
 
         if let error = stub.error {
             client?.urlProtocol(self, didFailWithError: error)

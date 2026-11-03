@@ -29,9 +29,9 @@ describe('B1-1 frozen live wire schemas', () => {
   });
 
   it('rejects unknown kinds or additional assistant-only fields on user messages', () => {
-    expect(
-      B1ConversationMessageSchema.safeParse({ ...userMessage, kind: 'unknown' }).success,
-    ).toBe(false);
+    expect(B1ConversationMessageSchema.safeParse({ ...userMessage, kind: 'unknown' }).success).toBe(
+      false,
+    );
     expect(
       B1ConversationMessageSchema.safeParse({ ...userMessage, model_label: 'forged' }).success,
     ).toBe(false);
@@ -40,9 +40,9 @@ describe('B1-1 frozen live wire schemas', () => {
   it('rejects a stale-outbox send shape lacking a transcript epoch', () => {
     const send = { client_submission_id: submissionId, text: 'Hello' };
     expect(B1SendMessageRequestSchema.safeParse(send).success).toBe(false);
-    expect(
-      B1SendMessageRequestSchema.safeParse({ ...send, transcript_epoch: 0 }).success,
-    ).toBe(true);
+    expect(B1SendMessageRequestSchema.safeParse({ ...send, transcript_epoch: 0 }).success).toBe(
+      true,
+    );
     expect(
       B1SendMessageRequestSchema.safeParse({
         ...send,

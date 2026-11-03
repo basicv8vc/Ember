@@ -1,21 +1,30 @@
 import { randomUUID } from 'node:crypto';
-import { deriveTaskCreationIdempotencyKey, type WorkerLeaseGrant } from '@ember/contracts';
+import {
+  DEFAULT_CONSENT_OPERATIONS,
+  DEFAULT_CONSENT_SCOPES,
+  deriveTaskCreationIdempotencyKey,
+  type ConsentOperation,
+  type PersistedConsentGrant,
+  type WorkerLeaseGrant,
+} from '@ember/contracts';
 import type { AuthContext, LeasedRun } from '@ember/domain';
-import { fromResolvedGenerationConsent, type ConsentFenceAuthority } from '@ember/execution';
+import {
+  fromResolvedGenerationConsent,
+  type ConsentFenceAuthority,
+  type ConsentGrantSource,
+} from '@ember/execution';
 import {
   PostgresAgentRepository,
   PostgresCommitmentRepository,
   PostgresCommitmentTaskDispatcher,
+  PostgresConsentPublicationGuard,
+  PostgresConsentRepository,
   PostgresLeaseQueue,
   PostgresTaskRepository,
   systemClock,
 } from '@ember/postgres';
 import type { TestDatabase } from './database.js';
 import { createTenantFixture, type TenantFixture } from './fixtures.js';
-import {
-  createTestConsentPublicationGuard,
-  InMemoryTestConsentStore,
-} from './consent-test-double.js';
 
 /** Deterministic fixture Source Profile exposed by Lane C's fake source reader. */
 export const FIXTURE_SOURCE_PROFILE = 'sp_ember_releases';
@@ -26,10 +35,18 @@ export interface CommitmentHarness {
   readonly ctx: AuthContext;
   readonly agentId: string;
   readonly commitments: PostgresCommitmentRepository;
-  /** Fixture consent STORE (grant/revoke). Never handed to the Worker as an authority. */
-  readonly consent: InMemoryTestConsentStore;
+  /**
+   * Authoritative DURABLE Consent (P0-C3D, PostgreSQL).
+   *
+   * Tests grant and revoke through it. It is never handed to the Worker as an authority — only the
+   * adapted fence gates below are — but it IS the grant record the read boundary evaluates policy
+   * against, so a test cannot grant something one component sees and another does not.
+   */
+  readonly consent: PostgresConsentRepository;
   /** The exact object the Worker is wired with: canonical authority + fence gates. */
   readonly consentAuthority: ConsentFenceAuthority;
+  /** The durable grant record the read boundary evaluates policy against — the same repository. */
+  readonly consentGrants: ConsentGrantSource;
   readonly tasks: PostgresTaskRepository;
   readonly dispatcher: PostgresCommitmentTaskDispatcher;
   readonly queue: PostgresLeaseQueue;
@@ -40,13 +57,21 @@ export interface CommitmentHarnessOptions {
 }
 
 /**
- * PostgreSQL composition used by the P0-C3B integration suites: tenant + agent fixture, actual
- * commitment/Task repositories, the Scheduler's Task dispatcher and the real lease queue.
+ * PostgreSQL composition used by the P0-C3B/P0-C3D integration suites: tenant + agent fixture,
+ * actual commitment/Task repositories, the Scheduler's Task dispatcher, the real lease queue and
+ * authoritative DURABLE consent.
  *
- * Consent is an in-memory STORE adapted by the production `fromResolvedGenerationConsent`, so the
- * Worker-side contract (authority -> fence -> read -> re-verify -> publish) is exercised exactly as
- * it will be against the durable repository. Only the *persistence* of consent is faked; that, and
- * the transaction-scoped revocation race, remain P0-C3D's acceptance criterion (#84).
+ * Consent is a `PostgresConsentRepository` over the same database, adapted once by the production
+ * `fromResolvedGenerationConsent`. Two properties follow, and both are the point of P0-C3D:
+ *
+ * - the authority that mints/verifies fences, the grant record the read boundary evaluates policy
+ *   against, and the transaction-scoped publication guard all read the SAME rows, so a generation
+ *   can never be authorized in one place and evaluated from another;
+ * - dispatch, revocation and publication are separate committed transactions, so the
+ *   dispatch-to-execution gap is reproduced rather than assumed away.
+ *
+ * Nothing here fabricates a permission: a source read succeeds only when a real `consent_grants`
+ * row authorizes it.
  */
 export async function createCommitmentHarness(
   db: TestDatabase,
@@ -63,11 +88,13 @@ export async function createCommitmentHarness(
   const agent = await agents.create(ctx, { name: 'P0-C3B runtime agent', policyVersion: 1 });
 
   const tasks = new PostgresTaskRepository(db.pool);
-  // Same wiring the production composition root performs once the durable repository lands: the
-  // canonical authority is adapted once, and every Worker gate plus the publication guard consumes
-  // that single object.
-  const consent = new InMemoryTestConsentStore();
-  const consentAuthority = fromResolvedGenerationConsent(consent, { grants: consent });
+  // The same wiring the production composition root performs: one durable repository, adapted ONCE,
+  // and every Worker gate plus the publication guard consumes that single object graph.
+  const consent = new PostgresConsentRepository(db.pool);
+  const consentGrants: ConsentGrantSource = {
+    get: (tenantId, sourceProfileId, now) => consent.getForTenant(tenantId, sourceProfileId, now),
+  };
+  const consentAuthority = fromResolvedGenerationConsent(consent, { grants: consentGrants });
   const queue = new PostgresLeaseQueue(db.pool, {
     leaseDurationMs: options.leaseDurationMs ?? 30_000,
     heartbeatIntervalMs: Math.max(1_000, Math.floor((options.leaseDurationMs ?? 30_000) / 3)),
@@ -83,14 +110,78 @@ export async function createCommitmentHarness(
     ctx,
     agentId: agent.agentId,
     commitments: new PostgresCommitmentRepository(db.pool, {
-      consentPublicationGuard: createTestConsentPublicationGuard(consentAuthority),
+      consentPublicationGuard: new PostgresConsentPublicationGuard(),
     }),
     consent,
     consentAuthority,
+    consentGrants,
     tasks,
     dispatcher: new PostgresCommitmentTaskDispatcher(db.pool, tasks),
     queue,
   };
+}
+
+export interface GrantConsentOptions {
+  readonly sourceProfileId?: string;
+  readonly allowedOperations?: readonly ConsentOperation[];
+  readonly scopes?: readonly string[];
+  /** ISO instant. Omit (or pass `null`) for a grant that never expires. */
+  readonly expiresAt?: string | null;
+}
+
+/**
+ * Grant — or explicitly re-grant — Consent through the DURABLE repository.
+ *
+ * The defaults are the connector contract's read requirements (`read_snapshot` +
+ * `source.readonly`), exactly like the production caller, so a test that wants a narrower grant has
+ * to ask for one. An identical re-grant of a still-effective grant replays and keeps the
+ * generation; changed terms, or a grant after a revocation, mint a new `grantId` and bump
+ * `version`.
+ */
+export async function grantConsent(
+  harness: CommitmentHarness,
+  options: GrantConsentOptions = {},
+): Promise<PersistedConsentGrant> {
+  const { consent } = await harness.consent.grant(harness.ctx, {
+    sourceProfileId: options.sourceProfileId ?? FIXTURE_SOURCE_PROFILE,
+    allowedOperations: [...(options.allowedOperations ?? DEFAULT_CONSENT_OPERATIONS)],
+    scopes: [...(options.scopes ?? DEFAULT_CONSENT_SCOPES)],
+    ...(options.expiresAt === undefined ? {} : { expiresAt: options.expiresAt }),
+  });
+
+  return consent;
+}
+
+/** Revoke Consent for one Source Profile through the DURABLE repository. */
+export async function revokeConsent(
+  harness: CommitmentHarness,
+  options: { readonly sourceProfileId?: string } = {},
+): Promise<PersistedConsentGrant> {
+  return harness.consent.revokeForTenant(
+    harness.ctx.tenantId,
+    options.sourceProfileId ?? FIXTURE_SOURCE_PROFILE,
+  );
+}
+
+/**
+ * The Consent generation DISPATCH recorded on the occurrence.
+ *
+ * Read back from the row rather than remembered from the test, so an assertion about "this
+ * occurrence was fenced under G1" is about persisted state.
+ */
+export async function readOccurrenceConsentGeneration(
+  db: TestDatabase,
+  occurrenceId: string,
+): Promise<{ readonly grantId: string | null; readonly version: number | null }> {
+  const result = await db.pool.query<{
+    consent_grant_id: string | null;
+    consent_version: number | null;
+  }>('SELECT consent_grant_id, consent_version FROM commitment_occurrences WHERE id = $1', [
+    occurrenceId,
+  ]);
+  const row = result.rows[0];
+
+  return { grantId: row?.consent_grant_id ?? null, version: row?.consent_version ?? null };
 }
 
 export interface CreateCommitmentOptions {

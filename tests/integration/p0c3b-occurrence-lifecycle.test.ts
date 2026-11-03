@@ -3,10 +3,10 @@ import type { AppendOutcomeCommand, WorkerLeaseGrant } from '@ember/contracts';
 import { systemClock } from '@ember/postgres';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import {
-  FIXTURE_SOURCE_PROFILE,
   claimNextRun,
   createCommitment,
   createCommitmentHarness,
+  grantConsent,
   grantForRun,
   readCommitment,
   readOccurrence,
@@ -55,10 +55,7 @@ describe('P0-C3B: terminal occurrence lifecycle', () => {
     scheduleKind: 'once' | 'interval' = 'once',
   ): Promise<Prepared> {
     const harness = await createCommitmentHarness(db);
-    harness.consent.grant({
-      tenantId: harness.ctx.tenantId,
-      sourceProfileId: FIXTURE_SOURCE_PROFILE,
-    });
+    await grantConsent(harness);
 
     const { commitmentId, version } = await createCommitment(harness, { scheduleKind });
     const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);

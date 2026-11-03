@@ -4,10 +4,10 @@ import { deriveTaskCreationIdempotencyKey } from '@ember/contracts';
 import { PostgresCommitmentRepository } from '@ember/postgres';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import {
-  FIXTURE_SOURCE_PROFILE,
   claimNextRun,
   createCommitment,
   createCommitmentHarness,
+  grantConsent,
   grantForRun,
   readOccurrence,
   readOutcomeCount,
@@ -38,12 +38,9 @@ describe('P0-C3B/P0-C3D: missing durable consent dependency fails closed', () =>
     const harness = await createCommitmentHarness(db);
     const repositoryWithoutConsent = new PostgresCommitmentRepository(db.pool);
 
-    // The in-memory fixture store is synchronous, like `ConsentRegistry.grant`; the authority
-    // adapter is what adds asynchrony. Awaiting it would imply a durable write that does not happen.
-    harness.consent.grant({
-      tenantId: harness.ctx.tenantId,
-      sourceProfileId: FIXTURE_SOURCE_PROFILE,
-    });
+    // Consent is granted through the DURABLE repository, so the deny-all repository below differs
+    // from the harness only in the one dependency under test.
+    await grantConsent(harness);
 
     const { commitmentId, version } = await createCommitment(harness);
     const { occurrenceId, taskId } = await reserveAndDispatch(harness, commitmentId, version);

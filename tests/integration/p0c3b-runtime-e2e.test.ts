@@ -23,11 +23,13 @@ import {
   claimNextRun,
   createCommitment,
   createCommitmentHarness,
+  grantConsent,
   grantForRun,
   readCommitment,
   readOccurrence,
   readOutcomeCount,
   reserveAndDispatch,
+  revokeConsent,
   type CommitmentHarness,
 } from './support/commitment-runtime.js';
 
@@ -39,10 +41,11 @@ import {
  *   -> CommitmentRunHandler -> CommitmentSourceReader -> CommitmentOrchestrator
  *   -> PostgresCommitmentRepository.appendOutcomeIfAbsent -> Occurrence completion
  *
- * Commitment, Task, Run, Outcome and Occurrence assertions read PostgreSQL rows. The consent
- * authority/publication guard is an explicit process-local *fenced* fixture, so the suite proves
- * the Worker-side binding (fence -> read -> re-verify -> publish); it does not prove Lane C's
- * still-missing transaction-level consent acceptance gate.
+ * Commitment, Task, Run, Outcome, Occurrence AND Consent assertions read PostgreSQL rows: consent is
+ * the durable `PostgresConsentRepository`, adapted once by `fromResolvedGenerationConsent`, and the
+ * repository publishes through `PostgresConsentPublicationGuard`. No in-memory consent double is
+ * involved, so grants, revocations and generation changes are separate committed transactions
+ * exactly as they are in production.
  */
 const WORKER_ID = 'worker-e2e';
 const logger = createWorkerLogger({ level: 'error' });
@@ -87,7 +90,7 @@ function createRuntime(harness: CommitmentHarness, options: RuntimeOptions = {})
       options.sourceReader ??
       new CommitmentSourceReader({
         consent: harness.consentAuthority,
-        grants: harness.consent,
+        grants: harness.consentGrants,
       }),
     // The Worker orchestrator re-verifies the versioned fence before publication, so it uses the
     // SAME adapted authority as the reader and the PostgreSQL publication guard. Nothing in this
@@ -167,10 +170,9 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     // retryable leftover can never be claimed by a later case.
     await truncateRuntimeTables(db);
     harness = await createCommitmentHarness(db);
-    harness.consent.grant({
-      tenantId: harness.ctx.tenantId,
-      sourceProfileId: FIXTURE_SOURCE_PROFILE,
-    });
+    // Real, DURABLE consent: the Worker below runs against the same rows a production deployment
+    // would read, so this suite exercises the real dispatch-to-execution path.
+    await grantConsent(harness);
   });
 
   it('1. executes the full chain: scheduler -> task -> worker -> outcome -> occurrence completion', async () => {
@@ -445,7 +447,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
     const run = await claimNextRun(harness, WORKER_ID);
 
-    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+    await revokeConsent(harness);
 
     const result = await runOnce(runtime, run);
     expect(result.outcome).toBe('failed_terminal');
@@ -453,33 +455,42 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
   });
 
-  it('9b. a grant that does not authorize read_snapshot cannot read a snapshot', async () => {
-    // Narrower re-grant: the lineage is active, but only for metadata. Before the mirror stopped
-    // defaulting to `read_snapshot`, this read succeeded on a fabricated local grant.
-    harness.consent.grant({
+  it('9b. a grant that does not authorize read_snapshot cannot dispatch work, let alone read', async () => {
+    // Narrower re-grant: the lineage is active, but only for metadata. Dispatch is consent-gated on
+    // the DURABLE grant, so the occurrence is refused before a Task is bound — the Worker is never
+    // handed work it could not legally read. (Before the durable gate, dispatch minted a fence from
+    // a local default and the read then succeeded on a fabricated grant. The read-boundary denial
+    // itself is covered by `tests/unit/p0c3b-consent-fence.test.ts`. The frozen typed `grant`
+    // command cannot express a non-snapshot operation, so the row is seeded through the durable,
+    // tenant-explicit API.)
+    await harness.consent.grantForTenant({
       tenantId: harness.ctx.tenantId,
       sourceProfileId: FIXTURE_SOURCE_PROFILE,
       allowedOperations: ['read_metadata'],
       scopes: ['source.metadata'],
     });
 
-    const runtime = createRuntime(harness);
     const { commitmentId, version } = await createCommitment(harness);
-    const { occurrenceId } = await reserveAndDispatch(harness, commitmentId, version);
-    const run = await claimNextRun(harness, WORKER_ID);
 
-    const result = await runOnce(runtime, run);
+    await expect(reserveAndDispatch(harness, commitmentId, version)).rejects.toThrow(
+      expect.objectContaining({ code: 'POLICY_DENIED' }),
+    );
 
-    expect(result.outcome).toBe('failed_terminal');
-    expect((await readOccurrence(db, occurrenceId))?.status).toBe('failed');
-    expect(await readOutcomeCount(db, occurrenceId)).toBe(0);
+    // The refused dispatch left no BOUND occurrence: the occurrence stays pending with no Task
+    // attached (the unbound Task is reconciled by the repository, never published against).
+    const occurrences = await db.pool.query<{ status: string; task_id: string | null }>(
+      'SELECT status, task_id FROM commitment_occurrences WHERE commitment_id = $1',
+      [commitmentId],
+    );
+
+    expect(occurrences.rows).toEqual([{ status: 'pending', task_id: null }]);
   });
 
   it('9c. revocation before execution performs zero source reads and publishes nothing', async () => {
     let connectorReads = 0;
     const inner = new CommitmentSourceReader({
       consent: harness.consentAuthority,
-      grants: harness.consent,
+      grants: harness.consentGrants,
     });
     const countingReader: SourceReaderPort = {
       readSnapshot: async (profileId, trustedContext, signal) => {
@@ -496,7 +507,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     // happen at the authorization gate, not after a read. Counting the connector calls is the point
     // of this case. (Revoking earlier than dispatch is refused by the dispatch fence itself, which
     // is a different case — see `tests/integration/p0c3d-consent-postgres.test.ts`.)
-    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+    await revokeConsent(harness);
 
     const run = await claimNextRun(harness, WORKER_ID);
 
@@ -511,7 +522,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
   it('9d. a snapshot read under a revoked grant is discarded before publication', async () => {
     const inner = new CommitmentSourceReader({
       consent: harness.consentAuthority,
-      grants: harness.consent,
+      grants: harness.consentGrants,
     });
     let reads = 0;
     const revokingReader: SourceReaderPort = {
@@ -520,7 +531,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
         reads += 1;
         // The read succeeded under the fenced generation; the revocation lands immediately after
         // it, i.e. while the execution is still in flight.
-        harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+        await revokeConsent(harness);
         return snapshot;
       },
     };
@@ -544,14 +555,14 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
 
     const inner = new CommitmentSourceReader({
       consent: harness.consentAuthority,
-      grants: harness.consent,
+      grants: harness.consentGrants,
     });
     const regrantingReader: SourceReaderPort = {
       readSnapshot: async (profileId, trustedContext, signal) => {
         const snapshot = await inner.readSnapshot(profileId, trustedContext, signal);
         // Revoke + re-grant: the lineage is active again, but under a NEW generation.
-        harness.consent.revoke(tenantId, FIXTURE_SOURCE_PROFILE);
-        harness.consent.grant({ tenantId, sourceProfileId: FIXTURE_SOURCE_PROFILE });
+        await revokeConsent(harness);
+        await grantConsent(harness);
         return snapshot;
       },
     };
@@ -586,7 +597,7 @@ describe('P0-C3B: end-to-end commitment runtime on real PostgreSQL', () => {
     const run = await claimNextRun(harness, WORKER_ID);
 
     // A genuinely different pool/connection performs the revocation...
-    harness.consent.revoke(harness.ctx.tenantId, FIXTURE_SOURCE_PROFILE);
+    await revokeConsent(harness);
 
     const result = await runOnce(runtime, run);
 

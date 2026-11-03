@@ -400,6 +400,36 @@ implementation (`expected true to be false`: an `active` grant that carries `sou
 gate flips to `false` when the row's `expires_at` is elapsed in the database, and there is no clock
 parameter through which a caller could argue otherwise.
 
+### 7.3 Durable Worker acceptance (dispatch → execution)
+
+`tests/integration/p0c3d-worker-consent-acceptance.test.ts` →
+`P0-C3D: Worker consent acceptance on durable PostgreSQL`. Every case drives the **production** Worker
+chain — `CommitmentOrchestrator` → `CommitmentSourceReader` → `GuardedSourceReader` →
+`FakeSourceReader` — over `PostgresConsentRepository` + `PostgresConsentPublicationGuard`. There is no
+in-memory consent authority anywhere in the path; the harness wires exactly what `apps/worker` wires.
+
+"0 inner reads" is counted one frame below the adapter: the suite spies
+`FakeSourceReader.prototype.readSnapshot`, so a refused read means **the provider was never called**,
+not that the adapter declined to return a result.
+
+| Case | Shape                                                                     | Asserted outcome                                                                             |
+| ---- | ------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| A    | re-grant without `read_snapshot` between dispatch and execution           | 0 inner reads, `failed_terminal`, 0 Outcomes, occurrence `failed`, exactly 1 Run             |
+| B    | re-grant with different operations and scopes after dispatch              | 0 inner reads, `POLICY_DENIED`, 0 Outcomes (the new terms would allow the read)              |
+| C    | revoke + re-grant with identical terms (new generation)                   | 0 inner reads, 0 Outcomes — identical permissions cannot resurrect a fenced attempt          |
+| D    | grant expired in PostgreSQL while the Worker clock runs 6 h behind        | 0 inner reads, 0 Outcomes; `getForTenant(workerNow)` says `active`, the store says `expired` |
+| E    | revocation committed mid-read on a **second** connection (`observerPool`) | 1 inner read, snapshot discarded, 0 Outcomes, occurrence `failed`, exactly 1 Run             |
+| F    | control: unrevoked, unexpired generation                                  | exactly 1 inner read, exactly 1 Outcome — the gate is not a blanket refusal                  |
+
+Case A records the generation at dispatch (`consent_grant_id` / `consent_version`) and then narrows
+the lineage to `read_metadata`, which the frozen typed `grant` command cannot express; the row is
+seeded through the durable tenant-explicit API instead. Case E lets the provider read start, blocks it
+on a promise gate, commits the revocation on a separate backend, then releases the read: the
+authorization really was valid when the read began, and the snapshot is still discarded, because the
+authoritative check happens inside the publication transaction.
+
+Result: `6/6 passed` (`A`–`F`, 1.3–3.1 s per case).
+
 ---
 
 ## 8. Migration coordination
@@ -436,19 +466,27 @@ count, the idempotent replay, the **normal** `0009` → `0010` order, and the **
 | Typecheck (strict)                  | `pnpm typecheck`                                    | **0**                                 |
 | Build                               | `pnpm build`                                        | **0**                                 |
 | Unit                                | `pnpm test:unit`                                    | **0** — 70 files, 1184 tests          |
-| Integration (real PostgreSQL)       | `pnpm test:integration`                             | **0** — 35 files, 364 tests           |
+| Integration (real PostgreSQL)       | `pnpm test:integration`                             | **0** — 36 files, 370 tests           |
 | Chaos (real PostgreSQL)             | `pnpm test:chaos`                                   | **0** — 6 files, 30 tests             |
 | End-to-end (real HTTP + PostgreSQL) | `pnpm test:e2e`                                     | **0** — 9 files, 18 tests             |
 | Demo CLI smoke                      | `pnpm demo --scenario fast`                         | **0** — Fast Path PASS                |
 | Migration from a clean database     | `DATABASE_URL=<fresh> pnpm db:migrate`              | **0** — 10 applied, 0 already applied |
 | Migration idempotency (re-run)      | `DATABASE_URL=<fresh> pnpm db:migrate`              | **0** — 0 applied, 10 already applied |
 | Consent suites in isolation         | `… p0c3d-consent-postgres p0c3b-consent-dependency` | **0** — 21 tests                      |
+| Worker consent acceptance (§7.3)    | `… p0c3d-worker-consent-acceptance`                 | **0** — 6 cases A–F                   |
 
 Round-3 evidence: the two new grant cases and the two read-gate cases were run against the _previous_
 `consent-repository.ts` (`git show HEAD~:…`) and fail there (§7.1/§7.2); they pass on this branch.
 `pnpm` is not installed in this environment, so the equivalent commands were invoked directly
 (`npx prettier --check .`, `npx eslint . --max-warnings=0`, `npx tsc -p tsconfig.json --noEmit`,
 `npx tsc -b tsconfig.build.json`, `vitest run --config vitest.<suite>.config.ts`).
+
+Round-4 evidence: `tests/integration/support/consent-test-double.ts` was deleted and every Worker
+integration suite re-run against real PostgreSQL (§7.3 is the new acceptance suite, and
+`p0c3b-runtime-e2e.test.ts` now asserts that a `read_metadata`-only grant is refused at **dispatch**:
+the occurrence stays `pending` with `task_id = null`). All eight gates above were re-run on the resulting
+tree; the integration count moved from 35/364 to 36/370 because the double is gone and six durable
+acceptance cases replaced it.
 
 CI evidence (workflow `Verify (Node 24 LTS + PostgreSQL 17)`, 10 steps: Lint, Check formatting,
 Typecheck, Unit, Build, Migrate ×2, Integration, Chaos, E2E, Demo CLI smoke):
@@ -478,12 +516,11 @@ Live status is `gh pr checks 84`.
    `apps/worker/src/commitment-consent.ts` and in `tests/integration/support/consent-test-double.ts`.
    The worker declaration is gone with the deleted guard factory, so the repository's
    `ConsentPublicationGuard` is the only shape.
-3. **The in-memory test double stays.** `InMemoryTestConsentAuthority` is used only by integration
-   scenarios that are not about consent; the revocation claims in this document are backed by
-   `PostgresConsentPublicationGuard` against real row locks, never by the double. Its publication guard
-   now implements the same `authorizeFence` / `assertFenceCurrent` contract as the durable one (`null`
-   fence denied, generation compared), so the commitment suites cannot pass under a weaker gate than
-   production.
+3. **The in-memory test double is gone.** The Worker-facing suites (P0-C3A persistence, P0-C3B
+   runtime, P0-C3D acceptance) all wire `PostgresConsentRepository` + `PostgresConsentPublicationGuard`.
+   `InMemoryTestConsentAuthority` / `createTestConsentPublicationGuard` were deleted with
+   `tests/integration/support/consent-test-double.ts`: keeping a second, weaker consent
+   implementation in the tree only invited a suite to pass against it.
 4. **`evaluateConsent` is advisory.** It is a lock-free read used for pre-read decisions and
    diagnostics. The authoritative decision is always the one taken inside the publication
    transaction; nothing may treat a successful `evaluateConsent` as permission to publish.

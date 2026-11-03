@@ -4,13 +4,13 @@ import type { AuthContext, Id } from '@ember/domain';
 import {
   PostgresAgentRepository,
   PostgresCommitmentRepository,
+  PostgresConsentPublicationGuard,
   PostgresConsentRepository,
   PostgresTaskRepository,
 } from '@ember/postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 import { createTenantFixture, type TenantFixture } from './support/fixtures.js';
-import { allowTestConsentPublication } from './support/consent-test-double.js';
 
 describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => {
   let db: TestDatabase;
@@ -26,10 +26,10 @@ describe('P0-C3A PostgreSQL Commitment Persistence & DueCommitmentStore', () => 
 
   beforeAll(async () => {
     db = await createTestDatabase();
-    // This suite predates Lane C durable consent and focuses on Commitment persistence. Its
-    // explicit test-only gate does not prove the transaction-level consent requirement.
+    // The DURABLE publication gate: dispatch and publication both resolve the generation the
+    // tenant really holds, so this suite can never pass under a weaker gate than production.
     commitmentRepo = new PostgresCommitmentRepository(db.pool, {
-      consentPublicationGuard: allowTestConsentPublication,
+      consentPublicationGuard: new PostgresConsentPublicationGuard(),
     });
     agentRepo = new PostgresAgentRepository(db.pool);
     taskRepo = new PostgresTaskRepository(db.pool);

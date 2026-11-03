@@ -73,6 +73,13 @@ describe('B1-1 frozen live wire schemas', () => {
     expect(
       B1AssistantTurnDtoSchema.safeParse({
         ...completed,
+        response_message_id: messageId,
+        failure_reason: 'timeout',
+      }).success,
+    ).toBe(false);
+    expect(
+      B1AssistantTurnDtoSchema.safeParse({
+        ...completed,
         status: 'failed',
         failure_reason: 'provider secret:abc',
       }).success,

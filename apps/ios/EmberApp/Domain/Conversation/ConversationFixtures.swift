@@ -5,9 +5,10 @@ public enum ConversationFixtures {
     public static let mainConversationID = ConversationID(
         rawValue: UUID(uuidString: "71000000-0000-4000-8000-000000000001")!
     )
-    public static let taskID = UUID(uuidString: "72000000-0000-4000-8000-000000000001")!
+    // Links to the existing .completed Task from Networking/Fixtures/completed.json.
+    // This is fixed local demo data, not a production Task or a newly created Task.
+    public static let taskID = UUID(uuidString: "00000000-0000-4000-8000-000000000103")!
     public static let commitmentID = UUID(uuidString: "73000000-0000-4000-8000-000000000001")!
-    public static let artifactID = UUID(uuidString: "74000000-0000-4000-8000-000000000001")!
     public static let outcomeID = UUID(uuidString: "75000000-0000-4000-8000-000000000001")!
 
     public static let firstTurnID = AssistantTurnID(
@@ -117,9 +118,9 @@ public enum ConversationFixtures {
                 sequence: 8,
                 turnID: secondTurnID,
                 createdAt: baseTime.addingTimeInterval(45),
-                kind: .outcomeReference(
-                    .artifact(artifactID: artifactID, taskID: taskID)
-                )
+                // The completed Task has a bundled MockOutcomeFixture, not a readable
+                // production Artifact. Link to the Task and let the UI resolve it.
+                kind: .outcomeReference(.taskResult(taskID: taskID))
             ),
             ConversationMessage(
                 id: userThreeID,

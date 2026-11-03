@@ -43,8 +43,8 @@ final class ConversationRepositoryTests: XCTestCase {
         XCTAssertTrue(kinds.contains { if case let .commitmentReference(reference) = $0 {
             reference.commitmentID == ConversationFixtures.commitmentID
         } else { false } })
-        XCTAssertTrue(kinds.contains { if case let .outcomeReference(.artifact(artifactID, taskID)) = $0 {
-            artifactID == ConversationFixtures.artifactID && taskID == ConversationFixtures.taskID
+        XCTAssertTrue(kinds.contains { if case let .outcomeReference(.taskResult(taskID)) = $0 {
+            taskID == ConversationFixtures.taskID
         } else { false } })
     }
 
@@ -245,4 +245,88 @@ final class ConversationRepositoryTests: XCTestCase {
             )
         }
     }
+
+    func testConversationTaskReferenceResolvesToBundledCompletedTask() throws {
+        let fixture = try BundledMockScenarioProvider().load(.completed)
+        let task = try XCTUnwrap(fixture.task)
+
+        XCTAssertEqual(fixture.scenarioID, .completed)
+        XCTAssertEqual(task.taskID, ConversationFixtures.taskID)
+        XCTAssertEqual(task.status, .completed)
+
+        let linkedTaskIDs = ConversationFixtures.mainConversation.messages.compactMap { message -> UUID? in
+            if case let .taskReference(reference) = message.kind {
+                return reference.taskID
+            }
+            return nil
+        }
+        XCTAssertEqual(linkedTaskIDs, [task.taskID])
+    }
+
+    func testConversationTaskReferenceResolvesInExistingTaskJourneySession() async {
+        let (startupError, selectedTaskID) = await MainActor.run {
+            let session = TaskJourneySession()
+            session.select(taskID: ConversationFixtures.taskID)
+            return (session.startupError, session.selectedRecord?.task.taskID)
+        }
+
+        XCTAssertNil(startupError)
+        XCTAssertEqual(selectedTaskID, ConversationFixtures.taskID)
+    }
+
+    func testOutcomeReferenceUsesExistingTaskResultWithoutInventingArtifact() throws {
+        let references = ConversationFixtures.mainConversation.messages.compactMap { message -> OutcomeReference? in
+            if case let .outcomeReference(reference) = message.kind {
+                return reference
+            }
+            return nil
+        }
+        XCTAssertEqual(references, [.taskResult(taskID: ConversationFixtures.taskID)])
+
+        let fixture = try BundledMockScenarioProvider().load(.completed)
+        XCTAssertEqual(fixture.task?.taskID, ConversationFixtures.taskID)
+        let readableDemo = try XCTUnwrap(fixture.outcomeFixture)
+        XCTAssertFalse(readableDemo.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+        XCTAssertTrue(readableDemo.label.contains("演示"))
+        XCTAssertTrue(readableDemo.content.contains("并非"))
+    }
+
+    func testMissingTaskReferenceDoesNotResolveToUnrelatedFixture() async {
+        let missingID = UUID(uuidString: "72000000-0000-4000-8000-000000000099")!
+        let (matchedRecord, knownTaskExists) = await MainActor.run {
+            let session = TaskJourneySession()
+            return (
+                session.records.contains { $0.id == missingID },
+                session.records.contains { $0.id == ConversationFixtures.taskID }
+            )
+        }
+
+        XCTAssertFalse(matchedRecord)
+        XCTAssertTrue(knownTaskExists)
+    }
+
+    func testCompletedTaskWithoutReadableOutcomeStaysUnavailable() throws {
+        let fixture = try BundledMockScenarioProvider().load(.missingResult)
+
+        XCTAssertEqual(fixture.scenarioID, .missingResult)
+        XCTAssertEqual(fixture.task?.status, .completed)
+        XCTAssertNil(fixture.outcomeFixture)
+        XCTAssertNotEqual(fixture.task?.taskID, ConversationFixtures.taskID)
+    }
+
+    func testCommitmentFixtureIsOnlyAnOpaqueStableReference() {
+        let references = ConversationFixtures.mainConversation.messages.compactMap { message -> CommitmentReference? in
+            if case let .commitmentReference(reference) = message.kind {
+                return reference
+            }
+            return nil
+        }
+
+        XCTAssertEqual(references, [CommitmentReference(commitmentID: ConversationFixtures.commitmentID)])
+        XCTAssertEqual(
+            ConversationFixtures.commitmentID,
+            UUID(uuidString: "73000000-0000-4000-8000-000000000001")!
+        )
+    }
+
 }

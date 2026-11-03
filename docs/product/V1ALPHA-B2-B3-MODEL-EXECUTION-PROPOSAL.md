@@ -406,23 +406,25 @@ run admission silently fail or give any other action new authority.
 ```ts
 const RunIntent = z.strictObject({
   subjectKind: z.literal('run'),
-  tenantId: Uuid, runId: Uuid,
-  taskId: Uuid.optional(), actionId: Uuid.optional(),
-  actionCategory: Category, policyVersion: Version,
+  tenantId: Uuid,
+  runId: Uuid,
+  taskId: Uuid.optional(),
+  actionId: Uuid.optional(),
+  actionCategory: Category,
+  policyVersion: Version,
 });
 
 const TurnIntent = z.strictObject({
   subjectKind: z.literal('turn'),
-  tenantId: Uuid, turnId: Uuid,
+  tenantId: Uuid,
+  turnId: Uuid,
   actionCategory: z.literal('model.infer'),
   policyVersion: z.literal(2),
   providerId: z.literal('openai'),
   operation: z.literal('conversation.turn'),
 });
 
-const SentinelIntentV2 = z.discriminatedUnion('subjectKind', [
-  RunIntent, TurnIntent,
-]);
+const SentinelIntentV2 = z.discriminatedUnion('subjectKind', [RunIntent, TurnIntent]);
 ```
 
 Keep the **legacy v1 Run validator** available for existing callers until all

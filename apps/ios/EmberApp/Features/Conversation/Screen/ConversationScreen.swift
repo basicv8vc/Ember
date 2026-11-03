@@ -33,11 +33,12 @@ struct ConversationScreen: View {
             )
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-home")
     }
 
     private var header: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 0) {
             HStack(spacing: 12) {
                 Image(systemName: "sparkle")
                     .font(.title3.weight(.semibold))
@@ -58,7 +59,6 @@ struct ConversationScreen: View {
                 Spacer(minLength: 0)
             }
 
-            MockOnlyBanner()
         }
         .padding(.horizontal, 16)
         .padding(.top, 10)

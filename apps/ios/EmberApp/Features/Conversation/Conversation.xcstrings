@@ -169,6 +169,18 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复已停止" } }
       }
     },
+    "conversation.submission.acknowledged" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ACK · Message accepted" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ACK · 消息已确认" } }
+      }
+    },
+    "conversation.submission.failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · The message could not be accepted." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 消息未能确认。" } }
+      }
+    },
     "conversation.suggestions.title" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Start anywhere" } },

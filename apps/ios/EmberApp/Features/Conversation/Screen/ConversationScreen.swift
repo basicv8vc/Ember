@@ -15,6 +15,16 @@ struct ConversationScreen: View {
         VStack(spacing: 0) {
             header
 
+            if state.commandStatus == .acknowledged {
+                Text("conversation.submission.acknowledged", tableName: "Conversation")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: 680, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+                    .accessibilityIdentifier("conversation-submission-status")
+            }
+
             ConversationTimelineView(
                 state: state,
                 showsSuggestions: state.showsEmptyState && state.timeline.isEmpty && !composerIsFocused,
@@ -114,7 +124,8 @@ struct ConversationDemoHost: View {
             ],
             showsEmptyState: model.showsEmptyState,
             isLoading: model.isLoading,
-            isSubmitting: model.isSubmitting || model.isStoppingReply
+            isSubmitting: model.isSubmitting || model.isStoppingReply,
+            commandStatus: model.commandStatus
         )
     }
 

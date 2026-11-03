@@ -8,6 +8,8 @@ final class ConversationHostModel {
     let conversationID: ConversationID
 
     private let repository: any ConversationRepositoryProtocol
+    private let submissionRepository: MockConversationSubmissionRepository
+    private let submissionCoordinator: ConversationSubmissionCoordinator
     private let replyDelayNanoseconds: UInt64
     private var pendingReply: PendingReply?
     private var replyWork: Task<Void, Never>?
@@ -18,6 +20,7 @@ final class ConversationHostModel {
     private(set) var loadFailureMessage: String?
     private(set) var isSubmitting = false
     private(set) var isStoppingReply = false
+    private(set) var commandStatus: ConversationCommandStatus = .idle
 
     var isLoading: Bool {
         if case .loading = loadState { return true }
@@ -39,10 +42,14 @@ final class ConversationHostModel {
     init(
         conversationID: ConversationID = ConversationFixtures.mainConversationID,
         repository: (any ConversationRepositoryProtocol)? = nil,
+        submissionRepository: MockConversationSubmissionRepository? = nil,
         replyDelayNanoseconds: UInt64 = 900_000_000
     ) {
         self.conversationID = conversationID
         self.repository = repository ?? (try! ConversationFixtures.makeRepository())
+        let resolvedSubmissionRepository = submissionRepository ?? MockConversationSubmissionRepository()
+        self.submissionRepository = resolvedSubmissionRepository
+        self.submissionCoordinator = ConversationSubmissionCoordinator(repository: resolvedSubmissionRepository)
         self.replyDelayNanoseconds = replyDelayNanoseconds
     }
 
@@ -53,6 +60,9 @@ final class ConversationHostModel {
 
         do {
             let loaded = try await repository.fetchConversation(id: conversationID)
+            await submissionRepository.setNextSequence(
+                Int64((loaded.messages.map(\.sequence).max() ?? 0) + 1)
+            )
             snapshot = loaded
             loadState = ConversationLoadState.resolved(loaded)
         } catch let error as ConversationRepositoryError {
@@ -75,12 +85,36 @@ final class ConversationHostModel {
         }
         guard let snapshot else { return }
 
-        let turnID = AssistantTurnID(rawValue: UUID())
+        let nextSequence = (snapshot.messages.map(\.sequence).max() ?? 0) + 1
+        await submissionRepository.setNextSequence(Int64(nextSequence))
+        guard submissionCoordinator.prepare(
+            conversationID: conversationID,
+            transcriptEpoch: 0,
+            text: submission.message
+        ) != nil else { return }
+
+        isSubmitting = true
+        commandStatus = .submitting
+        await submissionCoordinator.dispatchPrepared()
+
+        guard case .accepted(_, let receipt) = submissionCoordinator.state,
+              let messageSequence = Int(exactly: receipt.sequence) else {
+            isSubmitting = false
+            commandStatus = .failed
+            replyState = .failed(
+                message: String(localized: "conversation.submission.failed", table: "Conversation"),
+                retryable: false
+            )
+            return
+        }
+
+        commandStatus = .acknowledged
+        let turnID = receipt.turnID
         let timestamp = Date()
         let triggeringMessage = ConversationMessage(
-            id: MessageID(rawValue: UUID()),
+            id: receipt.messageID,
             conversationID: conversationID,
-            sequence: (snapshot.messages.map(\.sequence).max() ?? 0) + 1,
+            sequence: messageSequence,
             turnID: turnID,
             createdAt: timestamp,
             kind: .user(text: submission.message)
@@ -105,6 +139,7 @@ final class ConversationHostModel {
             await persistPendingInputAndStartReply(turnID: turnID)
         } catch {
             isSubmitting = false
+            commandStatus = .failed
             replyState = .failed(
                 message: String(localized: "conversation.error.recoverable", table: "Conversation"),
                 retryable: false

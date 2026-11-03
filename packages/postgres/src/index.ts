@@ -43,6 +43,17 @@ export {
   type MigrationRunResult,
   type RunMigrationsOptions,
 } from './migrator.js';
+export type {
+  B1AssistantTurnRepository,
+  B1ConsumerIdentity,
+  B1ConsumerProvisioningRepository,
+  B1ConsumerSessionRepository,
+  B1ConversationIdentity,
+  B1ConversationRepository,
+  B1ProvisionedIdentity,
+  B1SessionRecord,
+  B1TaskResultRepository,
+} from './repositories/b1-interfaces.js';
 export {
   PostgresAgentRepository,
   type AgentRepository,

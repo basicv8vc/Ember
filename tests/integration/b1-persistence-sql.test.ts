@@ -55,15 +55,17 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
        WHERE table_schema = current_schema()
          AND table_name = ANY($1::text[])
        ORDER BY table_name`,
-      [[
-        'consumers',
-        'consumer_identities',
-        'consumer_sessions',
-        'conversations',
-        'conversation_messages',
-        'assistant_turns',
-        'task_results',
-      ]],
+      [
+        [
+          'consumers',
+          'consumer_identities',
+          'consumer_sessions',
+          'conversations',
+          'conversation_messages',
+          'assistant_turns',
+          'task_results',
+        ],
+      ],
     );
     expect(rows.rows.map((row) => row.table_name)).toEqual([
       'assistant_turns',
@@ -78,15 +80,16 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
 
   it('enforces exactly one Consumer per tenant even for different principals', async () => {
     const firstConsumer = randomUUID();
-    await db.pool.query(
-      'INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)',
-      [firstConsumer, tenantId, principalId],
-    );
+    await db.pool.query('INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)', [
+      firstConsumer,
+      tenantId,
+      principalId,
+    ]);
     const secondPrincipal = randomUUID();
-    await db.pool.query(
-      "INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')",
-      [secondPrincipal, tenantId],
-    );
+    await db.pool.query("INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')", [
+      secondPrincipal,
+      tenantId,
+    ]);
     await expect(
       db.pool.query('INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)', [
         randomUUID(),
@@ -99,7 +102,7 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     });
   });
 
-  it('rejects another tenant\'s Conversation using a composite FK', async () => {
+  it("rejects another tenant's Conversation using a composite FK", async () => {
     await expect(
       db.pool.query(
         `INSERT INTO conversation_messages

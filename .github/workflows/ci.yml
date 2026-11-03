@@ -65,10 +65,7 @@ jobs:
         run: pnpm lint
 
       - name: Check formatting
-        run: |
-          pnpm exec prettier --write docs/adr/0004-beta-v1-live-platform-contract.md docs/product/B1_PLATFORM_CONTRACT.md
-          git --no-pager diff -- docs/adr/0004-beta-v1-live-platform-contract.md docs/product/B1_PLATFORM_CONTRACT.md
-          pnpm format:check
+        run: pnpm format:check
 
       - name: Typecheck (strict)
         run: pnpm typecheck

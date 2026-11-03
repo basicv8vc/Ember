@@ -20,11 +20,12 @@ by the B2-first proposal:
 2. **Migration numbering.** This file says "next slot `0011`". The B1 platform contract (PR #92,
    §11) reserves `0011`–`0013`. Model execution therefore takes `0014`, and B3 takes `0015`.
 3. **Sections that are history, not instruction.** §5 (design), §6 (cost model), §8.6, §9 (PR
-   sequence) and §11 (approval checklist) describe the earlier single-capability shape. Do **not**
-   implement from them. The current plan is the B2/B3 proposal; where the two disagree, the proposal
-   wins and this file is stale on that point.
+   sequence), §11 (approval checklist) and the appendix (that plan's file inventory, which still names
+   `0011`/`0012` — now B1's slots) describe the earlier single-capability shape. Do **not** implement
+   from them. The current plan is the B2/B3 proposal; where the two disagree, the proposal wins and
+   this file is stale on that point.
 
-Everything in §1–§4, §7, §8.1–§8.5, §10 and the appendix is the audit itself and is current.
+Everything in §1–§4, §7, §8.1–§8.5 and §10 is the audit itself and is current.
 
 ## 0. Decision requested
 

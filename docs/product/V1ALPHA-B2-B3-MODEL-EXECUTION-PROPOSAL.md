@@ -638,7 +638,7 @@ canonical attempt**. An idempotent existing attempt returns its reservation
 and never starts another provider call. New first attempts increment
 `turns_started` once (not twice if retried); existing attempt uniqueness
 and the bounded attempt number reject duplicates. Reject before commit
-if *any* bucket's new cumulative reserved amount exceeds its ceiling,
+if _any_ bucket's new cumulative reserved amount exceeds its ceiling,
 or the principal's 60-turn daily count is exceeded. Roll back all buckets
 and the attempt on failure. Do not hold any budget lock across HTTP.
 
@@ -654,7 +654,7 @@ exceeds the reserved estimate, fail closed for further egress, trigger
 alert/reconciliation, and retain the overage evidence. A CHECK on
 `applied_cost_micro_usd` cannot constrain an external invoice.
 
-**Global concurrency test:** two *different* tenants, on independent
+**Global concurrency test:** two _different_ tenants, on independent
 PostgreSQL connections, both reserve the final available global budget.
 Exactly one reservation commits; the other is refused; assert **zero**
 extra gateway calls and the persisted global reserved total ≤ 5,000,000
@@ -689,12 +689,12 @@ until that external enforcement is independently verified.
 
 ### 7.5 Fixing the settlement defect (F-4) rather than inheriting it
 
-`runBudgetedStep` currently settles full *simulated work units* for
+`runBudgetedStep` currently settles full _simulated work units_ for
 existing Task kinds. B2's ordinary Chat Turn **does not use** that ledger:
 it uses the independent model-money attempt ledger described in §7.3.
 
 When B3 adds an infer Task step, an optional `consumedFor(result)` may
-settle the *work-unit* reservation correctly without changing existing
+settle the _work-unit_ reservation correctly without changing existing
 mock kinds, but it must not double-charge or replace the model-money
 ledger. The model-money source of truth is the unique provider attempt,
 not the worker step or a best-effort local estimate.

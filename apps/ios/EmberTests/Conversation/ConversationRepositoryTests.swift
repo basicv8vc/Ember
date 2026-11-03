@@ -305,6 +305,15 @@ final class ConversationRepositoryTests: XCTestCase {
         XCTAssertTrue(knownTaskExists)
     }
 
+    func testCompletedTaskWithoutReadableOutcomeStaysUnavailable() throws {
+        let fixture = try BundledMockScenarioProvider().load(.missingResult)
+
+        XCTAssertEqual(fixture.scenarioID, .missingResult)
+        XCTAssertEqual(fixture.task?.status, .completed)
+        XCTAssertNil(fixture.outcomeFixture)
+        XCTAssertNotEqual(fixture.task?.taskID, ConversationFixtures.taskID)
+    }
+
     func testCommitmentFixtureIsOnlyAnOpaqueStableReference() {
         let references = ConversationFixtures.mainConversation.messages.compactMap { message -> CommitmentReference? in
             if case let .commitmentReference(reference) = message.kind {

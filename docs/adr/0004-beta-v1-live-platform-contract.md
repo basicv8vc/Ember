@@ -128,8 +128,8 @@ deployment or production data processing in B1-1.
   the implementation PR; require review before B1-2 session routes begin.
 
 **Cross-team boundary:** B2 shall use the B1-defined
-\`assistant_turns (tenant_id,id)\` identity and server-authoritative terminal transitions.
-Its future \`model_turn_attempts\` and lease fields (not part of B1-1) require a separate
+`assistant_turns (tenant_id,id)` identity and server-authoritative terminal transitions.
+Its future `model_turn_attempts` and lease fields (not part of B1-1) require a separate
 forward-only migration and a fencing/cancellation review. iOS shall use this ADR's
 versioned wire semantics only after the frozen B1 contract is merged.
 

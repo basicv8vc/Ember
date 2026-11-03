@@ -45,14 +45,18 @@ export {
 } from './migrator.js';
 export type {
   B1AssistantTurnRepository,
+  B1AuthenticatedSession,
   B1ConsumerIdentity,
   B1ConsumerProvisioningRepository,
   B1ConsumerSessionRepository,
   B1ConversationIdentity,
   B1ConversationRepository,
   B1ProvisionedIdentity,
+  B1ProvisionedSession,
+  B1SessionRotationResult,
   B1SessionRecord,
   B1TaskResultRepository,
+  B1TranscriptClearResult,
 } from './repositories/b1-interfaces.js';
 export {
   PostgresAgentRepository,

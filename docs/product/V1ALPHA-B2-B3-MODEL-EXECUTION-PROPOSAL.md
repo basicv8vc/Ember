@@ -133,7 +133,7 @@ machine. **A Turn is not a Task/Run.** The ability to claim and fence asynchrono
 inference belongs to a narrowly reviewed B2 additive migration after the B1 Turn schema
 is frozen; do not hold a PostgreSQL transaction open across the provider call.
 
-\`\`\`text
+```text
 B1 POST message → commit user message + assistant_turn(running)
                          ↓
 B2 short TX: claim turn, increment lease_epoch, commit/release locks
@@ -147,7 +147,7 @@ external model call, NO database transaction held
 short TX: verify same lease_epoch, nonterminal, not cancelled,
           unexpired turn and valid policy → commit ember reply +
           completed turn + attempt settlement atomically
-\`\`\`
+```
 
 If the worker loses its claim, cancellation wins, or the deadline expires, it
 must discard the response and must **not** publish a reply. Any unobserved provider
@@ -175,10 +175,10 @@ strict 20-second per-attempt timeout bounded by the remaining Turn deadline.
 | 12  | Final provider failure or exhausted/deadline: short TX terminalizes failed once and records safe failure response under B1 T-2                                                         | No third attempt and no duplicate reply                       |
 
 **Fencing protocol (B2 migration 0014, subject to B1 owner review):**
-\`assistant_turns\` gains \`lease_epoch bigint NOT NULL DEFAULT 0\`,
-\`lease_owner\`, \`lease_expires_at\` and a bounded claim/attempt counter.
+`assistant_turns` gains `lease_epoch bigint NOT NULL DEFAULT 0`,
+`lease_owner`, `lease_expires_at` and a bounded claim/attempt counter.
 Claims and reclaims use a short transaction; publishing checks the same
-lease epoch/owner and that \`status='running'\` and \`deadline_at > clock_timestamp()\`.
+lease epoch/owner and that `status='running'` and `deadline_at > clock_timestamp()`.
 Cancellation and the deadline sweeper win by changing terminal status; any
 older claim then fails the guarded update. Do not fabricate a Run or reuse
 Task lease columns without their ownership contract.
@@ -206,10 +206,10 @@ enforced in characters before a request is built.
 
 ### 4.6 Provider outcome → turn outcome
 
-B1's Turn statuses \`running | completed | failed | cancelled\` are immutable
+B1's Turn statuses `running | completed | failed | cancelled` are immutable
 once terminal. **Attempt outcome is not Turn outcome.** A retryable provider
 failure is saved on an internal attempt record while the Turn remains
-\`running\`; only a success or a final, exhausted or expired attempt
+`running`; only a success or a final, exhausted or expired attempt
 transitions the Turn to terminal state.
 
 | Provider outcome           | Attempt outcome_code | Turn while retry eligible           | Final turn outcome                      |
@@ -226,7 +226,7 @@ A Turn's **overall** 60-second deadline is authoritative and includes queueing,
 both attempts, and final persistence; a 20-second provider timeout does not
 extend it. A failed Turn gets B1's fixed user-safe reply, not a provider-specific
 error body. First-call 5xx followed by a successful second call must yield
-**one** completed Turn and **one** reply, never a terminal \`failed\` Turn
+**one** completed Turn and **one** reply, never a terminal `failed` Turn
 that is later resurrected.
 
 ### 4.7 What the user sees
@@ -396,14 +396,14 @@ Three properties of this shape matter more than any field:
 
 ### 6.3 Admission: how `model.infer` enters Sentinel without breaking it
 
-The existing Sentinel is a closed v1 evaluator. It requires \`runId\` and
-hard-denies \`network.egress\`, \`host.exec\`, and \`credential.use\`. B2
-introduces one **narrow** \`model.infer\` action; it must not make old v1
+The existing Sentinel is a closed v1 evaluator. It requires `runId` and
+hard-denies `network.egress`, `host.exec`, and `credential.use`. B2
+introduces one **narrow** `model.infer` action; it must not make old v1
 run admission silently fail or give any other action new authority.
 
 **Strict intent union (normative design target):**
 
-\`\`\`ts
+```ts
 const RunIntent = z.strictObject({
   subjectKind: z.literal('run'),
   tenantId: Uuid, runId: Uuid,
@@ -423,31 +423,31 @@ const TurnIntent = z.strictObject({
 const SentinelIntentV2 = z.discriminatedUnion('subjectKind', [
   RunIntent, TurnIntent,
 ]);
-\`\`\`
+```
 
 Keep the **legacy v1 Run validator** available for existing callers until all
 call sites are migrated, or add a lossless normalization adapter that injects
-\`subjectKind:'run'\` from trusted internal code. Do not add optional \`runId\`
-or allow both \`runId\` and \`turnId\` to be present. Existing policy-v1 mock
+`subjectKind:'run'` from trusted internal code. Do not add optional `runId`
+or allow both `runId` and `turnId` to be present. Existing policy-v1 mock
 and Commitment tests MUST continue to pass. v1 policies never allow
-\`model.infer\`; v2 must be explicitly provisioned by the platform.
+`model.infer`; v2 must be explicitly provisioned by the platform.
 The default policy cannot silently upgrade to a model-enabled policy.
 
 The trusted admission layer derives tenant, provider, operation, policy version
 and turn identity from authenticated server-side context and persisted rows.
-Neither \`providerId\` nor \`operation\` is accepted from the user's chat message.
-A candidate is permitted only when it is \`model.infer\`, policy version 2,
+Neither `providerId` nor `operation` is accepted from the user's chat message.
+A candidate is permitted only when it is `model.infer`, policy version 2,
 the trusted provider is in the **code-owned closed allowlist**, and that
 tenant's matching current policy explicitly grants the action.
 
 This new allow branch remains **after** the three pre-existing hard denies;
-\`network.egress\`, \`host.exec\` and \`credential.use\` stay denied regardless
-of any \`model.infer\` grant. Credential retrieval and TLS egress occur only
+`network.egress`, `host.exec` and `credential.use` stay denied regardless
+of any `model.infer` grant. Credential retrieval and TLS egress occur only
 inside the separately reviewed pinned model adapter; they are not generic
 Sentinel permissions.
 
 Compatibility tests: every prior v1 vector unchanged; strict union rejects a
-Turn with \`runId\`, a Run with \`turnId\`, missing discriminator and unknown
+Turn with `runId`, a Run with `turnId`, missing discriminator and unknown
 provider; v1+model.infer always denied; high-risk categories denied even under
 a v2 policy granting model.infer; mismatched tenant or policy denied.
 
@@ -549,14 +549,14 @@ platform currently has, and it is labelled as such in the code and in the runboo
 
 ### 7.3 Migration `0014` (sketch, not written)
 
-B1 owns \`0011\`–\`0013\`; this is a **proposed** B2-only forward migration.
+B1 owns `0011`–`0013`; this is a **proposed** B2-only forward migration.
 The previous sketch had two integrity failures: a platform-global budget
 did not exist, and one spend-operation key could not represent both tenant
 and principal postings. Replace it with **one canonical attempt/operation
 row plus three locked aggregate buckets**, with no duplicated operation
 row per scope:
 
-\`\`\`sql
+```sql
 -- 0014_model_execution.sql (PROPOSED; not executed or approved)
 -- Additive B2 claim fields on the B1-owned assistant_turns table.
 ALTER TABLE assistant_turns
@@ -627,30 +627,30 @@ CREATE TABLE model_turn_attempts (
   FOREIGN KEY (tenant_id, principal_id)
     REFERENCES principals (tenant_id,id) ON DELETE RESTRICT
 );
-\`\`\`
+```
 
 **Atomic reservation:** within **one** short PostgreSQL transaction,
 upsert the UTC global bucket, tenant bucket and principal bucket, then lock
 in deterministic order **global day → tenant day → principal day →
 canonical attempt**. An idempotent existing attempt returns its reservation
 and never starts another provider call. New first attempts increment
-\`turns_started\` once (not twice if retried); existing attempt uniqueness
+`turns_started` once (not twice if retried); existing attempt uniqueness
 and the bounded attempt number reject duplicates. Reject before commit
 if *any* bucket's new cumulative reserved amount exceeds its ceiling,
 or the principal's 60-turn daily count is exceeded. Roll back all buckets
 and the attempt on failure. Do not hold any budget lock across HTTP.
 
 **Settlement:** update the same three buckets and attempt atomically under
-the same lock order. \`reserved_micro_usd\` is a **monotonic pessimistic
-commitment** for calls already sent; \`consumed_micro_usd\` reflects the
+the same lock order. `reserved_micro_usd` is a **monotonic pessimistic
+commitment** for calls already sent; `consumed_micro_usd` reflects the
 amount recognized against that reservation. If a call timed out or crashed
-with uncertain provider billing, mark \`unknown_billed\` and keep the
+with uncertain provider billing, mark `unknown_billed` and keep the
 reservation charged until verified reconciliation. Release only when no
 outbound request could have been sent. The provider-reported/invoiced
-actual is recorded in \`observed_cost_micro_usd\` without clamping; if it
+actual is recorded in `observed_cost_micro_usd` without clamping; if it
 exceeds the reserved estimate, fail closed for further egress, trigger
 alert/reconciliation, and retain the overage evidence. A CHECK on
-\`applied_cost_micro_usd\` cannot constrain an external invoice.
+`applied_cost_micro_usd` cannot constrain an external invoice.
 
 **Global concurrency test:** two *different* tenants, on independent
 PostgreSQL connections, both reserve the final available global budget.
@@ -687,11 +687,11 @@ until that external enforcement is independently verified.
 
 ### 7.5 Fixing the settlement defect (F-4) rather than inheriting it
 
-\`runBudgetedStep\` currently settles full *simulated work units* for
+`runBudgetedStep` currently settles full *simulated work units* for
 existing Task kinds. B2's ordinary Chat Turn **does not use** that ledger:
 it uses the independent model-money attempt ledger described in §7.3.
 
-When B3 adds an infer Task step, an optional \`consumedFor(result)\` may
+When B3 adds an infer Task step, an optional `consumedFor(result)` may
 settle the *work-unit* reservation correctly without changing existing
 mock kinds, but it must not double-charge or replace the model-money
 ledger. The model-money source of truth is the unique provider attempt,
@@ -710,7 +710,7 @@ means **zero** provider calls.
 
 For an immediate operational stop, disable the model provider account's
 own spend ability and/or revoke the scoped credential; process-level
-\`EMBER_MODEL_EXECUTION=disabled\` takes effect only on restart and is
+`EMBER_MODEL_EXECUTION=disabled` takes effect only on restart and is
 **not** an instantaneous stop. The optional reviewed runtime kill switch
 must be tested for propagation and checked before every request if
 enabled. Stop/alert on billing discrepancy, pricing mismatch, unknown
@@ -804,14 +804,14 @@ assumed, and the database cannot roll back an external invoice.
 
 ### 10.2 One outbound start per durable attempt
 
-An attempt identity is \`(tenant_id,turn_id,attempt_no)\`, with
-\`attempt_no IN (1,2)\`. Before any network I/O the current lease holder
-atomically changes \`send_started_at\` from NULL to a database timestamp
+An attempt identity is `(tenant_id,turn_id,attempt_no)`, with
+`attempt_no IN (1,2)`. Before any network I/O the current lease holder
+atomically changes `send_started_at` from NULL to a database timestamp
 using a compare-and-set that also checks the current Turn lease epoch/owner,
 nonterminal state, nonexpired deadline, active permission and reserved money.
 Only that successful CAS grants the **one outbound start** for the attempt.
 On claim expiry or process crash, another worker must **never** reuse an
-attempt whose \`send_started_at\` is non-NULL; it may start the next numbered
+attempt whose `send_started_at` is non-NULL; it may start the next numbered
 attempt only if the Turn deadline and budget allow. Disable all automatic
 retries inside the HTTP provider client and redirect handling.
 
@@ -831,7 +831,7 @@ without making a call. That is preferable to an undetectable third paid call.
 
 **At most two outbound request starts** follows only if the send-start CAS,
 attempt uniqueness, lease check, and disabled HTTP automatic retry all hold.
-The provisional \`$0.010\` is a **maximum aggregate reserved estimate**, not
+The provisional `$0.010` is a **maximum aggregate reserved estimate**, not
 a guarantee that an external provider cannot bill more. A proven invoice
 cap also needs provider-side billing limits and verified rates.
 
@@ -983,7 +983,7 @@ These design corrections are **not** permission for production model egress.
 | Sentinel compatibility and mode ambiguity      | §6.3/§6.5: strict intent union, policy-v1 tests, legacy admission preserved, disabled means no fake inference |
 
 **Cross-team resolutions:** B1 PR #92 now proposes
-\`assistant_turns UNIQUE (tenant_id,id)\`, so B2 shall use that composite
+`assistant_turns UNIQUE (tenant_id,id)`, so B2 shall use that composite
 identity after B1 merges; Alpha principal identity is server-authenticated
 and 1:1 with Consumer, but cannot be caller supplied. The B1 Turn 60-second
 deadline includes queueing and retries. B1's 200 submitted messages per

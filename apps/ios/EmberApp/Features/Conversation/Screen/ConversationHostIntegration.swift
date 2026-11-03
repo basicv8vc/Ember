@@ -319,15 +319,8 @@ final class ConversationHostModel {
     }
 }
 
-struct ConversationOutcomePresentation: Equatable {
-    let title: String
-    let readableContent: String?
-
-    var isAvailable: Bool { readableContent != nil }
-}
-
 /// Projects typed domain messages into the transcript's existing rows and inline-card slots.
-/// Agent C's reusable Cards compose through `ConversationTimelineEntry.inlineCard`.
+/// Agent C's shared renderer composes through `ConversationTimelineEntry.inlineCard`.
 @MainActor
 enum ConversationTimelineAdapter {
     static func entries(
@@ -353,10 +346,17 @@ enum ConversationTimelineAdapter {
         records.first { $0.task.taskID == taskID }
     }
 
-    static func outcomePresentation(
+    static func commitmentFixture(
+        for reference: CommitmentReference
+    ) -> ConversationCardRenderer.CommitmentFixture? {
+        let fixture = ConversationCardRenderer.commitmentFixture
+        return fixture.id == reference.commitmentID ? fixture : nil
+    }
+
+    static func outcomeRecord(
         for reference: OutcomeReference,
-        taskRecords: [TaskJourneyRecord]
-    ) -> ConversationOutcomePresentation {
+        in taskRecords: [TaskJourneyRecord]
+    ) -> TaskJourneyRecord? {
         let taskID: UUID?
         switch reference {
         case .taskResult(let id):
@@ -366,20 +366,22 @@ enum ConversationTimelineAdapter {
         case .commitmentOutcome:
             taskID = nil
         }
+        guard let taskID else { return nil }
+        return taskRecord(withID: taskID, in: taskRecords)
+    }
 
-        guard let taskID,
-              let record = taskRecord(withID: taskID, in: taskRecords),
-              let fixture = record.outcomeFixture else {
-            return ConversationOutcomePresentation(
-                title: String(localized: "conversation.outcome.unavailable", table: "Conversation"),
-                readableContent: nil
+    static func outcomePresentation(
+        for reference: OutcomeReference,
+        taskRecords: [TaskJourneyRecord]
+    ) -> ConversationCardRenderer.OutcomePresentation {
+        guard let record = outcomeRecord(for: reference, in: taskRecords) else {
+            return ConversationCardRenderer.OutcomePresentation(
+                title: String(localized: "card.result", table: "ConversationCards"),
+                readableContent: nil,
+                isMockOnly: false
             )
         }
-
-        let content = fixture.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            ? nil
-            : fixture.content
-        return ConversationOutcomePresentation(title: fixture.label, readableContent: content)
+        return ConversationCardRenderer.outcomePresentation(for: record)
     }
 
     private static func entry(
@@ -416,15 +418,10 @@ enum ConversationTimelineAdapter {
             let title = String(localized: "card.task", table: "ConversationCards")
             if let record = taskRecord(withID: reference.taskID, in: taskRecords) {
                 return .inlineCard(id: messageID, accessibilityLabel: title) {
-                    TaskActivityCard(
-                        title: record.title,
-                        task: record.task,
-                        presentation: record.presentation,
-                        onOpenDetail: {
-                            taskJourneySession.select(taskID: reference.taskID)
-                            onOpenTaskDetail(reference.taskID)
-                        }
-                    )
+                    ConversationCardRenderer.TaskActivity(record: record) { taskID in
+                        taskJourneySession.select(taskID: taskID)
+                        onOpenTaskDetail(taskID)
+                    }
                 }
             }
             return .inlineCard(id: messageID, accessibilityLabel: title) {
@@ -434,27 +431,36 @@ enum ConversationTimelineAdapter {
                 )
             }
         case .commitmentReference(let reference):
-            let title = String(localized: "conversation.commitment.demo_title", table: "Conversation")
+            guard let fixture = commitmentFixture(for: reference) else {
+                let title = String(localized: "conversation.commitment.unavailable", table: "Conversation")
+                return .inlineCard(id: messageID, accessibilityLabel: title) {
+                    ConversationUnavailableReferenceCard(
+                        title: title,
+                        identifier: reference.commitmentID.uuidString
+                    )
+                }
+            }
+
+            let title = fixture.title
             return .inlineCard(id: messageID, accessibilityLabel: title) {
-                // This is a fixed local demo card. Its status is not read from or written to Task state.
-                CommitmentCard(
-                    title: title,
-                    status: .active,
-                    isMockOnly: true,
-                    onOpenDetails: { onOpenCommitmentDetail(reference.commitmentID) }
-                )
+                ConversationCardRenderer.Commitment(onOpenDetails: onOpenCommitmentDetail)
             }
         case .outcomeReference(let reference):
             let presentation = outcomePresentation(for: reference, taskRecords: taskRecords)
+            let record = outcomeRecord(for: reference, in: taskRecords)
             return .inlineCard(
                 id: messageID,
                 accessibilityLabel: presentation.title
             ) {
-                OutcomeCard(
-                    title: presentation.title,
-                    readableContent: presentation.readableContent,
-                    isMockOnly: true
-                )
+                if let record {
+                    ConversationCardRenderer.Outcome(record: record)
+                } else {
+                    OutcomeCard(
+                        title: presentation.title,
+                        readableContent: nil,
+                        isMockOnly: presentation.isMockOnly
+                    )
+                }
             }
         }
     }

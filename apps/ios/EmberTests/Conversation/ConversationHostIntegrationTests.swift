@@ -160,12 +160,18 @@ final class ConversationHostIntegrationTests: XCTestCase {
         XCTAssertNil(
             ConversationTimelineAdapter.taskRecord(withID: missingTaskID, in: taskSession.records)
         )
-        let missingTaskOutcome = ConversationTimelineAdapter.outcomePresentation(
-            for: .taskResult(taskID: missingTaskID),
-            taskRecords: taskSession.records
+        XCTAssertNil(
+            ConversationTimelineAdapter.outcomeRecord(
+                for: .taskResult(taskID: missingTaskID),
+                in: taskSession.records
+            )
         )
-        XCTAssertFalse(missingTaskOutcome.isAvailable)
+        let missingTaskOutcome = ConversationTimelineAdapter.outcomePresentation(
+            for: .taskResult(taskID: missingTaskID), taskRecords: taskSession.records
+        )
+        XCTAssertEqual(missingTaskOutcome.title, String(localized: "card.result", table: "ConversationCards"))
         XCTAssertNil(missingTaskOutcome.readableContent)
+        XCTAssertFalse(missingTaskOutcome.isMockOnly)
 
         let missingResultRecord = try XCTUnwrap(
             taskSession.records.first { $0.origin == .fixture(.missingResult) }
@@ -174,8 +180,44 @@ final class ConversationHostIntegrationTests: XCTestCase {
             for: .taskResult(taskID: missingResultRecord.task.taskID),
             taskRecords: taskSession.records
         )
-        XCTAssertFalse(missingFixtureOutcome.isAvailable)
+        XCTAssertEqual(missingFixtureOutcome.title, String(localized: "card.result", table: "ConversationCards"))
         XCTAssertNil(missingFixtureOutcome.readableContent)
+        XCTAssertFalse(missingFixtureOutcome.isMockOnly)
+    }
+
+    func testOutcomeAdapterUsesRendererCompletedOnlyProtection() throws {
+        let taskSession = try makeTaskSession(
+            linkedTaskID: ConversationFixtures.taskID,
+            staleOutcomeForQueuedTask: true
+        )
+        let queuedRecord = try XCTUnwrap(taskSession.records.first { $0.origin == .fixture(.queued) })
+
+        let presentation = ConversationTimelineAdapter.outcomePresentation(
+            for: .taskResult(taskID: queuedRecord.task.taskID),
+            taskRecords: taskSession.records
+        )
+
+        XCTAssertEqual(
+            presentation,
+            ConversationCardRenderer.outcomePresentation(for: queuedRecord)
+        )
+        XCTAssertNil(presentation.readableContent)
+        XCTAssertFalse(presentation.isMockOnly)
+    }
+
+    func testCommitmentReferenceMustMatchSharedRendererFixtureID() {
+        let fixture = ConversationCardRenderer.commitmentFixture
+        let knownReference = CommitmentReference(commitmentID: fixture.id)
+
+        let resolved = ConversationTimelineAdapter.commitmentFixture(for: knownReference)
+        XCTAssertEqual(resolved?.id, fixture.id)
+        XCTAssertEqual(resolved?.title, fixture.title)
+        XCTAssertEqual(resolved?.status, fixture.status)
+
+        let unknownReference = CommitmentReference(
+            commitmentID: UUID(uuidString: "72000000-0000-4000-8000-000000000099")!
+        )
+        XCTAssertNil(ConversationTimelineAdapter.commitmentFixture(for: unknownReference))
     }
 
     func testEmptyConversationLoadsAsEmptyState() async throws {
@@ -190,8 +232,14 @@ final class ConversationHostIntegrationTests: XCTestCase {
         XCTAssertTrue(try XCTUnwrap(model.snapshot).messages.isEmpty)
     }
 
-    private func makeTaskSession(linkedTaskID: UUID) throws -> TaskJourneySession {
-        let provider = ConversationTaskFixtureProvider(linkedTaskID: linkedTaskID)
+    private func makeTaskSession(
+        linkedTaskID: UUID,
+        staleOutcomeForQueuedTask: Bool = false
+    ) throws -> TaskJourneySession {
+        let provider = ConversationTaskFixtureProvider(
+            linkedTaskID: linkedTaskID,
+            staleOutcomeForQueuedTask: staleOutcomeForQueuedTask
+        )
         let repository = try FakeTaskRepository(provider: provider)
         return TaskJourneySession(repository: repository, provider: provider)
     }
@@ -199,6 +247,7 @@ final class ConversationHostIntegrationTests: XCTestCase {
 
 private struct ConversationTaskFixtureProvider: MockScenarioProvider {
     let linkedTaskID: UUID
+    let staleOutcomeForQueuedTask: Bool
 
     func load(_ scenarioID: MockScenarioID) throws -> MockTaskScenarioFixture {
         if scenarioID == .receipt {
@@ -253,7 +302,7 @@ private struct ConversationTaskFixtureProvider: MockScenarioProvider {
             commandInFlight: nil,
             capability: .mockOnly
         )
-        let outcome = scenarioID == .completed
+        let outcome = scenarioID == .completed || (scenarioID == .queued && staleOutcomeForQueuedTask)
             ? MockOutcomeFixture(label: "MOCK ONLY result", content: "MOCK ONLY sample result")
             : nil
 

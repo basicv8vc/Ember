@@ -49,10 +49,10 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 任务动态" } }
       }
     },
-    "conversation.commitment.demo_title" : {
+    "conversation.commitment.unavailable" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local commitment preview" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本地承诺预览" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Commitment unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关联承诺暂不可用" } }
       }
     },
     "conversation.empty.message" : {
@@ -95,12 +95,6 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "You" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你" } }
-      }
-    },
-    "conversation.outcome.unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result unavailable" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果暂不可用" } }
       }
     },
     "conversation.mock_reply.default" : {

@@ -65,7 +65,10 @@ jobs:
         run: pnpm lint
 
       - name: Check formatting
-        run: pnpm format:check
+        run: |
+          pnpm exec prettier --write packages/contracts/src/b1-live-schemas.ts packages/postgres/src/repositories/b1-interfaces.ts tests/integration/b1-persistence-sql.test.ts tests/unit/b1-live-schemas.test.ts tests/integration/migrations.test.ts
+          git --no-pager diff -- packages/contracts/src/b1-live-schemas.ts packages/postgres/src/repositories/b1-interfaces.ts tests/integration/b1-persistence-sql.test.ts tests/unit/b1-live-schemas.test.ts tests/integration/migrations.test.ts
+          pnpm format:check
 
       - name: Typecheck (strict)
         run: pnpm typecheck

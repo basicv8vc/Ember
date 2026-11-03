@@ -1,6 +1,6 @@
 # ADR-0004 — Beta V1 Live Platform Contract (conversation-first Alpha)
 
-- **Status:** Proposed — Round 1 CTO review corrections applied to PR #92; approval pending
+- **Status:** Accepted — CTO approved 2026-11-03; B1-1 implementation only after merge
 - **Decision date:** 2026-11-03
 - **Owner:** Ember Architecture / CTO
 - **Decision:** Issue #91 — freeze one versioned, CTO-approved Beta V1 live platform contract before any
@@ -96,7 +96,7 @@ wording, so they are recorded here:
 - The frozen scope is intentionally narrow. Anything not in the annex's §2.2 non-goals requires a new ADR;
   "it was implied by the contract" is not a license.
 
-## B1-1 handoff (prepared, NOT authorized before merge)
+## B1-1 handoff (authorized only after ADR merge)
 
 Implementation may start only after the CTO approves and merges this ADR and its normative
 annex. Ownership is deliberately narrow: B1 owns identity, the Conversation/Message/Assistant
@@ -139,6 +139,6 @@ versioned wire semantics only after the frozen B1 contract is merged.
 | -------------- | ------------------------------------------ |
 | Contract PR    | #92 (`cto/b1-platform-contract`)           |
 | Annex path     | `docs/product/B1_PLATFORM_CONTRACT.md`     |
-| Annex blob SHA | `1eae8ec3332040b3089e62a425fde13e7590966b` |
-| Approved by    | CTO (Round 2 review pending)               |
+| Annex blob SHA | `465a5b5cd5ce5f219d560fa51f9ff12e1b85deba` |
+| Approved by    | CTO — 2026-11-03               |
 | Frozen from    | the merge commit of this ADR onward        |

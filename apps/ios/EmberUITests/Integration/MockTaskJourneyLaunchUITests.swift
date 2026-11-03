@@ -3,7 +3,7 @@ import XCTest
 final class MockTaskJourneyLaunchUITests: XCTestCase {
     func testEnglishOnboardingCanReachReceiptAndSessionInbox() {
         let app = XCUIApplication()
-        launch(app, arguments: ["--ember-show-onboarding"], locale: "en")
+        launch(app, arguments: ["--ember-show-onboarding", "--ember-start-task-flow"], locale: "en")
 
         let demoButton = app.buttons["View the mock demo"]
         XCTAssertTrue(demoButton.waitForExistence(timeout: 10))
@@ -82,7 +82,7 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
 
     func testSimplifiedChineseOnboardingAndDirectTaskFlowEntry() {
         let onboardingApp = XCUIApplication()
-        launch(onboardingApp, arguments: ["--ember-show-onboarding"], locale: "zh-Hans")
+        launch(onboardingApp, arguments: ["--ember-show-onboarding", "--ember-start-task-flow"], locale: "zh-Hans")
         let demoButton = onboardingApp.buttons["查看模拟演示"]
         XCTAssertTrue(demoButton.waitForExistence(timeout: 10))
         demoButton.tap()

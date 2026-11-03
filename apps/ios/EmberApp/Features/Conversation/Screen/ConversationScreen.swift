@@ -8,7 +8,7 @@ struct ConversationScreen: View {
     @FocusState private var composerIsFocused: Bool
 
     private var isGenerating: Bool {
-        state.replyState == .generating
+        state.replyState == .generating || state.isSubmitting || state.isLoading
     }
 
     var body: some View {
@@ -17,7 +17,7 @@ struct ConversationScreen: View {
 
             ConversationTimelineView(
                 state: state,
-                showsSuggestions: state.timeline.isEmpty && !composerIsFocused,
+                showsSuggestions: state.showsEmptyState && state.timeline.isEmpty && !composerIsFocused,
                 onPromptSelected: selectPrompt,
                 onRetry: actions.retry,
                 onStopGenerating: actions.stopGenerating
@@ -73,29 +73,48 @@ struct ConversationScreen: View {
     }
 }
 
-/// A local-only host for previews and Lead integration. It deliberately holds no durable Task state.
+/// The Lead injects the existing Task session and its navigation callback. This host owns only
+/// the local Conversation repository and the cancellable mock-reply work.
 struct ConversationDemoHost: View {
-    @State private var draft = ""
-    @State private var timeline: [ConversationTimelineEntry] = []
-    @State private var replyState: ConversationReplyState = .idle
-    @State private var pendingMessage: String?
-    @State private var nextMessageID = 0
-    @State private var mockReplyWork: Task<Void, Never>?
+    let taskJourneySession: TaskJourneySession
+    private let onOpenTaskDetail: (UUID) -> Void
+    private let onOpenCommitmentDetail: (UUID) -> Void
 
-    private var suggestedPrompts: [String] {
-        [
-            String(localized: "conversation.prompt.reflect", table: "Conversation"),
-            String(localized: "conversation.prompt.plan", table: "Conversation"),
-            String(localized: "conversation.prompt.notes", table: "Conversation")
-        ]
+    @State private var model: ConversationHostModel
+    @State private var draft = ""
+
+    init(
+        taskJourneySession: TaskJourneySession,
+        onOpenTaskDetail: @escaping (UUID) -> Void,
+        onOpenCommitmentDetail: @escaping (UUID) -> Void = { _ in }
+    ) {
+        self.taskJourneySession = taskJourneySession
+        self.onOpenTaskDetail = onOpenTaskDetail
+        self.onOpenCommitmentDetail = onOpenCommitmentDetail
+        _model = State(initialValue: ConversationHostModel())
     }
 
     private var screenState: ConversationScreenState {
-        ConversationScreenState(
-            partnerName: "Ember",
+        let timeline = model.snapshot.map {
+            ConversationTimelineAdapter.entries(
+                from: $0,
+                taskJourneySession: taskJourneySession,
+                onOpenTaskDetail: onOpenTaskDetail,
+                onOpenCommitmentDetail: onOpenCommitmentDetail
+            )
+        } ?? []
+
+        return ConversationScreenState(
             timeline: timeline,
-            replyState: replyState,
-            suggestedPrompts: suggestedPrompts
+            replyState: model.screenReplyState,
+            suggestedPrompts: [
+                String(localized: "conversation.prompt.reflect", table: "Conversation"),
+                String(localized: "conversation.prompt.plan", table: "Conversation"),
+                String(localized: "conversation.prompt.notes", table: "Conversation")
+            ],
+            showsEmptyState: model.showsEmptyState,
+            isLoading: model.isLoading,
+            isSubmitting: model.isSubmitting || model.isStoppingReply
         )
     }
 
@@ -104,120 +123,18 @@ struct ConversationDemoHost: View {
             state: screenState,
             draft: $draft,
             actions: ConversationScreenActions(
-                send: send,
-                retry: retry,
-                stopGenerating: stopGenerating,
+                send: { text in
+                    Task { await model.send(text) }
+                },
+                retry: model.retry,
+                stopGenerating: {
+                    Task { await model.stopReply() }
+                },
                 selectPrompt: { draft = $0 }
             )
         )
-        .onDisappear(perform: endMockReplyIfNeeded)
-    }
-
-    private func send(_ text: String) {
-        guard let submission = ConversationInteractionRules.submission(
-            for: text,
-            isGenerating: replyState == .generating
-        ) else { return }
-
-        appendUserMessage(submission.message)
-        beginMockReply(for: submission.message)
-    }
-
-    private func retry() {
-        guard ConversationInteractionRules.retryAction(for: replyState) == .retryMockReply,
-              let pendingMessage else { return }
-        beginMockReply(for: pendingMessage)
-    }
-
-    private func beginMockReply(for message: String) {
-        mockReplyWork?.cancel()
-        pendingMessage = message
-        replyState = .generating
-
-        // A short, static demo pause makes the explicit stop action usable; it shows no fake stream.
-        mockReplyWork = Task { @MainActor in
-            do {
-                try await Task.sleep(nanoseconds: 900_000_000)
-            } catch {
-                return
-            }
-
-            guard !Task.isCancelled else { return }
-            appendEmberMessage(mockReply(for: message))
-            pendingMessage = nil
-            replyState = .idle
-            mockReplyWork = nil
-        }
-    }
-
-    private func stopGenerating() {
-        guard ConversationInteractionRules.stopAction(for: replyState) == .stopMockReply else { return }
-
-        mockReplyWork?.cancel()
-        mockReplyWork = nil
-        pendingMessage = nil
-        replyState = .idle
-        timeline.append(
-            .activity(
-                ConversationActivityPresentation(
-                    id: nextID(prefix: "activity"),
-                    title: String(localized: "conversation.reply.stopped", table: "Conversation"),
-                    detail: String(localized: "conversation.reply.stop_detail", table: "Conversation"),
-                    timestamp: Date()
-                )
-            )
-        )
-    }
-
-    private func endMockReplyIfNeeded() {
-        mockReplyWork?.cancel()
-        mockReplyWork = nil
-        pendingMessage = nil
-        if replyState == .generating {
-            replyState = .idle
-        }
-    }
-
-    private func appendUserMessage(_ text: String) {
-        timeline.append(
-            .message(
-                ConversationMessagePresentation(
-                    id: nextID(prefix: "message"),
-                    author: .user,
-                    text: text,
-                    timestamp: Date()
-                )
-            )
-        )
-    }
-
-    private func appendEmberMessage(_ text: String) {
-        timeline.append(
-            .message(
-                ConversationMessagePresentation(
-                    id: nextID(prefix: "message"),
-                    author: .ember,
-                    text: text,
-                    timestamp: Date()
-                )
-            )
-        )
-    }
-
-    private func nextID(prefix: String) -> String {
-        defer { nextMessageID += 1 }
-        return "\(prefix)-\(nextMessageID)"
-    }
-
-    private func mockReply(for message: String) -> String {
-        let normalized = message.lowercased()
-        if normalized.contains("plan") || normalized.contains("day") {
-            return String(localized: "conversation.mock_reply.plan", table: "Conversation")
-        }
-        if normalized.contains("note") || normalized.contains("action") {
-            return String(localized: "conversation.mock_reply.notes", table: "Conversation")
-        }
-        return String(localized: "conversation.mock_reply.default", table: "Conversation")
+        .task { await model.load() }
+        .onDisappear(perform: model.cancelReplyForDisappearance)
     }
 }
 
@@ -243,8 +160,11 @@ private struct ConversationScreenPreviewHarness: View {
     }
 }
 
-#Preview("Conversation · empty") {
-    ConversationDemoHost()
+#Preview("Conversation · repository fixture") {
+    ConversationDemoHost(
+        taskJourneySession: TaskJourneySession(),
+        onOpenTaskDetail: { _ in }
+    )
 }
 
 #Preview("Conversation · inline content") {

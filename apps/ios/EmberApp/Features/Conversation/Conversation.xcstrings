@@ -31,6 +31,30 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "将这条消息发送给 Ember。" } }
       }
     },
+    "conversation.activity.commitment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Commitment update" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 承诺动态" } }
+      }
+    },
+    "conversation.activity.system" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Conversation update" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 对话动态" } }
+      }
+    },
+    "conversation.activity.task" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Task update" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 任务动态" } }
+      }
+    },
+    "conversation.commitment.demo_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Local commitment preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "本地承诺预览" } }
+      }
+    },
     "conversation.empty.message" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Bring a question, a thought, or something you want to work through. You can keep the conversation going here." } },
@@ -49,6 +73,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这条模拟回复暂时无法准备。你的消息仍在，可以重试。" } }
       }
     },
+    "conversation.error.load" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · The local conversation could not be loaded. Retry to try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 本地对话暂时无法加载，请重试。" } }
+      }
+    },
     "conversation.header.subtitle" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Your personal AI partner" } },
@@ -65,6 +95,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "You" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你" } }
+      }
+    },
+    "conversation.outcome.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果暂不可用" } }
       }
     },
     "conversation.mock_reply.default" : {
@@ -143,6 +179,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Start anywhere" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以从这里开始" } }
+      }
+    },
+    "conversation.task.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Task unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关联任务暂不可用" } }
       }
     }
   },

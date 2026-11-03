@@ -154,10 +154,7 @@ export const B1AssistantTurnDtoSchema = z
         path: ['response_message_id'],
       });
     }
-    if (
-      (turn.status === 'running' || turn.status === 'cancelled') &&
-      turn.failure_reason !== null
-    ) {
+    if (turn.status !== 'failed' && turn.failure_reason !== null) {
       context.addIssue({
         code: 'custom',
         message: 'non-failed turns must not contain a failure reason',

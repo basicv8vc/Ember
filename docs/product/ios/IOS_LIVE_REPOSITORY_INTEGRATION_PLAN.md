@@ -40,19 +40,19 @@ Specifically, no approved mobile consumer session/refresh/revocation contract, d
 
 ## 3. Existing Platform capabilities (source-audited)
 
-| Capability | Current source status | iOS consequence |
-|---|---|---|
-| Task create | Existing authenticated route `POST /v1/tasks`; requires `Idempotency-Key`; returns 202 for new acceptance and 200 for replay | Request kinds are currently only `mock.chat`, `mock.compute`, `mock.file`, `mock.approval`; this is not a real LLM task |
-| Task detail | Existing `GET /v1/tasks/:taskId` | Returns lifecycle metadata, not a human-readable final answer |
-| Task event page | Existing `GET /v1/tasks/:taskId/events?after=N`, max 100 events/page | Payload is a strict typed allowlist and contains no free-text progress summary |
-| Task SSE | Existing `GET /v1/tasks/:taskId/stream`; resume with `Last-Event-ID` or `after` (if both are supplied, they must match) | Task progress only; it is not an assistant Conversation stream |
-| Task cancel | Existing `POST /v1/tasks/:taskId/cancel` | 202 means cancellation is pending; it is not terminal completion |
-| Artifact read | Existing task artifact list and authenticated artifact-byte read routes | No general typed Task result/Outcome manifest or user-readable result contract |
-| Commitment outcomes | Existing tenant-authenticated `GET /v1/commitments/:id/outcomes` | Commitment outcomes are not general Task Outcomes |
-| Consumer auth | Development bearer-token configuration only; it refuses `NODE_ENV=production` | Not safe mobile sign-in/session auth; never ship a dev token |
-| Main Conversation/messages | No production routes or shared wire DTOs found | Live Conversation is blocked on Platform contract and implementation |
-| Default Agent / Task Inbox | No consumer-facing resolver/list route found | Do not hard-code Agent or invent a list endpoint |
-| Real model gateway/task kind | No approved consumer model-backed text-task path found | No real model execution or spend from iOS |
+| Capability                   | Current source status                                                                                                        | iOS consequence                                                                                                         |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Task create                  | Existing authenticated route `POST /v1/tasks`; requires `Idempotency-Key`; returns 202 for new acceptance and 200 for replay | Request kinds are currently only `mock.chat`, `mock.compute`, `mock.file`, `mock.approval`; this is not a real LLM task |
+| Task detail                  | Existing `GET /v1/tasks/:taskId`                                                                                             | Returns lifecycle metadata, not a human-readable final answer                                                           |
+| Task event page              | Existing `GET /v1/tasks/:taskId/events?after=N`, max 100 events/page                                                         | Payload is a strict typed allowlist and contains no free-text progress summary                                          |
+| Task SSE                     | Existing `GET /v1/tasks/:taskId/stream`; resume with `Last-Event-ID` or `after` (if both are supplied, they must match)      | Task progress only; it is not an assistant Conversation stream                                                          |
+| Task cancel                  | Existing `POST /v1/tasks/:taskId/cancel`                                                                                     | 202 means cancellation is pending; it is not terminal completion                                                        |
+| Artifact read                | Existing task artifact list and authenticated artifact-byte read routes                                                      | No general typed Task result/Outcome manifest or user-readable result contract                                          |
+| Commitment outcomes          | Existing tenant-authenticated `GET /v1/commitments/:id/outcomes`                                                             | Commitment outcomes are not general Task Outcomes                                                                       |
+| Consumer auth                | Development bearer-token configuration only; it refuses `NODE_ENV=production`                                                | Not safe mobile sign-in/session auth; never ship a dev token                                                            |
+| Main Conversation/messages   | No production routes or shared wire DTOs found                                                                               | Live Conversation is blocked on Platform contract and implementation                                                    |
+| Default Agent / Task Inbox   | No consumer-facing resolver/list route found                                                                                 | Do not hard-code Agent or invent a list endpoint                                                                        |
+| Real model gateway/task kind | No approved consumer model-backed text-task path found                                                                       | No real model execution or spend from iOS                                                                               |
 
 The source-level audit is consistent with the current `IOS_API_DEPENDENCIES.md`; route existence does not assert deployment or production readiness.
 
@@ -74,7 +74,7 @@ ConversationHostModel
   └─ ConversationRepositoryProtocol
        ├─ InMemoryConversationRepository (Mock)
        └─ LiveConversationRepository (Live; server-authoritative)
-       
+
 Task cards / Task Detail
   └─ TaskRepositoryProtocol
        ├─ FakeTaskRepository / MockTaskAPIRepository (Mock)
@@ -150,14 +150,14 @@ The current Task create route returns a receipt (202 new / 200 replay), but the 
 
 ## 9. Delivery slices and merge gates
 
-| Slice | Deliverable | Gate / dependency |
-|---|---|---|
-| L0 — Contract freeze | Versioned OpenAPI/DTOs and decisions for identity, main Conversation, messages, idempotency reconciliation, assistant turn/stream, Task linkage/result, privacy and quotas | CTO + Platform approval; **blocks Live implementation** |
-| L1 — Authenticated transport | Auth session provider, Keychain-backed credential lifecycle, authenticated URLSession wrapper, redacted errors | Approved identity/session contract + security review |
-| L2 — Live Conversation repository | Server-authoritative main Conversation, history, idempotent send, ACK reconciliation, durable assistant turn | Approved Conversation/message/turn contracts |
-| L3 — Live Task repository and Outcome | Real bounded task receipt, safe progress events, typed authenticated result retrieval | Approved non-mock task kind, progress and result contracts, Model Gateway gate |
-| L4 — Continuity | Relaunch restore, active-turn/task reconciliation, protected pending outbox/cache | Approved retention and local-storage policy |
-| L5 — Internal Alpha gate | End-to-end signed-in iPhone flow, offline/retry, duplicate suppression, tenant isolation, no Mock/Live confusion | CTO release approval and consolidated device QA |
+| Slice                                 | Deliverable                                                                                                                                                                | Gate / dependency                                                              |
+| ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| L0 — Contract freeze                  | Versioned OpenAPI/DTOs and decisions for identity, main Conversation, messages, idempotency reconciliation, assistant turn/stream, Task linkage/result, privacy and quotas | CTO + Platform approval; **blocks Live implementation**                        |
+| L1 — Authenticated transport          | Auth session provider, Keychain-backed credential lifecycle, authenticated URLSession wrapper, redacted errors                                                             | Approved identity/session contract + security review                           |
+| L2 — Live Conversation repository     | Server-authoritative main Conversation, history, idempotent send, ACK reconciliation, durable assistant turn                                                               | Approved Conversation/message/turn contracts                                   |
+| L3 — Live Task repository and Outcome | Real bounded task receipt, safe progress events, typed authenticated result retrieval                                                                                      | Approved non-mock task kind, progress and result contracts, Model Gateway gate |
+| L4 — Continuity                       | Relaunch restore, active-turn/task reconciliation, protected pending outbox/cache                                                                                          | Approved retention and local-storage policy                                    |
+| L5 — Internal Alpha gate              | End-to-end signed-in iPhone flow, offline/retry, duplicate suppression, tenant isolation, no Mock/Live confusion                                                           | CTO release approval and consolidated device QA                                |
 
 Run thin vertical slices; do not create all abstractions in advance of the approved wire contract. The first useful Live slice should be **sign in → resolve main Conversation → send one text → receive persisted assistant reply → force quit/relaunch → restore the same transcript**. Add delegated Task execution only after the conversation path is real and stable.
 

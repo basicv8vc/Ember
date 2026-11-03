@@ -6,6 +6,9 @@ struct ConversationScreenState {
     var timeline: [ConversationTimelineEntry] = []
     var replyState: ConversationReplyState = .idle
     var suggestedPrompts: [String] = []
+    var showsEmptyState = true
+    var isLoading = false
+    var isSubmitting = false
 }
 
 enum ConversationReplyState: Equatable {

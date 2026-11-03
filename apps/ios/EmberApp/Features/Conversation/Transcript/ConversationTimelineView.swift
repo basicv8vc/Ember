@@ -13,7 +13,11 @@ struct ConversationTimelineView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if showsSuggestions {
+                    if state.isLoading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 32)
+                    } else if showsSuggestions {
                         ConversationEmptyStateView(
                             prompts: state.suggestedPrompts,
                             onPromptSelected: onPromptSelected

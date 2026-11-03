@@ -360,6 +360,39 @@ final class ConversationSubmissionCoordinatorTests: XCTestCase {
         XCTAssertEqual(acceptedReceipt, receipt)
     }
 
+    func testAssistantTurnIdentityIsIndependentFromMessageIdentity() async throws {
+        let repository = MockConversationSubmissionRepository(
+            submitOutcomes: [.unknownAcknowledgement(committed: false)]
+        )
+        let coordinator = ConversationSubmissionCoordinator(repository: repository)
+        let result = await coordinator.begin(
+            conversationID: conversationID,
+            transcriptEpoch: 0,
+            text: "Message and assistant turn are separate identities."
+        )
+        let submission = try XCTUnwrap(result)
+        let messageID = MessageID(rawValue: UUID(uuidString: "75000000-0000-4000-8000-000000000001")!)
+        let turnID = AssistantTurnID(rawValue: UUID(uuidString: "75000000-0000-4000-8000-000000000002")!)
+        let receipt = ConversationSubmissionReceipt(
+            clientSubmissionID: submission.clientSubmissionID,
+            conversationID: conversationID,
+            messageID: messageID,
+            sequence: 21,
+            turnID: turnID,
+            turnStatus: .running,
+            transcriptEpoch: 0
+        )
+
+        coordinator.resolveAccepted(receipt)
+
+        guard case .accepted(_, let acceptedReceipt) = coordinator.state else {
+            return XCTFail("Expected accepted receipt")
+        }
+        XCTAssertEqual(acceptedReceipt.messageID, messageID)
+        XCTAssertEqual(acceptedReceipt.turnID, turnID)
+        XCTAssertNotEqual(acceptedReceipt.messageID.rawValue, acceptedReceipt.turnID.rawValue)
+    }
+
     func testLateResponseFromSupersededAttemptCannotOverwriteRecoveryRetry() async throws {
         let repository = DeferredConversationSubmissionRepository()
         let coordinator = ConversationSubmissionCoordinator(repository: repository)

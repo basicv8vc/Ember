@@ -4,7 +4,7 @@
 > **Owner:** iOS Lead
 > **Repository:** `basicv8vc/Ember`
 > **Planning base:** `main@154860a82402648ce0548573a3db1a85b5b45e37`
-> **Related:** CTO Task — Ember V1 Alpha / iOS Integration; [#75 Beta V1 Roadmap](https://github.com/basicv8vc/Ember/issues/75); [#73 Conversation state and API proposal](https://github.com/basicv8vc/Ember/issues/73)
+> **Related:** CTO Task — Ember V1 Alpha / iOS Integration; [#91 B1 Live Platform Contract Freeze](https://github.com/basicv8vc/Ember/issues/91); [#75 Beta V1 Roadmap](https://github.com/basicv8vc/Ember/issues/75); [#73 Conversation state and API proposal](https://github.com/basicv8vc/Ember/issues/73)
 
 ## 1. Current iOS baseline
 
@@ -25,18 +25,16 @@ Do not redesign the UI. Preserve the existing SwiftUI Conversation, typed timeli
 
 ## 2. Contract status — implementation gate
 
-The current main branch does **not** contain a discoverable CTO-approved consumer Conversation/identity contract for the requested Live path.
-
-The following repository documents still classify the relevant missing capabilities as PROPOSED or BLOCKED:
+CTO has confirmed that the repository currently has **no approved Beta V1 Live Platform wire contract**. The source documents below are proposals/dependency records, not approved endpoints:
 
 - `docs/product/ios/IOS_API_DEPENDENCIES.md`
 - `docs/product/ios/IOS_M3_CONVERSATION_API_PROPOSAL.md`
 - `docs/product/ios/IOS_CONTRACT_FREEZE.md`
-- `docs/product/BETA_V1_ROADMAP.md` (B1 remains a CTO/Platform contract-review milestone)
+- `docs/product/BETA_V1_ROADMAP.md`
 
-Specifically, no approved mobile consumer session/refresh/revocation contract, default-Agent/main-Conversation resolver, Conversation/Message persistence API, assistant-turn stream contract, Task Inbox, general Task result manifest, or real bounded text-task kind was found in the audited main.
+The P0 contract work is tracked by [Issue #91](https://github.com/basicv8vc/Ember/issues/91). Platform must create `docs/adr/0004-beta-v1-live-platform-contract.md` in a separate PR. That ADR will be the single versioned CTO decision record after review and merge; machine-checked DTOs under `packages/contracts/src/**` must agree with it.
 
-**Action required:** attach the exact CTO approval artifact (PR, ADR, issue decision, or versioned contract document) to this plan before implementation. If approval exists outside the repository, Platform must publish or link the authoritative version and schema. This plan intentionally does not infer approval from proposed endpoint names.
+**PR #90 is only the iOS client integration plan.** It is not a wire-contract authority. iOS Live HTTP/session implementation remains gated until the Platform PR is reviewed, merged, and explicitly approved by CTO. This plan does not infer endpoint names or approval from existing proposals.
 
 ## 3. Existing Platform capabilities (source-audited)
 
@@ -93,7 +91,7 @@ After the wire contract is frozen, revise the repository boundary around server-
 - Fetch a paginated Conversation snapshot/history with stable server message IDs, sequence/order and timestamps.
 - Send a user-message command with a stable idempotency key; receive the canonical persisted message ID/sequence and assistant-turn ID/status.
 - Resolve an uncertain send after an unknown ACK without generating a new key or duplicate message.
-- Fetch/observe an assistant turn from a server cursor; streaming transport and terminal semantics are defined by Platform.
+- Fetch/observe an assistant turn through the simplest Platform-approved durable mechanism. Polling is acceptable; resumable events are optional. Token streaming is not required for the first Alpha.
 - Fetch the current Task snapshot and validated Task events through the existing Task repository boundary.
 - Fetch a typed, authenticated readable Outcome/Artifact only after the authoritative Task state is completed.
 
@@ -129,11 +127,11 @@ Platform must choose and specify one recovery mechanism:
 
 A volatile in-memory key alone does not satisfy force-quit recovery. Persisting raw text without a reviewed privacy/retention policy is not allowed. Do not invent an idempotency lookup route.
 
-## 7. Assistant streaming, Task progress and Outcomes
+## 7. Assistant turns, Task progress and Outcomes
 
 These are three distinct server facts:
 
-- **Assistant turn:** accepted/generating/completed/failed/cancelled, with a durable cursor and reconnect/replay behavior. A Conversation stream contract is missing and must be approved.
+- **Assistant turn:** accepted/generating/completed/failed/cancelled, with authoritative status and durable retrieval. Platform may choose polling or resumable events; token streaming is not required for the first Alpha.
 - **Task:** use authoritative Task snapshots and event sequence. The existing Task SSE parser/reconnect approach can be reused only for the Task event contract. It must not be treated as assistant-token streaming. Existing Task event payloads intentionally contain no free text; user-readable progress needs an approved safe summary field/event or a separate display contract.
 - **Outcome:** fetch a typed result/manifest using authenticated reads after Task status is completed. Validate task/result association, content type, size and integrity before rendering/copy/share. The existing Commitment outcomes route is not a substitute for Task result retrieval.
 
@@ -154,19 +152,19 @@ The current Task create route returns a receipt (202 new / 200 replay), but the 
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | L0 — Contract freeze                  | Versioned OpenAPI/DTOs and decisions for identity, main Conversation, messages, idempotency reconciliation, assistant turn/stream, Task linkage/result, privacy and quotas | CTO + Platform approval; **blocks Live implementation**                        |
 | L1 — Authenticated transport          | Auth session provider, Keychain-backed credential lifecycle, authenticated URLSession wrapper, redacted errors                                                             | Approved identity/session contract + security review                           |
-| L2 — Live Conversation repository     | Server-authoritative main Conversation, history, idempotent send, ACK reconciliation, durable assistant turn                                                               | Approved Conversation/message/turn contracts                                   |
+| L2 — Live Conversation repository     | Server-authoritative main Conversation, history, idempotent send, ACK reconciliation, durable assistant turn retrieval                                                      | Approved Conversation/message/turn contracts; polling or resumable events as specified by Platform |
 | L3 — Live Task repository and Outcome | Real bounded task receipt, safe progress events, typed authenticated result retrieval                                                                                      | Approved non-mock task kind, progress and result contracts, Model Gateway gate |
 | L4 — Continuity                       | Relaunch restore, active-turn/task reconciliation, protected pending outbox/cache                                                                                          | Approved retention and local-storage policy                                    |
 | L5 — Internal Alpha gate              | End-to-end signed-in iPhone flow, offline/retry, duplicate suppression, tenant isolation, no Mock/Live confusion                                                           | CTO release approval and consolidated device QA                                |
 
-Run thin vertical slices; do not create all abstractions in advance of the approved wire contract. The first useful Live slice should be **sign in → resolve main Conversation → send one text → receive persisted assistant reply → force quit/relaunch → restore the same transcript**. Add delegated Task execution only after the conversation path is real and stable.
+Run thin vertical slices; do not create all abstractions in advance of the approved wire contract. The first Live slice is **persistent multi-turn Chat**: sign in → resolve the main Conversation → send a message → receive a real assistant turn → persist the transcript → force quit/relaunch → restore the same history. Notes → Action Items is one bounded capability to add later, not the app home or a prerequisite for Chat. Add delegated Task execution after the Conversation path is real and stable.
 
 ## 10. Required acceptance tests
 
 - Auth: missing/expired/revoked session, refresh single-flight, logout clears credentials and pending private data.
 - Tenant isolation: foreign Conversation/Task/Outcome IDs are indistinguishable from not found.
 - Send: same key + same payload replays one canonical message/turn; same key + different payload conflicts; timeout/unknown ACK does not duplicate.
-- Streaming: event ordering, duplicate suppression, cursor validation, disconnect/reconnect, terminal-state authority.
+- Assistant turn delivery: authoritative status, duplicate suppression, durable retrieval/polling or resumable-event semantics, and terminal-state authority.
 - Task: receipt is not completion; progress comes only from server facts; cancellation pending is distinct from cancelled.
 - Outcome: unavailable before completion; authenticated result association and integrity validation; no stale result.
 - Continuity: force-quit after send-before-ACK, after ACK-before-reply, during stream, and while Task is running.
@@ -177,9 +175,9 @@ Run thin vertical slices; do not create all abstractions in advance of the appro
 
 Please attach or approve the authoritative contract version and answer:
 
-1. What exact PR/ADR/OpenAPI document is the **CTO-approved Platform contract** referenced by the integration task?
+1. What immutable merged commit SHA identifies the CTO-approved `docs/adr/0004-beta-v1-live-platform-contract.md` and matching `packages/contracts/src/**` schemas?
 2. What consumer identity/session provider and refresh/revocation lifecycle are approved?
-3. What are the authoritative main Conversation, message, assistant-turn and stream contracts?
+3. What are the authoritative main Conversation, message, assistant-turn and polling or resumable-event contracts?
 4. What is the unknown-ACK reconciliation mechanism: server lookup or approved protected outbox?
 5. Which non-mock Task kind and Model Gateway policy are approved for the first real delegated capability?
 6. What safe Task progress summary and typed Outcome/result manifest can iOS render?

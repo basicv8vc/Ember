@@ -11,12 +11,7 @@ import { IdSchema, IsoDateTimeSchema, TaskStatusSchema } from './task-schemas.js
  */
 export const B1TranscriptEpochSchema = z.number().int().nonnegative();
 export const B1MessageSequenceSchema = z.number().int().positive();
-export const B1AssistantTurnStatusSchema = z.enum([
-  'running',
-  'completed',
-  'failed',
-  'cancelled',
-]);
+export const B1AssistantTurnStatusSchema = z.enum(['running', 'completed', 'failed', 'cancelled']);
 export const B1AssistantFailureReasonSchema = z.enum(['timeout', 'internal_error']);
 
 export const B1SessionRequestSchema = z.strictObject({
@@ -55,7 +50,11 @@ const b1MessageBase = {
 export const B1UserMessageSchema = z.strictObject({
   ...b1MessageBase,
   kind: z.literal('user'),
-  text: z.string().min(1).max(4096).refine((value) => value.trim().length > 0),
+  text: z
+    .string()
+    .min(1)
+    .max(4096)
+    .refine((value) => value.trim().length > 0),
   client_submission_id: IdSchema,
 });
 
@@ -107,7 +106,11 @@ export const B1ConversationMessageSchema = z.discriminatedUnion('kind', [
 
 export const B1SendMessageRequestSchema = z.strictObject({
   client_submission_id: IdSchema,
-  text: z.string().min(1).max(4096).refine((value) => value.trim().length > 0),
+  text: z
+    .string()
+    .min(1)
+    .max(4096)
+    .refine((value) => value.trim().length > 0),
   transcript_epoch: B1TranscriptEpochSchema,
   client_created_at: IsoDateTimeSchema.optional(),
 });
@@ -132,38 +135,43 @@ export const B1ConversationPageSchema = z.strictObject({
   has_more: z.boolean(),
 });
 
-export const B1AssistantTurnDtoSchema = z.strictObject({
-  turn_id: IdSchema,
-  conversation_id: IdSchema,
-  source_message_id: IdSchema,
-  status: B1AssistantTurnStatusSchema,
-  created_at: IsoDateTimeSchema,
-  updated_at: IsoDateTimeSchema,
-  response_message_id: IdSchema.nullable(),
-  failure_reason: B1AssistantFailureReasonSchema.nullable(),
-}).superRefine((turn, context) => {
-  if (turn.status === 'completed' && turn.response_message_id === null) {
-    context.addIssue({
-      code: 'custom',
-      message: 'completed turn requires a response message',
-      path: ['response_message_id'],
-    });
-  }
-  if ((turn.status === 'running' || turn.status === 'cancelled') && turn.failure_reason !== null) {
-    context.addIssue({
-      code: 'custom',
-      message: 'non-failed turns must not contain a failure reason',
-      path: ['failure_reason'],
-    });
-  }
-  if (turn.status === 'failed' && turn.failure_reason === null) {
-    context.addIssue({
-      code: 'custom',
-      message: 'failed turn requires a failure reason',
-      path: ['failure_reason'],
-    });
-  }
-});
+export const B1AssistantTurnDtoSchema = z
+  .strictObject({
+    turn_id: IdSchema,
+    conversation_id: IdSchema,
+    source_message_id: IdSchema,
+    status: B1AssistantTurnStatusSchema,
+    created_at: IsoDateTimeSchema,
+    updated_at: IsoDateTimeSchema,
+    response_message_id: IdSchema.nullable(),
+    failure_reason: B1AssistantFailureReasonSchema.nullable(),
+  })
+  .superRefine((turn, context) => {
+    if (turn.status === 'completed' && turn.response_message_id === null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'completed turn requires a response message',
+        path: ['response_message_id'],
+      });
+    }
+    if (
+      (turn.status === 'running' || turn.status === 'cancelled') &&
+      turn.failure_reason !== null
+    ) {
+      context.addIssue({
+        code: 'custom',
+        message: 'non-failed turns must not contain a failure reason',
+        path: ['failure_reason'],
+      });
+    }
+    if (turn.status === 'failed' && turn.failure_reason === null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'failed turn requires a failure reason',
+        path: ['failure_reason'],
+      });
+    }
+  });
 
 const b1TextResultSchema = z.strictObject({
   summary_text: z.string().max(2048),

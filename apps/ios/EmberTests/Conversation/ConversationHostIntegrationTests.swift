@@ -76,6 +76,38 @@ final class ConversationHostIntegrationTests: XCTestCase {
         XCTAssertEqual(model.replyState, .idle)
     }
 
+    func testSendingUsesMockAcknowledgementAndPersistsOneReceiptIdentifiedMessage() async throws {
+        let repository = try ConversationFixtures.makeRepository()
+        let submissionRepository = MockConversationSubmissionRepository()
+        let model = ConversationHostModel(
+            repository: repository,
+            submissionRepository: submissionRepository,
+            replyDelayNanoseconds: 60_000_000_000
+        )
+        await model.load()
+
+        let text = "Verify the chat mock acknowledgement."
+        await model.send(text)
+
+        XCTAssertEqual(model.commandStatus, .acknowledged)
+        XCTAssertEqual(model.replyState, .generating)
+        let submissions = await submissionRepository.recordedSubmissions()
+        XCTAssertEqual(submissions.count, 1)
+        XCTAssertEqual(submissions.first?.text, text)
+
+        let snapshot = try await repository.fetchConversation(id: ConversationFixtures.mainConversationID)
+        let submittedMessages = snapshot.messages.filter {
+            if case .user(let submittedText) = $0.kind { submittedText == text } else { false }
+        }
+        XCTAssertEqual(submittedMessages.count, 1)
+        let submittedMessage = try XCTUnwrap(submittedMessages.first)
+        XCTAssertEqual(submittedMessage.sequence, 10)
+        XCTAssertEqual(snapshot.assistantTurns.last?.triggeringMessageID, submittedMessage.id)
+        XCTAssertEqual(snapshot.assistantTurns.last?.id, submittedMessage.turnID)
+
+        await model.stopReply()
+    }
+
     func testRepositorySequenceRemainsStableAcrossMultipleNewTurns() async throws {
         let repository = try ConversationFixtures.makeRepository()
         let model = ConversationHostModel(repository: repository, replyDelayNanoseconds: 0)

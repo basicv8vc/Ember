@@ -496,6 +496,11 @@ public actor MockConversationSubmissionRepository: ConversationSubmissionReposit
         lookupIDs
     }
 
+    public func setNextSequence(_ sequence: Int64) {
+        guard sequence > 0 else { return }
+        nextSequence = max(nextSequence, sequence)
+    }
+
     private func makeReceipt(
         for submission: ConversationSubmission
     ) -> ConversationSubmissionReceipt {

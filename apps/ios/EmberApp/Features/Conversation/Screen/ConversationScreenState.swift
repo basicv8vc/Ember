@@ -9,6 +9,7 @@ struct ConversationScreenState {
     var showsEmptyState = true
     var isLoading = false
     var isSubmitting = false
+    var commandStatus: ConversationCommandStatus = .idle
 }
 
 enum ConversationReplyState: Equatable {

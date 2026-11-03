@@ -157,11 +157,12 @@ CREATE TABLE IF NOT EXISTS assistant_turns (
     (status = 'cancelled' AND failure_reason IS NULL) OR
     (status IN ('running', 'completed') AND failure_reason IS NULL)
   ),
-  -- T-2: `completed` always has a response message. Uniqueness and kind are the FK above.
-  CONSTRAINT assistant_turns_completed_response_check CHECK (
-    status <> 'completed' OR response_message_id IS NOT NULL
+  -- T-2/A1: completed and failed Turns always have a response message. Uniqueness and kind are
+  -- enforced by the FK and unique constraint above; cancelled Turns may have no response.
+  CONSTRAINT assistant_turns_terminal_response_check CHECK (
+    status NOT IN ('completed', 'failed') OR response_message_id IS NOT NULL
   ),
-  -- A cancelled or failed turn may or may not have produced a message; a running one never has.
+  -- A running Turn never has a response; a cancelled Turn may end before one is produced.
   CONSTRAINT assistant_turns_running_response_check CHECK (
     status <> 'running' OR response_message_id IS NULL
   )

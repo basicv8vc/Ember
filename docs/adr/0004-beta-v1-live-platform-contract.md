@@ -96,12 +96,49 @@ wording, so they are recorded here:
 - The frozen scope is intentionally narrow. Anything not in the annex's §2.2 non-goals requires a new ADR;
   "it was implied by the contract" is not a license.
 
+## B1-1 handoff (prepared, NOT authorized before merge)
+
+Implementation may start only after the CTO approves and merges this ADR and its normative
+annex. Ownership is deliberately narrow: B1 owns identity, the Conversation/Message/Assistant
+Turn wire and persistence, and the existing Task linkage/result additions. B2 owns only a
+future model responder and its **separately reviewed** durable claim/lease extension. Do not
+create a second Assistant Turn state machine, change existing Task kind enums or silently
+authorize external model egress.
+
+**First implementation PR (B1-1) scope:** migrations 0011–0013, checked-in contract schemas
+and repository interfaces for consumer/session, Conversation, Message, Assistant Turn and
+Task result, plus deterministic tests. No HTTP routes, new real provider, credentials,
+deployment or production data processing in B1-1.
+
+**Acceptance gates before B1-2:**
+
+- Run forward migration and checksum-stable repeat application from a clean PostgreSQL 17
+  database using the repository's actual migrator; do not rely only on SQL copied from docs.
+- Assert tenant-qualified foreign keys and malformed-row rejections, including wrong
+  source/response message kinds, foreign Conversation, invalid message union fields, and
+  Consumer 1:1 uniqueness.
+- Test concurrent ordered appends and assigned sequence consistency, message
+  idempotency/unknown ACK, and deletion-epoch stale-send rejection using separate
+  PostgreSQL connections.
+- Verify Task-linkage identity does not silently mutate on replay (including no-link →
+  linked replay), and terminal result reads do not report pending for already-terminal
+  Tasks.
+- Preserve existing M2 Task/Commitment/Consent routes and the complete CI suite.
+- Report exact migration SHAs, test commands, results, and targeted negative cases in
+  the implementation PR; require review before B1-2 session routes begin.
+
+**Cross-team boundary:** B2 shall use the B1-defined
+\`assistant_turns (tenant_id,id)\` identity and server-authoritative terminal transitions.
+Its future \`model_turn_attempts\` and lease fields (not part of B1-1) require a separate
+forward-only migration and a fencing/cancellation review. iOS shall use this ADR's
+versioned wire semantics only after the frozen B1 contract is merged.
+
 ## Approval record
 
 | Field          | Value                                                                                |
 | -------------- | ------------------------------------------------------------------------------------ |
 | Contract PR    | #92 (`cto/b1-platform-contract`)                                                     |
 | Annex path     | `docs/product/B1_PLATFORM_CONTRACT.md`                                               |
-| Annex blob SHA | recorded on merge: `git rev-parse <merged-sha>:docs/product/B1_PLATFORM_CONTRACT.md` |
+| Annex blob SHA | `1eae8ec3332040b3089e62a425fde13e7590966b`                                           |
 | Approved by    | CTO (Round 2 review pending)                                                         |
 | Frozen from    | the merge commit of this ADR onward                                                  |

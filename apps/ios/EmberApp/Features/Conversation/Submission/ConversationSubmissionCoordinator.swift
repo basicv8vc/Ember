@@ -242,6 +242,9 @@ public final class ConversationSubmissionCoordinator {
         switch state {
         case .submitting(let submission), .unknownAcknowledgement(let submission),
              .reconciling(let submission):
+            // A delayed reconciliation result for a prior intent must not invalidate or
+            // retire the active attempt for a newer submission.
+            guard receipt.clientSubmissionID == submission.clientSubmissionID else { return }
             activeAttemptID = nil
             accept(receipt, for: submission)
         case .prepared, .idle, .retryableFailure, .accepted, .conflict, .failed,

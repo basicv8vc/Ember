@@ -115,6 +115,28 @@ final class ConversationSubmissionCoordinatorTests: XCTestCase {
         XCTAssertEqual(recorded, [stale])
     }
 
+    func testLookup404WithOlderCurrentEpochStopsWithoutLookupOrResubmit() async throws {
+        let repository = MockConversationSubmissionRepository(
+            submitOutcomes: [.unknownAcknowledgement(committed: false), .accepted]
+        )
+        let coordinator = ConversationSubmissionCoordinator(repository: repository)
+        let result = await coordinator.begin(
+            conversationID: conversationID,
+            transcriptEpoch: 2,
+            text: "The client must not invent a future transcript epoch."
+        )
+        let submission = try XCTUnwrap(result)
+
+        let recovered = await coordinator.recoverUnknownAcknowledgement(currentTranscriptEpoch: 1)
+
+        XCTAssertNil(recovered)
+        XCTAssertEqual(coordinator.state, .conflict(submission))
+        let recorded = await repository.recordedSubmissions()
+        let lookups = await repository.recordedLookupIDs()
+        XCTAssertEqual(recorded, [submission])
+        XCTAssertTrue(lookups.isEmpty)
+    }
+
     func testLookupUnavailableKeepsUnknownAckWithoutPostingAgain() async throws {
         let repository = MockConversationSubmissionRepository(
             submitOutcomes: [.unknownAcknowledgement(committed: false)],
@@ -330,6 +352,32 @@ final class ConversationSubmissionCoordinatorTests: XCTestCase {
         XCTAssertEqual(accepted, deliberate)
     }
 
+    func testLatePostResponseAfterTranscriptDeletionCannotRestoreSubmission() async throws {
+        let repository = DeferredConversationSubmissionRepository()
+        let coordinator = ConversationSubmissionCoordinator(repository: repository)
+        let attempt = Task {
+            await coordinator.begin(
+                conversationID: conversationID,
+                transcriptEpoch: 0,
+                text: "This in-flight response belongs to the deleted transcript."
+            )
+        }
+
+        await repository.waitForSubmissionCount(1)
+        guard case .submitting(let stale) = coordinator.state else {
+            return XCTFail("Expected an in-flight submission before deletion")
+        }
+
+        coordinator.transcriptWasDeleted(currentEpoch: 1)
+        await repository.resolve(index: 0)
+        _ = await attempt.value
+
+        XCTAssertEqual(
+            coordinator.state,
+            .discardedByTranscriptDeletion(stale, currentEpoch: 1)
+        )
+    }
+
     func testLateReceiptCanResolveUnknownAcknowledgement() async throws {
         let repository = MockConversationSubmissionRepository(
             submitOutcomes: [.unknownAcknowledgement(committed: false)]
@@ -428,6 +476,47 @@ final class ConversationSubmissionCoordinatorTests: XCTestCase {
             return XCTFail("Latest attempt should own the accepted state")
         }
         XCTAssertEqual(accepted, original)
+    }
+
+    func testLateReceiptForPriorSubmissionCannotInvalidateNewAttempt() async throws {
+        let repository = DeferredConversationSubmissionRepository()
+        let coordinator = ConversationSubmissionCoordinator(repository: repository)
+        let firstAttempt = Task {
+            await coordinator.begin(
+                conversationID: conversationID,
+                transcriptEpoch: 0,
+                text: "First submission."
+            )
+        }
+
+        await repository.waitForSubmissionCount(1)
+        await repository.resolve(index: 0)
+        let firstResult = await firstAttempt.value
+        let firstSubmission = try XCTUnwrap(firstResult)
+        guard case .accepted(_, let firstReceipt) = coordinator.state else {
+            return XCTFail("Expected the first submission to be accepted")
+        }
+
+        let nextSubmission = try XCTUnwrap(
+            coordinator.prepare(
+                conversationID: conversationID,
+                transcriptEpoch: 0,
+                text: "New submission."
+            )
+        )
+        let nextAttempt = Task { await coordinator.dispatchPrepared() }
+        await repository.waitForSubmissionCount(2)
+
+        coordinator.resolveAccepted(firstReceipt)
+        XCTAssertEqual(coordinator.state, .submitting(nextSubmission))
+
+        await repository.resolve(index: 1)
+        await nextAttempt.value
+        guard case .accepted(let accepted, _) = coordinator.state else {
+            return XCTFail("The current submission should retain its active attempt")
+        }
+        XCTAssertNotEqual(firstSubmission.clientSubmissionID, nextSubmission.clientSubmissionID)
+        XCTAssertEqual(accepted, nextSubmission)
     }
 
     func testMockRepositoryRejectsReusingSubmissionIDWithDifferentText() async throws {

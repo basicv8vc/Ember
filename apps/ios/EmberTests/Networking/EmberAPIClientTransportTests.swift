@@ -42,6 +42,35 @@ final class EmberAPIClientTransportTests: XCTestCase {
         XCTAssertEqual(captured.httpBody, request.httpBody)
     }
 
+    func testClientReadsURLSessionProvidedRequestBodyStream() async throws {
+        let expectedBody = Data([
+            0x00, 0x7B, 0x22, 0x6D, 0x65, 0x73, 0x73, 0x61, 0x67,
+            0x65, 0x22, 0x3A, 0x22, 0x68, 0x69, 0x22, 0x7D, 0xFF
+        ])
+        let responseBody = Data("{\"accepted\":true}".utf8)
+        let requests = LockedRequestBox<[URLRequest]>([])
+        registerHandler({ request in
+            requests.update { $0.append(request) }
+            return URLProtocolStubResponse(statusCode: 201, body: responseBody)
+        }, forHost: "body-stream.fixture.invalid")
+
+        var request = URLRequest(url: URL(string: "https://body-stream.fixture.invalid/v1/upload")!)
+        request.httpMethod = "POST"
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        request.setValue("stream-test", forHTTPHeaderField: "Idempotency-Key")
+        request.httpBodyStream = InputStream(data: expectedBody)
+
+        let response = try await makeClient().send(request)
+
+        XCTAssertEqual(response.statusCode, 201)
+        XCTAssertEqual(response.data, responseBody)
+        let captured = try XCTUnwrap(requests.value.first)
+        XCTAssertEqual(captured.httpMethod, "POST")
+        XCTAssertEqual(captured.value(forHTTPHeaderField: "Content-Type"), "application/octet-stream")
+        XCTAssertEqual(captured.value(forHTTPHeaderField: "Idempotency-Key"), "stream-test")
+        XCTAssertEqual(captured.httpBody, expectedBody)
+    }
+
     func testHandlersAreScopedToTheirRequestHosts() async throws {
         registerHandler({ _ in .json(statusCode: 201, body: "first") }, forHost: "first.fixture.invalid")
         registerHandler({ _ in .json(statusCode: 202, body: "second") }, forHost: "second.fixture.invalid")

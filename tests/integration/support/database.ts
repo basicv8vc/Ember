@@ -18,6 +18,15 @@ export interface TestDatabase {
   /** Separate pool used to prove that committed rows are visible outside the writer. */
   readonly observerPool: TestPool;
   readonly adminPool: TestPool;
+  /**
+   * Pool used only for cluster-level DDL that needs elevated privileges (`CREATE ROLE`).
+   *
+   * Migrations, production repositories and every other fixture keep using `TEST_DATABASE_URL`;
+   * only tests that intentionally exercise role provisioning reach for this pool. It is backed by
+   * `TEST_ADMIN_DATABASE_URL` when that is set, and otherwise falls back to `adminPool` so a
+   * cluster where the test role already has `CREATEROLE` keeps working unchanged.
+   */
+  readonly roleAdminPool: TestPool;
   close(): Promise<void>;
 }
 
@@ -96,6 +105,14 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
   const adminPool = createPool({ ...baseConfig, maxConnections: 2 });
   const schema = `ember_it_${randomBytes(6).toString('hex')}`;
 
+  // A cluster-level role-provisioning test needs CREATEROLE, which the ordinary test role must not
+  // have. When a dedicated privileged URL is configured it is used for that one purpose only.
+  const roleAdminUrl = process.env.TEST_ADMIN_DATABASE_URL;
+  const roleAdminPool =
+    roleAdminUrl === undefined || roleAdminUrl.length === 0
+      ? adminPool
+      : createPool({ ...loadDatabaseConfig({ DATABASE_URL: roleAdminUrl }), maxConnections: 2 });
+
   let pool: TestPool | undefined;
   let observerPool: TestPool | undefined;
 
@@ -118,12 +135,16 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
       pool: scopedPool,
       observerPool: scopedObserver,
       adminPool,
+      roleAdminPool,
       close: async () => {
         // Throws (rather than hanging) if a test left a client checked out; the pools after it
         // then stay open on purpose, because this run is already failing loudly.
         await endPool(scopedPool, 'test pool');
         await endPool(scopedObserver, 'observer pool');
         await endPool(adminPool, 'admin pool');
+        if (roleAdminPool !== adminPool) {
+          await endPool(roleAdminPool, 'role admin pool');
+        }
 
         if (!schemaPattern.test(schema)) {
           throw new Error('refusing to drop an unverified test schema');
@@ -144,6 +165,9 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
       await adminPool.query(`DROP SCHEMA IF EXISTS "${schema}" CASCADE`).catch(() => undefined);
     }
     await adminPool.end().catch(() => undefined);
+    if (roleAdminPool !== adminPool) {
+      await roleAdminPool.end().catch(() => undefined);
+    }
     throw error;
   }
 }

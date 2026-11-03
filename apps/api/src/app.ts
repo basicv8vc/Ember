@@ -17,6 +17,9 @@ import {
   unconfiguredCommitmentStore,
   type CommitmentStore,
 } from './commitments/commitment-store.js';
+import { unconfiguredConsentStore, type ConsentHttpStore } from './consents/consent-store.js';
+import { CONSENTS_PATH } from './consents/constants.js';
+import { createConsentRoutes } from './consents/routes.js';
 import {
   requestIdMiddleware,
   requestIdOf,
@@ -63,6 +66,11 @@ export interface AppDependencies {
   readonly approvalStore?: ApprovalHttpStore;
   /** Commitment persistence. Defaults to a store that reports `DB_UNAVAILABLE` (503). */
   readonly commitmentStore?: CommitmentStore;
+  /**
+   * Consent persistence (P0-C3D). Defaults to a store that reports `DB_UNAVAILABLE` (503), so a
+   * process without a database refuses to grant consent instead of falling back to "allow".
+   */
+  readonly consentStore?: ConsentHttpStore;
 }
 
 /**
@@ -71,9 +79,10 @@ export interface AppDependencies {
  *
  * Cross-cutting order matters and is fixed here:
  * 1. request id (every response, including errors, carries it);
- * 2. tenant authentication for `/v1/agents`, `/v1/tasks` and `/v1/artifacts` — `/healthz` and
- *    `/readyz` stay unauthenticated because an orchestrator has no tenant credential;
- * 3. agent, task and Artifact routes;
+ * 2. tenant authentication for every `/v1` surface (`agents`, `tasks`, `artifacts`,
+ *    `approvals`, `commitments`, `consents`) — `/healthz` and `/readyz` stay unauthenticated
+ *    because an orchestrator has no tenant credential;
+ * 3. agent, task, Artifact, approval, commitment and consent routes;
  * 4. one error mapper for the whole app.
  */
 export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
@@ -88,6 +97,7 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   const artifactStore = deps.artifactStore ?? unconfiguredArtifactHttpStore();
   const approvalStore = deps.approvalStore ?? unconfiguredApprovalHttpStore();
   const commitmentStore = deps.commitmentStore ?? unconfiguredCommitmentStore();
+  const consentStore = deps.consentStore ?? unconfiguredConsentStore();
   const tenantAuth = requireTenantAuth({ authenticator, logger });
 
   /**
@@ -150,9 +160,12 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   app.use(`${APPROVALS_PATH}/*`, tenantAuth);
   app.use(COMMITMENTS_PATH, tenantAuth);
   app.use(`${COMMITMENTS_PATH}/*`, tenantAuth);
+  app.use(CONSENTS_PATH, tenantAuth);
+  app.use(`${CONSENTS_PATH}/*`, tenantAuth);
   app.route(AGENTS_PATH, createAgentRoutes({ store: agentStore }));
   app.route(TASKS_PATH, createTaskRoutes({ store: taskStore }));
   app.route(COMMITMENTS_PATH, createCommitmentRoutes({ store: commitmentStore }));
+  app.route(CONSENTS_PATH, createConsentRoutes({ consents: consentStore }));
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
   app.route('/v1', createApprovalRoutes({ approvals: approvalStore, tasks: taskStore }));
 

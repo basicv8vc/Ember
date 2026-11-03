@@ -111,3 +111,39 @@ export {
   type SentinelReasonCode,
   type SentinelVerdict,
 } from './sentinel-lite.js';
+export {
+  FakeSummaryEngine,
+  MAX_SUMMARY_LENGTH,
+  OUTCOME_RESULT_STATUSES,
+  type OutcomeResultStatus,
+  type SourceSnapshot,
+  type SourceSnapshotItem,
+  type SummaryEngineResult,
+} from './commitment-summary-engine.js';
+export {
+  CommitmentOrchestrator,
+  type AppendOutcomeCommand,
+  type CommitmentOrchestrationContext,
+  type CommitmentOrchestratorDependencies,
+  type CommitmentStorePort,
+  type OrchestrationResult,
+  type SourceReaderPort,
+  type TrustedSourceAccessContext,
+  type WorkerLeaseGrant,
+} from './commitment-orchestrator.js';
+export {
+  consentDenied,
+  fromResolvedGenerationConsent,
+  isConsentAuthority,
+  isConsentFenceAuthority,
+  toConsentDenied,
+  type AuthorizedConsentGeneration,
+  type ConsentAuthority,
+  type ConsentAuthorizationFence,
+  type ConsentFenceAuthority,
+  type ConsentFenceExpectation,
+  type ConsentGrant,
+  type ConsentGrantSource,
+  type ConsentReadAuthorization,
+  type ResolvedGenerationAdapterOptions,
+} from './commitment-consent.js';

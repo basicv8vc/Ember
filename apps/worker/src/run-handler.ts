@@ -31,12 +31,34 @@ import type { WorkerLogger } from './logger.js';
  *   doing so would attempt a second terminal transition and could only produce a rejected,
  *   misleading finish.
  */
+/**
+ * Post-finish hook of a terminal Run outcome.
+ *
+ * It is invoked by the poll loop **after** `LeaseQueue.finish()` reported whether the terminal
+ * transition was accepted (`accepted === true`) or rejected because another Worker owns the
+ * lease. Handlers use it to finalize occurrence-level state (P0-C3B) without ever being able to
+ * write it after losing the lease. A hook may not throw: the Run is already terminal.
+ */
+export type RunHandlerFinalizer = (accepted: boolean) => Promise<void>;
+
 export type RunHandlerCompletion =
-  | { readonly type: 'finish'; readonly outcome: RunTerminalStatus }
+  | {
+      readonly type: 'finish';
+      readonly outcome: RunTerminalStatus;
+      readonly finalize?: RunHandlerFinalizer;
+    }
   | { readonly type: 'committed'; readonly receipt: CommitReceipt };
 
 export interface RunHandler {
-  handle(run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion>;
+  /**
+   * `context` is an already lease-validated `RunExecutionContext` supplied by a routing
+   * handler. Handlers must not re-read it when it is provided.
+   */
+  handle(
+    run: LeasedRun,
+    signal: AbortSignal,
+    context?: RunExecutionContext,
+  ): Promise<RunHandlerCompletion>;
 }
 
 export interface RunHandlerDependencies {
@@ -110,7 +132,11 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
   const { contextReader, router, executor, clock, logger } = deps;
 
   return {
-    async handle(run: LeasedRun, signal: AbortSignal): Promise<RunHandlerCompletion> {
+    async handle(
+      run: LeasedRun,
+      signal: AbortSignal,
+      preloadedContext?: RunExecutionContext,
+    ): Promise<RunHandlerCompletion> {
       const startedAtHr = performance.now();
       const base = {
         taskId: run.taskId,
@@ -122,7 +148,7 @@ export function createRunHandler(deps: RunHandlerDependencies): RunHandler {
       let context: RunExecutionContext;
 
       try {
-        context = await contextReader.read(run, clock.now());
+        context = preloadedContext ?? (await contextReader.read(run, clock.now()));
       } catch (error) {
         if (isDomainError(error) && (error.code === 'STALE_LEASE' || error.code === 'NOT_FOUND')) {
           // The lease is gone or belongs to someone else. Never execute, never finish.

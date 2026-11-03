@@ -3,7 +3,7 @@
 > **Status: APPROVED DESIGN — CTO 2026-11-03, ADR-0004. Implementation gated by merge and per-slice tests.**
 > This PR adds no routes, no migrations, no auth implementation, no provider credentials, no
 > model spend and no APNs. Capabilities below are labelled **EXISTING**, **PROPOSED** or
-> **DEFERRED** as *implementation states*; design approval does not make a route live.
+> **DEFERRED** as _implementation states_; design approval does not make a route live.
 >
 > **Audit baseline:** `main` @ `154860a82402648ce0548573a3db1a85b5b45e37` (2026-11-03).
 > Evidence was read from `apps/api/src/**`, `apps/worker/src/**`, `packages/contracts/src/**`,

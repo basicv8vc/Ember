@@ -150,8 +150,10 @@ CREATE TABLE IF NOT EXISTS assistant_turns (
   CONSTRAINT assistant_turns_status_check CHECK (
     status IN ('running', 'completed', 'failed', 'cancelled')
   ),
+  -- A CHECK accepts UNKNOWN; failed turns must explicitly carry a known reason.
   CONSTRAINT assistant_turns_failure_reason_check CHECK (
-    (status = 'failed' AND failure_reason IN ('timeout', 'internal_error')) OR
+    (status = 'failed' AND failure_reason IS NOT NULL
+      AND failure_reason IN ('timeout', 'internal_error')) OR
     (status = 'cancelled' AND failure_reason IS NULL) OR
     (status IN ('running', 'completed') AND failure_reason IS NULL)
   ),

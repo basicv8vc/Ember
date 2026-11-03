@@ -30,15 +30,18 @@ CREATE TABLE IF NOT EXISTS task_results (
   CONSTRAINT task_results_state_check CHECK (
     result_state IN ('pending', 'available', 'unavailable')
   ),
+  -- Each state has one row shape; no-text states carry neither truncation nor output metadata.
   CONSTRAINT task_results_shape_check CHECK (
     (result_state = 'pending' AND summary_text IS NULL AND detail_text IS NULL
+      AND reason_code IS NULL AND truncated = false
       AND model_label IS NULL AND simulated IS NULL AND produced_at IS NULL)
     OR
     (result_state = 'available' AND summary_text IS NOT NULL AND produced_at IS NOT NULL
       AND model_label IS NOT NULL AND simulated IS NOT NULL AND reason_code IS NULL)
     OR
     (result_state = 'unavailable' AND summary_text IS NULL AND detail_text IS NULL
-      AND reason_code IS NOT NULL)
+      AND reason_code IS NOT NULL AND truncated = false
+      AND model_label IS NULL AND simulated IS NULL AND produced_at IS NULL)
   ),
   CONSTRAINT task_results_bounds_check CHECK (
     (summary_text IS NULL OR char_length(summary_text) <= 2048) AND

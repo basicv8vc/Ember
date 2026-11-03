@@ -16,9 +16,51 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
   const otherPrincipalId = randomUUID();
   const otherAgentId = randomUUID();
   const otherConversationId = randomUUID();
+  const taskId = randomUUID();
+  const otherTaskId = randomUUID();
+  const commitmentId = randomUUID();
+  const otherCommitmentId = randomUUID();
   let nextSequence = 0;
 
   const sequence = (): number => ++nextSequence;
+
+  async function insertMessage(input: {
+    kind: string;
+    conversationId?: string;
+    tenantId?: string;
+    text?: string | null;
+    modelLabel?: string | null;
+    simulated?: boolean | null;
+    source?: string | null;
+    taskId?: string | null;
+    commitmentId?: string | null;
+    outcome?: unknown;
+    clientSubmissionId?: string | null;
+  }): Promise<string> {
+    const id = randomUUID();
+    await db.pool.query(
+      `INSERT INTO conversation_messages
+         (id, tenant_id, conversation_id, sequence, kind, text, model_label,
+          simulated, source, task_id, commitment_id, outcome, client_submission_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+      [
+        id,
+        input.tenantId ?? tenantId,
+        input.conversationId ?? conversationId,
+        sequence(),
+        input.kind,
+        input.text ?? null,
+        input.modelLabel ?? null,
+        input.simulated ?? null,
+        input.source ?? null,
+        input.taskId ?? null,
+        input.commitmentId ?? null,
+        input.outcome ?? null,
+        input.clientSubmissionId ?? null,
+      ],
+    );
+    return id;
+  }
 
   beforeAll(async () => {
     db = await createTestDatabase();
@@ -42,6 +84,27 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       `INSERT INTO conversations (id, tenant_id, agent_id, kind)
        VALUES ($1, $2, $3, 'main'), ($4, $5, $6, 'main')`,
       [conversationId, tenantId, agentId, otherConversationId, otherTenantId, otherAgentId],
+    );
+    await db.pool.query(
+      `INSERT INTO tasks (id, tenant_id, agent_id, kind, input, digest, idempotency_key)
+       VALUES ($1, $2, $3, 'mock.chat', '{}'::jsonb, $4, 'b1-alpha-task'),
+              ($5, $6, $7, 'mock.chat', '{}'::jsonb, $8, 'b1-other-task')`,
+      [
+        taskId,
+        tenantId,
+        agentId,
+        'a'.repeat(64),
+        otherTaskId,
+        otherTenantId,
+        otherAgentId,
+        'b'.repeat(64),
+      ],
+    );
+    await db.pool.query(
+      `INSERT INTO commitments (id, tenant_id, agent_id, title, schedule_kind, source_profile_id)
+       VALUES ($1, $2, $3, 'Alpha test', 'once', 'test.profile'),
+              ($4, $5, $6, 'Other test', 'once', 'test.profile')`,
+      [commitmentId, tenantId, agentId, otherCommitmentId, otherTenantId, otherAgentId],
     );
   });
 
@@ -102,6 +165,67 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     });
   });
 
+  it("rejects a Consumer linked to another tenant's Principal", async () => {
+    const isolatedTenantId = randomUUID();
+    await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [
+      isolatedTenantId,
+      'B1 isolated principal FK',
+    ]);
+    await expect(
+      db.pool.query('INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)', [
+        randomUUID(),
+        isolatedTenantId,
+        principalId,
+      ]),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'consumers_principal_fk' });
+  });
+
+  it('tenant-qualifies identity and session foreign keys and requires revoked-session reasons', async () => {
+    const otherConsumerId = randomUUID();
+    await db.pool.query('INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)', [
+      otherConsumerId,
+      otherTenantId,
+      otherPrincipalId,
+    ]);
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO consumer_identities (id, tenant_id, consumer_id, provider, provider_subject)
+         VALUES ($1, $2, $3, 'dev', 'cross-tenant-identity')`,
+        [randomUUID(), tenantId, otherConsumerId],
+      ),
+    ).rejects.toMatchObject({
+      code: '23503',
+      constraint: 'consumer_identities_consumer_fk',
+    });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO consumer_sessions
+           (id, tenant_id, consumer_id, token_digest, expires_at, idle_expires_at)
+         VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 hour')`,
+        [randomUUID(), tenantId, otherConsumerId, Buffer.alloc(32, 1)],
+      ),
+    ).rejects.toMatchObject({
+      code: '23503',
+      constraint: 'consumer_sessions_consumer_fk',
+    });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO consumer_sessions
+           (id, tenant_id, consumer_id, token_digest, expires_at, idle_expires_at,
+            revoked_at, revocation_reason)
+         VALUES ($1, $2, $3, $4, now() + interval '1 day', now() + interval '1 hour',
+                 now(), NULL)`,
+        [randomUUID(), otherTenantId, otherConsumerId, Buffer.alloc(32, 2)],
+      ),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'consumer_sessions_revocation_check',
+    });
+  });
+
   it("rejects another tenant's Conversation using a composite FK", async () => {
     await expect(
       db.pool.query(
@@ -116,19 +240,101 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     });
   });
 
-  it('rejects an unexpected extra field on the strict user variant', async () => {
+  it('rejects cross-tenant Task and Commitment references and Task Results', async () => {
+    await expect(
+      insertMessage({ kind: 'task_reference', taskId: otherTaskId }),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'conversation_messages_task_fk' });
+    await expect(
+      insertMessage({ kind: 'commitment_reference', commitmentId: otherCommitmentId }),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'conversation_messages_commitment_fk' });
     await expect(
       db.pool.query(
-        `INSERT INTO conversation_messages
-           (id, tenant_id, conversation_id, sequence, kind, text,
-            client_submission_id, model_label)
-         VALUES ($1, $2, $3, $4, 'user', 'hello', $5, 'forbidden')`,
-        [randomUUID(), tenantId, conversationId, sequence(), randomUUID()],
+        `INSERT INTO task_results (id, tenant_id, task_id, result_state)
+         VALUES ($1, $2, $3, 'pending')`,
+        [randomUUID(), tenantId, otherTaskId],
       ),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'task_results_task_fk' });
+  });
+
+  it('enforces the closed six-variant message union', async () => {
+    const validMessages = [
+      { kind: 'user', text: 'hello', clientSubmissionId: randomUUID() },
+      { kind: 'ember', text: 'reply', modelLabel: 'ember-fake-test', simulated: true },
+      { kind: 'activity', text: 'started', source: 'system' },
+      { kind: 'task_reference', taskId },
+      { kind: 'commitment_reference', commitmentId },
+      {
+        kind: 'outcome_reference',
+        outcome: { outcome_kind: 'no_change', task_id: taskId, commitment_id: null },
+      },
+    ];
+    for (const message of validMessages) {
+      await insertMessage(message);
+    }
+
+    const malformedMessages = [
+      { kind: 'user', text: 'hello', clientSubmissionId: randomUUID(), modelLabel: 'forbidden' },
+      {
+        kind: 'ember',
+        text: 'reply',
+        modelLabel: 'ember-fake-test',
+        simulated: true,
+        source: 'forbidden',
+      },
+      { kind: 'activity', text: 'started', source: 'system', simulated: true },
+      { kind: 'task_reference', taskId, text: 'forbidden' },
+      { kind: 'commitment_reference', commitmentId, modelLabel: 'forbidden' },
+      { kind: 'outcome_reference', outcome: { outcome_kind: 'no_change' }, taskId },
+      { kind: 'user', text: 'hello' },
+      { kind: 'ember', text: 'reply', simulated: true },
+      { kind: 'activity', text: 'started' },
+      { kind: 'task_reference' },
+      { kind: 'commitment_reference' },
+      { kind: 'outcome_reference' },
+      { kind: 'unknown', text: 'hello' },
+    ];
+    for (const message of malformedMessages) {
+      await expect(insertMessage(message)).rejects.toMatchObject({ code: '23514' });
+    }
+
+    await expect(
+      insertMessage({
+        kind: 'activity',
+        text: 'x'.repeat(281),
+        source: 'system',
+      }),
     ).rejects.toMatchObject({
       code: '23514',
-      constraint: 'conversation_messages_shape_check',
+      constraint: 'conversation_messages_text_bounds_check',
     });
+    await expect(
+      insertMessage({
+        kind: 'user',
+        text: 'x'.repeat(4097),
+        clientSubmissionId: randomUUID(),
+      }),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'conversation_messages_text_bounds_check',
+    });
+  });
+
+  it('enforces the Conversation Agent uniqueness and tenant-qualified Agent FK', async () => {
+    await expect(
+      db.pool.query(
+        `INSERT INTO conversations (id, tenant_id, agent_id, kind)
+         VALUES ($1, $2, $3, 'main')`,
+        [randomUUID(), tenantId, agentId],
+      ),
+    ).rejects.toMatchObject({ code: '23505', constraint: 'conversations_one_per_kind_unique' });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO conversations (id, tenant_id, agent_id, kind)
+         VALUES ($1, $2, $3, 'main')`,
+        [randomUUID(), tenantId, otherAgentId],
+      ),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'conversations_agent_fk' });
   });
 
   it('refuses using an Ember message as a Turn source (generated-column FK)', async () => {
@@ -178,6 +384,34 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     });
   });
 
+  it('rejects a cross-tenant Ember response for a completed Turn', async () => {
+    const sourceId = await insertMessage({
+      kind: 'user',
+      text: 'same tenant source',
+      clientSubmissionId: randomUUID(),
+    });
+    const foreignResponse = await insertMessage({
+      kind: 'ember',
+      tenantId: otherTenantId,
+      conversationId: otherConversationId,
+      text: 'foreign tenant response',
+      modelLabel: 'ember-fake-test',
+      simulated: true,
+    });
+    await expect(
+      db.pool.query(
+        `INSERT INTO assistant_turns
+           (id, tenant_id, conversation_id, source_message_id, response_message_id,
+            status, deadline_at)
+         VALUES ($1, $2, $3, $4, $5, 'completed', now() + interval '60 seconds')`,
+        [randomUUID(), tenantId, conversationId, sourceId, foreignResponse],
+      ),
+    ).rejects.toMatchObject({
+      code: '23503',
+      constraint: 'assistant_turns_response_message_fk',
+    });
+  });
+
   it('accepts a completed Turn only with a valid same-conversation Ember response', async () => {
     const sourceId = randomUUID();
     const responseId = randomUUID();
@@ -203,5 +437,149 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       [randomUUID(), tenantId, conversationId, sourceId, responseId],
     );
     expect(result.rows[0]?.status).toBe('completed');
+  });
+
+  it('rejects failed Turns without a failure reason and terminal-shape contradictions', async () => {
+    const failedSource = await insertMessage({
+      kind: 'user',
+      text: 'failed turn',
+      clientSubmissionId: randomUUID(),
+    });
+    await expect(
+      db.pool.query(
+        `INSERT INTO assistant_turns
+           (id, tenant_id, conversation_id, source_message_id, status,
+            failure_reason, deadline_at)
+         VALUES ($1, $2, $3, $4, 'failed', NULL, now() + interval '60 seconds')`,
+        [randomUUID(), tenantId, conversationId, failedSource],
+      ),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'assistant_turns_failure_reason_check',
+    });
+
+    const runningSource = await insertMessage({
+      kind: 'user',
+      text: 'running turn',
+      clientSubmissionId: randomUUID(),
+    });
+    const response = await insertMessage({
+      kind: 'ember',
+      text: 'response too early',
+      modelLabel: 'ember-fake-test',
+      simulated: true,
+    });
+    await expect(
+      db.pool.query(
+        `INSERT INTO assistant_turns
+           (id, tenant_id, conversation_id, source_message_id,
+            response_message_id, status, deadline_at)
+         VALUES ($1, $2, $3, $4, $5, 'running', now() + interval '60 seconds')`,
+        [randomUUID(), tenantId, conversationId, runningSource, response],
+      ),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'assistant_turns_running_response_check',
+    });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO assistant_turns
+           (id, tenant_id, conversation_id, source_message_id,
+            response_message_id, status, deadline_at)
+         VALUES ($1, $2, $3, $4, NULL, 'completed', now() + interval '60 seconds')`,
+        [randomUUID(), tenantId, conversationId, runningSource],
+      ),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'assistant_turns_completed_response_check',
+    });
+  });
+
+  it('accepts all three valid Task Result states and enforces one result per Task', async () => {
+    const insertResult = (resultState: string, extraColumns = '', extraValues = '') =>
+      db.pool.query(
+        `INSERT INTO task_results (id, tenant_id, task_id, result_state${extraColumns})
+         VALUES ($1, $2, $3, $4${extraValues})`,
+        [randomUUID(), tenantId, taskId, resultState],
+      );
+
+    await insertResult('pending');
+    await expect(insertResult('pending')).rejects.toMatchObject({
+      code: '23505',
+      constraint: 'task_results_task_unique',
+    });
+    await db.pool.query('DELETE FROM task_results WHERE tenant_id = $1 AND task_id = $2', [
+      tenantId,
+      taskId,
+    ]);
+
+    await insertResult(
+      'available',
+      ', summary_text, model_label, simulated, produced_at',
+      ", 'summary', 'ember-fake-test', true, now()",
+    );
+    await db.pool.query('DELETE FROM task_results WHERE tenant_id = $1 AND task_id = $2', [
+      tenantId,
+      taskId,
+    ]);
+
+    await insertResult('unavailable', ', reason_code', ", 'no_text_output'");
+  });
+
+  it('rejects Task Result fields that contradict pending or unavailable state', async () => {
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results (id, tenant_id, task_id, result_state, reason_code)
+         VALUES ($1, $2, $3, 'pending', 'no_text_output')`,
+        [randomUUID(), tenantId, taskId],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_shape_check' });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results (id, tenant_id, task_id, result_state, truncated)
+         VALUES ($1, $2, $3, 'pending', true)`,
+        [randomUUID(), tenantId, taskId],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_shape_check' });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results
+           (id, tenant_id, task_id, result_state, reason_code, model_label)
+         VALUES ($1, $2, $3, 'unavailable', 'no_text_output', 'ember-fake-test')`,
+        [randomUUID(), tenantId, taskId],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_shape_check' });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results
+           (id, tenant_id, task_id, result_state, reason_code, truncated)
+         VALUES ($1, $2, $3, 'unavailable', 'no_text_output', true)`,
+        [randomUUID(), tenantId, taskId],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_shape_check' });
+
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results (id, tenant_id, task_id, result_state, reason_code)
+         VALUES ($1, $2, $3, 'unavailable', 'other_reason')`,
+        [randomUUID(), tenantId, taskId],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_reason_check' });
+  });
+
+  it('rejects Task Result text above the frozen bounds', async () => {
+    await expect(
+      db.pool.query(
+        `INSERT INTO task_results
+           (id, tenant_id, task_id, result_state, summary_text,
+            model_label, simulated, produced_at)
+         VALUES ($1, $2, $3, 'available', $4, 'ember-fake-test', true, now())`,
+        [randomUUID(), tenantId, taskId, 'x'.repeat(2049)],
+      ),
+    ).rejects.toMatchObject({ code: '23514', constraint: 'task_results_bounds_check' });
   });
 });

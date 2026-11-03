@@ -18,10 +18,10 @@ describe('B1-1 T-17: concurrent SQL constraints', () => {
     db = await createTestDatabase();
     await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [tenantId, 'B1 T-17']);
     for (const principalId of principalIds) {
-      await db.pool.query(
-        "INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')",
-        [principalId, tenantId],
-      );
+      await db.pool.query("INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')", [
+        principalId,
+        tenantId,
+      ]);
     }
     for (let i = 0; i < agentIds.length; i += 1) {
       await db.pool.query(

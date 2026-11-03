@@ -16,10 +16,7 @@ describe('B1-1 T-17: concurrent SQL constraints', () => {
 
   beforeAll(async () => {
     db = await createTestDatabase();
-    await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [
-      tenantId,
-      'B1 T-17',
-    ]);
+    await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [tenantId, 'B1 T-17']);
     for (const principalId of principalIds) {
       await db.pool.query(
         "INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')",
@@ -42,10 +39,7 @@ describe('B1-1 T-17: concurrent SQL constraints', () => {
     await db?.close();
   });
 
-  async function insertMessage(
-    conversationId: string,
-    kind: 'user' | 'ember',
-  ): Promise<string> {
+  async function insertMessage(conversationId: string, kind: 'user' | 'ember'): Promise<string> {
     const id = randomUUID();
     nextSequence += 1;
     if (kind === 'user') {

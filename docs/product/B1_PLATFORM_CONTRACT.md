@@ -1,9 +1,9 @@
 # Ember B1 — Platform Contract (iPhone-only Personal Agent Alpha)
 
-> **Status: PROPOSED — CTO approval required. Documentation only.**
+> **Status: APPROVED DESIGN — CTO 2026-11-03, ADR-0004. Implementation gated by merge and per-slice tests.**
 > This PR adds no routes, no migrations, no auth implementation, no provider credentials, no
-> model spend and no APNs. Every capability below is labelled **EXISTING**, **PROPOSED** or
-> **DEFERRED**; nothing is labelled APPROVED.
+> model spend and no APNs. Capabilities below are labelled **EXISTING**, **PROPOSED** or
+> **DEFERRED** as *implementation states*; design approval does not make a route live.
 >
 > **Audit baseline:** `main` @ `154860a82402648ce0548573a3db1a85b5b45e37` (2026-11-03).
 > Evidence was read from `apps/api/src/**`, `apps/worker/src/**`, `packages/contracts/src/**`,
@@ -1342,8 +1342,8 @@ buys nothing this fence does not already provide and costs a permanent write-amp
 
 ## 17. Approval
 
-Status: **PROPOSED — Round 1 corrections applied, awaiting re-review.** This document contains no code,
-no migration, no route and no schema change; implementing it requires CTO approval. Reviewing means
+Status: **APPROVED DESIGN — CTO 2026-11-03, ADR-0004.** This document contains no code,
+no migration, no route and no schema change; implementing it requires the merged ADR and B1-1's own verified PR. Reviewing means
 checking §16.1 and reading §17.2, which maps every Round 1 review item to the section that answers it.
 
 ### 17.1 Change log

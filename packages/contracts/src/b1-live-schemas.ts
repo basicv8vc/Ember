@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { TASK_TERMINAL_STATUSES } from '@ember/domain';
 import { OUTCOME_RESULT_STATUSES } from './commitment-schemas.js';
 import { IdSchema, IsoDateTimeSchema, TaskStatusSchema } from './task-schemas.js';
 
@@ -13,6 +14,7 @@ export const B1TranscriptEpochSchema = z.number().int().nonnegative();
 export const B1MessageSequenceSchema = z.number().int().positive();
 export const B1AssistantTurnStatusSchema = z.enum(['running', 'completed', 'failed', 'cancelled']);
 export const B1AssistantFailureReasonSchema = z.enum(['timeout', 'internal_error']);
+const B1ClientSubmissionIdSchema = z.uuidv4();
 
 export const B1SessionRequestSchema = z.strictObject({
   provider: z.enum(['apple', 'dev']),
@@ -55,7 +57,7 @@ export const B1UserMessageSchema = z.strictObject({
     .min(1)
     .max(4096)
     .refine((value) => value.trim().length > 0),
-  client_submission_id: IdSchema,
+  client_submission_id: B1ClientSubmissionIdSchema,
 });
 
 export const B1EmberMessageSchema = z.strictObject({
@@ -105,7 +107,7 @@ export const B1ConversationMessageSchema = z.discriminatedUnion('kind', [
 ]);
 
 export const B1SendMessageRequestSchema = z.strictObject({
-  client_submission_id: IdSchema,
+  client_submission_id: B1ClientSubmissionIdSchema,
   text: z
     .string()
     .min(1)
@@ -127,13 +129,37 @@ export const B1SendMessageReceiptSchema = z.strictObject({
   transcript_epoch: B1TranscriptEpochSchema,
 });
 
-export const B1ConversationPageSchema = z.strictObject({
-  conversation_id: IdSchema,
-  transcript_epoch: B1TranscriptEpochSchema,
-  messages: z.array(B1ConversationMessageSchema).max(100),
-  next_after: z.number().int().nonnegative(),
-  has_more: z.boolean(),
-});
+/** GET /v1/message-submissions/{id} returns the exact POST receipt after an unknown ACK. */
+export const B1MessageSubmissionReconciliationDtoSchema = B1SendMessageReceiptSchema;
+
+export const B1ConversationPageSchema = z
+  .strictObject({
+    conversation_id: IdSchema,
+    transcript_epoch: B1TranscriptEpochSchema,
+    messages: z.array(B1ConversationMessageSchema).max(100),
+    next_after: z.number().int().nonnegative(),
+    has_more: z.boolean(),
+  })
+  .superRefine((page, context) => {
+    for (let index = 1; index < page.messages.length; index += 1) {
+      if (page.messages[index]!.sequence <= page.messages[index - 1]!.sequence) {
+        context.addIssue({
+          code: 'custom',
+          message: 'messages must be in strictly ascending sequence order',
+          path: ['messages', index, 'sequence'],
+        });
+      }
+    }
+
+    const lastMessage = page.messages.at(-1);
+    if (lastMessage !== undefined && page.next_after !== lastMessage.sequence) {
+      context.addIssue({
+        code: 'custom',
+        message: 'next_after must equal the last message sequence',
+        path: ['next_after'],
+      });
+    }
+  });
 
 export const B1AssistantTurnDtoSchema = z
   .strictObject({
@@ -151,6 +177,20 @@ export const B1AssistantTurnDtoSchema = z
       context.addIssue({
         code: 'custom',
         message: 'completed turn requires a response message',
+        path: ['response_message_id'],
+      });
+    }
+    if (turn.status === 'failed' && turn.response_message_id === null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'failed turn requires its safe response message',
+        path: ['response_message_id'],
+      });
+    }
+    if (turn.status === 'running' && turn.response_message_id !== null) {
+      context.addIssue({
+        code: 'custom',
+        message: 'running turn must not contain a response message',
         path: ['response_message_id'],
       });
     }
@@ -183,23 +223,41 @@ const b1ResultBase = {
   task_status: TaskStatusSchema,
 };
 
-export const B1TaskResultDtoSchema = z.discriminatedUnion('result_state', [
-  z.strictObject({
-    ...b1ResultBase,
-    result_state: z.literal('pending'),
-    result: z.null(),
-  }),
-  z.strictObject({
-    ...b1ResultBase,
-    result_state: z.literal('available'),
-    result: b1TextResultSchema,
-  }),
-  z.strictObject({
-    ...b1ResultBase,
-    result_state: z.literal('unavailable'),
-    result: z.null(),
-  }),
-]);
+export const B1TaskResultDtoSchema = z
+  .discriminatedUnion('result_state', [
+    z.strictObject({
+      ...b1ResultBase,
+      result_state: z.literal('pending'),
+      result: z.null(),
+    }),
+    z.strictObject({
+      ...b1ResultBase,
+      result_state: z.literal('available'),
+      result: b1TextResultSchema,
+    }),
+    z.strictObject({
+      ...b1ResultBase,
+      result_state: z.literal('unavailable'),
+      result: z.null(),
+    }),
+  ])
+  .superRefine((dto, context) => {
+    const isTerminal = (TASK_TERMINAL_STATUSES as readonly string[]).includes(dto.task_status);
+    if (dto.result_state === 'pending' && isTerminal) {
+      context.addIssue({
+        code: 'custom',
+        message: 'terminal tasks cannot have pending results',
+        path: ['result_state'],
+      });
+    }
+    if (dto.result_state !== 'pending' && !isTerminal) {
+      context.addIssue({
+        code: 'custom',
+        message: 'available or unavailable results require a terminal task',
+        path: ['result_state'],
+      });
+    }
+  });
 
 export type B1SessionRequest = z.infer<typeof B1SessionRequestSchema>;
 export type B1SessionResponse = z.infer<typeof B1SessionResponseSchema>;
@@ -207,6 +265,9 @@ export type B1MeResponse = z.infer<typeof B1MeResponseSchema>;
 export type B1ConversationMessage = z.infer<typeof B1ConversationMessageSchema>;
 export type B1SendMessageRequest = z.infer<typeof B1SendMessageRequestSchema>;
 export type B1SendMessageReceipt = z.infer<typeof B1SendMessageReceiptSchema>;
+export type B1MessageSubmissionReconciliationDto = z.infer<
+  typeof B1MessageSubmissionReconciliationDtoSchema
+>;
 export type B1ConversationPage = z.infer<typeof B1ConversationPageSchema>;
 export type B1AssistantTurnDto = z.infer<typeof B1AssistantTurnDtoSchema>;
 export type B1TaskResultDto = z.infer<typeof B1TaskResultDtoSchema>;

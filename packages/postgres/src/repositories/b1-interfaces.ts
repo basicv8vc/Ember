@@ -1,7 +1,7 @@
 import type {
   B1AssistantTurnDto,
-  B1ConversationMessage,
   B1ConversationPage,
+  B1MessageSubmissionReconciliationDto,
   B1SendMessageRequest,
   B1SendMessageReceipt,
   B1TaskResultDto,
@@ -10,8 +10,9 @@ import type { Id } from '@ember/domain';
 
 /**
  * B1-1 persistence boundaries. No implementation uses network auth or model egress.
- * Every operation gets a trusted server-derived tenantId; none accepts caller-supplied tenant JSON.
- * Approved by ADR-0004; methods that change multiple rows must be implemented transactionally.
+ * Tenant-scoped operations take a trusted server-derived tenantId; identity/session bootstrap
+ * derives scope from verified provider identity or a server-side token digest, never caller JSON.
+ * Approved by ADR-0004; multi-row changes are explicitly transactional.
  */
 export interface B1ConsumerIdentity {
   readonly consumerId: Id;
@@ -29,12 +30,23 @@ export interface B1ProvisionedIdentity {
   readonly conversationId: Id;
 }
 
+export interface B1ProvisionedSession {
+  readonly identity: B1ProvisionedIdentity;
+  readonly session: B1SessionRecord;
+}
+
 export interface B1ConsumerProvisioningRepository {
-  /** Entire consumer, principal, agent and main conversation is created in one transaction. */
-  provisionIdentity(identity: {
+  /**
+   * Provision identity and persist the session digest in the same transaction (ADR-0004 I-4).
+   * The raw bearer token never crosses this persistence boundary.
+   */
+  provisionIdentityAndCreateSession(command: {
     readonly provider: 'apple' | 'dev';
     readonly providerSubject: string;
-  }): Promise<B1ProvisionedIdentity>;
+    readonly tokenDigest: Uint8Array;
+    readonly expiresAt: string;
+    readonly idleExpiresAt: string;
+  }): Promise<B1ProvisionedSession>;
 }
 
 export interface B1SessionRecord {
@@ -46,34 +58,38 @@ export interface B1SessionRecord {
   readonly revokedAt: string | null;
 }
 
+/** Session lookup projection needed to resolve the unchanged AuthContext server-side. */
+export interface B1AuthenticatedSession {
+  readonly session: B1SessionRecord;
+  readonly principalId: Id;
+  readonly policyVersion: number;
+}
+
 export interface B1ConsumerSessionRepository {
-  /** Raw bearer token is never persisted or returned by this repository. */
-  createSession(command: {
-    readonly tenantId: Id;
-    readonly consumerId: Id;
-    readonly tokenDigest: Uint8Array;
-    readonly expiresAt: string;
-    readonly idleExpiresAt: string;
-  }): Promise<B1SessionRecord>;
+  /** Server-authoritative lookup, with DB clock expiry/revocation checks and hourly idle sliding. */
+  findActiveSession(tokenDigest: Uint8Array): Promise<B1AuthenticatedSession | null>;
 
-  /** Server-authoritative lookup, with DB clock expiry and revocation checks. */
-  findActiveSession(tokenDigest: Uint8Array): Promise<B1SessionRecord | null>;
-
-  /** Atomically rotate: revoke original, then persist the new digest and replay guard. */
+  /**
+   * Atomically rotate the session identified by the presented digest. A previously rotated
+   * digest revokes every session for that consumer and returns `reuse_detected`; any other
+   * missing, expired or revoked session returns `inactive`. Only SHA-256 digests cross this
+   * persistence boundary.
+   */
   rotateSession(command: {
-    readonly sessionId: Id;
-    readonly tenantId: Id;
+    readonly currentTokenDigest: Uint8Array;
     readonly newTokenDigest: Uint8Array;
     readonly expiresAt: string;
     readonly idleExpiresAt: string;
-  }): Promise<B1SessionRecord>;
+  }): Promise<B1SessionRotationResult>;
 
-  revokeSession(command: {
-    readonly sessionId: Id;
-    readonly tenantId: Id;
-    readonly reason: 'logout' | 'reuse_detected';
-  }): Promise<void>;
+  /** Idempotently revoke only the tenant-qualified session presented for logout. */
+  revokeSession(command: { readonly sessionId: Id; readonly tenantId: Id }): Promise<void>;
 }
+
+export type B1SessionRotationResult =
+  | { readonly kind: 'rotated'; readonly session: B1SessionRecord }
+  | { readonly kind: 'reuse_detected' }
+  | { readonly kind: 'inactive' };
 
 export interface B1ConversationIdentity {
   readonly conversationId: Id;
@@ -105,13 +121,26 @@ export interface B1ConversationRepository {
     readonly limit: number;
   }): Promise<B1ConversationPage>;
 
-  findMessageBySubmission(command: {
+  /** Tenant-scoped unknown-ACK lookup that joins the user message to its original turn receipt. */
+  findSubmissionReceipt(command: {
     readonly tenantId: Id;
     readonly clientSubmissionId: Id;
-  }): Promise<B1ConversationMessage | null>;
+  }): Promise<B1MessageSubmissionReconciliationDto | null>;
 
-  /** Increment epoch and erase the transcript atomically, never touching tasks/results. */
-  clearTranscript(command: { readonly tenantId: Id; readonly conversationId: Id }): Promise<number>;
+  /**
+   * Increment the epoch and erase messages/turns in one transaction, never touching tasks/results.
+   * Returns the exact counters required by the clear-transcript response.
+   */
+  clearTranscript(command: {
+    readonly tenantId: Id;
+    readonly conversationId: Id;
+  }): Promise<B1TranscriptClearResult>;
+}
+
+export interface B1TranscriptClearResult {
+  readonly deletedMessages: number;
+  readonly deletedTurns: number;
+  readonly transcriptEpoch: number;
 }
 
 export interface B1AssistantTurnRepository {

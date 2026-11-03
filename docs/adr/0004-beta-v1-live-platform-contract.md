@@ -139,6 +139,6 @@ versioned wire semantics only after the frozen B1 contract is merged.
 | -------------- | ------------------------------------------ |
 | Contract PR    | #92 (`cto/b1-platform-contract`)           |
 | Annex path     | `docs/product/B1_PLATFORM_CONTRACT.md`     |
-| Annex blob SHA | `465a5b5cd5ce5f219d560fa51f9ff12e1b85deba` |
-| Approved by    | CTO — 2026-11-03               |
+| Annex blob SHA | `2e06b47691b71b05e3903f0bd65d5b9f381776c0` |
+| Approved by    | CTO — 2026-11-03                           |
 | Frozen from    | the merge commit of this ADR onward        |

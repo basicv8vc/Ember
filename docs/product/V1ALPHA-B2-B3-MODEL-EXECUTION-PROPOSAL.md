@@ -547,7 +547,7 @@ policyVersion }`; the caller cannot supply either identity. Therefore:
 - storage remains `(tenant_id, scope_kind, scope_id)` with `scope_kind IN ('tenant','principal')`; no speculative consumer scope is needed for Alpha;
 - the contract decision is complete, but the production session/auth runtime is not shipped by B1-1. The B1-2 implementation and integration tests must prove that every issued session resolves the correct principal before a real model call can be enabled.
 
-This settles the identity *model* without overstating implementation readiness. The spend ledger must
+This settles the identity _model_ without overstating implementation readiness. The spend ledger must
 not accept a caller-supplied principal ID, and no paid call may proceed if the authenticated
 `AuthContext` or its policy version cannot be resolved.
 

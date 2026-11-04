@@ -71,7 +71,7 @@ AppCompositionRoot
        ├─ Authenticated API transport (URLSession)
        ├─ LiveConversationRepository
        ├─ LiveTaskRepository
-       └─ protected pending-send/cache store (only if retention policy approves)
+       └─ protected pending-send outbox (required by B1; storage implementation security-reviewed)
 
 ConversationHostModel
   └─ ConversationRepositoryProtocol
@@ -123,7 +123,7 @@ B1 freezes the send and unknown-ACK protocol; iOS must implement it literally:
 
 1. Before the first attempt, persist a pending outbox entry containing the exact message, a fresh `client_submission_id` and the current `transcript_epoch`. Reuse that submission ID for retries of the same intent.
 2. Submit `POST /v1/conversations/{conversation_id}/messages` with `client_submission_id`, text and `transcript_epoch`. Do **not** send an `Idempotency-Key` header on this route; that header remains the existing Task protocol.
-3. On timeout or transport failure, call `GET /v1/message-submissions/{client_submission_id}`. A 200 means adopt the original message + Turn receipt; a 404 means retry the POST with the same ID and same epoch.
+3. On timeout or transport failure, call `GET /v1/message-submissions/{client_submission_id}`. A 200 means adopt the original message + Turn receipt. On 404, compare the stored epoch with a fresh `GET /v1/me`: retry the POST with the same ID and epoch only if the epoch is unchanged; if it advanced, treat the entry as pre-deletion and discard it rather than retrying.
 4. On resume, page messages and reconcile by the returned `client_submission_id`; never use text, timestamp or message length as a deduplication heuristic.
 5. A 409 `IDEMPOTENCY_CONFLICT` is not an automatic retry signal. Refresh `GET /v1/me`, reload the page, clear the affected outbox entry and preserve the text only as an unsent draft. A new ID is created only after the user explicitly chooses to send it as a new message.
 6. On transcript deletion, clear the outbox and retire in-flight sends. The server increments `transcript_epoch`; a stale entry must never be replayed into the cleared transcript.
@@ -134,7 +134,7 @@ The outbox is part of the frozen client contract, not an optional alternative to
 
 These are three distinct server facts:
 
-- **Assistant turn:** `running/completed/failed/cancelled`, with authoritative status and durable retrieval through the B1 Turn route. B1 specifies polling (at least the contract's 1000 ms cadence); token streaming and assistant-turn SSE are deferred.
+- **Assistant turn:** `running/completed/failed/cancelled`, with authoritative status and durable retrieval through the B1 Turn route. B1 specifies polling no more frequently than once per 1000 ms; token streaming and assistant-turn SSE are deferred.
 - **Task:** use authoritative Task snapshots and event sequence. The existing Task SSE parser/reconnect approach can be reused only for the Task event contract. It must not be treated as assistant-token streaming. Existing Task event payloads intentionally contain no free text; user-readable progress needs an approved safe summary field/event or a separate display contract.
 - **Outcome:** fetch a typed result/manifest using authenticated reads after Task status is completed. Validate task/result association, content type, size and integrity before rendering/copy/share. The existing Commitment outcomes route is not a substitute for Task result retrieval.
 

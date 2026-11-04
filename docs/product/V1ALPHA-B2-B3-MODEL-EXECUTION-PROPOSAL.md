@@ -2,22 +2,24 @@
 
 | field                     | value                                                                                   |
 | ------------------------- | --------------------------------------------------------------------------------------- |
-| status                    | **proposed — awaiting CTO review; no code, no key, no egress**                          |
-| phase 1                   | **B2 — Real Assistant Turn** (Conversation-first, the Alpha milestone)                  |
-| phase 2                   | **B3 — Bounded Task Execution** (`notes.action_items`, invoked from Chat)               |
-| audit of record           | `docs/product/V1ALPHA-MODEL-EXECUTION-AUDIT.md` (findings unchanged)                    |
-| wire authority            | `docs/adr/0004-beta-v1-live-platform-contract.md` (Issue #91), contract draft in PR #92 |
-| base commit               | `154860a` (`main` HEAD at branch time)                                                  |
-| branch                    | `cto/v1alpha-notes-action-items`                                                        |
-| migrations on base        | `0001`–`0010`; B1 reserves `0011`–`0013`; **B2 takes `0014`, B3 takes `0015`**          |
-| external provider traffic | **zero**. Not provisioned, not contacted, not enabled.                                  |
+| status                    | **proposed — documentation/design baseline only; no implementation or activation authorization** |
+| phase 1                   | **B2 — Real Assistant Turn** (Conversation-first, the Alpha milestone) |
+| phase 2                   | **B3 — Bounded Task Execution** (`notes.action_items`, invoked from Chat) |
+| audit of record           | `docs/product/V1ALPHA-MODEL-EXECUTION-AUDIT.md` (findings unchanged) |
+| wire authority            | ADR-0004 merged via PR #92; normative annex blob `2e06b47691b71b05e3903f0bd65d5b9f381776c0` |
+| historical audit baseline | `154860a` (`main` at the time of the original repository audit) |
+| current main baseline     | `38dd69b38a3f9c2dad5730b6902080a1ca3b4c1a` (PR #97 / B1-1 merged 2026-11-04) |
+| branch                    | `cto/v1alpha-notes-action-items` |
+| migrations on current main | `0001`–`0013`; **B2 takes `0014`, B3 takes `0015`**, subject to rechecking the sequence when implementation starts |
+| external provider traffic | **zero**. Not provisioned, not contacted, not enabled. |
 
 ## 0. Decision requested
 
-Approve a **two-phase plan** in which the first paid, externally-visible model call powers an
-assistant reply inside Chat, and `notes.action_items` follows as a capability Chat can invoke.
+Accept the **B2-first / B3-second sequencing and its safety architecture as the planning baseline**: the first real model-backed capability should be an assistant reply inside Chat; `notes.action_items` follows as a bounded capability Chat can invoke.
 
-Concretely, five decisions:
+This is a documentation-only decision. Merging this proposal does **not** approve a provider/model, provision credentials, permit user-transcript egress, authorize paid calls, or activate `real` mode.
+
+The following implementation and activation decisions remain open:
 
 | #   | Decision                                 | Default if the CTO says "yes to the proposal"                                              |
 | --- | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
@@ -48,13 +50,13 @@ The B2-first order changes four things in the plan and nothing in the audit:
 | New tables           | 2 (`model_spend_*`)                              | 2 + 1 audit trail (`model_turn_attempts`)                             |
 | Visible result       | typed JSON artifact + `task_results`             | assistant text in the transcript **and** duplicate-call cost evidence |
 
-The second row is the important one. **B2 needs no new wire field at all**, because the B1 contract
-already requires every assistant message to carry `model_label` and `simulated` (M-5, §9.4) and
-already defines a three-state result resource with an `unavailable` branch reserved for
+The second row is the important one. **B2 needs no new wire field at all**, because the frozen B1
+contract already requires every assistant message to carry `model_label` and `simulated` (M-5, §9.4)
+and already defines a three-state result resource with an `unavailable` branch reserved for
 "artifact-only Task kinds" (X-4). That reservation is what makes B3 fit later without widening a
 frozen shape. The old plan's hardest problem — inventing a vocabulary inside the `task_events`
-payload allowlist — is now a B3 problem that lands **after** the platform contract is merged, against
-a contract owner who has already published the rules.
+payload allowlist — is now a B3 problem that must be implemented against the merged contract and
+the Platform-owned runtime.
 
 What the re-scope costs: B2 is useless on its own if B1 is late, and B2's correctness depends on a
 schema we do not own. Both are stated as hard dependencies in §3 rather than absorbed as optimism.
@@ -76,32 +78,34 @@ F-2 is new in this revision and it is not small. It is the reason §6.3 exists.
 
 ## 3. Implementation dependencies (explicit, ordered, each one a gate)
 
-Nothing in this proposal can start before D-1, and each later item is a gate rather than an
-assumption.
+The contract and B1-1 persistence foundation have landed. The remaining B1 runtime slices are still
+hard dependencies for the parts of B2/B3 that call them; a merged schema or interface is not a live
+endpoint or worker capability.
 
-| ID  | Dependency                                                                                                                          | Owner                         | Blocks                 | If it slips                                                                                                    |
-| --- | ----------------------------------------------------------------------------------------------------------------------------------- | ----------------------------- | ---------------------- | -------------------------------------------------------------------------------------------------------------- |
-| D-1 | Issue #91: `docs/adr/0004-beta-v1-live-platform-contract.md` merged, immutable SHA named                                            | Platform contract owner / CTO | **everything**         | B2 does not start. No partial wire work                                                                        |
-| D-2 | PR #92 (B1 contract) merged                                                                                                         | CTO                           | B2 wire alignment      | B2 is designed against a draft; re-review required                                                             |
-| D-3 | B1-1 … B1-5 implemented: `0011`–`0012` migrations, `POST`/`GET` messages, turn rows, **responder seam**, turn polling + T-1 sweeper | Platform                      | B2-4                   | B2-2/B2-3 (gateway + ledger) may proceed dark; no turn path                                                    |
-| D-4 | B1-6/B1-7 implemented: message→task linkage, `task_results` write path                                                              | Platform                      | B3                     | B3 waits; B2 unaffected                                                                                        |
-| D-5 | Migration slot: B1 owns `0011`–`0013`; this proposal takes `0014` (B2) and `0015` (B3)                                              | Platform                      | migrations             | If B1 renumbers, B2 renumbers; the proposal states the **rule**, not just the number                           |
-| D-6 | Consumer Identity contract (#91 §5, §11.1): account → tenant/principal mapping                                                      | Platform                      | per-user quota keying  | Interim keying is `AuthContext.principalId` (§7.2), which is real today, not an assumption that tenant == user |
-| D-7 | CTO approval items A1–A5, B1–B4 (§14)                                                                                               | CTO                           | any paid call          | `EMBER_MODEL_EXECUTION` stays `disabled`                                                                       |
-| D-8 | iOS #90: Live repository plan; no Live calls before B2 merges                                                                       | iOS lead                      | user-visible milestone | Mock transport must not silently fall back to Live, or vice versa                                              |
+| ID | Dependency | Owner | Blocks | Current state / consequence |
+| --- | --- | --- | --- | --- |
+| D-1 | ADR-0004 approved and merged; immutable annex SHA recorded | CTO / Platform | Contract alignment | **Complete** — PR #92 merged at `8f7dc1934e508b9a7e6a551ef19fbe9cf6bc6026`; annex blob `2e06b47691b71b05e3903f0bd65d5b9f381776c0`. |
+| D-2 | B1 contract PR #92 merged | CTO | Wire alignment | **Complete** — no B2/B3 work may invent or revise overlapping wire semantics. |
+| D-3a | B1-1 persistence foundation: migrations `0011`–`0013`, strict schemas and typed repository ports | Platform | B2 schema alignment | **Complete** — PR #97 merged at `38dd69b38a3f9c2dad5730b6902080a1ca3b4c1a`. |
+| D-3b | B1-2…B1-5 runtime: concrete repositories/transactions, session and Conversation/Message/Turn routes, responder seam, polling and T-1 sweeper | Platform | B2-4 | **Not complete** — B2-4 cannot wire into a responder until the B1-5 seam and authoritative runtime transitions exist. B2-1/B2-2/B2-3 may be developed dark behind tests. |
+| D-4 | B1-6/B1-7 runtime: verified Message→Task linkage and Task Result write/read path | Platform | B3 | **Not complete** — B3 waits; B2 remains independent. |
+| D-5 | Migration order: B1 owns `0011`–`0013`; B2 takes `0014`; B3 takes `0015` | Platform | Migrations | **Current allocation** — recheck `main` migration inventory before creating each migration; renumber only if a preceding slice has legitimately consumed a slot. |
+| D-6 | Consumer identity mapping and authenticated principal semantics from ADR-0004 §5 | Platform | Per-user quota keying | **Contract complete; runtime pending** — Alpha defines Consumer↔Tenant and Consumer↔Principal as 1:1, with owner role; `AuthContext` remains the server-derived identity boundary. |
+| D-7 | CTO decisions in §14: C1–C6 for the relevant Sentinel/Gateway design; A1–A5 and B1–B4 before any real provider call | CTO | Trusted-module changes / paid egress | Unresolved items remain explicit; until the real-call gate passes, `EMBER_MODEL_EXECUTION` stays `disabled` (or `fake` only in explicitly labelled tests). |
+| D-8 | iOS #90 client integration plan and implementation | iOS Lead | User-visible milestone | Client work may proceed against the frozen contract; Live calls remain blocked until the corresponding B1 runtime and B2 real-model gates are deployed and approved. Mock/Live must never silently fall back. |
 
-D-5 and D-6 deserve a sentence each.
+D-5 and D-6 record two important boundaries.
 
-**D-5.** A migration number is a coordination artifact, not a preference. If B1's `0013` moves, B2's
-file renames; nothing else changes, because no B2 migration references a B1 object by number.
+**D-5.** Migration numbers are a coordination artifact, not a preference. The current main tree contains
+`0011`–`0013`; B2's proposed migration is `0014`, B3's is `0015`. Recheck the actual migration
+inventory immediately before implementation—do not assume this proposal grants a slot if another
+approved slice has consumed it.
 
-**D-6.** The CTO said do not assume tenant equals user. The proposal does not: it keys the per-user
-ceiling on `principalId` from the existing `AuthContext` (`apps/api/src/auth/bearer-authenticator.ts`
-already carries `tenantId`, `principalId`, `policyVersion`), stores it as
-`(scope_kind, scope_id)` so a future `consumer` scope is a `CHECK` extension rather than a rewrite,
-and states plainly that **until #91 lands, "per user" means "per principal within a tenant"** — for
-the current dev authenticator those are 1:1, and that 1:1 relation is a property of today's fixture,
-not a platform guarantee.
+**D-6.** ADR-0004 §5.1 settles the Alpha identity model: Consumer↔Tenant is 1:1 and Consumer↔Principal
+is 1:1 with the owner role. The client cannot supply either identifier; session authentication
+derives the unchanged `AuthContext { tenantId, principalId, policyVersion }`. Therefore `principalId`
+is the correct server-side per-user spend key for Alpha. This is a **frozen contract decision**, not
+yet a claim that production session/auth runtime has shipped or that a multi-user tenant is supported.
 
 ## 4. Phase 1 — B2: Real Assistant Turn
 
@@ -532,22 +536,20 @@ They are checked independently and **both must pass**. When they disagree, the s
 allowance never overrides a ceiling. Neither value is computed from the other, and no code reads
 `tenant_id` to infer a user.
 
-### 7.2 What "per user" means until #91 lands
+### 7.2 What "per user" means under the frozen Alpha identity contract
 
-This is the CTO's point 5, and the honest answer is a limitation, not a design. `AuthContext` today
-carries `tenantId`, `principalId` and `policyVersion` and nothing else, and the only authenticator is
-the dev bearer one. So:
+ADR-0004 §5.1 defines Consumer↔Tenant as 1:1 and Consumer↔Principal as 1:1 with the owner role.
+The session authenticator resolves the unchanged server-side `AuthContext { tenantId, principalId,
+policyVersion }`; the caller cannot supply either identity. Therefore:
 
-- the per-user ceiling is keyed on `principalId`, scoped by tenant;
-- for the current dev fixture tenant and principal are 1:1, which means the per-user ceiling is
-  **untested against a real multi-user tenant** until #91 provisions accounts;
-- storage is `(tenant_id, scope_kind, scope_id)` with `scope_kind IN ('tenant','principal')`, so adding
-  `'consumer'` is one `CHECK` change later plus one constant — not a data migration;
-- if #91 decides the consumer is not the principal, the per-user ceiling follows the consumer and the
-  principal-scoped rows remain history that is still auditable.
+- the per-user ceiling is keyed on `principalId`, scoped by tenant; this matches the frozen Alpha identity model rather than relying on the current dev fixture's accidental 1:1 mapping;
+- a tenant has one Alpha consumer/owner principal; shared or multi-user tenants are explicitly outside this contract;
+- storage remains `(tenant_id, scope_kind, scope_id)` with `scope_kind IN ('tenant','principal')`; no speculative consumer scope is needed for Alpha;
+- the contract decision is complete, but the production session/auth runtime is not shipped by B1-1. The B1-2 implementation and integration tests must prove that every issued session resolves the correct principal before a real model call can be enabled.
 
-I will not claim the per-user ceiling is proven. It is implemented against the only identity the
-platform currently has, and it is labelled as such in the code and in the runbook.
+This settles the identity *model* without overstating implementation readiness. The spend ledger must
+not accept a caller-supplied principal ID, and no paid call may proceed if the authenticated
+`AuthContext` or its policy version cannot be resolved.
 
 ### 7.3 Migration `0014` (sketch, not written)
 
@@ -879,28 +881,29 @@ one genuinely global bucket; local per-tenant tests alone cannot prove it.
 
 ## 12. PR sequence
 
-Each implementation PR must leave main green. **No code implementation
-starts before the approved B1 ADR and its normative annex are merged.**
-The PR numbers below are work items, not existing PRs.
+Each implementation PR must leave main green. The approved B1 contract and B1-1 persistence
+foundation are already merged; this removes the old contract-freeze blocker, **not** the remaining
+runtime, trusted-module or provider-activation gates. The PR numbers below are work items, not
+existing PRs.
 
-| Slice | Deliverable                                                                                              | Gate                                                                       |
-| ----- | -------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| B2-0  | This design PR + preserved original audit, docs only                                                     | CTO design review                                                          |
-| B2-1  | Strict Run/Turn Sentinel intent, model.infer category, version-1 compatibility, negative tests           | B1 contract frozen; T1–T3                                                  |
-| B2-2  | Gateway types, strict config, FakeModelGateway, offline error mapping                                    | T4–T5; zero real egress                                                    |
-| B2-3  | Forward-only 0014, durable Turn claim/fence, shared global + tenant/principal money ledgers, attempt CAS | T6, T10–T15, migration replay                                              |
-| B2-4  | Worker ModelTurnResponder behind B1-5 responder seam; fenced publication; retries and sweeper            | B1-5 merged, T7–T11, T16–T17                                               |
-| B2-5  | One real provider adapter, pinned origin/model, merged dark and disabled                                 | Separate model/provider/pricing/privacy CTO gate; no paid smoke by default |
-| B2-6  | Runbook, account spend limit check, 80% warning destination, emergency stop and billing reconciliation   | Named operational owner; operator dry run                                  |
-| B3-1  | 0015 Task kind/event payload/error vocabulary, fail-closed tests                                         | B1 Task linkage/results frozen, T18                                        |
-| B3-2  | Bounded action-item extraction via same gateway, unique paid-attempt fence and immutable artifact        | T19 and safe cost accounting                                               |
-| B3-3  | iOS Task/Outcome card integrated into Conversation                                                       | iOS Lead, production truthfulness                                          |
+| Slice | Deliverable | Gate |
+| --- | --- | --- |
+| B2-0 | This design proposal + preserved original audit, docs only | Merge accepts the sequencing/guardrails as a planning baseline only; unresolved §14 decisions remain open. |
+| B2-1 | Strict Run/Turn Sentinel intent, `model.infer` category, version-1 compatibility and negative tests | Frozen B1 contract + CTO approval of C1–C3/C6; T1–T3. |
+| B2-2 | Gateway types, strict config, FakeModelGateway and offline error mapping | T4–T5; no provider network egress, credentials or production routes. |
+| B2-3 | Forward-only `0014`, durable Turn claim/fence, shared global + tenant/principal money ledgers, attempt CAS | B1-1 ports/schema; CTO approval of relevant limits; T6, T10–T15 and migration replay. |
+| B2-4 | Worker ModelTurnResponder behind the B1-5 responder seam; fenced publication, retries and sweeper | B1-2…B1-5 runtime complete, including the real responder seam; T7–T11, T16–T17. |
+| B2-5 | One real provider adapter, pinned origin/model, merged dark and disabled | Separate approval of A1–A5 and B1–B4; verified model/pricing, data terms/DPA, billing controls and operator stop/alerts. |
+| B2-6 | Runbook, account spend-limit check, 80% warning destination, emergency stop and billing reconciliation | Named operational owner; operator dry run. |
+| B3-1 | `0015` Task kind/event payload/error vocabulary and fail-closed tests | B1-6/B1-7 Task linkage/Result runtime; C4 approval; T18. |
+| B3-2 | Bounded action-item extraction via the same gateway, unique paid-attempt fence and immutable artifact | T19 and safe cost accounting; same real-provider gate as B2-5. |
+| B3-3 | iOS Task/Outcome card integrated into Conversation | iOS Lead; B1-6/B1-7 runtime and production truthfulness. |
 
-B2-1/B2-2 cannot contact a provider and must not expose new production
-routes. B2-5 may be merged dark, but **cannot be activated** by a
-documentation merge, an environment switch alone, or a per-tenant policy
-alone; the separate provider, data-protection and billing acceptance gate
-must pass.
+B2-1/B2-2/B2-3 are dark, non-provider work: they must not contact a provider, use a credential or
+expose a real model-backed route. B2-4 remains blocked on the B1 responder runtime. B2-5 may be
+merged dark, but **cannot be activated** by a documentation merge, an environment switch alone or a
+per-tenant policy alone. The separate provider, data-protection, billing and operational acceptance
+gate must pass first.
 
 ## 13. Explicitly out of scope
 
@@ -984,20 +987,24 @@ These design corrections are **not** permission for production model egress.
 | Token heuristics and unknown invoices          | §7.3–§8, §10: verified token preflight, pessimistic unknown charges, no claim of invoice-hard cap             |
 | Sentinel compatibility and mode ambiguity      | §6.3/§6.5: strict intent union, policy-v1 tests, legacy admission preserved, disabled means no fake inference |
 
-**Cross-team resolutions:** B1 PR #92 now proposes
-`assistant_turns UNIQUE (tenant_id,id)`, so B2 shall use that composite
-identity after B1 merges; Alpha principal identity is server-authenticated
-and 1:1 with Consumer, but cannot be caller supplied. The B1 Turn 60-second
+**Cross-team resolutions:** ADR-0004 and its normative annex are frozen and merged in PR #92;
+B1-1 is implemented and merged in PR #97. The live database now enforces
+`assistant_turns UNIQUE (tenant_id,id)`, so B2 must use that composite
+identity. ADR-0004 §5.1 freezes the Alpha Consumer↔Tenant and
+Consumer↔Principal mappings as server-derived 1:1 relationships with the
+owner role; caller-supplied identity is forbidden. The B1 Turn 60-second
 deadline includes queueing and retries. B1's 200 submitted messages per
 rolling 24 h is distinct from 60 paid Turns per UTC day. B3's initial iOS
 path requires verified Conversation/Message linkage.
 
-**Still blocked:** exact pinned provider/model and official pricing,
-provider prompt retention/training terms and applicable DPA, account-level
-billing controls, operator alert destination, finished B1 implementation,
-and separate CTO authorization for any real-mode activation.
+**Still blocked:** B1-2…B1-7 runtime implementation (including auth/session,
+Conversation/Message/Turn routes, responder seam, Task linkage and Result
+writer/read path); exact pinned provider/model and invoice-grade pricing;
+provider prompt retention/training terms and applicable DPA; provider-side
+billing controls; operator alert destination/runbook; and separate CTO
+authorization for any real-mode activation.
 
-## Appendix A — file inventory per PR (none of these exist yet)
+## Appendix A — planned file inventory for B2/B3 implementation slices (not created by this proposal)
 
 | PR   | Files                                                                                                                                                        |
 | ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
@@ -1010,10 +1017,16 @@ and separate CTO authorization for any real-mode activation.
 | B3-1 | `migrations/0015_notes_action_items.sql`, `tests/integration/kind-vocabulary.test.ts`                                                                        |
 | B3-2 | `packages/model-gateway/src/action-items/*`, `apps/worker/src/durable-run-handler.ts` (`infer` step + `consumedFor`), `tests/e2e/notes-action-items.test.ts` |
 
-No file in this appendix has been created, and `docs/` is the only directory this PR touches.
+As of current main `38dd69b`, none of the B2/B3 implementation files in this appendix has been
+created. This PR remains documentation-only and changes no executable directory.
 
 ---
 
-Status: **PROPOSED**. No executable change, no dependency, no secret, no migration file, no provider
-contact. Implementing B2 requires D-1 (the #91 ADR) plus approval of §14.1–§14.3. Implementing B3
-additionally requires B1-6/B1-7 and §14.3 C4.
+Status: **PROPOSED — documentation/design baseline only**. This PR changes documentation only:
+no executable code, dependency, secret, migration file, provider contact or model spend. D-1/D-2
+(the approved B1 contract) and B1-1 are complete. B2-1/B2-2/B2-3 may proceed only as dark,
+non-provider implementation slices after their relevant CTO design decisions and tests are approved.
+B2-4 additionally requires B1-2…B1-5 runtime and the responder seam. B2-5 real mode requires all
+A1–A5 and B1–B4 approvals plus verified provider, pricing, data-protection, billing and operational
+controls. B3 additionally requires B1-6/B1-7 runtime and C4 approval. Merging this document grants
+none of those implementation or activation permissions.

@@ -150,9 +150,7 @@ describe('B1-1 T-17: concurrent SQL constraints', () => {
     );
   });
 
-  it(
-    'rejects concurrent reuse of one submission ID across conversations in the same tenant',
-    async () => {
+  it('rejects concurrent tenant-wide submission ID reuse', async () => {
       const submissionId = randomUUID();
       const firstSequence = ++nextSequence;
       const secondSequence = ++nextSequence;

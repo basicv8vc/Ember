@@ -25,10 +25,11 @@
 > **Round 1 review:** the CTO review on PR #92 requested five P0 corrections. All are applied in this
 > revision and indexed in §17.2, which maps each review item to the section that now answers it.
 
-> **CTO amendment (2026-11-04):** [Decision 0002](../decisions/0002-b1-1-tenant-wide-submission-uniqueness.md)
-> supersedes the original submission-ID uniqueness scope in §6.4, §11.2 and D-6.
-> The original annex blob `2e06b47691b71b05e3903f0bd65d5b9f381776c0` remains preserved
-> in Git history; no HTTP route or DTO has changed.
+> **CTO amendment (2026-11-04):**
+> [Decision 0002](../decisions/0002-b1-1-tenant-wide-submission-uniqueness.md) supersedes the
+> original submission-ID uniqueness scope in §6.4, §11.2 and D-6. The original annex blob
+> `2e06b47691b71b05e3903f0bd65d5b9f381776c0` remains preserved in Git history; no HTTP route or
+> DTO has changed.
 
 ## 1. Executive summary
 
@@ -362,8 +363,8 @@ Headers: `Authorization: Bearer <session>`, `Content-Type: application/json`. Ca
 The message route deliberately takes **no** `Idempotency-Key`. Message idempotency must be
 _recoverable_: after a lost response the client asks `GET /v1/message-submissions/{id}` (§10.1) and a
 header key cannot answer that. Two keys for one write would also create a mismatch state that no
-constraint can resolve, so `client_submission_id` is the tenant-wide dedupe key and it is stored in the row
-(`UNIQUE (tenant_id, client_submission_id)`, §11.2). Tasks keep their EXISTING header
+constraint can resolve, so `client_submission_id` is the tenant-wide dedupe key and it is stored
+in the row (`UNIQUE (tenant_id, client_submission_id)`, §11.2). Tasks keep their EXISTING header
 semantics unchanged (N-6).
 
 `transcript_epoch` is required rather than optional because an omitted epoch is indistinguishable from
@@ -1189,7 +1190,7 @@ applying the repository's real `migrations/0001`–`0010` in order:
 | Second `consumers` row for the same tenant                              | rejected by `consumers_one_per_tenant_unique`                |
 | `running` turn that already has a response message                      | rejected by `assistant_turns_running_response_check`         |
 | `completed` turn with no response message                               | rejected by `assistant_turns_completed_response_check`       |
-| Duplicate `client_submission_id` within the same tenant                 | rejected by `conversation_messages_tenant_submission_unique` |
+| Duplicate tenant-wide submission ID                 | rejected by `conversation_messages_tenant_submission_unique` |
 
 This is a design-time proof that the sketch is executable and that the claimed constraints exist; it is
 **not** a substitute for T-10/T-12/T-17 in CI, which must reproduce it through the migration runner and

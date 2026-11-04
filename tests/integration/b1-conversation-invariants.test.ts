@@ -151,20 +151,19 @@ describe('B1-1 T-17: concurrent SQL constraints', () => {
   });
 
   it('rejects concurrent tenant-wide submission ID reuse', async () => {
-      const submissionId = randomUUID();
-      const firstSequence = ++nextSequence;
-      const secondSequence = ++nextSequence;
-      const sql = `INSERT INTO conversation_messages
+    const submissionId = randomUUID();
+    const firstSequence = ++nextSequence;
+    const secondSequence = ++nextSequence;
+    const sql = `INSERT INTO conversation_messages
         (id, tenant_id, conversation_id, sequence, kind, text, client_submission_id)
         VALUES ($1, $2, $3, $4, 'user', 'concurrent submission', $5)`;
-      await expectSecondWriterRejected(
-        sql,
-        [randomUUID(), tenantId, conversationIds[0], firstSequence, submissionId],
-        [randomUUID(), tenantId, conversationIds[1], secondSequence, submissionId],
-        'conversation_messages_tenant_submission_unique',
-      );
-    },
-  );
+    await expectSecondWriterRejected(
+      sql,
+      [randomUUID(), tenantId, conversationIds[0], firstSequence, submissionId],
+      [randomUUID(), tenantId, conversationIds[1], secondSequence, submissionId],
+      'conversation_messages_tenant_submission_unique',
+    );
+  });
 
   it('enforces one Assistant Turn per source user message', async () => {
     const source = await insertMessage(conversationIds[0]!, 'user');

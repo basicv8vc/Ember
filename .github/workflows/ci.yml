@@ -61,12 +61,6 @@ jobs:
       - name: Install dependencies (reproducible)
         run: pnpm install --frozen-lockfile
 
-      - name: Temporary Prettier diff (remove before merge)
-        run: |
-          file=docs/product/V1ALPHA-B2-B3-MODEL-EXECUTION-PROPOSAL.md
-          pnpm exec prettier "$file" > /tmp/proposal.formatted.md
-          diff -u "$file" /tmp/proposal.formatted.md || true
-
       - name: Lint
         run: pnpm lint
 

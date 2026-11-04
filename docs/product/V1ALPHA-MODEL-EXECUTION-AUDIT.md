@@ -29,7 +29,7 @@ current implementation inventory. Three things about it are superseded by the CT
    from them. The current plan is the B2/B3 proposal; where the two disagree, the proposal wins and
    this file is stale on that point.
 
-Everything in §1–§4, §7, §8.1–§8.5 and §10 is the audit itself and is current.
+The findings in §1–§4, §7, §8.1–§8.5 and §10 remain relevant as audit findings; repository-specific observations and line references are historical and must be revalidated against current main before implementation.
 
 ## 0. Decision requested
 

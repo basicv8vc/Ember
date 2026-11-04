@@ -439,6 +439,74 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     expect(result.rows[0]?.status).toBe('completed');
   });
 
+  it('rejects a failed Turn with a valid failure reason but no response message', async () => {
+    const sourceId = await insertMessage({
+      kind: 'user',
+      text: 'failed turn without response',
+      clientSubmissionId: randomUUID(),
+    });
+    await expect(
+      db.pool.query(
+        `INSERT INTO assistant_turns
+           (id, tenant_id, conversation_id, source_message_id, response_message_id,
+            status, failure_reason, deadline_at)
+         VALUES ($1, $2, $3, $4, NULL, 'failed', 'timeout', now() + interval '60 seconds')`,
+        [randomUUID(), tenantId, conversationId, sourceId],
+      ),
+    ).rejects.toMatchObject({
+      code: '23514',
+      constraint: 'assistant_turns_terminal_response_check',
+    });
+  });
+
+  it('accepts a failed Turn with a same-conversation Ember response', async () => {
+    const sourceId = await insertMessage({
+      kind: 'user',
+      text: 'failed turn with response',
+      clientSubmissionId: randomUUID(),
+    });
+    const responseId = await insertMessage({
+      kind: 'ember',
+      text: 'The turn failed because it timed out.',
+      modelLabel: 'ember-fake-test',
+      simulated: true,
+    });
+    const result = await db.pool.query<{
+      status: string;
+      response_message_id: string;
+    }>(
+      `INSERT INTO assistant_turns
+         (id, tenant_id, conversation_id, source_message_id, response_message_id,
+          status, failure_reason, deadline_at)
+       VALUES ($1, $2, $3, $4, $5, 'failed', 'timeout', now() + interval '60 seconds')
+       RETURNING status, response_message_id`,
+      [randomUUID(), tenantId, conversationId, sourceId, responseId],
+    );
+    expect(result.rows[0]).toEqual({
+      status: 'failed',
+      response_message_id: responseId,
+    });
+  });
+
+  it('continues to allow a cancelled Turn without a response message', async () => {
+    const sourceId = await insertMessage({
+      kind: 'user',
+      text: 'cancelled before response',
+      clientSubmissionId: randomUUID(),
+    });
+    const result = await db.pool.query<{
+      status: string;
+      response_message_id: string | null;
+    }>(
+      `INSERT INTO assistant_turns
+         (id, tenant_id, conversation_id, source_message_id, status, deadline_at)
+       VALUES ($1, $2, $3, $4, 'cancelled', now() + interval '60 seconds')
+       RETURNING status, response_message_id`,
+      [randomUUID(), tenantId, conversationId, sourceId],
+    );
+    expect(result.rows[0]).toEqual({ status: 'cancelled', response_message_id: null });
+  });
+
   it('rejects failed Turns without a failure reason and terminal-shape contradictions', async () => {
     const failedSource = await insertMessage({
       kind: 'user',
@@ -492,7 +560,7 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       ),
     ).rejects.toMatchObject({
       code: '23514',
-      constraint: 'assistant_turns_completed_response_check',
+      constraint: 'assistant_turns_terminal_response_check',
     });
   });
 

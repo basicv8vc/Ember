@@ -192,7 +192,7 @@ describe('PostgreSQL migrations (real database)', () => {
       {
         id: '0012',
         name: '0012_conversation.sql',
-        checksum: 'cec85a606d5821f1e34ab12a2f75b9ac503d9a211608f38e0112f2c6e3d82a0a',
+        checksum: '83944434b04590bda5abbb92515aedd3187708d1c146d0c4c19a6f52ba4e5238',
       },
       {
         id: '0013',

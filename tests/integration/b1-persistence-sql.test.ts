@@ -16,6 +16,8 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
   const otherPrincipalId = randomUUID();
   const otherAgentId = randomUUID();
   const otherConversationId = randomUUID();
+  const siblingAgentId = randomUUID();
+  const siblingConversationId = randomUUID();
   const taskId = randomUUID();
   const otherTaskId = randomUUID();
   const commitmentId = randomUUID();
@@ -84,6 +86,16 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       `INSERT INTO conversations (id, tenant_id, agent_id, kind)
        VALUES ($1, $2, $3, 'main'), ($4, $5, $6, 'main')`,
       [conversationId, tenantId, agentId, otherConversationId, otherTenantId, otherAgentId],
+    );
+    await db.pool.query(
+      `INSERT INTO agents (id, tenant_id, name, policy_version)
+       VALUES ($1, $2, 'Sibling Ember', 1)`,
+      [siblingAgentId, tenantId],
+    );
+    await db.pool.query(
+      `INSERT INTO conversations (id, tenant_id, agent_id, kind)
+       VALUES ($1, $2, $3, 'main')`,
+      [siblingConversationId, tenantId, siblingAgentId],
     );
     await db.pool.query(
       `INSERT INTO tasks (id, tenant_id, agent_id, kind, input, digest, idempotency_key)
@@ -317,6 +329,59 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       code: '23514',
       constraint: 'conversation_messages_text_bounds_check',
     });
+  });
+
+
+  it('rejects a submission ID reused in a different conversation of the same tenant', async () => {
+    const submissionId = randomUUID();
+    await insertMessage({
+      kind: 'user',
+      text: 'original submission',
+      clientSubmissionId: submissionId,
+    });
+    await expect(
+      insertMessage({
+        kind: 'user',
+        conversationId: siblingConversationId,
+        text: 'duplicate submission in a sibling conversation',
+        clientSubmissionId: submissionId,
+      }),
+    ).rejects.toMatchObject({
+      code: '23505',
+      constraint: 'conversation_messages_tenant_submission_unique',
+    });
+  });
+
+  it('allows the same submission ID in different tenants', async () => {
+    const submissionId = randomUUID();
+    const originalMessageId = await insertMessage({
+      kind: 'user',
+      text: 'tenant A submission',
+      clientSubmissionId: submissionId,
+    });
+    const otherTenantMessageId = await insertMessage({
+      kind: 'user',
+      tenantId: otherTenantId,
+      conversationId: otherConversationId,
+      text: 'tenant B submission',
+      clientSubmissionId: submissionId,
+    });
+    expect(otherTenantMessageId).not.toBe(originalMessageId);
+  });
+
+  it('accepts distinct submission IDs across conversations in one tenant', async () => {
+    const originalMessageId = await insertMessage({
+      kind: 'user',
+      text: 'first distinct submission',
+      clientSubmissionId: randomUUID(),
+    });
+    const siblingMessageId = await insertMessage({
+      kind: 'user',
+      conversationId: siblingConversationId,
+      text: 'second distinct submission',
+      clientSubmissionId: randomUUID(),
+    });
+    expect(siblingMessageId).not.toBe(originalMessageId);
   });
 
   it('enforces the Conversation Agent uniqueness and tenant-qualified Agent FK', async () => {

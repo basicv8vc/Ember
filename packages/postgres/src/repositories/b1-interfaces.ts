@@ -121,7 +121,11 @@ export interface B1ConversationRepository {
     readonly limit: number;
   }): Promise<B1ConversationPage>;
 
-  /** Tenant-scoped unknown-ACK lookup that joins the user message to its original turn receipt. */
+  /**
+   * Unknown-ACK lookup uses the original receipt, not the Turn's current status.
+   * The live user-message submission ID is unique across all conversations in this tenant
+   * (CTO Decision 0002); foreign tenant IDs remain invisible.
+   */
   findSubmissionReceipt(command: {
     readonly tenantId: Id;
     readonly clientSubmissionId: Id;

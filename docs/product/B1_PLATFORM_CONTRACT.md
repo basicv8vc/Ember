@@ -25,6 +25,11 @@
 > **Round 1 review:** the CTO review on PR #92 requested five P0 corrections. All are applied in this
 > revision and indexed in §17.2, which maps each review item to the section that now answers it.
 
+> **CTO amendment (2026-11-04):** [Decision 0002](../decisions/0002-b1-1-tenant-wide-submission-uniqueness.md)
+> supersedes the original submission-ID uniqueness scope in §6.4, §11.2 and D-6.
+> The original annex blob `2e06b47691b71b05e3903f0bd65d5b9f381776c0` remains preserved
+> in Git history; no HTTP route or DTO has changed.
+
 ## 1. Executive summary
 
 The Alpha question this contract answers is narrow:
@@ -357,8 +362,8 @@ Headers: `Authorization: Bearer <session>`, `Content-Type: application/json`. Ca
 The message route deliberately takes **no** `Idempotency-Key`. Message idempotency must be
 _recoverable_: after a lost response the client asks `GET /v1/message-submissions/{id}` (§10.1) and a
 header key cannot answer that. Two keys for one write would also create a mismatch state that no
-constraint can resolve, so `client_submission_id` is the single dedupe key and it is stored in the row
-(`UNIQUE (tenant_id, conversation_id, client_submission_id)`, §11.2). Tasks keep their EXISTING header
+constraint can resolve, so `client_submission_id` is the tenant-wide dedupe key and it is stored in the row
+(`UNIQUE (tenant_id, client_submission_id)`, §11.2). Tasks keep their EXISTING header
 semantics unchanged (N-6).
 
 `transcript_epoch` is required rather than optional because an omitted epoch is indistinguishable from
@@ -394,8 +399,8 @@ current generation, and so a `409` fence is always repairable in one extra round
 | ID  | Invariant                                                                                                                                                                                                                                                                                                                             |
 | --- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | S-1 | The user message row and the `assistant_turns` row are created in **one** transaction; no observable state has a message without a turn.                                                                                                                                                                                              |
-| S-2 | Same `client_submission_id` + same `text` + same current epoch → 200 with the identical `message_id`, `sequence` and `turn_id`. Nothing new is written, no turn is restarted.                                                                                                                                                         |
-| S-3 | Same `client_submission_id` + different `text` (any epoch) → 409 `IDEMPOTENCY_CONFLICT`, body shaped like the existing Task conflict body.                                                                                                                                                                                            |
+| S-2 | Same `client_submission_id` + same conversation + same `text` + same current epoch → 200 with the identical `message_id`, `sequence` and `turn_id`. Nothing new is written, no turn is restarted.                                                                                                                                     |
+| S-3 | Same `client_submission_id` + different `text` or conversation (any epoch) → 409 `IDEMPOTENCY_CONFLICT`, body shaped like the existing Task conflict body.                                                                                                                                                                            |
 | S-4 | `201` is returned only after commit, so a 201 always means the message is readable by `GET .../messages`.                                                                                                                                                                                                                             |
 | S-5 | A per-conversation quota is enforced (Alpha: 200 messages / rolling 24 h, Q-2). Exceeded → 429 `BUDGET_EXCEEDED`, no rows written.                                                                                                                                                                                                    |
 | S-6 | The route never creates a Task. Task creation stays an explicit, separate `POST /v1/tasks` call (§8).                                                                                                                                                                                                                                 |
@@ -957,7 +962,7 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
     UNIQUE (tenant_id, conversation_id, id),
   CONSTRAINT conversation_messages_sequence_unique UNIQUE (tenant_id, conversation_id, sequence),
   CONSTRAINT conversation_messages_tenant_submission_unique
-    UNIQUE (tenant_id, conversation_id, client_submission_id),
+    UNIQUE (tenant_id, client_submission_id),
   CONSTRAINT conversation_messages_ember_target_unique
     UNIQUE (tenant_id, conversation_id, ember_only_id),
   CONSTRAINT conversation_messages_user_target_unique
@@ -1184,7 +1189,7 @@ applying the repository's real `migrations/0001`–`0010` in order:
 | Second `consumers` row for the same tenant                              | rejected by `consumers_one_per_tenant_unique`                |
 | `running` turn that already has a response message                      | rejected by `assistant_turns_running_response_check`         |
 | `completed` turn with no response message                               | rejected by `assistant_turns_completed_response_check`       |
-| Duplicate `client_submission_id` in one conversation                    | rejected by `conversation_messages_tenant_submission_unique` |
+| Duplicate `client_submission_id` within the same tenant                 | rejected by `conversation_messages_tenant_submission_unique` |
 
 This is a design-time proof that the sketch is executable and that the claimed constraints exist; it is
 **not** a substitute for T-10/T-12/T-17 in CI, which must reproduce it through the migration runner and
@@ -1310,7 +1315,7 @@ buys nothing this fence does not already provide and costs a permanent write-amp
 | D-3  | Linkage is atomic inside `POST /v1/tasks`                                                                                                                          | Separate link endpoint                       | No orphaned-Task window, one round trip, idempotency stays in a single digest                                                                                                  |
 | D-4  | Turns are polled; Tasks keep SSE                                                                                                                                   | Turn SSE / WebSocket                         | No truthful `streaming` state in B1; a poll is one indexed row read with a documented cadence                                                                                  |
 | D-5  | No `conversation.store` consent at Alpha                                                                                                                           | New consent kind                             | The transcript is the product's core function; a consent that cannot be refused is theatre                                                                                     |
-| D-6  | `client_submission_id` uniqueness is per conversation row, so it is reusable after transcript deletion — **and a monotonic `transcript_epoch` fences stale sends** | Tombstone table of deleted submission ids    | The fence is one integer on a row that already exists; a tombstone table costs permanent write amplification and still cannot distinguish "deleted" from "never seen"          |
+| D-6  | `client_submission_id` is tenant-wide unique while a row exists, reusable after transcript deletion — **and `transcript_epoch` fences stale sends**                | Tombstone table of deleted submission ids    | The fence is one integer on a row that already exists; a tombstone table costs permanent write amplification and still cannot distinguish "deleted" from "never seen"          |
 | D-7  | Failure reasons stay in `task_status`; `result_state` stays three-valued                                                                                           | A duplicated `failed` state                  | Two sources of truth for one fact is the classic drift bug                                                                                                                     |
 | D-8  | No account deletion in B1                                                                                                                                          | Ship it with B1                              | It is a B2-sized feature; gating it on TestFlight (R-4) is honest about the cost                                                                                               |
 | D-9  | `POST .../messages` dedupes on `client_submission_id` only; no `Idempotency-Key` header                                                                            | Reuse the Task header key                    | Recoverable idempotency needs a key the client can re-query; two keys for one write can disagree                                                                               |

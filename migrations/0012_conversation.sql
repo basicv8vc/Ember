@@ -50,8 +50,9 @@ CREATE TABLE IF NOT EXISTS conversation_messages (
   CONSTRAINT conversation_messages_tenant_conversation_id_unique
     UNIQUE (tenant_id, conversation_id, id),
   CONSTRAINT conversation_messages_sequence_unique UNIQUE (tenant_id, conversation_id, sequence),
+  -- CTO Decision 0002: unknown-ACK lookup is tenant-scoped and takes submission ID alone.
   CONSTRAINT conversation_messages_tenant_submission_unique
-    UNIQUE (tenant_id, conversation_id, client_submission_id),
+    UNIQUE (tenant_id, client_submission_id),
   CONSTRAINT conversation_messages_ember_target_unique
     UNIQUE (tenant_id, conversation_id, ember_only_id),
   CONSTRAINT conversation_messages_user_target_unique

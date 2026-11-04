@@ -1,12 +1,12 @@
 # V1 Alpha — Model Execution Audit (technical and security findings)
 
-| field                    | value                                                    |
-| ------------------------ | -------------------------------------------------------- |
+| field                    | value                                                                             |
+| ------------------------ | --------------------------------------------------------------------------------- |
 | status                   | **historical audit snapshot — findings retained; repository state as of 154860a** |
-| superseded by            | `docs/product/V1ALPHA-B2-B3-MODEL-EXECUTION-PROPOSAL.md` |
-| base commit of audit     | `154860a` (`main` HEAD when audited) |
-| latest migration on base | `0010_p0c3d_consent.sql` |
-| original framing         | Notes → Action Items as the first capability |
+| superseded by            | `docs/product/V1ALPHA-B2-B3-MODEL-EXECUTION-PROPOSAL.md`                          |
+| base commit of audit     | `154860a` (`main` HEAD when audited)                                              |
+| latest migration on base | `0010_p0c3d_consent.sql`                                                          |
+| original framing         | Notes → Action Items as the first capability                                      |
 
 ## Document status (read this before the rest)
 

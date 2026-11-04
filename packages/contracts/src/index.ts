@@ -1,4 +1,5 @@
 export * from './approval-schemas.js';
+export * from './b1-live-schemas.js';
 export * from './canonical.js';
 export * from './commitment-schemas.js';
 export * from './consent-schemas.js';

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -96,6 +96,8 @@ async function stageMigrations(names: readonly string[]): Promise<string> {
   return dir;
 }
 
+// Fixed pre-B1 history for explicit 0009/0010 out-of-order compatibility tests.
+// The full production migration list is discovered by runMigrations(migrationsDir).
 const MIGRATION_FILES = [
   '0001_platform_metadata.sql',
   '0002_durable_task_inbox.sql',
@@ -120,7 +122,7 @@ describe('PostgreSQL migrations (real database)', () => {
   it('applies migrations from an empty schema and records the version', async () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(10);
+    expect(result.applied).toHaveLength(13);
     expect(result.applied.map((migration) => migration.id)).toEqual([
       '0001',
       '0002',
@@ -132,6 +134,9 @@ describe('PostgreSQL migrations (real database)', () => {
       '0008',
       '0009',
       '0010',
+      '0011',
+      '0012',
+      '0013',
     ]);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
@@ -142,6 +147,9 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(result.applied[7]?.name).toBe('0008_p0c3_commitments.sql');
     expect(result.applied[8]?.name).toBe('0009_p0c3b_runtime_closure.sql');
     expect(result.applied[9]?.name).toBe('0010_p0c3d_consent.sql');
+    expect(result.applied[10]?.name).toBe('0011_identity_session.sql');
+    expect(result.applied[11]?.name).toBe('0012_conversation.sql');
+    expect(result.applied[12]?.name).toBe('0013_task_results.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -151,7 +159,7 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(10);
+    expect(versions.rows).toHaveLength(13);
     expect(versions.rows.map((row) => row.id)).toEqual([
       '0001',
       '0002',
@@ -163,11 +171,35 @@ describe('PostgreSQL migrations (real database)', () => {
       '0008',
       '0009',
       '0010',
+      '0011',
+      '0012',
+      '0013',
     ]);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
       expect(row.execution_ms).toBeGreaterThanOrEqual(0);
     }
+    expect(
+      versions.rows
+        .filter((row) => ['0011', '0012', '0013'].includes(row.id))
+        .map(({ id, name, checksum }) => ({ id, name, checksum })),
+    ).toEqual([
+      {
+        id: '0011',
+        name: '0011_identity_session.sql',
+        checksum: '37bcec88863f6c83d30c16bba755b63c07197bd9155089e713f89e5358934122',
+      },
+      {
+        id: '0012',
+        name: '0012_conversation.sql',
+        checksum: '4d0fca538f18241bdace22de322fa0dbb40e8444aa9535e667d28df3eac2df58',
+      },
+      {
+        id: '0013',
+        name: '0013_task_results.sql',
+        checksum: 'a8860cc8b0bfe692d6b27842a0ae66192985d1ac97e68b189b9cd65a68718037',
+      },
+    ]);
 
     const metadata = await requirePool().query<{ value: string }>(
       "SELECT value FROM platform_metadata WHERE key = 'ember.foundation.version'",
@@ -203,15 +235,22 @@ describe('PostgreSQL migrations (real database)', () => {
   });
 
   it('is idempotent on a repeated run', async () => {
+    const before = await requirePool().query<{ id: string; checksum: string }>(
+      'SELECT id, checksum FROM schema_migrations ORDER BY id',
+    );
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(10);
+    expect(result.alreadyApplied).toBe(13);
+    const after = await requirePool().query<{ id: string; checksum: string }>(
+      'SELECT id, checksum FROM schema_migrations ORDER BY id',
+    );
+    expect(after.rows).toEqual(before.rows);
 
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('10');
+    expect(versions.rows[0]?.count).toBe('13');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -272,7 +311,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('10');
+      expect(versions.rows[0]?.count).toBe('13');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -426,56 +465,15 @@ describe('PostgreSQL migrations (real database)', () => {
     const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
 
     try {
-      const original = await readFile(
-        path.join(migrationsDir, '0001_platform_metadata.sql'),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0001_platform_metadata.sql'),
-        `${original}\n-- edited after being applied\n`,
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0002_durable_task_inbox.sql'),
-        await readFile(path.join(migrationsDir, '0002_durable_task_inbox.sql'), 'utf8'),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0003_tasks_current_run_tenant_fk.sql'),
-        await readFile(path.join(migrationsDir, '0003_tasks_current_run_tenant_fk.sql'), 'utf8'),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0004_lease_fencing_and_retry.sql'),
-        await readFile(path.join(migrationsDir, '0004_lease_fencing_and_retry.sql'), 'utf8'),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0005_p0b06_artifacts_workspace_checkpoint.sql'),
-        await readFile(
-          path.join(migrationsDir, '0005_p0b06_artifacts_workspace_checkpoint.sql'),
-          'utf8',
-        ),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0006_p0b08b_persistent_budget.sql'),
-        await readFile(path.join(migrationsDir, '0006_p0b08b_persistent_budget.sql'), 'utf8'),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
-        await readFile(
-          path.join(migrationsDir, '0007_p0b08d_persistent_mock_approval.sql'),
-          'utf8',
-        ),
-        'utf8',
-      );
-      await writeFile(
-        path.join(tempMigrationsDir, '0008_p0c3_commitments.sql'),
-        await readFile(path.join(migrationsDir, '0008_p0c3_commitments.sql'), 'utf8'),
-        'utf8',
-      );
+      const filenames = (await readdir(migrationsDir)).filter((name) => name.endsWith('.sql'));
+      for (const name of filenames) {
+        const original = await readFile(path.join(migrationsDir, name), 'utf8');
+        const contents =
+          name === '0013_task_results.sql'
+            ? `${original}\n-- edited after being applied\n`
+            : original;
+        await writeFile(path.join(tempMigrationsDir, name), contents, 'utf8');
+      }
 
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(MigrationError);
       await expect(runMigrations(requirePool(), tempMigrationsDir)).rejects.toThrow(
@@ -485,7 +483,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('10');
+      expect(versions.rows[0]?.count).toBe('13');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

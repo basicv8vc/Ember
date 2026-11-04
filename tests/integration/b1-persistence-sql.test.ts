@@ -331,7 +331,6 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
     });
   });
 
-
   it('rejects a submission ID reused in a different conversation of the same tenant', async () => {
     const submissionId = randomUUID();
     await insertMessage({
@@ -382,6 +381,26 @@ describe('B1-1: durable Conversation and Consumer SQL invariants', () => {
       clientSubmissionId: randomUUID(),
     });
     expect(siblingMessageId).not.toBe(originalMessageId);
+  });
+
+  it('allows reuse after deletion removes the original submission row', async () => {
+    const submissionId = randomUUID();
+    const originalId = await insertMessage({
+      kind: 'user',
+      text: 'transcript content to delete',
+      clientSubmissionId: submissionId,
+    });
+    await db.pool.query('DELETE FROM conversation_messages WHERE tenant_id = $1 AND id = $2', [
+      tenantId,
+      originalId,
+    ]);
+    const reusedId = await insertMessage({
+      kind: 'user',
+      conversationId: siblingConversationId,
+      text: 'new deliberate submission after deletion',
+      clientSubmissionId: submissionId,
+    });
+    expect(reusedId).not.toBe(originalId);
   });
 
   it('enforces the Conversation Agent uniqueness and tenant-qualified Agent FK', async () => {

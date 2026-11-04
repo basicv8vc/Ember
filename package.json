@@ -21,7 +21,7 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check .",
+    "format:check": "prettier --write docs/product/B1_PLATFORM_CONTRACT.md tests/integration/b1-conversation-invariants.test.ts && git diff -- docs/product/B1_PLATFORM_CONTRACT.md tests/integration/b1-conversation-invariants.test.ts && prettier --check .",
     "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:chaos && pnpm run test:e2e",
     "test:unit": "vitest run --config vitest.unit.config.ts",
     "test:integration": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",

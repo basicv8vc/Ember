@@ -42,8 +42,9 @@ Approve, modify or reject four things before any code lands:
 4. **A 6-PR sequence** where the kill switch ships first and the real provider adapter
    ships dark (§9).
 
-Nothing in this document has been executed. No branch has been pushed, no provider
-account contacted, no key provisioned.
+This historical audit contains no executable implementation. At the time of the original
+source snapshot, no provider account or key had been provisioned. Current implementation
+status and authorization gates are recorded in the B2/B3 proposal.
 
 ---
 
@@ -146,8 +147,11 @@ Two checks make the contract change a migration, and both fail closed:
   kinds, and re-lists all 15 `errorCode` values.
 
 So adding a kind, an error code, or a single new event field is rejected by the database
-until `0011` replaces that function. This is a feature: no service can emit an unreviewed
-payload. It also means every field proposed in §5.7 must be justified individually,
+until a future approved migration replaces that function. Under the current B2/B3 plan,
+B3 proposes migration `0015` for the task-kind and event-vocabulary change (subject to
+rechecking the migration inventory before implementation). This is a feature: no service
+can emit an unreviewed payload. It also means every field proposed in the historical §5.7
+must be justified individually,
 because each one is a permanent DB-level contract.
 
 ### 4.3 The budget ledger is per-tenant only — there is no global ceiling

@@ -2,23 +2,27 @@
 
 | field                    | value                                                    |
 | ------------------------ | -------------------------------------------------------- |
-| status                   | **audit — findings current; superseded as a plan**       |
+| status                   | **historical audit snapshot — findings retained; repository state as of 154860a** |
 | superseded by            | `docs/product/V1ALPHA-B2-B3-MODEL-EXECUTION-PROPOSAL.md` |
-| base commit of audit     | `154860a` (`main` HEAD when audited)                     |
-| latest migration on base | `0010_p0c3d_consent.sql`                                 |
-| original framing         | Notes → Action Items as the first capability             |
+| base commit of audit     | `154860a` (`main` HEAD when audited) |
+| latest migration on base | `0010_p0c3d_consent.sql` |
+| original framing         | Notes → Action Items as the first capability |
 
 ## Document status (read this before the rest)
 
-This file is the **audit of record**. Its findings — the database vocabulary traps, the Sentinel
-analysis, the budget/settlement defect, the failure-semantics review — are unchanged and remain the
-basis for the phased plan. Three things about it are superseded by the CTO decision of 2026-11-03 and
-by the B2-first proposal:
+This file is the **historical audit of record**, not a live repository-status report. Its findings —
+the database vocabulary traps, the Sentinel analysis, the budget/settlement defect and the
+failure-semantics review — remain the basis for the phased plan. Source paths, migration state and
+"what exists" statements inside the audit describe `main@154860a`; they must not be read as a
+current implementation inventory. Three things about it are superseded by the CTO decision of
+2026-11-03 and by the B2-first proposal:
 
 1. **Ordering.** The capability is not first. **B2 (real assistant turn) precedes B3
    (`notes.action_items`)**, which becomes a capability _invoked from Chat_, never the app home.
-2. **Migration numbering.** This file says "next slot `0011`". The B1 platform contract (PR #92,
-   §11) reserves `0011`–`0013`. Model execution therefore takes `0014`, and B3 takes `0015`.
+2. **Migration numbering.** This file says "next slot `0011`" because its source snapshot ended at
+   `0010`. ADR-0004/PR #92 reserved `0011`–`0013`, and B1-1 consumed those migrations in PR #97
+   (merged at `38dd69b`). The current B2/B3 proposal therefore allocates `0014` and `0015`,
+   respectively, subject to checking the actual migration inventory before implementation.
 3. **Sections that are history, not instruction.** §5 (design), §6 (cost model), §8.6, §9 (PR
    sequence), §11 (approval checklist) and the appendix (that plan's file inventory, which still names
    `0011`/`0012` — now B1's slots) describe the earlier single-capability shape. Do **not** implement

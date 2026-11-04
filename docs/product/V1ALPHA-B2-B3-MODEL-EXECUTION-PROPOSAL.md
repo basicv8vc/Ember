@@ -23,7 +23,7 @@ The following implementation and activation decisions remain open:
 
 | #   | Decision                                 | Current proposal (not yet authorized for real-mode activation)                            |
 | --- | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
-| A   | Provider and model id                    | one provider, one pinned small-tier model; exact provider/model remains unselected         |
+| A   | Provider and model id                    | OpenAI as the proposed sole provider; exact dated model ID and real-mode approval remain pending         |
 | B   | Price sheet is provisional               | derive ceilings from a formula, then re-derive from an invoice-grade source before enablement |
 | C   | Per-user and per-tenant spend ceilings   | proposed per-user-day $0.25, per-tenant-day $1.00, global-day $5.00                         |
 | D   | Conversation context leaves the platform | only a bounded transcript excerpt; retention/training terms must be verified in writing   |
@@ -955,15 +955,21 @@ Everything below is a proposal. None of it is enabled, provisioned or paid for.
 | C5  | Is the bounded duplicate paid call (§10) acceptable for Alpha?                                                   | yes: ≤ 2 calls, ≤ $0.010, observable        | a provider-side idempotency claim we cannot verify                      |
 | C6  | Is "refuse to boot" correct for `real` without a key or without policy?                                          | yes                                         | silent downgrade to fake                                                |
 
-### 14.4 Open questions I cannot answer from the repository
+### 14.4 Cross-team questions resolved by ADR-0004 / B1-1
 
-| ID   | Question                                                                                       | Why it blocks                                                      |
-| ---- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
-| OQ-1 | Does #91 make the consumer the same object as `AuthContext.principalId`?                       | decides whether §7.2's interim keying is permanent or superseded   |
-| OQ-2 | Does the B1 owner accept CR-2 (`UNIQUE (tenant_id, id)` on `assistant_turns`)?                 | decides whether B2 gets a composite FK or a weaker guarantee       |
-| OQ-3 | Is T-1's 60 s turn budget meant to include provider latency, or is it a ceiling to stay under? | 20 s is comfortable either way, but the sweeper's clock must agree |
-| OQ-4 | Should the message quota (S-5, 200/day) and the turn cap (60/day) be reconciled?               | two caps on one action confuse users and support                   |
-| OQ-5 | May `notes.action_items` be created without transcript linkage?                                | decides whether B3 can exist before B1-6                           |
+The following items appeared as open questions in the original review. They are now settled by the
+merged contract and B1-1 implementation; they must not be reopened in B2/B3 implementation PRs:
+
+| Former question | Frozen resolution |
+| --- | --- |
+| Consumer identity vs `AuthContext.principalId` | ADR-0004 §5.1: Consumer↔Tenant and Consumer↔Principal are each 1:1 in Alpha; principal is server-derived and has owner role. |
+| Composite identity for Assistant Turns | B1-1 implements `UNIQUE (tenant_id, id)`; B2 must use this tenant-qualified identity. |
+| Whether the 60 s Turn budget includes queueing/retries | Yes. The full deadline includes queueing and retries; B2 must not start a new attempt after it expires. |
+| 200 messages / rolling 24 h vs 60 paid Turns / UTC day | Separate limits with different purposes and windows; do not collapse them into one quota. |
+| Whether B3 may start without transcript linkage | No for the initial iOS path: B3 depends on verified Conversation/Message linkage and B1-6/B1-7. |
+
+These are contract/design resolutions, not proof that the corresponding B1 runtime routes or
+transactions have shipped. Runtime acceptance remains tracked in §3.
 
 ### 14.5 What to review first
 

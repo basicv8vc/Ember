@@ -21,13 +21,13 @@ This is a documentation-only decision. Merging this proposal does **not** approv
 
 The following implementation and activation decisions remain open:
 
-| #   | Decision                                 | Default if the CTO says "yes to the proposal"                                              |
+| #   | Decision                                 | Current proposal (not yet authorized for real-mode activation)                            |
 | --- | ---------------------------------------- | ------------------------------------------------------------------------------------------ |
-| A   | Provider and model id                    | one provider, one pinned model, proapproved small tier (A1 below)                          |
-| B   | Price sheet is provisional               | ceilings derived from a formula, re-derived from an invoice-grade source before enablement |
-| C   | Per-user and per-tenant spend ceilings   | per-user-day $0.25, per-tenant-day $1.00, global-day $5.00 (proposed)                      |
-| D   | Conversation context leaves the platform | transcript excerpt sent to the provider, retention terms verified in writing first         |
-| E   | Sentinel and credential model changes    | one category `model.infer`, policy version 2, one credential binder, one hard-coded origin |
+| A   | Provider and model id                    | one provider, one pinned small-tier model; exact provider/model remains unselected         |
+| B   | Price sheet is provisional               | derive ceilings from a formula, then re-derive from an invoice-grade source before enablement |
+| C   | Per-user and per-tenant spend ceilings   | proposed per-user-day $0.25, per-tenant-day $1.00, global-day $5.00                         |
+| D   | Conversation context leaves the platform | only a bounded transcript excerpt; retention/training terms must be verified in writing   |
+| E   | Sentinel and credential model changes    | one narrow `model.infer` category, policy version 2, one credential binder and hard-coded origin |
 
 **Not requested, and not done:** no provider account, no API key, no dependency added, no route, no
 migration, no CI secret, no `fetch` to a model host, and no change to any executable file. This PR is

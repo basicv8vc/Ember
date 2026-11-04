@@ -168,10 +168,10 @@ Run thin vertical slices against the frozen contract. The first Live slice remai
 - Auth: missing/expired/revoked session, refresh single-flight, logout clears credentials and pending private data.
 - Tenant isolation: foreign Conversation/Task/Outcome IDs are indistinguishable from not found.
 - Send: same tenant-wide `client_submission_id` + same conversation/text/current epoch replays one canonical message/Turn; cross-conversation reuse within a tenant or changed text conflicts; different tenants may reuse the same ID.
-- Assistant turn delivery: authoritative status, duplicate suppression, durable retrieval/polling or resumable-event semantics, and terminal-state authority.
+- Assistant turn delivery: authoritative status, duplicate suppression, durable retrieval through the B1 polling route, and terminal-state authority.
 - Task: receipt is not completion; progress comes only from server facts; cancellation pending is distinct from cancelled.
 - Outcome: unavailable before completion; authenticated result association and integrity validation; no stale result.
-- Continuity: force-quit after send-before-ACK, after ACK-before-reply, during stream, and while Task is running.
+- Continuity: force-quit after send-before-ACK, after ACK-before-reply, during Turn polling, and while a linked Task is running.
 - Offline: no false success, no fake assistant reply, explicit recoverable state.
 - Mode isolation: Mock and Live compositions are explicit; Live failures never render fixture data or mock replies; release builds cannot access dev bearer credentials.
 

@@ -37,21 +37,27 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
         let app = XCUIApplication()
         launch(app, arguments: ["--ember-start-task-flow"], locale: "en")
 
-        app.buttons["填入示例"].tap()
+        let fillExampleButton = app.buttons["填入示例"]
+        XCTAssertTrue(fillExampleButton.waitForExistence(timeout: 10))
+        fillExampleButton.tap()
         let noteInput = app.textViews["compose-note-input"]
         XCTAssertTrue(noteInput.waitForExistence(timeout: 10))
 
+        let submitButton = app.buttons["compose-submit"]
+        XCTAssertTrue(submitButton.waitForExistence(timeout: 10))
+
         let lostReceiptToggle = app.switches["compose-simulate-unknown-receipt"]
         XCTAssertTrue(lostReceiptToggle.waitForExistence(timeout: 10))
-        if !lostReceiptToggle.isHittable {
-            app.swipeUp()
-        }
+        scrollClear(of: submitButton, target: lostReceiptToggle, in: app)
         lostReceiptToggle.tap()
 
-        let submitButton = app.buttons["compose-submit"]
-        if !submitButton.isHittable {
-            app.swipeUp()
-        }
+        // The pinned submit bar is drawn above the scroll content. Tapping a control that is
+        // still behind it silently presses Submit instead, so prove the switch itself flipped
+        // before continuing: enabling this simulation must not create a task on its own.
+        XCTAssertEqual(lostReceiptToggle.value as? String, "1", "The simulation switch must toggle itself, not submit the form.")
+        XCTAssertTrue(submitButton.exists, "The submit control must stay visible after toggling the simulation switch.")
+        XCTAssertFalse(app.staticTexts["Local demo receipt"].exists, "Toggling the simulation switch must not submit anything.")
+
         submitButton.tap()
 
         let unknownStatus = app.descendants(matching: .any)["compose-status-message"]
@@ -62,6 +68,7 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
         XCTAssertFalse(app.descendants(matching: .any)["compose-receipt"].exists)
         XCTAssertFalse(app.staticTexts["Local demo receipt"].exists)
 
+        XCTAssertTrue(submitButton.waitForExistence(timeout: 10))
         submitButton.tap()
 
         let receiptTitle = app.staticTexts["Local demo receipt"]
@@ -99,5 +106,21 @@ final class MockTaskJourneyLaunchUITests: XCTestCase {
         let appleLocale = locale == "en" ? "en_US" : "zh_CN"
         app.launchArguments = arguments + ["-AppleLanguages", "(\(locale))", "-AppleLocale", appleLocale]
         app.launch()
+    }
+
+    /// The Compose screen pins its submit bar over the scroll content via `safeAreaInset`. On
+    /// iOS 27 the accessibility tree still reports a covered control as hittable, and a tap on it
+    /// is delivered to the submit bar instead. Scroll until the target sits fully above the bar.
+    private func scrollClear(of submitButton: XCUIElement, target: XCUIElement, in app: XCUIApplication) {
+        var attempts = 0
+        while target.frame.maxY > submitButton.frame.minY && attempts < 4 {
+            app.swipeUp()
+            attempts += 1
+        }
+        XCTAssertLessThanOrEqual(
+            target.frame.maxY,
+            submitButton.frame.minY,
+            "The simulation toggle must be scrolled clear of the pinned submit bar before it can be tapped."
+        )
     }
 }

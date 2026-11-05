@@ -204,6 +204,11 @@ private struct ConversationMessageBubble: View {
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .accessibilityElement(children: .combine)
+        // The combined bubble and its inner text node are both exposed as StaticText on
+        // iOS 27, so a label predicate alone matches the same message twice. This stable
+        // identifier marks the bubble itself (one element per message), which lets UI tests
+        // count messages without relying on label formatting.
+        .accessibilityIdentifier(isUser ? "conversation-message-user" : "conversation-message-ember")
     }
 }
 

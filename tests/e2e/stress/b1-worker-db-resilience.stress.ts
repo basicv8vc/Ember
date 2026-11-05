@@ -38,15 +38,26 @@ describe('B1 Worker PostgreSQL outage resilience (bounded stress)', () => {
     await cluster.close().catch((error: unknown) => {
       cleanupError = error;
     });
-    assertNoSensitiveProcessLogs();
-
-    if (unexpectedExit) {
-      if (cleanupError !== undefined && !isOnlyWorkerExit(cleanupError)) {
-        throw asError(cleanupError);
-      }
-      throw new Error(`Worker exited before cleanup: ${JSON.stringify(snapshot)}`);
+    const failures: Error[] = [];
+    const leakedCategories = cluster.sensitiveProcessLogCategories(cluster.logs());
+    if (leakedCategories.length > 0) {
+      failures.push(
+        new Error(`process logs contained sensitive categories: ${leakedCategories.join(', ')}`),
+      );
     }
-    if (cleanupError !== undefined) throw asError(cleanupError);
+    if (unexpectedExit) {
+      failures.push(
+        new Error(
+          `Worker exited before cleanup: exitCode=${snapshot?.exitCode ?? 'unknown'}, exitSignal=${snapshot?.exitSignal ?? 'unknown'}`,
+        ),
+      );
+    }
+    if (cleanupError !== undefined && (!unexpectedExit || !isOnlyWorkerExit(cleanupError))) {
+      failures.push(asError(cleanupError));
+    }
+    if (failures.length > 0) {
+      throw new AggregateError(failures, 'B1 worker stress cleanup verification failed');
+    }
   }, 60_000);
 
   it.each(CYCLES)(
@@ -375,25 +386,6 @@ function assertSafeUnavailableBody(body: string): void {
   }
   if ([...cluster.sensitiveValues].some((value) => value.length > 0 && body.includes(value))) {
     throw new Error('the database failure response exposed a session token or private message');
-  }
-}
-
-function assertNoSensitiveProcessLogs(): void {
-  const logs = cluster.logs();
-  const databaseUrl = new URL(cluster.databaseUrl);
-  const sensitiveValues = [
-    ...cluster.sensitiveValues,
-    cluster.databaseName,
-    cluster.databaseUrl,
-    databaseUrl.username,
-    databaseUrl.password,
-    decodeURIComponent(databaseUrl.username),
-    decodeURIComponent(databaseUrl.password),
-  ];
-  if (sensitiveValues.some((value) => value.length > 0 && logs.includes(value))) {
-    throw new Error(
-      'a database credential, provider assertion, session token, or private message appeared in process logs',
-    );
   }
 }
 

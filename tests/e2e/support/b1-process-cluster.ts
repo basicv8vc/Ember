@@ -61,6 +61,7 @@ export class B1ProcessCluster {
   private worker?: ManagedProcess;
   private apiUrlValue?: string;
   private readonly completedProcessLogs: string[] = [];
+  private readonly sensitiveValueCategories = new Map<string, Set<string>>();
 
   private constructor(input: {
     databaseName: string;
@@ -266,8 +267,8 @@ export class B1ProcessCluster {
   async signIn(label: string, retainedAssertion?: string): Promise<B1Identity> {
     const assertion = retainedAssertion ?? `b1-e2e-${label}-${randomBytes(18).toString('hex')}`;
     const nonce = `b1-e2e-nonce-${randomBytes(18).toString('hex')}`;
-    this.sensitiveValues.add(assertion);
-    this.sensitiveValues.add(nonce);
+    this.registerSensitiveValue(assertion, 'provider assertion');
+    this.registerSensitiveValue(nonce, 'authentication nonce');
 
     const response = await this.request('/v1/auth/session', {
       method: 'POST',
@@ -278,7 +279,7 @@ export class B1ProcessCluster {
       throw new Error(`Ember Session sign-in returned HTTP ${response.status}`);
     }
     const session = B1SessionResponseSchema.parse(await response.json());
-    this.sensitiveValues.add(session.access_token);
+    this.registerSensitiveValue(session.access_token, 'session token');
 
     const meResponse = await this.get('/v1/me', session.access_token);
     if (meResponse.status !== 200) {
@@ -303,8 +304,8 @@ export class B1ProcessCluster {
   }
 
   async send(identity: B1Identity, conversationId: string, input: B1SendInput): Promise<Response> {
-    this.sensitiveValues.add(input.text);
-    this.sensitiveValues.add(input.client_submission_id);
+    this.registerSensitiveValue(input.text, 'private message text');
+    this.registerSensitiveValue(input.client_submission_id, 'client submission identifier');
     return this.request(`/v1/conversations/${conversationId}/messages`, {
       method: 'POST',
       headers: {
@@ -380,6 +381,45 @@ export class B1ProcessCluster {
     return `${this.completedProcessLogs.join('\n')}\n${this.apiLogs}\n${this.workerLogs}`;
   }
 
+  sensitiveProcessLogCategories(logs: string): string[] {
+    const categories = new Set<string>();
+    for (const [value, labels] of this.sensitiveValueCategories) {
+      if (value.length > 0 && logs.includes(value)) {
+        for (const label of labels) categories.add(label);
+      }
+    }
+
+    const databaseUrl = new URL(this.databaseUrl);
+    if (logs.includes(this.databaseUrl)) categories.add('database connection URL');
+    // Startup metadata includes the random disposable database name; it is not a credential and
+    // remains redacted in every process snapshot printed by the test.
+    if (
+      databaseUrl.password.length > 0 &&
+      (logs.includes(databaseUrl.password) ||
+        logs.includes(decodeURIComponent(databaseUrl.password)))
+    ) {
+      categories.add('database password');
+    }
+    const usernames = [databaseUrl.username, decodeURIComponent(databaseUrl.username)].filter(
+      (value, index, values) => value.length > 0 && values.indexOf(value) === index,
+    );
+    if (
+      usernames.some((username) => {
+        const escaped = escapeRegExp(username);
+        return [
+          new RegExp(`postgres(?:ql)?:\\/\\/${escaped}(?:[:@])`, 'i'),
+          new RegExp(
+            `(?:["']?(?:user|username)["']?\\s*[:=]\\s*["']?|\\buser\\s+)${escaped}(?=["'\\s,}]|$)`,
+            'i',
+          ),
+        ].some((pattern) => pattern.test(logs));
+      })
+    ) {
+      categories.add('database username');
+    }
+    return [...categories].sort();
+  }
+
   async close(): Promise<void> {
     const errors: unknown[] = [];
     await this.stopWorker().catch((error: unknown) => errors.push(error));
@@ -419,9 +459,7 @@ export class B1ProcessCluster {
     const redactions = [
       this.databaseName,
       this.databaseUrl,
-      databaseUrl.username,
       databaseUrl.password,
-      decodeURIComponent(databaseUrl.username),
       decodeURIComponent(databaseUrl.password),
       ...this.sensitiveValues,
     ];
@@ -432,6 +470,8 @@ export class B1ProcessCluster {
           result = result.replaceAll(value, '[redacted]');
         }
       }
+      result = redactDatabaseUsername(result, databaseUrl.username);
+      result = redactDatabaseUsername(result, decodeURIComponent(databaseUrl.username));
       return result.slice(-3_000);
     };
 
@@ -440,6 +480,13 @@ export class B1ProcessCluster {
       stdout: redact(snapshot.stdout),
       stderr: redact(snapshot.stderr),
     });
+  }
+
+  private registerSensitiveValue(value: string, category: string): void {
+    this.sensitiveValues.add(value);
+    const categories = this.sensitiveValueCategories.get(value) ?? new Set<string>();
+    categories.add(category);
+    this.sensitiveValueCategories.set(value, categories);
   }
 
   private launch(entry: string, overrides: Readonly<Record<string, string>>): ManagedProcess {
@@ -492,6 +539,27 @@ export class B1ProcessCluster {
     }
     throw new Error('API process did not become healthy within the startup deadline');
   }
+}
+
+function redactDatabaseUsername(text: string, username: string): string {
+  if (username.length === 0) return text;
+  const escaped = escapeRegExp(username);
+  let result = text.replace(
+    new RegExp(`(postgres(?:ql)?:\\/\\/)${escaped}(?=[:@])`, 'gi'),
+    '$1[redacted]',
+  );
+  result = result.replace(
+    new RegExp(
+      `((?:["']?(?:user|username)["']?\\s*[:=]\\s*["']?|\\buser\\s+["']?))${escaped}(?=["'\\s,}]|$)`,
+      'gi',
+    ),
+    '$1[redacted]',
+  );
+  return result;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 class ManagedProcess {

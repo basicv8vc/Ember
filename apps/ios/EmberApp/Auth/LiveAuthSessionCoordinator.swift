@@ -532,13 +532,27 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         do {
             dto = try await operation.task.value
         } catch {
-            if refresh === operation { refresh = nil }
             let authError = (error as? AuthError) ?? .transportFailure
 
+            // Ownership check, mirroring the one the success path performs after its own await. A
+            // rotation can be outstanding long enough for a logout or a newer sign-in to replace this
+            // session, and a failure that arrives afterwards describes a credential nobody is using any
+            // more. Acting on it would clear a fence a *different* rotation armed and end the session
+            // that replaced this one — including deleting its Keychain item.
+            let stillOwnsTheSession = generation == expectedGeneration && !isLoggingOut
+            if refresh === operation { refresh = nil }
+
+            guard stillOwnsTheSession else {
+                // The failure belongs to a superseded rotation. Reporting the original cause would tell
+                // the caller its session is gone while a newer one is live, so the cause is dropped
+                // along with the operation.
+                throw AuthError.superseded
+            }
+
             if authError == .unauthenticated {
-                // Only the credential that actually failed may be revoked. A delayed 401 for a token
-                // that has since been replaced by a newer sign-in says nothing about the new session,
-                // so this is a guarded no-op in that case.
+                // Past the guard above, this rotation still owns the session, so a 401 is evidence about
+                // the token actually in use. `revokeLocally(ifCurrent:)` keeps its own token check as a
+                // second line: revocation is always keyed to the credential that failed.
                 revokeLocally(ifCurrent: operation.token)
                 throw authError
             }

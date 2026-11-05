@@ -118,6 +118,9 @@ Each await is followed by a re-validation before any mutation:
   mutates nothing, so a logout that lands mid-exchange cannot be undone by the login it raced.
 - `settle()` re-checks `generation` after the rotation returns and before touching the store. A stale
   rotation writes nothing — in particular it does not delete the credential a newer sign-in just stored.
+- `settle()` applies the **same ownership check to a failed rotation**, before it clears the fence or ends
+  the session. A failure that arrives after the session was replaced belongs to a credential nobody is
+  using, and acting on it would end the newer session and delete its Keychain item (§8d).
 - Revocation is keyed to the token that actually failed (`revokeLocally(ifCurrent:)`). A delayed 401 for
   a token that has since been replaced is a no-op, so it cannot sign out the newer session; the same 401
   still revokes when the rejected token is current.
@@ -378,6 +381,56 @@ coordinator** over the same store and fence and asserts `refreshCallCount == 0`,
 **Verified against the defect.** Removing the pre-request `arm()` and restoring the pre-fix failure
 handling fails five of these (19 assertion failures across 282 tests); restoring the fix returns the
 suite to 282/282.
+
+## 8d. Review follow-up (PR #119 round 4) — a failure that belongs to nobody
+
+### The defect
+
+`settle()` guarded its **success** path with `generation == expectedGeneration`, but its outcome depended
+on a network call, and the **failure** path ran without any ownership check at all. Two ways to see it:
+
+- A rotation for session A is outstanding. The person signs in again, producing session B. The old
+  request then times out — an _unknown_ outcome — and the failure branch ends "the session", which is now
+  B: `record` is dropped and B's Keychain item is deleted. A request describing an abandoned session
+  destroys the live one.
+- A rotation for A is outstanding. Session B is established and a rotation for B arms the fence. A's
+  request then fails with something in `credentialUnaffectedByRefresh`, and the branch clears the fence —
+  disarming the protection that B's _still in flight_ rotation depends on. A crash right there would
+  present a token B's rotation may already have rotated away.
+
+Both are the same missing question: _is this failure still mine to act on?_
+
+### The fix
+
+`settle()` now computes ownership before touching any state, mirroring the success path:
+
+```swift
+let stillOwnsTheSession = generation == expectedGeneration && !isLoggingOut
+if refresh === operation { refresh = nil }
+guard stillOwnsTheSession else { throw AuthError.superseded }
+```
+
+Nothing is mutated when the guard fails: no fence is cleared, no record is dropped, no Keychain item is
+deleted, and `refresh` is only relinquished if it is still this operation's.
+
+### One deliberate behaviour change
+
+A delayed **401** for a rotation that has since been replaced used to surface as `unauthenticated`. It now
+surfaces as `superseded`. The old answer was false: the caller is authenticated with the newer session, and
+telling the UI "your session is no longer valid, sign in again" would have pushed the person through a
+sign-in they did not need. `testDelayedUnauthorizedForAnOldTokenDoesNotRevokeANewSession` was updated to
+assert the truthful value; its other assertions — new session intact, nothing deleted — are unchanged.
+
+### Tests
+
+| Scenario                                                              | Test                                                           |
+| --------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Stale timeout arrives after a newer sign-in → newer session survives  | `testStaleRotationFailureCannotEndANewerSession`               |
+| Stale failure while another rotation holds the fence → fence survives | `testStaleRotationFailureCannotClearANewerRotationsFence`      |
+| Stale 401 reports `superseded`, not `unauthenticated`                 | `testDelayedUnauthorizedForAnOldTokenDoesNotRevokeANewSession` |
+
+**Verified against the defect.** Removing the ownership guard fails exactly these three (7 assertion
+failures across 284 tests); restoring the fix returns the suite to 284/284.
 
 ## 9. Verification
 

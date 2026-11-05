@@ -200,6 +200,8 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
     private var storedLogoutResult: Result<Void, AuthError> = .success(())
     private var storedBootstrapResults: [Result<EmberMeDTO, AuthError>] = [.success(AuthFixture.me())]
     private var storedRefreshGate: AsyncGate?
+    /// One gate per call, consumed in order. Lets a test hold two rotations open independently.
+    private var storedRefreshGateQueue: [AsyncGate] = []
     private var storedRefreshStarted: (@Sendable () -> Void)?
     private var storedCreateSessionGate: AsyncGate?
     private var storedCreateSessionStarted: (@Sendable () -> Void)?
@@ -213,6 +215,12 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
     var lastCreateSessionIdentityToken: String? { lock.withLock { storedLastIdentityToken } }
 
     func setRefreshGate(_ gate: AsyncGate?) { lock.withLock { storedRefreshGate = gate } }
+
+    /// Holds the first N rotations open separately, so a stale one can be failed while a newer one is
+    /// still in flight.
+    func setRefreshGates(_ gates: [AsyncGate]) {
+        lock.withLock { storedRefreshGateQueue = gates }
+    }
 
     /// Called as a refresh enters the API, so a test can wait for "a refresh started" without polling.
     func setRefreshStartedHandler(_ handler: (@Sendable () -> Void)?) {
@@ -268,7 +276,13 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
             } else {
                 queued = storedRefreshResults.first ?? .failure(.invalidResponse)
             }
-            return (storedRefreshGate, queued, storedRefreshStarted)
+            let gate: AsyncGate?
+            if storedRefreshGateQueue.isEmpty {
+                gate = storedRefreshGate
+            } else {
+                gate = storedRefreshGateQueue.removeFirst()
+            }
+            return (gate, queued, storedRefreshStarted)
         }
 
         started?()

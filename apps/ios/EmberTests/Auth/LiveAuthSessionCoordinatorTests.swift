@@ -746,7 +746,9 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
             _ = try await refreshing.value
             XCTFail("expected the old rotation to be rejected")
         } catch let error as AuthError {
-            XCTAssertEqual(error, .unauthenticated)
+            // `.superseded`, not `.unauthenticated`: the 401 described a token nobody is using any more.
+            // Telling the caller it is signed out while a newer session is live would be false.
+            XCTAssertEqual(error, .superseded)
         }
 
         // The failure belonged to the old credential, so the new session is untouched.
@@ -1107,6 +1109,111 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
+    }
+
+    // MARK: - Failure callbacks must belong to the session they started on (review, round 4)
+
+    /// A rotation that fails *after* a newer sign-in has replaced the session must not end it.
+    ///
+    /// The success path re-checks the generation after its await; the failure path used to act
+    /// unconditionally. A timeout on an old rotation would therefore drop the new session from memory and
+    /// delete its Keychain item — the person's freshly minted credential, destroyed by a request that
+    /// described a different, already-abandoned session.
+    func testStaleRotationFailureCannotEndANewerSession() async throws {
+        let gate = AsyncGate()
+        let started = expectation(description: "rotation started")
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "old", expiresIn: 10)) { api in
+            api.setRefreshGates([gate])
+            api.setRefreshStartedHandler { started.fulfill() }
+            api.setRefreshResults([.failure(.timedOut)])
+            api.setCreateSessionResult(.success(AuthFixture.sessionResponse(tokenSuffix: "new")))
+        }
+
+        let stale = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [started], timeout: 5)
+
+        // The person signs in again while the old rotation is still outstanding.
+        let signed = try await built.coordinator.signInWithApple()
+        XCTAssertEqual(signed.accessToken, AuthFixture.token("new"))
+
+        // Only now does the old request time out — `.timedOut` is an unknown outcome, which without the
+        // ownership check would end whichever session happened to be current.
+        await gate.open()
+
+        do {
+            _ = try await stale.value
+            XCTFail("expected the stale rotation to be superseded")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .superseded)
+        }
+
+        // The newer session survives in memory and on disk, and the fence is not left armed.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("new"))
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_new"))))
+        XCTAssertEqual(built.store.deleteCount, 0)
+        XCTAssertFalse(built.fence.isArmed)
+    }
+
+    /// A stale failure must not clear the fence that a *different, live* rotation is relying on.
+    ///
+    /// Clearing it would tell the next launch that the stored credential is trustworthy while the newer
+    /// rotation is still outstanding — reopening the exact window the fence exists to close.
+    func testStaleRotationFailureCannotClearANewerRotationsFence() async throws {
+        let staleGate = AsyncGate()
+        let liveGate = AsyncGate()
+        let staleStarted = expectation(description: "stale rotation started")
+        let liveStarted = expectation(description: "live rotation started")
+        let starts = Counter()
+
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "old", expiresIn: 10)) { api in
+            api.setRefreshGates([staleGate, liveGate])
+            api.setRefreshResults([
+                .failure(.offline),
+                .success(AuthFixture.sessionResponse(tokenSuffix: "live", expiresIn: 10)),
+            ])
+            api.setCreateSessionResult(.success(AuthFixture.sessionResponse(tokenSuffix: "new", expiresIn: 10)))
+            api.setRefreshStartedHandler {
+                starts.increment()
+                if starts.value == 1 {
+                    staleStarted.fulfill()
+                } else {
+                    liveStarted.fulfill()
+                }
+            }
+        }
+
+        let stale = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [staleStarted], timeout: 5)
+
+        // A newer session replaces the one the stale rotation started on.
+        _ = try await built.coordinator.signInWithApple()
+
+        // A second rotation begins and arms the fence for the *new* session.
+        let live = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [liveStarted], timeout: 5)
+        XCTAssertTrue(built.fence.isArmed)
+
+        // The stale rotation now fails with `.offline` — the branch that clears the fence when it owns
+        // the session. It does not own this one.
+        await staleGate.open()
+
+        do {
+            _ = try await stale.value
+            XCTFail("expected the stale rotation to be superseded")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .superseded)
+        }
+
+        // The live rotation's protection is intact, so a crash right here is still safe.
+        XCTAssertTrue(built.fence.isArmed)
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("new"))
+
+        // ...and it is cleared only by the rotation that actually finishes.
+        await liveGate.open()
+        let liveRecord = try await live.value
+        XCTAssertEqual(liveRecord.accessToken, AuthFixture.token("live"))
+        XCTAssertFalse(built.fence.isArmed)
     }
 
     // MARK: - Helpers

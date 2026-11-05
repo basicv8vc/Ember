@@ -548,6 +548,7 @@ describe('GET /v1/tasks/:taskId/stream with PostgreSQL', () => {
         DATABASE_URL: login.connectionString,
         NODE_ENV: 'test',
         EMBER_ENV: 'test',
+        EMBER_APPLE_BUNDLE_ID: 'com.ember.alpha.test',
         EMBER_HOST: '127.0.0.1',
         EMBER_PORT: String(port),
         EMBER_LOG_LEVEL: 'info',

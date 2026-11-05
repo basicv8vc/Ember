@@ -149,16 +149,48 @@ export class PostgresB1ConsumerSessionRepository implements B1ConsumerSessionRep
 
   /**
    * Resolve `{tenantId, principalId, policyVersion}` from a token digest alone (I-9), with
-   * DB-clock absolute/idle expiry and revocation checks, plus the hourly idle slide.
+   * DB-clock absolute/idle expiry and revocation checks, plus the hourly idle slide. Reading a
+   * `rotated` token is itself replay: revoke the Consumer's whole active set before returning
+   * null. The HTTP/session layer maps that to 401 while preserving this approved port shape.
    */
   async findActiveSession(tokenDigest: Uint8Array): Promise<B1AuthenticatedSession | null> {
     const digest = readDigest(tokenDigest, 'tokenDigest');
 
-    return withB1SessionTransaction(this.pool, async (client) => {
+    const outcome = await withB1SessionTransaction(this.pool, async (client) => {
+      // Follow the same lock order as rotation/logout. The digest lookup is only a hint; the
+      // row is re-read under the Consumer lock before any authorization or replay decision.
+      const ownerResult = await client.query<SessionOwnerRow>(SELECT_SESSION_OWNER_SQL, [digest]);
+      const owner = ownerResult.rows[0];
+      if (owner === undefined) {
+        return { kind: 'inactive' as const };
+      }
+
+      await lockConsumer(client, owner.consumer_id);
+
       const found = await client.query<ActiveSessionRow>(FIND_ACTIVE_SQL, [digest]);
       const row = found.rows[0];
-      if (row === undefined || !row.is_live) {
-        return null;
+      if (
+        row === undefined ||
+        row.tenant_id !== owner.tenant_id ||
+        row.consumer_id !== owner.consumer_id
+      ) {
+        return { kind: 'inactive' as const };
+      }
+
+      if (row.revoked_at !== null) {
+        if (row.revocation_reason === 'rotated') {
+          await client.query(REVOKE_ALL_ACTIVE_SQL, [
+            row.tenant_id,
+            row.consumer_id,
+            'reuse_detected',
+          ]);
+          return { kind: 'reuse_detected' as const };
+        }
+        return { kind: 'inactive' as const };
+      }
+
+      if (!row.is_live) {
+        return { kind: 'inactive' as const };
       }
 
       // I-4: a live token implies the default Agent and main Conversation. `policyVersion`
@@ -171,8 +203,13 @@ export class PostgresB1ConsumerSessionRepository implements B1ConsumerSessionRep
       const slid = await client.query<B1SessionRow>(SLIDE_IDLE_SQL, [row.tenant_id, row.id]);
       const effective: B1SessionRow = slid.rows[0] ?? row;
 
-      return authenticatedSession(effective, row.principal_id, conversation.policy_version);
+      return {
+        kind: 'active' as const,
+        session: authenticatedSession(effective, row.principal_id, conversation.policy_version),
+      };
     });
+
+    return outcome.kind === 'active' ? outcome.session : null;
   }
 
   /**

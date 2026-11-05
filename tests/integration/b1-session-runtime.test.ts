@@ -419,7 +419,7 @@ describe('B1-2A: Consumer identity and session runtime (PostgreSQL 17)', () => {
     ).toBe('inactive');
   });
 
-  it('7. rotation atomically invalidates the old token', async () => {
+  it('7. rotation invalidates the old token and read replay revokes the Consumer sessions', async () => {
     const current = newToken('rotate-1');
     const next = newToken('rotate-2');
     const provisioned = await signIn(subject('rotate'), current);
@@ -432,14 +432,17 @@ describe('B1-2A: Consumer identity and session runtime (PostgreSQL 17)', () => {
     expect(result.session.sessionId).not.toBe(provisioned.session.sessionId);
     expect(result.session.tenantId).toBe(provisioned.identity.tenantId);
 
-    expect(await sessions.findActiveSession(current.digest)).toBeNull();
     expect(await sessions.findActiveSession(next.digest)).not.toBeNull();
+    // A protected-read lookup of an already-rotated token is a replay, not a passive 401.
+    expect(await sessions.findActiveSession(current.digest)).toBeNull();
+    expect(await sessions.findActiveSession(next.digest)).toBeNull();
 
     const old = await sessionRow(provisioned.session.sessionId);
     const fresh = await sessionRow(result.session.sessionId);
     expect(old.revoked_at).not.toBeNull();
     expect(old.revocation_reason).toBe('rotated');
-    expect(fresh.revoked_at).toBeNull();
+    expect(fresh.revoked_at).not.toBeNull();
+    expect(fresh.revocation_reason).toBe('reuse_detected');
     expect(fresh.rotated_from_session_id).toBe(provisioned.session.sessionId);
     expect(Buffer.compare(fresh.token_digest, next.digest)).toBe(0);
   });

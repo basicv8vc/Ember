@@ -156,7 +156,27 @@ export function createSessionService(options: CreateSessionServiceOptions): Sess
       const resolved = await resolveActiveSession(rawToken);
 
       if (resolved === null) {
-        // Idempotent: an already revoked / expired session has nothing left to revoke.
+        // Preserve idempotent logout for ordinary expired/revoked tokens, but do not hide
+        // rotated-token reuse behind the 204. `findActiveSession` has already revoked the
+        // Consumer's active set when the token was rotated; this second call uses the existing
+        // rotation result to distinguish replay from every other inactive token without
+        // extending the approved repository interface. The candidate digest is never stored
+        // because the presented session is no longer active.
+        if (SESSION_TOKEN_PATTERN.test(rawToken)) {
+          const candidateToken = generateSessionToken();
+          const ttl = windows();
+          const inactive = await ports.sessions.rotateSession({
+            currentTokenDigest: digestSessionToken(rawToken),
+            newTokenDigest: digestSessionToken(candidateToken),
+            expiresAt: ttl.expiresAt,
+            idleExpiresAt: ttl.idleExpiresAt,
+          });
+
+          if (inactive.kind === 'reuse_detected') {
+            throw new DomainError('UNAUTHENTICATED', 'rotated B1 session token was reused');
+          }
+        }
+
         return;
       }
 

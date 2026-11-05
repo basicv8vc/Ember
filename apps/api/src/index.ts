@@ -1,23 +1,35 @@
 import type { Server as HttpServer } from 'node:http';
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { ServerType } from '@hono/node-server';
 import { serve } from '@hono/node-server';
+import type { JWTVerifyGetKey } from 'jose';
 import {
   LocalBlobStore,
   PostgresAgentRepository,
   PostgresApprovalRepository,
   PostgresArtifactStore,
   PostgresBlobStore,
+  PostgresB1ConsumerProvisioningRepository,
+  PostgresB1ConsumerSessionRepository,
   PostgresCommitmentRepository,
   PostgresConsentRepository,
   PostgresTaskRepository,
   createPool,
   describeDatabaseTarget,
   loadDatabaseConfig,
+  type DatabaseConfig,
 } from '@ember/postgres';
 import { createApp, SERVICE_NAME } from './app.js';
 import { createDevTokenAuthenticator } from './auth/bearer-authenticator.js';
+import { PostgresB1MeProjectionReader } from './auth/b1-me-projection-reader.js';
+import {
+  createB1AuthRuntimeFromEnvironment,
+  type ListenerAddress,
+} from './auth/b1-auth-runtime.js';
+import type { B1SessionPorts } from './auth/session-service.js';
 import { loadDevAuthConfig } from './auth/dev-auth-config.js';
-import { isLoopbackHost, loadApiConfig } from './env.js';
+import { isLoopbackHost, loadApiConfig, type ApiConfig } from './env.js';
 import { unexpectedErrorCategory } from './http/error-mapping.js';
 import { createLogger, type Logger } from './logger.js';
 import { createDatabaseReadiness } from './readiness.js';
@@ -74,11 +86,25 @@ function registerShutdown(server: ServerType, pool: CloseablePool, logger: Logge
   process.once('SIGTERM', () => void shutdown('SIGTERM'));
 }
 
-function main(): void {
-  const apiConfig = loadApiConfig();
-  const databaseConfig = loadDatabaseConfig();
-  const devAuth = loadDevAuthConfig();
-  const logger = createLogger({ level: apiConfig.logLevel });
+export interface ApiApplicationOptions {
+  readonly pool: ReturnType<typeof createPool>;
+  readonly apiConfig: ApiConfig;
+  readonly databaseConfig: DatabaseConfig;
+  readonly env: NodeJS.ProcessEnv;
+  readonly logger: Logger;
+  /** Must report the actual bound socket; null/string/unbound addresses keep dev sign-in off. */
+  readonly actualListener: () => ListenerAddress;
+  /** In-process local JWKS fixture for E2E only; production startup does not set this. */
+  readonly appleKeyResolver?: JWTVerifyGetKey;
+}
+
+/**
+ * Build the production API composition with PostgreSQL-backed B1 session ports. The listener
+ * is injected as a callback so the R-9 policy samples the real server address on each request.
+ */
+export function createApiApplication(options: ApiApplicationOptions) {
+  const { pool, apiConfig, env, logger } = options;
+  const devAuth = loadDevAuthConfig(env);
 
   if (devAuth.tenants.length === 0) {
     // Fail closed, but loudly: the process still starts so the cause is a log line rather
@@ -91,14 +117,22 @@ function main(): void {
     logger.info('dev tenant credentials loaded', { tenants: devAuth.tenants.length });
   }
 
-  const pool = createPool(databaseConfig, {
-    onIdleError: (error) => {
-      // Category only: an idle-connection fault can include the endpoint it tried to reach.
-      logger.warn('database idle connection error', { category: unexpectedErrorCategory(error) });
-    },
+  const ports: B1SessionPorts = {
+    provisioning: new PostgresB1ConsumerProvisioningRepository(pool),
+    sessions: new PostgresB1ConsumerSessionRepository(pool),
+    me: new PostgresB1MeProjectionReader(pool),
+  };
+
+  const b1Session = createB1AuthRuntimeFromEnvironment({
+    ports,
+    env,
+    actualListener: options.actualListener,
+    ...(options.appleKeyResolver === undefined
+      ? {}
+      : { appleKeyResolver: options.appleKeyResolver }),
   });
 
-  const app = createApp({
+  return createApp({
     readiness: createDatabaseReadiness(pool),
     serviceVersion: SERVICE_VERSION,
     logger,
@@ -108,6 +142,7 @@ function main(): void {
     approvalStore: new PostgresApprovalRepository(pool),
     commitmentStore: new PostgresCommitmentRepository(pool),
     consentStore: new PostgresConsentRepository(pool),
+    b1Session,
     ...(apiConfig.blobRoot === null
       ? {}
       : {
@@ -117,6 +152,50 @@ function main(): void {
           ),
         }),
   });
+}
+
+export type StartApiServerOptions = Omit<ApiApplicationOptions, 'actualListener'>;
+
+/**
+ * Start the same server used by the executable entry point. `actualListener` is null until
+ * `server.address()` reports a bound socket, so dev sign-in cannot be enabled during startup.
+ */
+export function startApiServer(options: StartApiServerOptions): ServerType {
+  const listener: { server?: ServerType } = {};
+  const app = createApiApplication({
+    ...options,
+    actualListener: () => listener.server?.address() ?? null,
+  });
+
+  const server = serve(
+    { fetch: app.fetch, hostname: options.apiConfig.host, port: options.apiConfig.port },
+    (info) => {
+      options.logger.info('api listening', {
+        service: SERVICE_NAME,
+        version: SERVICE_VERSION,
+        env: options.apiConfig.env,
+        host: info.address,
+        port: info.port,
+        database: describeDatabaseTarget(options.databaseConfig.connectionString),
+      });
+    },
+  );
+
+  listener.server = server;
+  return server;
+}
+
+async function main(): Promise<void> {
+  const env = process.env;
+  const apiConfig = loadApiConfig(env);
+  const databaseConfig = loadDatabaseConfig(env);
+  const logger = createLogger({ level: apiConfig.logLevel });
+  const pool = createPool(databaseConfig, {
+    onIdleError: (error) => {
+      // Category only: an idle-connection fault can include the endpoint it tried to reach.
+      logger.warn('database idle connection error', { category: unexpectedErrorCategory(error) });
+    },
+  });
 
   if (!isLoopbackHost(apiConfig.host)) {
     logger.warn('binding to a non-loopback interface', {
@@ -125,32 +204,31 @@ function main(): void {
     });
   }
 
-  const server = serve(
-    { fetch: app.fetch, hostname: apiConfig.host, port: apiConfig.port },
-    (info) => {
-      logger.info('api listening', {
-        service: SERVICE_NAME,
-        version: SERVICE_VERSION,
-        env: apiConfig.env,
-        host: info.address,
-        port: info.port,
-        database: describeDatabaseTarget(databaseConfig.connectionString),
-      });
-    },
-  );
+  const server = await (async (): Promise<ServerType> => {
+    try {
+      return startApiServer({ pool, apiConfig, databaseConfig, env, logger });
+    } catch (error) {
+      await pool.end();
+      throw error;
+    }
+  })();
 
   registerShutdown(server, pool, logger);
 }
 
-try {
-  main();
-} catch (error) {
-  // Startup failures are operator-facing and happen before any request is served, so the
-  // detail is kept: the only errors reachable here are config-validation errors, which name
-  // environment variables and never interpolate a credential value. Request-path faults take
-  // the redacted route in `app.onError` instead.
-  process.stderr.write(
-    `api failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
-  );
-  process.exitCode = 1;
+function isMainModule(): boolean {
+  const entryPoint = process.argv[1];
+  return entryPoint !== undefined && pathToFileURL(resolve(entryPoint)).href === import.meta.url;
+}
+
+if (isMainModule()) {
+  void main().catch((error: unknown) => {
+    // Startup failures are operator-facing and happen before any request is served, so the
+    // detail is kept: configuration errors never interpolate credentials. Request-path
+    // failures take the redacted route in `app.onError` instead.
+    process.stderr.write(
+      `api failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  });
 }

@@ -23,7 +23,7 @@ The existing CI workflow runs this file through `pnpm test:e2e` with its Postgre
 
 ## Real process commands
 
-The E2E harness starts these separate processes from the repository root, each with the disposable database URL and loopback-only test auth configuration:
+The E2E harness starts these separate processes from the repository root, each with the disposable database URL and loopback-only test auth configuration. The Worker explicitly enables `EMBER_B1_FAKE_RESPONDER_ENABLED=true` because it defaults to off:
 
 ```sh
 node --import tsx apps/api/src/index.ts

@@ -525,7 +525,10 @@ describe('B1 independent cloud lifecycle: real API + Worker + PostgreSQL 17', ()
       expect(readiness.status).toBe(503);
       const errorText = JSON.stringify(failureBody);
       expect(errorText).not.toContain(cluster.databaseName);
-      expect(errorText).not.toContain(new URL(cluster.databaseUrl).password);
+      const databasePassword = decodeURIComponent(new URL(cluster.databaseUrl).password);
+      if (databasePassword.length > 0) {
+        expect(errorText).not.toContain(databasePassword);
+      }
       expect(errorText).not.toMatch(/ECONN|postgres:\/\//i);
     } finally {
       await cluster.allowDatabaseConnections();

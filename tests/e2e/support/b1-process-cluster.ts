@@ -166,8 +166,14 @@ export class B1ProcessCluster {
     if (this.worker !== undefined && this.worker.exit === undefined) {
       return;
     }
-    this.worker = this.launch('apps/worker/src/index.ts', {});
-    await this.worker.waitForOutput('worker starting', PROCESS_START_TIMEOUT_MS, 'Worker');
+    this.worker = this.launch('apps/worker/src/index.ts', {
+      EMBER_B1_FAKE_RESPONDER_ENABLED: 'true',
+    });
+    await this.worker.waitForOutput(
+      'fake B1 assistant turn responder enabled',
+      PROCESS_START_TIMEOUT_MS,
+      'Worker Fake Responder',
+    );
   }
 
   async stopApi(): Promise<void> {

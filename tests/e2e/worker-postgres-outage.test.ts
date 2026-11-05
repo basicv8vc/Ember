@@ -157,7 +157,7 @@ function safeWorkerExitDiagnostic(): string {
   const failureLine = worker
     ?.getLogs()
     .split(/\r?\n/)
-    .find((line) => /^worker failed: [a-z_]+$/.test(line));
+    .find((line) => /^worker failed: [A-Za-z0-9_]+$/.test(line));
   return failureLine ?? 'Worker exited without a safe failure category';
 }
 

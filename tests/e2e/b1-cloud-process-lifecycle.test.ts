@@ -29,6 +29,8 @@ let cluster: B1ProcessCluster;
 describe('B1 independent cloud lifecycle: real API + Worker + PostgreSQL 17', () => {
   beforeAll(async () => {
     cluster = await B1ProcessCluster.start();
+    expect(cluster.nodeVersion).toMatch(/^v24\./);
+    console.info(`[b1-e2e] Node ${cluster.nodeVersion}; ${cluster.postgresVersion.split(' (')[0]}`);
   }, 60_000);
 
   afterAll(async () => {
@@ -464,13 +466,15 @@ describe('B1 independent cloud lifecycle: real API + Worker + PostgreSQL 17', ()
     expect(await errorCode(invalid)).toBe('UNAUTHENTICATED');
 
     const expired = await cluster.signIn('expired-session');
-    await cluster.observerPool.query(
+    const expiredUpdate = await cluster.observerPool.query(
       `UPDATE consumer_sessions
-          SET expires_at = clock_timestamp() - interval '1 second',
-              idle_expires_at = clock_timestamp() - interval '1 second'
+          SET expires_at = issued_at + interval '1 millisecond',
+              idle_expires_at = issued_at + interval '1 millisecond'
         WHERE tenant_id = $1 AND id = $2`,
       [await cluster.tenantIdFor(expired), expired.session.session_id],
     );
+    expect(expiredUpdate.rowCount).toBe(1);
+    await delay(10);
     const expiredRead = await cluster.get('/v1/me', expired.session.access_token);
     expect(expiredRead.status).toBe(401);
     expect(await errorCode(expiredRead)).toBe('UNAUTHENTICATED');

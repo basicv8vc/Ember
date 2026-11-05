@@ -109,6 +109,23 @@ function authHeaders(): Record<string, string> {
 }
 
 describe('B1 Turn HTTP routes', () => {
+  it('does not leak session authentication onto other /v1 routes when mounted', async () => {
+    const app = buildApp({
+      getTurn() {
+        return Promise.resolve(runningTurn());
+      },
+      cancelTurn() {
+        return Promise.resolve(runningTurn());
+      },
+    });
+    app.get('/v1/legacy-probe', (c) => c.text('legacy route remains independent'));
+
+    const response = await app.request('/v1/legacy-probe');
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('legacy route remains independent');
+  });
+
   it('requires a verified Ember Session and scopes repository calls from its AuthContext', async () => {
     const calls: { tenantId: Id; conversationId: Id; turnId: Id }[] = [];
     const repository: B1TurnRouteDependencies['repository'] = {

@@ -29,9 +29,9 @@ export interface B1TurnRouteDependencies {
  */
 export function createB1TurnRoutes(deps: B1TurnRouteDependencies): Hono<AppBindings> {
   const routes = new Hono<AppBindings>();
-  routes.use('*', requireSessionAuth({ service: deps.sessions, logger: deps.logger }));
+  const sessionAuth = requireSessionAuth({ service: deps.sessions, logger: deps.logger });
 
-  routes.get('/conversations/:conversation_id/turns/:turn_id', async (c) => {
+  routes.get('/conversations/:conversation_id/turns/:turn_id', sessionAuth, async (c) => {
     const rejected = await rejectUnexpectedTurnInput(c);
 
     if (rejected !== undefined) {
@@ -57,7 +57,7 @@ export function createB1TurnRoutes(deps: B1TurnRouteDependencies): Hono<AppBindi
     return c.json(B1AssistantTurnDtoSchema.parse(turn), 200);
   });
 
-  routes.post('/conversations/:conversation_id/turns/:turn_id/cancel', async (c) => {
+  routes.post('/conversations/:conversation_id/turns/:turn_id/cancel', sessionAuth, async (c) => {
     const rejected = await rejectUnexpectedTurnInput(c);
 
     if (rejected !== undefined) {

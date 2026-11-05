@@ -64,6 +64,30 @@ describe('request id', () => {
   });
 });
 
+describe('B1 Cloud Chat route defaults', () => {
+  it('keeps the five session-authenticated chat endpoints absent without injected B1 runtime ports', async () => {
+    const app = createApp();
+    const endpoints = [
+      { method: 'POST', path: '/v1/conversations/11111111-1111-4111-8111-111111111111/messages' },
+      { method: 'GET', path: '/v1/conversations/11111111-1111-4111-8111-111111111111/messages' },
+      { method: 'GET', path: '/v1/message-submissions/11111111-1111-4111-8111-111111111111' },
+      {
+        method: 'GET',
+        path: '/v1/conversations/11111111-1111-4111-8111-111111111111/turns/22222222-2222-4222-8222-222222222222',
+      },
+      {
+        method: 'POST',
+        path: '/v1/conversations/11111111-1111-4111-8111-111111111111/turns/22222222-2222-4222-8222-222222222222/cancel',
+      },
+    ] as const;
+
+    for (const endpoint of endpoints) {
+      const response = await app.request(endpoint.path, { method: endpoint.method });
+      expect(response.status).toBe(404);
+    }
+  });
+});
+
 describe('readJsonBody', () => {
   it('accepts application/json with parameters', async () => {
     const result = await readJsonBody(

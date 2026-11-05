@@ -72,8 +72,8 @@ async function main(): Promise<void> {
   const databaseConfig = loadDatabaseConfig();
   const logger = createWorkerLogger({ level: config.logLevel });
   const pool = createPool(databaseConfig, {
-    onIdleError: (error) => {
-      logger.warn('database idle connection error', {
+    onClientError: (error) => {
+      logger.warn('database client connection error', {
         category: safeWorkerErrorCategory(error),
       });
     },

@@ -201,6 +201,8 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
     private var storedBootstrapResults: [Result<EmberMeDTO, AuthError>] = [.success(AuthFixture.me())]
     private var storedRefreshGate: AsyncGate?
     private var storedRefreshStarted: (@Sendable () -> Void)?
+    private var storedCreateSessionGate: AsyncGate?
+    private var storedCreateSessionStarted: (@Sendable () -> Void)?
 
     var createSessionCallCount: Int { lock.withLock { createSessionCount } }
     var refreshCallCount: Int { lock.withLock { refreshCount } }
@@ -215,6 +217,15 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
     /// Called as a refresh enters the API, so a test can wait for "a refresh started" without polling.
     func setRefreshStartedHandler(_ handler: (@Sendable () -> Void)?) {
         lock.withLock { storedRefreshStarted = handler }
+    }
+
+    /// Holds a session exchange open, so a logout or a second sign-in can be interleaved deterministically.
+    func setCreateSessionGate(_ gate: AsyncGate?) {
+        lock.withLock { storedCreateSessionGate = gate }
+    }
+
+    func setCreateSessionStartedHandler(_ handler: (@Sendable () -> Void)?) {
+        lock.withLock { storedCreateSessionStarted = handler }
     }
 
     func setLogoutResult(_ result: Result<Void, AuthError>) {
@@ -234,12 +245,16 @@ final class FakeEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
     }
 
     func createSession(identityToken: String, nonce: String) async throws -> EmberSessionResponseDTO {
-        let result = lock.withLock { () -> Result<EmberSessionResponseDTO, AuthError> in
+        let (gate, result, started) = lock.withLock {
+            () -> (AsyncGate?, Result<EmberSessionResponseDTO, AuthError>, (@Sendable () -> Void)?) in
             createSessionCount += 1
             storedLastIdentityToken = identityToken
             storedLastNonce = nonce
-            return storedCreateSessionResult
+            return (storedCreateSessionGate, storedCreateSessionResult, storedCreateSessionStarted)
         }
+
+        started?()
+        if let gate { await gate.wait() }
         return try result.get()
     }
 

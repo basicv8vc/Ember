@@ -67,24 +67,31 @@ public struct EmberSessionRecord: Equatable, Sendable, CustomStringConvertible,
 ///
 /// Implementations must distinguish "no record" from "cannot read the record": the first is a
 /// signed-out consumer, the second is not (annex §10.3).
+///
+/// **The API is synchronous on purpose.** The Keychain is a local, fast, synchronous facility, and an
+/// `async` store would put a suspension point inside every credential commit. That is precisely the
+/// window in which a logout, a new sign-in or a stale refresh could interleave with a write that had
+/// already been decided — the class of defect this slice must not have. Keeping these calls
+/// synchronous lets `LiveAuthSessionCoordinator` perform "check generation → write → commit" as one
+/// uninterrupted actor step.
 public protocol EmberSessionStore: Sendable {
     /// Returns the stored record, or `nil` when none exists.
     /// - Throws: `AuthError.keychainUnavailable` when storage exists but cannot be read,
     ///   `AuthError.storedSessionCorrupt` when a record exists and cannot be decoded.
-    func load() async throws -> EmberSessionRecord?
+    func load() throws -> EmberSessionRecord?
 
     /// Writes the record, replacing any existing value.
-    func save(_ record: EmberSessionRecord) async throws
+    func save(_ record: EmberSessionRecord) throws
 
     /// Atomically replaces the record after a token rotation.
     ///
     /// A rotation must never leave the store empty: if it did, a crash between "revoke old" and
     /// "write new" would silently sign the consumer out of a session the server still considers
     /// live.
-    func replace(_ record: EmberSessionRecord) async throws
+    func replace(_ record: EmberSessionRecord) throws
 
     /// Removes the record. Idempotent: deleting an absent record is success.
-    func delete() async throws
+    func delete() throws
 }
 
 /// Keychain-backed store for the Ember session.
@@ -119,7 +126,7 @@ public final class KeychainSessionStore: EmberSessionStore {
 
     // MARK: - EmberSessionStore
 
-    public func load() async throws -> EmberSessionRecord? {
+    public func load() throws -> EmberSessionRecord? {
         var query = baseQuery
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -139,7 +146,7 @@ public final class KeychainSessionStore: EmberSessionStore {
         }
     }
 
-    public func save(_ record: EmberSessionRecord) async throws {
+    public func save(_ record: EmberSessionRecord) throws {
         let data = try StoredSessionPayload.encode(record)
 
         let updateStatus = SecItemUpdate(
@@ -159,11 +166,11 @@ public final class KeychainSessionStore: EmberSessionStore {
 
     /// Rotation is one `SecItemUpdate` when a record exists. The Keychain replaces the value in
     /// place, so there is no interval in which the store holds neither the old nor the new token.
-    public func replace(_ record: EmberSessionRecord) async throws {
-        try await save(record)
+    public func replace(_ record: EmberSessionRecord) throws {
+        try save(record)
     }
 
-    public func delete() async throws {
+    public func delete() throws {
         let status = SecItemDelete(baseQuery as CFDictionary)
         switch status {
         case errSecSuccess, errSecItemNotFound:
@@ -266,59 +273,74 @@ private enum StoredSessionPayload {
 /// Deterministic in-memory store for tests and previews. No Keychain, no disk.
 ///
 /// The availability switch models the real failure the coordinator must survive: a locked device
-/// where the credential exists but cannot be read.
-public actor InMemoryEmberSessionStore: EmberSessionStore {
+/// where the credential exists but cannot be read. A lock, not an actor, so the store keeps the same
+/// synchronous contract as the Keychain implementation and tests observe it without `await`.
+public final class InMemoryEmberSessionStore: EmberSessionStore, @unchecked Sendable {
+    private let lock = NSLock()
     private var record: EmberSessionRecord?
     private var isUnavailable = false
     private var deleteFailure: AuthError?
 
-    public private(set) var loadCount = 0
-    public private(set) var saveCount = 0
-    public private(set) var replaceCount = 0
-    public private(set) var deleteCount = 0
+    private var loadCalls = 0
+    private var saveCalls = 0
+    private var replaceCalls = 0
+    private var deleteCalls = 0
 
     public init(initialRecord: EmberSessionRecord? = nil) {
         self.record = initialRecord
     }
 
+    public var loadCount: Int { lock.withLock { loadCalls } }
+    public var saveCount: Int { lock.withLock { saveCalls } }
+    public var replaceCount: Int { lock.withLock { replaceCalls } }
+    public var deleteCount: Int { lock.withLock { deleteCalls } }
+
     public func setUnavailable(_ unavailable: Bool) {
-        isUnavailable = unavailable
+        lock.withLock { isUnavailable = unavailable }
     }
 
     public func setDeleteFailure(_ error: AuthError?) {
-        deleteFailure = error
+        lock.withLock { deleteFailure = error }
     }
 
     public func seed(_ record: EmberSessionRecord?) {
-        self.record = record
+        lock.withLock { self.record = record }
     }
 
     public func currentRecord() -> EmberSessionRecord? {
-        record
+        lock.withLock { record }
     }
 
-    public func load() async throws -> EmberSessionRecord? {
-        loadCount += 1
-        if isUnavailable { throw AuthError.keychainUnavailable }
-        return record
+    public func load() throws -> EmberSessionRecord? {
+        try lock.withLock {
+            loadCalls += 1
+            if isUnavailable { throw AuthError.keychainUnavailable }
+            return record
+        }
     }
 
-    public func save(_ record: EmberSessionRecord) async throws {
-        saveCount += 1
-        if isUnavailable { throw AuthError.keychainUnavailable }
-        self.record = record
+    public func save(_ record: EmberSessionRecord) throws {
+        try lock.withLock {
+            saveCalls += 1
+            if isUnavailable { throw AuthError.keychainUnavailable }
+            self.record = record
+        }
     }
 
-    public func replace(_ record: EmberSessionRecord) async throws {
-        replaceCount += 1
-        if isUnavailable { throw AuthError.keychainUnavailable }
-        self.record = record
+    public func replace(_ record: EmberSessionRecord) throws {
+        try lock.withLock {
+            replaceCalls += 1
+            if isUnavailable { throw AuthError.keychainUnavailable }
+            self.record = record
+        }
     }
 
-    public func delete() async throws {
-        deleteCount += 1
-        if let deleteFailure { throw deleteFailure }
-        if isUnavailable { throw AuthError.keychainUnavailable }
-        record = nil
+    public func delete() throws {
+        try lock.withLock {
+            deleteCalls += 1
+            if let deleteFailure { throw deleteFailure }
+            if isUnavailable { throw AuthError.keychainUnavailable }
+            record = nil
+        }
     }
 }

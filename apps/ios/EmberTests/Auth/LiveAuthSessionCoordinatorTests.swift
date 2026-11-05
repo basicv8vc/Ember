@@ -34,7 +34,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(record.sessionID, AuthFixture.sessionID)
         XCTAssertEqual(record.consumerID, AuthFixture.consumerID)
 
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertEqual(stored, record)
 
         let state = await built.coordinator.currentSession()
@@ -66,7 +66,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         }
 
         XCTAssertEqual(built.api.createSessionCallCount, 0)
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         // The pre-existing session is untouched: a cancel is not a sign-out.
         XCTAssertEqual(stored, AuthFixture.record())
     }
@@ -83,7 +83,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
             XCTAssertEqual(error, .unauthenticated)
         }
 
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .unauthenticated)
@@ -91,7 +91,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
     func testSignInFailsHonestlyWhenTheKeychainCannotStore() async throws {
         let built = try makeCoordinator()
-        await built.store.setUnavailable(true)
+        built.store.setUnavailable(true)
 
         do {
             _ = try await built.coordinator.signInWithApple()
@@ -131,7 +131,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
         XCTAssertEqual(built.api.refreshCallCount, 1)
         XCTAssertEqual(built.api.bootstrapCallCount, 1)
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertEqual(stored?.accessToken, AuthFixture.token("rotated"))
     }
 
@@ -149,7 +149,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         }
 
         // The credential is untouched: offline is not a sign-out.
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertEqual(stored, AuthFixture.record())
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
@@ -172,13 +172,13 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
     func testLockedKeychainIsUnavailableRatherThanSignedOut() async throws {
         let built = try makeCoordinator(storedRecord: AuthFixture.record())
-        await built.store.setUnavailable(true)
+        built.store.setUnavailable(true)
 
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .unavailable)
 
         // The device is unlocked later in the same launch; the session becomes visible again.
-        await built.store.setUnavailable(false)
+        built.store.setUnavailable(false)
         let recovered = await built.coordinator.currentSession()
         XCTAssertEqual(recovered, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
     }
@@ -218,7 +218,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         // One network rotation, one shared answer, no second token.
         XCTAssertEqual(built.api.refreshCallCount, 1)
         XCTAssertEqual(Set(tokens.map(\.rawValue)), ["ems_rotated1"])
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertEqual(stored?.accessToken, AuthFixture.token("rotated1"))
     }
 
@@ -248,7 +248,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         }
 
         XCTAssertEqual(built.api.refreshCallCount, 1)
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
 
         // Every later attempt fails locally: a revoked session must not generate more traffic.
@@ -283,7 +283,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         // Exactly one rotation and two reads: the bounded recovery, not an unbounded loop.
         XCTAssertEqual(built.api.refreshCallCount, 1)
         XCTAssertEqual(built.api.bootstrapCallCount, 2)
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
     }
 
@@ -297,7 +297,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(outcome, .revokedRemotely)
         XCTAssertEqual(built.api.logoutCallCount, 1)
         XCTAssertEqual(built.api.lastLogoutToken, AuthFixture.token())
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .unauthenticated)
@@ -315,7 +315,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertFalse(outcome.isFullySignedOut)
         // Local credentials are gone regardless: the device is signed out even if the server
         // could not be told.
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
 
         // No automatic retry of logout.
@@ -346,7 +346,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
     func testLogoutReportsAFailureToRemoveLocalCredentials() async throws {
         let built = try makeCoordinator(storedRecord: AuthFixture.record())
-        await built.store.setDeleteFailure(.keychainUnavailable)
+        built.store.setDeleteFailure(.keychainUnavailable)
 
         let outcome = await built.coordinator.logout()
 
@@ -360,7 +360,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         let store = built.store
 
         await built.coordinator.registerSignOutCleanup {
-            if await store.currentRecord() == nil {
+            if store.currentRecord() == nil {
                 observedCredentialAtCleanup.increment()
             }
         }
@@ -422,7 +422,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
             XCTAssertEqual(error, .superseded)
         }
 
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertEqual(stored?.accessToken, AuthFixture.token("first"))
         XCTAssertEqual(built.api.createSessionCallCount, 1)
     }
@@ -449,7 +449,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         }
 
         // The rotated token was never written after the logout.
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
         let state = await built.coordinator.currentSession()
         XCTAssertEqual(state, .unauthenticated)
@@ -507,7 +507,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
         // One rotation, one replay, then revocation — never a loop.
         XCTAssertEqual(built.api.refreshCallCount, 1)
-        let stored = await built.store.currentRecord()
+        let stored = built.store.currentRecord()
         XCTAssertNil(stored)
     }
 
@@ -638,6 +638,139 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         // A 500 is a response, not a transport failure: it is returned to the caller untouched.
         XCTAssertEqual(response.statusCode, 500)
         XCTAssertEqual(attempts.value, 1)
+    }
+
+    // MARK: - Interleavings reported in review
+
+    /// A logout that lands while the session exchange is still on the wire must win.
+    ///
+    /// The credential commit is a single uninterrupted actor step, so the only suspension a logout can
+    /// interleave with is the network call — which is exactly what the gate holds open here.
+    func testLogoutDuringSignInExchangeLeavesNoCredential() async throws {
+        let gate = AsyncGate()
+        let exchangeStarted = expectation(description: "session exchange started")
+        let built = try makeCoordinator { api in
+            api.setCreateSessionGate(gate)
+            api.setCreateSessionStartedHandler { exchangeStarted.fulfill() }
+        }
+
+        let signIn = Task { try await built.coordinator.signInWithApple() }
+        await fulfillment(of: [exchangeStarted], timeout: 5)
+        built.api.setCreateSessionStartedHandler(nil)
+
+        // The consumer signs out while the exchange is in flight.
+        let outcome = await built.coordinator.logout()
+        XCTAssertEqual(outcome, .alreadyInvalidated)
+
+        await gate.open()
+
+        do {
+            _ = try await signIn.value
+            XCTFail("expected the superseded sign-in to be rejected")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .superseded)
+        }
+
+        // Nothing survived: no Keychain record, no in-memory credential, no authenticated state.
+        XCTAssertNil(built.store.currentRecord())
+        XCTAssertEqual(built.store.saveCount, 0)
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+    }
+
+    /// A rotation that finishes after a newer sign-in must not delete the newer credential.
+    ///
+    /// Regression: the old settlement path deleted the store "to be safe" when its generation was
+    /// stale, which removed the credential the new sign-in had just written.
+    func testStaleRefreshDoesNotDeleteANewerSignInsCredential() async throws {
+        let gate = AsyncGate()
+        let rotationStarted = expectation(description: "rotation started")
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "old", expiresIn: 10)) { api in
+            api.setRefreshGate(gate)
+            api.setRefreshStartedHandler { rotationStarted.fulfill() }
+            api.setCreateSessionResult(.success(AuthFixture.sessionResponse(tokenSuffix: "new")))
+        }
+
+        let refreshing = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [rotationStarted], timeout: 5)
+
+        // A fresh sign-in replaces the session while the old rotation is still in flight.
+        let signed = try await built.coordinator.signInWithApple()
+        XCTAssertEqual(signed.accessToken, AuthFixture.token("new"))
+
+        await gate.open()
+
+        do {
+            _ = try await refreshing.value
+            XCTFail("expected the stale rotation to be superseded")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .superseded)
+        }
+
+        // The newer credential is intact, in the store and in memory.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("new"))
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_new"))))
+
+        // The rotated token of the abandoned session was never written.
+        let stored = built.store.currentRecord()
+        XCTAssertNotEqual(stored?.accessToken, AuthFixture.token("rotated"))
+    }
+
+    /// A 401 that arrives for a replaced token must not revoke the session that replaced it.
+    ///
+    /// Regression: revocation was unconditional, so a delayed rejection of the old token signed the
+    /// new session out locally and deleted its Keychain item.
+    func testDelayedUnauthorizedForAnOldTokenDoesNotRevokeANewSession() async throws {
+        let gate = AsyncGate()
+        let rotationStarted = expectation(description: "rotation started")
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "old", expiresIn: 10)) { api in
+            api.setRefreshGate(gate)
+            api.setRefreshStartedHandler { rotationStarted.fulfill() }
+            api.setRefreshResults([.failure(.unauthenticated)])
+            api.setCreateSessionResult(.success(AuthFixture.sessionResponse(tokenSuffix: "new")))
+        }
+
+        let refreshing = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [rotationStarted], timeout: 5)
+
+        let signed = try await built.coordinator.signInWithApple()
+        XCTAssertEqual(signed.accessToken, AuthFixture.token("new"))
+
+        // Only now does the server reject the *old* token.
+        await gate.open()
+
+        do {
+            _ = try await refreshing.value
+            XCTFail("expected the old rotation to be rejected")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .unauthenticated)
+        }
+
+        // The failure belonged to the old credential, so the new session is untouched.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("new"))
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_new"))))
+        XCTAssertEqual(built.store.deleteCount, 0)
+    }
+
+    /// The same 401 *is* acted on when the rejected token is still the current one.
+    func testUnauthorizedForTheCurrentTokenStillRevokes() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10)) { api in
+            api.setRefreshResults([.failure(.unauthenticated)])
+        }
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected revocation")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .unauthenticated)
+        }
+
+        XCTAssertNil(built.store.currentRecord())
+        XCTAssertEqual(built.store.deleteCount, 1)
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
     }
 
     // MARK: - Helpers

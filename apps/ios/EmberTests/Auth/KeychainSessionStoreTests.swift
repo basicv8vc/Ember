@@ -9,7 +9,7 @@ final class KeychainSessionStoreTests: XCTestCase {
 
     override func tearDown() async throws {
         for store in stores {
-            try? await store.delete()
+            try? store.delete()
         }
         stores.removeAll()
         try await super.tearDown()
@@ -21,15 +21,15 @@ final class KeychainSessionStoreTests: XCTestCase {
         let store = InMemoryEmberSessionStore()
         let record = AuthFixture.record()
 
-        let initiallyStored = await store.currentRecord()
+        let initiallyStored = store.currentRecord()
         XCTAssertNil(initiallyStored)
 
-        try await store.save(record)
-        let loaded = try await store.load()
+        try store.save(record)
+        let loaded = try store.load()
         XCTAssertEqual(loaded, record)
 
-        try await store.delete()
-        let afterDelete = try await store.load()
+        try store.delete()
+        let afterDelete = try store.load()
         XCTAssertNil(afterDelete)
     }
 
@@ -37,37 +37,37 @@ final class KeychainSessionStoreTests: XCTestCase {
         let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record())
         let rotated = AuthFixture.record(tokenSuffix: "rotated")
 
-        try await store.replace(rotated)
+        try store.replace(rotated)
 
-        let loaded = try await store.load()
-        let replaceCount = await store.replaceCount
+        let loaded = try store.load()
+        let replaceCount = store.replaceCount
         XCTAssertEqual(loaded?.accessToken, rotated.accessToken)
         XCTAssertEqual(replaceCount, 1)
     }
 
     func testInMemoryStoreDistinguishesUnavailableFromEmpty() async throws {
         let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record())
-        await store.setUnavailable(true)
+        store.setUnavailable(true)
 
         // The distinction the coordinator depends on: this throws, it does not return nil.
         do {
-            let loaded = try await store.load()
+            let loaded = try store.load()
             XCTFail("expected keychainUnavailable, got \(String(describing: loaded))")
         } catch let error as AuthError {
             XCTAssertEqual(error, .keychainUnavailable)
         }
 
-        await store.setUnavailable(false)
-        let recovered = try await store.load()
+        store.setUnavailable(false)
+        let recovered = try store.load()
         XCTAssertEqual(recovered, AuthFixture.record())
     }
 
     func testInMemoryStoreReportsDeleteFailure() async throws {
         let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record())
-        await store.setDeleteFailure(.keychainUnavailable)
+        store.setDeleteFailure(.keychainUnavailable)
 
         do {
-            try await store.delete()
+            try store.delete()
             XCTFail("expected keychainUnavailable")
         } catch let error as AuthError {
             XCTAssertEqual(error, .keychainUnavailable)
@@ -77,9 +77,9 @@ final class KeychainSessionStoreTests: XCTestCase {
     func testDeletingAnAbsentRecordIsSuccess() async throws {
         let store = InMemoryEmberSessionStore()
 
-        try await store.delete()
+        try store.delete()
 
-        let loaded = try await store.load()
+        let loaded = try store.load()
         XCTAssertNil(loaded)
     }
 
@@ -90,12 +90,12 @@ final class KeychainSessionStoreTests: XCTestCase {
         let record = AuthFixture.record(tokenSuffix: "keychain-roundtrip")
 
         do {
-            let initiallyStored = try await store.load()
+            let initiallyStored = try store.load()
             XCTAssertNil(initiallyStored)
 
-            try await store.save(record)
+            try store.save(record)
 
-            let loaded = try await store.load()
+            let loaded = try store.load()
             XCTAssertEqual(loaded?.accessToken, record.accessToken)
             XCTAssertEqual(loaded?.sessionID, record.sessionID)
             XCTAssertEqual(loaded?.consumerID, record.consumerID)
@@ -115,10 +115,10 @@ final class KeychainSessionStoreTests: XCTestCase {
         let second = AuthFixture.record(tokenSuffix: "second")
 
         do {
-            try await store.save(first)
-            try await store.replace(second)
+            try store.save(first)
+            try store.replace(second)
 
-            let loaded = try await store.load()
+            let loaded = try store.load()
             XCTAssertEqual(loaded?.accessToken, second.accessToken)
         } catch let error as AuthError where error == .keychainUnavailable {
             throw XCTSkip("Keychain is not available in this host context: \(error)")
@@ -129,14 +129,14 @@ final class KeychainSessionStoreTests: XCTestCase {
         let store = makeKeychainStore()
 
         do {
-            try await store.save(AuthFixture.record())
-            try await store.delete()
+            try store.save(AuthFixture.record())
+            try store.delete()
 
-            let afterDelete = try await store.load()
+            let afterDelete = try store.load()
             XCTAssertNil(afterDelete)
 
             // A second delete of an absent item must not throw.
-            try await store.delete()
+            try store.delete()
         } catch let error as AuthError where error == .keychainUnavailable {
             throw XCTSkip("Keychain is not available in this host context: \(error)")
         }

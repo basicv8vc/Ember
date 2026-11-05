@@ -6,17 +6,35 @@ import Foundation
 /// UI, repositories and the future Live Conversation repository all talk to this boundary instead of
 /// holding a token, so there is exactly one place that can rotate, revoke or delete a credential.
 ///
-/// Invariants it enforces:
+/// ## How the race windows are closed
+///
+/// Every `await` in this file is a network call or a UI presentation — never credential storage. The
+/// store protocol is synchronous (`EmberSessionStore`), so each credential mutation runs as one
+/// uninterrupted actor step: *validate generation → write → commit*. Nothing can interleave inside that
+/// step, so these interleavings cannot happen:
+///
+/// - a logout landing between "Keychain written" and "session installed" by a sign-in;
+/// - a stale refresh deleting the credential a newer sign-in just stored;
+/// - a rotation committing onto a session that was replaced while its network call was in flight.
+///
+/// The awaits that remain are each followed by a re-validation before any mutation, which is what makes
+/// the surviving interleavings deterministic and testable:
+///
+/// - `signInWithApple()` bumps `signInSequence` before presenting the sheet and re-checks it after both
+///   awaits. A completion that lost the race throws `superseded` and mutates nothing.
+/// - `settle()` re-checks `generation` after the rotation returns and before touching the store.
+/// - Revocation is keyed to the token that actually failed (`revokeLocally(ifCurrent:)`), so a delayed
+///   401 for a token that has since been replaced cannot sign out the newer session.
+///
+/// Other invariants:
 ///
 /// - **One rotation per generation.** Concurrent callers share a single in-flight refresh task. A
 ///   rotated token is never used to start a second refresh, because reuse is a server-side security
 ///   event that can revoke every session for the consumer (annex §5.3).
-/// - **Stale completions are dropped.** Every mutation is fenced by a generation counter and a
-///   sign-in sequence number, so a callback from an abandoned attempt cannot overwrite newer state.
-/// - **Transient failure is not sign-out.** Only an explicit 401 revokes local state. Offline,
-///   timeout, 5xx and a locked Keychain leave the stored session untouched.
-/// - **Revocation is terminal for this generation.** After a 401 the in-memory record is dropped,
-///   so a retry path finds nothing to refresh and cannot start a request storm.
+/// - **Transient failure is not sign-out.** Only an explicit 401 for the current token revokes local
+///   state. Offline, timeout, 5xx and a locked Keychain leave the stored session untouched.
+/// - **Revocation is terminal for this generation.** After a 401 the in-memory record is dropped, so a
+///   retry path finds nothing to refresh and cannot start a request storm.
 public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     public struct Dependencies: Sendable {
         public let api: EmberSessionAPI
@@ -48,17 +66,23 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
     /// One refresh that has been started and not yet settled.
     ///
-    /// `task` is the network call. `settlement` is the single actor-isolated operation that turns its
-    /// response into the new credential: it performs the one Keychain write, the generation checks and
-    /// the commit, and every caller awaits that same task's value. Without it, two waiters resuming
-    /// around the store write could both believe they own the rotation.
+    /// `token` is the credential this rotation is allowed to revoke if the server rejects it. `task` is
+    /// the network call. `settlement` is the single actor-isolated operation that turns the response
+    /// into the new credential; every caller awaits that same task's value, so one rotation produces
+    /// one store write.
     private final class RefreshOperation {
         let generation: UInt64
+        let token: EmberAccessToken
         let task: Task<EmberSessionResponseDTO, Error>
         var settlement: Task<EmberSessionRecord, Error>?
 
-        init(generation: UInt64, task: Task<EmberSessionResponseDTO, Error>) {
+        init(
+            generation: UInt64,
+            token: EmberAccessToken,
+            task: Task<EmberSessionResponseDTO, Error>
+        ) {
             self.generation = generation
+            self.token = token
             self.task = task
         }
     }
@@ -79,9 +103,6 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     private var signInSequence: UInt64 = 0
 
     private var refresh: RefreshOperation?
-    /// The in-flight Keychain read, shared so N concurrent cold-start callers produce one load and one
-    /// generation bump.
-    private var restoreTask: Task<EmberSessionRecord?, Error>?
     private var isLoggingOut = false
     private var cleanupHooks: [@Sendable () async -> Void] = []
 
@@ -104,7 +125,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     public func currentSession() async -> AuthSessionState {
         if !didAttemptRestore {
             do {
-                try await restoreRecordIfNeeded()
+                try restoreRecordIfNeeded()
             } catch {
                 return .unavailable
             }
@@ -145,17 +166,20 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         )
 
         try Task.checkCancellation()
-        // A newer sign-in or a logout started while the exchange was in flight. This credential
-        // must not become the session.
+
+        // From here to the end of this method there is no suspension: a logout either completed before
+        // this point — in which case the guard rejects the credential — or starts entirely after the
+        // commit. There is no window in which a signed-out device can end up authenticated.
         guard attempt == signInSequence, !isLoggingOut else { throw AuthError.superseded }
 
         let newRecord = makeRecord(from: dto)
 
         do {
-            try await store.save(newRecord)
+            try store.save(newRecord)
         } catch {
             // The server minted a session this device cannot keep. Best-effort revoke it once so a
-            // dangling session is not left behind; the storage failure is what gets reported.
+            // dangling session is not left behind; the storage failure is what gets reported. No local
+            // state was changed, so this await cannot resurrect anything.
             try? await api.logout(accessToken: newRecord.accessToken)
             throw AuthError.keychainUnavailable
         }
@@ -174,7 +198,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     /// Returns what the server says about the consumer, Agent and main Conversation. It never invents
     /// an id, and it never converts a transient failure into a signed-out state.
     public func restoreSession() async throws -> EmberMeDTO {
-        try await restoreRecordIfNeeded()
+        try restoreRecordIfNeeded()
 
         guard let current = record else { throw AuthError.sessionMissing }
 
@@ -198,7 +222,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     ///
     /// Concurrent callers await the same in-flight rotation, so a token cannot be rotated twice.
     public func refreshSessionIfNeeded() async throws -> EmberSessionRecord {
-        try await restoreRecordIfNeeded()
+        try restoreRecordIfNeeded()
 
         guard let current = record else { throw AuthError.sessionMissing }
         guard !isLoggingOut else { throw AuthError.sessionEnded }
@@ -219,6 +243,13 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         guard !isLoggingOut else { throw AuthError.sessionEnded }
 
         let session = try await validSessionForRequest()
+
+        // Preparing the request awaited a possible rotation. If the session ended in the meantime, the
+        // request is refused here rather than being sent with a token the device already gave up.
+        guard !isLoggingOut, record?.accessToken == session.accessToken else {
+            throw AuthError.sessionEnded
+        }
+
         let urlRequest = try transport.makeRequest(request, accessToken: session.accessToken)
 
         let response: EmberAPIResponse
@@ -252,7 +283,9 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             let second = try await transport.send(retry)
 
             guard second.statusCode != 401 else {
-                await revokeLocally()
+                // Keyed to the token that was rejected, so a logout or a newer sign-in that happened
+                // during the replay is not signed out by this older failure.
+                revokeLocally(ifCurrent: refreshed.accessToken)
                 throw AuthError.unauthenticated
             }
             return second
@@ -275,15 +308,16 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
     /// Ends the session truthfully.
     ///
-    /// Order matters: local state is dropped first so no new request can be authorized with the
-    /// departing token while the server call is in flight; the remote call is attempted exactly once;
-    /// and local credentials are removed regardless of the remote answer. The outcome distinguishes
-    /// "server confirmed", "token already invalid" and "we could not reach the server".
+    /// Local state is cleared first and synchronously, before any network call: from that instant no
+    /// new request can be authorized with the departing token, an in-flight rotation fails its
+    /// generation check, and a crash mid-logout leaves no credential behind. The remote call is then
+    /// attempted exactly once, and the outcome distinguishes "server confirmed", "token already
+    /// invalid" and "we could not reach the server".
     @discardableResult
     public func logout() async -> LogoutOutcome {
         // Load once so a logout after a cold start still revokes the stored session remotely.
         if !didAttemptRestore {
-            try? await restoreRecordIfNeeded()
+            try? restoreRecordIfNeeded()
         }
 
         signInSequence &+= 1
@@ -296,6 +330,13 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         refresh = nil
         didAttemptRestore = true
 
+        var localError: AuthError?
+        do {
+            try store.delete()
+        } catch {
+            localError = (error as? AuthError) ?? .keychainUnavailable
+        }
+
         var remoteError: AuthError?
         if let departing {
             do {
@@ -303,13 +344,6 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             } catch {
                 remoteError = (error as? AuthError) ?? .transportFailure
             }
-        }
-
-        var localError: AuthError?
-        do {
-            try await store.delete()
-        } catch {
-            localError = (error as? AuthError) ?? .keychainUnavailable
         }
 
         // Narrow hook for the L4 outbox: it runs only after credentials are gone, and it is not the
@@ -339,45 +373,30 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
     /// Loads the stored record at most once per successful attempt.
     ///
-    /// A failed load does not count as an attempt: a locked Keychain becomes readable after the next
-    /// unlock, and the coordinator must be able to notice that without a relaunch.
-    private func restoreRecordIfNeeded() async throws {
+    /// Synchronous, so concurrent cold-start callers cannot each install the record and bump the
+    /// generation twice. A failed load does not count as an attempt: a locked Keychain becomes readable
+    /// after the next unlock, and the coordinator must notice that without a relaunch.
+    private func restoreRecordIfNeeded() throws {
         guard !didAttemptRestore else { return }
 
-        let task: Task<EmberSessionRecord?, Error>
-        if let existing = restoreTask {
-            task = existing
-        } else {
-            let store = self.store
-            task = Task { try await store.load() }
-            restoreTask = task
-        }
-
+        let stored: EmberSessionRecord?
         do {
-            let stored = try await task.value
-            // Another caller may have committed this same load while this one was suspended. Only the
-            // first resumption may install the record and bump the generation, otherwise a generation
-            // captured moments earlier would be invalidated by a duplicate load.
-            guard !didAttemptRestore else { return }
-
-            didAttemptRestore = true
-            restoreTask = nil
-            if let stored {
-                record = stored
-                generation &+= 1
-            }
+            stored = try store.load()
         } catch let error as AuthError {
-            // A failed read is not an attempt: a locked Keychain must be retryable in this launch.
-            restoreTask = nil
             throw error
         } catch {
-            restoreTask = nil
             throw AuthError.keychainUnavailable
+        }
+
+        didAttemptRestore = true
+        if let stored {
+            record = stored
+            generation &+= 1
         }
     }
 
     private func validSessionForRequest() async throws -> EmberSessionRecord {
-        try await restoreRecordIfNeeded()
+        try restoreRecordIfNeeded()
 
         guard record != nil else { throw AuthError.sessionMissing }
         guard !isLoggingOut else { throw AuthError.sessionEnded }
@@ -400,13 +419,17 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             let token = current.accessToken
             let operationGeneration = expectedGeneration
 
-            // The task owns the network call only. The Keychain write happens in `settle`, inside the
-            // actor, so it can be fenced against a logout that lands mid-flight.
+            // The task owns the network call only. The Keychain write and the commit happen in
+            // `settle`, inside the actor, with no await between them.
             let task = Task<EmberSessionResponseDTO, Error> {
                 try await api.refreshSession(accessToken: token)
             }
 
-            operation = RefreshOperation(generation: operationGeneration, task: task)
+            operation = RefreshOperation(
+                generation: operationGeneration,
+                token: token,
+                task: task
+            )
             refresh = operation
         }
 
@@ -432,16 +455,21 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         do {
             dto = try await operation.task.value
         } catch {
-            let authError = (error as? AuthError) ?? .transportFailure
             if refresh === operation { refresh = nil }
+            let authError = (error as? AuthError) ?? .transportFailure
+
             if authError == .unauthenticated {
-                // Reuse of a rotated token revokes every session for the consumer, so local state
-                // must follow immediately. Nothing here retries.
-                await revokeLocally()
+                // Only the credential that actually failed may be revoked. A delayed 401 for a token
+                // that has since been replaced by a newer sign-in says nothing about the new session,
+                // so this is a guarded no-op in that case.
+                revokeLocally(ifCurrent: operation.token)
             }
             throw authError
         }
 
+        // The rotation may have taken long enough for a logout or a newer sign-in to replace this
+        // session. The new token is then discarded and *nothing* is written: there is deliberately no
+        // cleanup delete here, because the credential now in the store belongs to somebody else.
         guard generation == expectedGeneration, !isLoggingOut else {
             if refresh === operation { refresh = nil }
             throw AuthError.superseded
@@ -457,27 +485,20 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
         var storageError: AuthError?
         do {
-            try await store.replace(rotated)
+            try store.replace(rotated)
         } catch {
             storageError = (error as? AuthError) ?? .keychainUnavailable
         }
 
-        // A logout or a newer sign-in may have run while the store write was suspended. A rotated
-        // token must never leave a live credential behind after the consumer signed out, so the
-        // write is undone before the result is discarded.
-        guard generation == expectedGeneration, !isLoggingOut else {
-            try? await store.delete()
-            if refresh === operation { refresh = nil }
-            throw AuthError.superseded
-        }
-
+        // No suspension since the guard above, so the credential cannot have changed underneath this
+        // commit. The single write is the one the state now reflects.
         record = rotated
         generation &+= 1
         if refresh === operation { refresh = nil }
 
         if let storageError {
-            // The token is live but not durable. Reporting the failure is the honest option: the
-            // caller can warn that the session will not survive a relaunch.
+            // The token is live but not durable. Reporting the failure is the honest option: the caller
+            // can warn that the session will not survive a relaunch.
             throw storageError
         }
         return rotated
@@ -489,15 +510,15 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         do {
             return try await api.bootstrap(accessToken: session.accessToken)
         } catch let error as AuthError where error == .unauthenticated {
-            // A locally valid-looking token can still be expired or revoked server-side. One
-            // rotation and one retry is the contract's bounded recovery (annex §10.3); a second 401
-            // ends the session instead of looping.
+            // A locally valid-looking token can still be expired or revoked server-side. One rotation
+            // and one retry is the contract's bounded recovery (annex §10.3); a second 401 ends the
+            // session instead of looping.
             let refreshed = try await performRefresh(expectedGeneration: generation)
 
             do {
                 return try await api.bootstrap(accessToken: refreshed.accessToken)
             } catch let retryError as AuthError where retryError == .unauthenticated {
-                await revokeLocally()
+                revokeLocally(ifCurrent: refreshed.accessToken)
                 throw AuthError.unauthenticated
             }
         }
@@ -505,11 +526,17 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
     // MARK: - Revocation
 
-    /// Drops the local credential after the server has definitively rejected it.
+    /// Drops the local credential when the server rejects **the token that is still current**.
     ///
-    /// Deliberately narrow: it is only reachable from an explicit 401. Offline, timeout, 5xx and a
-    /// locked Keychain never call it, so a temporary condition cannot become a sign-out.
-    private func revokeLocally() async {
+    /// The guard is the point: a 401 is only evidence about the credential that produced it. If a
+    /// logout has already cleared the session, or a newer sign-in has replaced the token, this is a
+    /// no-op — a stale failure must never sign out a newer session.
+    ///
+    /// Reachability is deliberately narrow: only an explicit 401 calls it. Offline, timeout, 5xx and a
+    /// locked Keychain never do, so a temporary condition cannot become a sign-out.
+    private func revokeLocally(ifCurrent token: EmberAccessToken) {
+        guard record?.accessToken == token else { return }
+
         record = nil
         generation &+= 1
         refresh = nil
@@ -517,7 +544,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
 
         // A failed delete is not a security hole — the token is already invalid server-side — but it
         // must not change the reported state, so the error is dropped on purpose.
-        try? await store.delete()
+        try? store.delete()
     }
 
     // MARK: - Helpers

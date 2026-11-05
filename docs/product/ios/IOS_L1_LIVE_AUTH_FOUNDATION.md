@@ -13,19 +13,19 @@
 **Sign in with Apple → Ember session → Keychain → authenticated `GET /v1/me` → restore / refresh /
 logout**, as reusable components rather than a one-off demo:
 
-| File | Responsibility |
-| ---- | -------------- |
-| `Auth/AuthFailure.swift` | Closed, payload-free error taxonomy + truthful `LogoutOutcome` |
-| `Auth/AppleNonce.swift` | CSPRNG nonce, SHA-256 representation, bounded lifetime |
-| `Auth/AppleSignInAuthorizing.swift` | Credential value, attempt ledger, credential validation |
-| `Auth/AppleSignInAuthorizer.swift` | Native `ASAuthorizationController` adapter |
-| `Auth/EmberSessionDTO.swift` | Strict `Codable` DTOs for both frozen responses |
-| `Auth/EmberSessionAPI.swift` | Typed client over the existing `EmberAPIClient` |
-| `Auth/KeychainSessionStore.swift` | `SecItem` store + in-memory store |
-| `Auth/AuthenticatedTransport.swift` | Authenticated request boundary and idempotency rules |
-| `Auth/LiveAuthSessionCoordinator.swift` | Actor: sign-in, restore, single-flight refresh, logout |
-| `Auth/UI/LiveAuthEntryView.swift` | Isolated native Sign in with Apple entry point |
-| `Auth/UI/LiveAuthEntryModel.swift` | Its state machine |
+| File                                    | Responsibility                                                 |
+| --------------------------------------- | -------------------------------------------------------------- |
+| `Auth/AuthFailure.swift`                | Closed, payload-free error taxonomy + truthful `LogoutOutcome` |
+| `Auth/AppleNonce.swift`                 | CSPRNG nonce, SHA-256 representation, bounded lifetime         |
+| `Auth/AppleSignInAuthorizing.swift`     | Credential value, attempt ledger, credential validation        |
+| `Auth/AppleSignInAuthorizer.swift`      | Native `ASAuthorizationController` adapter                     |
+| `Auth/EmberSessionDTO.swift`            | Strict `Codable` DTOs for both frozen responses                |
+| `Auth/EmberSessionAPI.swift`            | Typed client over the existing `EmberAPIClient`                |
+| `Auth/KeychainSessionStore.swift`       | `SecItem` store + in-memory store                              |
+| `Auth/AuthenticatedTransport.swift`     | Authenticated request boundary and idempotency rules           |
+| `Auth/LiveAuthSessionCoordinator.swift` | Actor: sign-in, restore, single-flight refresh, logout         |
+| `Auth/UI/LiveAuthEntryView.swift`       | Isolated native Sign in with Apple entry point                 |
+| `Auth/UI/LiveAuthEntryModel.swift`      | Its state machine                                              |
 
 **Not changed:** `AppCompositionRoot` still runs the Mock experience. `AuthSessionProvider` is
 unchanged and the coordinator conforms to it. No Conversation request exists in this slice, and
@@ -54,12 +54,12 @@ unchanged and the coordinator conforms to it. No Conversation request exists in 
 
 ## 3. Session HTTP contract
 
-| Operation | Route | Method | Success | Notes |
-| --------- | ----- | ------ | ------- | ----- |
-| Create | `/v1/auth/session` | POST | **201** | Body: `provider: "apple"`, `identity_token`, `nonce` |
-| Refresh | `/v1/auth/session/refresh` | POST | **200** | Bearer only; **no body**, no assertion, no nonce |
-| Logout | `/v1/auth/session` | DELETE | **204** | Bearer only; no body |
-| Bootstrap | `/v1/me` | GET | **200** | Server-authoritative consumer, Agent, Conversation, `transcript_epoch` |
+| Operation | Route                      | Method | Success | Notes                                                                  |
+| --------- | -------------------------- | ------ | ------- | ---------------------------------------------------------------------- |
+| Create    | `/v1/auth/session`         | POST   | **201** | Body: `provider: "apple"`, `identity_token`, `nonce`                   |
+| Refresh   | `/v1/auth/session/refresh` | POST   | **200** | Bearer only; **no body**, no assertion, no nonce                       |
+| Logout    | `/v1/auth/session`         | DELETE | **204** | Bearer only; no body                                                   |
+| Bootstrap | `/v1/me`                   | GET    | **200** | Server-authoritative consumer, Agent, Conversation, `transcript_epoch` |
 
 Implementation rules:
 
@@ -89,6 +89,11 @@ Implementation rules:
 - `replace()` is a single `SecItemUpdate` when a record exists, falling back to `SecItemAdd`. The
   Keychain replaces the value in place, so a rotation never leaves the store empty.
 - `delete()` is idempotent.
+- **The store API is synchronous.** The Keychain is a local, fast, synchronous facility, and an `async`
+  store would place a suspension point inside every credential commit — the exact window in which a
+  logout, a new sign-in or a stale refresh could interleave with a write that had already been decided.
+  Synchronous calls let the coordinator perform _validate generation → write → commit_ as one
+  uninterrupted actor step.
 - Tokens are never written to `UserDefaults`, files, the Info.plist, build settings, URLs or logs.
   `EmberAccessToken`, `AppleNonce`, `AppleSignInCredential` and `EmberSessionRecord` all redact
   `description`, `debugDescription` and `Mirror`.
@@ -99,9 +104,23 @@ Implementation rules:
 
 ### Cold start
 
-`restoreSession()` loads the record once (a shared task, so N concurrent callers cause one Keychain
-read and one generation bump), rotates it when it is expired or within `refreshLeeway`, then calls
-`GET /v1/me` and returns the server's projection. No id is ever synthesised.
+`restoreSession()` loads the record once (synchronously, so N concurrent callers cannot each install
+the record and bump the generation twice), rotates it when it is expired or within `refreshLeeway`, then
+calls `GET /v1/me` and returns the server's projection. No id is ever synthesised.
+
+### Interleaving rules
+
+Every `await` in the coordinator is a network call or a UI presentation — never credential storage.
+Each await is followed by a re-validation before any mutation:
+
+- `signInWithApple()` bumps `signInSequence` before presenting the sheet and re-checks it after the
+  authorization and after the session exchange. A completion that lost the race throws `superseded` and
+  mutates nothing, so a logout that lands mid-exchange cannot be undone by the login it raced.
+- `settle()` re-checks `generation` after the rotation returns and before touching the store. A stale
+  rotation writes nothing — in particular it does not delete the credential a newer sign-in just stored.
+- Revocation is keyed to the token that actually failed (`revokeLocally(ifCurrent:)`). A delayed 401 for
+  a token that has since been replaced is a no-op, so it cannot sign out the newer session; the same 401
+  still revokes when the rejected token is current.
 
 ### Single-flight refresh
 
@@ -129,10 +148,13 @@ cannot be validated — never `unauthenticated`.
 
 ### Logout
 
-Order: invalidate local authorization state → attempt `DELETE` exactly once → delete local credentials
-→ run registered cleanup hooks → report the truthful outcome. Outcomes are `revokedRemotely` (204),
-`alreadyInvalidated` (401 / nothing stored), `remoteUnconfirmed(error)` and `localCleanupFailed(error)`.
-`registerSignOutCleanup` is the narrow hook for the L4 outbox; no outbox is implemented here.
+Order: clear local state and delete the stored credential synchronously → attempt `DELETE` exactly once
+→ run registered cleanup hooks → report the truthful outcome. Local credential removal happens _before_
+the network call, so from that instant no request can be authorized with the departing token, an
+in-flight rotation fails its generation check, and a crash mid-logout leaves nothing behind. Outcomes are
+`revokedRemotely` (204), `alreadyInvalidated` (401 / nothing stored), `remoteUnconfirmed(error)` and
+`localCleanupFailed(error)`. `registerSignOutCleanup` is the narrow hook for the L4 outbox; no outbox is
+implemented here.
 
 ## 6. Authenticated transport
 
@@ -174,6 +196,22 @@ These are deliberately **not** invented in this PR:
    is verified against deterministic `URLProtocol` fixtures, not a live server.
 
 Until all five hold, real-account sign-in stays gated and the app stays Mock-only.
+
+## 8a. Review follow-up (PR #119 round 1)
+
+Three reported interleavings were all real, and all three shared one root cause: the credential store
+was `async`, so `check state → write → commit` contained a suspension in the middle. The fix is
+structural rather than three local patches:
+
+| Reported risk                                                                              | Root cause                                                 | Fix                                                                                                           | Regression test                                                                                                  |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Logout while the login's Keychain write was in flight could restore an authenticated state | `store.save` awaited between the last guard and the commit | Store is synchronous; after the exchange the guard, the write and the commit are one uninterrupted actor step | `testLogoutDuringSignInExchangeLeavesNoCredential`                                                               |
+| An old refresh's cleanup could delete the newly signed-in session                          | Stale settlement unconditionally deleted the store         | Stale settlement writes nothing and deletes nothing                                                           | `testStaleRefreshDoesNotDeleteANewerSignInsCredential`                                                           |
+| A delayed 401 could revoke an already-replaced session                                     | Revocation was unconditional                               | `revokeLocally(ifCurrent:)` only acts on the token that is still current                                      | `testDelayedUnauthorizedForAnOldTokenDoesNotRevokeANewSession`, `testUnauthorizedForTheCurrentTokenStillRevokes` |
+
+Because the intra-store window no longer exists, the deterministic tests gate the suspension that
+remains reachable — the network call — and assert the observable outcome (stored credential, in-memory
+state, store write/delete counts) rather than an internal implementation detail.
 
 ## 9. Verification
 

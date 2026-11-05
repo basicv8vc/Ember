@@ -14,12 +14,14 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
     private let host = "live-auth.l1.invalid"
 
-    override func tearDown() {
+    /// `async` so the override runs on the class's main-actor isolation; the synchronous form is
+    /// `nonisolated` in XCTest and cannot touch the actor-isolated fixtures.
+    override func tearDown() async throws {
         sessions.forEach { $0.invalidateAndCancel() }
         sessions.removeAll()
         registrations.forEach { $0.remove() }
         registrations.removeAll()
-        super.tearDown()
+        try await super.tearDown()
     }
 
     // MARK: - Sign in
@@ -390,7 +392,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         apple.onAuthorizeStarted = nil
 
         // A second sign-in starts and finishes while the first is still on Apple's sheet.
-        await apple.setBehavior(
+        apple.setBehavior(
             .succeed(
                 AppleSignInCredential(
                     identityToken: "second.jwt",

@@ -6,8 +6,10 @@ import { createAgentRoutes } from './agents/routes.js';
 import type { ApprovalHttpStore } from './approvals/approval-store.js';
 import { unconfiguredApprovalHttpStore } from './approvals/approval-store.js';
 import { APPROVALS_PATH, createApprovalRoutes } from './approvals/routes.js';
+import type { B1SessionRuntime } from './auth/b1-auth-runtime.js';
 import { requireTenantAuth } from './auth/auth-middleware.js';
 import { createDevTokenAuthenticator, type DevAuthenticator } from './auth/bearer-authenticator.js';
+import { createB1SessionRoutes, UNKNOWN_ROUTE_DIAGNOSTIC } from './auth/session-routes.js';
 import type { ArtifactHttpStore } from './artifacts/artifact-store.js';
 import { unconfiguredArtifactHttpStore } from './artifacts/artifact-store.js';
 import { createArtifactRoutes } from './artifacts/routes.js';
@@ -71,6 +73,13 @@ export interface AppDependencies {
    * process without a database refuses to grant consent instead of falling back to "allow".
    */
   readonly consentStore?: ConsentHttpStore;
+  /**
+   * B1-2B authentication/session runtime. Optional by design: without explicitly injected
+   * B1 ports the four new endpoints are not registered at all, so a process that has not
+   * been wired to real repositories fails closed with 404 instead of minting sessions.
+   * Legacy Task/Agent/Artifact authentication is deliberately left untouched.
+   */
+  readonly b1Session?: B1SessionRuntime;
 }
 
 /**
@@ -169,9 +178,16 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   app.route('/v1', createArtifactRoutes({ artifacts: artifactStore, tasks: taskStore }));
   app.route('/v1', createApprovalRoutes({ approvals: approvalStore, tasks: taskStore }));
 
+  // B1-2B session routes are mounted only when a fully injected runtime exists. The paths do
+  // not overlap any legacy `/v1` route, and legacy tenant authentication is not replaced:
+  // a new Ember session token can never silently bypass the existing tenant checks.
+  if (deps.b1Session !== undefined) {
+    app.route('/v1', createB1SessionRoutes({ runtime: deps.b1Session, logger }));
+  }
+
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a
   // client never has to understand a second error format.
-  app.notFound((c) => respondNotFound(c, 'no route matches this method and path'));
+  app.notFound((c) => respondNotFound(c, UNKNOWN_ROUTE_DIAGNOSTIC));
 
   app.onError((error, c) => {
     const requestId = requestIdOf(c);

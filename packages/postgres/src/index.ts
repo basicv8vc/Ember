@@ -58,6 +58,15 @@ export type {
   B1TaskResultRepository,
   B1TranscriptClearResult,
 } from './repositories/b1-interfaces.js';
+export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
+export {
+  PostgresB1ConversationReadRepository,
+  type B1ConversationReadOperations,
+} from './repositories/b1-conversation-read.js';
+export {
+  PostgresB1ConversationWriteRepository,
+  type B1ConversationWriteRepository,
+} from './repositories/b1-conversation-write.js';
 export {
   PostgresB1ConsumerProvisioningRepository,
   type B1ProvisioningRepositoryOptions,

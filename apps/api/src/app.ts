@@ -1,4 +1,5 @@
 import { isDomainError } from '@ember/domain';
+import type { B1AssistantTurnRepository, B1ConversationRepository } from '@ember/postgres';
 import { Hono } from 'hono';
 import { unconfiguredAgentStore, type AgentStore } from './agents/agent-store.js';
 import { AGENTS_PATH } from './agents/constants.js';
@@ -10,6 +11,8 @@ import type { B1SessionRuntime } from './auth/b1-auth-runtime.js';
 import { requireTenantAuth } from './auth/auth-middleware.js';
 import { createDevTokenAuthenticator, type DevAuthenticator } from './auth/bearer-authenticator.js';
 import { createB1SessionRoutes, UNKNOWN_ROUTE_DIAGNOSTIC } from './auth/session-routes.js';
+import { createConversationMessageReadRoutes } from './conversation/message-read-routes.js';
+import { createConversationMessageWriteRoutes } from './conversation/message-write-routes.js';
 import type { ArtifactHttpStore } from './artifacts/artifact-store.js';
 import { unconfiguredArtifactHttpStore } from './artifacts/artifact-store.js';
 import { createArtifactRoutes } from './artifacts/routes.js';
@@ -41,6 +44,7 @@ import { notConfiguredReadiness, type ReadinessCheck } from './readiness.js';
 import { TASKS_PATH } from './tasks/constants.js';
 import { createTaskRoutes } from './tasks/routes.js';
 import { unconfiguredTaskStore, type TaskStore } from './tasks/task-store.js';
+import { createB1TurnRoutes } from './turns/turn-routes.js';
 
 export const SERVICE_NAME = 'ember-api';
 
@@ -80,6 +84,15 @@ export interface AppDependencies {
    * Legacy Task/Agent/Artifact authentication is deliberately left untouched.
    */
   readonly b1Session?: B1SessionRuntime;
+  /** Conversation write runtime for the session-authenticated B1 message send route. */
+  readonly b1ConversationWriteRepository?: Pick<B1ConversationRepository, 'submitUserMessage'>;
+  /** Conversation read runtime for B1 transcript and Unknown ACK routes. */
+  readonly b1ConversationReadRepository?: Pick<
+    B1ConversationRepository,
+    'readMessages' | 'findSubmissionReceipt'
+  >;
+  /** Turn read/cancel runtime for the session-authenticated B1 Turn routes. */
+  readonly b1AssistantTurnRepository?: Pick<B1AssistantTurnRepository, 'getTurn' | 'cancelTurn'>;
 }
 
 /**
@@ -183,6 +196,41 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   // a new Ember session token can never silently bypass the existing tenant checks.
   if (deps.b1Session !== undefined) {
     app.route('/v1', createB1SessionRoutes({ runtime: deps.b1Session, logger }));
+  }
+
+  // B1 Cloud Chat routes are mounted as one fail-closed group. The existing Session service is
+  // their only authentication boundary; none of these routes join the legacy dev-token guard.
+  // Requiring every port prevents a partial composition from exposing only some of the contract.
+  if (
+    deps.b1Session !== undefined &&
+    deps.b1ConversationWriteRepository !== undefined &&
+    deps.b1ConversationReadRepository !== undefined &&
+    deps.b1AssistantTurnRepository !== undefined
+  ) {
+    app.route(
+      '/v1',
+      createConversationMessageWriteRoutes({
+        session: deps.b1Session.service,
+        conversations: deps.b1ConversationWriteRepository,
+        logger,
+      }),
+    );
+    app.route(
+      '/v1',
+      createConversationMessageReadRoutes({
+        session: deps.b1Session.service,
+        conversations: deps.b1ConversationReadRepository,
+        logger,
+      }),
+    );
+    app.route(
+      '/v1',
+      createB1TurnRoutes({
+        repository: deps.b1AssistantTurnRepository,
+        sessions: deps.b1Session.service,
+        logger,
+      }),
+    );
   }
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a

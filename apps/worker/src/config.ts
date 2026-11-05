@@ -27,6 +27,8 @@ export interface WorkerConfig {
   readonly mode: WorkerMode;
   readonly env: EmberEnv;
   readonly simulatedExecution: SimulatedExecutionMode;
+  /** Explicit opt-in for the local-only deterministic B1 chat responder. */
+  readonly b1FakeResponderEnabled: boolean;
   /**
    * Absolute path of the controlled blob root. When set, poll mode uses the durable
    * `RunResultCommitter` (artifacts + checkpoint + atomic terminal commit); when absent it
@@ -76,6 +78,10 @@ const workerEnvSchema = z.object({
   EMBER_ENV: z.enum(['local', 'test', 'ci', 'production']).default('local'),
   EMBER_WORKER_MODE: z.enum(['reaper-only', 'poll']).default('reaper-only'),
   EMBER_WORKER_SIMULATED_EXECUTION: z.enum(['disabled', 'local-only']).default('disabled'),
+  EMBER_B1_FAKE_RESPONDER_ENABLED: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((value) => value === 'true'),
   EMBER_WORKER_ID: z.string().default('worker-local'),
   EMBER_WORKER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   EMBER_WORKER_INTERVAL_MS: z.coerce.number().int().min(100).max(60_000).default(2_000),
@@ -186,6 +192,18 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
 
   const mode = parsed.data.EMBER_WORKER_MODE;
   const simulatedExecution = parsed.data.EMBER_WORKER_SIMULATED_EXECUTION;
+  const b1FakeResponderEnabled = parsed.data.EMBER_B1_FAKE_RESPONDER_ENABLED;
+
+  const productionProcess =
+    parsed.data.EMBER_ENV === 'production' ||
+    env.NODE_ENV === 'production' ||
+    env.NODE_ENV === 'staging';
+
+  if (b1FakeResponderEnabled && productionProcess) {
+    throw new WorkerConfigError(
+      'EMBER_B1_FAKE_RESPONDER_ENABLED=true is refused in production or staging environments',
+    );
+  }
 
   // The Scheduler must not turn due commitments into terminal failures while the durable
   // Lane C consent authority is still missing. Its default remains disabled; until the real
@@ -219,6 +237,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     mode,
     env: parsed.data.EMBER_ENV,
     simulatedExecution,
+    b1FakeResponderEnabled,
     blobRoot: parsed.data.EMBER_WORKER_BLOB_ROOT ?? null,
     workerId: workerId.data,
     intervalMs: parsed.data.EMBER_WORKER_INTERVAL_MS,

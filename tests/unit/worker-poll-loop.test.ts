@@ -454,8 +454,35 @@ describe('poll worker configuration guards', () => {
 
     expect(config.mode).toBe('reaper-only');
     expect(config.simulatedExecution).toBe('disabled');
+    expect(config.b1FakeResponderEnabled).toBe(false);
     expect(config.concurrency).toBe(4);
     expect(config.scheduler.enabled).toBe(false);
+  });
+
+  it('requires an explicit non-production opt-in for the simulated B1 responder', () => {
+    for (const env of ['local', 'test', 'ci'] as const) {
+      expect(
+        loadWorkerConfig({ EMBER_ENV: env, EMBER_B1_FAKE_RESPONDER_ENABLED: 'true' })
+          .b1FakeResponderEnabled,
+      ).toBe(true);
+    }
+
+    expect(() =>
+      loadWorkerConfig({
+        EMBER_ENV: 'production',
+        EMBER_B1_FAKE_RESPONDER_ENABLED: 'true',
+      }),
+    ).toThrow(/production or staging environments/);
+    expect(() =>
+      loadWorkerConfig({
+        EMBER_ENV: 'local',
+        NODE_ENV: 'production',
+        EMBER_B1_FAKE_RESPONDER_ENABLED: 'true',
+      }),
+    ).toThrow(/production or staging environments/);
+    expect(() => loadWorkerConfig({ EMBER_B1_FAKE_RESPONDER_ENABLED: 'yes' })).toThrow(
+      WorkerConfigError,
+    );
   });
 
   it('refuses to enable autonomous scheduling until durable consent is wired', () => {

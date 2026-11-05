@@ -2,10 +2,9 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { once } from 'node:events';
-import type { Server as HttpServer } from 'node:http';
-import { createServer, type AddressInfo } from 'node:net';
-import type { ServerType } from '@hono/node-server';
+import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer } from 'node:net';
+import { fileURLToPath } from 'node:url';
 import {
   B1AssistantTurnDtoSchema,
   B1ConversationPageSchema,
@@ -14,11 +13,7 @@ import {
   B1SessionResponseSchema,
 } from '@ember/contracts';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { startApiServer } from '../../apps/api/src/index.js';
-import { loadApiConfig } from '../../apps/api/src/env.js';
-import { createLogger } from '../../apps/api/src/logger.js';
 import { FAKE_TURN_REPLY_PREFIX } from '../../apps/worker/src/b1/fake-turn-responder.js';
-import { loadDatabaseConfig } from '../../packages/postgres/src/index.js';
 import { createTestDatabase, type TestDatabase } from '../integration/support/database.js';
 import {
   spawnWorkerSubprocess,
@@ -27,9 +22,15 @@ import {
 
 const APPLE_BUNDLE_ID = 'com.ember.mobile';
 const SECRET_USER_TEXT = 'private cloud runtime test text 94b2f7';
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const API_SCRIPT = path.resolve(REPO_ROOT, 'apps/api/src/index.ts');
 
 interface RunningApi {
-  readonly server: ServerType;
+  readonly child: ChildProcess;
+  readonly exitPromise: Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>;
   readonly baseUrl: string;
 }
 
@@ -38,14 +39,6 @@ interface Session {
   readonly consumer_id: string;
   readonly session_id: string;
   readonly expires_at: string;
-}
-
-function addressOf(server: ServerType): AddressInfo {
-  const address = server.address();
-  if (address === null || typeof address === 'string') {
-    throw new Error('expected a bound TCP listener');
-  }
-  return address;
 }
 
 async function availablePort(): Promise<number> {
@@ -70,7 +63,10 @@ async function startApi(
   logLines: string[],
 ): Promise<RunningApi> {
   const port = await availablePort();
+  const scopedDatabaseUrl = new URL(databaseUrl);
+  scopedDatabaseUrl.searchParams.set('options', `-csearch_path=${db.schema}`);
   const env: NodeJS.ProcessEnv = {
+    ...process.env,
     NODE_ENV: 'test',
     EMBER_ENV: 'test',
     EMBER_HOST: '127.0.0.1',
@@ -79,31 +75,72 @@ async function startApi(
     EMBER_DEV_PROVIDER_ENABLED: 'true',
     EMBER_DEV_PROVIDER_ISOLATED: 'true',
     EMBER_APPLE_BUNDLE_ID: APPLE_BUNDLE_ID,
-    DATABASE_URL: databaseUrl,
+    DATABASE_URL: scopedDatabaseUrl.toString(),
   };
-  const apiConfig = loadApiConfig(env);
-  const logger = createLogger({ level: 'debug', sink: (_level, line) => logLines.push(line) });
-  const server = startApiServer({
-    pool: db.pool,
-    apiConfig,
-    databaseConfig: loadDatabaseConfig(env),
+  const child = spawn(process.execPath, ['--import', 'tsx', API_SCRIPT], {
+    cwd: REPO_ROOT,
     env,
-    logger,
+    stdio: ['ignore', 'pipe', 'pipe'],
   });
-  if (!server.listening) {
-    await once(server, 'listening');
+  if (child.pid === undefined) throw new Error('failed to start API subprocess');
+  let output = '';
+  const collect = (chunk: Buffer): void => {
+    const line = chunk.toString('utf8');
+    output += line;
+    logLines.push(line);
+  };
+  child.stdout?.on('data', collect);
+  child.stderr?.on('data', collect);
+  const exitPromise = new Promise<{
+    readonly code: number | null;
+    readonly signal: NodeJS.Signals | null;
+  }>((resolve) => {
+    child.once('exit', (code, signal) => resolve({ code, signal }));
+  });
+  const api: RunningApi = {
+    child,
+    exitPromise,
+    baseUrl: `http://127.0.0.1:${port}`,
+  };
+
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`API exited before readiness:\n${output}`);
+    }
+    try {
+      const health = await fetch(`${api.baseUrl}/healthz`);
+      if (health.status === 200) return api;
+    } catch {
+      // The listener has not bound yet; retry until it responds or the startup deadline expires.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  const address = addressOf(server);
-  return { server, baseUrl: `http://127.0.0.1:${address.port}` };
+  child.kill('SIGTERM');
+  await exitPromise;
+  throw new Error(`API did not become ready within 10 seconds:\n${output}`);
 }
 
-async function closeApi(server: ServerType | undefined): Promise<void> {
-  if (server === undefined || !server.listening) return;
-  const closed = new Promise<void>((resolve, reject) => {
-    server.close((error) => (error === undefined ? resolve() : reject(error)));
+async function stopApi(api: RunningApi | undefined): Promise<void> {
+  if (api === undefined) return;
+  if (api.child.exitCode !== null || api.child.signalCode !== null) {
+    expect((await api.exitPromise).code).toBe(0);
+    return;
+  }
+  api.child.kill('SIGTERM');
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error('API subprocess did not drain within 5 seconds')),
+      5_000,
+    );
   });
-  (server as HttpServer).closeAllConnections();
-  await closed;
+  try {
+    const stopped = await Promise.race([api.exitPromise, timeout]);
+    expect(stopped.code).toBe(0);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function createSession(baseUrl: string, assertion: string): Promise<Session> {
@@ -200,7 +237,7 @@ describe('B1 Cloud Chat runtime over real HTTP and PostgreSQL 17', () => {
 
   afterAll(async () => {
     await stopWorker();
-    await closeApi(api?.server);
+    await stopApi(api);
     if (blobRoot !== undefined) rmSync(blobRoot, { recursive: true, force: true });
     await db?.close();
   });
@@ -280,6 +317,8 @@ describe('B1 Cloud Chat runtime over real HTTP and PostgreSQL 17', () => {
     expect(userMessage.text).toBe(SECRET_USER_TEXT);
     expect(assistantMessage.text.startsWith(FAKE_TURN_REPLY_PREFIX)).toBe(true);
     expect(assistantMessage.simulated).toBe(true);
+    if (worker === undefined) throw new Error('Worker exited before completing the simulated turn');
+    expect(worker.getLogs()).not.toContain(SECRET_USER_TEXT);
 
     const secondSession = await createSession(api.baseUrl, `dev-${randomUUID()}`);
     const secondMeResponse = await fetch(`${api.baseUrl}/v1/me`, {
@@ -375,9 +414,9 @@ describe('B1 Cloud Chat runtime over real HTTP and PostgreSQL 17', () => {
     );
     expect(timedAssistantMessages.rows[0]?.count).toBe('1');
 
-    // Stop and restart the real worker, then restart the real API listener over the same PG schema.
+    // Restart both real service processes over the same PostgreSQL schema.
     worker = await startWorker();
-    await closeApi(api.server);
+    await stopApi(api);
     api = await startApi(db, databaseUrl, apiLogs);
 
     const recoveredMeResponse = await fetch(`${api.baseUrl}/v1/me`, {
@@ -393,6 +432,7 @@ describe('B1 Cloud Chat runtime over real HTTP and PostgreSQL 17', () => {
     expect(recovered.status).toBe(200);
     const recoveredTranscript = B1ConversationPageSchema.parse(await recovered.json());
     expect(recoveredTranscript.messages.map((message) => message.kind)).toEqual(['user', 'ember']);
+    expect(recoveredTranscript.messages).toEqual(transcript.messages);
     await new Promise((resolve) => setTimeout(resolve, 700));
     const assistantCount = await db.observerPool.query<{ count: string }>(
       `SELECT count(*)::text AS count FROM conversation_messages

@@ -12,6 +12,9 @@ import {
   PostgresBlobStore,
   PostgresB1ConsumerProvisioningRepository,
   PostgresB1ConsumerSessionRepository,
+  PostgresB1AssistantTurnRepository,
+  PostgresB1ConversationReadRepository,
+  PostgresB1ConversationWriteRepository,
   PostgresCommitmentRepository,
   PostgresConsentRepository,
   PostgresTaskRepository,
@@ -132,6 +135,10 @@ export function createApiApplication(options: ApiApplicationOptions) {
       : { appleKeyResolver: options.appleKeyResolver }),
   });
 
+  const b1ConversationWriteRepository = new PostgresB1ConversationWriteRepository(pool);
+  const b1ConversationReadRepository = new PostgresB1ConversationReadRepository(pool);
+  const b1AssistantTurnRepository = new PostgresB1AssistantTurnRepository(pool);
+
   return createApp({
     readiness: createDatabaseReadiness(pool),
     serviceVersion: SERVICE_VERSION,
@@ -143,6 +150,9 @@ export function createApiApplication(options: ApiApplicationOptions) {
     commitmentStore: new PostgresCommitmentRepository(pool),
     consentStore: new PostgresConsentRepository(pool),
     b1Session,
+    b1ConversationWriteRepository,
+    b1ConversationReadRepository,
+    b1AssistantTurnRepository,
     ...(apiConfig.blobRoot === null
       ? {}
       : {

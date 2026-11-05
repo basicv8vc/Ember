@@ -1,7 +1,10 @@
+import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { RunExecutionContext, SourceProfileId } from '@ember/contracts';
 import {
   LocalBlobStore,
   PostgresApprovalRepository,
+  PostgresB1AssistantTurnRepository,
   PostgresBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
@@ -39,6 +42,7 @@ import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
 import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, type WorkerLogger } from './logger.js';
+import { createFakeTurnResponder, type FakeTurnResponderRunner } from './b1/fake-turn-responder.js';
 import { runPollLoop } from './poll-loop.js';
 import { runReaperLoop } from './reaper-loop.js';
 import { createRunHandler } from './run-handler.js';
@@ -120,6 +124,7 @@ async function main(): Promise<void> {
     mode: config.mode,
     env: config.env,
     simulatedExecution: config.simulatedExecution,
+    b1FakeResponderEnabled: config.b1FakeResponderEnabled,
     durableExecution: config.blobRoot !== null,
     workerId: config.workerId,
     database: describeDatabaseTarget(databaseConfig.connectionString),
@@ -140,7 +145,16 @@ async function main(): Promise<void> {
 
   let schedulerLoop: Promise<void> = Promise.resolve();
   let reaperLoop: Promise<void> | undefined;
+  let fakeTurnRunner: FakeTurnResponderRunner | undefined;
   try {
+    if (config.b1FakeResponderEnabled) {
+      fakeTurnRunner = createFakeTurnResponder({
+        repository: new PostgresB1AssistantTurnRepository(pool),
+        logger,
+      }).start(controller.signal);
+      logger.info('fake B1 assistant turn responder enabled');
+    }
+
     // P0-C3B: shares `controller.signal`, so SIGINT/SIGTERM drains it with every other loop.
     schedulerLoop = startCommitmentScheduler({
       config,
@@ -161,8 +175,12 @@ async function main(): Promise<void> {
     reaperLoop = reaper;
 
     if (config.mode === 'reaper-only') {
-      // The scheduler still shares this lifecycle: shutdown drains both loops together.
-      await Promise.all([reaper, schedulerLoop]);
+      // Task reaping, the scheduler and B1 turns share one lifecycle and drain together.
+      await Promise.all([
+        reaper,
+        schedulerLoop,
+        ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+      ]);
       return;
     }
 
@@ -282,46 +300,66 @@ async function main(): Promise<void> {
       logger,
     });
 
-    // Every loop shares one stop signal: shutdown drains the reaper and scheduler while the poll
-    // loop stops claiming new Runs, and in-flight executions observe the abort.
+    // Every loop shares one stop signal: shutdown drains Task polling/reaping, the scheduler and
+    // B1 turns before the PostgreSQL pool can close.
     try {
-      const summary = await Promise.all([
+      const pollSummary = runPollLoop({
+        queue,
+        handler,
+        clock: systemClock,
+        workerId: config.workerId,
+        concurrency: config.concurrency,
+        heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
+        idleIntervalMs: config.intervalMs,
+        errorBackoffMs: config.errorBackoffMs,
+        logger,
+        signal: controller.signal,
+      });
+      await Promise.all([
         reaper,
         schedulerLoop,
-        runPollLoop({
-          queue,
-          handler,
-          clock: systemClock,
-          workerId: config.workerId,
-          concurrency: config.concurrency,
-          heartbeatIntervalMs: config.lease.heartbeatIntervalMs,
-          idleIntervalMs: config.intervalMs,
-          errorBackoffMs: config.errorBackoffMs,
-          logger,
-          signal: controller.signal,
-        }),
-      ]).then(([, , pollSummary]) => pollSummary);
+        pollSummary,
+        ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+      ]);
+      const summary = await pollSummary;
 
       logger.info('poll loop stopped', { ...summary, workerId: config.workerId });
     } catch (error) {
       // A failing poll loop must never leave the reaper or scheduler running: abort first, then
       // drain them, so the pool can be closed exactly once below.
       controller.abort();
-      await Promise.allSettled([reaper, schedulerLoop]);
+      fakeTurnRunner?.stop();
+      await Promise.allSettled([
+        reaper,
+        schedulerLoop,
+        ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+      ]);
       throw error;
     }
   } finally {
     // Also drain loops if initialization failed before reaching the main Promise.all. Otherwise
-    // the scheduler could keep using a pool that is already closing.
+    // the scheduler or B1 responder could keep using a pool that is already closing.
     controller.abort();
-    await Promise.allSettled([schedulerLoop, ...(reaperLoop === undefined ? [] : [reaperLoop])]);
+    fakeTurnRunner?.stop();
+    await Promise.allSettled([
+      schedulerLoop,
+      ...(reaperLoop === undefined ? [] : [reaperLoop]),
+      ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+    ]);
     await pool.end();
     logger.info('worker stopped', { workerId: config.workerId });
   }
 }
 
-main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.message : String(error);
-  process.stderr.write(`worker failed: ${message}\n`);
-  process.exitCode = 1;
-});
+function isMainModule(): boolean {
+  const entryPoint = process.argv[1];
+  return entryPoint !== undefined && pathToFileURL(resolve(entryPoint)).href === import.meta.url;
+}
+
+if (isMainModule()) {
+  void main().catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`worker failed: ${message}\n`);
+    process.exitCode = 1;
+  });
+}

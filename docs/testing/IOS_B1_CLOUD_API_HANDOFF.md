@@ -2,7 +2,7 @@
 
 - **Audience:** iOS Live client lead
 - **Contract:** ADR-0004 and [B1 Platform Contract](../product/B1_PLATFORM_CONTRACT.md)
-- **Runtime baseline:** `main@3110827c0ee8a7d8b153b4ff81ec50ec94e42da8`; process E2E uses real Node API/Worker processes and PostgreSQL 17.
+- **Runtime baseline:** `main@699fc8371069f68b28e7567f6c1f20d1226bbf01` (PR #120 merged); process E2E uses real Node API/Worker processes and PostgreSQL 17.
 - **Evidence boundary:** The process harness verifies Ember Session behavior using the explicitly loopback-only `dev` identity. Apple assertion verification has a separate real HTTP/PostgreSQL test with a deterministic local JWK fixture; this does not claim validation against Apple's live service.
 
 This is the B1 Cloud Conversation surface for the Live repository. IDs, message sequence, transcript epoch and Turn status returned by the server are authoritative. Values below are sanitized examples; bearer tokens, message text and IDs are placeholders.
@@ -121,4 +121,4 @@ If a send times out or the connection drops, query Unknown ACK before deciding w
 - Independent process lifecycle: `tests/e2e/b1-cloud-process-lifecycle.test.ts` (real API and Worker child processes, PostgreSQL 17, loopback HTTP).
 - Bounded database fault injection: `tests/e2e/stress/b1-worker-db-resilience.stress.ts` (separate from normal CI to avoid unbounded stress).
 - Apple local-fixture/session HTTP behavior: `tests/e2e/b1-2c-session-http.test.ts`.
-- Historical intermittent Worker failure: [GitHub Actions run 41989278252](https://github.com/basicv8vc/Ember/actions/runs/41989278252). A separate Worker runtime-fix PR is under review; its draft commit is not yet the acceptance baseline.
+- Historical intermittent Worker failure on the pre-fix runtime: [GitHub Actions run 41989278252](https://github.com/basicv8vc/Ember/actions/runs/41989278252). Worker PostgreSQL recovery was fixed in PR #120 and merged to the acceptance baseline above. The independent post-fix verification, including three complete stress runs, is recorded in [PR #117](https://github.com/basicv8vc/Ember/pull/117).

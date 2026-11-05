@@ -44,9 +44,11 @@ final class ConversationRootLaunchUITests: XCTestCase {
         XCTAssertTrue(demoButton.waitForExistence(timeout: 10))
         demoButton.tap()
 
-        let conversation = app.descendants(matching: .any)["conversation-home"]
+        let conversation = app.otherElements["conversation-home"]
         XCTAssertTrue(conversation.waitForExistence(timeout: 10))
-        let composer = app.descendants(matching: .any)["conversation-composer-input"]
+        let timeline = app.scrollViews["conversation-timeline"]
+        XCTAssertTrue(timeline.waitForExistence(timeout: 10))
+        let composer = app.textFields["conversation-composer-input"]
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.tap()
         let text = "Verify the first chat mock acknowledgement."
@@ -61,17 +63,24 @@ final class ConversationRootLaunchUITests: XCTestCase {
         XCTAssertEqual(acknowledgements.firstMatch.label, "MOCK ACK · Message accepted")
         XCTAssertEqual(acknowledgements.count, 1)
 
-        let userMessage = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", text)
-        )
-        XCTAssertTrue(userMessage.firstMatch.waitForExistence(timeout: 10))
-        XCTAssertEqual(userMessage.count, 1)
+        // Count message bubbles, not text nodes. On iOS 27 the combined bubble and its inner
+        // StaticText both carry the message text, so a broad `descendants(matching: .any)` label
+        // predicate double-counts a single message. The identifiers below mark one element per
+        // bubble and are resolved inside the timeline container; the label predicate then picks
+        // the bubble that actually carries this submission, so a duplicate still fails the count.
+        let userMessages = timeline.staticTexts
+            .matching(identifier: "conversation-message-user")
+            .matching(NSPredicate(format: "label CONTAINS %@", text))
+        XCTAssertTrue(userMessages.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(userMessages.count, 1, "The submitted message must be rendered as exactly one user bubble.")
+        XCTAssertTrue(userMessages.firstMatch.label.contains(text), "The user bubble must carry the submitted text.")
 
-        let mockReply = app.descendants(matching: .any).matching(
-            NSPredicate(format: "label CONTAINS %@", "MOCK reply:")
-        )
-        XCTAssertTrue(mockReply.firstMatch.waitForExistence(timeout: 10))
-        XCTAssertEqual(mockReply.count, 1)
+        let mockReplies = timeline.staticTexts
+            .matching(identifier: "conversation-message-ember")
+            .matching(NSPredicate(format: "label CONTAINS %@", "MOCK reply:"))
+        XCTAssertTrue(mockReplies.firstMatch.waitForExistence(timeout: 10))
+        XCTAssertEqual(mockReplies.count, 1, "The mock reply must be rendered as exactly one Ember bubble.")
+        XCTAssertTrue(mockReplies.firstMatch.label.contains("MOCK reply:"), "The Ember bubble must carry the mock reply.")
         XCTAssertTrue(composer.isEnabled, "The composer should leave its submitting state after the mock reply.")
     }
 

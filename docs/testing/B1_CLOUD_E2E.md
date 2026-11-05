@@ -21,6 +21,17 @@ TEST_DATABASE_URL='postgres://ember:<local-password>@127.0.0.1:55432/ember_test'
 
 The existing CI workflow runs this file through `pnpm test:e2e` with its PostgreSQL 17 service. The suite reports the Node and PostgreSQL versions through the cluster fixture when diagnosing a run; it enforces PostgreSQL 17 before starting the application processes.
 
+## Bounded Worker database fault stress
+
+The normal CI gate runs the independent process lifecycle suite once. A separate bounded stress suite runs two cycles each while the Worker is idle, a durable Turn is running, and the Worker is establishing database connections. It exercises real PostgreSQL connection rejection/termination, requires the same Worker process to survive recoverable outages, and checks Turn durability, user-message retention, exactly one simulated reply, and sanitized process stdout/stderr. It does not restart a failed Worker to hide an exit. Run it explicitly with:
+
+```sh
+TEST_DATABASE_URL='postgres://ember:<local-password>@127.0.0.1:55432/ember_test' \
+  pnpm test:e2e:stress
+```
+
+The suite prints bounded `[b1-db-stress]` JSON evidence per cycle, including outage/recovery timestamps, Turn state, Worker PID/exit code/signal, redacted stdout/stderr, and durable message counts. It uses the same disposable-database and loopback safety checks as the normal suite.
+
 ## Real process commands
 
 The E2E harness starts these separate processes from the repository root, each with the disposable database URL and loopback-only test auth configuration. The Worker explicitly enables `EMBER_B1_FAKE_RESPONDER_ENABLED=true` because it defaults to off:

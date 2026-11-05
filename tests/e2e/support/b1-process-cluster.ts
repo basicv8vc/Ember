@@ -39,6 +39,14 @@ interface ProcessExit {
   readonly signal: NodeJS.Signals | null;
 }
 
+export interface B1ProcessOutputSnapshot {
+  readonly pid: number | null;
+  readonly exitCode: number | null;
+  readonly exitSignal: NodeJS.Signals | null;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
 /** Owns a real temporary PostgreSQL database and the API/Worker child processes. */
 export class B1ProcessCluster {
   readonly databaseName: string;
@@ -147,26 +155,13 @@ export class B1ProcessCluster {
   }
 
   get workerExitDiagnostics(): string {
+    const snapshot = this.workerProcessSnapshot;
+    return snapshot === undefined ? 'Worker process is not registered' : JSON.stringify(snapshot);
+  }
+
+  get workerProcessSnapshot(): B1ProcessOutputSnapshot | undefined {
     const current = this.worker;
-    if (current === undefined) {
-      return 'Worker process is not registered';
-    }
-
-    let output = current.output;
-    const databaseUrl = new URL(this.databaseUrl);
-    const redactions = [
-      this.databaseName,
-      this.databaseUrl,
-      decodeURIComponent(databaseUrl.password),
-      ...this.sensitiveValues,
-    ];
-    for (const value of redactions) {
-      if (value.length > 0) {
-        output = output.replaceAll(value, '[redacted]');
-      }
-    }
-
-    return `exit=${current.exit?.code ?? current.exit?.signal ?? 'running'}\n${output.slice(-3_000)}`;
+    return current === undefined ? undefined : this.redactSnapshot(current.snapshot());
   }
 
   get workerIsRunning(): boolean {
@@ -210,18 +205,25 @@ export class B1ProcessCluster {
     this.apiUrlValue = undefined;
   }
 
-  async stopWorker(): Promise<void> {
+  async stopWorker(): Promise<B1ProcessOutputSnapshot | undefined> {
     const current = this.worker;
     if (current === undefined) {
-      return;
+      return undefined;
     }
     if (current.paused) {
       current.signal('SIGCONT');
       current.paused = false;
     }
-    await current.stop();
+    try {
+      await current.stop();
+    } catch (error) {
+      this.completedProcessLogs.push(current.output);
+      throw error;
+    }
+    const snapshot = this.redactSnapshot(current.snapshot());
     this.completedProcessLogs.push(current.output);
     this.worker = undefined;
+    return snapshot;
   }
 
   pauseWorker(): void {
@@ -245,7 +247,7 @@ export class B1ProcessCluster {
     current.paused = false;
   }
 
-  async crashPausedWorker(): Promise<void> {
+  async crashPausedWorker(): Promise<B1ProcessOutputSnapshot> {
     const current = this.worker;
     if (current === undefined || current.exit !== undefined || !current.paused) {
       throw new Error('Worker must be paused before the crash-recovery check');
@@ -255,8 +257,10 @@ export class B1ProcessCluster {
     if (exit.signal !== 'SIGKILL') {
       throw new Error('Worker did not exit from the controlled crash');
     }
+    const snapshot = this.redactSnapshot(current.snapshot());
     this.completedProcessLogs.push(current.output);
     this.worker = undefined;
+    return snapshot;
   }
 
   async signIn(label: string, retainedAssertion?: string): Promise<B1Identity> {
@@ -410,6 +414,34 @@ export class B1ProcessCluster {
     await this.adminPool.query(`ALTER DATABASE "${this.databaseName}" ALLOW_CONNECTIONS true`);
   }
 
+  private redactSnapshot(snapshot: B1ProcessOutputSnapshot): B1ProcessOutputSnapshot {
+    const databaseUrl = new URL(this.databaseUrl);
+    const redactions = [
+      this.databaseName,
+      this.databaseUrl,
+      databaseUrl.username,
+      databaseUrl.password,
+      decodeURIComponent(databaseUrl.username),
+      decodeURIComponent(databaseUrl.password),
+      ...this.sensitiveValues,
+    ];
+    const redact = (text: string): string => {
+      let result = text;
+      for (const value of redactions) {
+        if (value.length > 0) {
+          result = result.replaceAll(value, '[redacted]');
+        }
+      }
+      return result.slice(-3_000);
+    };
+
+    return Object.freeze({
+      ...snapshot,
+      stdout: redact(snapshot.stdout),
+      stderr: redact(snapshot.stderr),
+    });
+  }
+
   private launch(entry: string, overrides: Readonly<Record<string, string>>): ManagedProcess {
     const environment: NodeJS.ProcessEnv = {
       ...process.env,
@@ -464,6 +496,8 @@ export class B1ProcessCluster {
 
 class ManagedProcess {
   output = '';
+  stdout = '';
+  stderr = '';
   exit?: ProcessExit;
   paused = false;
   private readonly exitPromise: Promise<ProcessExit>;
@@ -474,8 +508,8 @@ class ManagedProcess {
   ) {
     child.stdout?.setEncoding('utf8');
     child.stderr?.setEncoding('utf8');
-    child.stdout?.on('data', (chunk: string) => this.append(chunk));
-    child.stderr?.on('data', (chunk: string) => this.append(chunk));
+    child.stdout?.on('data', (chunk: string) => this.append('stdout', chunk));
+    child.stderr?.on('data', (chunk: string) => this.append('stderr', chunk));
     this.exitPromise = new Promise<ProcessExit>((resolve, reject) => {
       child.once('error', reject);
       child.once('exit', (code, signal) => {
@@ -517,6 +551,16 @@ class ManagedProcess {
     return withTimeout(this.exitPromise, timeoutMs, `${this.entry} process did not exit`);
   }
 
+  snapshot(): B1ProcessOutputSnapshot {
+    return Object.freeze({
+      pid: this.child.pid ?? null,
+      exitCode: this.exit?.code ?? null,
+      exitSignal: this.exit?.signal ?? null,
+      stdout: this.stdout,
+      stderr: this.stderr,
+    });
+  }
+
   async stop(): Promise<void> {
     if (this.exit !== undefined) {
       if (this.exit.code !== 0) {
@@ -537,8 +581,13 @@ class ManagedProcess {
     }
   }
 
-  private append(chunk: string): void {
+  private append(stream: 'stdout' | 'stderr', chunk: string): void {
     this.output += chunk;
+    if (stream === 'stdout') {
+      this.stdout += chunk;
+    } else {
+      this.stderr += chunk;
+    }
   }
 }
 

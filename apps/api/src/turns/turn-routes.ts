@@ -32,7 +32,7 @@ export function createB1TurnRoutes(deps: B1TurnRouteDependencies): Hono<AppBindi
   routes.use('*', requireSessionAuth({ service: deps.sessions, logger: deps.logger }));
 
   routes.get('/conversations/:conversation_id/turns/:turn_id', async (c) => {
-    const rejected = rejectUnexpectedTurnInput(c);
+    const rejected = await rejectUnexpectedTurnInput(c);
 
     if (rejected !== undefined) {
       return rejected;
@@ -58,7 +58,7 @@ export function createB1TurnRoutes(deps: B1TurnRouteDependencies): Hono<AppBindi
   });
 
   routes.post('/conversations/:conversation_id/turns/:turn_id/cancel', async (c) => {
-    const rejected = rejectUnexpectedTurnInput(c);
+    const rejected = await rejectUnexpectedTurnInput(c);
 
     if (rejected !== undefined) {
       return rejected;
@@ -102,17 +102,13 @@ function parseTurnIdentity(
 }
 
 /** No caller-selected scope, query options, or body is part of either frozen Turn operation. */
-function rejectUnexpectedTurnInput(c: AppContext): Response | undefined {
+async function rejectUnexpectedTurnInput(c: AppContext): Promise<Response | undefined> {
   const url = new URL(c.req.url);
   const hasForbiddenScope =
     FORBIDDEN_SCOPE_QUERY_KEYS.some((key) => url.searchParams.has(key)) ||
     FORBIDDEN_SCOPE_HEADERS.some((header) => c.req.header(header) !== undefined);
   const hasQuery = url.searchParams.size > 0;
-  const declaredLength = Number(c.req.header('content-length') ?? 0);
-  const hasBody =
-    c.req.raw.body !== null ||
-    (Number.isFinite(declaredLength) && declaredLength > 0) ||
-    c.req.header('transfer-encoding') !== undefined;
+  const hasBody = await hasRequestBody(c.req.raw);
 
   if (hasForbiddenScope) {
     return respondInvalidArgument(c, 'client-supplied identity scope fields are not allowed');
@@ -123,4 +119,39 @@ function rejectUnexpectedTurnInput(c: AppContext): Response | undefined {
   }
 
   return undefined;
+}
+
+/**
+ * Real Node HTTP requests may carry an EMPTY ReadableStream for a bodyless POST. Checking
+ * request.body !== null rejects legitimate `POST .../cancel` calls; inspect bytes instead.
+ * This mirrors the B1 Session routes' bounded/no-body handling at the HTTP adapter boundary.
+ */
+async function hasRequestBody(request: Request): Promise<boolean> {
+  const contentLength = request.headers.get('content-length');
+  if (
+    request.headers.get('transfer-encoding') !== null ||
+    (contentLength !== null && contentLength.trim() !== '0')
+  ) {
+    return true;
+  }
+
+  if (request.body === null) {
+    return false;
+  }
+
+  const reader = request.body.getReader();
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        return false;
+      }
+      if (chunk.value.byteLength > 0) {
+        await reader.cancel();
+        return true;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
 }

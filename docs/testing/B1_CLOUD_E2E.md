@@ -32,6 +32,6 @@ node --import tsx apps/worker/src/index.ts
 
 The API is health-checked over HTTP before test requests begin. The Worker must report its startup event and is observed through its durable effects in PostgreSQL and the API. Restart and cancellation cases signal the actual child process; the pending-Turn recovery case kills a paused Worker after the message/Turn transaction commits, then starts a fresh Worker against the same database.
 
-## Runtime integration prerequisite
+## Runtime integration verification
 
-This suite is intentionally separate from B1 runtime composition code. At the starting revision `afa05e27681a5adeb67ba5cfcb6f90b8458a9b6e`, the API executable mounted the Session routes but not the Conversation message/Turn routes, and the Worker executable did not start the Fake Turn Responder. The process E2E checks must be run after those integrations are merged and this Draft PR is rebased onto that commit. The Draft must stay unmerged until the complete suite runs against the integrated runtime.
+The independent suite remains separate from B1 runtime composition code. Its runtime prerequisite is met by PR #118, merged to `main` as `3110827c0ee8a7d8b153b4ff81ec50ec94e42da8`. The suite was rebased onto that commit and exercised the integrated API and Worker entry points as real processes. The Fake Turn Responder is enabled only in the loopback-only test Worker process.

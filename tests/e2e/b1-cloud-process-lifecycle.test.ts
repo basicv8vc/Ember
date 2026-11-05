@@ -534,7 +534,7 @@ describe('B1 independent cloud lifecycle: real API + Worker + PostgreSQL 17', ()
       await cluster.allowDatabaseConnections();
     }
 
-    expect(cluster.workerIsRunning).toBe(true);
+    expect(cluster.workerIsRunning, cluster.workerExitDiagnostics).toBe(true);
     const preRetryRows = await cluster.observerPool.query<{ total: string }>(
       `SELECT count(*)::text AS total FROM conversation_messages
         WHERE tenant_id = $1 AND client_submission_id = $2`,

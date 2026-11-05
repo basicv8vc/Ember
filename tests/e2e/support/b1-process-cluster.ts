@@ -146,6 +146,29 @@ export class B1ProcessCluster {
     return this.worker?.output ?? '';
   }
 
+  get workerExitDiagnostics(): string {
+    const current = this.worker;
+    if (current === undefined) {
+      return 'Worker process is not registered';
+    }
+
+    let output = current.output;
+    const databaseUrl = new URL(this.databaseUrl);
+    const redactions = [
+      this.databaseName,
+      this.databaseUrl,
+      decodeURIComponent(databaseUrl.password),
+      ...this.sensitiveValues,
+    ];
+    for (const value of redactions) {
+      if (value.length > 0) {
+        output = output.replaceAll(value, '[redacted]');
+      }
+    }
+
+    return `exit=${current.exit?.code ?? current.exit?.signal ?? 'running'}\n${output.slice(-3_000)}`;
+  }
+
   get workerIsRunning(): boolean {
     return this.worker !== undefined && this.worker.exit === undefined;
   }

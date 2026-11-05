@@ -16,7 +16,7 @@ import { DomainError, isDomainError, type DomainErrorCode, type LeasedRun } from
 import type { CommitmentOrchestrator, ExecutionClock, WorkerLeaseGrant } from '@ember/execution';
 import { WorkerIdSchema } from '@ember/postgres';
 import { readCommitmentTaskMarker } from './commitment-ports.js';
-import type { WorkerLogger } from './logger.js';
+import { safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 import type { RunHandler, RunHandlerCompletion, RunHandlerFinalizer } from './run-handler.js';
 
 export interface CommitmentRunHandlerDependencies {
@@ -164,7 +164,7 @@ export function createCommitmentRunHandler(deps: CommitmentRunHandlerDependencie
           }
           logger.warn('Failed to read commitment execution context', {
             ...baseLog,
-            error: error instanceof Error ? error.message : String(error),
+            category: safeWorkerErrorCategory(error),
           });
           return { type: 'finish', outcome: 'failed_retryable' };
         }
@@ -492,7 +492,7 @@ export function createCommitmentRunHandler(deps: CommitmentRunHandlerDependencie
 
         logger.warn('Commitment occurrence execution failed with retryable error', {
           ...baseLog,
-          error: error instanceof Error ? error.message : String(error),
+          category: safeWorkerErrorCategory(error),
         });
         return { type: 'finish', outcome: 'failed_retryable' };
       }

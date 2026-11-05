@@ -11,7 +11,7 @@ import {
   type DueCommitmentStore,
   type ExistingTaskDispatcher,
 } from './commitment-ports.js';
-import type { WorkerLogger } from './logger.js';
+import { safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 
 export interface CommitmentSchedulerOptions {
   /** Master switch. Must default to false (disabled) in production until CTO sign-off. */
@@ -151,7 +151,7 @@ export class CommitmentScheduler {
         skippedOrFailed++;
         this.logger?.warn?.('Failed to schedule commitment occurrence', {
           commitmentId: commitment.commitmentId,
-          error: error instanceof Error ? error.message : String(error),
+          category: safeWorkerErrorCategory(error),
         });
       }
     }
@@ -227,7 +227,7 @@ export class CommitmentScheduler {
       } catch (error) {
         this.logger?.warn?.('Failed to reconcile stalled occurrence', {
           occurrenceId: occurrence.occurrenceId,
-          error: error instanceof Error ? error.message : String(error),
+          category: safeWorkerErrorCategory(error),
         });
       }
     }
@@ -306,7 +306,7 @@ export class CommitmentScheduler {
         const backoffMs = Math.min(this.errorBackoffMs * 2 ** exponent, this.maxErrorBackoffMs);
 
         this.logger?.warn?.('Scheduler loop encountered error; backing off', {
-          error: error instanceof Error ? error.message : String(error),
+          category: safeWorkerErrorCategory(error),
           consecutiveFailures,
           backoffMs,
         });

@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto';
+import { once } from 'node:events';
+import { serve } from '@hono/node-server';
 import { describe, expect, it } from 'vitest';
 import { B1AssistantTurnDtoSchema, ErrorResponseSchema } from '@ember/contracts';
 import type { Id } from '@ember/domain';
@@ -231,6 +233,54 @@ describe('B1 Turn HTTP routes', () => {
     expect(await second.json()).toEqual(terminal);
     expect(withBody.status).toBe(400);
     expect(calls).toBe(2);
+  });
+
+  it('accepts a bodyless cancellation over the real Node HTTP adapter', async () => {
+    const terminal = B1AssistantTurnDtoSchema.parse({
+      ...runningTurn(),
+      status: 'cancelled',
+      updated_at: '2026-11-05T00:01:00.000Z',
+    });
+    let cancels = 0;
+    const app = buildApp({
+      getTurn() {
+        return Promise.resolve(terminal);
+      },
+      cancelTurn() {
+        cancels += 1;
+        return Promise.resolve(terminal);
+      },
+    });
+    const server = serve({ fetch: app.fetch, hostname: '127.0.0.1', port: 0 });
+
+    try {
+      if (!server.listening) {
+        await once(server, 'listening');
+      }
+      const address = server.address();
+      if (address === null || typeof address === 'string') {
+        throw new Error('expected a bound IPv4 loopback HTTP listener');
+      }
+      const url = `http://127.0.0.1:${address.port}/v1/conversations/${conversationId}/turns/${turnId}/cancel`;
+
+      // Node's Hono adapter can materialize an empty stream for a POST with no request bytes.
+      // A null-body check would incorrectly produce 400 here even though the wire body is empty.
+      const valid = await fetch(url, { method: 'POST', headers: authHeaders() });
+      expect(valid.status).toBe(200);
+      expect(await valid.json()).toEqual(terminal);
+
+      const nonEmpty = await fetch(url, {
+        method: 'POST',
+        headers: { ...authHeaders(), 'content-type': 'application/json' },
+        body: '{}',
+      });
+      expect(nonEmpty.status).toBe(400);
+      expect(cancels).toBe(1);
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) => (error === undefined ? resolve() : reject(error)));
+      });
+    }
   });
 
   it('parses every successful repository result through the frozen strict Turn DTO schema', async () => {

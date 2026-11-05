@@ -38,9 +38,13 @@ import Foundation
 /// - **A credential that is not durable is not adopted.** When a rotation succeeds server-side but the
 ///   replacement cannot be written, the session ends instead of continuing from memory: a token that
 ///   exists only in the process would leave the *rotated-away* token on disk, and the next launch would
-///   present it — which the backend answers by revoking every session for the consumer. The stale item
-///   is deleted, and if that also fails a `SessionRecoveryFence` keeps the next launch from presenting
-///   it.
+///   present it — which the backend answers by revoking every session for the consumer.
+/// - **A rotation is fenced before it is sent.** `POST /v1/auth/session/refresh` can commit on the server
+///   and then vanish — a timeout, a dropped connection, a process kill. The stored token is then
+///   unusable but still on disk. The `SessionRecoveryFence` is made durable *before* the request exists
+///   and is cleared only once a replacement is persisted or the failure proves the token untouched, so
+///   the next launch destroys the credential instead of replaying it. If the fence cannot be persisted,
+///   the rotation is not attempted at all.
 public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     public struct Dependencies: Sendable {
         public let api: EmberSessionAPI
@@ -60,7 +64,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             transport: EmberAuthenticatedTransport,
             store: EmberSessionStore,
             appleSignIn: AppleSignInAuthorizing,
-            fence: SessionRecoveryFence = UserDefaultsSessionRecoveryFence(),
+            fence: SessionRecoveryFence = FileSessionRecoveryFence(),
             now: @escaping @Sendable () -> Date = { Date() },
             refreshLeeway: TimeInterval = 60
         ) {
@@ -356,7 +360,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             localError = (error as? AuthError) ?? .keychainUnavailable
             // The departing token is dead the moment the server processes this logout. If its item could
             // not be removed, fence the store so the next launch cannot present it.
-            fence.arm()
+            try? fence.arm()
         }
 
         var remoteError: AuthError?
@@ -459,12 +463,24 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             // Single-flight: this caller joins the rotation already in progress for this generation.
             operation = existing
         } else {
+            // The marker is made durable *before* the request exists. From this instant the stored token
+            // must be assumed unusable by the next launch, because the server may rotate it and neither
+            // this process nor the response may survive to say so. If the marker cannot be persisted the
+            // rotation is not attempted at all: sending one without it would recreate exactly the window
+            // this fence closes.
+            do {
+                try fence.arm()
+            } catch {
+                throw (error as? AuthError) ?? .recoveryFenceUnavailable
+            }
+
             let api = self.api
             let token = current.accessToken
             let operationGeneration = expectedGeneration
 
             // The task owns the network call only. The Keychain write and the commit happen in
-            // `settle`, inside the actor, with no await between them.
+            // `settle`, inside the actor, with no await between them. Creating it immediately after
+            // arming keeps the window between "recorded" and "sent" as small as the language allows.
             let task = Task<EmberSessionResponseDTO, Error> {
                 try await api.refreshSession(accessToken: token)
             }
@@ -524,8 +540,24 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
                 // that has since been replaced by a newer sign-in says nothing about the new session,
                 // so this is a guarded no-op in that case.
                 revokeLocally(ifCurrent: operation.token)
+                throw authError
             }
-            throw authError
+
+            if authError.credentialUnaffectedByRefresh {
+                // The server declined before rotating, or the request never left the device. The stored
+                // credential is exactly what it was, so the fence's warning is no longer true and the
+                // session survives.
+                fence.clear()
+                throw authError
+            }
+
+            // The outcome is unknown: the rotation may have committed, so the token on disk may already
+            // be dead. Replaying it is what `reuse_detected` punishes by revoking every session for the
+            // consumer, so the session ends here and the credential is destroyed without being
+            // presented again. The cause is deliberately not forwarded: a caller that treated
+            // `.timedOut` as "your session was kept" would be told a lie.
+            endSessionAfterUnusableCredential(orphanedToken: nil)
+            throw AuthError.rotationOutcomeUnknown
         }
 
         // The rotation may have taken long enough for a logout or a newer sign-in to replace this
@@ -559,7 +591,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             //
             // So the session ends, atomically with the generation check above: no suspension has
             // occurred since it, so this is still one uninterrupted actor step.
-            endSessionAfterUnpersistedRotation(staleToken: rotated.accessToken)
+            endSessionAfterUnusableCredential(orphanedToken: rotated.accessToken)
             throw storageError
         }
 
@@ -573,22 +605,27 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         return rotated
     }
 
-    /// Ends the session after a rotation the server accepted but this device could not persist.
+    /// Ends the session because the credential on disk can no longer be trusted.
+    ///
+    /// Two situations reach here: a rotation the server accepted but this device could not persist, and
+    /// a rotation whose outcome is unknown. They are the same state — the stored token may already be
+    /// rotated away — so they get the same treatment.
     ///
     /// Called only with no pending suspension, so it runs as one uninterrupted actor step. Three things
     /// happen, in this order, and the order is the point:
     ///
-    /// 1. The fence is armed **first**. Everything after it can fail, and a crash between here and the
+    /// 1. The fence is armed **first**, and its failure is tolerated only because the caller already
+    ///    armed it before the request. Everything after this can fail, and a crash between here and the
     ///    delete would otherwise leave an unmarked stale credential on disk.
-    /// 2. Local state is dropped. No caller can obtain the new token, so no request is sent with a
-    ///    credential this device cannot vouch for after a relaunch.
-    /// 3. The stale item is deleted, which is what makes the next launch clean rather than merely
-    ///    fenced. The fence is cleared only if that delete is confirmed.
+    /// 2. Local state is dropped. From this instant no request of any kind — read, write, refresh or
+    ///    logout — can be sent with the suspect token.
+    /// 3. The stale item is deleted, which makes the next launch clean rather than merely fenced. The
+    ///    fence is cleared only if that delete is confirmed.
     ///
-    /// The replacement token is then returned to the server on a best-effort basis: refusing to keep a
-    /// credential is not a reason to leave the session alive where nobody can reach it.
-    private func endSessionAfterUnpersistedRotation(staleToken: EmberAccessToken) {
-        fence.arm()
+    /// - Parameter orphanedToken: a replacement token the server minted but this device refused to keep,
+    ///   handed back on a best-effort basis. `nil` when the outcome was never received.
+    private func endSessionAfterUnusableCredential(orphanedToken token: EmberAccessToken?) {
+        try? fence.arm()
 
         record = nil
         generation &+= 1
@@ -599,9 +636,8 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             fence.clear()
         }
 
-        // A credential this device refuses to keep is handed back rather than left alive server-side.
         // The outcome cannot change local state, so it is not awaited before the settlement returns.
-        orphanedToken = staleToken
+        orphanedToken = token
     }
 
     /// Consumes `orphanedToken`, if a previous settlement left one, and revokes it exactly once.
@@ -658,7 +694,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         if (try? store.delete()) != nil {
             fence.clear()
         } else {
-            fence.arm()
+            try? fence.arm()
         }
     }
 

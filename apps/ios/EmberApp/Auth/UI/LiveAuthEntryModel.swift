@@ -106,6 +106,10 @@ final class LiveAuthEntryModel {
             "Too many attempts. Wait a moment and try again."
         case .unauthenticated, .sessionMissing, .sessionEnded:
             "Your session is no longer valid. Sign in again to continue."
+        case .rotationOutcomeUnknown:
+            "Your session could not be confirmed. Sign in again to continue."
+        case .recoveryFenceUnavailable:
+            "Ember could not prepare a secure session on this device. Try again."
         case .storedSessionCorrupt:
             "The saved session could not be read. Sign in again to continue."
         case .invalidResponse, .unexpectedStatus, .notFound, .invalidRequest:

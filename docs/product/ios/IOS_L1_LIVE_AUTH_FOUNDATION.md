@@ -142,9 +142,14 @@ presents one twice.
 
 ### Transient failure
 
-`offline`, `timedOut`, `transportFailure`, `serverUnavailable` and `keychainUnavailable` never revoke.
-The stored record stays and `AuthSessionState.unavailable` is reported when a credential exists but
-cannot be validated — never `unauthenticated`.
+For a **read**, `offline`, `timedOut`, `transportFailure`, `serverUnavailable` and
+`keychainUnavailable` never revoke. The stored record stays and `AuthSessionState.unavailable` is
+reported when a credential exists but cannot be validated — never `unauthenticated`.
+
+For a **rotation** the rule is narrower, because the request itself is a state change. Only a failure
+that proves the server never rotated keeps the session; see §8c. A timeout, a dropped connection or a 5xx
+during `POST /v1/auth/session/refresh` ends it, because the token may already be dead and replaying it
+would be reuse.
 
 ### Logout
 
@@ -255,11 +260,11 @@ Step 3 can fail for the same reason step's write did. The fence is the second li
 must outlive the process, so it cannot live in the Keychain — the Keychain is the component that is
 failing in exactly this scenario.
 
-It is one boolean in `UserDefaults` (`com.basicv8vc.ember.auth.rotation-unpersisted`). It carries no
-token, session id, consumer id, assertion or nonce: it cannot be replayed, identifies nobody, and says
-only "what is in the Keychain right now belongs to a session the server already rotated away". The
-annex §5.1 I-8 prohibition is about the credential itself leaving the Keychain, and this does not move
-it.
+It is a single marker file (`Application Support/EmberAuth/rotation-in-flight`, payload `{"version":1}`).
+It carries no token, session id, consumer id, assertion or nonce: it cannot be replayed, identifies
+nobody, and says only "what is in the Keychain right now belongs to a session the server already rotated
+away". The annex §5.1 I-8 prohibition is about the credential itself leaving the Keychain, and this does
+not move it. Its durability requirements are in §8c.
 
 A cold start that finds it armed destroys the stored item without ever loading it, then clears the
 fence and reports a signed-out consumer. If the deletion fails, the thrown `keychainUnavailable` keeps
@@ -289,6 +294,90 @@ actually matters, rather than the shape of the state machine.
 **These tests were verified against the defect.** Re-introducing the pre-fix `record = rotated` on the
 failure path fails three of them (12 assertion failures across 271 tests); restoring the fix returns the
 suite to green. The guard is therefore load-bearing, not decorative.
+
+## 8c. Review follow-up (PR #119 round 3) — a rotation whose outcome is never heard
+
+### The window
+
+§8b covers "the server rotated and the write failed". This round closes the window in front of it: the
+server may rotate and the **answer** may never arrive — a timeout, a dropped connection, a process kill
+while the request is outstanding. The stored token is then dead on the server and unmarked on disk.
+
+The fence could not help, because it was only armed after a rotation was known to have succeeded.
+
+### Why there is no safe probe
+
+I checked the backend before assuming anything: reuse detection is not confined to rotation. Both
+`findActiveSession` (`b1-session-repository.ts:179`) and `rotateSession` revoke **every** active session
+for the consumer when they see a digest whose `revocation_reason` is `rotated`. So presenting a
+suspected token to `GET /v1/me` to see whether it still works is itself the attack the backend punishes.
+There is no read-only way to ask. The only correct behaviour is to never present the token again.
+
+### The rule
+
+**The marker is durable before the request exists.** `performRefresh` arms the fence, and only then
+creates the task that sends `POST /v1/auth/session/refresh`.
+
+- If `arm()` throws, the rotation is **not attempted**. `AuthError.recoveryFenceUnavailable` is returned
+  and the session is untouched. Sending a rotation that cannot be recorded would recreate the exact
+  window.
+- On a **persisted** rotation the marker is cleared (§8b's success path).
+- On a failure that **proves** no rotation happened — `.offline`, `.invalidBaseURL`, `.invalidRequest`,
+  `.unauthenticated`, `.rateLimited` — the marker is cleared and the session survives. This is
+  `AuthError.credentialUnaffectedByRefresh`, and it is deliberately narrower than
+  `preservesLocalSession`.
+- On any other failure — timeout, connection lost, 5xx, malformed 2xx, unmodelled status — the outcome
+  is unknown. The session ends, the stored credential is destroyed without being presented again, and
+  `AuthError.rotationOutcomeUnknown` is returned. The cause is not forwarded: a caller told "your session
+  was kept, try again when you are online" would be told a lie.
+
+`.networkConnectionLost` moved out of the `.offline` bucket for this reason. It strikes mid-exchange and
+says nothing about whether the server committed, so it must not be read as "the request never left".
+
+### Durability
+
+`FileSessionRecoveryFence` writes a one-line payload (`{"version":1}`) to
+`Application Support/EmberAuth/rotation-in-flight`, then:
+
+1. `fsync` the file,
+2. `fsync` the containing directory, so the rename that published it is durable,
+3. read the file back and compare.
+
+Only then does `arm()` return. The write uses `.atomic`, so a crash never leaves a half-written marker
+that reads as "not armed". The directory is excluded from backup, because a verdict about a session
+should not travel to a device whose Keychain never carried that session.
+
+This is why the marker is not a `UserDefaults` boolean: `set(_:forKey:)` returns before the preferences
+daemon has necessarily reached the platter, which is not a claim that can be made about a crash. A file
+with an `fsync` and a read-back is.
+
+### The cost, stated plainly
+
+A timeout or a 5xx during rotation now signs the person out instead of retrying. That is the deliberate
+trade: the client cannot distinguish "the server declined" from "the server committed and then failed to
+answer", and guessing wrong is the difference between one re-authentication and revoking every session
+the consumer owns. Offline is still free, because the request provably never left the device.
+
+### Tests
+
+| Scenario                                                     | Test                                                                     |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| The marker exists while the request is outstanding           | `testFenceIsArmedBeforeTheRefreshIsSent`                                 |
+| **Process killed mid-request → cold start must not replay**  | `testProcessDeathDuringRefreshLeavesTheNextLaunchUnableToReplayTheToken` |
+| Lost response (timeout) ends the session, no replay anywhere | `testLostRefreshResponseEndsTheSessionWithoutReplayingTheToken`          |
+| Pre-send failure keeps the session and withdraws the marker  | `testPreSendFailureKeepsTheSessionAndClearsTheFence`                     |
+| 5xx during rotation is an unknown outcome                    | `testServerErrorDuringRotationIsAnUnknownOutcome`                        |
+| Marker cannot be persisted → no request is sent              | `testRotationIsRefusedWhenTheFenceCannotBePersisted`                     |
+| Marker survives a fresh reader; carries no credential        | `SessionRecoveryFenceTests` (5 cases)                                    |
+
+The process-death test does not mock the kill. It holds the refresh behind a gate that is never opened
+— nothing ever resumes the first coordinator, exactly as a force-quit leaves it — then builds a **second
+coordinator** over the same store and fence and asserts `refreshCallCount == 0`, `bootstrapCallCount ==
+0`, `logoutCallCount == 0`.
+
+**Verified against the defect.** Removing the pre-request `arm()` and restoring the pre-fix failure
+handling fails five of these (19 assertion failures across 282 tests); restoring the fix returns the
+suite to 282/282.
 
 ## 9. Verification
 

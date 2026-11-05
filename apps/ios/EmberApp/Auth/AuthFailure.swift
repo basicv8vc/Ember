@@ -80,6 +80,18 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
     case invalidBaseURL
     /// The caller asked for an authenticated request after that session ended.
     case sessionEnded
+    /// A rotation was attempted but its outcome could not be confirmed: the response was lost, timed
+    /// out, or the server answered with something that may or may not have followed a committed
+    /// rotation.
+    ///
+    /// The session is ended rather than retried. The old token may already be dead, and presenting it
+    /// again is exactly what the backend answers by revoking every session for the consumer.
+    case rotationOutcomeUnknown
+    /// The recovery marker could not be made durable, so the rotation was not attempted.
+    ///
+    /// Failing closed is deliberate: sending a rotation that cannot be recorded is the window that
+    /// produces `reuse_detected` after a crash.
+    case recoveryFenceUnavailable
 
     public var description: String {
         switch self {
@@ -107,6 +119,8 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
         case .unknownWriteOutcome: "unknownWriteOutcome"
         case .invalidBaseURL: "invalidBaseURL"
         case .sessionEnded: "sessionEnded"
+        case .rotationOutcomeUnknown: "rotationOutcomeUnknown"
+        case .recoveryFenceUnavailable: "recoveryFenceUnavailable"
         }
     }
 
@@ -115,7 +129,8 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
     /// True when the only honest recovery is a fresh Sign in with Apple.
     public var requiresNewSignIn: Bool {
         switch self {
-        case .unauthenticated, .sessionMissing, .sessionEnded, .storedSessionCorrupt:
+        case .unauthenticated, .sessionMissing, .sessionEnded, .storedSessionCorrupt,
+            .rotationOutcomeUnknown:
             true
         default:
             false
@@ -139,6 +154,30 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
         switch self {
         case .offline, .timedOut, .transportFailure, .serverUnavailable, .keychainUnavailable,
             .rateLimited, .nonHTTPResponse, .superseded:
+            true
+        default:
+            false
+        }
+    }
+
+    /// True when a failed `POST /v1/auth/session/refresh` provably did **not** rotate the token.
+    ///
+    /// This is narrower than `preservesLocalSession` on purpose, and the difference is the point. A read
+    /// that times out leaves the server untouched, so the session survives. A *rotation* that times out
+    /// may have committed: the token can be dead before we ever see an answer. Only these cases are
+    /// evidence that no rotation happened:
+    ///
+    /// - `.offline` — every `URLError` it maps from fails before the HTTP request is written (name
+    ///   resolution, connect, no route). `networkConnectionLost` is deliberately excluded, because it
+    ///   strikes mid-exchange and says nothing about whether the server committed.
+    /// - `.invalidBaseURL` — the request was never built.
+    /// - `.invalidRequest`, `.unauthenticated`, `.rateLimited` — the server answered and declined.
+    ///
+    /// Everything else — timeout, connection lost, 5xx, a malformed 2xx, an unmodelled status — is an
+    /// unknown outcome and must be treated as "the token may already be gone".
+    public var credentialUnaffectedByRefresh: Bool {
+        switch self {
+        case .offline, .invalidBaseURL, .invalidRequest, .unauthenticated, .rateLimited:
             true
         default:
             false

@@ -934,6 +934,181 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertNil(store.currentRecord())
     }
 
+    // MARK: - Rotation in flight, outcome unknown (review P1, round 3)
+
+    /// The marker must exist before the request does.
+    ///
+    /// If the app dies at any point after this instant, the next launch has to know that the token on disk
+    /// may already be rotated away. Arming after the response would be arming too late: the crash we are
+    /// defending against happens precisely while the response is outstanding.
+    func testFenceIsArmedBeforeTheRefreshIsSent() async throws {
+        let gate = AsyncGate()
+        let started = expectation(description: "refresh started")
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10)) { api in
+            api.setRefreshGate(gate)
+            api.setRefreshStartedHandler { started.fulfill() }
+        }
+
+        let refreshing = Task { try await built.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [started], timeout: 5)
+
+        // The request is in flight and unanswered, and the marker is already durable.
+        XCTAssertTrue(built.fence.isArmed)
+        XCTAssertEqual(built.api.refreshCallCount, 1)
+        // The old credential is still what the store holds — which is why the marker is required.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+
+        await gate.open()
+        _ = try await refreshing.value
+        // A completed rotation that persisted clears it again.
+        XCTAssertFalse(built.fence.isArmed)
+    }
+
+    /// Process death while the rotation is outstanding, then a cold start.
+    ///
+    /// The gate models a response that never arrives: nothing ever resumes the first coordinator, exactly
+    /// as a force-quit leaves it. The relaunch must refuse to present the stored token — a replay would
+    /// be answered with `reuse_detected`, which revokes every session for the consumer.
+    func testProcessDeathDuringRefreshLeavesTheNextLaunchUnableToReplayTheToken() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record(tokenSuffix: "alpha", expiresIn: 10))
+        let fence = InMemorySessionRecoveryFence()
+        let gate = AsyncGate()
+        let started = expectation(description: "refresh started")
+
+        let first = try makeCoordinator(store: store, fence: fence) { api in
+            api.setRefreshGate(gate)
+            api.setRefreshStartedHandler { started.fulfill() }
+        }
+
+        let doomed = Task { try await first.coordinator.refreshSessionIfNeeded() }
+        await fulfillment(of: [started], timeout: 5)
+
+        XCTAssertTrue(fence.isArmed)
+        XCTAssertEqual(store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+
+        // ---- the process is killed here; the gate is never opened ----
+
+        let relaunched = try makeCoordinator(store: store, fence: fence)
+
+        do {
+            _ = try await relaunched.coordinator.restoreSession()
+            XCTFail("a fenced cold start must not restore anything")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .sessionMissing)
+        }
+
+        // Nothing was sent: no rotation, no profile read, no logout.
+        XCTAssertEqual(relaunched.api.refreshCallCount, 0)
+        XCTAssertEqual(relaunched.api.bootstrapCallCount, 0)
+        XCTAssertEqual(relaunched.api.logoutCallCount, 0)
+
+        XCTAssertNil(store.currentRecord())
+        XCTAssertFalse(fence.isArmed)
+        let state = await relaunched.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+
+        // The suspended task is released only after the assertions, so it cannot settle first.
+        await gate.open()
+        _ = try? await doomed.value
+    }
+
+    /// A lost response is not a transient fault for a rotation.
+    ///
+    /// The token may already be dead, so the session ends and nothing is retried — not immediately, not
+    /// on the next call, and not after a relaunch.
+    func testLostRefreshResponseEndsTheSessionWithoutReplayingTheToken() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10)) { api in
+            api.setRefreshResults([.failure(.timedOut)])
+        }
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the unknown outcome to end the session")
+        } catch let error as AuthError {
+            // Not `.timedOut`: a caller told "try again when you are online" would be told a lie.
+            XCTAssertEqual(error, .rotationOutcomeUnknown)
+        }
+
+        XCTAssertEqual(built.api.refreshCallCount, 1)
+        XCTAssertEqual(built.api.logoutCallCount, 0)
+        XCTAssertNil(built.store.currentRecord())
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+
+        // A second attempt finds nothing to rotate, so the dead token is never replayed.
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the ended session to fail")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .sessionMissing)
+        }
+        XCTAssertEqual(built.api.refreshCallCount, 1)
+    }
+
+    /// A read that fails offline keeps the session; a rotation that fails offline does too, because the
+    /// request provably never left the device.
+    func testPreSendFailureKeepsTheSessionAndClearsTheFence() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10)) { api in
+            api.setRefreshResults([.failure(.offline)])
+        }
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the offline rotation to fail")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .offline)
+        }
+
+        // The token was never put at risk, so it survives and the marker's warning is withdrawn.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+        XCTAssertFalse(built.fence.isArmed)
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
+    }
+
+    /// A 5xx during rotation is an unknown outcome, not a transient fault.
+    ///
+    /// The client cannot distinguish "the server declined" from "the server committed and then failed to
+    /// answer", so it must assume the token may be gone.
+    func testServerErrorDuringRotationIsAnUnknownOutcome() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10)) { api in
+            api.setRefreshResults([.failure(.serverUnavailable)])
+        }
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the unknown outcome to end the session")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .rotationOutcomeUnknown)
+        }
+
+        XCTAssertNil(built.store.currentRecord())
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+    }
+
+    /// If the marker cannot be made durable, the rotation must not be attempted.
+    ///
+    /// Sending a rotation that cannot be recorded is exactly the window this fence closes, so failing
+    /// closed is the only acceptable behaviour.
+    func testRotationIsRefusedWhenTheFenceCannotBePersisted() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(expiresIn: 10))
+        built.fence.setArmFailure(.recoveryFenceUnavailable)
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the rotation to be refused")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .recoveryFenceUnavailable)
+        }
+
+        // No request was sent, and the stored credential was not disturbed.
+        XCTAssertEqual(built.api.refreshCallCount, 0)
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
+    }
+
     // MARK: - Helpers
 
     /// `nil` means "the default successful authorizer", constructed in this main-actor context.

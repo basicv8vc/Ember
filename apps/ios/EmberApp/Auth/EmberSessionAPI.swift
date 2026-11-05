@@ -185,8 +185,11 @@ public final class LiveEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
 
         guard let urlError = error as? URLError else { return .transportFailure }
         switch urlError.code {
-        case .notConnectedToInternet, .networkConnectionLost, .cannotConnectToHost,
-            .cannotFindHost, .dnsLookupFailed, .dataNotAllowed, .internationalRoamingOff:
+        // Every code here fails before the HTTP request is written, so the server never saw a body it
+        // could have acted on. `networkConnectionLost` is deliberately absent: the connection can drop
+        // after the request was transmitted, which makes the outcome unknown rather than absent.
+        case .notConnectedToInternet, .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+            .dataNotAllowed, .internationalRoamingOff:
             return .offline
         case .timedOut:
             return .timedOut

@@ -229,6 +229,25 @@ describe('B1 independent cloud lifecycle: real API + Worker + PostgreSQL 17', ()
     expect(recovered.response_message_id).not.toBeNull();
   }, 90_000);
 
+  it.each(['SIGTERM', 'SIGINT'] as const)(
+    'shuts down and restarts the real API and Worker cleanly on %s',
+    async (signal) => {
+      await cluster.signIn(`shutdown-${signal}`);
+
+      const worker = await cluster.stopWorker(signal);
+      expect(worker).toBeDefined();
+      expectCleanSignalShutdown(worker!, signal, 'worker stopping', 'worker stopped');
+
+      const api = await cluster.stopApi(signal);
+      expect(api).toBeDefined();
+      expectCleanSignalShutdown(api!, signal, 'shutting down', 'shutdown complete');
+
+      await cluster.startApi();
+      await cluster.startWorker();
+    },
+    60_000,
+  );
+
   it('E2E-05 replays the canonical receipt, finds Unknown ACK, and rejects conflicting reuse', async () => {
     const identity = await cluster.signIn('idempotency');
     const conversationId = identity.me.conversation.conversation_id;
@@ -677,6 +696,25 @@ function publicError(value: unknown): unknown {
   }
   const error = (value as { error?: { code?: string; message?: string } }).error;
   return { code: error?.code, message: error?.message };
+}
+
+function expectCleanSignalShutdown(
+  snapshot: {
+    readonly exitCode: number | null;
+    readonly exitSignal: NodeJS.Signals | null;
+    readonly stdout: string;
+    readonly stderr: string;
+  },
+  signal: NodeJS.Signals,
+  startMessage: string,
+  completionMessage: string,
+): void {
+  expect(snapshot.exitCode).toBe(0);
+  expect(snapshot.exitSignal).toBeNull();
+  const logs = `${snapshot.stdout}\n${snapshot.stderr}`;
+  expect(logs).toContain(`"message":"${startMessage}"`);
+  expect(logs).toContain(`"signal":"${signal}"`);
+  expect(logs).toContain(`"message":"${completionMessage}"`);
 }
 
 function delay(ms: number): Promise<void> {

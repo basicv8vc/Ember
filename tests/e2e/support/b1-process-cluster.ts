@@ -195,18 +195,27 @@ export class B1ProcessCluster {
     );
   }
 
-  async stopApi(): Promise<void> {
+  async stopApi(signal: NodeJS.Signals = 'SIGTERM'): Promise<B1ProcessOutputSnapshot | undefined> {
     const current = this.api;
     if (current === undefined) {
-      return;
+      return undefined;
     }
-    await current.stop();
+    try {
+      await current.stop(signal);
+    } catch (error) {
+      this.completedProcessLogs.push(current.output);
+      throw error;
+    }
+    const snapshot = this.redactSnapshot(current.snapshot());
     this.completedProcessLogs.push(current.output);
     this.api = undefined;
     this.apiUrlValue = undefined;
+    return snapshot;
   }
 
-  async stopWorker(): Promise<B1ProcessOutputSnapshot | undefined> {
+  async stopWorker(
+    signal: NodeJS.Signals = 'SIGTERM',
+  ): Promise<B1ProcessOutputSnapshot | undefined> {
     const current = this.worker;
     if (current === undefined) {
       return undefined;
@@ -216,7 +225,7 @@ export class B1ProcessCluster {
       current.paused = false;
     }
     try {
-      await current.stop();
+      await current.stop(signal);
     } catch (error) {
       this.completedProcessLogs.push(current.output);
       throw error;
@@ -629,7 +638,7 @@ class ManagedProcess {
     });
   }
 
-  async stop(): Promise<void> {
+  async stop(signal: NodeJS.Signals = 'SIGTERM'): Promise<void> {
     if (this.exit !== undefined) {
       if (this.exit.code !== 0) {
         throw new Error(
@@ -638,7 +647,7 @@ class ManagedProcess {
       }
       return;
     }
-    this.signal('SIGTERM');
+    this.signal(signal);
     const exit = await this.waitForExit(PROCESS_STOP_TIMEOUT_MS).catch(async (error: unknown) => {
       this.signal('SIGKILL');
       await this.waitForExit(PROCESS_STOP_TIMEOUT_MS).catch(() => undefined);

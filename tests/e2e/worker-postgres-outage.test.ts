@@ -154,11 +154,20 @@ async function waitForCompletedTurn(fixture: TurnFixture): Promise<void> {
 }
 
 function safeWorkerExitDiagnostic(): string {
-  const failureLine = worker
-    ?.getLogs()
-    .split(/\r?\n/)
-    .find((line) => /^worker failed: [A-Za-z0-9_]+$/.test(line));
-  return failureLine ?? 'Worker exited without a safe failure category';
+  const lines = worker?.getLogs().split(/\r?\n/) ?? [];
+  const failureLine = lines.find((line) => /^worker failed: [A-Za-z0-9_]+$/.test(line));
+  if (failureLine !== undefined) return failureLine;
+
+  const exceptionLine = lines.find((line) =>
+    /^\s*(?:Error|TypeError|RangeError|SyntaxError|ReferenceError|AggregateError):/.test(line),
+  );
+  const exceptionType = exceptionLine?.trim().split(':', 1)[0] ?? 'unknown_fatal_error';
+  const frames = lines
+    .map((line) => line.match(/^\s*at .*?([^/\\():]+):(\d+):(\d+)\)?$/))
+    .filter((match): match is RegExpMatchArray => match !== null)
+    .slice(0, 3)
+    .map((match) => `${match[1]}:${match[2]}`);
+  return `${exceptionType}${frames.length === 0 ? '' : ` at ${frames.join(' <- ')}`}`;
 }
 
 describe('Worker recovery from isolated PostgreSQL connection loss', () => {

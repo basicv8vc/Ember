@@ -153,6 +153,14 @@ async function waitForCompletedTurn(fixture: TurnFixture): Promise<void> {
   throw new Error('durable assistant Turn did not complete after database recovery');
 }
 
+function safeWorkerExitDiagnostic(): string {
+  const failureLine = worker
+    ?.getLogs()
+    .split(/\r?\n/)
+    .find((line) => /^worker failed: [a-z_]+$/.test(line));
+  return failureLine ?? 'Worker exited without a safe failure category';
+}
+
 describe('Worker recovery from isolated PostgreSQL connection loss', () => {
   beforeAll(async () => {
     const testUrl = process.env.TEST_DATABASE_URL;
@@ -280,7 +288,7 @@ describe('Worker recovery from isolated PostgreSQL connection loss', () => {
         await delay(OUTAGE_MS);
         expect(
           worker.isAlive(),
-          'Worker must remain alive while its database rejects connections',
+          `Worker must remain alive while its database rejects connections; ${safeWorkerExitDiagnostic()}`,
         ).toBe(true);
       } finally {
         if (blocked) await allowDatabaseConnections();

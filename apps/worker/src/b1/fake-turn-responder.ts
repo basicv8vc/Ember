@@ -276,8 +276,8 @@ export function createFakeTurnResponder(options: FakeTurnResponderOptions): {
           try {
             await processOnce(controller.signal);
           } catch (error) {
-            // Categories are selected only by built-in Error class. The value, its message and
-            // user source text are never stringified or passed to the logger.
+            // Only fixed DomainError codes and built-in Error classes become categories. The
+            // value, its message and user source text are never stringified or passed to logger.
             options.logger?.warn('fake assistant turn iteration failed', {
               category: safeWorkerErrorCategory(error),
             });

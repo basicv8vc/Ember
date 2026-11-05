@@ -10,7 +10,7 @@ import type { createPool } from '@ember/postgres';
 import { evaluateSchedulerConsentGate } from './commitment-consent.js';
 import { CommitmentScheduler, DEFAULT_MAX_ERROR_BACKOFF_MS } from './commitment-scheduler.js';
 import type { WorkerConfig } from './config.js';
-import type { WorkerLogger } from './logger.js';
+import { safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 
 export interface CommitmentSchedulerRuntimeOptions {
   readonly config: WorkerConfig;
@@ -97,7 +97,7 @@ export function startCommitmentScheduler(
   return scheduler.runLoop(signal).catch((error: unknown) => {
     // Defensive: `runLoop` is internally guarded, but the Worker must never die of a scheduler.
     logger.error('commitment scheduler loop failed unexpectedly', {
-      error: error instanceof Error ? error.message : String(error),
+      category: safeWorkerErrorCategory(error),
     });
   });
 }

@@ -1,4 +1,15 @@
 import type { LogLevel } from './config.js';
+import { isDomainError } from '@ember/domain';
+
+/** Return a fixed, non-sensitive category for a failure diagnostic. */
+export function safeWorkerErrorCategory(error: unknown): string {
+  if (isDomainError(error)) return error.code;
+  if (error instanceof TypeError) return 'type_error';
+  if (error instanceof RangeError) return 'range_error';
+  if (error instanceof SyntaxError) return 'syntax_error';
+  if (error instanceof Error) return 'error';
+  return 'non_error';
+}
 
 const LEVEL_SEVERITY: Record<LogLevel, number> = {
   debug: 10,

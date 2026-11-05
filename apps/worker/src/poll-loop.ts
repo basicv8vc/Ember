@@ -109,6 +109,8 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
 
   const inFlight = new Set<Promise<void>>();
   const counters = { claimed: 0, finished: 0, rejectedFinishes: 0, abandoned: 0, committed: 0 };
+  let hasFatalTaskFailure = false;
+  let fatalTaskFailure: unknown;
 
   const executeOne = async (run: LeasedRun): Promise<void> => {
     const startedAtHr = performance.now();
@@ -305,6 +307,10 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
   };
 
   while (!signal.aborted) {
+    if (hasFatalTaskFailure) {
+      throw fatalTaskFailure;
+    }
+
     if (inFlight.size >= concurrency) {
       await raceWithAbort(Promise.race(inFlight), signal);
       continue;
@@ -336,14 +342,28 @@ export async function runPollLoop(options: PollLoopOptions): Promise<PollLoopSum
       leaseEpoch: claimed.leaseEpoch,
     });
 
-    const job = executeOne(claimed).finally(() => {
-      inFlight.delete(job);
-    });
+    // Attach both outcomes immediately. A fatal rejection is handed back to this loop (and then
+    // to the composition root) instead of becoming an unhandled process-level rejection while
+    // another claim is pending. The rejection remains fatal; it is not converted into success.
+    const job = executeOne(claimed).then(
+      () => {
+        inFlight.delete(job);
+      },
+      (error: unknown) => {
+        hasFatalTaskFailure = true;
+        fatalTaskFailure = error;
+        inFlight.delete(job);
+      },
+    );
 
     inFlight.add(job);
   }
 
   await Promise.allSettled(inFlight);
+
+  if (hasFatalTaskFailure) {
+    throw fatalTaskFailure;
+  }
 
   return Object.freeze({ ...counters });
 }

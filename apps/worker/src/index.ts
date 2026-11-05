@@ -41,7 +41,7 @@ import { createCommitmentRouteAwareRunHandler } from './commitment-run-router.js
 import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
 import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
-import { createWorkerLogger, type WorkerLogger } from './logger.js';
+import { createWorkerLogger, safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 import { createFakeTurnResponder, type FakeTurnResponderRunner } from './b1/fake-turn-responder.js';
 import { runPollLoop } from './poll-loop.js';
 import { runReaperLoop } from './reaper-loop.js';
@@ -72,8 +72,10 @@ async function main(): Promise<void> {
   const databaseConfig = loadDatabaseConfig();
   const logger = createWorkerLogger({ level: config.logLevel });
   const pool = createPool(databaseConfig, {
-    onIdleError: () => {
-      logger.warn('database idle connection error');
+    onClientError: (error) => {
+      logger.warn('database client connection error', {
+        category: safeWorkerErrorCategory(error),
+      });
     },
   });
 
@@ -358,8 +360,9 @@ function isMainModule(): boolean {
 
 if (isMainModule()) {
   void main().catch((error: unknown) => {
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`worker failed: ${message}\n`);
+    // Keep fatal programming errors fatal, but never print driver messages that may include
+    // connection details, SQL, parameters or source text.
+    process.stderr.write(`worker failed: ${safeWorkerErrorCategory(error)}\n`);
     process.exitCode = 1;
   });
 }

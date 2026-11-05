@@ -59,6 +59,11 @@ export type {
   B1TranscriptClearResult,
 } from './repositories/b1-interfaces.js';
 export {
+  PostgresB1ConsumerProvisioningRepository,
+  type B1ProvisioningRepositoryOptions,
+} from './repositories/b1-session-provisioning-repository.js';
+export { PostgresB1ConsumerSessionRepository } from './repositories/b1-session-repository.js';
+export {
   PostgresAgentRepository,
   type AgentRepository,
   type AgentView,

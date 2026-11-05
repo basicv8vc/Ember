@@ -61,17 +61,45 @@ const FORBIDDEN_SCOPE_HEADERS = ['x-tenant-id', 'x-principal-id', 'x-policy-vers
  * additionally have no request body at all, so a smuggled body is refused before any handler
  * can accidentally read it.
  */
-function rejectClientScope(c: AppContext, allowBody: boolean): Response | undefined {
+async function hasRequestBody(request: Request): Promise<boolean> {
+  const declaredLength = request.headers.get('content-length');
+  if (
+    request.headers.get('transfer-encoding') !== null ||
+    (declaredLength !== null && declaredLength.trim() !== '0')
+  ) {
+    return true;
+  }
+
+  if (request.body === null) {
+    return false;
+  }
+
+  // Framework adapters may expose an empty ReadableStream for a body-capable method even
+  // when the peer sent no bytes. Probe it so empty streams remain valid, while a body without
+  // framing headers (as used by in-process Request fixtures) is still rejected.
+  const reader = request.body.getReader();
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) {
+        return false;
+      }
+      if (chunk.value instanceof Uint8Array && chunk.value.byteLength > 0) {
+        await reader.cancel();
+        return true;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+async function rejectClientScope(c: AppContext, allowBody: boolean): Promise<Response | undefined> {
   const query = c.req.query();
   const hasScopeField =
     FORBIDDEN_SCOPE_QUERY_KEYS.some((key) => query[key] !== undefined) ||
     FORBIDDEN_SCOPE_HEADERS.some((header) => c.req.header(header) !== undefined);
-
-  const declaredLength = Number(c.req.header('content-length') ?? 0);
-  const hasUnexpectedBody =
-    c.req.raw.body !== null ||
-    (Number.isFinite(declaredLength) && declaredLength > 0) ||
-    c.req.header('transfer-encoding') !== undefined;
+  const hasUnexpectedBody = !allowBody && (await hasRequestBody(c.req.raw));
 
   return hasScopeField || (!allowBody && hasUnexpectedBody)
     ? respondInvalidArgument(c, 'client-supplied identity scope fields are not allowed')
@@ -98,7 +126,7 @@ export function createB1SessionRoutes(deps: B1SessionRouteDependencies): Hono<Ap
   };
 
   routes.post('/auth/session', async (c) => {
-    const rejected = rejectClientScope(c, true);
+    const rejected = await rejectClientScope(c, true);
 
     if (rejected !== undefined) {
       return rejected;
@@ -139,7 +167,7 @@ export function createB1SessionRoutes(deps: B1SessionRouteDependencies): Hono<Ap
   });
 
   routes.post('/auth/session/refresh', async (c) => {
-    const rejected = rejectClientScope(c, false);
+    const rejected = await rejectClientScope(c, false);
 
     if (rejected !== undefined) {
       return rejected;
@@ -163,7 +191,7 @@ export function createB1SessionRoutes(deps: B1SessionRouteDependencies): Hono<Ap
   });
 
   routes.delete('/auth/session', async (c) => {
-    const rejected = rejectClientScope(c, false);
+    const rejected = await rejectClientScope(c, false);
 
     if (rejected !== undefined) {
       return rejected;
@@ -181,7 +209,7 @@ export function createB1SessionRoutes(deps: B1SessionRouteDependencies): Hono<Ap
   });
 
   routes.get('/me', requireSessionAuth({ service: runtime.service, logger }), async (c) => {
-    const rejected = rejectClientScope(c, false);
+    const rejected = await rejectClientScope(c, false);
 
     if (rejected !== undefined) {
       return rejected;

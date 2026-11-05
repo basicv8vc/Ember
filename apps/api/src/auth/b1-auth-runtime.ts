@@ -1,4 +1,5 @@
 import type { AddressInfo } from 'node:net';
+import type { JWTVerifyGetKey } from 'jose';
 import {
   createAppleIdentityVerifier,
   loadAppleVerifierConfig,
@@ -20,12 +21,11 @@ import {
 import type { DevProviderPolicy } from './dev-provider-policy.js';
 
 /**
- * Composition root for the B1-2B auth runtime.
+ * Composition root for the B1 auth runtime.
  *
- * Every dependency is explicitly typed and injected. There is no import of any concrete
- * PostgreSQL implementation: Agent A's repositories can be wired later by the CTO without
- * changing a route or a service. Until a runtime is injected, `createApp` registers none
- * of the new endpoints (fail closed).
+ * Every dependency is explicitly typed and injected. The API startup composition supplies
+ * the PostgreSQL-backed ports; unit and E2E tests may supply isolated PostgreSQL fixtures.
+ * Until a runtime is injected, `createApp` registers none of the new endpoints (fail closed).
  */
 export interface B1SessionRuntime {
   readonly service: SessionService;
@@ -60,6 +60,8 @@ export interface CreateB1AuthRuntimeFromEnvironmentOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Real bound address from `server.address()`; omitted means "not listening" (deny). */
   readonly actualListener?: () => LoopbackListener;
+  /** In-process deterministic JWKS fixture seam; never read from environment or production config. */
+  readonly appleKeyResolver?: JWTVerifyGetKey;
   readonly now?: () => Date;
 }
 
@@ -77,7 +79,10 @@ export function createB1AuthRuntimeFromEnvironment(
 
   return createB1SessionRuntime({
     ports: options.ports,
-    apple: loadAppleVerifierConfig(env),
+    apple: {
+      ...loadAppleVerifierConfig(env),
+      ...(options.appleKeyResolver === undefined ? {} : { keyResolver: options.appleKeyResolver }),
+    },
     devProvider: createDevProviderPolicy({
       environment: authEnvironment,
       ...(options.actualListener === undefined ? {} : { actualListener: options.actualListener }),

@@ -146,7 +146,7 @@ async function hasRequestBody(request: Request): Promise<boolean> {
       if (chunk.done) {
         return false;
       }
-      if (chunk.value.byteLength > 0) {
+      if (chunk.value instanceof Uint8Array && chunk.value.byteLength > 0) {
         await reader.cancel();
         return true;
       }

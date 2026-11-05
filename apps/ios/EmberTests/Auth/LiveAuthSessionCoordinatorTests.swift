@@ -775,17 +775,180 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         XCTAssertEqual(state, .unauthenticated)
     }
 
+    // MARK: - Rotation succeeded but could not be persisted (review P1)
+
+    /// A rotation the server accepted but this device could not persist must not become the in-memory
+    /// session.
+    ///
+    /// The defect: the old token dies server-side the moment the rotation commits, so a device that keeps
+    /// the *new* token only in memory while the *old* one stays on disk is one force-quit away from
+    /// presenting a rotated-away token. The backend answers that with `reuse_detected`, which revokes
+    /// every session for the consumer.
+    func testRotationThatCannotBePersistedDoesNotAdoptTheNewToken() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "alpha", expiresIn: 10))
+        built.store.setReplaceFailure(.keychainUnavailable)
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the unpersistable rotation to end the session")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .keychainUnavailable)
+        }
+
+        // The rotated token was never adopted, and it is not what the store holds either.
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+        XCTAssertNotEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("rotated"))
+
+        // The stale item was removed, so there is nothing left to present on the next launch.
+        XCTAssertNil(built.store.currentRecord())
+        XCTAssertFalse(built.fence.isArmed)
+
+        // The replacement this device refused to keep was handed back instead of being left alive.
+        XCTAssertEqual(built.api.logoutCallCount, 1)
+        XCTAssertEqual(built.api.lastLogoutToken, AuthFixture.token("rotated"))
+    }
+
+    /// When the stale item cannot be removed either, the fence is what carries the knowledge across a
+    /// relaunch.
+    func testUnremovableStaleCredentialArmsTheFence() async throws {
+        let built = try makeCoordinator(storedRecord: AuthFixture.record(tokenSuffix: "alpha", expiresIn: 10))
+        built.store.setReplaceFailure(.keychainUnavailable)
+        built.store.setDeleteFailure(.keychainUnavailable)
+
+        do {
+            _ = try await built.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the unpersistable rotation to end the session")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .keychainUnavailable)
+        }
+
+        XCTAssertTrue(built.fence.isArmed)
+        // The dead token is still there — which is exactly the situation the fence exists for.
+        XCTAssertEqual(built.store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+    }
+
+    /// The full path the review asked for: rotation succeeds, the Keychain write fails, the app is
+    /// force-quit, and the next launch must not present the rotated-away token.
+    ///
+    /// A second coordinator over the same store and fence *is* the relaunch: nothing that lived only in
+    /// the first coordinator's memory survives it.
+    func testColdStartAfterAnUnpersistedRotationNeverPresentsTheRotatedAwayToken() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record(tokenSuffix: "alpha", expiresIn: 10))
+        let fence = InMemorySessionRecoveryFence()
+
+        let first = try makeCoordinator(store: store, fence: fence)
+        store.setReplaceFailure(.keychainUnavailable)
+        store.setDeleteFailure(.keychainUnavailable)
+
+        do {
+            _ = try await first.coordinator.refreshSessionIfNeeded()
+            XCTFail("expected the unpersistable rotation to end the session")
+        } catch {
+            // Expected: the rotation is unwelcome and cannot be persisted.
+        }
+
+        XCTAssertTrue(fence.isArmed)
+        XCTAssertEqual(store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+
+        // ---- force quit ----
+
+        // The device is unlocked again on the next launch, so storage works — which is precisely why the
+        // stale token would have been loaded and presented without the fence.
+        store.setReplaceFailure(nil)
+        store.setDeleteFailure(nil)
+
+        let relaunched = try makeCoordinator(store: store, fence: fence)
+
+        do {
+            _ = try await relaunched.coordinator.restoreSession()
+            XCTFail("a fenced cold start must not restore anything")
+        } catch let error as AuthError {
+            XCTAssertEqual(error, .sessionMissing)
+        }
+
+        // The decisive assertions: the dead token was never sent anywhere.
+        XCTAssertEqual(relaunched.api.refreshCallCount, 0)
+        XCTAssertEqual(relaunched.api.bootstrapCallCount, 0)
+        XCTAssertEqual(relaunched.api.logoutCallCount, 0)
+
+        // And the launch cleaned up after itself.
+        XCTAssertNil(store.currentRecord())
+        XCTAssertFalse(fence.isArmed)
+        let state = await relaunched.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+    }
+
+    /// A fenced launch whose cleanup fails must stay `unavailable`, not claim a signed-out consumer.
+    func testAFencedColdStartWithALockedKeychainIsUnavailableRatherThanSignedOut() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record(tokenSuffix: "alpha"))
+        let fence = InMemorySessionRecoveryFence(armed: true)
+        store.setUnavailable(true)
+
+        let built = try makeCoordinator(store: store, fence: fence)
+
+        let state = await built.coordinator.currentSession()
+        XCTAssertEqual(state, .unavailable)
+        XCTAssertTrue(fence.isArmed)
+        XCTAssertEqual(built.api.refreshCallCount, 0)
+    }
+
+    /// Signing in after a fenced recovery must re-arm nothing: a fresh session is trustworthy, and a
+    /// stale fence would delete it on the next launch.
+    func testSignInAfterAFencedRecoveryIsNotDeferredToTheFence() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record(tokenSuffix: "alpha"))
+        let fence = InMemorySessionRecoveryFence(armed: true)
+
+        let built = try makeCoordinator(store: store, fence: fence)
+        _ = try await built.coordinator.signInWithApple()
+
+        XCTAssertFalse(fence.isArmed)
+        XCTAssertEqual(store.currentRecord()?.accessToken, AuthFixture.token("alpha"))
+
+        // The next launch keeps the new session instead of treating it as stale.
+        let relaunched = try makeCoordinator(store: store, fence: fence)
+        let state = await relaunched.coordinator.currentSession()
+        XCTAssertEqual(state, .authenticated(try XCTUnwrap(AuthSession(accessToken: "ems_alpha"))))
+        XCTAssertNotNil(store.currentRecord())
+    }
+
+    /// Logout that cannot remove the departing item fences it, so the next launch does not present a
+    /// token the server has already revoked.
+    func testLogoutThatCannotRemoveTheItemFencesTheStore() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record())
+        let fence = InMemorySessionRecoveryFence()
+
+        let built = try makeCoordinator(store: store, fence: fence)
+        store.setDeleteFailure(.keychainUnavailable)
+
+        let outcome = await built.coordinator.logout()
+        XCTAssertEqual(outcome, .localCleanupFailed(.keychainUnavailable))
+        XCTAssertTrue(fence.isArmed)
+
+        store.setDeleteFailure(nil)
+        let relaunched = try makeCoordinator(store: store, fence: fence)
+        let state = await relaunched.coordinator.currentSession()
+        XCTAssertEqual(state, .unauthenticated)
+        XCTAssertNil(store.currentRecord())
+    }
+
     // MARK: - Helpers
 
     /// `nil` means "the default successful authorizer", constructed in this main-actor context.
     private func makeCoordinator(
         apple: FakeAppleSignInAuthorizer? = nil,
         storedRecord: EmberSessionRecord? = nil,
+        store: InMemoryEmberSessionStore? = nil,
+        fence: InMemorySessionRecoveryFence? = nil,
         configure: (FakeEmberSessionAPI) -> Void = { _ in }
     ) throws -> CoordinatorFixture.Built {
         let built = try CoordinatorFixture.make(
             apple: apple,
             storedRecord: storedRecord,
+            store: store,
+            fence: fence,
             configure: configure
         )
         sessions.append(built.session)

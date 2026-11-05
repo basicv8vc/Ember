@@ -308,6 +308,7 @@ enum CoordinatorFixture {
         /// The interception-enabled session behind the authenticated transport, so a test can
         /// register `StubURLProtocol` handlers for authenticated-request assertions.
         let session: URLSession
+        let fence: InMemorySessionRecoveryFence
     }
 
     /// The default authorizer is built inside this main-actor function: a default argument would be
@@ -315,6 +316,8 @@ enum CoordinatorFixture {
     static func make(
         apple: FakeAppleSignInAuthorizer? = nil,
         storedRecord: EmberSessionRecord? = nil,
+        store: InMemoryEmberSessionStore? = nil,
+        fence: InMemorySessionRecoveryFence? = nil,
         now: @escaping @Sendable () -> Date = { AuthFixture.epoch },
         leeway: TimeInterval = 60,
         configure: (FakeEmberSessionAPI) -> Void = { _ in }
@@ -339,7 +342,8 @@ enum CoordinatorFixture {
             baseURL: AuthFixture.baseURL,
             client: EmberAPIClient(session: session)
         )
-        let store = InMemoryEmberSessionStore(initialRecord: storedRecord)
+        let store = store ?? InMemoryEmberSessionStore(initialRecord: storedRecord)
+        let fence = fence ?? InMemorySessionRecoveryFence()
 
         let coordinator = LiveAuthSessionCoordinator(
             dependencies: .init(
@@ -347,6 +351,7 @@ enum CoordinatorFixture {
                 transport: transport,
                 store: store,
                 appleSignIn: authorizer,
+                fence: fence,
                 now: now,
                 refreshLeeway: leeway
             )
@@ -357,7 +362,8 @@ enum CoordinatorFixture {
             api: api,
             store: store,
             apple: authorizer,
-            session: session
+            session: session,
+            fence: fence
         )
     }
 }

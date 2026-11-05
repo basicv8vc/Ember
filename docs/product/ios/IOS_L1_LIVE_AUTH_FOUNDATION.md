@@ -129,8 +129,8 @@ Each await is followed by a re-validation before any mutation:
   **settlement** task claimed by exactly one caller before any suspension. Every other caller awaits
   that same task's value, so a token is rotated once and written once.
 - After a rotation the generation advances, so the old token can never start a second refresh.
-- A settlement that is still in flight when a logout lands re-checks the generation **after** the
-  store write and undoes it, so a signed-out device cannot keep a live rotated credential.
+- A settlement that is in flight when a logout or a newer sign-in lands fails its generation check and
+  writes nothing at all, so it cannot overwrite or delete the credential that replaced it.
 
 ### Revocation (401)
 
@@ -212,6 +212,83 @@ structural rather than three local patches:
 Because the intra-store window no longer exists, the deterministic tests gate the suspension that
 remains reachable — the network call — and assert the observable outcome (stored credential, in-memory
 state, store write/delete counts) rather than an internal implementation detail.
+
+## 8b. Review follow-up (PR #119 round 2) — a rotated token that could not be persisted
+
+### The defect
+
+`settle()` wrote the replacement and then adopted it unconditionally:
+
+```swift
+do { try store.replace(rotated) } catch { storageError = ... }
+record = rotated          // adopted even when the write failed
+```
+
+The server has already invalidated the old token by that point. So a failed write produced the worst
+possible pair: the **dead** token on disk, the **live** one only in memory. A force-quit, a jetsam kill
+or a crash between them loses the live token and keeps the dead one. The next launch presents it, and
+`reuse_detected` — the backend's theft signal — revokes every session for that consumer. One failed
+Keychain write would sign the person out of every device they own.
+
+### The rule that replaces it
+
+**A credential that is not durable is not adopted.** A token the store does not hold cannot become the
+session, because the session is defined by what survives a relaunch.
+
+`settle()` therefore ends the session on a storage failure, in one uninterrupted actor step (no
+suspension has occurred since the generation check):
+
+1. **Arm the fence first.** A crash between here and the delete must not leave an unmarked stale
+   credential.
+2. **Drop local state.** No caller can obtain the replacement, so no request is ever sent with a
+   credential this device cannot vouch for after a relaunch.
+3. **Delete the stale item.** This is what makes the next launch clean rather than merely fenced; the
+   fence is cleared only when the delete is confirmed.
+4. **Hand the replacement back** with a single best-effort `DELETE /v1/auth/session`. Refusing to keep a
+   credential is not a reason to leave the session alive where nobody can reach it. It is not retried:
+   the outcome cannot change local state, and a loop here would be a request storm for a token no device
+   holds.
+
+### `SessionRecoveryFence`
+
+Step 3 can fail for the same reason step's write did. The fence is the second line of defence, and it
+must outlive the process, so it cannot live in the Keychain — the Keychain is the component that is
+failing in exactly this scenario.
+
+It is one boolean in `UserDefaults` (`com.basicv8vc.ember.auth.rotation-unpersisted`). It carries no
+token, session id, consumer id, assertion or nonce: it cannot be replayed, identifies nobody, and says
+only "what is in the Keychain right now belongs to a session the server already rotated away". The
+annex §5.1 I-8 prohibition is about the credential itself leaving the Keychain, and this does not move
+it.
+
+A cold start that finds it armed destroys the stored item without ever loading it, then clears the
+fence and reports a signed-out consumer. If the deletion fails, the thrown `keychainUnavailable` keeps
+the state `unavailable` rather than claiming a sign-out the device cannot verify.
+
+The same rule is applied wherever a known-dead credential cannot be removed: `logout()` arms the fence
+when its delete fails, and `revokeLocally(ifCurrent:)` arms it when a 401-driven delete fails. A
+successful `save`, `replace` or `delete` clears it, and a successful sign-in clears it unconditionally —
+without that, a fence left over from an earlier failure would delete the next valid session.
+
+### Tests
+
+| Scenario                                                     | Test                                                                      |
+| ------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| Rotation succeeds, write fails → no in-memory session        | `testRotationThatCannotBePersistedDoesNotAdoptTheNewToken`                |
+| Write and delete both fail → fence armed, dead item retained | `testUnremovableStaleCredentialArmsTheFence`                              |
+| **Rotation → write fails → force-quit → cold start**         | `testColdStartAfterAnUnpersistedRotationNeverPresentsTheRotatedAwayToken` |
+| Fenced launch with a locked Keychain                         | `testAFencedColdStartWithALockedKeychainIsUnavailableRatherThanSignedOut` |
+| Sign-in after a fenced recovery                              | `testSignInAfterAFencedRecoveryIsNotDeferredToTheFence`                   |
+| Logout whose delete fails                                    | `testLogoutThatCannotRemoveTheItemFencesTheStore`                         |
+
+The force-quit test does not mock the relaunch: it builds a **second coordinator** over the same store
+and fence, so nothing that lived only in the first one's memory survives. It then asserts the dead token
+was never sent — `refreshCallCount == 0`, `bootstrapCallCount == 0` — which is the property that
+actually matters, rather than the shape of the state machine.
+
+**These tests were verified against the defect.** Re-introducing the pre-fix `record = rotated` on the
+failure path fails three of them (12 assertion failures across 271 tests); restoring the fix returns the
+suite to green. The guard is therefore load-bearing, not decorative.
 
 ## 9. Verification
 

@@ -280,6 +280,7 @@ public final class InMemoryEmberSessionStore: EmberSessionStore, @unchecked Send
     private var record: EmberSessionRecord?
     private var isUnavailable = false
     private var deleteFailure: AuthError?
+    private var replaceFailure: AuthError?
 
     private var loadCalls = 0
     private var saveCalls = 0
@@ -301,6 +302,12 @@ public final class InMemoryEmberSessionStore: EmberSessionStore, @unchecked Send
 
     public func setDeleteFailure(_ error: AuthError?) {
         lock.withLock { deleteFailure = error }
+    }
+
+    /// Fails the rotation write only, leaving `load` and `save` working. That is the state the
+    /// post-rotation recovery path has to survive: the credential is readable but no longer replaceable.
+    public func setReplaceFailure(_ error: AuthError?) {
+        lock.withLock { replaceFailure = error }
     }
 
     public func seed(_ record: EmberSessionRecord?) {
@@ -330,6 +337,7 @@ public final class InMemoryEmberSessionStore: EmberSessionStore, @unchecked Send
     public func replace(_ record: EmberSessionRecord) throws {
         try lock.withLock {
             replaceCalls += 1
+            if let replaceFailure { throw replaceFailure }
             if isUnavailable { throw AuthError.keychainUnavailable }
             self.record = record
         }

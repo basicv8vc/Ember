@@ -4,6 +4,7 @@ import {
   SENTINEL_POLICY_VERSION,
   type BudgetPolicy,
 } from '@ember/execution';
+import { resolveModelExecution, type ModelExecutionResolution } from '@ember/model-gateway';
 import { z } from 'zod';
 
 export class WorkerConfigError extends Error {
@@ -72,6 +73,14 @@ export interface WorkerConfig {
     readonly concurrency: number;
     readonly stalledTimeoutSeconds: number;
   };
+  /**
+   * B2 Assistant Turn execution.
+   *
+   * Resolved, not raw: `disabled` and `fake` are always `ok`, while `real` is only `ok` when the
+   * provider, the pinned model, an invoice-verified rate row and a usable credential are all
+   * present. A refused `real` mode is a startup error — there is no silent downgrade to `fake`.
+   */
+  readonly model: ModelExecutionResolution;
 }
 
 const workerEnvSchema = z.object({
@@ -149,6 +158,40 @@ const workerEnvSchema = z.object({
   EMBER_SCHEDULER_BATCH_SIZE: z.coerce.number().int().min(1).max(100).default(10),
   EMBER_SCHEDULER_CONCURRENCY: z.coerce.number().int().min(1).max(16).default(4),
   EMBER_SCHEDULER_STALLED_TIMEOUT_SECONDS: z.coerce.number().int().min(10).max(86_400).default(120),
+  // B2 model execution. `disabled` is the default in every environment, including production:
+  // enabling a paid provider is a reviewed code change, not an environment switch.
+  EMBER_MODEL_EXECUTION: z.enum(['disabled', 'fake', 'real']).default('disabled'),
+  EMBER_MODEL_PROVIDER: z.string().min(1).max(64).default('openai'),
+  EMBER_MODEL_ID: z.string().max(120).optional(),
+  EMBER_MODEL_API_KEY: z.string().max(512).optional(),
+  EMBER_MODEL_TURN_LEASE_MS: z.coerce.number().int().min(1_000).max(60_000).default(30_000),
+  EMBER_MODEL_ATTEMPT_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(30_000).default(20_000),
+  EMBER_MODEL_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(2).default(2),
+  EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(5_000)
+    .default(5_000),
+  EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(250_000)
+    .default(250_000),
+  EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(1_000_000)
+    .default(1_000_000),
+  EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: z.coerce
+    .number()
+    .int()
+    .min(0)
+    .max(5_000_000)
+    .default(5_000_000),
+  EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: z.coerce.number().int().min(0).max(60).default(60),
 });
 
 function formatIssues(error: z.ZodError): string {
@@ -202,6 +245,47 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   if (b1FakeResponderEnabled && productionProcess) {
     throw new WorkerConfigError(
       'EMBER_B1_FAKE_RESPONDER_ENABLED=true is refused in production or staging environments',
+    );
+  }
+
+  // B2 execution resolution. Every branch below is a hard startup failure rather than a warning:
+  // a process that cannot deliver the mode it was configured for must be dead and visible.
+  const model = resolveModelExecution({
+    mode: parsed.data.EMBER_MODEL_EXECUTION,
+    providerId: parsed.data.EMBER_MODEL_PROVIDER,
+    modelId: parsed.data.EMBER_MODEL_ID,
+    apiKey: parsed.data.EMBER_MODEL_API_KEY,
+    ceilings: {
+      perAttemptMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD,
+      principalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD,
+      tenantDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD,
+      globalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD,
+      principalDailyTurns: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS,
+    },
+    maxAttempts: parsed.data.EMBER_MODEL_MAX_ATTEMPTS,
+    attemptTimeoutMs: parsed.data.EMBER_MODEL_ATTEMPT_TIMEOUT_MS,
+    leaseMs: parsed.data.EMBER_MODEL_TURN_LEASE_MS,
+  });
+
+  if (!model.ok) {
+    throw new WorkerConfigError(
+      `EMBER_MODEL_EXECUTION=${parsed.data.EMBER_MODEL_EXECUTION} refused: ${model.reason}`,
+    );
+  }
+
+  const modelEnabled = model.mode !== 'disabled';
+
+  if (modelEnabled && b1FakeResponderEnabled) {
+    throw new WorkerConfigError(
+      'EMBER_B1_FAKE_RESPONDER_ENABLED and EMBER_MODEL_EXECUTION cannot both be enabled: ' +
+        'one Turn must have exactly one responder',
+    );
+  }
+
+  if (model.mode === 'fake' && productionProcess) {
+    throw new WorkerConfigError(
+      'EMBER_MODEL_EXECUTION=fake is refused in production or staging: simulated replies must ' +
+        'never be served by a process that claims to run a live model',
     );
   }
 
@@ -274,5 +358,6 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       concurrency: parsed.data.EMBER_SCHEDULER_CONCURRENCY,
       stalledTimeoutSeconds: parsed.data.EMBER_SCHEDULER_STALLED_TIMEOUT_SECONDS,
     }),
+    model,
   };
 }

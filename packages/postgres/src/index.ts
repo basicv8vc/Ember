@@ -60,6 +60,31 @@ export type {
 } from './repositories/b1-interfaces.js';
 export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
 export {
+  PostgresModelTurnExecutionRepository,
+  B2_TURN_CANDIDATE_LIMIT,
+} from './repositories/b2-model-turn-execution-repository.js';
+export type {
+  B2AttemptCharge,
+  B2AttemptReservation,
+  B2BudgetCeilings,
+  B2BudgetIncident,
+  B2ClaimOutcome,
+  B2PublicationResult,
+  B2PublishCommand,
+  B2ReserveAttemptCommand,
+  B2ReserveOutcome,
+  B2SettlementOutcome,
+  B2TurnContextRow,
+  B2TurnLease,
+} from './repositories/b2-interfaces.js';
+export { B2_ABSOLUTE_DAY_CEILINGS } from './repositories/b2-ledger-limits.js';
+export {
+  B1_ASSISTANT_TURN_FAILURE_MESSAGE as B1_TURN_FAILURE_MESSAGE,
+  B1_ASSISTANT_TURN_MODEL_LABEL,
+  type AssistantModelIdentity,
+  type PendingAssistantTurn as B1PendingAssistantTurn,
+} from './repositories/b1-turn-publication.js';
+export {
   PostgresB1ConversationReadRepository,
   type B1ConversationReadOperations,
 } from './repositories/b1-conversation-read.js';

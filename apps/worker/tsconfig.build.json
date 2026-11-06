@@ -12,6 +12,7 @@
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/credentials/tsconfig.build.json" },
     { "path": "../../packages/execution/tsconfig.build.json" },
+    { "path": "../../packages/model-gateway/tsconfig.build.json" },
     { "path": "../../packages/postgres/tsconfig.build.json" }
   ],
   "include": ["src/**/*.ts"]

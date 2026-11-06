@@ -22,6 +22,9 @@ export default defineConfig({
       '@ember/execution': fileURLToPath(
         new URL('./packages/execution/src/index.ts', import.meta.url),
       ),
+      '@ember/model-gateway': fileURLToPath(
+        new URL('./packages/model-gateway/src/index.ts', import.meta.url),
+      ),
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),

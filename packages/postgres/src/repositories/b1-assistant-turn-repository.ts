@@ -1,36 +1,33 @@
-import { randomUUID } from 'node:crypto';
-import {
-  B1AssistantTurnDtoSchema,
-  IdSchema,
-  toInvalidArgumentError,
-  type B1AssistantTurnDto,
-} from '@ember/contracts';
+import { IdSchema, toInvalidArgumentError, type B1AssistantTurnDto } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
-import { FAKE_LLM_MODEL } from '@ember/execution';
 import type pg from 'pg';
 import { z } from 'zod';
 import type { B1AssistantTurnRepository } from './b1-interfaces.js';
+import {
+  B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+  B1_ASSISTANT_TURN_MODEL_LABEL,
+  SIMULATED_MODEL_IDENTITY,
+  insertTurnResponse,
+  isExpired,
+  lockTurn,
+  markTurnCompleted,
+  markTurnFailed,
+  toTurnDto,
+  turnColumns,
+  type AssistantTurnSourceMessage,
+  type PendingAssistantTurn,
+  type TurnRow,
+} from './b1-turn-publication.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 
-/** Every B1 assistant Message is explicitly marked as simulated and uses this model label. */
-export const B1_ASSISTANT_TURN_MODEL_LABEL = FAKE_LLM_MODEL;
-
-/** Fixed user-safe text; exception, SQL and provider details never enter a failed reply. */
-export const B1_ASSISTANT_TURN_FAILURE_MESSAGE =
-  'This simulated reply could not be completed. Please try again.';
+export {
+  B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+  B1_ASSISTANT_TURN_MODEL_LABEL,
+  type AssistantTurnSourceMessage,
+  type PendingAssistantTurn,
+} from './b1-turn-publication.js';
 
 export const B1_ASSISTANT_TURN_BATCH_LIMIT = 100;
-
-export interface PendingAssistantTurn {
-  readonly tenantId: Id;
-  readonly conversationId: Id;
-  readonly turnId: Id;
-}
-
-export interface AssistantTurnSourceMessage extends PendingAssistantTurn {
-  readonly text: string;
-  readonly deadlineAt: string;
-}
 
 /**
  * B1-5 durable Turn lifecycle repository.
@@ -38,6 +35,10 @@ export interface AssistantTurnSourceMessage extends PendingAssistantTurn {
  * Every lifecycle transaction locks `conversations` before `assistant_turns`. This is the same
  * order used by user-message submission and transcript deletion: it serializes sequence allocation
  * with appends and makes deletion win cleanly without a stale responder recreating content.
+ *
+ * This repository publishes **simulated** replies only. Publishing real model output requires the
+ * lease fence in `PostgresModelTurnExecutionRepository`, so `simulated: false` is unreachable from
+ * here by construction.
  */
 export class PostgresB1AssistantTurnRepository implements B1AssistantTurnRepository {
   constructor(private readonly pool: pg.Pool) {}
@@ -57,7 +58,7 @@ export class PostgresB1AssistantTurnRepository implements B1AssistantTurnReposit
       }
 
       if (locked.status === 'running' && (await isExpired(client, locked))) {
-        return expireTurn(client, identity, locked);
+        return expireTurn(client, identity);
       }
 
       return toTurnDto(locked);
@@ -104,10 +105,10 @@ export class PostgresB1AssistantTurnRepository implements B1AssistantTurnReposit
       }
 
       if (result.status === 'failed') {
-        return failRunningTurn(client, identity, locked, result.failureReason);
+        return failRunningTurn(client, identity, result.failureReason);
       }
 
-      return completeRunningTurn(client, identity, locked, result.text);
+      return completeRunningTurn(client, identity, result.text);
     });
   }
 
@@ -130,7 +131,7 @@ export class PostgresB1AssistantTurnRepository implements B1AssistantTurnReposit
       }
 
       if (await isExpired(client, locked)) {
-        return expireTurn(client, identity, locked);
+        return expireTurn(client, identity);
       }
 
       const updated = await client.query<TurnRow>(
@@ -139,12 +140,13 @@ WITH decision AS (SELECT clock_timestamp() AS now)
 UPDATE assistant_turns t
    SET status = 'cancelled',
        failure_reason = NULL,
+       lease_owner = NULL,
+       lease_expires_at = NULL,
        updated_at = decision.now
   FROM decision
  WHERE t.tenant_id = $1 AND t.conversation_id = $2 AND t.id = $3
    AND t.status = 'running' AND t.deadline_at > decision.now
-RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, t.updated_at,
-          t.response_message_id, t.failure_reason, t.deadline_at`,
+RETURNING ${turnColumns('t')}`,
         [identity.tenantId, identity.conversationId, identity.turnId],
       );
       const row = updated.rows[0];
@@ -152,7 +154,7 @@ RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, 
       if (row === undefined) {
         // The deadline may have crossed after the first clock check. The turn row is still locked,
         // so timeout wins deterministically and publishes its safe Message in this transaction.
-        return expireTurn(client, identity, locked);
+        return expireTurn(client, identity);
       }
 
       return toTurnDto(row);
@@ -168,7 +170,11 @@ RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, 
     }
 
     try {
-      const result = await this.pool.query<PendingTurnRow>(
+      const result = await this.pool.query<{
+        readonly tenant_id: string;
+        readonly conversation_id: string;
+        readonly turn_id: string;
+      }>(
         `
 SELECT tenant_id, conversation_id, id AS turn_id
   FROM assistant_turns
@@ -198,7 +204,10 @@ SELECT tenant_id, conversation_id, id AS turn_id
     const identity = parseIdentity(command);
 
     try {
-      const result = await this.pool.query<SourceMessageRow>(
+      const result = await this.pool.query<{
+        readonly text: string;
+        readonly deadline_at: Date | string;
+      }>(
         `
 SELECT m.text, t.deadline_at
   FROM assistant_turns t
@@ -228,33 +237,6 @@ SELECT m.text, t.deadline_at
   }
 }
 
-interface TurnRow {
-  readonly id: string;
-  readonly conversation_id: string;
-  readonly source_message_id: string;
-  readonly status: 'running' | 'completed' | 'failed' | 'cancelled';
-  readonly created_at: Date | string;
-  readonly updated_at: Date | string;
-  readonly response_message_id: string | null;
-  readonly failure_reason: 'timeout' | 'internal_error' | null;
-  readonly deadline_at: Date | string;
-}
-
-interface PendingTurnRow {
-  readonly tenant_id: string;
-  readonly conversation_id: string;
-  readonly turn_id: string;
-}
-
-interface SourceMessageRow {
-  readonly text: string;
-  readonly deadline_at: Date | string;
-}
-
-interface ConversationSequenceRow {
-  readonly last_sequence: string | number;
-}
-
 const identitySchema = z.strictObject({
   tenantId: IdSchema,
   conversationId: IdSchema,
@@ -265,6 +247,8 @@ const resultSchema = z.discriminatedUnion('status', [
   z.strictObject({
     status: z.literal('completed'),
     text: z.string().min(1).max(8192),
+    // B1-5 publishes simulated output only. Real output is reachable solely through the
+    // lease-fenced B2 path, so this stays a literal instead of widening the frozen B1 seam.
     modelLabel: z.literal(B1_ASSISTANT_TURN_MODEL_LABEL),
     simulated: z.literal(true),
   }),
@@ -296,145 +280,40 @@ function parseIdentity(command: PendingAssistantTurn): PendingAssistantTurn {
   return parsed.data;
 }
 
-function toTurnDto(row: TurnRow): B1AssistantTurnDto {
-  return B1AssistantTurnDtoSchema.parse({
-    turn_id: row.id,
-    conversation_id: row.conversation_id,
-    source_message_id: row.source_message_id,
-    status: row.status,
-    created_at: toIsoTimestamp(row.created_at),
-    updated_at: toIsoTimestamp(row.updated_at),
-    response_message_id: row.response_message_id,
-    failure_reason: row.failure_reason,
-  });
-}
-
-async function lockTurn(
+async function completeRunningTurn(
   client: pg.PoolClient,
   identity: PendingAssistantTurn,
-): Promise<TurnRow | null> {
-  const conversation = await client.query<{ readonly id: string }>(
-    `
-SELECT id
-  FROM conversations
- WHERE tenant_id = $1 AND id = $2
- FOR UPDATE`,
-    [identity.tenantId, identity.conversationId],
-  );
-
-  if (conversation.rows[0] === undefined) {
-    return null;
-  }
-
-  const turn = await client.query<TurnRow>(
-    `
-SELECT id, conversation_id, source_message_id, status, created_at, updated_at,
-       response_message_id, failure_reason, deadline_at
-  FROM assistant_turns
- WHERE tenant_id = $1 AND conversation_id = $2 AND id = $3
- FOR UPDATE`,
-    [identity.tenantId, identity.conversationId, identity.turnId],
-  );
-
-  return turn.rows[0] ?? null;
-}
-
-async function isExpired(client: pg.PoolClient, row: TurnRow): Promise<boolean> {
-  const result = await client.query<{ readonly expired: boolean }>(
-    'SELECT $1::timestamptz <= clock_timestamp() AS expired',
-    [row.deadline_at],
-  );
-
-  return result.rows[0]?.expired ?? true;
-}
-
-async function allocateSequence(
-  client: pg.PoolClient,
-  identity: PendingAssistantTurn,
-): Promise<string | number> {
-  const result = await client.query<ConversationSequenceRow>(
-    `
-UPDATE conversations
-   SET last_sequence = last_sequence + 1,
-       updated_at = clock_timestamp()
- WHERE tenant_id = $1 AND id = $2
-RETURNING last_sequence`,
-    [identity.tenantId, identity.conversationId],
-  );
-  const row = result.rows[0];
-
-  if (row === undefined) {
-    throw new DomainError('DB_UNAVAILABLE', 'locked conversation did not accept a sequence');
-  }
-
-  return row.last_sequence;
-}
-
-async function insertAssistantMessage(
-  client: pg.PoolClient,
-  identity: PendingAssistantTurn,
-  sequence: string | number,
-  responseMessageId: Id,
   text: string,
-): Promise<void> {
-  await client.query(
-    `
-INSERT INTO conversation_messages
-       (id, tenant_id, conversation_id, sequence, kind, text, model_label, simulated)
-VALUES ($1, $2, $3, $4::bigint, 'ember', $5, $6, true)`,
-    [
-      responseMessageId,
-      identity.tenantId,
-      identity.conversationId,
-      sequence,
-      text,
-      B1_ASSISTANT_TURN_MODEL_LABEL,
-    ],
+): Promise<B1AssistantTurnDto> {
+  const responseMessageId = await insertTurnResponse(
+    client,
+    identity,
+    text,
+    SIMULATED_MODEL_IDENTITY,
   );
+  const row = await markTurnCompleted(client, identity, responseMessageId);
+
+  if (row === null) {
+    throw new DomainError('DB_UNAVAILABLE', 'locked turn did not accept completion');
+  }
+
+  return toTurnDto(row);
 }
 
 async function failRunningTurn(
   client: pg.PoolClient,
   identity: PendingAssistantTurn,
-  _locked: TurnRow,
   requestedReason: 'timeout' | 'internal_error',
 ): Promise<B1AssistantTurnDto> {
-  const responseMessageId = randomUUID();
-  const sequence = await allocateSequence(client, identity);
-  await insertAssistantMessage(
+  const responseMessageId = await insertTurnResponse(
     client,
     identity,
-    sequence,
-    responseMessageId,
     B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+    SIMULATED_MODEL_IDENTITY,
   );
+  const row = await markTurnFailed(client, identity, responseMessageId, requestedReason);
 
-  const updated = await client.query<TurnRow>(
-    `
-WITH decision AS (SELECT clock_timestamp() AS now)
-UPDATE assistant_turns t
-   SET status = 'failed',
-       failure_reason = CASE
-         WHEN $4::text = 'timeout' OR t.deadline_at <= decision.now THEN 'timeout'
-         ELSE 'internal_error'
-       END,
-       response_message_id = $5,
-       updated_at = decision.now
-  FROM decision
- WHERE t.tenant_id = $1 AND t.conversation_id = $2 AND t.id = $3 AND t.status = 'running'
-RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, t.updated_at,
-          t.response_message_id, t.failure_reason, t.deadline_at`,
-    [
-      identity.tenantId,
-      identity.conversationId,
-      identity.turnId,
-      requestedReason,
-      responseMessageId,
-    ],
-  );
-  const row = updated.rows[0];
-
-  if (row === undefined) {
+  if (row === null) {
     throw new DomainError('DB_UNAVAILABLE', 'locked turn did not accept failure');
   }
 
@@ -444,58 +323,6 @@ RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, 
 async function expireTurn(
   client: pg.PoolClient,
   identity: PendingAssistantTurn,
-  locked: TurnRow,
 ): Promise<B1AssistantTurnDto> {
-  return failRunningTurn(client, identity, locked, 'timeout');
-}
-
-async function completeRunningTurn(
-  client: pg.PoolClient,
-  identity: PendingAssistantTurn,
-  _locked: TurnRow,
-  text: string,
-): Promise<B1AssistantTurnDto> {
-  const responseMessageId = randomUUID();
-  const sequence = await allocateSequence(client, identity);
-  await insertAssistantMessage(client, identity, sequence, responseMessageId, text);
-
-  // The DB clock is sampled once for both fields. If the deadline crossed while the reply was
-  // being written, the same transaction converts the not-yet-visible message to fixed timeout
-  // text and commits failed/timeout instead of exposing a late completion.
-  const updated = await client.query<TurnRow>(
-    `
-WITH decision AS (SELECT clock_timestamp() AS now)
-UPDATE assistant_turns t
-   SET status = CASE WHEN t.deadline_at <= decision.now THEN 'failed' ELSE 'completed' END,
-       failure_reason = CASE WHEN t.deadline_at <= decision.now THEN 'timeout' ELSE NULL END,
-       response_message_id = $4,
-       updated_at = decision.now
-  FROM decision
- WHERE t.tenant_id = $1 AND t.conversation_id = $2 AND t.id = $3 AND t.status = 'running'
-RETURNING t.id, t.conversation_id, t.source_message_id, t.status, t.created_at, t.updated_at,
-          t.response_message_id, t.failure_reason, t.deadline_at`,
-    [identity.tenantId, identity.conversationId, identity.turnId, responseMessageId],
-  );
-  const row = updated.rows[0];
-
-  if (row === undefined) {
-    throw new DomainError('DB_UNAVAILABLE', 'locked turn did not accept completion');
-  }
-
-  if (row.status === 'failed' && row.failure_reason === 'timeout') {
-    await client.query(
-      `
-UPDATE conversation_messages
-   SET text = $4
- WHERE tenant_id = $1 AND conversation_id = $2 AND id = $3 AND kind = 'ember'`,
-      [
-        identity.tenantId,
-        identity.conversationId,
-        responseMessageId,
-        B1_ASSISTANT_TURN_FAILURE_MESSAGE,
-      ],
-    );
-  }
-
-  return toTurnDto(row);
+  return failRunningTurn(client, identity, 'timeout');
 }

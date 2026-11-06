@@ -1,0 +1,201 @@
+# Ember Cloud Staging — single-host stack (Docker Compose).
+#
+# Topology
+# --------
+#
+#   Internet ──443──▶ edge (Caddy, TLS) ──▶ api (Ember Cloud API, :8787)
+#                                            │
+#   worker ─────────────────────────────────┼──▶ postgres (PostgreSQL 17, no published port)
+#   migrate (one-shot, opt-in profile) ──────┘
+#
+# Published ports
+#   edge   : 80, 443   (public; 80 exists only for the ACME HTTP-01 challenge and redirect)
+#   api    127.0.0.1:8787 (loopback-only, operator debugging; never reachable from the Internet)
+#   postgres none — it lives on an `internal: true` network with no host mapping.
+#
+# Usage (never run `up` without the preflight guard):
+#
+#   infra/staging/scripts/preflight.sh --env-file /etc/ember/staging.env
+#   docker compose --env-file /etc/ember/staging.env -f infra/staging/compose.yaml up -d
+#
+# Everything environment-specific comes from the file named by EMBER_STAGING_ENV_FILE.
+# No secret is written in this file.
+
+name: ember-staging
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: '10m'
+    max-file: '5'
+    # Container logs are operational data. Rotation bounds both disk use and how long a
+    # request line can be retained.
+
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+
+services:
+  postgres:
+    # Exact minor release: a staging rebuild must not silently pick up a new PostgreSQL.
+    image: ${EMBER_POSTGRES_IMAGE:-postgres:17.6-alpine}
+    <<: *hardening
+    networks:
+      - db
+    environment:
+      POSTGRES_DB: ${EMBER_POSTGRES_DB:-ember}
+      POSTGRES_USER: ${EMBER_POSTGRES_USER:-ember}
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      # Init-time only. Runtime settings below are explicit so the cluster is not tuned by
+      # accident through a shell variable.
+      POSTGRES_INITDB_ARGS: '--data-checksums'
+    secrets:
+      - postgres_password
+    command:
+      - postgres
+      - -c
+      - max_connections=100
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - password_encryption=scram-sha-256
+    volumes:
+      - ember-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+
+  # Schema migration is an explicit, opt-in operation. It is never part of `up`, so a
+  # staging restart can never mutate the schema by accident (task constraint: do not run
+  # production migrations automatically).
+  migrate:
+    profiles: ['tools']
+    build: &ember-build
+      context: ../..
+      dockerfile: infra/staging/docker/Dockerfile
+      target: api
+      args:
+        NODE_IMAGE: ${EMBER_NODE_IMAGE:-node:24.22.1-bookworm-slim}
+        PNPM_VERSION: ${EMBER_PNPM_VERSION:-12.15.0}
+        EMBER_IMAGE_VERSION: ${EMBER_IMAGE_VERSION:-dev}
+    image: ${EMBER_API_IMAGE:-ember-api:staging-local}
+    networks:
+      - db
+    env_file:
+      - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    command: ['node', 'packages/postgres/dist/cli/migrate.js']
+    depends_on:
+      postgres:
+        condition: service_healthy
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    restart: 'no'
+    logging: *default-logging
+
+  api:
+    build:
+      <<: *ember-build
+    image: ${EMBER_API_IMAGE:-ember-api:staging-local}
+    <<: *hardening
+    networks:
+      - edge
+      - db
+    env_file:
+      - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    # Loopback-only. The edge proxy reaches the API over the `edge` network; this mapping
+    # exists so an operator can curl /healthz and /readyz on the host itself.
+    ports:
+      - '127.0.0.1:${EMBER_API_HOST_PORT:-8787}:8787'
+    volumes:
+      - ember-blobs:/var/lib/ember/blobs
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    stop_grace_period: 30s
+    logging: *default-logging
+
+  worker:
+    build:
+      context: ../..
+      dockerfile: infra/staging/docker/Dockerfile
+      target: worker
+      args:
+        NODE_IMAGE: ${EMBER_NODE_IMAGE:-node:24.22.1-bookworm-slim}
+        PNPM_VERSION: ${EMBER_PNPM_VERSION:-12.15.0}
+        EMBER_IMAGE_VERSION: ${EMBER_IMAGE_VERSION:-dev}
+    image: ${EMBER_WORKER_IMAGE:-ember-worker:staging-local}
+    <<: *hardening
+    networks:
+      - db
+    env_file:
+      - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    volumes:
+      - ember-blobs:/var/lib/ember/blobs
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      postgres:
+        condition: service_healthy
+    # The Worker drains in-flight Runs on SIGTERM; give it the lease window to finish.
+    stop_grace_period: 45s
+    logging: *default-logging
+
+  edge:
+    image: ${EMBER_CADDY_IMAGE:-caddy:2.10.2-alpine}
+    <<: *hardening
+    networks:
+      - edge
+    env_file:
+      - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    ports:
+      # Public on staging (0.0.0.0); loopback-only when the same stack is verified locally.
+      - '${EMBER_EDGE_BIND:-0.0.0.0}:${EMBER_EDGE_HTTP_PORT:-80}:80'
+      - '${EMBER_EDGE_BIND:-0.0.0.0}:${EMBER_EDGE_HTTPS_PORT:-443}:443'
+    volumes:
+      - ./caddy/${EMBER_CADDY_CONFIG:-Caddyfile}:/etc/caddy/Caddyfile:ro
+      - ember-caddy-data:/data
+      - ember-caddy-config:/config
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *default-logging
+
+networks:
+  # Public-facing leg: edge <-> api only.
+  edge:
+    driver: bridge
+  # Data leg: no route off the host. postgres is reachable only from api/worker/migrate.
+  db:
+    driver: bridge
+    internal: true
+
+volumes:
+  ember-pgdata:
+    name: ember-staging-pgdata
+  ember-blobs:
+    name: ember-staging-blobs
+  ember-caddy-data:
+    name: ember-staging-caddy-data
+  ember-caddy-config:
+    name: ember-staging-caddy-config
+
+secrets:
+  postgres_password:
+    # Render this file with `infra/staging/scripts/render-env.sh` (mode 0600).
+    file: ${EMBER_POSTGRES_PASSWORD_FILE:-./secrets/postgres_password}

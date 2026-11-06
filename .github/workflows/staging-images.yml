@@ -1,0 +1,182 @@
+name: Staging deployment config
+
+# Builds the two staging images and runs the real stack, because a deployment PR that only
+# describes itself is not evidence. Nothing here touches a cloud account: it builds, starts
+# four containers on the runner, migrates a throwaway database twice, and asserts the
+# security properties with the same scripts an operator runs.
+
+on:
+  pull_request:
+    paths:
+      - 'infra/staging/**'
+      - 'docs/CLOUD-STAGING-*.md'
+      - 'tests/unit/deploy/**'
+      - 'tests/e2e/**'
+      - '.dockerignore'
+      - '.github/workflows/staging-images.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'infra/staging/**'
+      - 'tests/unit/deploy/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: staging-images-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    name: Build images and run the staging stack
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build API image
+        run: |
+          docker build \
+            --file infra/staging/docker/Dockerfile \
+            --target api \
+            --build-arg EMBER_IMAGE_VERSION="git-${GITHUB_SHA::12}" \
+            --tag ember-api:ci \
+            .
+
+      - name: Build Worker image
+        run: |
+          docker build \
+            --file infra/staging/docker/Dockerfile \
+            --target worker \
+            --build-arg EMBER_IMAGE_VERSION="git-${GITHUB_SHA::12}" \
+            --tag ember-worker:ci \
+            .
+
+      - name: Assert images contain no local environment file and run unprivileged
+        run: |
+          set -euo pipefail
+          for image in ember-api:ci ember-worker:ci; do
+            docker run --rm --entrypoint sh "$image" -c 'test ! -e /app/.env && test ! -e /app/.env.local'
+            user="$(docker image inspect "$image" --format '{{.Config.User}}')"
+            test "$user" = "10001:10001" || { echo "$image runs as $user"; exit 1; }
+          done
+
+      - name: Prepare the local verification environment
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 24)"
+          mkdir -p /tmp/ember-ci-secrets
+          printf '%s' "$password" > /tmp/ember-ci-secrets/postgres_password
+          chmod 600 /tmp/ember-ci-secrets/postgres_password
+
+          sed \
+            -e "s|REPLACE_WITH_LOCAL_THROWAWAY_PASSWORD|${password}|" \
+            -e 's|EMBER_API_IMAGE=.*|EMBER_API_IMAGE=ember-api:ci|' \
+            -e 's|EMBER_WORKER_IMAGE=.*|EMBER_WORKER_IMAGE=ember-worker:ci|' \
+            -e 's|EMBER_IMAGE_VERSION=.*|EMBER_IMAGE_VERSION=ci|' \
+            -e 's|EMBER_POSTGRES_PASSWORD_FILE=.*|EMBER_POSTGRES_PASSWORD_FILE=/tmp/ember-ci-secrets/postgres_password|' \
+            infra/staging/env/local-verify.env.example > /tmp/ember-ci.env
+          chmod 600 /tmp/ember-ci.env
+
+          echo "EMBER_STAGING_ENV_FILE=/tmp/ember-ci.env" >> "$GITHUB_ENV"
+
+      - name: Preflight guard (local mode)
+        run: infra/staging/scripts/preflight.sh --env-file=/tmp/ember-ci.env --mode=local
+
+      - name: Validate the compose file
+        run: docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml config -q
+
+      - name: Start PostgreSQL
+        run: docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml up -d --wait --wait-timeout 120 postgres
+
+      - name: Apply migrations (run 1)
+        # The schema must exist before the Worker starts: its health probe refuses an
+        # unmigrated database, and `--wait` would legitimately time out.
+        run: docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml --profile tools run --rm migrate
+
+      - name: Apply migrations (run 2 — must be a no-op)
+        run: |
+          set -euo pipefail
+          expected="$(ls migrations/*.sql | wc -l | tr -d ' ')"
+          output="$(docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml --profile tools run --rm migrate)"
+          echo "$output"
+          grep -q "migrations complete: 0 applied, ${expected} already applied" <<<"$output"
+
+      - name: Start the application stack
+        run: docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml up -d --wait --wait-timeout 240
+
+      - name: Extract the internal CA
+        run: |
+          set -euo pipefail
+          docker run --rm -v ember-staging-caddy-data:/data:ro alpine:3 \
+            cat /data/caddy/pki/authorities/local/root.crt > /tmp/ember-ci-ca.crt
+
+      - name: Smoke (TLS through the edge)
+        run: |
+          EMBER_SMOKE_CACERT=/tmp/ember-ci-ca.crt \
+            infra/staging/scripts/smoke.sh --env-file=/tmp/ember-ci.env
+
+      - name: Worker health
+        run: infra/staging/scripts/worker-health.sh --env-file=/tmp/ember-ci.env --json
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker compose --env-file /tmp/ember-ci.env -f infra/staging/compose.yaml logs --tail=200
+
+  durability:
+    name: Restart durability and log redaction
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_USER: ember
+          POSTGRES_PASSWORD: ember_ci_only
+          POSTGRES_DB: ember_ci_admin
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ember -d ember_ci_admin"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 12.15.0
+          run_install: false
+
+      - name: Install Node.js (LTS from .nvmrc)
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - name: Install dependencies (reproducible)
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the compiled artifacts the images run
+        run: pnpm build
+
+      - name: Ensure the PostgreSQL client is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y postgresql-client
+          fi
+
+      - name: Restart durability, conversation history and log redaction
+        run: |
+          node infra/staging/scripts/verify-durability.mjs \
+            --admin-database-url postgres://ember:ember_ci_only@127.0.0.1:5432/ember_ci_admin

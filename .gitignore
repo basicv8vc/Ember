@@ -20,3 +20,7 @@ coverage/
 
 # local PostgreSQL data if a developer points Docker at a bind mount
 .data/
+
+# staging secrets rendered on the host by infra/staging/scripts/render-env.sh
+infra/staging/secrets/*
+!infra/staging/secrets/README.md

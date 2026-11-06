@@ -1,0 +1,284 @@
+{
+  "schemaVersion": "1.0",
+  "status": "FAIL",
+  "startedAt": "2026-11-06T05:21:50.428Z",
+  "finishedAt": "2026-11-06T05:24:25.642Z",
+  "elapsedMs": 155214,
+  "environment": {
+    "sdkVersion": "0.230.0",
+    "pinnedSdkVersion": "0.230.0",
+    "nodeVersion": "v24.22.2",
+    "platform": "darwin/arm64",
+    "apiHost": "app.daytona.io",
+    "target": null,
+    "snapshot": "daytona-small",
+    "sandboxClass": "container",
+    "profileId": "container-small",
+    "owner": "daytona-poc:netprobe-06",
+    "tenantA": "0ea1caee-e2f9-48ea-8679-7c5604da20ea",
+    "tenantB": "cda86848-1068-4959-99d4-96f01df16e76",
+    "tierNote": "tier is a dashboard fact, not an API field; new accounts are Tier 1 (10 vCPU / 10 GiB) with vendor-restricted egress",
+    "startedAt": "2026-11-06T05:21:50.383Z"
+  },
+  "steps": {
+    "preflight": {
+      "step": "preflight",
+      "status": "PASS",
+      "durationMs": 0,
+      "details": {
+        "capabilities": {
+          "shell": true,
+          "browser": false,
+          "filesystemSnapshot": false,
+          "memoryResume": false,
+          "diskSurvivesStop": true,
+          "forkFromSnapshot": false,
+          "persistentVolume": false,
+          "networkPolicy": true
+        },
+        "snapshot": "daytona-small",
+        "sandboxClass": "container",
+        "lifetimeSec": 120,
+        "idleStopMinutes": 2
+      }
+    },
+    "create": {
+      "step": "create",
+      "status": "PASS",
+      "durationMs": 2025,
+      "details": {
+        "sandboxId": "710b329c-ae4a-4168-863a-a5972f36f93e",
+        "latencyMs": 2025
+      }
+    },
+    "waitReady": {
+      "step": "waitReady",
+      "status": "PASS",
+      "durationMs": 5699,
+      "details": {
+        "latencyMs": 2857,
+        "reportedClass": "container",
+        "reportedCpu": 1,
+        "reportedMemoryGiB": 1,
+        "networkBlockAll": true,
+        "autoStopIntervalMinutes": 2,
+        "autoDeleteIntervalMinutes": 0,
+        "autoDestroyAtMs": 1793942632159
+      }
+    },
+    "execHello": {
+      "step": "execHello",
+      "status": "PASS",
+      "durationMs": 7805,
+      "details": {
+        "latencyMs": 7805,
+        "exitCode": 0,
+        "stdout": "hello ember\n",
+        "stderr": "",
+        "stdoutRef": "59bcbf02-3c9d-4e6a-8eb8-e18e5d338060",
+        "stderrRef": "b0204a2e-b265-46e6-bc65-9bba43829e98"
+      }
+    },
+    "kernelProbe": {
+      "step": "kernelProbe",
+      "status": "PASS",
+      "durationMs": 32043,
+      "details": {
+        "kernelRelease": "7.0.0-38-generic",
+        "cgroupDriver": "vm-init-scope",
+        "cgroupCpuMax": "100000 100000",
+        "uid": 1001,
+        "cgroupRaw": "0::/init.scope"
+      }
+    },
+    "fileRoundTrip": {
+      "step": "fileRoundTrip",
+      "status": "PASS",
+      "durationMs": 15763,
+      "details": {
+        "path": "notes/probe.txt",
+        "bytes": 56,
+        "writeLatencyMs": 8043,
+        "readLatencyMs": 1544,
+        "catLatencyMs": 6176
+      }
+    },
+    "execTimeout": {
+      "step": "execTimeout",
+      "status": "PASS",
+      "durationMs": 4816,
+      "details": {
+        "requestedTimeoutMs": 2000,
+        "observedMs": 4815,
+        "code": "EXECUTION_TIMEOUT"
+      }
+    },
+    "cancel": {
+      "step": "cancel",
+      "status": "PASS",
+      "durationMs": 6418,
+      "details": {
+        "outcome": "CANCELLED",
+        "cancelObservedMs": 2452
+      }
+    },
+    "egressProbe": {
+      "step": "egressProbe",
+      "status": "PASS",
+      "durationMs": 42030,
+      "details": {
+        "probePolicy": "layered: dns | public-tcp | metadata-tcp | metadata-http | https",
+        "bodyPolicy": "status-and-server-header-only; user-data and IAM credential paths never requested",
+        "dnsExitCode": 1,
+        "dnsStdout": "{\"probe\": \"dns\", \"result\": \"blocked\", \"error\": \"gaierror\"}\n",
+        "publicTcpExitCode": 0,
+        "publicTcpStdout": "{\"probe\": \"public_tcp\", \"target\": \"1.1.1.1:443\", \"result\": \"connected\"}\n",
+        "metadataTcpExitCode": 0,
+        "metadataTcpStdout": "{\"probe\": \"metadata_tcp\", \"target\": \"169.254.169.254:80\", \"result\": \"connected\"}\n",
+        "metadataHttpExitCode": 0,
+        "metadataHttpStdout": "{\"probe\": \"metadata_http\", \"body_policy\": \"status-and-server-header-only\", \"imds_v1\": {\"status\": 403, \"server\": \"envoy\"}, \"imds_v2_token\": {\"status\": 403, \"server\": \"envoy\"}}\n",
+        "metadataHttpStderr": "",
+        "metadataHttpStatus": 403,
+        "metadataImdsV2TokenStatus": 403,
+        "metadataHttpReachable": true,
+        "metadataTcpReachable": true,
+        "internetExitCode": 1,
+        "internetStdout": "",
+        "internetStderr": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1333, in do_open\n    h.request(req.get_method(), req.selector, req.data, headers,\n    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n              encode_chunked=req.has_header('Transfer-encoding'))\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1386, in request\n    self._send_request(method, url, body, headers, encode_chunked)\n    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1432, in _send_request\n    self.endheaders(body, encode_chunked=encode_chunked)\n    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1381, in endheaders\n    self._send_output(message_body, encode_chunked=encode_chunked)\n    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1141, in _send_output\n    self.send(msg)\n    ~~~~~~~~~^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1085, in send\n    self.connect()\n    ~~~~~~~~~~~~^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1520, in connect\n    super().connect()\n    ~~~~~~~~~~~~~~~^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1051, in connect\n    self.sock = self._create_connection(\n                ~~~~~~~~~~~~~~~~~~~~~~~^\n        (self.host,self.port), self.timeout, self.source_address)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/socket.py\", line 850, in create_connection\n    for res in getaddrinfo(host, port, 0, SOCK_STREAM):\n               ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/socket.py\", line 989, in getaddrinfo\n    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):\n               ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsocket.gaierror: [Errno -3] Temporary failure in name resolution\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import urllib.request;urllib.request.urlopen('https://example.com',timeout=3).read(1)\n                          ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 187, in urlopen\n    return opener.open(url, data, timeout)\n           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 487, in open\n    response = self._open(req, data)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 504, in _open\n    result = self._call_chain(self.handle_open, protocol, protocol +\n                              '_open', req)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 464, in _call_chain\n    result = func(*args)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1381, in https_open\n    return self.do_open(http.client.HTTPSConnection, req,\n           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n                        context=self._context)\n                        ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1336, in do_open\n    raise URLError(err)\nurllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>\n",
+        "internetReachable": false
+      }
+    },
+    "isolationCrossTenant": {
+      "step": "isolationCrossTenant",
+      "status": "PASS",
+      "durationMs": 9258,
+      "details": {
+        "crossTenantHandleDenied": true,
+        "crossTenantFileVisible": false,
+        "crossReadExitCode": 1,
+        "sharedPathExists": false
+      }
+    },
+    "crashRecovery": {
+      "step": "crashRecovery",
+      "status": "PASS",
+      "durationMs": 14182,
+      "details": {
+        "orphanId": "66377486-9b94-4223-81b0-d9f540d1f7ce",
+        "crashTenant": "59325e4c-bf95-4a64-a909-ba3b48ef123b",
+        "swept": 1,
+        "failures": 0,
+        "reconcilerProcessId": "93469",
+        "reconcilerElapsedMs": 4542,
+        "stateAfterSweep": "gone"
+      }
+    },
+    "usage": {
+      "step": "usage",
+      "status": "PASS",
+      "durationMs": 1604,
+      "details": {
+        "usage": {
+          "cpuSeconds": 135.158,
+          "memoryGiBSeconds": 135.158,
+          "egressBytes": 0,
+          "basis": "RESERVATION_WALL_CLOCK"
+        },
+        "basis": "RESERVATION_WALL_CLOCK",
+        "estimatedUsd": 0.002572,
+        "elapsedSec": 139,
+        "vendorMetrics": {
+          "timestampMs": 1793942651000,
+          "cpuUsedPct": 1.2526794201317217,
+          "memUsedBytes": 64118784,
+          "memTotalBytes": 1073741824,
+          "diskUsedBytes": 61440,
+          "diskTotalBytes": 3221225472
+        }
+      }
+    },
+    "stop": {
+      "step": "stop",
+      "status": "FAIL",
+      "durationMs": 1629,
+      "error": "DaytonaConflictError: Sandbox state change in progress"
+    },
+    "destroy": {
+      "step": "destroy",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "cleanupVerify": {
+      "step": "cleanupVerify",
+      "status": "SKIP",
+      "durationMs": 0
+    }
+  },
+  "measurements": {
+    "createLatencyMs": 2025,
+    "readyLatencyMs": 2857,
+    "firstCommandLatencyMs": 7805,
+    "commandLatencyMs": 6176,
+    "fileWriteLatencyMs": 8043,
+    "fileReadLatencyMs": 1544,
+    "timeoutObservedMs": 4815,
+    "cancelObservedMs": 2452,
+    "stopLatencyMs": null,
+    "destroyLatencyMs": null,
+    "reconcileLatencyMs": 4542
+  },
+  "isolation": {
+    "dnsBlocked": true,
+    "publicTcpBlocked": false,
+    "egressBlocked": true,
+    "metadataTcpReachable": true,
+    "metadataHttpStatus": 403,
+    "metadataImdsV2TokenStatus": 403,
+    "metadataHttpReachable": true,
+    "crossTenantHandleDenied": true,
+    "crossTenantFileVisible": false,
+    "sandboxClassReported": "container",
+    "snapshotReported": "daytona-small",
+    "kernelRelease": "7.0.0-38-generic",
+    "cgroupDriver": "vm-init-scope",
+    "cgroupCpuMax": "100000 100000",
+    "uid": 1001,
+    "networkBlockAllReported": true
+  },
+  "cleanup": {
+    "liveBeforeDestroy": null,
+    "vendorLiveAfterDestroy": null,
+    "ownerWideLiveAfterDestroy": null,
+    "orphanSweptCount": 1,
+    "orphanSweepFailures": 0,
+    "orphanSweepProcessId": "93469"
+  },
+  "usage": {
+    "cpuSeconds": 135.158,
+    "memoryGiBSeconds": 135.158,
+    "egressBytes": 0,
+    "basis": "RESERVATION_WALL_CLOCK"
+  },
+  "cost": {
+    "estimatedUsd": 0.002572,
+    "estimatedPerMinuteUsd": 0.00111,
+    "rateCard": {
+      "vCpuHourUsd": 0.0504,
+      "memoryGiBHourUsd": 0.0162,
+      "storageGiBHourUsd": 0.000108
+    }
+  },
+  "limits": {
+    "requestedCpu": 1,
+    "requestedMemoryMiB": 1024,
+    "maxLifetimeSec": 120,
+    "vendorTtlMinutes": 2,
+    "idleStopMinutes": 2,
+    "concurrencyCap": 2
+  },
+  "findings": [
+    "SECURITY (isolation gap, CONFIRMED at HTTP layer): link-local metadata service answered despite networkBlockAll=true (IMDSv1 status 403, IMDSv2 token status 403). Credential exposure NOT tested and NOT proven: probe reads status codes only, never bodies, never user-data/IAM paths.",
+    "SECURITY: TCP to fixed public IP 1.1.1.1:443 succeeded in a deny-all sandbox",
+    "run aborted: DaytonaConflictError: Sandbox state change in progress"
+  ]
+}

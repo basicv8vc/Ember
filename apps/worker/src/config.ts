@@ -13,7 +13,42 @@ export class WorkerConfigError extends Error {
 
 export type WorkerMode = 'reaper-only' | 'poll';
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
-export type EmberEnv = 'local' | 'test' | 'ci' | 'production';
+export type EmberEnv = 'local' | 'test' | 'ci' | 'staging' | 'production';
+
+/**
+ * Deployment classification for the Worker.
+ *
+ * `staging` and `production` are *shared* deployments: reachable over the network, holding real
+ * rows, and therefore not allowed to run any local-only capability (simulated execution, the
+ * deterministic fake turn responder). This mirrors `apps/api/src/deployment.ts` so both
+ * processes classify the same environment bag the same way.
+ *
+ * A `NODE_ENV` the Worker does not recognise is treated as a shared deployment, not as a
+ * developer run: an unexpected marker must never be able to enable a mock execution path.
+ */
+const DEVELOPMENT_NODE_ENVS: ReadonlySet<string> = new Set([
+  'development',
+  'dev',
+  'test',
+  'local',
+  'ci',
+]);
+
+const SHARED_DEPLOYMENT_EMBER_ENVS: ReadonlySet<EmberEnv> = new Set(['staging', 'production']);
+
+function isSharedDeployment(emberEnv: EmberEnv, nodeEnv: string | undefined): boolean {
+  if (SHARED_DEPLOYMENT_EMBER_ENVS.has(emberEnv)) {
+    return true;
+  }
+
+  const trimmed = nodeEnv?.trim();
+
+  if (trimmed === undefined || trimmed === '') {
+    return false;
+  }
+
+  return !DEVELOPMENT_NODE_ENVS.has(trimmed.toLowerCase());
+}
 
 /**
  * Simulated execution opt-in.
@@ -84,7 +119,7 @@ export interface WorkerConfig {
 }
 
 const workerEnvSchema = z.object({
-  EMBER_ENV: z.enum(['local', 'test', 'ci', 'production']).default('local'),
+  EMBER_ENV: z.enum(['local', 'test', 'ci', 'staging', 'production']).default('local'),
   EMBER_WORKER_MODE: z.enum(['reaper-only', 'poll']).default('reaper-only'),
   EMBER_WORKER_SIMULATED_EXECUTION: z.enum(['disabled', 'local-only']).default('disabled'),
   EMBER_B1_FAKE_RESPONDER_ENABLED: z
@@ -237,12 +272,9 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
   const simulatedExecution = parsed.data.EMBER_WORKER_SIMULATED_EXECUTION;
   const b1FakeResponderEnabled = parsed.data.EMBER_B1_FAKE_RESPONDER_ENABLED;
 
-  const productionProcess =
-    parsed.data.EMBER_ENV === 'production' ||
-    env.NODE_ENV === 'production' ||
-    env.NODE_ENV === 'staging';
+  const sharedDeployment = isSharedDeployment(parsed.data.EMBER_ENV, env.NODE_ENV);
 
-  if (b1FakeResponderEnabled && productionProcess) {
+  if (b1FakeResponderEnabled && sharedDeployment) {
     throw new WorkerConfigError(
       'EMBER_B1_FAKE_RESPONDER_ENABLED=true is refused in production or staging environments',
     );
@@ -282,7 +314,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     );
   }
 
-  if (model.mode === 'fake' && productionProcess) {
+  if (model.mode === 'fake' && sharedDeployment) {
     throw new WorkerConfigError(
       'EMBER_MODEL_EXECUTION=fake is refused in production or staging: simulated replies must ' +
         'never be served by a process that claims to run a live model',
@@ -309,10 +341,10 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
       );
     }
 
-    if (parsed.data.EMBER_ENV === 'production') {
+    if (sharedDeployment) {
       throw new WorkerConfigError(
-        'simulated execution is refused when EMBER_ENV=production; it stays a local/test ' +
-          'capability until P0B-06 provides durable execution results',
+        'simulated execution is refused when EMBER_ENV is staging or production (or NODE_ENV is); ' +
+          'it stays a local/test capability until P0B-06 provides durable execution results',
       );
     }
   }

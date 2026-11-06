@@ -8,8 +8,52 @@ private struct MockReceiptPresentation: Identifiable {
 
 @MainActor
 enum AppCompositionRoot {
+    /// Live must be explicitly selected by the Alpha launch configuration.
+    /// An absent/malformed endpoint fails closed; never fall back from Live to Mock.
+    @ViewBuilder
     static func makeRootView() -> some View {
-        IntegratedAppRootView()
+        if ProcessInfo.processInfo.arguments.contains("--ember-live-cloud") {
+            if let origin = ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"],
+               let url = URL(string: origin),
+               let model = try? LiveComposition.make(baseURL: url) {
+                LiveConversationHost(model: model)
+            } else {
+                ContentUnavailableView(
+                    "Live Cloud configuration unavailable",
+                    systemImage: "network.slash",
+                    description: Text("Set a secure EMBER_CLOUD_BASE_URL for the Live Alpha build.")
+                )
+            }
+        } else {
+            IntegratedAppRootView()
+        }
+    }
+}
+
+@MainActor
+private enum LiveComposition {
+    static func make(baseURL: URL) throws -> LiveConversationHostModel {
+        let client = EmberAPIClient()
+        let api = try LiveEmberSessionAPI(baseURL: baseURL, client: client)
+        let transport = try EmberAuthenticatedTransport(baseURL: baseURL, client: client)
+        // Built before the coordinator so the durable-intent cleanup can be handed to it at
+        // construction. Registering it afterwards would leave a window in which a logout clears the
+        // credential but leaves unsent private text on disk.
+        let journal = LiveConversationJournal()
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: api,
+            transport: transport,
+            store: KeychainSessionStore(),
+            appleSignIn: AppleSignInAuthorizer(),
+            signOutCleanupHooks: [{ try? await journal.reset() }]
+        ))
+        let repository = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth), journal: journal
+        )
+        // Process-local caches only: identity is re-established by `bootstrap()` on every entry, so
+        // this is not the security boundary and may settle asynchronously.
+        Task { await auth.registerSignOutCleanup { await repository.clearOnLogout() } }
+        return LiveConversationHostModel(repository: repository, auth: auth)
     }
 }
 

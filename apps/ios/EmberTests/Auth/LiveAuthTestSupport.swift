@@ -332,6 +332,7 @@ enum CoordinatorFixture {
         storedRecord: EmberSessionRecord? = nil,
         store: InMemoryEmberSessionStore? = nil,
         fence: InMemorySessionRecoveryFence? = nil,
+        signOutCleanupHooks: [@Sendable () async -> Void] = [],
         now: @escaping @Sendable () -> Date = { AuthFixture.epoch },
         leeway: TimeInterval = 60,
         configure: (FakeEmberSessionAPI) -> Void = { _ in }
@@ -366,6 +367,7 @@ enum CoordinatorFixture {
                 store: store,
                 appleSignIn: authorizer,
                 fence: fence,
+                signOutCleanupHooks: signOutCleanupHooks,
                 now: now,
                 refreshLeeway: leeway
             )

@@ -22,9 +22,11 @@
 ## 构建与验证结果
 
 - 实体设备构建：退出码 65。Xcode 报 `No Accounts` 和没有匹配 `com.basicv8vc.ember` 的 iOS App Development provisioning profile；没有生成可安装的签名产物。
-- 模拟器构建：退出码 65，因启动卷空间不足，Xcode 无法写入 build database。没有在该提交上完成成功构建或测试。
+- 本机模拟器构建：退出码 65，因启动卷空间不足，Xcode 无法写入 build database。
+- GitHub Actions iOS L2 Validation（run `42230975104`）：构建 App 与两个测试 bundle、iOS Unit Tests、iOS UI Tests 均通过；截图 XCResult artifact 步骤通过。该截图属于 CI 模拟器，不是真机证据。完整结果：[iOS CI run](https://github.com/basicv8vc/Ember/actions/runs/42230975104)。
+- GitHub Actions Verify（Node 24 LTS + PostgreSQL 17，run `42230974944`）：lint、格式、typecheck、unit、build、迁移、PostgreSQL integration/chaos、HTTP/E2E 和 Demo CLI 均通过。完整结果：[后端 CI run](https://github.com/basicv8vc/Ember/actions/runs/42230974944)。
 - 未安装本分支 App，未运行真实 Apple ID 系统授权、Cloud Session、Keychain 持久化或 Logout；没有启用 Fake Model。
-- 脱敏真机截图：未采集。当前没有签名构建可安装，不能用旧版本或模拟器截图冒充本分支真机证据。
+- 脱敏真机截图：未采集。当前没有签名构建可安装；CI 模拟器截图不作为本分支真机证据。
 
 ## 继续真机验证所需条件
 

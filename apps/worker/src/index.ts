@@ -12,6 +12,7 @@ import {
   PostgresConsentPublicationGuard,
   PostgresConsentRepository,
   PostgresLeaseQueue,
+  PostgresModelTurnExecutionRepository,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
   PostgresWorkspaceStore,
@@ -20,6 +21,7 @@ import {
   loadDatabaseConfig,
   systemClock,
 } from '@ember/postgres';
+import { createModelGateway } from '@ember/model-gateway';
 import {
   CommitmentOrchestrator,
   createDefaultSentinelPolicy,
@@ -43,6 +45,10 @@ import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 import { createFakeTurnResponder, type FakeTurnResponderRunner } from './b1/fake-turn-responder.js';
+import {
+  createModelTurnResponder,
+  type ModelTurnResponderRunner,
+} from './b1/model-turn-responder.js';
 import { runPollLoop } from './poll-loop.js';
 import { runReaperLoop } from './reaper-loop.js';
 import { createRunHandler } from './run-handler.js';
@@ -127,6 +133,7 @@ async function main(): Promise<void> {
     env: config.env,
     simulatedExecution: config.simulatedExecution,
     b1FakeResponderEnabled: config.b1FakeResponderEnabled,
+    modelExecution: config.model.ok ? config.model.mode : 'refused',
     durableExecution: config.blobRoot !== null,
     workerId: config.workerId,
     database: describeDatabaseTarget(databaseConfig.connectionString),
@@ -148,6 +155,7 @@ async function main(): Promise<void> {
   let schedulerLoop: Promise<void> = Promise.resolve();
   let reaperLoop: Promise<void> | undefined;
   let fakeTurnRunner: FakeTurnResponderRunner | undefined;
+  let modelTurnRunner: ModelTurnResponderRunner | undefined;
   try {
     if (config.b1FakeResponderEnabled) {
       fakeTurnRunner = createFakeTurnResponder({
@@ -155,6 +163,38 @@ async function main(): Promise<void> {
         logger,
       }).start(controller.signal);
       logger.info('fake B1 assistant turn responder enabled');
+    }
+
+    // B2: the only place a real model reply can be produced. `disabled` starts nothing at all;
+    // `fake` runs the same claim/fence chain with labelled, zero-cost output; `real` reaches the
+    // pinned adapter, which itself refuses to be constructed without an approved model and rate.
+    if (config.model.ok && config.model.mode !== 'disabled') {
+      const mode = config.model.mode;
+      const gateway = createModelGateway(config.model);
+
+      modelTurnRunner = createModelTurnResponder({
+        mode,
+        repository: new PostgresModelTurnExecutionRepository(pool),
+        gateway,
+        workerId: config.workerId,
+        leaseMs: config.model.settings.leaseMs,
+        ceilings: config.model.settings.ceilings,
+        maxAttempts: config.model.settings.maxAttempts,
+        attemptTimeoutMs: config.model.settings.attemptTimeoutMs,
+        rate: mode === 'real' ? config.model.rate : null,
+        logger,
+      }).start(controller.signal);
+
+      logger.info('model assistant turn responder enabled', {
+        mode,
+        providerId: config.model.settings.providerId,
+        modelId: config.model.settings.modelId,
+        // Ceilings are policy, not secrets: logging them makes a misconfiguration visible.
+        principalDailyMicroUsd: config.model.settings.ceilings.principalDailyMicroUsd,
+        tenantDailyMicroUsd: config.model.settings.ceilings.tenantDailyMicroUsd,
+        globalDailyMicroUsd: config.model.settings.ceilings.globalDailyMicroUsd,
+        maxAttempts: config.model.settings.maxAttempts,
+      });
     }
 
     // P0-C3B: shares `controller.signal`, so SIGINT/SIGTERM drains it with every other loop.
@@ -182,6 +222,7 @@ async function main(): Promise<void> {
         reaper,
         schedulerLoop,
         ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+        ...(modelTurnRunner === undefined ? [] : [modelTurnRunner.done]),
       ]);
       return;
     }
@@ -322,6 +363,7 @@ async function main(): Promise<void> {
         schedulerLoop,
         pollSummary,
         ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+        ...(modelTurnRunner === undefined ? [] : [modelTurnRunner.done]),
       ]);
       const summary = await pollSummary;
 
@@ -331,10 +373,12 @@ async function main(): Promise<void> {
       // drain them, so the pool can be closed exactly once below.
       controller.abort();
       fakeTurnRunner?.stop();
+      modelTurnRunner?.stop();
       await Promise.allSettled([
         reaper,
         schedulerLoop,
         ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+        ...(modelTurnRunner === undefined ? [] : [modelTurnRunner.done]),
       ]);
       throw error;
     }
@@ -343,10 +387,12 @@ async function main(): Promise<void> {
     // the scheduler or B1 responder could keep using a pool that is already closing.
     controller.abort();
     fakeTurnRunner?.stop();
+    modelTurnRunner?.stop();
     await Promise.allSettled([
       schedulerLoop,
       ...(reaperLoop === undefined ? [] : [reaperLoop]),
       ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+      ...(modelTurnRunner === undefined ? [] : [modelTurnRunner.done]),
     ]);
     await pool.end();
     logger.info('worker stopped', { workerId: config.workerId });

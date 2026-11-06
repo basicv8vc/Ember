@@ -1,0 +1,554 @@
+import type { B1AssistantTurnDto } from '@ember/contracts';
+import { realSleeper, type Sleeper } from '@ember/execution';
+import {
+  MODEL_LIMITS,
+  ModelInputRefused,
+  buildBoundedContext,
+  estimateCostMicroUsd,
+  isModelGatewayFailure,
+  isRetryableModelFailure,
+  preflightConversationTurn,
+  type ModelBudgetCeilings,
+  type ModelFailureCode,
+  type ModelGateway,
+  type ModelRateRow,
+  type ModelUsage,
+} from '@ember/model-gateway';
+import type {
+  B2AttemptCharge,
+  B2ClaimOutcome,
+  B2PublicationResult,
+  B2ReserveOutcome,
+  B2SettlementOutcome,
+  B2TurnContextRow,
+  B2TurnLease,
+} from '@ember/postgres';
+import { safeWorkerErrorCategory, type WorkerLogger } from '../logger.js';
+
+export const MODEL_TURN_BATCH_SIZE = 5;
+export const MODEL_TURN_POLL_INTERVAL_MS = 500;
+export const MODEL_TURN_ERROR_BACKOFF_MS = 1_000;
+
+export interface PendingModelTurn {
+  readonly tenantId: string;
+  readonly conversationId: string;
+  readonly turnId: string;
+}
+
+/**
+ * The persistence seam the responder needs.
+ *
+ * Every method is a short transaction: the responder never holds a connection across the provider
+ * call, which is the one rule that keeps a slow provider from becoming a database outage.
+ */
+export interface ModelTurnExecutionPort {
+  listRunningTurns(limit?: number): Promise<readonly PendingModelTurn[]>;
+  claimTurn(command: {
+    readonly turn: PendingModelTurn;
+    readonly workerId: string;
+    readonly leaseMs: number;
+  }): Promise<B2ClaimOutcome>;
+  loadTurnContext(command: {
+    readonly turn: PendingModelTurn;
+    readonly maxMessages: number;
+  }): Promise<readonly B2TurnContextRow[]>;
+  reserveAttempt(command: {
+    readonly lease: B2TurnLease;
+    readonly ceilings: ModelBudgetCeilings;
+    readonly reservedMicroUsd: number;
+    readonly rateVersion: string;
+    readonly providerId: 'openai';
+    readonly modelLabel: string;
+  }): Promise<B2ReserveOutcome>;
+  markAttemptSent(command: {
+    readonly lease: B2TurnLease;
+    readonly attemptNo: number;
+  }): Promise<boolean>;
+  settleAttempt(charge: B2AttemptCharge): Promise<B2SettlementOutcome>;
+  publishCompletion(command: {
+    readonly lease: B2TurnLease;
+    readonly result:
+      | {
+          readonly status: 'completed';
+          readonly text: string;
+          readonly modelLabel: string;
+          readonly simulated: boolean;
+        }
+      | {
+          readonly status: 'failed';
+          readonly failureReason: 'timeout' | 'internal_error';
+        };
+  }): Promise<B2PublicationResult>;
+  expireTurnIfDue(command: PendingModelTurn): Promise<B1AssistantTurnDto | null>;
+}
+
+/**
+ * The three fields every persistence method accepts.
+ *
+ * A lease carries more than an identity and the repository schemas are strict, so an identity is
+ * projected explicitly rather than passed by structural assumption.
+ */
+function identityOf(turn: PendingModelTurn): PendingModelTurn {
+  return {
+    tenantId: turn.tenantId,
+    conversationId: turn.conversationId,
+    turnId: turn.turnId,
+  };
+}
+
+/** How one turn finished, for the loop's summary counters. Field names are the counters. */
+export type ModelTurnOutcome =
+  'completed' | 'failed' | 'timedOut' | 'budgetDenied' | 'fenced' | 'skipped' | 'expired';
+
+export interface ModelTurnResponderSummary {
+  readonly examined: number;
+  readonly completed: number;
+  readonly failed: number;
+  readonly timedOut: number;
+  readonly budgetDenied: number;
+  readonly fenced: number;
+  readonly expired: number;
+  readonly skipped: number;
+}
+
+export interface ModelTurnResponderOptions {
+  /** `fake` never touches the money ledger; `real` always does. */
+  readonly mode: 'fake' | 'real';
+  readonly repository: ModelTurnExecutionPort;
+  readonly gateway: ModelGateway;
+  readonly workerId: string;
+  readonly leaseMs: number;
+  readonly ceilings: ModelBudgetCeilings;
+  readonly maxAttempts: number;
+  readonly attemptTimeoutMs: number;
+  /** Required in `real` mode; absent in `fake` mode, which has no priced call. */
+  readonly rate: ModelRateRow | null;
+  readonly batchSize?: number;
+  readonly intervalMs?: number;
+  readonly errorBackoffMs?: number;
+  readonly sleep?: Sleeper;
+  readonly logger?: Pick<WorkerLogger, 'warn'>;
+}
+
+export interface ModelTurnResponderRunner {
+  stop(): void;
+  readonly done: Promise<void>;
+}
+
+interface GatewaySuccess {
+  readonly kind: 'success';
+  readonly text: string;
+  readonly modelLabel: string;
+  readonly simulated: boolean;
+  readonly usage: ModelUsage;
+}
+
+interface GatewayFailure {
+  readonly kind: 'failure';
+  readonly code: ModelFailureCode;
+}
+
+/**
+ * B2 Assistant Turn responder.
+ *
+ * It replaces only the responder behind B1-5's seam: the Turn table, its statuses, the 60 s
+ * deadline, the single reply rule and the transcript are B1's and are not duplicated here.
+ *
+ * Order of operations per turn, each step a separate short transaction:
+ *
+ * ```text
+ * claim (lease_epoch += 1)      -> loser makes zero provider calls
+ * deadline sweep (DB clock)     -> an expired turn never reaches a provider
+ * reserve money + open attempt  -> any bucket over its ceiling: zero calls
+ * one-send CAS                  -> at most one outbound start per attempt number
+ * provider call, no transaction held
+ * settle attempt                -> pessimistic on anything ambiguous
+ * fenced publish                -> cancellation/timeout/lease loss discards the text
+ * ```
+ */
+export function createModelTurnResponder(options: ModelTurnResponderOptions): {
+  processOnce(signal?: AbortSignal): Promise<ModelTurnResponderSummary>;
+  start(signal?: AbortSignal): ModelTurnResponderRunner;
+} {
+  const batchSize = options.batchSize ?? MODEL_TURN_BATCH_SIZE;
+  const intervalMs = options.intervalMs ?? MODEL_TURN_POLL_INTERVAL_MS;
+  const errorBackoffMs = options.errorBackoffMs ?? MODEL_TURN_ERROR_BACKOFF_MS;
+  const wait = options.sleep ?? realSleeper;
+
+  for (const [name, value] of [
+    ['batchSize', batchSize],
+    ['intervalMs', intervalMs],
+    ['errorBackoffMs', errorBackoffMs],
+    ['leaseMs', options.leaseMs],
+    ['maxAttempts', options.maxAttempts],
+    ['attemptTimeoutMs', options.attemptTimeoutMs],
+  ] as const) {
+    if (!Number.isInteger(value) || value < 1) {
+      throw new TypeError(`${name} must be a positive integer`);
+    }
+  }
+
+  if (options.mode === 'real' && options.rate === null) {
+    throw new TypeError('real mode requires a pinned rate row');
+  }
+
+  const counters = (): Record<ModelTurnOutcome, number> & { examined: number } => ({
+    examined: 0,
+    completed: 0,
+    failed: 0,
+    timedOut: 0,
+    budgetDenied: 0,
+    fenced: 0,
+    expired: 0,
+    skipped: 0,
+  });
+
+  const reserveMicroUsd = (inputTokens: number): number => {
+    if (options.mode === 'fake' || options.rate === null) {
+      return MODEL_LIMITS.maxReservedMicroUsdPerAttempt;
+    }
+
+    const estimated = estimateCostMicroUsd(options.rate, inputTokens, MODEL_LIMITS.maxOutputTokens);
+
+    return Math.min(
+      Math.max(estimated, 1),
+      Math.min(options.ceilings.perAttemptMicroUsd, MODEL_LIMITS.maxReservedMicroUsdPerAttempt),
+    );
+  };
+
+  /**
+   * One bounded provider call.
+   *
+   * The attempt timeout and the worker shutdown signal share one `AbortController`, so a slow
+   * provider and a stopping worker take the identical code path.
+   */
+  const callGateway = async (
+    lease: B2TurnLease,
+    context: readonly { readonly role: 'user' | 'assistant'; readonly text: string }[],
+    signal: AbortSignal | undefined,
+  ): Promise<GatewaySuccess | GatewayFailure> => {
+    const remainingMs = Math.max(1, Date.parse(lease.deadlineAt) - Date.now());
+    const timeoutMs = Math.min(
+      options.attemptTimeoutMs,
+      remainingMs,
+      MODEL_LIMITS.attemptTimeoutMs,
+    );
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const onAbort = (): void => controller.abort();
+
+    if (signal?.aborted === true) {
+      controller.abort();
+    } else {
+      signal?.addEventListener('abort', onAbort, { once: true });
+    }
+
+    try {
+      const result = await options.gateway.generateConversationTurn(
+        {
+          conversationId: lease.conversationId,
+          turnId: lease.turnId,
+          context,
+          maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+        },
+        controller.signal,
+      );
+
+      return {
+        kind: 'success',
+        text: result.output.text,
+        modelLabel: result.modelLabel,
+        simulated: result.simulated,
+        usage: result.usage,
+      };
+    } catch (error) {
+      if (isModelGatewayFailure(error)) {
+        return { kind: 'failure', code: error.code };
+      }
+
+      // Anything else is our own defect, not a provider signal: it must not be retried with money.
+      return { kind: 'failure', code: 'model_invalid_output' };
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+    }
+  };
+
+  const settle = async (
+    lease: B2TurnLease,
+    attemptNo: number,
+    charge: Omit<B2AttemptCharge, 'tenantId' | 'turnId' | 'attemptNo'>,
+  ): Promise<void> => {
+    await options.repository.settleAttempt({
+      tenantId: lease.tenantId,
+      turnId: lease.turnId,
+      attemptNo,
+      ...charge,
+    });
+  };
+
+  const terminalFailure = async (
+    lease: B2TurnLease,
+    failureReason: 'timeout' | 'internal_error',
+  ): Promise<ModelTurnOutcome> => {
+    const published = await options.repository.publishCompletion({
+      lease,
+      result: { status: 'failed', failureReason },
+    });
+
+    if (published.outcome === 'fenced') {
+      return 'fenced';
+    }
+
+    return failureReason === 'timeout' ? 'timedOut' : 'failed';
+  };
+
+  const runTurn = async (
+    lease: B2TurnLease,
+    signal: AbortSignal | undefined,
+  ): Promise<ModelTurnOutcome> => {
+    const context = await options.repository.loadTurnContext({
+      // Only the identity: the persistence boundary accepts exactly these three fields, so a lease
+      // can never be mistaken for a row snapshot.
+      turn: identityOf(lease),
+      maxMessages: MODEL_LIMITS.maxContextMessages,
+    });
+
+    const bounded = buildBoundedContext(context);
+    const preflight = preflightConversationTurn({
+      characters: bounded.characters,
+      maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+    });
+
+    // `fake` mode is a labelled, zero-cost path: no attempt row, no reservation, no provider.
+    if (options.mode === 'fake') {
+      const result = await callGateway(lease, bounded.messages, signal);
+
+      if (result.kind === 'failure' || signal?.aborted === true) {
+        return terminalFailure(lease, 'internal_error');
+      }
+
+      const published = await options.repository.publishCompletion({
+        lease,
+        result: {
+          status: 'completed',
+          text: result.text,
+          modelLabel: result.modelLabel,
+          simulated: result.simulated,
+        },
+      });
+
+      return published.outcome === 'published' ? 'completed' : 'fenced';
+    }
+
+    const rate = options.rate;
+
+    if (rate === null) {
+      throw new TypeError('real mode requires a pinned rate row');
+    }
+
+    for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
+      const reservation = await options.repository.reserveAttempt({
+        lease,
+        ceilings: options.ceilings,
+        reservedMicroUsd: reserveMicroUsd(preflight.inputTokens),
+        rateVersion: rate.rateVersion,
+        providerId: 'openai',
+        modelLabel: options.gateway.modelLabel,
+      });
+
+      if (reservation.kind === 'lease_lost') {
+        return 'fenced';
+      }
+
+      if (reservation.kind === 'attempts_exhausted') {
+        return await terminalFailure(lease, 'internal_error');
+      }
+
+      if (reservation.kind === 'principal_unavailable') {
+        // No server-derived principal means no per-user metering: fail closed before any egress.
+        return await terminalFailure(lease, 'internal_error');
+      }
+
+      if (reservation.kind === 'budget_exceeded') {
+        // A hard refusal is a user-visible failure, not a silent downgrade to fake output.
+        return await terminalFailure(lease, 'internal_error');
+      }
+
+      const attemptNo = reservation.attempt.attemptNo;
+      const sent = await options.repository.markAttemptSent({ lease, attemptNo });
+
+      if (!sent) {
+        // The CAS proves nothing left the process, so the reservation is returned in full.
+        await settle(lease, attemptNo, { state: 'released', outcomeCode: 'not_sent' });
+        return 'fenced';
+      }
+
+      const result = await callGateway(lease, bounded.messages, signal);
+
+      if (result.kind === 'success') {
+        await settle(lease, attemptNo, {
+          state: 'settled',
+          outcomeCode: 'ok',
+          observedCostMicroUsd: result.usage.costMicroUsd,
+          inputTokens: result.usage.inputTokens,
+          outputTokens: result.usage.outputTokens,
+        });
+
+        const published = await options.repository.publishCompletion({
+          lease,
+          result: {
+            status: 'completed',
+            text: result.text,
+            modelLabel: result.modelLabel,
+            simulated: result.simulated,
+          },
+        });
+
+        return published.outcome === 'published' ? 'completed' : 'fenced';
+      }
+
+      const shutdown = signal?.aborted === true;
+
+      // A request that may have been sent keeps its reservation: an unknown charge is not a free one.
+      await settle(lease, attemptNo, {
+        state: 'unknown_billed',
+        outcomeCode: shutdown ? 'client_cancelled' : result.code,
+      });
+
+      if (shutdown) {
+        return 'skipped';
+      }
+
+      const retryable = isRetryableModelFailure(result.code);
+      const lastAttempt = attemptNo >= options.maxAttempts;
+
+      if (!retryable || lastAttempt) {
+        return await terminalFailure(
+          lease,
+          result.code === 'model_timeout' ? 'timeout' : 'internal_error',
+        );
+      }
+
+      // Between attempts the Turn must stay `running`: a retryable provider failure is an attempt
+      // outcome, never a terminal Turn. The next loop iteration re-checks the deadline through the
+      // database before reserving more money.
+      if ((await options.repository.expireTurnIfDue(identityOf(lease))) !== null) {
+        return 'expired';
+      }
+    }
+
+    return await terminalFailure(lease, 'internal_error');
+  };
+
+  const processOnce = async (signal?: AbortSignal): Promise<ModelTurnResponderSummary> => {
+    const summary = counters();
+    const candidates = await options.repository.listRunningTurns(batchSize);
+
+    for (const candidate of candidates) {
+      if (signal?.aborted === true) {
+        summary.skipped += candidates.length - summary.examined;
+        break;
+      }
+
+      summary.examined += 1;
+
+      // The deadline is authoritative and uses the database clock: an expired turn is swept before
+      // any money is reserved, so a slow queue cannot bill for a reply nobody will read.
+      if ((await options.repository.expireTurnIfDue(candidate)) !== null) {
+        summary.expired += 1;
+        continue;
+      }
+
+      const claim = await options.repository.claimTurn({
+        turn: candidate,
+        workerId: options.workerId,
+        leaseMs: options.leaseMs,
+      });
+
+      if (claim.kind === 'not_claimed') {
+        if (claim.reason === 'deadline_expired') {
+          summary.expired += 1;
+        } else {
+          summary.skipped += 1;
+        }
+        continue;
+      }
+
+      let outcome: ModelTurnOutcome;
+
+      try {
+        outcome = await runTurn(claim.lease, signal);
+      } catch (error) {
+        // Bounded input, a database error or a bug: the attempt (if any) keeps its pessimistic
+        // charge and the Turn is left `running` for the deadline sweeper to close.
+        if (error instanceof ModelInputRefused) {
+          outcome = await terminalFailure(claim.lease, 'internal_error');
+        } else {
+          options.logger?.warn('model turn iteration failed', {
+            category: safeWorkerErrorCategory(error),
+          });
+          summary.skipped += 1;
+          continue;
+        }
+      }
+
+      summary[outcome] += 1;
+    }
+
+    return Object.freeze(summary);
+  };
+
+  const start = (parentSignal?: AbortSignal): ModelTurnResponderRunner => {
+    const controller = new AbortController();
+    const stop = (): void => controller.abort();
+    const stopFromParent = (): void => stop();
+
+    if (parentSignal?.aborted === true) {
+      stop();
+    } else {
+      parentSignal?.addEventListener('abort', stopFromParent, { once: true });
+    }
+
+    const done = (async (): Promise<void> => {
+      try {
+        while (!controller.signal.aborted) {
+          try {
+            await processOnce(controller.signal);
+          } catch (error) {
+            options.logger?.warn('model turn iteration failed', {
+              category: safeWorkerErrorCategory(error),
+            });
+
+            try {
+              await wait(errorBackoffMs, controller.signal);
+            } catch {
+              if (!controller.signal.aborted) {
+                options.logger?.warn('model turn backoff failed');
+              }
+            }
+            continue;
+          }
+
+          if (controller.signal.aborted) {
+            break;
+          }
+
+          try {
+            await wait(intervalMs, controller.signal);
+          } catch {
+            if (!controller.signal.aborted) {
+              options.logger?.warn('model turn wait failed');
+            }
+          }
+        }
+      } finally {
+        parentSignal?.removeEventListener('abort', stopFromParent);
+      }
+    })();
+
+    return Object.freeze({ stop, done });
+  };
+
+  return Object.freeze({ processOnce, start });
+}

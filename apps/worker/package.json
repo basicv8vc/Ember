@@ -14,6 +14,7 @@
     "@ember/credentials": "workspace:*",
     "@ember/domain": "workspace:*",
     "@ember/execution": "workspace:*",
+    "@ember/model-gateway": "workspace:*",
     "@ember/postgres": "workspace:*",
     "zod": "4.6.7"
   }

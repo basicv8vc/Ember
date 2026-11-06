@@ -76,6 +76,23 @@ Rules (throw `WorkerConfigError`, never silent-fallback):
 5. Kill the worker mid-run; restart; assert the reconciler sweeps the orphan and the run converges to a terminal state (`lease_expired` / `retryable_failed`).
 6. Re-run with `EMBER_SANDBOX_PROVIDER=unset` and assert the full existing suite still passes unchanged (default-off invariant).
 
+### Must-fix before the integration PR lands (CTO review, 2026-11-06)
+
+Both are Ember-side engineering issues in `packages/sandbox-daytona`, not Daytona infrastructure questions:
+
+1. **Concurrency cap race in `create()`** — the per-instance concurrent-sandbox check runs
+   before the remote create request, but the record is registered only after the request
+   completes. Several concurrent `create()` calls can pass the check simultaneously and
+   exceed the two-sandbox per-instance cap. Fix: reserve the slot before the remote call
+   (pending record or counter with rollback on failure), then confirm on completion.
+   Acceptance: a parallel `create()` burst cannot push live sandboxes above the cap.
+2. **Cross-worker reclaim hazard in `sweepOrphanedSandboxes()`** — the sweep decides
+   "orphan" from owner label + creation age + retained ids. If multiple workers share one
+   owner, a worker-startup sweep can delete a sandbox that another worker is actively
+   using. Fix options: per-worker owner suffix (e.g. `owner + ':' + workerId`) or exclude
+   sandboxes younger than the max run lifetime / tied to an active lease. Acceptance: two
+   concurrent workers sharing an account never sweep each other's live sandboxes.
+
 ## 6. Explicitly out of scope (this phase)
 
 - Browser/filesystem-snapshot capabilities (`SandboxCapabilities` beyond `shell` + `networkPolicy`).

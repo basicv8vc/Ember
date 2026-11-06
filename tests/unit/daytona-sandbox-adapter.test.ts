@@ -368,10 +368,13 @@ describe('DaytonaSandboxProvider file transfer', () => {
 
 describe('DaytonaSandboxProvider lifecycle', () => {
   it('is idempotent on destroy', async () => {
-    const { provider: instance, sandboxId } = await readySandbox();
+    const { client, provider: instance, sandboxId } = await readySandbox();
 
     await expect(instance.destroy(sandboxId)).resolves.toBeUndefined();
     await expect(instance.destroy(sandboxId)).resolves.toBeUndefined();
+
+    // The vendor delete runs exactly once; the repeat is a pure local no-op.
+    expect(client.deleted.filter((id) => id === sandboxId)).toHaveLength(1);
   });
 
   it('reports DEADLINE_EXCEEDED when deletion is not confirmed', async () => {
@@ -412,6 +415,33 @@ describe('DaytonaSandboxProvider tenant isolation', () => {
 
     // NOT_FOUND, not FORBIDDEN: the adapter must not confirm that the id exists.
     expect(expectCode(error, 'NOT_FOUND')).toBe(true);
+  });
+
+  it("refuses to destroy another tenant's sandbox", async () => {
+    const client = new FakeDaytonaClient();
+    const providerA = provider(client);
+    const providerB = provider(client, { tenantId: TENANT_B });
+    const created = await providerA.create(spec());
+    await providerA.waitReady(created.sandboxId, 5_000);
+
+    const error = await providerB.destroy(created.sandboxId).catch((caught: unknown) => caught);
+
+    // Same shape as exec(): untracked ids must look like NOT_FOUND, and the shared vendor
+    // API key must never be used to delete a sandbox this instance does not own.
+    expect(expectCode(error, 'NOT_FOUND')).toBe(true);
+    expect(client.deleted).not.toContain(created.sandboxId);
+  });
+
+  it('refuses to destroy an id it never tracked, without touching the vendor', async () => {
+    const client = new FakeDaytonaClient();
+    const instance = provider(client);
+
+    const error = await instance
+      .destroy('99999999-9999-4999-8999-999999999999')
+      .catch((caught: unknown) => caught);
+
+    expect(expectCode(error, 'NOT_FOUND')).toBe(true);
+    expect(client.deleted).toHaveLength(0);
   });
 
   it('does not share files between tenants', async () => {

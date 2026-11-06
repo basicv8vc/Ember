@@ -338,20 +338,22 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   }
 
   public async destroy(sandboxId: Id): Promise<void> {
-    const record = this.records.get(sandboxId);
+    // Ownership check identical to exec()/stop()/readOutput(): an id this provider instance
+    // does not track — unknown, or belonging to another tenant — must look exactly like
+    // NOT_FOUND and must never reach the vendor API. The Daytona API key is shared across
+    // tenants, so an unscoped delete would destroy another tenant's sandbox.
+    const record = this.requireRecord(sandboxId);
 
-    // Idempotent: destroying an id the provider never tracked is a no-op, not an error, so a
+    // Idempotent: destroying an already-destroyed sandbox is a no-op, not an error, so a
     // retried cleanup after a crash cannot fail the run.
-    if (record !== undefined && record.state === 'destroyed') {
+    if (record.state === 'destroyed') {
       return;
     }
 
     const gone = await this.client.delete(sandboxId, 60_000);
 
-    if (record !== undefined) {
-      record.state = gone ? 'destroyed' : 'failed';
-      record.destroyedAtMs = gone ? this.clock() : null;
-    }
+    record.state = gone ? 'destroyed' : 'failed';
+    record.destroyedAtMs = gone ? this.clock() : null;
 
     if (!gone) {
       throw new DomainError('DEADLINE_EXCEEDED', 'sandbox deletion was accepted but not confirmed');

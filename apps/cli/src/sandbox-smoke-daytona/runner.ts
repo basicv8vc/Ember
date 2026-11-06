@@ -170,6 +170,10 @@ export class DaytonaSmokeRunner {
     let sandboxA: Id | null = null;
     let sandboxB: Id | null = null;
     let sandboxC: Id | null = null;
+    // sandboxC is created by its own provider instance (the cancel step needs an
+    // AbortSignal-bound provider), so cleanup must destroy it through that instance:
+    // destroy() is tenant- and instance-scoped and refuses ids it does not track.
+    let cancelProvider: DaytonaSandboxProvider | null = null;
     let holdStartedAtMs: number | null = null;
 
     const markStep = (
@@ -428,7 +432,7 @@ export class DaytonaSmokeRunner {
       // ---------------------------------------------------------------- cancel
       await attempt('cancel', async () => {
         const controller = new AbortController();
-        const cancelProvider = new DaytonaSandboxProvider({
+        cancelProvider = new DaytonaSandboxProvider({
           tenantId: this.options.environment.tenantA,
           runId: randomUUID(),
           client: this.options.client,
@@ -740,7 +744,10 @@ export class DaytonaSmokeRunner {
 
         const remainingC = sandboxC;
         if (remainingC !== null) {
-          await providerA.destroy(remainingC);
+          if (cancelProvider === null) {
+            throw new Error('cancel provider missing but its sandbox is still live');
+          }
+          await cancelProvider.destroy(remainingC);
           sandboxC = null;
         }
 

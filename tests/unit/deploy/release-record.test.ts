@@ -6,9 +6,12 @@
  * manual bookkeeping; a rollback rotates the record the same way. The rotation logic
  * lives in lib.sh (`record_release_tag` / `read_previous_release`) and is exercised here
  * against a scratch EMBER_RELEASE_DIR — no Docker, no /etc/ember, nothing shared.
+ *
+ * Persistence failures must be fatal: a deploy or rollback that cannot write the record
+ * must not report success. The failure-path tests pin that.
  */
 import { spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,6 +119,47 @@ describe('release record bookkeeping', () => {
 
     expect(recordedTag(dir, 'release')).toBe('git-aaaa');
     expect(recordedTag(dir, 'release.previous')).toBe('git-bbbb');
+  });
+
+  it('refuses to report success when the record directory cannot be created', () => {
+    // A path under a non-directory can never exist — deterministic even when the suite
+    // runs as root. The old implementation logged a warning and returned 0 here.
+    const result = record('git-aaaa', '/dev/null/ember-release-record');
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('cannot be created');
+  });
+
+  it.skipIf((process.getuid?.() ?? 0) === 0)(
+    'fails loudly and leaves the record intact when the directory is not writable',
+    () => {
+      // Consistency: a failed update must not touch what is already recorded.
+      const dir = scratchReleaseDir();
+      expect(record('git-aaaa', dir).status).toBe(0);
+
+      chmodSync(dir, 0o500);
+      try {
+        const result = record('git-bbbb', dir);
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('not writable');
+        expect(recordedTag(dir, 'release')).toBe('git-aaaa');
+        expect(recordedTag(dir, 'release.previous')).toBeUndefined();
+      } finally {
+        chmodSync(dir, 0o700);
+      }
+    },
+  );
+
+  it('rejects an empty release tag', () => {
+    const dir = scratchReleaseDir();
+
+    const result = bash(`source "${LIB_SH}"; record_release_tag ""`, {
+      EMBER_RELEASE_DIR: dir,
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('empty release tag');
   });
 });
 

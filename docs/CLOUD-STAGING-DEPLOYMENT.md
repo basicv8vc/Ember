@@ -135,6 +135,8 @@ infra/staging/scripts/deploy.sh --env-file=/etc/ember/staging.env
 Release bookkeeping is automatic: once a deploy fully succeeds, `deploy.sh` copies the
 outgoing tag to `/etc/ember/release.previous` before writing the new one, so
 `rollback.sh --previous` always has a target. No manual copy is needed (or useful).
+If the record cannot be written, the deploy fails loudly instead of reporting success
+without a rollback target.
 
 Rolling replacement is a `docker compose up -d`: Compose recreates one container at a time.
 The Worker drains in-flight Runs on `SIGTERM` (`stop_grace_period: 45s`); a Run that does not
@@ -163,11 +165,14 @@ infra/staging/scripts/rollback.sh --env-file=/etc/ember/staging.env --to=<releas
 infra/staging/scripts/rollback.sh --env-file=/etc/ember/staging.env --previous
 ```
 
-The script verifies both images for that tag exist locally, recreates the stack with
-`--no-build`, and re-runs the smoke suite. It refuses to invent a tag: an image that was
-never built cannot be rolled back to. A successful rollback updates the bookkeeping the
-same way a deploy does — the rolled-back-to tag becomes `release`, and the abandoned one
-becomes the new `release.previous`.
+The script clears the same fail-closed preflight guard as a deploy first (environment
+file permissions and the staging security rules) — a rollback with a malicious or
+misconfigured environment file is refused before any Docker operation. It then verifies
+both images for that tag exist locally, recreates the stack with `--no-build`, and
+re-runs the smoke suite. It refuses to invent a tag: an image that was never built
+cannot be rolled back to. A successful rollback updates the bookkeeping the same way a
+deploy does — the rolled-back-to tag becomes `release`, and the abandoned one becomes
+the new `release.previous`.
 
 **Schema is not rolled back.** If a release's migration is incompatible with the previous
 image, the rollback will fail its smoke test — that is the intended, loud failure.

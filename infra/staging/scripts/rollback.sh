@@ -44,6 +44,14 @@ if [[ "$PREVIOUS" == "true" ]]; then
 fi
 
 [[ -n "$TARGET" ]] || die "specify --to=<tag> or --previous"
+
+# A rollback runs the same containers as a deploy, so it must clear the same fail-closed
+# guard first: environment file permissions and the staging security rules (dev auth,
+# provider credentials, foreign database, TLS bypass). No Docker operation may start
+# before this passes.
+require_private_file "$ENV_FILE" "environment file"
+"${SCRIPT_DIR}/preflight.sh" "--env-file=${ENV_FILE}" --mode=staging
+
 require_command docker
 
 export EMBER_IMAGE_VERSION="$TARGET"

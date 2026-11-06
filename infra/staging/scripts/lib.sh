@@ -82,26 +82,36 @@ release_dir() {
 # release.previous, so `rollback.sh --previous` always has a target without manual
 # bookkeeping. Called by deploy.sh and rollback.sh only after the run has fully
 # succeeded: a failed deploy or rollback never disturbs the record.
+#
+# Persistence failures are fatal: a deploy or rollback that cannot record its release
+# must not report success, or `rollback.sh --previous` would later target a lie. Each
+# file is written through a temporary name and renamed into place, and the outgoing tag
+# is rotated first — a failure mid-update leaves the previous record intact and never
+# publishes a new current release that was not recorded.
 record_release_tag() {
   local tag="$1"
   local dir previous=""
   [[ -n "$tag" ]] || die "record_release_tag: empty release tag"
   dir="$(release_dir)"
-  mkdir -p "$dir" 2>/dev/null || true
-  if [[ ! -w "$dir" ]]; then
-    log "WARNING: ${dir} is not writable; release ${tag} was NOT recorded (rollback.sh --previous will have no target)"
-    return 0
-  fi
+  mkdir -p "$dir" 2>/dev/null || die "release record directory ${dir} cannot be created"
+  [[ -w "$dir" ]] || die "release record directory ${dir} is not writable; refusing to report success without a recorded rollback target"
+
   if [[ -s "${dir}/release" ]]; then
     previous="$(tr -d '[:space:]' < "${dir}/release")"
     # Redeploying the same tag keeps the older previous: the version to roll back to
     # does not change just because the same release was rebuilt.
     if [[ -n "$previous" && "$previous" != "$tag" ]]; then
-      printf '%s\n' "$previous" > "${dir}/release.previous"
+      printf '%s\n' "$previous" > "${dir}/release.previous.tmp" \
+        || die "failed to write ${dir}/release.previous"
+      mv "${dir}/release.previous.tmp" "${dir}/release.previous" \
+        || die "failed to update ${dir}/release.previous"
       chmod 644 "${dir}/release.previous"
     fi
   fi
-  printf '%s\n' "$tag" > "${dir}/release"
+  printf '%s\n' "$tag" > "${dir}/release.tmp" \
+    || die "failed to write ${dir}/release"
+  mv "${dir}/release.tmp" "${dir}/release" \
+    || die "failed to update ${dir}/release"
   chmod 644 "${dir}/release"
   log "recorded release ${tag} in ${dir}/release (previous: ${previous:-none})"
 }

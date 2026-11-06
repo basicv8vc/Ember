@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Fail-closed staging environment guard.
 #
-# Run this before every `deploy`, `update`, `migrate` or `up`. It refuses to continue when
-# the environment file could enable a development authentication path, bill a model
-# provider, reach a foreign database, or bypass TLS verification.
+# Run this before every `deploy`, `update`, `migrate`, `rollback` or `up`. It refuses to
+# continue when the environment file could enable a development authentication path, bill
+# a model provider, reach a foreign database, or bypass TLS verification.
 #
 #   infra/staging/scripts/preflight.sh --env-file /etc/ember/staging.env
 #   infra/staging/scripts/preflight.sh --env-file ./env/local-verify.env --mode=local

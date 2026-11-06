@@ -405,6 +405,75 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
       expect(Number(attempts[0]!.observed_cost_micro_usd)).toBe(OBSERVED_COST);
       expect(await readGlobal()).toMatchObject({ reserved: 0, consumed: OBSERVED_COST });
     });
+
+    it('opens a usage_missing incident and halts the next paid call', async () => {
+      await resetGlobalSpend();
+      const fixture = await createFixture();
+      const gateway = new UsageGateway(null);
+      await makeResponder(gateway).processOnce();
+
+      // The incident is the safety property: accounting alone is not enough.
+      const incidents = await repository.listOpenBudgetIncidents();
+      expect(incidents).toHaveLength(1);
+      expect(incidents[0]).toMatchObject({
+        scope: 'tenant',
+        reason: 'usage_missing',
+        overageMicroUsd: 0,
+        resolvedAt: null,
+      });
+
+      // The next Turn for the same tenant is hard-refused before any provider call.
+      const blocked = await createFixture({
+        tenantId: fixture.tenantId,
+        principalId: fixture.principalId,
+      });
+      const gateway2 = new UsageGateway({ inputTokens: 40, outputTokens: 20 });
+      const halted = await makeResponder(gateway2).processOnce();
+
+      expect(halted.halted).toBe(1);
+      expect(halted.completed).toBe(0);
+      expect(gateway2.calls).toBe(0);
+      expect(await readAttempts(blocked)).toHaveLength(0);
+
+      // Resolution is attributed; spending resumes only after it.
+      const resolved = await repository.resolveBudgetIncident({
+        id: incidents[0]!.id,
+        resolvedBy: 'cto@ember.test',
+        note: 'usage_missing reconciled against provider dashboard',
+      });
+      expect(resolved).toBe(true);
+
+      await createFixture({ tenantId: fixture.tenantId, principalId: fixture.principalId });
+      const after = await makeResponder(gateway2).processOnce();
+      expect(after.completed).toBe(1);
+      expect(gateway2.calls).toBe(1);
+    });
+
+    it('refuses a usage_missing incident that does not match its arithmetic shape', async () => {
+      await resetGlobalSpend();
+      const tenant = await createTenant();
+      const day = await utcDay();
+
+      // observed must equal applied must equal reservation for usage_missing.
+      await expect(
+        db.pool.query(
+          `INSERT INTO model_budget_incidents
+             (id, tenant_id, scope_kind, scope_id, utc_day, reason,
+              observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
+           VALUES ($1, $2, 'tenant', $3, $4::date, 'usage_missing', 0, 100, 0, 100)`,
+          [randomUUID(), tenant.tenantId, tenant.tenantId, day],
+        ),
+      ).rejects.toThrow(/check constraint/i);
+
+      // A valid usage_missing incident is accepted.
+      await db.pool.query(
+        `INSERT INTO model_budget_incidents
+           (id, tenant_id, scope_kind, scope_id, utc_day, reason,
+            observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
+         VALUES ($1, $2, 'tenant', $3, $4::date, 'usage_missing', 100, 100, 0, 100)`,
+        [randomUUID(), tenant.tenantId, tenant.tenantId, day],
+      );
+    });
   });
 
   // -------------------------------------------------------------------------
@@ -714,6 +783,120 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
           [randomUUID(), tenant.tenantId, tenant.tenantId, day],
         ),
       ).rejects.toThrow(/check constraint/i);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // P0-2 (second review) — TOCTOU between findOutstandingHalt and reserveAttempt.
+  //
+  // Two separate database connections, one holding the budget-halt advisory lock while it
+  // inserts an incident. The second connection's reserveAttempt must block on the lock, then
+  // observe the incident once the first commits. This proves the check and the insert are
+  // serialised at the transaction level, not by timing luck.
+  // -------------------------------------------------------------------------
+  describe('P0-2 TOCTOU: incident insertion vs concurrent reservation', () => {
+    it('serialises incident commit against a concurrent reserveAttempt (deterministic dual-connection)', async () => {
+      await resetGlobalSpend();
+      const fixture = await createFixture();
+      const lease = await claim(fixture);
+
+      // Connection A holds the budget-halt advisory lock and inserts an incident.
+      const connA = await db.pool.connect();
+
+      try {
+        await connA.query('BEGIN');
+        await connA.query('SELECT pg_advisory_xact_lock(782, 0)');
+        await connA.query(
+          `INSERT INTO model_budget_incidents
+             (id, tenant_id, scope_kind, scope_id, utc_day, reason, turn_id, attempt_no,
+              observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
+           VALUES ($1, $2::uuid, 'tenant', $2::text, $3::date, 'usage_missing', $4, 1, 100, 100, 0, 100)`,
+          [randomUUID(), fixture.tenantId, await utcDay(), fixture.turnId],
+        );
+
+        // Start a reservation in the repository's own connection. It must block on the advisory
+        // lock held by connA. The fence check (readFence) happens AFTER lockBudgetHalt, so the
+        // reservation is stuck at the very first step inside its transaction.
+        let reserveSettled = false;
+        const reservePromise = repository
+          .reserveAttempt({
+            lease,
+            ceilings: CEILINGS,
+            reservedMicroUsd: 100,
+            rateVersion: RATE.rateVersion,
+            providerId: 'openai',
+            modelLabel: MODEL_LABEL,
+          })
+          .then((r) => {
+            reserveSettled = true;
+            return r;
+          });
+
+        // Deterministic proof of blocking: after 300 ms the reservation has not settled.
+        await new Promise((r) => setTimeout(r, 300));
+        expect(reserveSettled).toBe(false);
+
+        // Commit A: releases the advisory lock and makes the incident visible.
+        await connA.query('COMMIT');
+
+        // The reservation now acquires the lock, sees the incident, and refuses.
+        const outcome = await reservePromise;
+        expect(reserveSettled).toBe(true);
+        expect(outcome.kind).toBe('budget_halted');
+        if (outcome.kind === 'budget_halted') {
+          expect(outcome.scope).toBe('tenant');
+          expect(outcome.reason).toBe('usage_missing');
+        }
+
+        // No attempt row was written; the reservation was refused before any money moved.
+        expect(await readAttempts(fixture)).toHaveLength(0);
+      } finally {
+        await connA.query('ROLLBACK').catch(() => undefined);
+        connA.release();
+      }
+    });
+
+    it('a reservation that acquires the lock first is not retroactively invalidated', async () => {
+      await resetGlobalSpend();
+      const fixture = await createFixture();
+      const lease = await claim(fixture);
+
+      // Hold the advisory lock in connection A but do NOT insert any incident.
+      const connA = await db.pool.connect();
+
+      try {
+        await connA.query('BEGIN');
+        await connA.query('SELECT pg_advisory_xact_lock(782, 0)');
+
+        let reserveSettled = false;
+        const reservePromise = repository
+          .reserveAttempt({
+            lease,
+            ceilings: CEILINGS,
+            reservedMicroUsd: 100,
+            rateVersion: RATE.rateVersion,
+            providerId: 'openai',
+            modelLabel: MODEL_LABEL,
+          })
+          .then((r) => {
+            reserveSettled = true;
+            return r;
+          });
+
+        await new Promise((r) => setTimeout(r, 300));
+        expect(reserveSettled).toBe(false);
+
+        // Commit without inserting an incident: the lock is released, no halt exists.
+        await connA.query('COMMIT');
+
+        const outcome = await reservePromise;
+        expect(reserveSettled).toBe(true);
+        // The reservation succeeds because no incident was ever opened.
+        expect(outcome.kind).toBe('reserved');
+      } finally {
+        await connA.query('ROLLBACK').catch(() => undefined);
+        connA.release();
+      }
     });
   });
 });

@@ -94,7 +94,7 @@ interface IncidentRow {
   readonly scope_kind: 'global' | 'tenant' | 'principal';
   readonly scope_id: string;
   readonly utc_day: string;
-  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
   readonly turn_id: string | null;
   readonly attempt_no: number | null;
   readonly observed_micro_usd: string | number;
@@ -316,6 +316,10 @@ SELECT m.sequence, m.kind, m.text
 
     try {
       return await transaction(this.pool, async (client) => {
+        // Serialize against concurrent incident creation (settleAttempt / resolveBudgetIncident)
+        // so the halt check below cannot race with an in-flight incident insert.
+        await lockBudgetHalt(client);
+
         const fence = await readFence(client, lease);
 
         if (!isFenceValid(fence, lease)) {
@@ -490,6 +494,10 @@ UPDATE model_turn_attempts a
     const input = parsed.data;
 
     return transaction(this.pool, async (client) => {
+      // Serialize against concurrent reservation checks (reserveAttempt) so any incident this
+      // settlement opens is visible to the next reservation that acquires the lock.
+      await lockBudgetHalt(client);
+
       const attempt = await client.query<{
         readonly state: string;
         readonly reserved_micro_usd: string | number;
@@ -596,6 +604,27 @@ SELECT state, reserved_micro_usd, utc_day::text AS utc_day, principal_id
           reservationMicroUsd: reserved,
         });
         incidentsOpened = 1;
+      }
+
+      // P0-1: a missing-usage reply is conservatively billed at the full reservation, but the
+      // *true* charge is unknown. That uncertainty is itself a budget incident: the ledger has
+      // spent money it cannot verify, so every subsequent paid call must halt until a human
+      // reconciles. Accounting alone is not enough — the halt is the safety property.
+      if (input.state === 'conservative_billed') {
+        await insertIncident(client, {
+          tenantId: input.tenantId,
+          scope: 'tenant',
+          scopeId: input.tenantId,
+          utcDay: row.utc_day,
+          reason: 'usage_missing',
+          turnId: input.turnId,
+          attemptNo: input.attemptNo,
+          observedMicroUsd: reserved,
+          appliedMicroUsd: reserved,
+          overageMicroUsd: 0,
+          reservationMicroUsd: reserved,
+        });
+        incidentsOpened += 1;
       }
 
       const attemptOverage = applied === null ? 0 : Math.max(0, (observed ?? 0) - applied);
@@ -799,19 +828,25 @@ SELECT id, tenant_id, scope_kind, scope_id, utc_day::text AS utc_day, reason, tu
     }
 
     try {
-      const result = await this.pool.query(
-        `
+      return await transaction(this.pool, async (client) => {
+        // Serialize against reserveAttempt / settleAttempt so a resolution cannot interleave
+        // with a halt check or incident insert.
+        await lockBudgetHalt(client);
+
+        const result = await client.query(
+          `
 UPDATE model_budget_incidents
    SET resolved_at = clock_timestamp(),
        resolved_by = $2,
        resolution_note = $3
  WHERE id = $1 AND resolved_at IS NULL`,
-        [parsed.data.id, parsed.data.resolvedBy, parsed.data.note],
-      );
+          [parsed.data.id, parsed.data.resolvedBy, parsed.data.note],
+        );
 
-      return (result.rowCount ?? 0) === 1;
+        return (result.rowCount ?? 0) === 1;
+      });
     } catch (error) {
-      throw asDomainError(error);
+      throw error instanceof Refusal ? error : asDomainError(error);
     }
   }
 
@@ -1124,6 +1159,26 @@ async function applyCharge(
   ];
 }
 
+/**
+ * Serialize budget halt checks against incident creation and resolution.
+ *
+ * `findOutstandingHalt` is a plain SELECT, so without this lock a settlement could commit an
+ * incident between the check and the reservation — a classic TOCTOU that would let a paid call
+ * proceed despite the halt. The advisory lock is taken first in every transaction that touches
+ * the incident table (`reserveAttempt`, `settleAttempt`, `resolveBudgetIncident`), which
+ * serializes the check with the insert at the database level. The lock is held only for the
+ * duration of a short, I/O-free transaction.
+ */
+const BUDGET_HALT_LOCK_CLASS = 782;
+const BUDGET_HALT_LOCK_ID = 0;
+
+async function lockBudgetHalt(client: pg.PoolClient): Promise<void> {
+  await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
+    BUDGET_HALT_LOCK_CLASS,
+    BUDGET_HALT_LOCK_ID,
+  ]);
+}
+
 async function insertIncident(
   client: pg.PoolClient,
   input: {
@@ -1131,7 +1186,7 @@ async function insertIncident(
     readonly scope: 'global' | 'tenant' | 'principal';
     readonly scopeId: string;
     readonly utcDay: string;
-    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
     readonly turnId: string;
     readonly attemptNo: number;
     readonly observedMicroUsd: number;
@@ -1176,11 +1231,11 @@ async function findOutstandingHalt(
   principalId: string,
 ): Promise<{
   readonly scope: 'global' | 'tenant' | 'principal';
-  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
 } | null> {
   const result = await client.query<{
     readonly scope_kind: 'global' | 'tenant' | 'principal';
-    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
   }>(
     `
 SELECT scope_kind, reason

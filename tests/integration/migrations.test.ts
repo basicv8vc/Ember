@@ -122,7 +122,7 @@ describe('PostgreSQL migrations (real database)', () => {
   it('applies migrations from an empty schema and records the version', async () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(15);
+    expect(result.applied).toHaveLength(16);
     expect(result.applied.map((migration) => migration.id)).toEqual([
       '0001',
       '0002',
@@ -139,6 +139,7 @@ describe('PostgreSQL migrations (real database)', () => {
       '0013',
       '0014',
       '0015',
+      '0016',
     ]);
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
@@ -154,6 +155,7 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(result.applied[12]?.name).toBe('0013_task_results.sql');
     expect(result.applied[13]?.name).toBe('0014_model_execution.sql');
     expect(result.applied[14]?.name).toBe('0015_model_budget_safety.sql');
+    expect(result.applied[15]?.name).toBe('0016_model_budget_incident_usage_missing.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -163,7 +165,7 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(15);
+    expect(versions.rows).toHaveLength(16);
     expect(versions.rows.map((row) => row.id)).toEqual([
       '0001',
       '0002',
@@ -180,6 +182,7 @@ describe('PostgreSQL migrations (real database)', () => {
       '0013',
       '0014',
       '0015',
+      '0016',
     ]);
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
@@ -251,7 +254,7 @@ describe('PostgreSQL migrations (real database)', () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(15);
+    expect(result.alreadyApplied).toBe(16);
     const after = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
@@ -260,7 +263,7 @@ describe('PostgreSQL migrations (real database)', () => {
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('15');
+    expect(versions.rows[0]?.count).toBe('16');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -321,7 +324,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('15');
+      expect(versions.rows[0]?.count).toBe('16');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -493,7 +496,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('15');
+      expect(versions.rows[0]?.count).toBe('16');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

@@ -53,7 +53,7 @@ export type B2ReserveOutcome =
   | {
       readonly kind: 'budget_halted';
       readonly scope: 'global' | 'tenant' | 'principal';
-      readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+      readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
     };
 
 export interface B2AttemptCharge {
@@ -91,7 +91,7 @@ export interface B2BudgetIncident {
   readonly scope: 'global' | 'tenant' | 'principal';
   readonly scopeId: string;
   readonly utcDay: string;
-  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
   readonly turnId: string | null;
   readonly attemptNo: number | null;
   readonly observedMicroUsd: number;

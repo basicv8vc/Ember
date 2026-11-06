@@ -1,0 +1,169 @@
+{
+  "schemaVersion": "1.0",
+  "status": "FAIL",
+  "startedAt": "2026-11-06T05:31:38.607Z",
+  "finishedAt": "2026-11-06T05:31:39.426Z",
+  "elapsedMs": 819,
+  "environment": {
+    "sdkVersion": "0.230.0",
+    "pinnedSdkVersion": "0.230.0",
+    "nodeVersion": "v24.22.2",
+    "platform": "darwin/arm64",
+    "apiHost": "app.daytona.io",
+    "target": null,
+    "snapshot": "daytona-vm-small",
+    "sandboxClass": "linux-vm",
+    "profileId": "linux-vm-small",
+    "owner": "daytona-poc:vmprobe-01",
+    "tenantA": "5043f34b-5ee1-4507-a8e8-d8737bc5fa4f",
+    "tenantB": "ecdfa350-8bc6-45e0-8343-9b0ed5bcf51c",
+    "tierNote": "tier is a dashboard fact, not an API field; new accounts are Tier 1 (10 vCPU / 10 GiB) with vendor-restricted egress",
+    "startedAt": "2026-11-06T05:31:38.559Z"
+  },
+  "steps": {
+    "preflight": {
+      "step": "preflight",
+      "status": "PASS",
+      "durationMs": 0,
+      "details": {
+        "capabilities": {
+          "shell": true,
+          "browser": false,
+          "filesystemSnapshot": false,
+          "memoryResume": false,
+          "diskSurvivesStop": true,
+          "forkFromSnapshot": false,
+          "persistentVolume": false,
+          "networkPolicy": true
+        },
+        "snapshot": "daytona-vm-small",
+        "sandboxClass": "linux-vm",
+        "lifetimeSec": 120,
+        "idleStopMinutes": 2
+      }
+    },
+    "create": {
+      "step": "create",
+      "status": "FAIL",
+      "durationMs": 819,
+      "error": "DaytonaValidationError: Snapshot daytona-vm-small is not available in region us"
+    },
+    "waitReady": {
+      "step": "waitReady",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "execHello": {
+      "step": "execHello",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "kernelProbe": {
+      "step": "kernelProbe",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "fileRoundTrip": {
+      "step": "fileRoundTrip",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "execTimeout": {
+      "step": "execTimeout",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "cancel": {
+      "step": "cancel",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "egressProbe": {
+      "step": "egressProbe",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "isolationCrossTenant": {
+      "step": "isolationCrossTenant",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "crashRecovery": {
+      "step": "crashRecovery",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "usage": {
+      "step": "usage",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "stop": {
+      "step": "stop",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "destroy": {
+      "step": "destroy",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "cleanupVerify": {
+      "step": "cleanupVerify",
+      "status": "SKIP",
+      "durationMs": 0
+    }
+  },
+  "measurements": {
+    "createLatencyMs": null,
+    "readyLatencyMs": null,
+    "firstCommandLatencyMs": null,
+    "commandLatencyMs": null,
+    "fileWriteLatencyMs": null,
+    "fileReadLatencyMs": null,
+    "timeoutObservedMs": null,
+    "cancelObservedMs": null,
+    "stopLatencyMs": null,
+    "destroyLatencyMs": null,
+    "reconcileLatencyMs": null
+  },
+  "isolation": {
+    "dnsBlocked": null,
+    "publicTcpBlocked": null,
+    "egressBlocked": null,
+    "metadataTcpReachable": null,
+    "metadataHttpStatus": null,
+    "metadataImdsV2TokenStatus": null,
+    "metadataHttpReachable": null,
+    "crossTenantHandleDenied": null,
+    "crossTenantFileVisible": null,
+    "sandboxClassReported": null,
+    "snapshotReported": null,
+    "kernelRelease": null,
+    "cgroupDriver": null,
+    "cgroupCpuMax": null,
+    "uid": null,
+    "networkBlockAllReported": null
+  },
+  "cleanup": {
+    "liveBeforeDestroy": null,
+    "vendorLiveAfterDestroy": null,
+    "ownerWideLiveAfterDestroy": null,
+    "orphanSweptCount": null,
+    "orphanSweepFailures": null,
+    "orphanSweepProcessId": null
+  },
+  "usage": null,
+  "cost": null,
+  "limits": {
+    "requestedCpu": 1,
+    "requestedMemoryMiB": 1024,
+    "maxLifetimeSec": 120,
+    "vendorTtlMinutes": 2,
+    "idleStopMinutes": 2,
+    "concurrencyCap": 2
+  },
+  "findings": [
+    "run aborted: DaytonaValidationError: Snapshot daytona-vm-small is not available in region us"
+  ]
+}

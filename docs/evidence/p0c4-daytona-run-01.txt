@@ -1,0 +1,70 @@
+────────────────────────────────────────────────────────────────────────
+Daytona sandbox smoke — FAIL
+────────────────────────────────────────────────────────────────────────
+profile      container-small
+snapshot     daytona-small (class container)
+sdk          0.230.0 (pinned 0.230.0)
+api host     app.daytona.io
+owner        daytona-poc:19165261
+elapsed      134.2s
+fingerprint  c4322919ab78da76
+
+steps
+  preflight              PASS   1ms
+  create                 PASS   821ms
+  waitReady              PASS   2973ms
+  execHello              PASS   5536ms
+  kernelProbe            PASS   21428ms
+  fileRoundTrip          PASS   11436ms
+  execTimeout            PASS   4704ms
+  cancel                 PASS   8646ms
+  egressProbe            PASS   26884ms
+  isolationCrossTenant   PASS   11466ms
+  crashRecovery          PASS   24859ms
+  usage                  PASS   1785ms
+  stop                   PASS   2726ms
+  destroy                PASS   562ms
+  cleanupVerify          PASS   10336ms
+
+measurements (ms)
+  createLatencyMs          821
+  readyLatencyMs           1310
+  firstCommandLatencyMs    5530
+  commandLatencyMs         4932
+  fileWriteLatencyMs       4796
+  fileReadLatencyMs        1708
+  timeoutObservedMs        4703
+  cancelObservedMs         2886
+  stopLatencyMs            2726
+  destroyLatencyMs         562
+  reconcileLatencyMs       3708
+
+isolation
+  egressBlocked                true
+  metadataEndpointReachable    true
+  crossTenantHandleDenied      true
+  crossTenantFileVisible       false
+  sandboxClassReported         container
+  snapshotReported             daytona-small
+  kernelRelease                6.8.0-136-generic
+  cgroupDriver                 vm-init-scope
+  cgroupCpuMax                 100000 100000
+  uid                          1001
+  networkBlockAllReported      true
+
+cleanup
+  liveBeforeDestroy            1
+  vendorLiveAfterDestroy       0
+  ownerWideLiveAfterDestroy    0
+  orphanSweptCount             1
+  orphanSweepFailures          0
+  orphanSweepProcessId         63969
+
+estimated cost   $0.002202 (this run)
+                 $0.001110 / minute
+
+findings
+  - SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true
+  - sandbox kernel release reported as 6.8.0-136-generic
+  - validation: metadata endpoint reachability was not disproven
+────────────────────────────────────────────────────────────────────────

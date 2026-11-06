@@ -1,0 +1,273 @@
+{
+  "schemaVersion": "1.0",
+  "status": "FAIL",
+  "startedAt": "2026-11-06T04:10:43.354Z",
+  "finishedAt": "2026-11-06T04:13:00.864Z",
+  "elapsedMs": 137510,
+  "environment": {
+    "sdkVersion": "0.230.0",
+    "pinnedSdkVersion": "0.230.0",
+    "nodeVersion": "v24.22.2",
+    "platform": "darwin/arm64",
+    "apiHost": "app.daytona.io",
+    "target": null,
+    "snapshot": "daytona-small",
+    "sandboxClass": "container",
+    "profileId": "container-small",
+    "owner": "daytona-poc:8ba097d7",
+    "tenantA": "dd438be6-e79b-4e90-bf5a-f6380c6345e9",
+    "tenantB": "502a21ba-2dc9-4181-ba6c-918a4f3c67e3",
+    "tierNote": "tier is a dashboard fact, not an API field; new accounts are Tier 1 (10 vCPU / 10 GiB) with vendor-restricted egress",
+    "startedAt": "2026-11-06T04:10:43.275Z"
+  },
+  "steps": {
+    "preflight": {
+      "step": "preflight",
+      "status": "PASS",
+      "durationMs": 0,
+      "details": {
+        "capabilities": {
+          "shell": true,
+          "browser": false,
+          "filesystemSnapshot": false,
+          "memoryResume": false,
+          "diskSurvivesStop": true,
+          "forkFromSnapshot": false,
+          "persistentVolume": false,
+          "networkPolicy": true
+        },
+        "snapshot": "daytona-small",
+        "sandboxClass": "container",
+        "lifetimeSec": 120,
+        "idleStopMinutes": 2
+      }
+    },
+    "create": {
+      "step": "create",
+      "status": "PASS",
+      "durationMs": 658,
+      "details": {
+        "sandboxId": "33bba1f9-47b9-4163-8a67-72e26b2fb8cd",
+        "latencyMs": 658
+      }
+    },
+    "waitReady": {
+      "step": "waitReady",
+      "status": "PASS",
+      "durationMs": 3048,
+      "details": {
+        "latencyMs": 1678,
+        "reportedClass": "container",
+        "reportedCpu": 1,
+        "reportedMemoryGiB": 1,
+        "networkBlockAll": true,
+        "autoStopIntervalMinutes": 2,
+        "autoDeleteIntervalMinutes": 0,
+        "autoDestroyAtMs": 1793938363991
+      }
+    },
+    "execHello": {
+      "step": "execHello",
+      "status": "PASS",
+      "durationMs": 5853,
+      "details": {
+        "latencyMs": 5853,
+        "exitCode": 0,
+        "stdout": "hello ember\n",
+        "stderr": "",
+        "stdoutRef": "c9fa99ae-01f6-48ff-b1b1-51e0aaec0b76",
+        "stderrRef": "88e0e4c4-1ef1-41c2-92d9-731411e2182f"
+      }
+    },
+    "kernelProbe": {
+      "step": "kernelProbe",
+      "status": "PASS",
+      "durationMs": 24648,
+      "details": {
+        "kernelRelease": "6.8.0-124-generic",
+        "cgroupDriver": "vm-init-scope",
+        "cgroupCpuMax": "100000 100000",
+        "uid": 1001,
+        "cgroupRaw": "0::/init.scope"
+      }
+    },
+    "fileRoundTrip": {
+      "step": "fileRoundTrip",
+      "status": "PASS",
+      "durationMs": 13264,
+      "details": {
+        "path": "notes/probe.txt",
+        "bytes": 56,
+        "writeLatencyMs": 4767,
+        "readLatencyMs": 2475,
+        "catLatencyMs": 6022
+      }
+    },
+    "execTimeout": {
+      "step": "execTimeout",
+      "status": "PASS",
+      "durationMs": 4351,
+      "details": {
+        "requestedTimeoutMs": 2000,
+        "observedMs": 4351,
+        "code": "EXECUTION_TIMEOUT"
+      }
+    },
+    "cancel": {
+      "step": "cancel",
+      "status": "PASS",
+      "durationMs": 5281,
+      "details": {
+        "outcome": "CANCELLED",
+        "cancelObservedMs": 1007
+      }
+    },
+    "egressProbe": {
+      "step": "egressProbe",
+      "status": "PASS",
+      "durationMs": 23445,
+      "details": {
+        "metadataExitCode": 0,
+        "metadataStdout": "",
+        "metadataStderr": "",
+        "internetExitCode": 1,
+        "internetStdout": "",
+        "internetStderr": "Traceback (most recent call last):\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1333, in do_open\n    h.request(req.get_method(), req.selector, req.data, headers,\n    ~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n              encode_chunked=req.has_header('Transfer-encoding'))\n              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1386, in request\n    self._send_request(method, url, body, headers, encode_chunked)\n    ~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1432, in _send_request\n    self.endheaders(body, encode_chunked=encode_chunked)\n    ~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1381, in endheaders\n    self._send_output(message_body, encode_chunked=encode_chunked)\n    ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1141, in _send_output\n    self.send(msg)\n    ~~~~~~~~~^^^^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1085, in send\n    self.connect()\n    ~~~~~~~~~~~~^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1520, in connect\n    super().connect()\n    ~~~~~~~~~~~~~~~^^\n  File \"/usr/local/lib/python3.14/http/client.py\", line 1051, in connect\n    self.sock = self._create_connection(\n                ~~~~~~~~~~~~~~~~~~~~~~~^\n        (self.host,self.port), self.timeout, self.source_address)\n        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/socket.py\", line 850, in create_connection\n    for res in getaddrinfo(host, port, 0, SOCK_STREAM):\n               ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/socket.py\", line 989, in getaddrinfo\n    for res in _socket.getaddrinfo(host, port, family, type, proto, flags):\n               ~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nsocket.gaierror: [Errno -3] Temporary failure in name resolution\n\nDuring handling of the above exception, another exception occurred:\n\nTraceback (most recent call last):\n  File \"<string>\", line 1, in <module>\n    import urllib.request;urllib.request.urlopen('https://example.com',timeout=3).read(1)\n                          ~~~~~~~~~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 187, in urlopen\n    return opener.open(url, data, timeout)\n           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 487, in open\n    response = self._open(req, data)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 504, in _open\n    result = self._call_chain(self.handle_open, protocol, protocol +\n                              '_open', req)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 464, in _call_chain\n    result = func(*args)\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1381, in https_open\n    return self.do_open(http.client.HTTPSConnection, req,\n           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n                        context=self._context)\n                        ^^^^^^^^^^^^^^^^^^^^^^\n  File \"/usr/local/lib/python3.14/urllib/request.py\", line 1336, in do_open\n    raise URLError(err)\nurllib.error.URLError: <urlopen error [Errno -3] Temporary failure in name resolution>\n",
+        "metadataReachable": true,
+        "internetReachable": false
+      }
+    },
+    "isolationCrossTenant": {
+      "step": "isolationCrossTenant",
+      "status": "PASS",
+      "durationMs": 19668,
+      "details": {
+        "crossTenantHandleDenied": true,
+        "crossTenantFileVisible": false,
+        "crossReadExitCode": 1,
+        "sharedPathExists": false
+      }
+    },
+    "crashRecovery": {
+      "step": "crashRecovery",
+      "status": "PASS",
+      "durationMs": 22250,
+      "details": {
+        "orphanId": "68aadaf7-44df-449b-9f38-d37801778474",
+        "crashTenant": "c5e27550-adab-4cf9-9d56-960d8cc2bd05",
+        "swept": 1,
+        "failures": 0,
+        "reconcilerProcessId": "65056",
+        "reconcilerElapsedMs": 3392,
+        "stateAfterSweep": "gone"
+      }
+    },
+    "usage": {
+      "step": "usage",
+      "status": "PASS",
+      "durationMs": 1551,
+      "details": {
+        "usage": {
+          "cpuSeconds": 120.13,
+          "memoryGiBSeconds": 120.13,
+          "egressBytes": 0,
+          "basis": "RESERVATION_WALL_CLOCK"
+        },
+        "basis": "RESERVATION_WALL_CLOCK",
+        "estimatedUsd": 0.002275,
+        "elapsedSec": 123,
+        "vendorMetrics": {
+          "timestampMs": 1793938367000,
+          "cpuUsedPct": 1.9444507531119992,
+          "memUsedBytes": 49577984,
+          "memTotalBytes": 1073741824,
+          "diskUsedBytes": 53248,
+          "diskTotalBytes": 3221225472
+        }
+      }
+    },
+    "stop": {
+      "step": "stop",
+      "status": "PASS",
+      "durationMs": 4636,
+      "details": {
+        "latencyMs": 4636
+      }
+    },
+    "destroy": {
+      "step": "destroy",
+      "status": "PASS",
+      "durationMs": 647,
+      "details": {
+        "latencyMs": 647
+      }
+    },
+    "cleanupVerify": {
+      "step": "cleanupVerify",
+      "status": "FAIL",
+      "durationMs": 8205,
+      "error": "Error: tenant still owns live sandboxes: c1ab5629-ee0d-4034-94e2-f82870942812"
+    }
+  },
+  "measurements": {
+    "createLatencyMs": 658,
+    "readyLatencyMs": 1678,
+    "firstCommandLatencyMs": 5853,
+    "commandLatencyMs": 6022,
+    "fileWriteLatencyMs": 4767,
+    "fileReadLatencyMs": 2475,
+    "timeoutObservedMs": 4351,
+    "cancelObservedMs": 1007,
+    "stopLatencyMs": 4636,
+    "destroyLatencyMs": 647,
+    "reconcileLatencyMs": 3392
+  },
+  "isolation": {
+    "egressBlocked": true,
+    "metadataEndpointReachable": true,
+    "crossTenantHandleDenied": true,
+    "crossTenantFileVisible": false,
+    "sandboxClassReported": "container",
+    "snapshotReported": "daytona-small",
+    "kernelRelease": "6.8.0-124-generic",
+    "cgroupDriver": "vm-init-scope",
+    "cgroupCpuMax": "100000 100000",
+    "uid": 1001,
+    "networkBlockAllReported": true
+  },
+  "cleanup": {
+    "liveBeforeDestroy": 2,
+    "vendorLiveAfterDestroy": 1,
+    "ownerWideLiveAfterDestroy": 0,
+    "orphanSweptCount": 1,
+    "orphanSweepFailures": 0,
+    "orphanSweepProcessId": "65056"
+  },
+  "usage": {
+    "cpuSeconds": 120.13,
+    "memoryGiBSeconds": 120.13,
+    "egressBytes": 0,
+    "basis": "RESERVATION_WALL_CLOCK"
+  },
+  "cost": {
+    "estimatedUsd": 0.002275,
+    "estimatedPerMinuteUsd": 0.00111,
+    "rateCard": {
+      "vCpuHourUsd": 0.0504,
+      "memoryGiBHourUsd": 0.0162,
+      "storageGiBHourUsd": 0.000108
+    }
+  },
+  "limits": {
+    "requestedCpu": 1,
+    "requestedMemoryMiB": 1024,
+    "maxLifetimeSec": 120,
+    "vendorTtlMinutes": 2,
+    "idleStopMinutes": 2,
+    "concurrencyCap": 2
+  },
+  "findings": [
+    "SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true",
+    "run aborted: Error: tenant still owns live sandboxes: c1ab5629-ee0d-4034-94e2-f82870942812"
+  ]
+}

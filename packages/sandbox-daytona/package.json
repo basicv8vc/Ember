@@ -1,0 +1,26 @@
+{
+  "name": "@ember/sandbox-daytona",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {
+    "@daytonaio/sdk": "0.230.0",
+    "@ember/contracts": "workspace:*",
+    "@ember/domain": "workspace:*",
+    "zod": "4.6.7"
+  }
+}

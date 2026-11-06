@@ -6,6 +6,10 @@ packages:
 # so a fresh `pnpm install` behaves identically on every machine.
 allowBuilds:
   esbuild: true
+  # Pulled in transitively by @opentelemetry through @daytonaio/sdk. Its postinstall only
+  # builds the pbjs/pbts CLI shims, which the sandbox adapter never calls, so the script is
+  # denied rather than allowed to run on every install.
+  protobufjs: false
 
 # pnpm 12's supply-chain policy refuses very recent package versions by default.
 # The lockfile pins these exact versions, so the exceptions are recorded here to keep
@@ -22,3 +26,7 @@ minimumReleaseAgeExclude:
   - '@typescript-eslint/utils@8.72.1'
   - '@typescript-eslint/visitor-keys@8.72.1'
   - typescript-eslint@8.72.1
+  - '@daytona/analytics-api-client@0.230.0'
+  - '@daytona/api-client@0.230.0'
+  - '@daytona/toolbox-api-client@0.230.0'
+  - '@daytonaio/sdk@0.230.0'

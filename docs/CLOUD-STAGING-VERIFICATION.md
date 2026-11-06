@@ -54,9 +54,12 @@ the single public surface. The Worker starts with `modelExecution: "disabled"` �
 turn responder, a submitted Turn stays durably pending, which is the staging contract
 until a reviewed real-model configuration exists.
 
-The acceptance profile (`NODE_ENV=test`, `EMBER_MODEL_EXECUTION=fake`, isolated volumes and
-ports) additionally proves the same images boot with the B2 responder
-(`model assistant turn responder enabled`, mode `fake`) — see §6.
+The acceptance profile (`NODE_ENV=test`, `EMBER_MODEL_EXECUTION=fake`, a per-run unique
+`ember-e2e-*` volume namespace and loopback-only ports) additionally proves the same
+images boot with the B2 responder (`model assistant turn responder enabled`, mode `fake`)
+— see §6. Every E2E run generates its own compose project name and volume prefix and
+force-injects them, so a run can never address (or tear down) volumes owned by staging or
+production; teardown removes only the resources that run created.
 
 ## 3. Migrations apply and are idempotent (acceptance 3)
 

@@ -26,8 +26,10 @@
  * Usage:
  *   node infra/staging/scripts/cloud-e2e.mjs --env-file /tmp/ember-staging-e2e.env [--keep]
  *
- * The env file must pass `preflight.sh --mode=e2e`. The script owns the compose project
- * named by EMBER_VOLUME_PREFIX and tears it down afterwards unless `--keep` is given.
+ * The env file must pass `preflight.sh --mode=e2e`. Every run generates its own unique
+ * compose project name and volume prefix (`ember-e2e-<run>`) and force-injects it into
+ * every compose invocation, so no environment file can point a run at volumes owned by a
+ * shared deployment. Teardown only ever removes the resources this run created.
  */
 
 import { spawnSync } from 'node:child_process';
@@ -36,7 +38,7 @@ import { request as httpsRequest } from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
-import { parseEnvFile } from './preflight.mjs';
+import { generateE2eRunPrefix, isE2eRunPrefix, parseEnvFile } from './preflight.mjs';
 
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const SCRIPT_DIR = fileURLToPath(new URL('./', import.meta.url));
@@ -72,7 +74,22 @@ if (!args.envFile || !existsSync(args.envFile)) {
 const envMap = parseEnvFile(readFileSync(args.envFile, 'utf8'));
 const envGet = (key, fallback) => envMap.get(key) ?? fallback;
 
-const PROJECT = envGet('EMBER_VOLUME_PREFIX', 'ember-staging-e2e');
+// The compose project name and volume prefix are GENERATED per run and never taken from
+// the environment file. An environment file may not select the namespace at all: a
+// carried prefix outside `ember-e2e-*` (e.g. `ember-staging`, `ember-production`) is
+// refused outright, and even a valid one is ignored. Combined with the forced injection
+// below (shell env wins over `--env-file` interpolation), no run can ever address —
+// much less tear down — volumes owned by a shared deployment.
+const FILE_PREFIX = envMap.get('EMBER_VOLUME_PREFIX');
+if (FILE_PREFIX !== undefined && !isE2eRunPrefix(FILE_PREFIX)) {
+  process.stderr.write(
+    `refusing to run: ${args.envFile} carries EMBER_VOLUME_PREFIX=${FILE_PREFIX}, ` +
+      'which is outside the acceptance-run namespace (ember-e2e-*); it could address ' +
+      'volumes owned by a live deployment. Remove the variable or use an ember-e2e-* value.\n',
+  );
+  process.exit(2);
+}
+const PROJECT = generateE2eRunPrefix();
 const HOSTNAME = envGet('EMBER_STAGING_HOSTNAME', 'localhost');
 const HTTPS_PORT = envGet('EMBER_EDGE_HTTPS_PORT', '443');
 const BASE_URL = HTTPS_PORT === '443' ? `https://${HOSTNAME}` : `https://${HOSTNAME}:${HTTPS_PORT}`;
@@ -93,11 +110,26 @@ const composeArgs = [
 /** Internal CA certificate (Caddy local authority), extracted before the first TLS call. */
 let caCert = '';
 
+/**
+ * Environment for every compose/docker invocation. `EMBER_VOLUME_PREFIX` and
+ * `EMBER_EDGE_BIND` are force-injected: Docker Compose interpolates shell variables
+ * ahead of `--env-file`, so an environment file can neither select the volume namespace
+ * nor open the acceptance stack beyond loopback.
+ */
+function composeEnv() {
+  return {
+    ...process.env,
+    EMBER_STAGING_ENV_FILE: args.envFile,
+    EMBER_VOLUME_PREFIX: PROJECT,
+    EMBER_EDGE_BIND: '127.0.0.1',
+  };
+}
+
 function compose(command, { capture = true, allowFail = false } = {}) {
   const result = spawnSync('docker', [...composeArgs, ...command], {
     cwd: REPO_ROOT,
     encoding: 'utf8',
-    env: { ...process.env, EMBER_STAGING_ENV_FILE: args.envFile },
+    env: composeEnv(),
     maxBuffer: 32 * 1024 * 1024,
   });
   const output = `${result.stdout ?? ''}${result.stderr ?? ''}`;
@@ -193,11 +225,19 @@ async function main() {
     `project: ${PROJECT}\nbase url: ${BASE_URL}\nmigrations on disk: ${expectedMigrations}\n`,
   );
 
+  // Publish the generated project name so CI failure handlers can collect logs without
+  // hardcoding a namespace.
+  const projectFile = process.env.EMBER_E2E_PROJECT_FILE ?? '/tmp/ember-cloud-e2e-project';
   try {
-    // The e2e project owns its prefixed volumes: start from a clean slate so the
-    // throwaway password generated for this run always matches the database.
-    compose(['down', '--volumes', '--remove-orphans'], { allowFail: true });
+    writeFileSync(projectFile, `${PROJECT}\n`, { mode: 0o600 });
+  } catch {
+    // purely informational
+  }
 
+  try {
+    // No pre-run `down --volumes`: the project name is unique per run, so the stack
+    // always starts on volumes this run itself creates. There is no prior state to
+    // "clean" — and any such command could only ever have been aimed at someone else's.
     // ---- 1. PostgreSQL + migrations ----------------------------------------------------
     compose(['up', '-d', '--wait', '--wait-timeout', '120', 'postgres']);
     record('E-1a PostgreSQL 17 starts healthy', true);
@@ -269,7 +309,7 @@ async function main() {
       {
         cwd: REPO_ROOT,
         encoding: 'utf8',
-        env: { ...process.env, EMBER_STAGING_ENV_FILE: args.envFile },
+        env: composeEnv(),
       },
     );
     const signinLine = (signin.stdout ?? '')
@@ -480,7 +520,10 @@ async function main() {
   } finally {
     if (!args.keep) {
       try {
-        compose(['down', '--remove-orphans'], { allowFail: true });
+        // Teardown is scoped to this run by construction: `-p` is the generated project
+        // name and the volumes are named `<generated prefix>-<role>`, so `--volumes`
+        // removes only the volumes this run created.
+        compose(['down', '--volumes', '--remove-orphans'], { allowFail: true });
       } catch {
         // teardown is best-effort
       }

@@ -3,6 +3,8 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import {
   evaluateStagingEnv,
+  generateE2eRunPrefix,
+  isE2eRunPrefix,
   parseEnvFile,
   type GuardResult,
 } from '../../../infra/staging/scripts/preflight.mjs';
@@ -240,6 +242,73 @@ describe('e2e acceptance profile guard', () => {
     expect(refused).toContain('E_MODEL_EXECUTION');
     expect(refused).toContain('E_NODE_ENV');
     expect(refused).toContain('E_EMBER_ENV');
+  });
+
+  it('refuses a volume prefix that addresses a shared deployment', () => {
+    // The P0 scenario: an environment file carrying the staging/production volume
+    // prefix would make a harness `down --volumes` delete live data volumes. In e2e
+    // mode only the ember-e2e-* acceptance namespace is ever addressable.
+    for (const value of [
+      'ember-staging',
+      'ember-staging-e2e',
+      'ember-production',
+      'ember-staging-pgdata',
+      'Ember-Staging',
+      'ember-e2e-UPPER',
+      'ember-e2e-',
+      'ember-e2e',
+      'e2e',
+      'default',
+      '',
+      '  ember-e2e-x  ',
+      'ember-e2e-x;down',
+      'ember-e2e-x/../ember-staging',
+    ]) {
+      const env = resolvedE2eEnv();
+      env.set('EMBER_VOLUME_PREFIX', value);
+      expect(codes(evaluateStagingEnv(env, { mode: 'e2e' })), `prefix=${JSON.stringify(value)}`).toContain(
+        'E_E2E_VOLUME_PREFIX',
+      );
+    }
+  });
+
+  it('refuses an e2e environment with no volume prefix at all', () => {
+    // compose.yaml falls back to `ember-staging` when the variable is absent — the
+    // worst possible default for an acceptance run, so the guard demands an explicit
+    // acceptance-namespace prefix.
+    const env = resolvedE2eEnv();
+    env.delete('EMBER_VOLUME_PREFIX');
+
+    expect(codes(evaluateStagingEnv(env, { mode: 'e2e' }))).toContain('E_E2E_VOLUME_PREFIX');
+  });
+
+  it('accepts only ember-e2e-* run prefixes', () => {
+    expect(isE2eRunPrefix('ember-e2e-1')).toBe(true);
+    expect(isE2eRunPrefix('ember-e2e-mabc123f')).toBe(true);
+    expect(isE2eRunPrefix('ember-e2e-placeholder')).toBe(true);
+    expect(isE2eRunPrefix('ember-staging')).toBe(false);
+    expect(isE2eRunPrefix('ember-staging-e2e')).toBe(false);
+    expect(isE2eRunPrefix('ember-production')).toBe(false);
+    expect(isE2eRunPrefix(undefined)).toBe(false);
+    expect(isE2eRunPrefix('')).toBe(false);
+    expect(isE2eRunPrefix('ember-e2e-')).toBe(false);
+  });
+
+  it('generates a unique acceptance-run prefix per call', () => {
+    const seen = new Set<string>();
+    for (let i = 0; i < 64; i += 1) {
+      const prefix = generateE2eRunPrefix();
+      expect(isE2eRunPrefix(prefix), prefix).toBe(true);
+      seen.add(prefix);
+    }
+    expect(seen.size).toBe(64);
+  });
+
+  it('ignores the volume namespace in every deployment mode except e2e', () => {
+    // The prefix rule is e2e-scoped: staging/local compose defaults (`ember-staging`)
+    // are legitimate there and must not start failing.
+    const env = resolvedStagingEnv();
+    expect(codes(evaluateStagingEnv(env))).not.toContain('E_E2E_VOLUME_PREFIX');
   });
 });
 

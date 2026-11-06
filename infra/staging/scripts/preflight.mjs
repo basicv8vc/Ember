@@ -17,6 +17,7 @@
  */
 
 import { readFileSync } from 'node:fs';
+import { randomBytes } from 'node:crypto';
 
 export const GUARD_VERSION = '1';
 
@@ -57,6 +58,31 @@ const LOCAL_HOSTNAMES = new Set(['localhost', 'api.localhost']);
 
 /** Variables that mean "accept a certificate that cannot be verified". */
 const TLS_BYPASS_VARIABLES = ['NODE_TLS_REJECT_UNAUTHORIZED', 'NODE_EXTRA_CA_CERTS_INSECURE'];
+
+/**
+ * Namespace an acceptance run is allowed to own.
+ *
+ * `compose.yaml` names every data volume `${EMBER_VOLUME_PREFIX}-<role>` and falls back to
+ * `ember-staging`, so an E2E environment file that carried `EMBER_VOLUME_PREFIX=ember-staging`
+ * would make the harness address — and clean up — the live staging volumes. The guard
+ * therefore refuses every prefix outside `ember-e2e-*` in e2e mode, and the harness
+ * additionally generates its own unique prefix per run instead of trusting the file.
+ */
+const E2E_RUN_PREFIX_PATTERN = /^ember-e2e-[a-z0-9][a-z0-9-]*$/;
+
+/** True when `value` is a volume/project prefix an acceptance run may own. */
+export function isE2eRunPrefix(value) {
+  return E2E_RUN_PREFIX_PATTERN.test(value ?? '');
+}
+
+/**
+ * A unique compose project name and volume prefix for one acceptance run. Generated at
+ * run start and never read back from an environment file, so no run can ever point at
+ * the staging or production volume set and teardown can only reach what it created.
+ */
+export function generateE2eRunPrefix() {
+  return `ember-e2e-${Date.now().toString(36)}-${randomBytes(4).toString('hex')}`;
+}
 
 /**
  * Parse a dotenv-style file.
@@ -313,6 +339,16 @@ export function evaluateStagingEnv(env, options = {}) {
       'must be true; the API refuses a non-loopback listener otherwise and the container would never start',
     );
   }
+  if (mode === 'e2e' && get('EMBER_EDGE_BIND') !== '127.0.0.1') {
+    // The acceptance profile must never publish a port off-host. The edge bind is the one
+    // listener whose address comes from the environment, so it is pinned here and again
+    // force-injected by the harness (process env overrides `--env-file` interpolation).
+    add(
+      'E_EDGE_BIND',
+      'EMBER_EDGE_BIND',
+      `must be 127.0.0.1 in e2e mode (got ${describe(get('EMBER_EDGE_BIND'))}); the acceptance stack must never be reachable off-host`,
+    );
+  }
 
   // ---- 6. Apple audience ----------------------------------------------------------------
   const bundleId = get('EMBER_APPLE_BUNDLE_ID');
@@ -425,6 +461,24 @@ export function evaluateStagingEnv(env, options = {}) {
         'E_PLACEHOLDER_VALUE',
         key,
         'still contains a template placeholder; the example file is not deployable as-is',
+      );
+    }
+  }
+
+  // ---- 11. Acceptance-run volume namespace (e2e only) ------------------------------------
+  // An e2e run may only ever address volumes inside its own `ember-e2e-*` namespace. A
+  // prefix outside that namespace — `ember-staging`, `ember-staging-e2e`, `ember-production`,
+  // anything else — would make the harness point at (and tear down) volumes that belong to
+  // a live deployment. The harness itself additionally generates a unique prefix per run
+  // and force-injects it, so an environment file cannot select the namespace at all; this
+  // rule is the fail-closed backstop for anyone composing `--env-file` by hand.
+  if (mode === 'e2e') {
+    const prefix = get('EMBER_VOLUME_PREFIX');
+    if (!isE2eRunPrefix(prefix)) {
+      add(
+        'E_E2E_VOLUME_PREFIX',
+        'EMBER_VOLUME_PREFIX',
+        `must be an acceptance-run prefix matching "ember-e2e-*" (got ${describe(prefix)}); any other prefix would address volumes owned by a shared deployment and the run's teardown would delete them`,
       );
     }
   }

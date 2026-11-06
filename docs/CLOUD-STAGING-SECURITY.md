@@ -189,8 +189,13 @@ Two guards keep the alternatives off the table, both verified against the runnin
 - `EMBER_MODEL_EXECUTION=fake` is **refused under `NODE_ENV=staging`** (B2 boundary: a
   process that claims to be a live deployment must never serve simulated replies). The
   full-lifecycle E2E therefore runs the documented `e2e` acceptance profile
-  (`NODE_ENV=test`, same images, isolated volumes/ports) — `preflight --mode=e2e` allows
-  `fake` there and nowhere else, and refuses `real` in every mode.
+  (`NODE_ENV=test`, same images, per-run `ember-e2e-*` volume namespace and
+  loopback-only ports) — `preflight --mode=e2e` allows
+  `fake` there and nowhere else, and refuses `real` in every mode. The harness generates
+  a unique compose project name and volume prefix per run and force-injects them
+  (shell env beats `--env-file`), refuses environment files carrying any other prefix,
+  never runs a pre-test `down --volumes`, and tears down only the resources the run
+  itself created.
 - `EMBER_MODEL_EXECUTION=real` cannot boot at all today (`model_not_approved`: the
   code-owned approval registry is empty and no invoice-verified rate or credential exists).
   There is no silent downgrade to `fake`.

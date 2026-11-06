@@ -27,6 +27,10 @@ export interface GuardResult {
 
 export declare function parseEnvFile(text: string): Map<string, string>;
 
+export declare function isE2eRunPrefix(value: string | undefined): boolean;
+
+export declare function generateE2eRunPrefix(): string;
+
 export declare function evaluateStagingEnv(
   env: Map<string, string>,
   options?: { readonly mode?: 'staging' | 'local' | 'e2e' },

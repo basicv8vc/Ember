@@ -216,5 +216,10 @@ jobs:
       - name: Container logs on failure
         if: failure()
         run: |
-          docker compose -p ember-staging-e2e --env-file /tmp/ember-staging-e2e.env \
-            -f infra/staging/compose.yaml logs --tail=200 || true
+          # The E2E harness generates a unique compose project name per run and
+          # publishes it here; nothing outside the run can select the namespace.
+          PROJECT="$(cat /tmp/ember-cloud-e2e-project 2>/dev/null || true)"
+          if [ -n "$PROJECT" ]; then
+            docker compose -p "$PROJECT" --env-file /tmp/ember-staging-e2e.env \
+              -f infra/staging/compose.yaml logs --tail=200 || true
+          fi

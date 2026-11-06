@@ -11,7 +11,9 @@
 #
 # The e2e profile is acceptance-only: NODE_ENV=test + EMBER_MODEL_EXECUTION=fake. It can
 # never be a deployment — the preflight refuses staging markers in this mode and refuses
-# `fake` in every other mode.
+# `fake` in every other mode. Each run generates a unique compose project name and
+# `ember-e2e-*` volume prefix (never taken from the env file), force-injects them into
+# every compose call, and tears down only the resources that run created.
 #
 # Exit codes: 0 = all checks passed, 1 = a check failed, 2 = usage.
 

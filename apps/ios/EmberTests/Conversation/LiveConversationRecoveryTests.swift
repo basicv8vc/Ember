@@ -457,11 +457,13 @@ final class LiveConversationRecoveryTests: XCTestCase {
             XCTAssertTrue(retryable)
         } else { XCTFail("ambiguous ACK should be visible as a recoverable failure") }
         XCTAssertTrue(model.screen.timeline.isEmpty)
-        XCTAssertNotNil(try await repository.pending())
+        let unresolved = try await repository.pending()
+        XCTAssertNotNil(unresolved)
 
         await model.retry()
         XCTAssertEqual(model.command, .acknowledged)
-        XCTAssertNil(try await repository.pending())
+        let reconciled = try await repository.pending()
+        XCTAssertNil(reconciled)
         XCTAssertEqual(capture.sentIDs.count, 1, "the UI must never mint a second POST ID")
         XCTAssertEqual(capture.lookups, 1)
         let rows = model.screen.timeline.compactMap { entry -> String? in
@@ -511,7 +513,8 @@ final class LiveConversationRecoveryTests: XCTestCase {
         XCTAssertEqual(cancels.value, 1)
         XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertNil(try await repository.activeTurn())
+        let active = try await repository.activeTurn()
+        XCTAssertNil(active)
         model.suspendForDisappearance()
     }
 

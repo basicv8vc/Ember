@@ -1,7 +1,8 @@
 # P0-C4: Daytona Sandbox Provider PoC
 
-**Status:** Real measurement **COMPLETE** — 3 runs, all 15 steps PASS. Report status FAIL
-due to confirmed security finding (metadata endpoint reachable).
+**Status:** Functional PoC **COMPLETE**. Production security **NO-GO** (see §9).
+Second-pass layered egress measurement complete (runs 06–08); first-pass runs 01–03 kept
+for latency baselines. Report status FAIL by design whenever the L4 link-local gap is open.
 **Date:** 2026-11-06
 **Branch:** `feature/daytona-sandbox-poc`
 **Base:** `main@c6c9c3d650f977f3783fa73b941f677639a449ff`
@@ -11,20 +12,45 @@ due to confirmed security finding (metadata endpoint reachable).
 
 ## 1. Executive Summary
 
-Daytona is now the primary sandbox provider candidate for Ember V1. This PoC delivers a
-complete `DaytonaSandboxProvider` adapter implementing the existing provider-neutral
-`SandboxProvider` contract, a real-remote smoke harness covering all required lifecycle
-steps, and 51 unit tests driven by an in-memory fake SDK client.
+Daytona is the primary sandbox provider candidate for Ember V1 (E2B deferred). This PoC
+delivers a complete `DaytonaSandboxProvider` adapter implementing the existing
+provider-neutral `SandboxProvider` contract, a real-remote smoke harness covering all
+required lifecycle steps, and 54 unit tests driven by an in-memory fake SDK client.
 
-**Three real smoke runs completed** with a free-tier account. All 15 steps PASS in every
-run. The overall report status is **FAIL** because the smoke harness confirmed a **critical
-security finding**: the cloud metadata endpoint (`169.254.169.254`) is reachable from
-inside the sandbox despite `networkBlockAll: true`.
+**Functional result: PASS.** Create/exec/files/timeout/cancel/cleanup/reconcile all work;
+latencies and cost are small (§6). **Security result: NO-GO for production** (§9).
+
+**Second-pass network findings (CTO review 2026-11-06, runs 06–08).** The egress probe was
+redesigned as five independent layers after review pointed out that a TCP connect proves
+neither HTTP reachability nor credential exposure. The measured profile is identical in
+3/3 runs:
+
+| Layer                                               | Result                     |
+| :-------------------------------------------------- | :------------------------- |
+| DNS (`example.com`)                                 | blocked (`gaierror`)       |
+| Raw TCP `1.1.1.1:443`                               | **connects**               |
+| Raw TCP `169.254.169.254:80`                        | **connects**               |
+| HTTP to metadata paths (IMDSv1 root + IMDSv2 token) | **`403`, `Server: envoy`** |
+| HTTPS `https://example.com`                         | blocked                    |
+
+Interpretation: the boundary is an **HTTP-layer egress proxy (envoy)** with a domain
+whitelist — the vendor's public `sandbox-network-whitelist` repo self-describes as
+"ALLOWED DOMAINS FOR ENVOY PROXY". L4 is not filtered; L7 denies non-whitelisted
+destinations, including link-local. **No metadata service has ever returned data;
+credential exposure is NOT proven** (the probe reads status codes only — never bodies,
+never `user-data`, never IAM credential paths). The gap that remains real: the network
+layer does not drop link-local traffic, so the guarantee is proxy-shaped, not
+firewall-shaped. Details in the Security Gap Report (G-2, G-12).
+
+**Tier caveat (official docs).** On Tier 1/2 (this account is Tier 1: email-only),
+sandbox-level network settings are **not enforced** — the org policy takes precedence.
+Strict `networkBlockAll` enforcement exists only on Tier 3+. The API's
+`networkBlockAll: true` echo must not be cited as proof of enforcement.
 
 **Key architectural finding:** Daytona's default sandbox class is a
 **shared-kernel container** (not a VM). The `linux-vm` class is opt-in and available.
-Empirically, the container class runs under `vm-init-scope` cgroups with kernel
-`6.8.0-xxx-generic` — shared with the host. This is documented in the Security Gap Report.
+Empirically, the container class runs the host vendor kernel (`6.8.0-xxx` / `7.0.0-xxx
+-generic` across runs). This is documented in the Security Gap Report (G-1).
 
 ---
 
@@ -110,7 +136,11 @@ The adapter implements the existing `SandboxProvider` interface without modifica
 
 ---
 
-## 6. Real Measurements (3 runs)
+## 6. Real Measurements
+
+**Pass 1 (runs 01–03):** latency/cost baselines (kept below). **Pass 2 (runs 06–08):**
+layered network probes after CTO review. Report `status: FAIL` is the validator refusing
+to pass while the L4 link-local gap is open — the functional steps themselves pass.
 
 > All measurements are **real**, captured from live Daytona sandboxes on 2026-11-06.
 > Free-tier account. No simulated or estimated values.
@@ -134,20 +164,31 @@ The adapter implements the existing `SandboxProvider` interface without modifica
 Run 3 had `stopLatencyMs` / `destroyLatencyMs` as N/A (cleanup step timing artifact;
 destroy itself succeeded as verified by `orphanSweptCount: 1`).
 
-### Isolation (all 3 runs consistent)
+### Isolation — second-pass layered probe (runs 06–08, consistent 3/3)
 
-| Property                    | Value                                         |
-| :-------------------------- | :-------------------------------------------- |
-| Egress blocked              | ✅ `true` (public internet unreachable)       |
-| Metadata endpoint reachable | ❌ **`true`** (`169.254.169.254:80` connects) |
-| Cross-tenant handle denied  | ✅ `true`                                     |
-| Cross-tenant file visible   | ✅ `false`                                    |
-| Sandbox class reported      | `container`                                   |
-| Kernel release              | `6.8.0-xxx-generic` (shared with host)        |
-| cgroup driver               | `vm-init-scope`                               |
-| cgroup CPU max              | `100000 100000` (1 vCPU)                      |
-| UID                         | `1001`                                        |
-| Network block-all reported  | ✅ `true`                                     |
+| Property                            | Value                                                                                  |
+| :---------------------------------- | :------------------------------------------------------------------------------------- |
+| DNS blocked                         | ✅ `true` (`gaierror`)                                                                 |
+| Public TCP blocked (`1.1.1.1:443`)  | ❌ **connects** (L4 not filtered)                                                      |
+| HTTPS egress blocked                | ✅ `true` (public internet unreachable)                                                |
+| Metadata TCP (`169.254.169.254:80`) | ❌ **connects** (L4 not filtered)                                                      |
+| Metadata HTTP (IMDSv1 root)         | **`403`, `Server: envoy`** — egress proxy denies it                                    |
+| Metadata HTTP (IMDSv2 token)        | **`403`, `Server: envoy`** — same                                                      |
+| Credential exposure                 | **NOT proven** — bodies never read; `user-data`/IAM paths never requested              |
+| Cross-tenant handle denied          | ✅ `true` (adapter-local record scope — see §8)                                        |
+| Cross-tenant file visible           | ✅ `false` (separate sandbox filesystems — see §8)                                     |
+| Sandbox class reported              | `container`                                                                            |
+| Kernel release                      | `6.8.0-xxx` / `7.0.0-xxx-generic` (vendor host kernel)                                 |
+| cgroup driver                       | `vm-init-scope` (heuristic does **not** distinguish Daytona classes)                   |
+| cgroup CPU max                      | `100000 100000` (1 vCPU)                                                               |
+| UID                                 | `1001`                                                                                 |
+| Network block-all reported          | ⚠️ `true` — echoed by API, but Tier 1/2 does not enforce sandbox-level settings (G-12) |
+
+The precise security statement: **the link-local path is not dropped at the network
+layer (TCP connects), and is denied only at the HTTP layer by an envoy egress proxy
+(403). No metadata service response has been observed; no credentials were ever
+requested or read by the probe.** See Security Gap Report G-2 for the full
+interpretation and G-12 for the tier-policy caveat.
 
 ### Cleanup (all 3 runs)
 
@@ -210,51 +251,74 @@ within 2 minutes of idle time.
 
 ---
 
-## 8. Multi-Tenant Isolation
+## 8. Multi-Tenant Isolation (scope narrowed per CTO review)
 
-**Empirically verified** across 3 runs:
+**Empirically verified** across runs:
 
 1. Sandbox A (tenant A) writes a file to its workspace
-2. Sandbox B (tenant B) attempts to read the same path
+2. Sandbox B (tenant B) attempts to read the same absolute path
 3. **Result:** `crossTenantFileVisible: false` — file does not exist in tenant B
 4. **Result:** `crossTenantHandleDenied: true` — cross-tenant sandbox handle rejected
 
-Each sandbox has its own filesystem. Tenant B cannot access tenant A's files.
+**What this actually proves (be precise):**
+
+- Two sandboxes have separate filesystems — expected vendor behaviour, demonstrated.
+- The _Ember adapter_ refuses a sandbox id it does not own (its tenant-scoped record map
+  rejects before any vendor API call). That is an adapter property, tested.
+
+**What it does NOT prove:** Daytona's _control-plane_ cross-account isolation (whether a
+second org's API key could address this org's sandboxes). That is a vendor-side property
+we cannot exercise from a single account and have not tested. Do not cite §8 as
+control-plane proof.
 
 ---
 
 ## 9. GO / NO-GO Recommendation
 
-### Verdict: **CONDITIONAL GO — pending metadata endpoint mitigation**
+### Verdict (2026-11-06, aligned with CTO review)
 
-Three real runs completed with all 15 steps PASS. Latency, isolation, crash recovery,
-and cost are all measured and within acceptable bounds. **One critical security finding
-blocks unconditional GO.**
+- **Functional PoC: GO.** The adapter and harness work; latency and cost are small.
+- **Production security: NO-GO.** The L4 link-local gap (G-2) is open, the enforcement
+  semantics of `networkBlockAll` on this tier are not what the field name implies (G-12),
+  and the default class shares the host kernel (G-1).
+- **PR #125 stays Draft. The adapter must not be wired into any production execution
+  path.** Ember's internal Alpha proceeds with sandbox code execution **off**
+  (iPhone → Cloud API → Worker → LLM → persisted reply only).
 
 ### What is proven
 
-| Gate                             | Status         |
-| :------------------------------- | :------------- |
-| All 15 smoke steps pass          | ✅ 3/3 runs    |
-| Create latency < 10 s            | ✅ 834 ms p95  |
-| Exec latency < 10 s              | ✅ 6.4 s p95   |
-| Cross-tenant isolation           | ✅ Verified    |
-| Crash recovery (reconciler)      | ✅ Verified    |
-| Cost within free tier            | ✅ ~$0.002/run |
-| Egress blocked (public internet) | ✅ Verified    |
+| Gate                                  | Status                                            |
+| :------------------------------------ | :------------------------------------------------ |
+| Functional flow (create/exec/files/…) | ✅ runs 01–08                                     |
+| Create latency < 10 s                 | ✅ 834 ms p95 (first pass)                        |
+| Egress: DNS + HTTPS blocked           | ✅ 3/3 (second pass)                              |
+| Metadata credentials exposure         | ✅ **not exposed** — 403 envoy, bodies never read |
+| Crash recovery (reconciler)           | ✅ runs 01–08 (`orphanSweptCount: 1` each)        |
+| Cost within free tier                 | ✅ ~$0.002–0.0026/run                             |
+| Cross-tenant (adapter scope, see §8)  | ✅ verified within stated scope                   |
 
-### What blocks GO
+### What blocks production GO
 
-| Finding                            | Severity | Status       |
-| :--------------------------------- | :------- | :----------- |
-| Metadata endpoint reachable        | CRITICAL | ❌ Confirmed |
-| Container class shares host kernel | HIGH     | ⚠️ By design |
+| Finding                                                   | Severity | Status     |
+| :-------------------------------------------------------- | :------- | :--------- |
+| Link-local not dropped at L4 (G-2)                        | CRITICAL | ❌ open    |
+| Tier 1/2 does not enforce sandbox-level net policy (G-12) | HIGH     | ❌ open    |
+| Container class shares host kernel (G-1)                  | CRITICAL | ❌ open    |
+| linux-vm untested — snapshot not provisioned (App. B)     | HIGH     | ⛔ BLOCKED |
 
-### Gates to flip to unconditional GO
+### Gates to flip to production GO
 
-1. **Block `169.254.169.254`** via `networkAllowList` or switch to `linux-vm` class
-2. **Re-run smoke** and confirm `metadataEndpointReachable: false`
-3. **Decide container vs `linux-vm`** for V1 workloads
+1. **Close the L4 link-local gap with vendor-enforced policy:** re-run the layered probe
+   on Tier 3 (strict `networkBlockAll`) **or** obtain written vendor confirmation of what
+   is enforced at L3/L4/L7 per tier. L7 envoy-403 alone is not a firewall guarantee.
+2. **Decide container vs `linux-vm`** for V1 workloads; provision the VM snapshot
+   (`daytona-linux-vm`, Dashboard) and measure kernel + network as separate properties.
+3. **Re-run smoke** and require `metadataTcpReachable: false` (network-layer drop), not
+   merely an HTTP-layer denial.
+
+_Note:_ the first-pass mitigations "allow-list `169.254.169.254/32`", "`linux-vm` fixes
+networking", and "`AWS_EC2_METADATA_DISABLED=true`" are all **withdrawn** — see Security
+Gap Report G-2 "Retractions".
 
 ### Commands
 
@@ -279,15 +343,16 @@ pnpm sandbox:smoke:daytona --out docs/evidence/run.txt --json-out docs/evidence/
 
 ## 11. Verification
 
-| Command                      | Exit  | Result                            |
-| :--------------------------- | :---: | :-------------------------------- |
-| `tsc -p tsconfig.json`       |   0   | Clean                             |
-| `tsc -b tsconfig.build.json` |   0   | Clean                             |
-| `prettier --check .`         |   0   | Clean                             |
-| `eslint` (new files)         |   0   | 0 errors / 0 warnings             |
-| `vitest run` (new tests)     |   0   | 51/51 pass                        |
-| `vitest run` (full suite)    |   1   | 1305 pass, 1 pre-existing failure |
-| `pnpm sandbox:smoke:daytona` | **1** | FAIL — metadata endpoint finding  |
+| Command                      | Exit  | Result                                          |
+| :--------------------------- | :---: | :---------------------------------------------- |
+| `tsc -p tsconfig.json`       |   0   | Clean                                           |
+| `tsc -b tsconfig.build.json` |   0   | Clean                                           |
+| `prettier --check .`         |   0   | Clean                                           |
+| `eslint` (new files)         |   0   | 0 errors / 0 warnings                           |
+| `vitest run` (new tests)     |   0   | 54/54 pass (second pass; 51/51 first pass)      |
+| `vitest run` (full suite)    |   1   | 1305 pass, 1 pre-existing failure               |
+| `pnpm sandbox:smoke:daytona` | **1** | FAIL — validator refuses while G-2 gap is open  |
+| `… --profile linux-vm-small` | **1** | BLOCKED at create — VM snapshot not provisioned |
 
 The 1 unit failure is **pre-existing on `main@c6c9c3d`**: `local-blob-store.test.ts`
 (reproduces on pristine main).

@@ -9,20 +9,36 @@
 
 ## Summary
 
-12 security gaps identified (G-1 through G-12). One is CRITICAL-CONFIRMED and blocks
+12 security gaps identified (G-1 through G-12). One is CRITICAL-OPEN and blocks
 production adoption. Three are verified/closed after real testing.
 
 | Severity | Count | IDs                   |
 | :------- | :---: | :-------------------- |
 | CRITICAL |   2   | G-1, G-2 ❌           |
-| HIGH     |   2   | G-3 ✅, G-4           |
+| HIGH     |   3   | G-3 ✅, G-4, G-12     |
 | MEDIUM   |   4   | G-5 ⚠️, G-6, G-7, G-8 |
 | LOW      |   2   | G-9, G-10             |
-| INFO     |   2   | G-11 ✅, G-12         |
+| INFO     |   1   | G-11 ✅               |
 
-**Real-testing status (2026-11-06):** 3 smoke runs completed. Cross-tenant isolation (G-3)
-and SDK pinning (G-11) verified closed. Metadata endpoint reachability (G-2) confirmed
-as a real vulnerability. Crash-recovery reconciler (G-5) partially verified.
+**Real-testing status (2026-11-06, second pass):** layered egress probes (DNS / public-IP
+TCP / metadata TCP / metadata HTTP / HTTPS) deployed and measured over 3+ real runs
+(runs 06–08, evidence `docs/evidence/p0c4-daytona-run-0{6,7,8}.json`). Findings:
+
+- **G-2 refined:** `169.254.169.254:80` accepts TCP (4/4 runs), but the HTTP layer answers
+  **`403` with `Server: envoy`** on both the IMDSv1 root and the IMDSv2 token endpoint.
+  That is the Daytona egress proxy _forbidding_ the request — **no metadata service
+  response has ever been observed, and credential exposure is NOT proven** (the probe
+  never reads response bodies and never requests `user-data` or IAM credential paths).
+  The isolation gap is now precisely characterised: **L4 is not filtered; L7 is gated by
+  an HTTP proxy (envoy) that denies non-whitelisted destinations.**
+- **Same L4/L7 split for public egress:** raw TCP to `1.1.1.1:443` connects, while DNS
+  resolution and HTTPS to `example.com` fail. The "deny-all" is an HTTP-layer policy.
+- **G-3 scope corrected:** cross-tenant checks prove the _Ember adapter's_ tenant-scoped
+  bookkeeping and separate-sandbox filesystems. They are **not** evidence that the Daytona
+  control plane enforces cross-account isolation (see G-3).
+- **G-12 promoted from INFO to decision-relevant:** official Daytona docs confirm Tier 1/2
+  sandbox-level network settings are **not enforced**; strict block-all requires Tier 3+
+  (see G-12 and the tier appendix).
 
 ---
 
@@ -48,43 +64,99 @@ for isolation, not a separate kernel. The `linux-vm` class provides full VM isol
 
 ---
 
-### G-2 — Cloud metadata endpoint reachable despite networkBlockAll (CRITICAL) — CONFIRMED
+### G-2 — Link-local metadata path is not dropped at the network layer (CRITICAL) — GAP CONFIRMED, CREDENTIAL EXPOSURE UNPROVEN
 
-**Description:** `networkBlockAll: true` blocks public internet egress (confirmed:
-`egressBlocked: true`), but `169.254.169.254:80` (cloud metadata endpoint) remains
-**reachable** from inside the sandbox. Confirmed across 3 real runs.
+**Description (second pass, per CTO review 2026-11-06).** A TCP connect alone proves
+nothing about HTTP reachability and nothing about credentials. The probe was therefore
+redesigned as five layers, each measured separately:
 
-**Impact:** A compromised sandbox can query the cloud metadata service to obtain IAM
-credentials, instance identity, user-data (which may contain secrets), and network
-configuration. This is the single most exploited sandbox escape vector in cloud environments.
+| Layer            | Probe                                             | Result (runs 06–08)                           |
+| :--------------- | :------------------------------------------------ | :-------------------------------------------- |
+| L3 DNS           | `gethostbyname('example.com')`                    | **blocked** (`gaierror`)                      |
+| L4 public TCP    | connect `1.1.1.1:443`                             | **connects**                                  |
+| L4 metadata TCP  | connect `169.254.169.254:80`                      | **connects** (4/4 runs)                       |
+| L7 metadata HTTP | `GET /latest/meta-data/`, `PUT /latest/api/token` | **`403`, `Server: envoy`** (status code only) |
+| L7 public HTTPS  | `urlopen('https://example.com')`                  | **blocked** (`URLError`)                      |
 
-**Evidence (3/3 runs):**
+**What this proves:**
 
-- `metadataEndpointReachable: true`
-- `egressBlocked: true` (public internet blocked)
-- `networkBlockAllReported: true` (vendor acknowledges the setting)
+- A **network isolation gap exists**: `networkBlockAll: true` does not drop link-local
+  traffic at L3/L4. `169.254.169.254:80` completes a TCP handshake.
+- The HTTP layer is gated by an **HTTP egress proxy (`envoy`)** that answers `403` for
+  both the IMDSv1 root and the IMDSv2 token endpoint. `Server: envoy` means the response
+  came from the proxy, **not** from any cloud metadata service.
 
-**Mitigation:**
+**What this does NOT prove (and must not be claimed):**
 
-- **Immediate:** Add `169.254.169.254/32` to `networkAllowList` deny rules (if supported)
-- **Alternative:** Switch to `linux-vm` class, which has an isolated network stack
-- **Belt-and-suspenders:** Set `AWS_EC2_METADATA_DISABLED=true` or equivalent in the
-  sandbox environment (adapter currently passes no envs — this would be an exception)
-- **Verify:** Re-run `egressProbe` after mitigation; require `metadataEndpointReachable: false`
+- **Credential exposure is NOT proven.** The probe never reads response bodies, never
+  requests `user-data`, and never requests IAM credential paths. With `403/envoy` at L7,
+  no metadata service has ever returned data on this account tier.
+- IAM exposure via this vector is _actively unlikely_ on Tier 1 (the proxy forbids the
+  request before any metadata service could answer), but "unlikely on Tier 1" is not the
+  same as "impossible by construction" — the L4 hole means any non-HTTP protocol toward
+  link-local space, or any envoy bypass, is not covered by the observed policy.
 
-**Status:** ❌ CONFIRMED — blocks production adoption.
+**Impact:** exfiltration of credentials via the classic SSRF→IMDS pattern is blocked at
+L7 on Tier 1 by envoy, but the network layer does not enforce the boundary. The guarantee
+is proxy-shaped, not firewall-shaped. On Tier 3+ (where sandbox-level `networkBlockAll` is
+documented as strictly enforced) the behaviour is **untested** and must be re-measured.
+
+**Corrected mitigations** (the first-pass list contained three errors — see "Retractions"):
+
+1. **Tier upgrade to 3+ and re-measure.** Official docs: strict per-sandbox enforcement
+   (`networkBlockAll` / allow lists) exists only on Tier 3/4; Tier 1/2 org policy
+   "takes precedence" and cannot be overridden at the sandbox level. Strict block-all is
+   the only vendor knob that plausibly drops L4 — verify, do not assume.
+2. **`linux-vm` class test** (separate guest kernel). This addresses G-1 (kernel boundary).
+   It is a _network-stack_ question whether link-local is dropped there — measure it.
+   Note: on Tier 1/2 the org egress policy still applies to VMs.
+3. **Confirm the policy with Daytona.** Ask whether the egress proxy (envoy) is in-path
+   for _all_ protocols and all tiers, and whether link-local `169.254.0.0/16` is dropped
+   at L3/L4 anywhere. Draft question prepared; channel: `security@daytona.io` or the
+   `daytonaio/sandbox-network-whitelist` repo. **Not yet sent — awaiting approval.**
+4. **Application-level:** never deliver secrets through `user-data`; use short-lived,
+   audience-scoped tokens minted outside the sandbox and injected for one run.
+
+**Retractions from the first-pass mitigation list:**
+
+- ~~"Add `169.254.169.254/32` to `networkAllowList` deny rules"~~ — **wrong.** An allow
+  list is not a deny list; and per official docs the options are mutually exclusive
+  (`networkBlockAll` + a non-empty allow list returns `400`).
+- ~~"`AWS_EC2_METADATA_DISABLED=true`"~~ — **ineffective.** It only stops the _AWS SDK_
+  credential chain from consulting the metadata endpoint; raw HTTP/TCP access is
+  unaffected.
+- ~~"`linux-vm` … which has an isolated network stack"~~ — **assumption removed.** An
+  independent kernel is a separate property from "network access is forbidden"; the VM
+  test measures both properties separately.
+
+**Status:** ❌ GAP CONFIRMED at L4 (TCP connect). L7 is proxy-denied (403 envoy);
+credential exposure unproven and not observed. Blocks any "production-ready" claim.
 
 ---
 
-### G-3 — Cross-tenant filesystem isolation (HIGH) — VERIFIED ✅
+### G-3 — Cross-tenant filesystem isolation (HIGH) — VERIFIED ✅ (scope narrowed per CTO review)
 
-**Description:** Each sandbox has its own filesystem. Verified across 3 real runs:
-file written by tenant A is **not visible** to tenant B (`crossTenantFileVisible: false`),
-and cross-tenant sandbox handles are rejected (`crossTenantHandleDenied: true`).
+**Description:** Each sandbox has its own filesystem. Verified across runs: a file written
+in tenant A's sandbox is **not visible** in tenant B's sandbox (`crossTenantFileVisible:
+false`), and tenant B cannot exec through tenant A's sandbox id
+(`crossTenantHandleDenied: true`).
 
-**Impact:** Resolved. Tenant isolation is confirmed at the filesystem and control-plane level.
+**Scope of this evidence (important):**
 
-**Status:** ✅ VERIFIED — closed.
+- The file check runs `cat <absolute path>` _inside sandbox B_ — it proves two separate
+  sandboxes have separate filesystems. That is expected vendor behaviour, not a deep
+  control-plane claim.
+- The handle check is enforced by the **Ember adapter's own tenant-scoped record map**:
+  the adapter refuses an id it does not track before any vendor API call. It is therefore
+  **not** a test of Daytona's control-plane/ cross-account isolation (whether a second
+  Daytona API key could address the first org's sandboxes is a vendor question we have
+  not tested and cannot test from a single account).
+
+**Impact:** Resolved for what it actually tests (adapter bookkeeping + per-sandbox
+filesystems). Do **not** cite it as "Daytona control-plane cross-account isolation
+proven".
+
+**Status:** ✅ VERIFIED — within the scope above.
 
 ---
 
@@ -228,19 +300,47 @@ transitive or hoisted upgrade could silently change the transport contract.
 
 ---
 
-### G-12 — Free tier network restrictions may affect egress probe (INFO)
+### G-12 — Tier-based network policy determines what any sandbox-level setting can do (HIGH after review)
 
-**Description:** Daytona Tier 1 (free) accounts have network egress restrictions. The
-egress probe may fail not because the adapter's policy works, but because the vendor
-blocks egress at the tier level.
+**Description:** Official Daytona documentation (network-limits, retrieved 2026-11-06)
+states:
 
-**Mitigation:**
+> **Tier 1 & Tier 2:** Network access is restricted and **cannot be overridden at the
+> sandbox level**. Organization-level network restrictions take precedence over
+> sandbox-level settings. Even with `networkAllowList` or `domainAllowList` specified when
+> creating a sandbox, the organization's network restrictions still apply.
 
-- Document the tier restriction in the report
-- Run the egress probe on both free and paid tiers if possible
-- Distinguish between "adapter policy blocks egress" and "vendor tier blocks egress"
+> **Tier 3 & Tier 4:** … You can set custom network settings per sandbox. A sandbox-level
+> `networkAllowList`, `domainAllowList`, or `networkBlockAll` replaces the default policy
+> for that sandbox. **Enforcement is strict.**
 
-**Status:** INFORMATIONAL — document in measurement report.
+> The options are mutually exclusive. Set at most one non-empty value. Sending a
+> conflicting combination returns a `400` error.
+
+Tier access requirements (official limits page): Tier 1 = email verified; Tier 2 = credit
+card + $25 top-up; Tier 3 = $500 top-up; Tier 4 = $2,000 top-up every 30 days.
+
+**Consequences for Ember:**
+
+- The PoC account is Tier 1. `networkBlockAll: true` is **accepted and echoed back** on
+  create, but per the docs it is **not enforced at the sandbox level** on Tier 1/2 — the
+  organisation policy is what runs. The API's `networkBlockAll: true` response field must
+  never be cited as proof of enforcement.
+- What we observe (DNS blocked, HTTPS blocked, L4 connects, L7 envoy 403) is the **org
+  policy** (an egress proxy with a domain whitelist — the public
+  `daytonaio/sandbox-network-whitelist` repo documents it as "ALLOWED DOMAINS FOR ENVOY
+  PROXY"; it contains no link-local entries).
+- Strict block-all semantics are documented **only** for Tier 3+. Whether strict block-all
+  drops L4 and link-local there is **untested**.
+- Budgeting: if production requires enforced network isolation, Tier 3 ($500 top-up) is
+  the minimum documented path. This is a cost/decision item for CTO, not a code fix.
+
+**Mitigation:** re-run the layered `egressProbe` on Tier 3 (or confirm with Daytona in
+writing what Tier 1/2 and Tier 3/4 each enforce at L3/L4/L7) before any production
+network-isolation claim.
+
+**Status:** OPEN — decision-relevant; documents why the sandbox-level flag cannot clear
+G-2 on the current tier.
 
 ---
 
@@ -249,8 +349,9 @@ blocks egress at the tier level.
 Before marking the Daytona adapter as production-ready:
 
 - [ ] G-1: Decide container vs `linux-vm` class; document rationale
-- [ ] G-2: Run egress probe against real API; verify deny-all
-- [ ] G-3: Run cross-tenant isolation test; verify filesystem separation
+- [ ] G-2: Close the L4 link-local gap (Tier 3 strict block-all test **or** written
+      vendor confirmation that L4/link-local is dropped) — L7 envoy-403 is not sufficient
+- [ ] G-3: (closed, scope documented) — do not cite as control-plane proof
 - [ ] G-4: Audit all logging paths for key leakage
 - [ ] G-5: Verify idle-stop backstop timing empirically
 - [ ] G-6: Add rate limiting to reconciler
@@ -258,6 +359,73 @@ Before marking the Daytona adapter as production-ready:
 - [ ] G-8: Add global retained-output cap
 - [ ] G-9: Review program allowlist with V1 team
 - [ ] G-10: Add structured audit logging
+- [ ] G-12: Re-run layered egress probe on Tier 3 (or obtain vendor enforcement matrix)
+- [ ] linux-vm: measure kernel independence AND network behaviour separately
 - [ ] Run full smoke suite 5 times; record p95 latencies
 - [ ] Confirm cost model against actual billing
 - [ ] Penetration test sandbox isolation (if handling untrusted input)
+
+---
+
+## Appendix A — Tier policy evidence (2026-11-06)
+
+**Sources (official):**
+
+- `https://www.daytona.io/docs/en/network-limits/` — tier-based network restrictions,
+  mutual exclusivity, strict enforcement on Tier 3/4. (Retrieved 2026-11-06.)
+- `https://www.daytona.io/docs/en/limits` — tier access requirements:
+  Tier 1 = email verified; Tier 2 = credit card + $25 top-up; Tier 3 = $500 top-up;
+  Tier 4 = $2,000 top-up every 30 days.
+- `https://github.com/daytonaio/sandbox-network-whitelist` (`whitelist.yaml`) — the
+  essential-services domain whitelist, self-described as "ALLOWED DOMAINS FOR ENVOY PROXY".
+  Contains package registries, git hosts, AI APIs, cloud SDK endpoints, etc. **Zero
+  entries for `169.254.0.0/16`, link-local, or any metadata service.** No CIDR/IP section
+  at all — it is a domain allow list.
+
+**Observed behaviour on Tier 1 (this account):**
+
+- `networkBlockAll: true` accepted at create and echoed back by the API — but per docs,
+  sandbox-level settings are not enforced on Tier 1/2.
+- DNS resolution: blocked. HTTPS to non-whitelisted domain: blocked.
+- Raw TCP: connects (both `1.1.1.1:443` and `169.254.169.254:80`) — consistent with an
+  HTTP-layer proxy (envoy) that terminates outbound TCP and filters at L7.
+- Metadata HTTP: `403`, `Server: envoy` on both IMDSv1 and IMDSv2 token paths.
+
+**Open question for Daytona (draft, not yet sent):**
+
+> Under a Tier 1/2 organization policy, is `169.254.0.0/16` (link-local, cloud metadata)
+> dropped at L3/L4, or only filtered at the HTTP proxy layer? Is the envoy egress proxy
+> in-path for all protocols (raw TCP, UDP, non-HTTP) on all tiers? On Tier 3/4 with
+> `networkBlockAll: true`, is link-local dropped at the network layer? We have measured
+> TCP connects to `169.254.169.254:80` succeeding and HTTP requests being answered with
+> `403 Server: envoy` — we want to document precisely what boundary is enforced where.
+
+## Appendix B — linux-vm evidence (2026-11-06): BLOCKED at provisioning
+
+**Goal (CTO item 3):** measure the VM class's kernel independence and its network
+behaviour as two separate properties.
+
+**Result: BLOCKED before any measurement.** The vendor catalog lists `daytona-linux-vm`
+(class `linux-vm`, state `active`), but the snapshot is **not provisioned to this
+organization**. Three access paths all fail:
+
+| Path                                       | Error                                                                                                        |
+| :----------------------------------------- | :----------------------------------------------------------------------------------------------------------- |
+| `snapshot.get('daytona-linux-vm')`         | `DaytonaNotFoundError: Snapshot with name daytona-linux-vm not found`                                        |
+| `snapshot.activate('daytona-linux-vm')`    | `DaytonaNotFoundError: … not found`                                                                          |
+| `create({ snapshot: 'daytona-linux-vm' })` | `DaytonaValidationError: Snapshot daytona-linux-vm not found. Did you add it through the Daytona Dashboard?` |
+
+Evidence: `docs/evidence/p0c4-daytona-vm-run-01.json` (first attempt used the wrong
+snapshot name `daytona-vm-small` — "not available in region us"), and
+`docs/evidence/p0c4-daytona-vm-run-02.json` (correct catalog name, still not provisioned).
+
+**What is needed to unblock:** add the `daytona-linux-vm` snapshot to the organization in
+the Daytona Dashboard (vendor error message points there explicitly), then re-run
+`pnpm sandbox:smoke:daytona --profile linux-vm-small`. Until then, **no claim about VM
+network isolation or kernel independence is made from this account.**
+
+**Reminder for the eventual VM run:** report the two properties separately — (a) kernel
+independence (`sandboxClassReported: 'linux-vm'`, `uname`, cgroup path; note the
+`classifyCgroup` heuristic mislabels Daytona containers as `vm-init-scope`, so the
+vendor-reported class field is authoritative), and (b) network behaviour (the same
+five-layer probe). One does not imply the other.

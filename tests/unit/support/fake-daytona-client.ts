@@ -27,6 +27,11 @@ export interface FakeDaytonaOptions {
   readonly maxSimulatedSleepMs?: number;
   readonly egressOpen?: boolean;
   readonly metadataReachable?: boolean;
+  /** TCP to 169.254.169.254 connects but no HTTP response — the layer split the CTO asked us to measure. */
+  readonly metadataTcpOnly?: boolean;
+  /** `false`/`true` override; defaults to following `egressOpen`. */
+  readonly dnsResolves?: boolean;
+  readonly publicTcpReachable?: boolean;
   readonly uid?: number;
 }
 
@@ -277,10 +282,62 @@ export class FakeDaytonaClient implements DaytonaSandboxClient {
       return this.result('hello ember\n');
     }
 
-    if (hasFlag(command, '169.254.169.254')) {
-      return this.options.metadataReachable === true
-        ? this.result('connected\n')
-        : { exitCode: 1, stdout: '', stderr: 'OSError: timed out', timedOut: false };
+    const layerOpen = {
+      dns: this.options.dnsResolves ?? this.options.egressOpen === true,
+      publicTcp: this.options.publicTcpReachable ?? this.options.egressOpen === true,
+      metadataTcp: this.options.metadataReachable === true || this.options.metadataTcpOnly === true,
+      metadataHttp: this.options.metadataReachable === true,
+    };
+
+    if (hasFlag(command, 'gethostbyname')) {
+      return layerOpen.dns
+        ? this.result('{"probe":"dns","result":"resolved","ip":"93.184.216.34"}\n')
+        : {
+            exitCode: 1,
+            stdout: '{"probe":"dns","result":"blocked","error":"gaierror"}\n',
+            stderr: '',
+            timedOut: false,
+          };
+    }
+
+    if (hasFlag(command, 'metadata_http')) {
+      return layerOpen.metadataHttp
+        ? this.result(
+            '{"probe":"metadata_http","body_policy":"status-and-server-header-only","imds_v1":{"status":401,"server":"EC2ws"},"imds_v2_token":{"status":401,"server":"EC2ws"}}\n',
+          )
+        : {
+            exitCode: 1,
+            stdout:
+              '{"probe":"metadata_http","body_policy":"status-and-server-header-only","imds_v1":{"status":null,"error":"URLError"},"imds_v2_token":{"status":null,"error":"URLError"}}\n',
+            stderr: '',
+            timedOut: false,
+          };
+    }
+
+    if (hasFlag(command, 'metadata_tcp')) {
+      return layerOpen.metadataTcp
+        ? this.result(
+            '{"probe":"metadata_tcp","target":"169.254.169.254:80","result":"connected"}\n',
+          )
+        : {
+            exitCode: 1,
+            stdout:
+              '{"probe":"metadata_tcp","target":"169.254.169.254:80","result":"blocked","error":"OSError"}\n',
+            stderr: '',
+            timedOut: false,
+          };
+    }
+
+    if (hasFlag(command, '1.1.1.1')) {
+      return layerOpen.publicTcp
+        ? this.result('{"probe":"public_tcp","target":"1.1.1.1:443","result":"connected"}\n')
+        : {
+            exitCode: 1,
+            stdout:
+              '{"probe":"public_tcp","target":"1.1.1.1:443","result":"blocked","error":"OSError"}\n',
+            stderr: '',
+            timedOut: false,
+          };
     }
 
     if (hasFlag(command, 'example.com')) {

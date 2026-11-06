@@ -1,0 +1,71 @@
+────────────────────────────────────────────────────────────────────────
+Daytona sandbox smoke — FAIL
+────────────────────────────────────────────────────────────────────────
+profile      linux-vm-small
+snapshot     daytona-linux-vm (class linux-vm)
+sdk          0.230.0 (pinned 0.230.0)
+api host     app.daytona.io
+owner        daytona-poc:vmprobe-02
+elapsed      1.5s
+fingerprint  5b44af8532e06c33
+
+steps
+  preflight              PASS   0ms
+  create                 FAIL   1472ms
+    ! DaytonaValidationError: Snapshot daytona-linux-vm not found. Did you add it through the Daytona Dashboard?
+  waitReady              SKIP   0ms
+  execHello              SKIP   0ms
+  kernelProbe            SKIP   0ms
+  fileRoundTrip          SKIP   0ms
+  execTimeout            SKIP   0ms
+  cancel                 SKIP   0ms
+  egressProbe            SKIP   0ms
+  isolationCrossTenant   SKIP   0ms
+  crashRecovery          SKIP   0ms
+  usage                  SKIP   0ms
+  stop                   SKIP   0ms
+  destroy                SKIP   0ms
+  cleanupVerify          SKIP   0ms
+
+measurements (ms)
+  createLatencyMs          not measured
+  readyLatencyMs           not measured
+  firstCommandLatencyMs    not measured
+  commandLatencyMs         not measured
+  fileWriteLatencyMs       not measured
+  fileReadLatencyMs        not measured
+  timeoutObservedMs        not measured
+  cancelObservedMs         not measured
+  stopLatencyMs            not measured
+  destroyLatencyMs         not measured
+  reconcileLatencyMs       not measured
+
+isolation
+  dnsBlocked                   not measured
+  publicTcpBlocked             not measured
+  egressBlocked                not measured
+  metadataTcpReachable         not measured
+  metadataHttpStatus           not measured
+  metadataImdsV2TokenStatus    not measured
+  metadataHttpReachable        not measured
+  crossTenantHandleDenied      not measured
+  crossTenantFileVisible       not measured
+  sandboxClassReported         not measured
+  snapshotReported             not measured
+  kernelRelease                not measured
+  cgroupDriver                 not measured
+  cgroupCpuMax                 not measured
+  uid                          not measured
+  networkBlockAllReported      not measured
+
+cleanup
+  liveBeforeDestroy            not measured
+  vendorLiveAfterDestroy       not measured
+  ownerWideLiveAfterDestroy    not measured
+  orphanSweptCount             not measured
+  orphanSweepFailures          not measured
+  orphanSweepProcessId         not measured
+
+findings
+  - run aborted: DaytonaValidationError: Snapshot daytona-linux-vm not found. Did you add it through the Daytona Dashboard?
+────────────────────────────────────────────────────────────────────────

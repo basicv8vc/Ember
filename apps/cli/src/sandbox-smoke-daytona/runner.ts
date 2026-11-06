@@ -41,10 +41,71 @@ const EGRESS_ARGV: readonly string[] = [
   "import urllib.request;urllib.request.urlopen('https://example.com',timeout=3).read(1)",
 ];
 
-const METADATA_ARGV: readonly string[] = [
+/**
+ * Layered egress probes (CTO review 2026-11-06: a TCP connect alone does not distinguish
+ * "port open" from "HTTP reachable" from "credentials readable"). Each probe prints one JSON
+ * line and exits 0 when the layer being measured succeeded.
+ *
+ * Safety rule for the metadata HTTP probe: status code and `Server` header ONLY. Response
+ * bodies are never read, and `user-data` / IAM credential paths are never requested, so the
+ * run can confirm an isolation gap without touching a single credential byte.
+ */
+const DNS_PROBE_ARGV: readonly string[] = [
   'python3',
   '-c',
-  "import socket;socket.setdefaulttimeout(3);socket.create_connection(('169.254.169.254',80))",
+  `import socket,json,sys
+socket.setdefaulttimeout(5)
+try:
+    ip=socket.gethostbyname('example.com')
+    print(json.dumps({"probe":"dns","result":"resolved","ip":ip}))
+except Exception as e:
+    print(json.dumps({"probe":"dns","result":"blocked","error":type(e).__name__}))
+    sys.exit(1)`,
+];
+
+const PUBLIC_TCP_PROBE_ARGV: readonly string[] = [
+  'python3',
+  '-c',
+  `import socket,json,sys
+socket.setdefaulttimeout(5)
+try:
+    s=socket.create_connection(("1.1.1.1",443));s.close()
+    print(json.dumps({"probe":"public_tcp","target":"1.1.1.1:443","result":"connected"}))
+except Exception as e:
+    print(json.dumps({"probe":"public_tcp","target":"1.1.1.1:443","result":"blocked","error":type(e).__name__}))
+    sys.exit(1)`,
+];
+
+const METADATA_TCP_PROBE_ARGV: readonly string[] = [
+  'python3',
+  '-c',
+  `import socket,json,sys
+socket.setdefaulttimeout(5)
+try:
+    s=socket.create_connection(("169.254.169.254",80));s.close()
+    print(json.dumps({"probe":"metadata_tcp","target":"169.254.169.254:80","result":"connected"}))
+except Exception as e:
+    print(json.dumps({"probe":"metadata_tcp","target":"169.254.169.254:80","result":"blocked","error":type(e).__name__}))
+    sys.exit(1)`,
+];
+
+const METADATA_HTTP_PROBE_ARGV: readonly string[] = [
+  'python3',
+  '-c',
+  `import json,sys,urllib.request,urllib.error,socket
+socket.setdefaulttimeout(5)
+def st(req):
+    try:
+        r=urllib.request.urlopen(req,timeout=5)
+        return {"status":r.status,"server":r.headers.get("Server")}
+    except urllib.error.HTTPError as e:
+        return {"status":e.code,"server":(e.headers.get("Server") if e.headers else None)}
+    except Exception as e:
+        return {"status":None,"error":type(e).__name__}
+v1=st(urllib.request.Request("http://169.254.169.254/latest/meta-data/",method="GET"))
+v2=st(urllib.request.Request("http://169.254.169.254/latest/api/token",method="PUT",headers={"X-aws-ec2-metadata-token-ttl-seconds":"60"}))
+print(json.dumps({"probe":"metadata_http","body_policy":"status-and-server-header-only","imds_v1":v1,"imds_v2_token":v2}))
+sys.exit(0 if (v1.get("status") is not None or v2.get("status") is not None) else 1)`,
 ];
 
 export interface DaytonaReconcileOutcome {
@@ -415,18 +476,39 @@ export class DaytonaSmokeRunner {
 
       // ---------------------------------------------------------------- egressProbe
       await attempt('egressProbe', async () => {
-        const metadata = await runProbe(providerA, sandboxA as Id, METADATA_ARGV);
+        const dns = await runProbe(providerA, sandboxA as Id, DNS_PROBE_ARGV);
+        const publicTcp = await runProbe(providerA, sandboxA as Id, PUBLIC_TCP_PROBE_ARGV);
+        const metadataTcp = await runProbe(providerA, sandboxA as Id, METADATA_TCP_PROBE_ARGV);
+        const metadataHttp = await runProbe(providerA, sandboxA as Id, METADATA_HTTP_PROBE_ARGV);
         const internet = await runProbe(providerA, sandboxA as Id, EGRESS_ARGV);
 
-        isolation.metadataEndpointReachable = metadata.succeeded;
+        const httpLayer = parseMetadataHttp(metadataHttp.stdout);
+
+        isolation.dnsBlocked = !dns.succeeded;
+        isolation.publicTcpBlocked = !publicTcp.succeeded;
+        isolation.metadataTcpReachable = metadataTcp.succeeded;
+        isolation.metadataHttpStatus = httpLayer.imdsV1Status;
+        isolation.metadataImdsV2TokenStatus = httpLayer.imdsV2TokenStatus;
+        isolation.metadataHttpReachable = httpLayer.reachable;
         isolation.egressBlocked = !internet.succeeded;
 
         // Record security findings without aborting: the remaining steps (isolation,
         // crash-recovery, cleanup) are still valuable measurements even when egress is
         // imperfect. The report validator marks the overall run FAIL on these findings.
-        if (metadata.succeeded) {
+        //
+        // Wording rule from the CTO review: a reachable metadata endpoint is a CONFIRMED
+        // network isolation gap. It is NOT "confirmed credential exposure" — the probe never
+        // reads response bodies and never requests user-data or IAM credential paths.
+        if (httpLayer.reachable) {
           findings.push(
-            'SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true',
+            `SECURITY (isolation gap, CONFIRMED at HTTP layer): link-local metadata service answered despite networkBlockAll=true ` +
+              `(IMDSv1 status ${String(httpLayer.imdsV1Status)}, IMDSv2 token status ${String(httpLayer.imdsV2TokenStatus)}). ` +
+              'Credential exposure NOT tested and NOT proven: probe reads status codes only, never bodies, never user-data/IAM paths.',
+          );
+        } else if (metadataTcp.succeeded) {
+          findings.push(
+            'SECURITY (isolation gap, CONFIRMED at TCP layer only): link-local metadata endpoint (169.254.169.254:80) accepted a TCP connection despite networkBlockAll=true, ' +
+              'but no HTTP response was received — HTTP-layer exposure and credential exposure are both unproven.',
           );
         }
 
@@ -434,16 +516,40 @@ export class DaytonaSmokeRunner {
           findings.push('SECURITY: public internet reachable from a deny-all sandbox');
         }
 
+        if (dns.succeeded) {
+          findings.push(
+            'SECURITY: DNS resolution succeeded in a deny-all sandbox (DNS layer not covered by networkBlockAll)',
+          );
+        }
+
+        if (publicTcp.succeeded) {
+          findings.push(
+            'SECURITY: TCP to fixed public IP 1.1.1.1:443 succeeded in a deny-all sandbox',
+          );
+        }
+
         return {
           value: undefined,
           details: {
-            metadataExitCode: metadata.exitCode,
-            metadataStdout: metadata.stdout,
-            metadataStderr: metadata.stderr,
+            probePolicy: 'layered: dns | public-tcp | metadata-tcp | metadata-http | https',
+            bodyPolicy:
+              'status-and-server-header-only; user-data and IAM credential paths never requested',
+            dnsExitCode: dns.exitCode,
+            dnsStdout: dns.stdout,
+            publicTcpExitCode: publicTcp.exitCode,
+            publicTcpStdout: publicTcp.stdout,
+            metadataTcpExitCode: metadataTcp.exitCode,
+            metadataTcpStdout: metadataTcp.stdout,
+            metadataHttpExitCode: metadataHttp.exitCode,
+            metadataHttpStdout: metadataHttp.stdout,
+            metadataHttpStderr: metadataHttp.stderr,
+            metadataHttpStatus: httpLayer.imdsV1Status,
+            metadataImdsV2TokenStatus: httpLayer.imdsV2TokenStatus,
+            metadataHttpReachable: httpLayer.reachable,
+            metadataTcpReachable: metadataTcp.succeeded,
             internetExitCode: internet.exitCode,
             internetStdout: internet.stdout,
             internetStderr: internet.stderr,
-            metadataReachable: metadata.succeeded,
             internetReachable: internet.succeeded,
           },
         };
@@ -783,8 +889,14 @@ export function validateDaytonaSmokeReport(report: DaytonaSmokeReport): readonly
     problems.push('vendor still reports live sandboxes after cleanup');
   }
 
-  if (report.isolation?.metadataEndpointReachable !== false) {
-    problems.push('metadata endpoint reachability was not disproven');
+  if (report.isolation?.metadataHttpReachable !== false) {
+    problems.push(
+      'metadata endpoint HTTP-layer reachability was not disproven (any status code, including 401/403, counts as reachable)',
+    );
+  }
+
+  if (report.isolation?.metadataTcpReachable !== false) {
+    problems.push('metadata endpoint TCP-layer reachability was not disproven');
   }
 
   if (report.isolation?.crossTenantHandleDenied !== true) {
@@ -804,6 +916,54 @@ async function runProbe(
   const stderr = await provider.readOutput(sandboxId, result.stderrRef);
 
   return { exitCode: result.exitCode, stdout, stderr, succeeded: result.exitCode === 0 };
+}
+
+interface MetadataHttpLayer {
+  readonly imdsV1Status: number | null;
+  readonly imdsV2TokenStatus: number | null;
+  readonly reachable: boolean;
+}
+
+/**
+ * Parses the metadata HTTP probe's single JSON line.
+ *
+ * Deliberately tolerant: anything unparseable becomes `null` (unmeasured), never a fabricated
+ * status code. `reachable` is true only when at least one real HTTP status was observed.
+ */
+function parseMetadataHttp(stdout: string): MetadataHttpLayer {
+  const empty: MetadataHttpLayer = {
+    imdsV1Status: null,
+    imdsV2TokenStatus: null,
+    reachable: false,
+  };
+
+  const line = stdout
+    .split('\n')
+    .map((candidate) => candidate.trim())
+    .filter((candidate) => candidate.startsWith('{'))
+    .pop();
+
+  if (line === undefined) {
+    return empty;
+  }
+
+  try {
+    const parsed = JSON.parse(line) as {
+      imds_v1?: { status?: unknown };
+      imds_v2_token?: { status?: unknown };
+    };
+    const v1 = typeof parsed.imds_v1?.status === 'number' ? parsed.imds_v1.status : null;
+    const v2 =
+      typeof parsed.imds_v2_token?.status === 'number' ? parsed.imds_v2_token.status : null;
+
+    return {
+      imdsV1Status: v1,
+      imdsV2TokenStatus: v2,
+      reachable: v1 !== null || v2 !== null,
+    };
+  } catch {
+    return empty;
+  }
 }
 
 /**
@@ -876,8 +1036,13 @@ function emptyMeasurements(): DaytonaSmokeMeasurements {
 
 function emptyIsolation(): DaytonaSmokeIsolation {
   return {
+    dnsBlocked: null,
+    publicTcpBlocked: null,
     egressBlocked: null,
-    metadataEndpointReachable: null,
+    metadataTcpReachable: null,
+    metadataHttpStatus: null,
+    metadataImdsV2TokenStatus: null,
+    metadataHttpReachable: null,
     crossTenantHandleDenied: null,
     crossTenantFileVisible: null,
     sandboxClassReported: null,

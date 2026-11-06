@@ -220,17 +220,20 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
     // which would make the contract's `stdoutRef` / `stderrRef` indistinguishable.
     await sandbox.process.createSession(request.sessionId);
 
+    const operation = sandbox.process.executeSessionCommand(
+      request.sessionId,
+      { command: request.command, runAsync: false },
+      timeoutSec,
+    );
+
+    // Cancellation abandons the in-flight request: the session is deleted underneath it and
+    // the vendor answers 404 (`PROCESS_NOT_FOUND`, "session not found"). Without this
+    // handler the abandoned rejection becomes an unhandledRejection that kills the whole
+    // process — the run must survive its own cancellation path.
+    operation.catch(() => undefined);
+
     try {
-      const response = await this.raceAbort(
-        sandbox.process.executeSessionCommand(
-          request.sessionId,
-          { command: request.command, runAsync: false },
-          timeoutSec,
-        ),
-        request.signal,
-        sandbox,
-        request.sessionId,
-      );
+      const response = await this.raceAbort(operation, request.signal, sandbox, request.sessionId);
 
       return {
         exitCode: response.exitCode ?? 0,
@@ -405,6 +408,10 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
     }
 
     if (signal.aborted) {
+      // `operation` was created at the call site before this check ran. Mark its rejection as
+      // handled: deleting the session below makes the in-flight vendor call fail with
+      // PROCESS_NOT_FOUND, and that abandonment must not surface as an unhandledRejection.
+      operation.catch(() => undefined);
       await sandbox.process.deleteSession(sessionId).catch(() => undefined);
       throw new DaytonaExecCancelledError();
     }

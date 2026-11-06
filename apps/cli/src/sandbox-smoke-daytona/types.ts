@@ -70,13 +70,48 @@ export interface DaytonaSmokeMeasurements {
 }
 
 export interface DaytonaSmokeIsolation {
-  /** `true` when an outbound connection to the public internet failed inside the sandbox. */
+  /**
+   * `true` when DNS resolution of a public hostname failed inside the sandbox.
+   * Layer 1 of the egress picture: a deny-all policy may still leak DNS.
+   */
+  dnsBlocked: boolean | null;
+  /**
+   * `true` when TCP to a fixed public IP (1.1.1.1:443) failed inside the sandbox.
+   * Layer 2: IP-literal connectivity, deliberately bypassing DNS.
+   */
+  publicTcpBlocked: boolean | null;
+  /** `true` when a full outbound HTTPS request to the public internet failed. Layer 3. */
   egressBlocked: boolean | null;
-  /** `true` when the cloud metadata endpoint was reachable — a hard security failure. */
-  metadataEndpointReachable: boolean | null;
-  /** `true` when tenant B's attempt to use tenant A's sandbox id was rejected. */
+  /** `true` when TCP connect to 169.254.169.254:80 succeeded. Link-local reachability at the transport layer. */
+  metadataTcpReachable: boolean | null;
+  /**
+   * HTTP status code returned by the IMDSv1 metadata root (`GET /latest/meta-data/`), or
+   * `null` when no HTTP response was received. ANY status code — including 401/403/404 —
+   * proves the metadata service is reachable at the HTTP layer.
+   *
+   * It does NOT prove credential exposure. The probe never reads response bodies and never
+   * requests `user-data` or IAM credential paths, so "credentials were readable" remains
+   * untested and unproven even when this field is non-null.
+   */
+  metadataHttpStatus: number | null;
+  /**
+   * HTTP status of the IMDSv2 token endpoint (`PUT /latest/api/token`), same caveats as
+   * `metadataHttpStatus`: status code only, body never read (the token itself is never captured).
+   */
+  metadataImdsV2TokenStatus: number | null;
+  /**
+   * `true` when the metadata service answered at the HTTP layer (any status code).
+   * This is the strongest statement the probe can make without touching credentials.
+   */
+  metadataHttpReachable: boolean | null;
+  /**
+   * `true` when tenant B's attempt to use tenant A's sandbox id was rejected.
+   *
+   * Scope note: this exercises the Ember adapter's own tenant-scoped record bookkeeping —
+   * it is NOT evidence that the Daytona control plane enforces cross-account isolation.
+   */
   crossTenantHandleDenied: boolean | null;
-  /** `true` when tenant B saw tenant A's file (must be false). */
+  /** `true` when tenant B saw tenant A's file (must be false). Adapter-local check, same scope note as above. */
   crossTenantFileVisible: boolean | null;
   sandboxClassReported: string | null;
   snapshotReported: string | null;

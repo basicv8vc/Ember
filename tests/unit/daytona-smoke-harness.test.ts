@@ -133,7 +133,12 @@ describe('daytona smoke harness', () => {
     expect(report.measurements?.stopLatencyMs).not.toBeNull();
     expect(report.measurements?.destroyLatencyMs).not.toBeNull();
 
-    expect(report.isolation?.metadataEndpointReachable).toBe(false);
+    expect(report.isolation?.metadataTcpReachable).toBe(false);
+    expect(report.isolation?.metadataHttpReachable).toBe(false);
+    expect(report.isolation?.metadataHttpStatus).toBeNull();
+    expect(report.isolation?.metadataImdsV2TokenStatus).toBeNull();
+    expect(report.isolation?.dnsBlocked).toBe(true);
+    expect(report.isolation?.publicTcpBlocked).toBe(true);
     expect(report.isolation?.egressBlocked).toBe(true);
     expect(report.isolation?.crossTenantHandleDenied).toBe(true);
     expect(report.isolation?.crossTenantFileVisible).toBe(false);
@@ -153,6 +158,62 @@ describe('daytona smoke harness', () => {
 
     const written = JSON.parse(readFileSync(jsonOut, 'utf8')) as DaytonaSmokeReport;
     expect(written.status).toBe('PASS');
+  });
+
+  it('reports an HTTP-layer metadata gap without ever claiming credential exposure', async () => {
+    const sink = capture();
+    const client = new FakeDaytonaClient({ metadataReachable: true });
+
+    const code = await runDaytonaCli(
+      ['--format', 'json'],
+      sink.streams,
+      { DAYTONA_API_KEY: 'dtn_test_key_value_123456' },
+      { createClient: () => client, reconcile: reconcileWith(client) },
+    );
+
+    // The functional flow completes, but the validator must refuse a PASS.
+    expect(code).toBe(DAYTONA_SMOKE_EXIT.fail);
+
+    const report = reportFrom(sink.stdout());
+
+    expect(report.status).toBe('FAIL');
+    expect(report.isolation?.metadataTcpReachable).toBe(true);
+    expect(report.isolation?.metadataHttpReachable).toBe(true);
+    expect(report.isolation?.metadataHttpStatus).toBe(401);
+
+    const finding = report.findings.find(
+      (entry) => entry.startsWith('SECURITY') && entry.includes('metadata'),
+    );
+
+    expect(finding).toBeDefined();
+    expect(finding).toContain('CONFIRMED at HTTP layer');
+    expect(finding).toContain('Credential exposure NOT tested and NOT proven');
+  });
+
+  it('distinguishes a TCP-only metadata gap from an HTTP-layer one', async () => {
+    const sink = capture();
+    const client = new FakeDaytonaClient({ metadataTcpOnly: true });
+
+    await runDaytonaCli(
+      ['--format', 'json'],
+      sink.streams,
+      { DAYTONA_API_KEY: 'dtn_test_key_value_123456' },
+      { createClient: () => client, reconcile: reconcileWith(client) },
+    );
+
+    const report = reportFrom(sink.stdout());
+
+    expect(report.isolation?.metadataTcpReachable).toBe(true);
+    expect(report.isolation?.metadataHttpReachable).toBe(false);
+    expect(report.isolation?.metadataHttpStatus).toBeNull();
+
+    const finding = report.findings.find(
+      (entry) => entry.startsWith('SECURITY') && entry.includes('metadata'),
+    );
+
+    expect(finding).toBeDefined();
+    expect(finding).toContain('CONFIRMED at TCP layer only');
+    expect(finding).toContain('unproven');
   });
 
   it('never writes the api key into a report', async () => {
@@ -225,8 +286,13 @@ describe('report validation', () => {
         reconcileLatencyMs: 1,
       },
       isolation: {
+        dnsBlocked: true,
+        publicTcpBlocked: true,
         egressBlocked: true,
-        metadataEndpointReachable: false,
+        metadataTcpReachable: false,
+        metadataHttpStatus: null,
+        metadataImdsV2TokenStatus: null,
+        metadataHttpReachable: false,
         crossTenantHandleDenied: true,
         crossTenantFileVisible: false,
         sandboxClassReported: 'container',
@@ -279,15 +345,26 @@ describe('report validation', () => {
     expect(problems).toContain('measurement createLatencyMs is missing');
   });
 
-  it('rejects a pass that did not disprove metadata reachability', () => {
+  it('rejects a pass that did not disprove metadata reachability at the HTTP layer', () => {
     const report = passing();
 
     const problems = validateDaytonaSmokeReport({
       ...report,
-      isolation: { ...report.isolation!, metadataEndpointReachable: null },
+      isolation: { ...report.isolation!, metadataHttpReachable: null },
     });
 
-    expect(problems.some((problem) => problem.includes('metadata endpoint'))).toBe(true);
+    expect(problems.some((problem) => problem.includes('metadata endpoint HTTP-layer'))).toBe(true);
+  });
+
+  it('rejects a pass that only disproved the HTTP layer but not TCP', () => {
+    const report = passing();
+
+    const problems = validateDaytonaSmokeReport({
+      ...report,
+      isolation: { ...report.isolation!, metadataTcpReachable: true },
+    });
+
+    expect(problems.some((problem) => problem.includes('metadata endpoint TCP-layer'))).toBe(true);
   });
 
   it('rejects a pass with live sandboxes left behind', () => {

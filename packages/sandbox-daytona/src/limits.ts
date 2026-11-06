@@ -125,7 +125,13 @@ export const DAYTONA_SANDBOX_PROFILES: Readonly<Record<string, DaytonaSandboxPro
     }),
     'linux-vm-small': Object.freeze({
       id: 'linux-vm-small',
-      snapshot: 'daytona-vm-small',
+      // Snapshot names are vendor-inventory facts. The catalog lists `daytona-small`
+      // (class container) and `daytona-linux-vm` (class linux-vm), but the VM snapshot is
+      // NOT provisioned to this organization: create fails with `DaytonaValidationError:
+      // Snapshot daytona-linux-vm not found. Did you add it through the Daytona Dashboard?`
+      // (2026-11-06). Enabling it is a Dashboard action; until then VM runs are BLOCKED.
+      // The earlier guess `daytona-vm-small` never existed ("not available in region us").
+      snapshot: 'daytona-linux-vm',
       sandboxClass: 'linux-vm',
       cpu: 1,
       memoryGiB: 1,

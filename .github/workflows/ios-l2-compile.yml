@@ -57,6 +57,7 @@ jobs:
             -configuration Debug \
             -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
             -derivedDataPath "$RUNNER_TEMP/EmberL2SignedData" \
+            -resultBundlePath "$RUNNER_TEMP/ember-l2-ui.xcresult" \
             -parallel-testing-enabled NO \
             -only-testing:EmberUITests \
             CODE_SIGNING_ALLOWED=YES \
@@ -64,3 +65,11 @@ jobs:
             SWIFT_STRICT_CONCURRENCY=complete \
             OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" \
             test 2>&1 | tee "$RUNNER_TEMP/ember-ios-ui.log"
+
+      - name: Preserve Live UI screenshot XCResult
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ember-ios-l2-ui-screenshot-xcresult
+          path: ${{ runner.temp }}/ember-l2-ui.xcresult/
+          retention-days: 7

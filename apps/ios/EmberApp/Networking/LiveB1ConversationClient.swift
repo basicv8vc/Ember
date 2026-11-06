@@ -4,7 +4,6 @@ import Foundation
 enum LiveB1Failure: Error, Equatable, Sendable {
     case invalidResponse
     case rejected
-    case rejected
     case notFound
     case conflict
     case unavailable

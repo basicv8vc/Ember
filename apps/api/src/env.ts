@@ -6,7 +6,16 @@ export class ApiConfigError extends Error {
   override readonly name = 'ApiConfigError';
 }
 
-export type EmberEnv = 'local' | 'test' | 'ci';
+/**
+ * Every environment this API is allowed to declare.
+ *
+ * `local`/`test`/`ci` are developer and CI runs. `staging` and `production` are *shared*
+ * deployments: they are reachable over the network, hold real user rows and must never expose a
+ * development-only surface. See `deployment.ts` for how the class is derived.
+ */
+export const EMBER_ENVS = ['local', 'test', 'ci', 'staging', 'production'] as const;
+
+export type EmberEnv = (typeof EMBER_ENVS)[number];
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
 
 export interface ApiConfig {
@@ -22,7 +31,7 @@ export interface ApiConfig {
 const LOOPBACK_HOSTNAMES = new Set(['localhost']);
 
 const apiEnvSchema = z.object({
-  EMBER_ENV: z.enum(['local', 'test', 'ci']).default('local'),
+  EMBER_ENV: z.enum(EMBER_ENVS).default('local'),
   EMBER_HOST: z.string().trim().min(1).max(255).default('127.0.0.1'),
   EMBER_PORT: z.coerce
     .number()

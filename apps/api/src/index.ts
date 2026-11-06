@@ -109,7 +109,24 @@ export function createApiApplication(options: ApiApplicationOptions) {
   const { pool, apiConfig, env, logger } = options;
   const devAuth = loadDevAuthConfig(env);
 
-  if (devAuth.tenants.length === 0) {
+  if (devAuth.disabled) {
+    // The deployment classification forbids dev tenant bearer tokens, so none were parsed. This
+    // is the normal shape of a staging/production boot: say so once, at info level, naming the
+    // marker so an operator can see why `/v1` will reject a local token.
+    logger.info('dev tenant authentication disabled by deployment', {
+      disabledBy: devAuth.disabledBy,
+    });
+
+    if (devAuth.ignoredVariables.length > 0) {
+      // Names only. A credential was injected where it must never exist; it is inert, but the
+      // operator needs to remove it from the deployment's configuration.
+      logger.error('ignoring dev tenant credential variables in this deployment', {
+        disabledBy: devAuth.disabledBy,
+        ignoredVariables: [...devAuth.ignoredVariables],
+        effect: 'the values are not loaded and cannot authenticate any request',
+      });
+    }
+  } else if (devAuth.tenants.length === 0) {
     // Fail closed, but loudly: the process still starts so the cause is a log line rather
     // than a crash loop, and every `/v1` request is rejected with 401.
     logger.warn('no dev tenant credentials configured; every /v1 request will be rejected', {
@@ -143,7 +160,10 @@ export function createApiApplication(options: ApiApplicationOptions) {
     readiness: createDatabaseReadiness(pool),
     serviceVersion: SERVICE_VERSION,
     logger,
-    authenticator: createDevTokenAuthenticator(devAuth.tenants),
+    // Belt and braces: when the deployment forbids dev tokens the authenticator is built from an
+    // empty list, so it holds no digest and no identity even if a future refactor were to
+    // populate `devAuth.tenants` in a non-development run.
+    authenticator: createDevTokenAuthenticator(devAuth.disabled ? [] : devAuth.tenants),
     agentStore: new PostgresAgentRepository(pool),
     taskStore: new PostgresTaskRepository(pool),
     approvalStore: new PostgresApprovalRepository(pool),

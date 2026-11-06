@@ -53,6 +53,14 @@ function twoTenants(): Env {
   };
 }
 
+/** A development run with no slot configured: valid, and every request fails closed. */
+const EMPTY_DEV_AUTH = {
+  tenants: [],
+  disabled: false,
+  disabledBy: null,
+  ignoredVariables: [],
+} as const;
+
 function catchConfigError(env: Env): DevAuthConfigError {
   try {
     loadDevAuthConfig(env);
@@ -92,19 +100,65 @@ describe('loadDevAuthConfig', () => {
   });
 
   it('treats a fully unconfigured environment as valid and empty (fail closed)', () => {
-    expect(loadDevAuthConfig({})).toEqual({ tenants: [] });
-    expect(loadDevAuthConfig({ UNRELATED: 'value' })).toEqual({ tenants: [] });
+    expect(loadDevAuthConfig({})).toEqual(EMPTY_DEV_AUTH);
+    expect(loadDevAuthConfig({ UNRELATED: 'value' })).toEqual(EMPTY_DEV_AUTH);
   });
 
   it('treats blank values as unset', () => {
-    expect(loadDevAuthConfig(slotEnv('A', { token: '   ' }))).toEqual({ tenants: [] });
+    expect(loadDevAuthConfig(slotEnv('A', { token: '   ' }))).toEqual(EMPTY_DEV_AUTH);
   });
 
-  it('refuses to load dev tokens when NODE_ENV=production', () => {
-    const error = catchConfigError({ NODE_ENV: 'production', ...twoTenants() });
+  it('keeps dev tokens inert instead of failing to start in staging and production', () => {
+    // The previous behaviour was an unconditional throw on `NODE_ENV=production`, which made a
+    // production boot impossible even with no dev credentials at all. The refusal is now scoped
+    // to the credential material: a shared deployment starts, parses nothing and reports the
+    // *names* it refused.
+    for (const [env, disabledBy] of [
+      [{ NODE_ENV: 'production' }, 'NODE_ENV=production'],
+      [{ NODE_ENV: 'staging' }, 'NODE_ENV=staging'],
+      [{ EMBER_ENV: 'production' }, 'EMBER_ENV=production'],
+      [{ EMBER_ENV: 'staging' }, 'EMBER_ENV=staging'],
+      // The outer marker wins on a conflict, so `EMBER_ENV=local` cannot downgrade the process.
+      [{ EMBER_ENV: 'local', NODE_ENV: 'production' }, 'NODE_ENV=production'],
+    ] as const) {
+      const config = loadDevAuthConfig({ ...env, ...twoTenants() });
 
-    expect(error.message).toContain('NODE_ENV=production');
-    expect(error.message).not.toContain(TOKEN_A);
+      expect(config.disabled, JSON.stringify(env)).toBe(true);
+      expect(config.disabledBy).toBe(disabledBy);
+      expect(config.tenants).toEqual([]);
+      expect(config.ignoredVariables).toEqual([
+        'EMBER_DEV_AUTH_TENANT_A_PRINCIPAL_ID',
+        'EMBER_DEV_AUTH_TENANT_A_TENANT_ID',
+        'EMBER_DEV_AUTH_TENANT_A_TOKEN',
+        'EMBER_DEV_AUTH_TENANT_B_PRINCIPAL_ID',
+        'EMBER_DEV_AUTH_TENANT_B_TENANT_ID',
+        'EMBER_DEV_AUTH_TENANT_B_TOKEN',
+      ]);
+      // Not even the names may be mistaken for values.
+      expect(JSON.stringify(config)).not.toContain(TOKEN_A);
+      expect(JSON.stringify(config)).not.toContain(TOKEN_B);
+    }
+  });
+
+  it('starts a shared deployment that has no dev credentials at all', () => {
+    expect(loadDevAuthConfig({ NODE_ENV: 'production' })).toEqual({
+      tenants: [],
+      disabled: true,
+      disabledBy: 'NODE_ENV=production',
+      ignoredVariables: [],
+    });
+  });
+
+  it('does not let a development marker re-enable tokens in a shared deployment', () => {
+    // `EMBER_ENV=local` next to `NODE_ENV=staging` must not be read as a development run.
+    const config = loadDevAuthConfig({
+      EMBER_ENV: 'local',
+      NODE_ENV: 'staging',
+      ...slotEnv('A', { token: TOKEN_A, tenantId: TENANT_A, principalId: PRINCIPAL_A }),
+    });
+
+    expect(config.tenants).toEqual([]);
+    expect(config.disabled).toBe(true);
   });
 
   it('rejects a partially configured slot and names only the missing variables', () => {

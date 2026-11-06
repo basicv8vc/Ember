@@ -373,19 +373,42 @@ export function evaluateStagingEnv(env, options = {}) {
   }
 
   // ---- 7. Worker shape ------------------------------------------------------------------
-  if (get('EMBER_WORKER_MODE') !== 'poll') {
-    add(
-      'E_WORKER_MODE',
-      'EMBER_WORKER_MODE',
-      `must be "poll" (got ${describe(get('EMBER_WORKER_MODE'))}); reaper-only would never consume a queued Turn`,
-    );
-  }
-  if (get('EMBER_WORKER_SIMULATED_EXECUTION') !== 'local-only') {
-    add(
-      'E_WORKER_SIMULATED',
-      'EMBER_WORKER_SIMULATED_EXECUTION',
-      'must be "local-only": poll mode is refused without the explicit deterministic-executor opt-in',
-    );
+  // The task poll lane requires the deterministic-executor opt-in, and the runtime refuses
+  // that combination in shared deployments ("it stays a local/test capability until P0B-06
+  // provides durable execution results", deployment classification, #126). Deployment
+  // profiles therefore run `reaper-only` (lease reaping, the scheduler, and the B2 turn
+  // responder when model execution is on); the acceptance profile exercises the task lane
+  // legally under test markers.
+  if (mode === 'e2e') {
+    if (get('EMBER_WORKER_MODE') !== 'poll') {
+      add(
+        'E_WORKER_MODE',
+        'EMBER_WORKER_MODE',
+        `must be "poll" in e2e mode (got ${describe(get('EMBER_WORKER_MODE'))}); the acceptance run exercises the task lane legally under test markers`,
+      );
+    }
+    if (get('EMBER_WORKER_SIMULATED_EXECUTION') !== 'local-only') {
+      add(
+        'E_WORKER_SIMULATED',
+        'EMBER_WORKER_SIMULATED_EXECUTION',
+        'must be "local-only" in e2e mode: poll mode is refused without the explicit deterministic-executor opt-in',
+      );
+    }
+  } else {
+    if (get('EMBER_WORKER_MODE') !== 'reaper-only') {
+      add(
+        'E_WORKER_MODE',
+        'EMBER_WORKER_MODE',
+        `must be "reaper-only" (got ${describe(get('EMBER_WORKER_MODE'))}); the runtime refuses the task poll lane's deterministic executor in shared deployments`,
+      );
+    }
+    if (get('EMBER_WORKER_SIMULATED_EXECUTION') !== 'disabled') {
+      add(
+        'E_WORKER_SIMULATED',
+        'EMBER_WORKER_SIMULATED_EXECUTION',
+        'must be "disabled": simulated execution is a local/test capability and the runtime refuses it in shared deployments',
+      );
+    }
   }
   const blobRoot = get('EMBER_WORKER_BLOB_ROOT');
   if (blobRoot === undefined || !blobRoot.startsWith('/')) {

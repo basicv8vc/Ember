@@ -266,9 +266,10 @@ describe('e2e acceptance profile guard', () => {
     ]) {
       const env = resolvedE2eEnv();
       env.set('EMBER_VOLUME_PREFIX', value);
-      expect(codes(evaluateStagingEnv(env, { mode: 'e2e' })), `prefix=${JSON.stringify(value)}`).toContain(
-        'E_E2E_VOLUME_PREFIX',
-      );
+      expect(
+        codes(evaluateStagingEnv(env, { mode: 'e2e' })),
+        `prefix=${JSON.stringify(value)}`,
+      ).toContain('E_E2E_VOLUME_PREFIX');
     }
   });
 

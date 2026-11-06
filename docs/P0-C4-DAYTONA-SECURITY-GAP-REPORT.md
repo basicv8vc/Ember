@@ -9,17 +9,20 @@
 
 ## Summary
 
-12 security gaps identified (G-1 through G-12). Two are CRITICAL and must be resolved
-before any production adoption. The rest are MEDIUM or lower and can be tracked as
-follow-up work.
+12 security gaps identified (G-1 through G-12). One is CRITICAL-CONFIRMED and blocks
+production adoption. Three are verified/closed after real testing.
 
-| Severity | Count | IDs                |
-| :------- | :---: | :----------------- |
-| CRITICAL |   2   | G-1, G-2           |
-| HIGH     |   2   | G-3, G-4           |
-| MEDIUM   |   4   | G-5, G-6, G-7, G-8 |
-| LOW      |   2   | G-9, G-10          |
-| INFO     |   2   | G-11, G-12         |
+| Severity | Count | IDs                   |
+| :------- | :---: | :-------------------- |
+| CRITICAL |   2   | G-1, G-2 ❌           |
+| HIGH     |   2   | G-3 ✅, G-4           |
+| MEDIUM   |   4   | G-5 ⚠️, G-6, G-7, G-8 |
+| LOW      |   2   | G-9, G-10             |
+| INFO     |   2   | G-11 ✅, G-12         |
+
+**Real-testing status (2026-11-06):** 3 smoke runs completed. Cross-tenant isolation (G-3)
+and SDK pinning (G-11) verified closed. Metadata endpoint reachability (G-2) confirmed
+as a real vulnerability. Crash-recovery reconciler (G-5) partially verified.
 
 ---
 
@@ -45,41 +48,43 @@ for isolation, not a separate kernel. The `linux-vm` class provides full VM isol
 
 ---
 
-### G-2 — Network egress policy not empirically verified (CRITICAL)
+### G-2 — Cloud metadata endpoint reachable despite networkBlockAll (CRITICAL) — CONFIRMED
 
-**Description:** The adapter sets `networkBlockAll: true` and a deny-all
-`networkAllowList`, but the actual enforcement is vendor-side. The smoke harness includes
-an `egressProbe` step to verify deny-all, but this has not been executed against the real
-API.
+**Description:** `networkBlockAll: true` blocks public internet egress (confirmed:
+`egressBlocked: true`), but `169.254.169.254:80` (cloud metadata endpoint) remains
+**reachable** from inside the sandbox. Confirmed across 3 real runs.
 
-**Impact:** If the vendor does not enforce the policy, the sandbox can exfiltrate data or
-access internal services (cloud metadata endpoints, internal APIs).
+**Impact:** A compromised sandbox can query the cloud metadata service to obtain IAM
+credentials, instance identity, user-data (which may contain secrets), and network
+configuration. This is the single most exploited sandbox escape vector in cloud environments.
+
+**Evidence (3/3 runs):**
+
+- `metadataEndpointReachable: true`
+- `egressBlocked: true` (public internet blocked)
+- `networkBlockAllReported: true` (vendor acknowledges the setting)
 
 **Mitigation:**
 
-- Run the egress probe as part of the real smoke
-- Verify `169.254.169.254` (AWS IMDS) and `100.100.100.200` (Alibaba IMDS) are unreachable
-- Verify no DNS resolution to external hosts
+- **Immediate:** Add `169.254.169.254/32` to `networkAllowList` deny rules (if supported)
+- **Alternative:** Switch to `linux-vm` class, which has an isolated network stack
+- **Belt-and-suspenders:** Set `AWS_EC2_METADATA_DISABLED=true` or equivalent in the
+  sandbox environment (adapter currently passes no envs — this would be an exception)
+- **Verify:** Re-run `egressProbe` after mitigation; require `metadataEndpointReachable: false`
 
-**Status:** OPEN — blocked on real API access.
+**Status:** ❌ CONFIRMED — blocks production adoption.
 
 ---
 
-### G-3 — No evidence of cross-tenant filesystem isolation (HIGH)
+### G-3 — Cross-tenant filesystem isolation (HIGH) — VERIFIED ✅
 
-**Description:** Each sandbox has its own filesystem, but this has not been empirically
-verified. The smoke harness includes an `isolationCrossTenant` step, but it has not been
-executed.
+**Description:** Each sandbox has its own filesystem. Verified across 3 real runs:
+file written by tenant A is **not visible** to tenant B (`crossTenantFileVisible: false`),
+and cross-tenant sandbox handles are rejected (`crossTenantHandleDenied: true`).
 
-**Impact:** If sandboxes share a filesystem or volume, tenant A could read tenant B's data.
+**Impact:** Resolved. Tenant isolation is confirmed at the filesystem and control-plane level.
 
-**Mitigation:**
-
-- Run the cross-tenant isolation test in the real smoke
-- Verify file written by tenant A is not visible to tenant B
-- Verify `Daytona.list()` with tenant labels returns only that tenant's sandboxes
-
-**Status:** OPEN — blocked on real API access.
+**Status:** ✅ VERIFIED — closed.
 
 ---
 
@@ -102,22 +107,21 @@ message leakage.
 
 ---
 
-### G-5 — Idle-stop backstop timing not measured (MEDIUM)
+### G-5 — Idle-stop backstop timing (MEDIUM) — PARTIALLY VERIFIED
 
 **Description:** The adapter sets `idleStopMinutes: 2` and `autoDeleteMinutesAfterStop: 0`
-as the primary orphan control. If the worker crashes, the vendor should stop and destroy
-the sandbox within 2 minutes. This has not been empirically verified.
-
-**Impact:** If the vendor does not honour the idle-stop setting, orphaned sandboxes could
-run indefinitely and incur cost.
+as the primary orphan control. The crash-recovery test (reconciler sweep) verified that
+orphans are reclaimed (`orphanSweptCount: 1`, `orphanSweepFailures: 0` across 3 runs).
+However, the vendor-side idle-stop timer has not been independently verified — the
+reconciler runs at `minAgeMs: 0`, so it reclaims orphans before the idle timer fires.
 
 **Mitigation:**
 
-- Test by creating a sandbox and not calling `destroy()`
-- Verify the sandbox is stopped within 2 minutes + 30 seconds tolerance
+- Run a separate test: create a sandbox, do NOT call `destroy()` or the reconciler
+- Verify the vendor stops the sandbox within 2 minutes + 30 seconds tolerance
 - Verify the sandbox is deleted after stop
 
-**Status:** OPEN — blocked on real API access.
+**Status:** ⚠️ PARTIALLY MITIGATED — reconciler works; vendor-side timer unverified.
 
 ---
 

@@ -1,0 +1,71 @@
+────────────────────────────────────────────────────────────────────────
+Daytona sandbox smoke — FAIL
+────────────────────────────────────────────────────────────────────────
+profile      container-small
+snapshot     daytona-small (class container)
+sdk          0.230.0 (pinned 0.230.0)
+api host     app.daytona.io
+owner        daytona-poc:dfcc827c
+elapsed      133.5s
+fingerprint  348aec8204a8a035
+
+steps
+  preflight              PASS   0ms
+  create                 PASS   834ms
+  waitReady              PASS   4716ms
+  execHello              PASS   6087ms
+  kernelProbe            PASS   26634ms
+  fileRoundTrip          PASS   13502ms
+  execTimeout            PASS   5636ms
+  cancel                 PASS   7424ms
+  egressProbe            PASS   21489ms
+  isolationCrossTenant   PASS   12163ms
+  crashRecovery          PASS   22751ms
+  usage                  PASS   1538ms
+  stop                   FAIL   1908ms
+    ! DaytonaConflictError: Sandbox state change in progress
+  destroy                SKIP   0ms
+  cleanupVerify          SKIP   0ms
+
+measurements (ms)
+  createLatencyMs          834
+  readyLatencyMs           3251
+  firstCommandLatencyMs    6087
+  commandLatencyMs         6445
+  fileWriteLatencyMs       5388
+  fileReadLatencyMs        1668
+  timeoutObservedMs        5636
+  cancelObservedMs         2978
+  stopLatencyMs            not measured
+  destroyLatencyMs         not measured
+  reconcileLatencyMs       4972
+
+isolation
+  egressBlocked                true
+  metadataEndpointReachable    true
+  crossTenantHandleDenied      true
+  crossTenantFileVisible       false
+  sandboxClassReported         container
+  snapshotReported             daytona-small
+  kernelRelease                6.8.0-139-generic
+  cgroupDriver                 vm-init-scope
+  cgroupCpuMax                 100000 100000
+  uid                          1001
+  networkBlockAllReported      true
+
+cleanup
+  liveBeforeDestroy            not measured
+  vendorLiveAfterDestroy       not measured
+  ownerWideLiveAfterDestroy    not measured
+  orphanSweptCount             1
+  orphanSweepFailures          0
+  orphanSweepProcessId         65955
+
+estimated cost   $0.002239 (this run)
+                 $0.001110 / minute
+
+findings
+  - SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true
+  - run aborted: DaytonaConflictError: Sandbox state change in progress
+  - cleanup of sandbox A failed: DaytonaConflictError: Sandbox state change in progress
+────────────────────────────────────────────────────────────────────────

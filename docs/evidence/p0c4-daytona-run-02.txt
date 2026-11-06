@@ -1,0 +1,70 @@
+────────────────────────────────────────────────────────────────────────
+Daytona sandbox smoke — FAIL
+────────────────────────────────────────────────────────────────────────
+profile      container-small
+snapshot     daytona-small (class container)
+sdk          0.230.0 (pinned 0.230.0)
+api host     app.daytona.io
+owner        daytona-poc:8ba097d7
+elapsed      137.5s
+fingerprint  4bd5891af52f5795
+
+steps
+  preflight              PASS   0ms
+  create                 PASS   658ms
+  waitReady              PASS   3048ms
+  execHello              PASS   5853ms
+  kernelProbe            PASS   24648ms
+  fileRoundTrip          PASS   13264ms
+  execTimeout            PASS   4351ms
+  cancel                 PASS   5281ms
+  egressProbe            PASS   23445ms
+  isolationCrossTenant   PASS   19668ms
+  crashRecovery          PASS   22250ms
+  usage                  PASS   1551ms
+  stop                   PASS   4636ms
+  destroy                PASS   647ms
+  cleanupVerify          FAIL   8205ms
+    ! Error: tenant still owns live sandboxes: c1ab5629-ee0d-4034-94e2-f82870942812
+
+measurements (ms)
+  createLatencyMs          658
+  readyLatencyMs           1678
+  firstCommandLatencyMs    5853
+  commandLatencyMs         6022
+  fileWriteLatencyMs       4767
+  fileReadLatencyMs        2475
+  timeoutObservedMs        4351
+  cancelObservedMs         1007
+  stopLatencyMs            4636
+  destroyLatencyMs         647
+  reconcileLatencyMs       3392
+
+isolation
+  egressBlocked                true
+  metadataEndpointReachable    true
+  crossTenantHandleDenied      true
+  crossTenantFileVisible       false
+  sandboxClassReported         container
+  snapshotReported             daytona-small
+  kernelRelease                6.8.0-124-generic
+  cgroupDriver                 vm-init-scope
+  cgroupCpuMax                 100000 100000
+  uid                          1001
+  networkBlockAllReported      true
+
+cleanup
+  liveBeforeDestroy            2
+  vendorLiveAfterDestroy       1
+  ownerWideLiveAfterDestroy    0
+  orphanSweptCount             1
+  orphanSweepFailures          0
+  orphanSweepProcessId         65056
+
+estimated cost   $0.002275 (this run)
+                 $0.001110 / minute
+
+findings
+  - SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true
+  - run aborted: Error: tenant still owns live sandboxes: c1ab5629-ee0d-4034-94e2-f82870942812
+────────────────────────────────────────────────────────────────────────

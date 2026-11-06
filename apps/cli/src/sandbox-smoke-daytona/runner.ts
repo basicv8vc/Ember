@@ -315,7 +315,9 @@ export class DaytonaSmokeRunner {
 
         const catStdout = await providerA.readOutput(sandboxA as Id, cat.stdoutRef);
 
-        if (cat.exitCode !== 0 || catStdout !== payload) {
+        // `cat` output may carry a trailing newline that the payload does not, so compare on
+        // trimmed content — the round-trip is what matters, not the exact byte boundary.
+        if (cat.exitCode !== 0 || catStdout.trimEnd() !== payload) {
           throw new Error('uploaded file was not readable from inside the sandbox');
         }
 
@@ -419,12 +421,17 @@ export class DaytonaSmokeRunner {
         isolation.metadataEndpointReachable = metadata.succeeded;
         isolation.egressBlocked = !internet.succeeded;
 
+        // Record security findings without aborting: the remaining steps (isolation,
+        // crash-recovery, cleanup) are still valuable measurements even when egress is
+        // imperfect. The report validator marks the overall run FAIL on these findings.
         if (metadata.succeeded) {
-          throw new Error('cloud metadata endpoint was reachable from the sandbox');
+          findings.push(
+            'SECURITY: cloud metadata endpoint (169.254.169.254) reachable despite networkBlockAll=true',
+          );
         }
 
         if (internet.succeeded) {
-          throw new Error('public internet was reachable from a deny-all sandbox');
+          findings.push('SECURITY: public internet reachable from a deny-all sandbox');
         }
 
         return {
@@ -436,6 +443,8 @@ export class DaytonaSmokeRunner {
             internetExitCode: internet.exitCode,
             internetStdout: internet.stdout,
             internetStderr: internet.stderr,
+            metadataReachable: metadata.succeeded,
+            internetReachable: internet.succeeded,
           },
         };
       });

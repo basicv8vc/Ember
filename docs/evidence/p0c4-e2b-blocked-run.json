@@ -1,0 +1,161 @@
+{
+  "schemaVersion": "1.0.0",
+  "testId": "cb968a6e-dcb7-4f45-9bbb-2aadf4d80664",
+  "provider": "e2b",
+  "mode": "REAL_REMOTE",
+  "status": "BLOCKED",
+  "blockedReason": "E2B_API_KEY is not set in the environment; real vendor measurement is blocked",
+  "environment": {
+    "sdkVersion": "2.63.0",
+    "pinnedSdkVersion": "2.63.0",
+    "template": "base",
+    "templateDigest": "base",
+    "nodeVersion": "v24.22.2",
+    "platform": "darwin/arm64",
+    "apiKeyPresent": false,
+    "apiKeyFingerprint": null
+  },
+  "steps": {
+    "preflight": {
+      "step": "preflight",
+      "status": "BLOCKED",
+      "durationMs": 0,
+      "error": "E2B_API_KEY is not set in the environment; real vendor measurement is blocked",
+      "details": {
+        "apiKeyPresent": false,
+        "sdkVersion": "2.63.0",
+        "pinnedSdkVersion": "2.63.0"
+      }
+    },
+    "capabilities": {
+      "step": "capabilities",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "create": {
+      "step": "create",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "waitReady": {
+      "step": "waitReady",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "execHello": {
+      "step": "execHello",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "fileRoundTrip": {
+      "step": "fileRoundTrip",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "execTimeout": {
+      "step": "execTimeout",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "egressProbe": {
+      "step": "egressProbe",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "usage": {
+      "step": "usage",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "stop": {
+      "step": "stop",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "destroy": {
+      "step": "destroy",
+      "status": "SKIPPED",
+      "durationMs": 0
+    },
+    "cleanupVerify": {
+      "step": "cleanupVerify",
+      "status": "SKIPPED",
+      "durationMs": 0
+    }
+  },
+  "timing": {
+    "totalWallMs": 0,
+    "createLatencyMs": null,
+    "readyLatencyMs": null,
+    "firstCommandLatencyMs": null,
+    "warmCommandLatencyMs": null,
+    "stopLatencyMs": null,
+    "destroyLatencyMs": null,
+    "cleanupVerifyLatencyMs": null
+  },
+  "measurements": {
+    "createLatencyMs": null,
+    "readyLatencyMs": null,
+    "firstCommandLatencyMs": null,
+    "secondCommandLatencyMs": null,
+    "stopLatencyMs": null,
+    "destroyLatencyMs": null,
+    "timeoutProbe": {
+      "requestedTimeoutMs": null,
+      "observedElapsedMs": null,
+      "observedExitCode": null,
+      "timedOut": null,
+      "overshootMs": null
+    },
+    "allocatedCpuCount": null,
+    "allocatedMemoryMiB": null,
+    "requestedCpuMilli": null,
+    "requestedMemoryMiB": null,
+    "sandboxLifetimeSec": null
+  },
+  "usage": {
+    "usage": null,
+    "basis": "NOT_MEASURED",
+    "egressBytes": null,
+    "egressSource": "NOT_MEASURED"
+  },
+  "isolation": {
+    "requestedAllowInternetAccess": null,
+    "observedAllowInternetAccess": null,
+    "networkPolicyId": null,
+    "egressProbes": [],
+    "egressDeniedAsExpected": null
+  },
+  "cost": {
+    "estimatedSandboxUsd": null,
+    "actualBilledUsd": null,
+    "remainingCreditUsd": null,
+    "source": "NOT_MEASURED",
+    "priceTableNote": null
+  },
+  "cleanup": {
+    "stopStatus": "NOT_ATTEMPTED",
+    "destroyStatus": "NOT_ATTEMPTED",
+    "leakStatus": "UNKNOWN",
+    "resourceVerification": "NOT_ATTEMPTED",
+    "liveSandboxIds": []
+  },
+  "evidence": {
+    "helloStdout": null,
+    "helloStderr": null,
+    "helloExitCode": null,
+    "helloStdoutMatches": null,
+    "fileWrittenBytes": null,
+    "fileReadMatches": null,
+    "fileVisibleInSandbox": null
+  },
+  "capabilities": null,
+  "error": "E2B_API_KEY is not set in the environment; real vendor measurement is blocked",
+  "limitations": [
+    "This report covers one sandbox in one region at one moment; it is not a benchmark of the E2B fleet.",
+    "Cost fields are NOT_MEASURED unless a price table is supplied; E2B publishes no per-sandbox invoice endpoint used here.",
+    "Egress bytes per sandbox are not exposed by the adapter API surface and are reported as null.",
+    "Latency measured from a developer machine includes local network conditions and is not a datacentre baseline.",
+    "A PASS here means the tested lifecycle and isolation assertions held; it is not a production readiness claim."
+  ]
+}

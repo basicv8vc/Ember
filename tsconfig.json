@@ -11,6 +11,7 @@
       "@ember/domain": ["./packages/domain/src/index.ts"],
       "@ember/execution": ["./packages/execution/src/index.ts"],
       "@ember/postgres": ["./packages/postgres/src/index.ts"],
+      "@ember/sandbox-e2b": ["./packages/sandbox-e2b/src/index.ts"],
       "@ember/telemetry": ["./packages/telemetry/src/index.ts"]
     }
   },

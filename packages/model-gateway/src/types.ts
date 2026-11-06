@@ -12,7 +12,12 @@ export type ModelExecutionMode = 'disabled' | 'fake' | 'real';
 export interface ModelUsage {
   readonly inputTokens: number;
   readonly outputTokens: number;
-  /** Integer micro-USD computed from the pinned rate row. Never a float. */
+  /**
+   * Integer micro-USD computed from the pinned rate row. Never a float.
+   *
+   * Only meaningful when the provider reported token counts. A missing report is `null` at the
+   * `ModelCallResult` level, because pricing "no tokens" would price the call at zero.
+   */
   readonly costMicroUsd: number;
   readonly rateVersion: string;
 }
@@ -40,7 +45,15 @@ export interface ModelCallResult<T> {
   readonly modelLabel: string;
   /** `true` only for the fake adapter. Asserted by tests, never assumed by a consumer. */
   readonly simulated: boolean;
-  readonly usage: ModelUsage;
+  /**
+   * Provider-reported usage, or `null` when a successful call did not report it.
+   *
+   * `null` is a first-class outcome, not an error: the reply is valid and may be published, but the
+   * charge is unknown. A consumer must then book the full reservation as a conservative cost —
+   * never zero. The type is nullable specifically so that "we were not told" cannot be silently
+   * represented by the same value as "it was free".
+   */
+  readonly usage: ModelUsage | null;
 }
 
 /**

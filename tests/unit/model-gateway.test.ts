@@ -18,6 +18,7 @@ import {
   buildBoundedContext,
   createModelGateway,
   estimateCostMicroUsd,
+  estimateTokensConservative,
   isModelGatewayFailure,
   isRetryableModelFailure,
   preflightConversationTurn,
@@ -159,23 +160,61 @@ describe('bounded conversation context', () => {
 });
 
 describe('token preflight', () => {
-  it('adds the fixed prompt and envelope overhead to the character estimate', () => {
-    const preflight = preflightConversationTurn({ characters: 1_000, maxOutputTokens: 512 });
+  it('adds the fixed prompt and envelope overhead to the character bound', () => {
+    const preflight = preflightConversationTurn({
+      messages: [{ text: 'a'.repeat(1_000) }],
+      maxOutputTokens: 512,
+    });
 
-    expect(preflight.inputChars).toBeGreaterThan(1_000 + CONVERSATION_SYSTEM_PROMPT.length);
-    expect(preflight.inputTokens).toBe(
-      Math.ceil(preflight.inputChars / MODEL_LIMITS.charsPerToken),
+    expect(preflight.inputChars).toBe(
+      1_000 + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars,
     );
+    expect(preflight.inputTokens).toBeGreaterThan(250);
+  });
+
+  it('prices ASCII at roughly four characters per token', () => {
+    expect(estimateTokensConservative('abcd')).toBe(1);
+    expect(estimateTokensConservative('a'.repeat(1_000))).toBe(250);
+    // Code points, not UTF-16 units: a surrogate pair is one character.
+    expect(estimateTokensConservative('🚀')).toBe(MODEL_LIMITS.nonAsciiTokensPerChar);
+  });
+
+  it('prices non-ASCII text far above the old 4-chars-per-token guess', () => {
+    const chinese = '中'.repeat(1_000);
+    const preflight = preflightConversationTurn({
+      messages: [{ text: chinese }],
+      maxOutputTokens: 512,
+    });
+
+    // The character loop counts 1 000, but the reservation must be sized for ~2 000 tokens: a Han
+    // character is a token or more, not a quarter of one.
+    expect(estimateTokensConservative(chinese)).toBe(2_000);
+    expect(preflight.inputTokens).toBeGreaterThanOrEqual(2_000);
+
+    const fourCharsPerToken = Math.ceil(preflight.inputChars / 4);
+
+    expect(fourCharsPerToken * 3).toBeLessThan(preflight.inputTokens);
+  });
+
+  it('refuses Chinese context that is legal in characters but not in tokens', () => {
+    // 4 500 Han characters is well inside the 12 000-character bound and well outside the token cap.
+    // The previous estimator priced it at ~1 600 tokens and let it through.
+    expect(() =>
+      preflightConversationTurn({ messages: [{ text: '中'.repeat(4_500) }], maxOutputTokens: 512 }),
+    ).toThrow(ModelInputRefused);
   });
 
   it('fails closed instead of trusting an estimate over the cap', () => {
-    expect(() => preflightConversationTurn({ characters: 12_001, maxOutputTokens: 512 })).toThrow(
-      ModelInputRefused,
-    );
-    expect(() => preflightConversationTurn({ characters: 1_000, maxOutputTokens: 0 })).toThrow(
-      ModelInputRefused,
-    );
-    expect(() => preflightConversationTurn({ characters: 1_000, maxOutputTokens: 513 })).toThrow(
+    expect(() =>
+      preflightConversationTurn({ messages: [{ text: 'a'.repeat(12_001) }], maxOutputTokens: 512 }),
+    ).toThrow(ModelInputRefused);
+    expect(() =>
+      preflightConversationTurn({ messages: [{ text: 'hi' }], maxOutputTokens: 0 }),
+    ).toThrow(ModelInputRefused);
+    expect(() =>
+      preflightConversationTurn({ messages: [{ text: 'hi' }], maxOutputTokens: 513 }),
+    ).toThrow(ModelInputRefused);
+    expect(() => preflightConversationTurn({ messages: [], maxOutputTokens: 512 })).toThrow(
       ModelInputRefused,
     );
   });
@@ -376,7 +415,9 @@ describe('fake gateway', () => {
     expect(first.modelLabel).toMatch(/-(fake|echo)-/);
     expect(first.output.text.startsWith(FAKE_REPLY_PREFIX)).toBe(true);
     expect(first.output.text).toBe(second.output.text);
-    expect(first.usage.costMicroUsd).toBe(0);
+    expect(first.usage!.costMicroUsd).toBe(0);
+    // The fake path reports usage explicitly rather than relying on "unknown means free".
+    expect(first.usage!.rateVersion).toBe('fake-zero-cost');
   });
 
   it('reports a cancellation through the closed taxonomy', async () => {
@@ -565,11 +606,44 @@ describe('openai adapter', () => {
       fetchImpl: stub.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 
-    expect(result.usage.inputTokens).toBe(3_130);
-    expect(result.usage.outputTokens).toBe(512);
-    expect(result.usage.costMicroUsd).toBe(1_807);
-    expect(result.usage.rateVersion).toBe('test-rate-v1');
+    expect(result.usage).not.toBeNull();
+    expect(result.usage!.inputTokens).toBe(3_130);
+    expect(result.usage!.outputTokens).toBe(512);
+    expect(result.usage!.costMicroUsd).toBe(1_807);
+    expect(result.usage!.rateVersion).toBe('test-rate-v1');
     expect(result.output.finishReason).toBe('length');
+  });
+
+  it('never prices a 2xx as free when the provider omits usage', async () => {
+    for (const body of [
+      // No usage key at all.
+      { choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }] },
+      // Present but unusable: partial, negative or non-integer token counts.
+      { choices: [{ message: { content: 'ok' } }], usage: { prompt_tokens: 10 } },
+      {
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: -1, completion_tokens: 5 },
+      },
+      {
+        choices: [{ message: { content: 'ok' } }],
+        usage: { prompt_tokens: 1.5, completion_tokens: 5 },
+      },
+      { choices: [{ message: { content: 'ok' } }], usage: {} },
+    ]) {
+      const stub = stubFetch(() => Promise.resolve(response(200, body)));
+
+      const result = await new OpenAiModelGateway({
+        apiKey: VALID_KEY,
+        modelId: 'gpt-5-mini-2026-11-01',
+        rate: VERIFIED_RATE,
+        fetchImpl: stub.fetchImpl,
+      }).generateConversationTurn(input(), new AbortController().signal);
+
+      // The reply is valid and usable, but the charge is unknown — not zero.
+      expect(result.output.text).toBe('ok');
+      expect(result.usage).toBeNull();
+      expect(result.simulated).toBe(false);
+    }
   });
 });
 

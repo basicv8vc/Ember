@@ -67,6 +67,7 @@ export type {
   B2AttemptCharge,
   B2AttemptReservation,
   B2BudgetCeilings,
+  B2BudgetIncident,
   B2ClaimOutcome,
   B2PublicationResult,
   B2PublishCommand,
@@ -76,6 +77,7 @@ export type {
   B2TurnContextRow,
   B2TurnLease,
 } from './repositories/b2-interfaces.js';
+export { B2_ABSOLUTE_DAY_CEILINGS } from './repositories/b2-ledger-limits.js';
 export {
   B1_ASSISTANT_TURN_FAILURE_MESSAGE as B1_TURN_FAILURE_MESSAGE,
   B1_ASSISTANT_TURN_MODEL_LABEL,

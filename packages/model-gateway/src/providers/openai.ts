@@ -53,13 +53,48 @@ const completionSchema = z.object({
       }),
     )
     .min(1),
-  usage: z
-    .object({
-      prompt_tokens: z.number().int().nonnegative(),
-      completion_tokens: z.number().int().nonnegative(),
-    })
-    .optional(),
+  // Validated separately and leniently: a reply whose billing metadata is absent or malformed is
+  // still a valid reply, but it has an *unknown* charge. Parsing it strictly here would either
+  // discard a paid answer or, worse, tempt the next line into defaulting the token counts to 0.
+  usage: z.unknown().optional(),
 });
+
+const usageSchema = z.object({
+  prompt_tokens: z.number().int().nonnegative(),
+  completion_tokens: z.number().int().nonnegative(),
+});
+
+/**
+ * Provider usage → priced usage, or `null` when the provider did not report it.
+ *
+ * `null` means "unknown", and the caller must book the reservation instead. Returning a zero-cost
+ * usage here would be indistinguishable from a genuinely free call, which is exactly the accounting
+ * hole this function exists to close.
+ */
+function toUsage(
+  usage: unknown,
+  rate: ModelRateRow,
+): {
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly costMicroUsd: number;
+} | null {
+  const parsed = usageSchema.safeParse(usage);
+
+  if (!parsed.success) {
+    return null;
+  }
+
+  return {
+    inputTokens: parsed.data.prompt_tokens,
+    outputTokens: parsed.data.completion_tokens,
+    costMicroUsd: estimateCostMicroUsd(
+      rate,
+      parsed.data.prompt_tokens,
+      parsed.data.completion_tokens,
+    ),
+  };
+}
 
 export interface OpenAiGatewayOptions {
   readonly apiKey: string;
@@ -160,15 +195,19 @@ export class OpenAiModelGateway implements ModelGateway {
       throw new ModelGatewayFailure('model_invalid_output');
     }
 
-    const inputTokens = parsed.data.usage?.prompt_tokens ?? 0;
-    const outputTokens = parsed.data.usage?.completion_tokens ?? 0;
+    const priced = toUsage(parsed.data.usage, this.#rate);
 
-    const usage: ModelUsage = Object.freeze({
-      inputTokens,
-      outputTokens,
-      costMicroUsd: estimateCostMicroUsd(this.#rate, inputTokens, outputTokens),
-      rateVersion: this.#rate.rateVersion,
-    });
+    // A 2xx without usage is *not* a free call. The charge is unknown, which the caller must handle
+    // by booking the full reservation; `null` carries that meaning explicitly.
+    const usage: ModelUsage | null =
+      priced === null
+        ? null
+        : Object.freeze({
+            inputTokens: priced.inputTokens,
+            outputTokens: priced.outputTokens,
+            costMicroUsd: priced.costMicroUsd,
+            rateVersion: this.#rate.rateVersion,
+          });
 
     return Object.freeze({
       output: Object.freeze({

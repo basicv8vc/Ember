@@ -99,6 +99,9 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   /** When set, every reservation is refused this way. The database models the same conditions. */
   reserveRefusal: B2ReserveOutcome | null = null;
 
+  /** Replaces the transcript this port returns, for context-bound tests. */
+  contextOverride: readonly B2TurnContextRow[] | null = null;
+
   attemptsIssued = 0;
 
   listRunningTurns(): Promise<readonly PendingModelTurn[]> {
@@ -130,7 +133,7 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
 
   loadTurnContext(): Promise<readonly B2TurnContextRow[]> {
     this.calls.push('loadTurnContext');
-    return Promise.resolve(contextRows);
+    return Promise.resolve(this.contextOverride ?? contextRows);
   }
 
   reserveAttempt(command: {
@@ -174,7 +177,13 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   settleAttempt(charge: B2AttemptCharge): Promise<B2SettlementOutcome> {
     this.calls.push('settleAttempt');
     this.charges.push(charge);
-    return Promise.resolve({ kind: 'applied', state: charge.state, appliedMicroUsd: null });
+    return Promise.resolve({
+      kind: 'applied',
+      state: charge.state,
+      appliedMicroUsd: null,
+      overageMicroUsd: 0,
+      incidentsOpened: 0,
+    });
   }
 
   publishCompletion(command: { readonly result: PublishRecord }): Promise<B2PublicationResult> {
@@ -706,5 +715,145 @@ describe('B2 responder: construction guards', () => {
 
     expect(warnings.join('\n')).not.toContain('secret transcript');
     expect(warnings.join('\n')).toContain('"category":"error"');
+  });
+});
+
+/** A gateway that answers successfully but reports no usage: the charge is unknown, not zero. */
+class NullUsageGateway implements ModelGateway {
+  readonly providerId = 'openai' as const;
+  readonly modelLabel = REAL_MODEL_LABEL;
+  readonly simulated = false;
+  readonly operations = ['conversation.turn'] as const;
+
+  readonly inputs: ConversationTurnInput[] = [];
+
+  generateConversationTurn(
+    input: ConversationTurnInput,
+  ): Promise<ModelCallResult<ConversationTurnOutput>> {
+    this.inputs.push(input);
+
+    return Promise.resolve({
+      output: { text: 'a reply with an unknown bill', finishReason: 'stop' as const },
+      modelLabel: REAL_MODEL_LABEL,
+      simulated: false as const,
+      usage: null,
+    });
+  }
+}
+
+/**
+ * A rate row priced far above the per-attempt cap, used only to prove the refusal.
+ *
+ * At $2/M input and $20/M output a maximal request costs ~$0.010, twice the $0.005 cap, so no honest
+ * reservation fits. It is a fixture, not a proposal: no such row exists in `MODEL_RATE_ROWS`.
+ */
+const EXPENSIVE_RATE: ModelRateRow = {
+  ...rate,
+  inputMicroUsdPerMillion: 2_000_000,
+  outputMicroUsdPerMillion: 20_000_000,
+  rateVersion: 'test-expensive-rate',
+};
+
+describe('B2 responder: unknown provider usage (review P0-1)', () => {
+  it('books the whole reservation instead of zero, and still publishes the reply', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new NullUsageGateway();
+    const summary = await realResponder(repository, gateway).processOnce();
+
+    expect(summary.completed).toBe(1);
+    expect(gateway.inputs).toHaveLength(1);
+
+    // No observed cost was invented, and the settlement is explicitly labelled conservative.
+    expect(repository.charges).toHaveLength(1);
+    expect(repository.charges[0]).toMatchObject({
+      state: 'conservative_billed',
+      outcomeCode: 'usage_missing',
+    });
+    expect(repository.charges[0]?.observedCostMicroUsd).toBeUndefined();
+
+    // The user paid for the answer, so the answer is delivered.
+    expect(repository.publishes[0]).toMatchObject({
+      status: 'completed',
+      text: 'a reply with an unknown bill',
+      simulated: false,
+    });
+
+    // The reservation that was held for this attempt is what gets booked.
+    expect(repository.reserveCommands[0]?.reservedMicroUsd).toBeGreaterThan(0);
+  });
+
+  it('never reports a successful call as settled when usage is unknown', async () => {
+    const repository = new MemoryExecutionPort();
+    await realResponder(repository, new NullUsageGateway()).processOnce();
+
+    expect(repository.charges.some((charge) => charge.state === 'settled')).toBe(false);
+  });
+});
+
+describe('B2 responder: reservation ceiling (review P0-2)', () => {
+  it('refuses before any attempt row or provider call when the worst case exceeds the cap', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['ok']);
+
+    const summary = await realResponder(repository, gateway, {
+      rate: EXPENSIVE_RATE,
+    }).processOnce();
+
+    expect(summary.failed).toBe(1);
+    // Nothing was reserved, nothing was sent, and the Turn still ends with the frozen B1 text.
+    expect(repository.reserveCommands).toHaveLength(0);
+    expect(repository.calls).not.toContain('reserveAttempt');
+    expect(gateway.inputs).toHaveLength(0);
+    expect(repository.publishes[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
+  });
+
+  it('reserves the exact worst case rather than clamping it to the cap', async () => {
+    const repository = new MemoryExecutionPort();
+    await realResponder(repository, new ScriptedGateway(['ok'])).processOnce();
+
+    const reserved = repository.reserveCommands[0]?.reservedMicroUsd ?? 0;
+
+    // Short context, 512 output tokens at the pinned rate: the reservation must cover the maximum
+    // output, and it must be below the cap (so this call is allowed at all).
+    expect(reserved).toBeGreaterThan(512 * 2);
+    expect(reserved).toBeLessThanOrEqual(ceilings.perAttemptMicroUsd);
+  });
+
+  it('refuses a Chinese transcript that the character bound alone would admit', async () => {
+    const repository = new MemoryExecutionPort();
+    // 4 500 Han characters: legal in characters, over the token cap once priced honestly.
+    repository.contextOverride = [{ sequence: 1, kind: 'user', text: '中'.repeat(4_500) }];
+    const gateway = new ScriptedGateway(['ok']);
+
+    const summary = await realResponder(repository, gateway).processOnce();
+
+    expect(summary.failed).toBe(1);
+    expect(gateway.inputs).toHaveLength(0);
+  });
+});
+
+describe('B2 responder: budget halt (review P0-3)', () => {
+  it('refuses the call, closes the Turn and makes no provider request', async () => {
+    const repository = new MemoryExecutionPort();
+    repository.reserveRefusal = {
+      kind: 'budget_halted',
+      scope: 'tenant',
+      reason: 'day_ceiling_exceeded',
+    };
+    const gateway = new ScriptedGateway(['ok']);
+
+    const summary = await realResponder(repository, gateway).processOnce();
+
+    expect(summary.halted).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(gateway.inputs).toHaveLength(0);
+    expect(repository.charges).toHaveLength(0);
+    expect(repository.publishes[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
   });
 });

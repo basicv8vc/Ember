@@ -98,7 +98,14 @@ function identityOf(turn: PendingModelTurn): PendingModelTurn {
 
 /** How one turn finished, for the loop's summary counters. Field names are the counters. */
 export type ModelTurnOutcome =
-  'completed' | 'failed' | 'timedOut' | 'budgetDenied' | 'fenced' | 'skipped' | 'expired';
+  | 'completed'
+  | 'failed'
+  | 'timedOut'
+  | 'budgetDenied'
+  | 'halted'
+  | 'fenced'
+  | 'skipped'
+  | 'expired';
 
 export interface ModelTurnResponderSummary {
   readonly examined: number;
@@ -106,6 +113,8 @@ export interface ModelTurnResponderSummary {
   readonly failed: number;
   readonly timedOut: number;
   readonly budgetDenied: number;
+  /** Refused because an unresolved budget incident already applies to the caller. */
+  readonly halted: number;
   readonly fenced: number;
   readonly expired: number;
   readonly skipped: number;
@@ -140,7 +149,8 @@ interface GatewaySuccess {
   readonly text: string;
   readonly modelLabel: string;
   readonly simulated: boolean;
-  readonly usage: ModelUsage;
+  /** `null` when the provider answered without reporting usage: an unknown charge, never a free one. */
+  readonly usage: ModelUsage | null;
 }
 
 interface GatewayFailure {
@@ -198,22 +208,45 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
     failed: 0,
     timedOut: 0,
     budgetDenied: 0,
+    halted: 0,
     fenced: 0,
     expired: 0,
     skipped: 0,
   });
 
+  /**
+   * Worst-case reservation for one attempt, or a refusal.
+   *
+   * The reservation is priced from the conservative token estimate at the pinned rate for
+   * `maxOutputTokens`, i.e. for the largest bill this request can plausibly produce. If that exceeds
+   * the per-attempt cap the call is **refused before any attempt row exists**, rather than clamped to
+   * the cap and sent anyway: clamping reserved $0.005 for a request that can cost $0.02, which is a
+   * spend ceiling that silently does not hold. The cap is a limit, not a target.
+   *
+   * `Math.max(..., 1)` is a floor, not a truncation: the ledger's smallest hold is one micro-USD.
+   */
   const reserveMicroUsd = (inputTokens: number): number => {
+    const capMicroUsd = Math.min(
+      options.ceilings.perAttemptMicroUsd,
+      MODEL_LIMITS.maxReservedMicroUsdPerAttempt,
+    );
+
     if (options.mode === 'fake' || options.rate === null) {
-      return MODEL_LIMITS.maxReservedMicroUsdPerAttempt;
+      return capMicroUsd;
     }
 
-    const estimated = estimateCostMicroUsd(options.rate, inputTokens, MODEL_LIMITS.maxOutputTokens);
-
-    return Math.min(
-      Math.max(estimated, 1),
-      Math.min(options.ceilings.perAttemptMicroUsd, MODEL_LIMITS.maxReservedMicroUsdPerAttempt),
+    const worstCaseMicroUsd = estimateCostMicroUsd(
+      options.rate,
+      inputTokens,
+      MODEL_LIMITS.maxOutputTokens,
     );
+    const reservation = Math.max(worstCaseMicroUsd, 1);
+
+    if (reservation > capMicroUsd) {
+      throw new ModelInputRefused('reservation_cap_exceeded');
+    }
+
+    return reservation;
   };
 
   /**
@@ -316,7 +349,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
 
     const bounded = buildBoundedContext(context);
     const preflight = preflightConversationTurn({
-      characters: bounded.characters,
+      messages: bounded.messages,
       maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
     });
 
@@ -347,11 +380,15 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       throw new TypeError('real mode requires a pinned rate row');
     }
 
+    // Priced once, before the first attempt row exists. A refusal here means zero rows, zero bytes
+    // and zero spend — the only acceptable outcome when the worst case does not fit the cap.
+    const reservedMicroUsd = reserveMicroUsd(preflight.inputTokens);
+
     for (let attempt = 1; attempt <= options.maxAttempts; attempt += 1) {
       const reservation = await options.repository.reserveAttempt({
         lease,
         ceilings: options.ceilings,
-        reservedMicroUsd: reserveMicroUsd(preflight.inputTokens),
+        reservedMicroUsd,
         rateVersion: rate.rateVersion,
         providerId: 'openai',
         modelLabel: options.gateway.modelLabel,
@@ -375,6 +412,23 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         return await terminalFailure(lease, 'internal_error');
       }
 
+      if (reservation.kind === 'budget_halted') {
+        // Spend already exceeded a reservation or a hard ceiling. Nothing may be sent until the
+        // incident is reconciled, so this is a refusal rather than a retry. The Turn is closed now
+        // instead of being left for the deadline sweeper: a 60 s wait would look like a slow model,
+        // and the answer is already known.
+        options.logger?.warn('model paid call halted by budget incident', {
+          scope: reservation.scope,
+          reason: reservation.reason,
+        });
+        const halted = await options.repository.publishCompletion({
+          lease,
+          result: { status: 'failed', failureReason: 'internal_error' },
+        });
+
+        return halted.outcome === 'published' ? 'halted' : 'fenced';
+      }
+
       const attemptNo = reservation.attempt.attemptNo;
       const sent = await options.repository.markAttemptSent({ lease, attemptNo });
 
@@ -387,13 +441,23 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       const result = await callGateway(lease, bounded.messages, signal);
 
       if (result.kind === 'success') {
-        await settle(lease, attemptNo, {
-          state: 'settled',
-          outcomeCode: 'ok',
-          observedCostMicroUsd: result.usage.costMicroUsd,
-          inputTokens: result.usage.inputTokens,
-          outputTokens: result.usage.outputTokens,
-        });
+        if (result.usage === null) {
+          // The provider answered but did not say what it charged. Booking zero would be a lie and
+          // would understate the day's spend, so the full reservation is recognized instead. The
+          // reply is still valid and is published below: the user paid for it either way.
+          await settle(lease, attemptNo, {
+            state: 'conservative_billed',
+            outcomeCode: 'usage_missing',
+          });
+        } else {
+          await settle(lease, attemptNo, {
+            state: 'settled',
+            outcomeCode: 'ok',
+            observedCostMicroUsd: result.usage.costMicroUsd,
+            inputTokens: result.usage.inputTokens,
+            outputTokens: result.usage.outputTokens,
+          });
+        }
 
         const published = await options.repository.publishCompletion({
           lease,

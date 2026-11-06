@@ -17,6 +17,7 @@ import {
 } from './b1-turn-publication.js';
 import type {
   B2AttemptCharge,
+  B2BudgetIncident,
   B2ClaimOutcome,
   B2PublicationResult,
   B2PublishCommand,
@@ -26,6 +27,7 @@ import type {
   B2TurnContextRow,
   B2TurnLease,
 } from './b2-interfaces.js';
+import { B2_ABSOLUTE_DAY_CEILINGS } from './b2-ledger-limits.js';
 import { asDomainError } from './support.js';
 
 export const B2_TURN_CANDIDATE_LIMIT = 50;
@@ -84,6 +86,46 @@ interface FenceRow {
 interface ClaimRow extends FenceRow {
   readonly deadline_at: Date | string;
   readonly lease_expires_at: Date | string;
+}
+
+interface IncidentRow {
+  readonly id: string;
+  readonly tenant_id: string;
+  readonly scope_kind: 'global' | 'tenant' | 'principal';
+  readonly scope_id: string;
+  readonly utc_day: string;
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  readonly turn_id: string | null;
+  readonly attempt_no: number | null;
+  readonly observed_micro_usd: string | number;
+  readonly applied_micro_usd: string | number;
+  readonly overage_micro_usd: string | number;
+  readonly reservation_micro_usd: string | number;
+  readonly detected_at: Date | string;
+  readonly resolved_at: Date | string | null;
+  readonly resolved_by: string | null;
+  readonly resolution_note: string | null;
+}
+
+function toIncident(row: IncidentRow): B2BudgetIncident {
+  return {
+    id: row.id,
+    tenantId: row.tenant_id,
+    scope: row.scope_kind,
+    scopeId: row.scope_id,
+    utcDay: row.utc_day,
+    reason: row.reason,
+    turnId: row.turn_id,
+    attemptNo: row.attempt_no,
+    observedMicroUsd: Number(row.observed_micro_usd),
+    appliedMicroUsd: Number(row.applied_micro_usd),
+    overageMicroUsd: Number(row.overage_micro_usd),
+    reservationMicroUsd: Number(row.reservation_micro_usd),
+    detectedAt: toIso(row.detected_at),
+    resolvedAt: row.resolved_at === null ? null : toIso(row.resolved_at),
+    resolvedBy: row.resolved_by,
+    resolutionNote: row.resolution_note,
+  };
 }
 
 /**
@@ -291,6 +333,19 @@ SELECT m.sequence, m.kind, m.text
           throw new Refusal({ kind: 'principal_unavailable' });
         }
 
+        // An unresolved incident means the ledger has already spent money it did not predict, or has
+        // crossed a hard ceiling. Either way no further paid call may start until a human has looked
+        // at it: this is the "stop spending" half of the overage path.
+        const halted = await findOutstandingHalt(client, lease.tenantId, principalId);
+
+        if (halted !== null) {
+          throw new Refusal({
+            kind: 'budget_halted',
+            scope: halted.scope,
+            reason: halted.reason,
+          });
+        }
+
         const day = await client.query<{ readonly utc_day: string }>(
           "SELECT (clock_timestamp() AT TIME ZONE 'UTC')::date::text AS utc_day",
         );
@@ -462,28 +517,89 @@ SELECT state, reserved_micro_usd, utc_day::text AS utc_day, principal_id
       const observed = input.observedCostMicroUsd ?? null;
 
       let applied: number | null = null;
+      let chargeMicroUsd = 0;
       let releaseMicroUsd = 0;
+      let billingBasis: string | null = null;
 
       if (input.state === 'settled') {
-        // `applied` is bounded by the reservation; the observed value is stored unclamped so an
-        // overage stays visible instead of being silently absorbed. The whole hold ends here:
-        // `applied` becomes consumed money and the remainder is returned.
+        // The reservation is released in full and the *actual* cost is recognized. `applied` is what
+        // the reservation covered; anything above it is overage, recorded rather than clipped.
+        // The whole hold ends here, so `applied` becomes consumed money and the hold is returned.
         applied = Math.min(observed ?? 0, reserved);
+        chargeMicroUsd = observed ?? 0;
         releaseMicroUsd = reserved;
+        billingBasis = 'provider_usage';
+      } else if (input.state === 'conservative_billed') {
+        // The provider answered but did not report usage. The charge is unknown, so the full
+        // reservation is booked: never zero, and never less than what was held.
+        applied = reserved;
+        chargeMicroUsd = reserved;
+        releaseMicroUsd = reserved;
+        billingBasis = 'conservative_reservation';
       } else if (input.state === 'released') {
         applied = 0;
+        billingBasis = 'not_billed';
         releaseMicroUsd = reserved;
       }
-      // `unknown_billed` releases nothing: the request may already be on an invoice.
+      // `unknown_billed` releases nothing and recognizes nothing: the request may already be on an
+      // invoice, and the hold is the only record of it.
 
-      await applyCharge(
-        client,
-        row.utc_day,
-        input.tenantId,
-        row.principal_id,
-        releaseMicroUsd,
-        applied ?? 0,
-      );
+      const charged =
+        releaseMicroUsd === 0 && chargeMicroUsd === 0
+          ? []
+          : await applyCharge(client, {
+              utcDay: row.utc_day,
+              tenantId: input.tenantId,
+              principalId: row.principal_id,
+              releaseMicroUsd,
+              chargeMicroUsd,
+            });
+
+      // A bucket that could not absorb the charge has breached its hard ceiling: preserve the
+      // excess and open the incident that stops further paid calls.
+      let incidentsOpened = 0;
+
+      for (const bucket of charged) {
+        if (bucket.overageMicroUsd > 0) {
+          await insertIncident(client, {
+            tenantId: input.tenantId,
+            scope: bucket.scope,
+            scopeId: bucket.scopeId,
+            utcDay: row.utc_day,
+            reason: 'day_ceiling_exceeded',
+            turnId: input.turnId,
+            attemptNo: input.attemptNo,
+            observedMicroUsd: chargeMicroUsd,
+            appliedMicroUsd: bucket.appliedMicroUsd,
+            overageMicroUsd: bucket.overageMicroUsd,
+            reservationMicroUsd: reserved,
+          });
+          incidentsOpened += 1;
+        }
+      }
+
+      // The day allowance absorbed the cost, but the actual charge still beat this attempt's
+      // reservation. That is a pricing defect, not a budget breach, and it must also halt spend:
+      // the next reservation would be just as wrong.
+      if (incidentsOpened === 0 && observed !== null && observed > reserved) {
+        await insertIncident(client, {
+          tenantId: input.tenantId,
+          scope: 'tenant',
+          scopeId: input.tenantId,
+          utcDay: row.utc_day,
+          reason: 'reservation_exceeded',
+          turnId: input.turnId,
+          attemptNo: input.attemptNo,
+          observedMicroUsd: observed,
+          appliedMicroUsd: observed,
+          overageMicroUsd: 0,
+          reservationMicroUsd: reserved,
+        });
+        incidentsOpened = 1;
+      }
+
+      const attemptOverage = applied === null ? 0 : Math.max(0, (observed ?? 0) - applied);
+      const overageMicroUsd = charged.reduce((total, item) => total + item.overageMicroUsd, 0);
 
       await client.query(
         `
@@ -494,6 +610,8 @@ UPDATE model_turn_attempts
        observed_cost_micro_usd = $7,
        input_tokens = $8,
        output_tokens = $9,
+       billing_basis = $10,
+       overage_micro_usd = $11,
        settled_at = clock_timestamp()
  WHERE tenant_id = $1 AND turn_id = $2 AND attempt_no = $3 AND state = 'reserved'`,
         [
@@ -506,10 +624,18 @@ UPDATE model_turn_attempts
           observed,
           input.inputTokens ?? null,
           input.outputTokens ?? null,
+          billingBasis,
+          attemptOverage,
         ],
       );
 
-      return { kind: 'applied' as const, state: input.state, appliedMicroUsd: applied };
+      return {
+        kind: 'applied' as const,
+        state: input.state,
+        appliedMicroUsd: applied,
+        overageMicroUsd,
+        incidentsOpened,
+      };
     });
   }
 
@@ -621,6 +747,72 @@ UPDATE model_turn_attempts
 
       return failed === null ? null : toTurnDto(failed);
     });
+  }
+
+  /**
+   * Open budget incidents, newest first.
+   *
+   * This is the operator half of the halt: a paid call is refused while any of these applies, and the
+   * row is the evidence needed to reconcile `observed_micro_usd` against an invoice line.
+   */
+  async listOpenBudgetIncidents(limit = 50): Promise<readonly B2BudgetIncident[]> {
+    const parsed = incidentListSchema.safeParse({ limit });
+
+    if (!parsed.success) {
+      throw toInvalidArgumentError(parsed.error);
+    }
+
+    try {
+      const result = await this.pool.query<IncidentRow>(
+        `
+SELECT id, tenant_id, scope_kind, scope_id, utc_day::text AS utc_day, reason, turn_id,
+       attempt_no, observed_micro_usd, applied_micro_usd, overage_micro_usd,
+       reservation_micro_usd, detected_at, resolved_at, resolved_by, resolution_note
+  FROM model_budget_incidents
+ WHERE resolved_at IS NULL
+ ORDER BY detected_at DESC, id ASC
+ LIMIT $1::int`,
+        [parsed.data.limit],
+      );
+
+      return result.rows.map(toIncident);
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
+  /**
+   * Resolve one incident, which re-enables paid calls for every scope it was blocking.
+   *
+   * Resolution is attributed and idempotent-by-refusal: an already-resolved incident updates zero
+   * rows rather than overwriting the original attribution.
+   */
+  async resolveBudgetIncident(command: {
+    readonly id: string;
+    readonly resolvedBy: string;
+    readonly note: string;
+  }): Promise<boolean> {
+    const parsed = resolveIncidentSchema.safeParse(command);
+
+    if (!parsed.success) {
+      throw toInvalidArgumentError(parsed.error);
+    }
+
+    try {
+      const result = await this.pool.query(
+        `
+UPDATE model_budget_incidents
+   SET resolved_at = clock_timestamp(),
+       resolved_by = $2,
+       resolution_note = $3
+ WHERE id = $1 AND resolved_at IS NULL`,
+        [parsed.data.id, parsed.data.resolvedBy, parsed.data.note],
+      );
+
+      return (result.rowCount ?? 0) === 1;
+    } catch (error) {
+      throw asDomainError(error);
+    }
   }
 
   private async classifyMiss(
@@ -748,39 +940,264 @@ ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO UPDATE
   }
 }
 
-/** Return unused money and book the recognized cost, in the same lock order as a reservation. */
-async function applyCharge(
+/** One bucket's share of a settlement: how much it could absorb, and what it could not. */
+interface BucketChargeResult {
+  readonly scope: 'global' | 'tenant' | 'principal';
+  readonly scopeId: string;
+  readonly appliedMicroUsd: number;
+  readonly overageMicroUsd: number;
+}
+
+/**
+ * How much of `charge` fits inside the day ceiling.
+ *
+ * `release` is money already held for this attempt; releasing it first is what makes room for the
+ * charge. The remainder is **overage and is returned, never discarded**: the caller records it in the
+ * bucket and opens an incident. Clipping it to the ceiling is the defect this function replaces.
+ */
+function splitCharge(
+  reserved: number,
+  consumed: number,
+  release: number,
+  charge: number,
+  ceiling: number,
+): {
+  readonly remainingReserved: number;
+  readonly appliedMicroUsd: number;
+  readonly overageMicroUsd: number;
+} {
+  const remainingReserved = reserved - release;
+  const room = Math.max(0, ceiling - (remainingReserved + consumed));
+  const appliedMicroUsd = Math.min(charge, room);
+
+  return { remainingReserved, appliedMicroUsd, overageMicroUsd: charge - appliedMicroUsd };
+}
+
+async function chargeGlobal(
   client: pg.PoolClient,
   utcDay: string,
-  tenantId: string,
-  principalId: string,
   releaseMicroUsd: number,
-  consumedMicroUsd: number,
-): Promise<void> {
+  chargeMicroUsd: number,
+): Promise<BucketChargeResult> {
+  // Ensures the row exists so the next statement can actually lock it; a reservation would normally
+  // have created it, but settlement must not depend on that.
+  await client.query(
+    `INSERT INTO model_global_spend_days (utc_day) VALUES ($1::date)
+     ON CONFLICT (utc_day) DO NOTHING`,
+    [utcDay],
+  );
+
+  const locked = await client.query<{
+    readonly reserved_micro_usd: string | number;
+    readonly consumed_micro_usd: string | number;
+  }>(
+    `SELECT reserved_micro_usd, consumed_micro_usd
+       FROM model_global_spend_days
+      WHERE utc_day = $1::date
+      FOR UPDATE`,
+    [utcDay],
+  );
+  const reserved = Number(locked.rows[0]!.reserved_micro_usd);
+  const consumed = Number(locked.rows[0]!.consumed_micro_usd);
+  const split = splitCharge(
+    reserved,
+    consumed,
+    releaseMicroUsd,
+    chargeMicroUsd,
+    B2_ABSOLUTE_DAY_CEILINGS.globalMicroUsd,
+  );
+
   await client.query(
     `
 UPDATE model_global_spend_days
-   SET reserved_micro_usd = reserved_micro_usd - $2,
-       consumed_micro_usd = consumed_micro_usd + $3,
+   SET reserved_micro_usd = $2,
+       consumed_micro_usd = $3,
+       overage_micro_usd = overage_micro_usd + $4,
        updated_at = clock_timestamp()
  WHERE utc_day = $1::date`,
-    [utcDay, releaseMicroUsd, consumedMicroUsd],
+    [utcDay, split.remainingReserved, consumed + split.appliedMicroUsd, split.overageMicroUsd],
   );
 
-  for (const [scopeKind, scopeId] of [
-    ['tenant', tenantId],
-    ['principal', principalId],
-  ] as const) {
-    await client.query(
-      `
+  return {
+    scope: 'global',
+    scopeId: 'platform',
+    appliedMicroUsd: split.appliedMicroUsd,
+    overageMicroUsd: split.overageMicroUsd,
+  };
+}
+
+async function chargeScope(
+  client: pg.PoolClient,
+  tenantId: string,
+  scopeKind: 'tenant' | 'principal',
+  scopeId: string,
+  utcDay: string,
+  releaseMicroUsd: number,
+  chargeMicroUsd: number,
+): Promise<BucketChargeResult> {
+  await client.query(
+    `INSERT INTO model_spend_days (tenant_id, scope_kind, scope_id, utc_day)
+     VALUES ($1, $2, $3, $4::date)
+     ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO NOTHING`,
+    [tenantId, scopeKind, scopeId, utcDay],
+  );
+
+  const locked = await client.query<{
+    readonly reserved_micro_usd: string | number;
+    readonly consumed_micro_usd: string | number;
+  }>(
+    `SELECT reserved_micro_usd, consumed_micro_usd
+       FROM model_spend_days
+      WHERE tenant_id = $1 AND scope_kind = $2 AND scope_id = $3 AND utc_day = $4::date
+      FOR UPDATE`,
+    [tenantId, scopeKind, scopeId, utcDay],
+  );
+  const reserved = Number(locked.rows[0]!.reserved_micro_usd);
+  const consumed = Number(locked.rows[0]!.consumed_micro_usd);
+  const ceiling =
+    scopeKind === 'tenant'
+      ? B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd
+      : B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd;
+  const split = splitCharge(reserved, consumed, releaseMicroUsd, chargeMicroUsd, ceiling);
+
+  await client.query(
+    `
 UPDATE model_spend_days
-   SET reserved_micro_usd = reserved_micro_usd - $4,
-       consumed_micro_usd = consumed_micro_usd + $5,
+   SET reserved_micro_usd = $5,
+       consumed_micro_usd = $6,
+       overage_micro_usd = overage_micro_usd + $7,
        updated_at = clock_timestamp()
- WHERE tenant_id = $1 AND scope_kind = $2 AND scope_id = $3 AND utc_day = $6::date`,
-      [tenantId, scopeKind, scopeId, releaseMicroUsd, consumedMicroUsd, utcDay],
-    );
-  }
+ WHERE tenant_id = $1 AND scope_kind = $2 AND scope_id = $3 AND utc_day = $4::date`,
+    [
+      tenantId,
+      scopeKind,
+      scopeId,
+      utcDay,
+      split.remainingReserved,
+      consumed + split.appliedMicroUsd,
+      split.overageMicroUsd,
+    ],
+  );
+
+  return {
+    scope: scopeKind,
+    scopeId,
+    appliedMicroUsd: split.appliedMicroUsd,
+    overageMicroUsd: split.overageMicroUsd,
+  };
+}
+
+/**
+ * Return unused money and book the recognized cost, in the same lock order as a reservation:
+ * global day → tenant day → principal day.
+ */
+async function applyCharge(
+  client: pg.PoolClient,
+  input: {
+    readonly utcDay: string;
+    readonly tenantId: string;
+    readonly principalId: string;
+    readonly releaseMicroUsd: number;
+    readonly chargeMicroUsd: number;
+  },
+): Promise<readonly BucketChargeResult[]> {
+  return [
+    await chargeGlobal(client, input.utcDay, input.releaseMicroUsd, input.chargeMicroUsd),
+    await chargeScope(
+      client,
+      input.tenantId,
+      'tenant',
+      input.tenantId,
+      input.utcDay,
+      input.releaseMicroUsd,
+      input.chargeMicroUsd,
+    ),
+    await chargeScope(
+      client,
+      input.tenantId,
+      'principal',
+      input.principalId,
+      input.utcDay,
+      input.releaseMicroUsd,
+      input.chargeMicroUsd,
+    ),
+  ];
+}
+
+async function insertIncident(
+  client: pg.PoolClient,
+  input: {
+    readonly tenantId: string;
+    readonly scope: 'global' | 'tenant' | 'principal';
+    readonly scopeId: string;
+    readonly utcDay: string;
+    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+    readonly turnId: string;
+    readonly attemptNo: number;
+    readonly observedMicroUsd: number;
+    readonly appliedMicroUsd: number;
+    readonly overageMicroUsd: number;
+    readonly reservationMicroUsd: number;
+  },
+): Promise<void> {
+  await client.query(
+    `
+INSERT INTO model_budget_incidents
+       (id, tenant_id, scope_kind, scope_id, utc_day, reason, turn_id, attempt_no,
+        observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
+VALUES ($1, $2, $3, $4, $5::date, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      randomUUID(),
+      input.tenantId,
+      input.scope,
+      input.scopeId,
+      input.utcDay,
+      input.reason,
+      input.turnId,
+      input.attemptNo,
+      input.observedMicroUsd,
+      input.appliedMicroUsd,
+      input.overageMicroUsd,
+      input.reservationMicroUsd,
+    ],
+  );
+}
+
+/**
+ * The stop switch: any unresolved incident that applies to this call.
+ *
+ * Checked before a reservation is written and before any request is built, so a halted tenant makes
+ * zero provider calls rather than "fewer" ones. Global incidents block everyone, which is correct:
+ * the shared daily bucket is the thing that ran out.
+ */
+async function findOutstandingHalt(
+  client: pg.PoolClient,
+  tenantId: string,
+  principalId: string,
+): Promise<{
+  readonly scope: 'global' | 'tenant' | 'principal';
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+} | null> {
+  const result = await client.query<{
+    readonly scope_kind: 'global' | 'tenant' | 'principal';
+    readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  }>(
+    `
+SELECT scope_kind, reason
+  FROM model_budget_incidents
+ WHERE resolved_at IS NULL
+   AND (
+     scope_kind = 'global'
+     OR (tenant_id = $1 AND scope_kind = 'tenant')
+     OR (tenant_id = $1 AND scope_kind = 'principal' AND scope_id = $2)
+   )
+ ORDER BY CASE scope_kind WHEN 'global' THEN 0 WHEN 'tenant' THEN 1 ELSE 2 END
+ LIMIT 1`,
+    [tenantId, principalId],
+  );
+  const row = result.rows[0];
+
+  return row === undefined ? null : { scope: row.scope_kind, reason: row.reason };
 }
 
 function toIso(value: Date | string): string {
@@ -838,24 +1255,51 @@ const markSentSchema = z.strictObject({
   attemptNo: z.number().int().min(1).max(2),
 });
 
-const settleSchema = z.strictObject({
-  tenantId: IdSchema,
-  turnId: IdSchema,
-  attemptNo: z.number().int().min(1).max(2),
-  outcomeCode: z.enum([
-    'ok',
-    'model_timeout',
-    'model_unavailable',
-    'model_rate_limited',
-    'model_auth_failed',
-    'model_invalid_output',
-    'client_cancelled',
-    'not_sent',
-  ]),
-  state: z.enum(['settled', 'unknown_billed', 'released']),
-  observedCostMicroUsd: z.number().int().min(0).nullable().optional(),
-  inputTokens: z.number().int().min(0).nullable().optional(),
-  outputTokens: z.number().int().min(0).nullable().optional(),
+const settleSchema = z
+  .strictObject({
+    tenantId: IdSchema,
+    turnId: IdSchema,
+    attemptNo: z.number().int().min(1).max(2),
+    outcomeCode: z.enum([
+      'ok',
+      'model_timeout',
+      'model_unavailable',
+      'model_rate_limited',
+      'model_auth_failed',
+      'model_invalid_output',
+      'client_cancelled',
+      'not_sent',
+      'usage_missing',
+    ]),
+    state: z.enum(['settled', 'unknown_billed', 'released', 'conservative_billed']),
+    observedCostMicroUsd: z.number().int().min(0).nullable().optional(),
+    inputTokens: z.number().int().min(0).nullable().optional(),
+    outputTokens: z.number().int().min(0).nullable().optional(),
+  })
+  // `settled` claims to know the cost, so it must carry one. `conservative_billed` claims the
+  // opposite, so inventing a number there would misrepresent an estimate as a measurement.
+  .refine(
+    (value) =>
+      value.state !== 'settled' ||
+      (value.observedCostMicroUsd !== null && value.observedCostMicroUsd !== undefined),
+    { message: 'settled requires an observed cost', path: ['observedCostMicroUsd'] },
+  )
+  .refine(
+    (value) =>
+      value.state !== 'conservative_billed' ||
+      value.observedCostMicroUsd === null ||
+      value.observedCostMicroUsd === undefined,
+    { message: 'conservative billing must not carry an observed cost', path: ['state'] },
+  );
+
+const incidentListSchema = z.strictObject({
+  limit: z.number().int().min(1).max(500),
+});
+
+const resolveIncidentSchema = z.strictObject({
+  id: IdSchema,
+  resolvedBy: z.string().min(1).max(128),
+  note: z.string().min(1).max(1_000),
 });
 
 const publishSchema = z.strictObject({

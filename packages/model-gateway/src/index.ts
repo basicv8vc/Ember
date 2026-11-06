@@ -9,7 +9,12 @@
  * - a second provider (doubles credential, egress and retention review for zero Alpha value);
  * - response caching (a second copy of the transcript we would then have to delete).
  */
-export { MODEL_BUDGET_ABSOLUTE_CEILINGS, MODEL_LIMITS } from './limits.js';
+export {
+  MODEL_BUDGET_ABSOLUTE_CEILINGS,
+  MODEL_LIMITS,
+  estimateTokensConservative,
+  serializationOverheadTokens,
+} from './limits.js';
 export {
   MODEL_FAILURE_CODES,
   ModelGatewayFailure,

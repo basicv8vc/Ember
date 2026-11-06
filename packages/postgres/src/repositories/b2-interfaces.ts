@@ -44,24 +44,65 @@ export type B2ReserveOutcome =
   | { readonly kind: 'attempts_exhausted' }
   | { readonly kind: 'budget_exceeded'; readonly scope: 'global' | 'tenant' | 'principal' }
   | { readonly kind: 'principal_unavailable' }
-  | { readonly kind: 'lease_lost' };
+  | { readonly kind: 'lease_lost' }
+  /**
+   * An unresolved budget incident applies to this call. Distinct from `budget_exceeded`: that one
+   * means *this* request would cross a ceiling, this one means spend already crossed it and a human
+   * must reconcile the ledger before any further paid call is allowed.
+   */
+  | {
+      readonly kind: 'budget_halted';
+      readonly scope: 'global' | 'tenant' | 'principal';
+      readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+    };
 
 export interface B2AttemptCharge {
   readonly tenantId: Id;
   readonly turnId: Id;
   readonly attemptNo: number;
   readonly outcomeCode: string;
-  /** `settled` books the actual cost; `unknown_billed` keeps the reservation; `released` returns it. */
-  readonly state: 'settled' | 'unknown_billed' | 'released';
+  /**
+   * `settled` books the provider-reported cost; `conservative_billed` books the full reservation
+   * because the charge is unknown; `unknown_billed` keeps the reservation; `released` returns it.
+   */
+  readonly state: 'settled' | 'unknown_billed' | 'released' | 'conservative_billed';
   readonly observedCostMicroUsd?: number | null;
   readonly inputTokens?: number | null;
   readonly outputTokens?: number | null;
 }
 
 export type B2SettlementOutcome =
-  | { readonly kind: 'applied'; readonly state: string; readonly appliedMicroUsd: number | null }
+  | {
+      readonly kind: 'applied';
+      readonly state: string;
+      readonly appliedMicroUsd: number | null;
+      /** Part of the actual cost the day allowance could not absorb. Never dropped on the floor. */
+      readonly overageMicroUsd: number;
+      /** How many budget incidents this settlement opened (0 when the reservation held). */
+      readonly incidentsOpened: number;
+    }
   | { readonly kind: 'already_settled'; readonly state: string }
   | { readonly kind: 'not_found' };
+
+/** One unresolved-or-resolved overage record, and the reason a paid call is (or was) refused. */
+export interface B2BudgetIncident {
+  readonly id: string;
+  readonly tenantId: string;
+  readonly scope: 'global' | 'tenant' | 'principal';
+  readonly scopeId: string;
+  readonly utcDay: string;
+  readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded';
+  readonly turnId: string | null;
+  readonly attemptNo: number | null;
+  readonly observedMicroUsd: number;
+  readonly appliedMicroUsd: number;
+  readonly overageMicroUsd: number;
+  readonly reservationMicroUsd: number;
+  readonly detectedAt: string;
+  readonly resolvedAt: string | null;
+  readonly resolvedBy: string | null;
+  readonly resolutionNote: string | null;
+}
 
 export type B2PublicationResult =
   | { readonly outcome: 'published'; readonly turn: B1AssistantTurnDto }

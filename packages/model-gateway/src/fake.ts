@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { ModelGatewayFailure } from './errors.js';
-import { MODEL_LIMITS } from './limits.js';
+import { MODEL_LIMITS, estimateTokensConservative } from './limits.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
@@ -89,10 +89,10 @@ export class FakeModelGateway implements ModelGateway {
       words.push(FAKE_VOCABULARY[seed[index]! % FAKE_VOCABULARY.length]!);
     }
 
-    const inputChars = input.context.reduce((total, message) => total + message.text.length, 0);
     const usage: ModelUsage = Object.freeze({
-      inputTokens: Math.ceil(
-        (inputChars + MODEL_LIMITS.systemPromptChars) / MODEL_LIMITS.charsPerToken,
+      inputTokens: input.context.reduce(
+        (total, message) => total + estimateTokensConservative(message.text),
+        0,
       ),
       outputTokens: words.length,
       costMicroUsd: 0,

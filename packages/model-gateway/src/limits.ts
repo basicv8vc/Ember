@@ -3,7 +3,12 @@
  *
  * These are the only bounds a caller can rely on, and they are enforced in characters before a
  * request is built. Token counts are an estimate we cannot verify offline; characters we own.
- * `charsPerToken` exists to *price and reserve* a call, never to prove a token bound.
+ *
+ * **The token estimate is a conservative reservation upper bound, not a guarantee.** It may
+ * over-count (which costs budget headroom) but it must never under-count, because a reservation that
+ * is too small is a spend ceiling that does not hold. Nothing in this package may describe it as a
+ * strict bound on the provider's tokenizer: the only thing that actually stops an over-charge is the
+ * overage path in `model_turn_attempts` raising a halt.
  */
 export const MODEL_LIMITS = Object.freeze({
   /** Last N messages of the same conversation, oldest dropped first. */
@@ -22,8 +27,21 @@ export const MODEL_LIMITS = Object.freeze({
   turnDeadlineMs: 60_000,
   /** Sentinels that make an unbounded call impossible even if a caller misbehaves. */
   maxInputTokens: 8_000,
-  /** Illustrative only: used with the pinned rate row to size a reservation. */
-  charsPerToken: 4,
+  /**
+   * ASCII characters per token, as used to *price* a request. Real tokenizers are near 4 for English
+   * prose; this figure is a planning ratio and proves nothing about any actual request.
+   */
+  asciiCharsPerToken: 4,
+  /**
+   * Token weight assumed for **one non-ASCII code point**.
+   *
+   * `charsPerToken = 4` is a Latin-script assumption. Chinese text is the counter-example that
+   * matters here: a Han character is commonly 1-2 tokens under current tokenizers, so pricing it at
+   * a quarter of a token under-reserved the call by roughly an order of magnitude. CJK, emoji and
+   * combining marks are therefore priced at 2 tokens per code point, which over-counts rather than
+   * under-counts.
+   */
+  nonAsciiTokensPerChar: 2,
   /** At most two outbound starts per Turn; the attempt table enforces the same bound. */
   maxAttemptsPerTurn: 2,
   /** $0.005 — the largest reservation one attempt may hold. */
@@ -43,3 +61,37 @@ export const MODEL_BUDGET_ABSOLUTE_CEILINGS = Object.freeze({
   globalDailyMicroUsd: 5_000_000,
   principalDailyTurns: 60,
 } as const);
+
+/**
+ * Conservative token estimate for one string, in code points.
+ *
+ * ASCII is priced at 4 characters per token; everything else at
+ * `nonAsciiTokensPerChar` tokens per code point. Iterating code points (not UTF-16 units) matters:
+ * a single emoji is two units and would otherwise be counted twice.
+ *
+ * The result is an upper bound *for reservation purposes only*. It is intentionally pessimistic
+ * about non-Latin scripts, and a caller must refuse a request rather than shrink the reservation to
+ * fit a cap.
+ */
+export function estimateTokensConservative(text: string): number {
+  let asciiCharacters = 0;
+  let otherCodePoints = 0;
+
+  for (const character of text) {
+    if (character.codePointAt(0)! < 0x80) {
+      asciiCharacters += 1;
+    } else {
+      otherCodePoints += 1;
+    }
+  }
+
+  return (
+    Math.ceil(asciiCharacters / MODEL_LIMITS.asciiCharsPerToken) +
+    otherCodePoints * MODEL_LIMITS.nonAsciiTokensPerChar
+  );
+}
+
+/** Token allowance for the fixed envelope, priced as ASCII. */
+export function serializationOverheadTokens(): number {
+  return Math.ceil(MODEL_LIMITS.serializationOverheadChars / MODEL_LIMITS.asciiCharsPerToken);
+}

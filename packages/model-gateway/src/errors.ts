@@ -66,7 +66,15 @@ export class ModelInputRefused extends Error {
     | 'context_invalid'
     | 'input_tokens_over_cap'
     | 'max_output_invalid'
-    | 'no_context';
+    | 'no_context'
+    /**
+     * The worst-case cost of this request is larger than the per-attempt reservation cap.
+     *
+     * The refusal exists because the alternative is truncating the reservation to the cap and then
+     * sending the request anyway, which spends money the ledger was never told about. The cap is a
+     * spend bound, so exceeding it must stop the call.
+     */
+    | 'reservation_cap_exceeded';
 
   constructor(reason: ModelInputRefused['reason']) {
     super(`model input refused: ${reason}`);

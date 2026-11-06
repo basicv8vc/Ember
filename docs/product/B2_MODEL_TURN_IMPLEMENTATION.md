@@ -1,13 +1,13 @@
 # B2 — Real Assistant Turn: implementation, failure matrix and enablement gates
 
-| field                   | value                                                                       |
-| ----------------------- | --------------------------------------------------------------------------- |
-| status                  | **implemented, `real` mode disabled in code** — this PR is a Draft          |
-| branch                  | `feature/b2-real-model-turn`                                                |
-| base                    | `main@c6c9c3d650f977f3783fa73b941f677639a449ff`                             |
-| migration added         | `0014_model_execution.sql` (inventory at base ended at `0013`)              |
-| production call status  | **none.** No provider account, key, model approval or price approval exists |
-| paid spend in this tree | **$0.** Every automated test uses a controlled fake provider                |
+| field                   | value                                                                                          |
+| ----------------------- | ---------------------------------------------------------------------------------------------- |
+| status                  | **implemented, `real` mode disabled in code** — this PR is a Draft                             |
+| branch                  | `feature/b2-real-model-turn`                                                                   |
+| base                    | `main@c6c9c3d650f977f3783fa73b941f677639a449ff`                                                |
+| migration added         | `0014_model_execution.sql`, `0015_model_budget_safety.sql` (inventory at base ended at `0013`) |
+| production call status  | **none.** No provider account, key, model approval or price approval exists                    |
+| paid spend in this tree | **$0.** Every automated test uses a controlled fake provider                                   |
 
 This document is the reviewer-facing companion to the implementation. It states what now exists, where
 each required invariant is enforced (code, database or test), what happens on every failure, what the
@@ -27,14 +27,17 @@ authorisation. Approval items are referenced by their proposal IDs (A1–A5, B1�
 | Path                                                                       | Role                                                                                                                                   |
 | -------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
 | `migrations/0014_model_execution.sql`                                      | Claim/fence columns on `assistant_turns`; `model_global_spend_days`, `model_spend_days`, `model_turn_attempts`                         |
+| `migrations/0015_model_budget_safety.sql`                                  | `conservative_billed`, `billing_basis`, `overage_micro_usd`, `model_budget_incidents` — the CTO review fixes (§3.2)                    |
 | `packages/model-gateway/`                                                  | The minimal gateway: types, limits, bounded context, token preflight, rates, credential, config, fake adapter, OpenAI adapter, factory |
 | `packages/postgres/src/repositories/b1-turn-publication.ts`                | The B1 publication primitives extracted so B1 and B2 share one atomic publish path                                                     |
 | `packages/postgres/src/repositories/b2-interfaces.ts`                      | Persistence-facing types for claim, reservation, settlement and publication                                                            |
 | `packages/postgres/src/repositories/b2-model-turn-execution-repository.ts` | Claim, fence, attempt accounting, money reservation, fenced publication, deadline sweep                                                |
+| `packages/postgres/src/repositories/b2-ledger-limits.ts`                   | The absolute day ceilings the settlement path needs to split consumed from overage (asserted against the CHECKs by a test)             |
 | `apps/worker/src/b1/model-turn-responder.ts`                               | The responder behind B1-5's existing seam                                                                                              |
-| `tests/unit/model-gateway.test.ts`                                         | 37 cases: limits, context, preflight, mode resolution, credential redaction, adapter behaviour                                         |
-| `tests/unit/b2-model-turn-responder.test.ts`                               | 24 cases: orchestration, retry, settlement state, abort path, construction guards                                                      |
+| `tests/unit/model-gateway.test.ts`                                         | 41 cases: limits, token estimate, context, preflight, mode resolution, credential redaction, adapter behaviour, missing-usage handling |
+| `tests/unit/b2-model-turn-responder.test.ts`                               | 30 cases: orchestration, retry, settlement state, abort path, reservation ceiling, budget halt                                         |
 | `tests/integration/b2-model-turn-runtime.test.ts`                          | 26 cases on PostgreSQL 17: the 12 required scenarios plus database-guard cases                                                         |
+| `tests/integration/b2-budget-safety.test.ts`                               | 10 cases on PostgreSQL 17: conservative billing, refusal, overage, halt, concurrent settlement, drift guard                            |
 
 ### 1.2 Unchanged on purpose
 
@@ -62,13 +65,16 @@ claim            UPDATE ... lease_epoch += 1, lease_expires_at = now + lease_ms
                  WHERE status='running' AND deadline > now AND lease free
                  loser: 0 rows -> 0 provider calls
 deadline sweep   DB clock; an expired Turn never reaches a provider
+halt gate        an unresolved budget incident applying to this tenant/principal/global:
+                 refuse before the reservation, 0 provider calls
 reserve          one transaction: fence re-check, principal lookup, UTC day, attempt_no,
                  global -> tenant -> principal reservation, attempt row
                  any bucket over its ceiling: whole transaction rolls back, 0 provider calls
 one-send CAS     send_started_at NULL -> clock_timestamp(), only while the lease is live
                  rowCount 0 -> the request provably never left: full release, 0 provider calls
 provider call    no transaction held, no client checked out, bounded by AbortSignal
-settle           settled | unknown_billed | released, in the same lock order as reservation
+settle           settled | conservative_billed | unknown_billed | released,
+                 in the same lock order as reservation; overage opens an incident
 publish          fence re-check under the conversation+turn locks; epoch/owner/status/deadline/lease
                  any mismatch -> the text is discarded
 ```
@@ -82,20 +88,24 @@ Every step is its own short transaction. `tests/integration/b2-model-turn-runtim
 
 A reviewer should not have to trust a comment. Each row names the mechanism, not the intent.
 
-| Invariant                                           | Code                                                                                                  | Database                                                             | Test                 |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- | -------------------- |
-| At most one valid Assistant Reply per user message  | `publishCompletion` requires `status='running'` + expected epoch/owner; second publish is `fenced`    | `assistant_turns UNIQUE (tenant_id, id)` (B1), attempt PK            | 1, 2, 12             |
-| Competing workers never double-publish              | `claimTurn` is one UPDATE; the loser updates zero rows and makes no call                              | Row lock serialises the two claimants                                | 2                    |
-| No transaction spans provider I/O                   | claim / reserve / settle / publish are separate transactions                                          | —                                                                    | 13                   |
-| Cancellation and timeout beat late output           | `isFenceValid` re-reads status, deadline and lease liveness under lock                                | `deadline_at`, `lease_expires_at`, DB clock                          | 6, 7, 8              |
-| Worker crash recovers safely                        | Lease expiry alone makes the Turn claimable; the abandoned attempt keeps its pessimistic charge       | `assistant_turns_lease_state_check`, `assistant_turns_lease_idx`     | 7                    |
-| Old migrations are immutable                        | —                                                                                                     | `0014` only; `migrations.test.ts` asserts the 14-migration inventory | migrations suite     |
-| Real output is marked `simulated: false`            | `publishCompletion` is the only writer of that flag; `B1AssistantTurnRepository` still literal `true` | `conversation_messages.simulated`                                    | 1, 14                |
-| A real label can never be simulated, or the reverse | zod `.refine` at the persistence boundary against `/-(fake\|echo)-/`                                  | —                                                                    | 15                   |
-| `real` cannot be enabled by configuration alone     | `APPROVED_REAL_MODELS` is empty; every rate row is `unverified`                                       | —                                                                    | 10, 10b              |
-| Budget overrun is a hard refusal                    | `Refusal` rolls the reservation back; the Turn fails, it never degrades to fake                       | Ceilings re-asserted as CHECK constraints                            | 9a–9d                |
-| Provider credentials never reach a sandbox or a log | `ModelCredential` has no accessor; `use()` passes the key once; `toJSON`/`toString` are `[redacted]`  | No key column exists anywhere                                        | `model-gateway` unit |
-| Provider origin is fixed                            | `OPENAI_ORIGIN` constant; `redirect: 'error'`, `credentials: 'omit'`                                  | —                                                                    | `model-gateway` unit |
+| Invariant                                           | Code                                                                                                  | Database                                                                    | Test                 |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- | -------------------- |
+| At most one valid Assistant Reply per user message  | `publishCompletion` requires `status='running'` + expected epoch/owner; second publish is `fenced`    | `assistant_turns UNIQUE (tenant_id, id)` (B1), attempt PK                   | 1, 2, 12             |
+| Competing workers never double-publish              | `claimTurn` is one UPDATE; the loser updates zero rows and makes no call                              | Row lock serialises the two claimants                                       | 2                    |
+| No transaction spans provider I/O                   | claim / reserve / settle / publish are separate transactions                                          | —                                                                           | 13                   |
+| Cancellation and timeout beat late output           | `isFenceValid` re-reads status, deadline and lease liveness under lock                                | `deadline_at`, `lease_expires_at`, DB clock                                 | 6, 7, 8              |
+| Worker crash recovers safely                        | Lease expiry alone makes the Turn claimable; the abandoned attempt keeps its pessimistic charge       | `assistant_turns_lease_state_check`, `assistant_turns_lease_idx`            | 7                    |
+| Old migrations are immutable                        | —                                                                                                     | `0014`/`0015` only; `migrations.test.ts` asserts the 15-migration inventory | migrations suite     |
+| Real output is marked `simulated: false`            | `publishCompletion` is the only writer of that flag; `B1AssistantTurnRepository` still literal `true` | `conversation_messages.simulated`                                           | 1, 14                |
+| A real label can never be simulated, or the reverse | zod `.refine` at the persistence boundary against `/-(fake\|echo)-/`                                  | —                                                                           | 15                   |
+| `real` cannot be enabled by configuration alone     | `APPROVED_REAL_MODELS` is empty; every rate row is `unverified`                                       | —                                                                           | 10, 10b              |
+| Budget overrun is a hard refusal                    | `Refusal` rolls the reservation back; the Turn fails, it never degrades to fake                       | Ceilings re-asserted as CHECK constraints                                   | 9a–9d                |
+| An unreported charge is never booked as zero        | `usage: null` is a distinct outcome; the responder settles `conservative_billed`                      | `state_shape_check` requires `applied = reserved` for that state            | budget-safety 1, 2   |
+| A request that cannot fit the cap is never sent     | `reserveMicroUsd` throws `reservation_cap_exceeded` before the attempt row exists                     | `reserved_micro_usd BETWEEN 1 AND 5000`                                     | budget-safety 3      |
+| Actual cost above the reservation is never clipped  | `splitCharge` returns the excess instead of dropping it                                               | `overage_micro_usd`, `overage = observed - applied`                         | budget-safety 4, 6   |
+| A spend overrun stops further paid calls            | `findOutstandingHalt` refuses before the reservation                                                  | `model_budget_incidents` (unresolved), partial index                        | budget-safety 4, 7   |
+| Provider credentials never reach a sandbox or a log | `ModelCredential` has no accessor; `use()` passes the key once; `toJSON`/`toString` are `[redacted]`  | No key column exists anywhere                                               | `model-gateway` unit |
+| Provider origin is fixed                            | `OPENAI_ORIGIN` constant; `redirect: 'error'`, `credentials: 'omit'`                                  | —                                                                           | `model-gateway` unit |
 
 ### 3.1 Two defects the tests found, and the fix
 
@@ -113,41 +123,81 @@ error that looks correct in a comment.
 The second fix changes the meaning of the cap from "outstanding hold" to "day spend", which is the only
 definition that can stop spend. `tests/integration/b2-model-turn-runtime.test.ts` case 9d covers it.
 
+### 3.2 Three defects found in CTO review, and the fix
+
+All three were in the paid path, and all three shared a shape: a value the code did not know was
+silently replaced by a convenient one. Each fix removes the substitution rather than adjusting it.
+
+| #    | Defect                                                                                  | Why it was dangerous                                                                                                        | Fix                                                                                                                                                     |
+| ---- | --------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| P0-1 | A 2xx without `usage` was priced at 0 and settled as `settled`                          | A billed call recorded as free understates the day's spend and lets the same budget be spent again                          | `usage` is nullable; `null` means "unknown". The responder settles `conservative_billed`, which books **the full reservation** and sets `billing_basis` |
+| P0-2 | `Math.min(estimate, cap)` reserved the cap and then sent a request that could cost more | The per-attempt cap stopped being a ceiling: a $0.02 request reserved $0.005 and the difference arrived on an invoice       | The worst-case cost is computed first and the call is **refused** (`reservation_cap_exceeded`) before an attempt row or a byte exists                   |
+| P0-3 | `applied = min(observed, reserved)` clipped the excess out of the day ledger            | Recorded spend could be lower than actual spend, with no record that it happened and nothing stopping the next bad estimate | The full amount is kept: `consumed` (absorbed) plus `overage_micro_usd` (excess). Any overage opens an incident that refuses further paid calls         |
+
+Three consequences a reviewer should check directly:
+
+1. **The token estimate is no longer 4 characters per token.** That ratio is a Latin-script assumption.
+   A Han character is roughly a token or more, so pricing Chinese text at a quarter of a token under-reserved
+   it by close to an order of magnitude. `estimateTokensConservative` prices ASCII at 4 chars/token and every
+   non-ASCII code point at 2 tokens, and the preflight now reads the message text rather than a character
+   count. It is a conservative upper bound **for reservation purposes**, not a proof about any tokenizer:
+   nothing in the code or this document claims it guarantees a cost ceiling. §5.3.
+2. **A reservation that is too small is now an event, not a rounding error.** It is recorded on the attempt
+   (`overage_micro_usd`), on the day bucket (outside the ceiling arithmetic) and as an incident, and it halts
+   spending. That is the only way an underestimate can be discovered before an invoice arrives.
+3. **The halt is reversible, and the reversal is attributed.** `resolveBudgetIncident` records who cleared it
+   and why; a second resolution updates zero rows rather than overwriting the first attribution.
+
+`tests/integration/b2-budget-safety.test.ts` carries the evidence: conservative billing books
+`applied = reserved` with `observed = NULL` (cases 1–2); an unaffordable request leaves no attempt row, no
+bucket and no provider call (case 3); an overage preserves `consumed + overage = observed` exactly (case 4);
+the next Turn is refused with `halted` and only resumes after an attributed resolution (case 5); two
+concurrent settlements move the money once (case 6); the incident outlives the transcript that caused it
+(case 7).
+
 ---
 
 ## 4. Failure matrix
 
 `fake` mode never reaches a provider; it is listed so a reader can see that it shares the gate chain.
 
-| #   | Trigger                                            | Detected by                         | Attempt ledger                                             | Turn result                             | Provider calls | User sees                        |
-| --- | -------------------------------------------------- | ----------------------------------- | ---------------------------------------------------------- | --------------------------------------- | -------------- | -------------------------------- |
-| 1   | Normal reply                                       | provider 200 + parse                | `settled` / `ok`, applied = observed                       | `completed`                             | 1              | the reply, `simulated:false`     |
-| 2   | Another worker holds the lease                     | claim updates 0 rows                | none created                                               | unchanged (`running`)                   | 0              | nothing yet                      |
-| 3   | Turn past its 60 s deadline                        | DB clock in sweep and claim         | none created                                               | `failed` / `timeout`                    | 0              | frozen failure text              |
-| 4   | Provider timeout (`model_timeout`)                 | adapter abort                       | `unknown_billed` (reservation kept)                        | retry, else `failed`/`timeout`          | ≤ 2            | frozen failure text              |
-| 5   | Provider 5xx / reset (`model_unavailable`)         | transport error                     | `unknown_billed`                                           | retry, else `failed`/`internal_error`   | ≤ 2            | frozen failure text              |
-| 6   | Provider 429 (`model_rate_limited`)                | HTTP 429                            | `unknown_billed`                                           | retry, else `failed`/`internal_error`   | ≤ 2            | frozen failure text              |
-| 7   | Provider 401/403 (`model_auth_failed`)             | HTTP 401/403                        | `unknown_billed`                                           | `failed`/`internal_error`, **no retry** | 1              | frozen failure text              |
-| 8   | 2xx with unparseable body (`model_invalid_output`) | adapter parse                       | `unknown_billed`                                           | `failed`/`internal_error`, no retry     | 1              | frozen failure text              |
-| 9   | Cancelled during inference                         | `cancelTurn` then publish fence     | `settled`/`unknown_billed` with the real cost              | stays `cancelled`; text discarded       | 1              | nothing (cancellation won)       |
-| 10  | Worker shutdown during inference                   | shared `AbortSignal`                | `unknown_billed` / `client_cancelled`                      | stays `running`                         | 1              | nothing yet; lease expires later |
-| 11  | One-send CAS loses                                 | `send_started_at IS NULL` CAS       | `released` / `not_sent`, full refund                       | `fenced`                                | 0              | nothing yet                      |
-| 12  | Lease taken over, then stale reply arrives         | publish fence: epoch/owner mismatch | the stale worker's attempt stays `settled` (money is real) | `fenced`; text discarded                | 1              | the takeover worker's reply      |
-| 13  | Lease expired, no takeover yet                     | `listRunningTurns` filter           | —                                                          | invisible until expiry                  | 0              | nothing yet                      |
-| 14  | Global / tenant / principal ceiling reached        | reservation predicates              | none created (rolled back)                                 | `failed`/`internal_error`               | 0              | frozen failure text              |
-| 15  | Principal turn allowance exhausted                 | `turns_started` predicate           | none created                                               | `failed`/`internal_error`               | 0              | frozen failure text              |
-| 16  | No server-derived principal for the tenant         | `consumers` lookup                  | none created                                               | `failed`/`internal_error`               | 0              | frozen failure text              |
-| 17  | Context too large / not user-terminated            | `buildBoundedContext` / preflight   | none created                                               | `failed`/`internal_error`               | 0              | frozen failure text              |
-| 18  | Credential missing on boot                         | `ModelCredential.parse`             | —                                                          | **process refuses to start**            | 0              | a dead worker, visibly           |
-| 19  | Model not in the code allowlist                    | `resolveModelExecution`             | —                                                          | **process refuses to start**            | 0              | a dead worker, visibly           |
-| 20  | PostgreSQL unavailable during an iteration         | `asDomainError`                     | whatever was committed stays committed                     | `running`; the loop backs off           | 0              | nothing yet                      |
+| #   | Trigger                                            | Detected by                         | Attempt ledger                                                          | Turn result                                     | Provider calls | User sees                        |
+| --- | -------------------------------------------------- | ----------------------------------- | ----------------------------------------------------------------------- | ----------------------------------------------- | -------------- | -------------------------------- |
+| 1   | Normal reply                                       | provider 200 + parse                | `settled` / `ok`, applied = observed                                    | `completed`                                     | 1              | the reply, `simulated:false`     |
+| 2   | Another worker holds the lease                     | claim updates 0 rows                | none created                                                            | unchanged (`running`)                           | 0              | nothing yet                      |
+| 3   | Turn past its 60 s deadline                        | DB clock in sweep and claim         | none created                                                            | `failed` / `timeout`                            | 0              | frozen failure text              |
+| 4   | Provider timeout (`model_timeout`)                 | adapter abort                       | `unknown_billed` (reservation kept)                                     | retry, else `failed`/`timeout`                  | ≤ 2            | frozen failure text              |
+| 5   | Provider 5xx / reset (`model_unavailable`)         | transport error                     | `unknown_billed`                                                        | retry, else `failed`/`internal_error`           | ≤ 2            | frozen failure text              |
+| 6   | Provider 429 (`model_rate_limited`)                | HTTP 429                            | `unknown_billed`                                                        | retry, else `failed`/`internal_error`           | ≤ 2            | frozen failure text              |
+| 7   | Provider 401/403 (`model_auth_failed`)             | HTTP 401/403                        | `unknown_billed`                                                        | `failed`/`internal_error`, **no retry**         | 1              | frozen failure text              |
+| 8   | 2xx with unparseable body (`model_invalid_output`) | adapter parse                       | `unknown_billed`                                                        | `failed`/`internal_error`, no retry             | 1              | frozen failure text              |
+| 9   | Cancelled during inference                         | `cancelTurn` then publish fence     | `settled`/`unknown_billed` with the real cost                           | stays `cancelled`; text discarded               | 1              | nothing (cancellation won)       |
+| 10  | Worker shutdown during inference                   | shared `AbortSignal`                | `unknown_billed` / `client_cancelled`                                   | stays `running`                                 | 1              | nothing yet; lease expires later |
+| 11  | One-send CAS loses                                 | `send_started_at IS NULL` CAS       | `released` / `not_sent`, full refund                                    | `fenced`                                        | 0              | nothing yet                      |
+| 12  | Lease taken over, then stale reply arrives         | publish fence: epoch/owner mismatch | the stale worker's attempt stays `settled` (money is real)              | `fenced`; text discarded                        | 1              | the takeover worker's reply      |
+| 13  | Lease expired, no takeover yet                     | `listRunningTurns` filter           | —                                                                       | invisible until expiry                          | 0              | nothing yet                      |
+| 14  | Global / tenant / principal ceiling reached        | reservation predicates              | none created (rolled back)                                              | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 15  | Principal turn allowance exhausted                 | `turns_started` predicate           | none created                                                            | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 16  | No server-derived principal for the tenant         | `consumers` lookup                  | none created                                                            | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 17  | Context too large / not user-terminated            | `buildBoundedContext` / preflight   | none created                                                            | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 18  | Credential missing on boot                         | `ModelCredential.parse`             | —                                                                       | **process refuses to start**                    | 0              | a dead worker, visibly           |
+| 19  | Model not in the code allowlist                    | `resolveModelExecution`             | —                                                                       | **process refuses to start**                    | 0              | a dead worker, visibly           |
+| 20  | PostgreSQL unavailable during an iteration         | `asDomainError`                     | whatever was committed stays committed                                  | `running`; the loop backs off                   | 0              | nothing yet                      |
+| 21  | 2xx reply with no reported `usage`                 | adapter: `usage` absent/invalid     | `conservative_billed` / `usage_missing`, applied = the full reservation | `completed` (the reply is real)                 | 1              | the reply, `simulated:false`     |
+| 22  | Worst-case cost above the per-attempt cap          | `reserveMicroUsd`                   | none created                                                            | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 23  | Chinese/Latin mix over the token cap               | conservative token estimate         | none created                                                            | `failed`/`internal_error`                       | 0              | frozen failure text              |
+| 24  | Actual cost above the reservation                  | `splitCharge` overage               | `settled` with `overage_micro_usd` > 0; incident opened                 | `completed`, then spend halted                  | 1              | the reply                        |
+| 25  | An unresolved incident applies to the caller       | `findOutstandingHalt`               | none created                                                            | `failed`/`internal_error` (counted as `halted`) | 0              | frozen failure text              |
 
 Deliberate design points visible in the matrix:
 
 - **There is no silent downgrade.** A process configured for `real` that cannot deliver it dies at boot
   (§6). A paid call refused by budget fails the Turn; it is never answered with simulated text.
 - **An unknown charge is not a free charge.** Every path where a request may have been sent keeps its
-  reservation as `unknown_billed`. Only a provably unsent request is released.
+  reservation as `unknown_billed`; a reply whose provider did not report usage books the reservation as
+  `conservative_billed`. Only a provably unsent request is released.
+- **A wrong estimate stops spending rather than quietly shrinking.** Row 24 is the one case where the
+  ledger learns its own reservation was too small; it records the difference and refuses the next call.
 - **A stale worker's text is discarded but its cost is booked.** Discarding the cost would make the ledger
   dishonest about an invoice we may receive.
 
@@ -164,9 +214,15 @@ All money is integer micro-USD (`1 USD = 1_000_000`). No float arithmetic exists
 | `model_global_spend_days` | one row per UTC day                  | the single cross-tenant bucket                                    |
 | `model_spend_days`        | one row per (tenant, scope, id, day) | `scope_kind IN ('tenant','principal')`, independent of each other |
 | `model_turn_attempts`     | one row per (turn, attempt_no)       | the canonical paid operation; at most 2 per Turn                  |
+| `model_budget_incidents`  | one row per detected overrun         | the audit record **and** the stop switch, until resolved          |
 
-`reserved` is the live hold. `consumed` is recognized spend. The budget predicate is
-`consumed + reserved + new <= ceiling`, so settling a call does not return its allowance.
+`reserved` is the live hold. `consumed` is recognized spend **inside** the day's allowance.
+`overage_micro_usd` is the part of an actual cost the allowance could not absorb, kept outside the
+`reserved + consumed <= ceiling` arithmetic so the ceiling still binds. Actual spend for the day is
+`consumed_micro_usd + overage_micro_usd`, and on an attempt
+`applied_cost_micro_usd + overage_micro_usd = observed_cost_micro_usd` holds exactly, by constraint.
+The budget predicate is `consumed + reserved + new <= ceiling`, so settling a call does not return its
+allowance.
 
 ### 5.2 Ceilings, in code and in the database
 
@@ -182,22 +238,44 @@ Configuration can only **lower** these; `resolveModelExecution` refuses a budget
 fractional, above the absolute ceiling, or inverted (`principal ≤ tenant ≤ global`). These are
 implementation design values from the CTO task; they are **not** an authorisation to spend.
 
-### 5.3 What one worst-case Turn costs, arithmetically
+### 5.3 What one worst-case Turn reserves — and why that is not a guarantee
 
-Derived from the code's own limits — bounded context 12 000 characters, 8 messages, system prompt 900
-characters, serialization overhead 512, output cap 512 tokens, 4 characters per token:
+The reservation is the largest bill the request can plausibly produce: the conservative token estimate of
+the bounded context plus the fixed prompt and envelope, priced at the pinned rate, with the full
+`maxOutputTokens` allowance.
+
+**The estimator is not 4 characters per token.** ASCII is priced at 4 characters per token; every non-ASCII
+code point is priced at **2 tokens**. The previous formula divided a character count by four, which is a
+Latin-script assumption: 12 000 characters of Chinese is roughly 12 000–24 000 tokens, not 3 353. That
+under-reservation was the mechanism behind P0-2.
+
+| Context     | Characters | Estimated input tokens | Outcome                               |
+| ----------- | ---------- | ---------------------- | ------------------------------------- |
+| ASCII prose | 12 000     | ≈ 3 353                | priced, reserved, sent                |
+| Chinese     | 12 000     | ≈ 24 353               | **refused** (`input_tokens_over_cap`) |
+| Chinese     | 3 500      | ≈ 7 353                | priced, reserved, sent                |
+
+Because the preflight fails closed above `maxInputTokens = 8 000`, the largest reservation any Turn can
+hold is bounded by 8 000 input tokens plus 512 output tokens:
 
 ```text
-input characters  = 12 000 + 900 + 512 = 13 412
-input tokens est. = ceil(13 412 / 4)   = 3 353
-cost (gpt-5-mini unverified row: $0.25/1M in, $2.00/1M out)
-  = ceil((3 353 × 250 000 + 512 × 2 000 000) / 1 000 000) = 1 863 µUSD = $0.001863
+gpt-5-mini   (unverified row $0.25/1M in, $2.00/1M out)
+  ceil((8 000 × 250 000 + 512 × 2 000 000) / 1 000 000) = 3 024 µUSD = $0.003024
+gpt-4.1-mini ceil((8 000 × 400 000 + 512 × 1 600 000) / 1 000 000) = 4 020 µUSD = $0.004020
+gpt-4o-mini  ceil((8 000 × 150 000 + 512 ×   600 000) / 1 000 000) = 1 508 µUSD = $0.001508
 ```
 
-`1 863 ≤ 5 000`, so one worst-case attempt fits inside the per-attempt cap. There is deliberately **no
-per-Turn cap**: a Turn may reserve up to `maxAttempts × perAttempt` = $0.010, which is the bound
-approval item C5 asks the CTO to accept. This is arithmetic on a proposed price sheet, not a quote:
-approval item A2 requires an invoice-verified row before any real call.
+Each fits under the $0.005 per-attempt cap, so today's rate rows can be reserved honestly. A rate row that
+could not fit would be **refused before egress** rather than clamped to the cap (P0-2).
+
+There is deliberately **no per-Turn cap**: a Turn may reserve up to `maxAttempts × perAttempt` = $0.010,
+which is the bound approval item C5 asks the CTO to accept. This is arithmetic on a proposed price sheet,
+not a quote: approval item A2 requires an invoice-verified row before any real call.
+
+**No part of this bounds an invoice.** A tokenizer that disagrees with the estimate, a price change applied
+mid-day, or cached-token accounting can all make the actual charge larger than the reservation. That is why
+the ledger records `overage_micro_usd` and halts spending when it happens, instead of asserting that it
+cannot (§3.2, P0-3).
 
 ### 5.4 Evidence produced by the automated tests
 
@@ -286,32 +364,33 @@ Nothing below is done. This is the checklist the enablement PR must satisfy, in 
 
 ### 7.2 Approvals that must be recorded first
 
-| ID  | Decision still owed                                                                 | Blocks                    |
-| --- | ----------------------------------------------------------------------------------- | ------------------------- |
-| A1  | Provider and pinned dated model id                                                  | gates 2 and 3             |
-| A2  | Invoice-grade price sheet for that exact id                                         | gate 3, and every ceiling |
-| A3  | Ceilings confirmed as $0.005 / $0.25 / $1 / $5 and 60 turns per principal           | this PR's defaults        |
-| A4  | Named owner of the global ceiling and the kill-switch runbook                       | first day of real traffic |
-| A5  | Alert destination for `model_auth_failed` and daily spend ≥ 80 %                    | incident response         |
-| B1  | Transcript egress of ≤ 8 messages accepted for Alpha and stated in the privacy copy | any real user             |
-| B2  | Provider retention and training terms, named source and dated                       | any real user             |
-| B3  | Content-free audit trail (turn id, tokens, cost, outcome) judged sufficient         | any real user             |
-| B4  | Provider data-processing addendum executed                                          | TestFlight at the latest  |
-| C5  | Bounded duplicate paid call (≤ 2 attempts, ≤ $0.010) accepted                       | this PR's retry policy    |
-| C6  | "Refuse to boot" confirmed as the correct failure for a misconfigured `real`        | §6                        |
+| ID  | Decision still owed                                                                                       | Blocks                    |
+| --- | --------------------------------------------------------------------------------------------------------- | ------------------------- |
+| A1  | Provider and pinned dated model id                                                                        | gates 2 and 3             |
+| A2  | Invoice-grade price sheet for that exact id                                                               | gate 3, and every ceiling |
+| A3  | Ceilings confirmed as $0.005 / $0.25 / $1 / $5 and 60 turns per principal                                 | this PR's defaults        |
+| A4  | Named owner of the global ceiling and the kill-switch runbook                                             | first day of real traffic |
+| A5  | Alert destination for `model_auth_failed`, **unresolved `model_budget_incidents`** and daily spend ≥ 80 % | incident response         |
+| B1  | Transcript egress of ≤ 8 messages accepted for Alpha and stated in the privacy copy                       | any real user             |
+| B2  | Provider retention and training terms, named source and dated                                             | any real user             |
+| B3  | Content-free audit trail (turn id, tokens, cost, outcome) judged sufficient                               | any real user             |
+| B4  | Provider data-processing addendum executed                                                                | TestFlight at the latest  |
+| C5  | Bounded duplicate paid call (≤ 2 attempts, ≤ $0.010) accepted                                             | this PR's retry policy    |
+| C6  | "Refuse to boot" confirmed as the correct failure for a misconfigured `real`                              | §6                        |
 
 `C1`–`C4` concern Sentinel intent and the B3 task kind; they block B3, not B2. B2 issues no Sentinel
 intent and creates no Task.
 
 ### 7.3 Verification that must be run, by a human, once
 
-| Step                                                                                                    | Evidence to attach                                                                                |
-| ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
-| Real provider smoke with a CTO-authorised key and a hard spend limit                                    | one Turn, `simulated:false`, attempt row `settled`, cost matching the invoice line                |
-| Account spend limit set at the provider                                                                 | screenshot or billing-config reference                                                            |
-| Reconciliation: sum of `model_turn_attempts.observed_micro_usd` for one UTC day vs the provider invoice | a signed comparison, not a claim                                                                  |
-| 80 % alert fires                                                                                        | a test notification in the named channel                                                          |
-| Emergency stop rehearsed                                                                                | `EMBER_MODEL_EXECUTION` flipped to `disabled` and rolled out; one Turn fails with the frozen text |
+| Step                                                                                                      | Evidence to attach                                                                                |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Real provider smoke with a CTO-authorised key and a hard spend limit                                      | one Turn, `simulated:false`, attempt row `settled`, cost matching the invoice line                |
+| Account spend limit set at the provider                                                                   | screenshot or billing-config reference                                                            |
+| Reconciliation: sum of `model_turn_attempts.observed_micro_usd` for one UTC day vs the provider invoice   | a signed comparison, not a claim                                                                  |
+| 80 % alert fires                                                                                          | a test notification in the named channel                                                          |
+| Emergency stop rehearsed                                                                                  | `EMBER_MODEL_EXECUTION` flipped to `disabled` and rolled out; one Turn fails with the frozen text |
+| Overage rehearsal in staging: force `observed > reserved`, confirm the halt and the attributed resolution | an incident row, a refused Turn, and a resolved incident with a named resolver                    |
 
 **The real provider smoke test is not part of this PR and must not be added to CI.** CI must never hold
 a provider credential; every automated test in this branch uses a controlled fake provider.
@@ -342,9 +421,15 @@ Supporting cases: `13` (no client checked out during provider I/O), `14` (fake m
 against SQL: attempt number ceiling, attempt state shape, provider allowlist, absolute ceilings,
 half-cleared lease, and cascade behaviour on transcript deletion.
 
-Unit coverage (`tests/unit/`): 37 gateway cases and 24 responder cases, including credential redaction,
-provider origin pinning, the closed failure taxonomy, bounded-context truncation, token preflight
-fail-closed, every `real` refusal reason, and the responder's settlement state for each outcome.
+`tests/integration/b2-budget-safety.test.ts` carries the CTO-review evidence: conservative billing for a
+missing usage report, refusal of an unaffordable request, an overage preserved in full, the halt and its
+attributed resolution, concurrent settlement, incident durability across transcript deletion, and a guard
+that the settlement path's ceiling constants still agree with the database CHECKs.
+
+Unit coverage (`tests/unit/`): 41 gateway cases and 30 responder cases, including credential redaction,
+provider origin pinning, the closed failure taxonomy, bounded-context truncation, the conservative token
+estimate (Latin and Chinese), token preflight fail-closed, every `real` refusal reason, the reservation
+ceiling, the budget halt, and the responder's settlement state for each outcome.
 
 ### 8.1 How to run
 
@@ -362,14 +447,15 @@ chaos 30 passed, e2e 39 passed.
 
 ## 9. Known limits, stated rather than hidden
 
-| Limit                                                                      | Consequence                                                                                                                                                |
-| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The rate sheet is not invoice-grade                                        | every ceiling is arithmetic on a secondary source; gate 3 exists precisely for this                                                                        |
-| Token counts are estimated locally before the call (4 chars/token)         | the reservation can be wrong in either direction; the invoice value is stored unclamped                                                                    |
-| A crash after the provider received the request keeps the full reservation | one Turn may cost up to 2 × per-attempt cap; bounded by `attempt_no ≤ 2`                                                                                   |
-| `model_turn_attempts` cascades with its Turn                               | deleting a transcript removes the attempt detail; the day buckets keep the spend                                                                           |
-| The 60-second Turn deadline can expire mid-call                            | the reply is discarded and the cost is still booked, which is the correct trade for the user                                                               |
-| The `fake` adapter's text is deterministic, not cached                     | it is a gate-chain exerciser, not a product behaviour                                                                                                      |
-| No streaming, no tools, no multi-turn agent loop                           | out of B2 scope; the adapter sends `stream:false`, `n:1`, no tools, no temperature                                                                         |
-| No reconciliation job                                                      | `model_turn_attempts_open_idx` exists so one can be added without a schema change                                                                          |
-| A tenant has exactly one consumer in Alpha                                 | the tenant bucket and the principal bucket therefore move together today; they remain separate so an N:1 tenant cannot silently inherit one user's ceiling |
+| Limit                                                                      | Consequence                                                                                                                                                      |
+| -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The rate sheet is not invoice-grade                                        | every ceiling is arithmetic on a secondary source; gate 3 exists precisely for this                                                                              |
+| Token counts are estimated locally, never proved                           | the reservation can be wrong in either direction; the estimate is deliberately pessimistic, and an overage is recorded and halts spend rather than being clipped |
+| A wrong reservation stops paid traffic until a human resolves it           | `model_budget_incidents` has no automatic expiry on purpose: an unreviewed overage is the failure mode being prevented                                           |
+| A crash after the provider received the request keeps the full reservation | one Turn may cost up to 2 × per-attempt cap; bounded by `attempt_no ≤ 2`                                                                                         |
+| `model_turn_attempts` cascades with its Turn                               | deleting a transcript removes the attempt detail; the day buckets keep the spend                                                                                 |
+| The 60-second Turn deadline can expire mid-call                            | the reply is discarded and the cost is still booked, which is the correct trade for the user                                                                     |
+| The `fake` adapter's text is deterministic, not cached                     | it is a gate-chain exerciser, not a product behaviour                                                                                                            |
+| No streaming, no tools, no multi-turn agent loop                           | out of B2 scope; the adapter sends `stream:false`, `n:1`, no tools, no temperature                                                                               |
+| No reconciliation job                                                      | `model_turn_attempts_open_idx` exists so one can be added without a schema change                                                                                |
+| A tenant has exactly one consumer in Alpha                                 | the tenant bucket and the principal bucket therefore move together today; they remain separate so an N:1 tenant cannot silently inherit one user's ceiling       |

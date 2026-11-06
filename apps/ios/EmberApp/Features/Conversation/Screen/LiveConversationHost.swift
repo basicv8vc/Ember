@@ -29,16 +29,28 @@ final class LiveConversationHostModel {
         isLoading = true
         defer { isLoading = false }
         do {
-            snapshot = try await repository.recoverAfterRelaunch()
+            // Bootstrap identity first: an unresolved outbox lookup may fail offline, but the
+            // signed-in user must still see the Live UI and a recovery action, not an empty Mock.
             profile = try await repository.bootstrap()
             requiresSignIn = false
-            status = nil
-            if try await repository.activeTurn() != nil { beginPolling() }
+            do {
+                snapshot = try await repository.recoverAfterRelaunch()
+                status = nil
+                reply = .idle
+                if try await repository.activeTurn() != nil { beginPolling() }
+            } catch {
+                command = .unknownAcknowledgement
+                reply = .failed(
+                    message: "Cloud history or send reconciliation unavailable. Retry safely.",
+                    retryable: true)
+                status = "Live Cloud is unavailable; no Mock response will be shown."
+            }
         } catch let error as AuthError where error.requiresNewSignIn {
             requiresSignIn = true
             status = "Sign in with Apple to use Live Cloud."
         } catch {
-            // An unavailable network is never a reason to show fake Mock messages.
+            // A failed bootstrap never causes a switch to the Mock conversation.
+            reply = .failed(message: "Cloud connection unavailable. Retry to connect.", retryable: true)
             status = "Cloud conversation is unavailable. Retry when connected."
         }
     }

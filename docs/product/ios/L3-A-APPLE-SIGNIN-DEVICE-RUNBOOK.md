@@ -9,12 +9,12 @@
 
 ## 1. 本次改动
 
-| 文件                                | 改动                                                                  | 原因                                                          |
-| ----------------------------------- | --------------------------------------------------------------------- | ------------------------------------------------------------- |
-| `apps/ios/Ember.entitlements`       | 新增 `com.apple.developer.applesignin = ["Default"]`                   | Sign in with Apple 的唯一必需 entitlement                     |
-| `apps/ios/Ember.xcodeproj`          | `CODE_SIGN_ENTITLEMENTS = Ember.entitlements`（Debug + Release）       | 把 entitlement 接入签名                                        |
-| `apps/ios/Ember.xcodeproj`          | `TargetAttributes.SystemCapabilities.com.apple.SignInWithApple = 1`    | 与 Xcode Capabilities 面板一致，自动签名据此申请 App ID 能力  |
-| `apps/ios/Ember.xcodeproj`          | 新增 `Ember.entitlements` 文件引用                                    | 让文件在 Xcode 导航器中可见                                   |
+| 文件                          | 改动                                                                | 原因                                                         |
+| ----------------------------- | ------------------------------------------------------------------- | ------------------------------------------------------------ |
+| `apps/ios/Ember.entitlements` | 新增 `com.apple.developer.applesignin = ["Default"]`                | Sign in with Apple 的唯一必需 entitlement                    |
+| `apps/ios/Ember.xcodeproj`    | `CODE_SIGN_ENTITLEMENTS = Ember.entitlements`（Debug + Release）    | 把 entitlement 接入签名                                      |
+| `apps/ios/Ember.xcodeproj`    | `TargetAttributes.SystemCapabilities.com.apple.SignInWithApple = 1` | 与 Xcode Capabilities 面板一致，自动签名据此申请 App ID 能力 |
+| `apps/ios/Ember.xcodeproj`    | 新增 `Ember.entitlements` 文件引用                                  | 让文件在 Xcode 导航器中可见                                  |
 
 **故意没有提交 `DEVELOPMENT_TEAM`。** Team ID（`9RN3YNYN27`）不是密钥，但它把工程钉死在一台机器的账号上；仓库保持开发者无关，Team 通过命令行参数或 Xcode 首次运行时的一次选择提供。`CODE_SIGN_STYLE` 维持 `Automatic`。
 
@@ -24,16 +24,16 @@ entitlements 文件放在 `apps/ios/` 而不是 `EmberApp/` 内部：`EmberApp` 
 
 ## 2. 已实测 / 待外部条件
 
-| 项目                                        | 结论        | 证据                                                                                                                          |
-| ------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| 工程文件可解析                              | ✅ 已实测   | `xcodebuild -list` exit 0，3 个 target / 1 个 shared scheme                                                                   |
-| entitlement 已接入签名请求                  | ✅ 已实测   | `-showBuildSettings` 输出 `CODE_SIGN_ENTITLEMENTS = Ember.entitlements`；entitlements plist `plutil -lint` = OK               |
-| 改动不破坏无签名构建（CI 路径）             | ✅ 已实测   | 模拟器 `CODE_SIGNING_ALLOWED=NO build` → **BUILD SUCCEEDED**                                                                  |
-| Xcode 确实在向描述文件要求该能力            | ✅ 已实测   | 设备构建报 `Provisioning profile ... doesn't include the com.apple.developer.applesignin entitlement`（未接入时不会有此报错） |
-| 真实签名构建                                | ⛔ 待外部   | 停在 provisioning：`No Accounts`                                                                                              |
-| 真机安装                                    | ⛔ 待外部   | 同上，且磁盘仅剩 189 MB                                                                                                       |
-| 真实 Apple 登录（含 identity token 回传）   | ⛔ 待外部   | 依赖 App ID 能力 + 描述文件                                                                                                   |
-| Keychain 持久化 / 退出登录（模拟器单元测试）| ⏸ 未复跑   | 见 §5，磁盘不足导致测试未跑完（代码与用例均已存在）                                                                           |
+| 项目                                         | 结论      | 证据                                                                                                                          |
+| -------------------------------------------- | --------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| 工程文件可解析                               | ✅ 已实测 | `xcodebuild -list` exit 0，3 个 target / 1 个 shared scheme                                                                   |
+| entitlement 已接入签名请求                   | ✅ 已实测 | `-showBuildSettings` 输出 `CODE_SIGN_ENTITLEMENTS = Ember.entitlements`；entitlements plist `plutil -lint` = OK               |
+| 改动不破坏无签名构建（CI 路径）              | ✅ 已实测 | 模拟器 `CODE_SIGNING_ALLOWED=NO build` → **BUILD SUCCEEDED**                                                                  |
+| Xcode 确实在向描述文件要求该能力             | ✅ 已实测 | 设备构建报 `Provisioning profile ... doesn't include the com.apple.developer.applesignin entitlement`（未接入时不会有此报错） |
+| 真实签名构建                                 | ⛔ 待外部 | 停在 provisioning：`No Accounts`                                                                                              |
+| 真机安装                                     | ⛔ 待外部 | 同上，且磁盘仅剩 189 MB                                                                                                       |
+| 真实 Apple 登录（含 identity token 回传）    | ⛔ 待外部 | 依赖 App ID 能力 + 描述文件                                                                                                   |
+| Keychain 持久化 / 退出登录（模拟器单元测试） | ⏸ 未复跑  | 见 §5，磁盘不足导致测试未跑完（代码与用例均已存在）                                                                           |
 
 签名链路本身（nonce、attempt ledger、Keychain、session 生命周期）已在 PR #119 落地，L3-A 不重写这部分。
 
@@ -66,10 +66,10 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/Ember-*     # 可再生
 
 ### B4 · 测试设备选择
 
-| 设备              | 型号            | iOS        | 建议                                                              |
-| ----------------- | --------------- | ---------- | ----------------------------------------------------------------- |
-| `phone`           | iPhone XR       | 18.7.10    | **首选**，在本机 Xcode 26.3（iOS 26.2 SDK）支持范围内             |
-| `Haha🎀`          | iPhone 12 Pro Max | 27.0.1   | 高于本机 SDK，Xcode 26.3 很可能拒绝安装，除非升级到 Xcode 27      |
+| 设备     | 型号              | iOS     | 建议                                                         |
+| -------- | ----------------- | ------- | ------------------------------------------------------------ |
+| `phone`  | iPhone XR         | 18.7.10 | **首选**，在本机 Xcode 26.3（iOS 26.2 SDK）支持范围内        |
+| `Haha🎀` | iPhone 12 Pro Max | 27.0.1  | 高于本机 SDK，Xcode 26.3 很可能拒绝安装，除非升级到 Xcode 27 |
 
 两台都已 `available (paired)`。若设备未登记在团队下，命令行无法注册（这是 Xcode GUI 的能力），GUI 首次运行会提示注册。
 

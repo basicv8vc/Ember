@@ -104,36 +104,27 @@ password. All five were absent across the scanned log lines.
 These are the gaps this PR cannot close without touching runtime code or spending money. Each
 one is a deliberate, reviewable decision, not an oversight.
 
-### R-1 — The API has no `production`/`staging` runtime mode _(blocker for real production)_
+### R-1 — The API has no `production`/`staging` runtime mode _(resolved by `fix/runtime-production-env`, #126, merged before this PR)_
 
-`apps/api/src/env.ts` accepts `EMBER_ENV` ∈ `local | test | ci`, and
-`loadDevAuthConfig()` throws when `NODE_ENV=production` — verified against the running
-code: a `NODE_ENV=production` boot with **no** dev credential configured is still refused
-(`Dev tenant bearer tokens are local-development only`). A process with
-`NODE_ENV=production` therefore cannot start the API at all. Staging runs
-`NODE_ENV=staging` + `EMBER_ENV=ci`, which is a truthful safety combination (the dev provider
-denies `staging`) but a misleading label in logs.
+Historically `apps/api/src/env.ts` accepted `EMBER_ENV` ∈ `local | test | ci` only, and
+`loadDevAuthConfig()` threw when `NODE_ENV=production` — so a shared deployment had to lie
+and label itself `ci` while `NODE_ENV=staging` did the actual safety work. The runtime now
+ships deployment classification (`apps/api/src/deployment.ts`): `EMBER_ENV=staging` is a
+first-class value classified as a shared deployment, every development surface is gated on
+that classification, and an unrecognised marker fails closed as `production`. Staging
+therefore declares `NODE_ENV=staging` + `EMBER_ENV=staging` truthfully (see
+`infra/staging/env/staging.env.example`), and the misleading `ci` workaround is gone.
 
-Proposed follow-up, owned by the API owner, not this PR: split the dev-credential loader out
-of the production composition root and add `staging`/`production` to the enum and to the
-`ISOLATED_EMBER_ENVS` exclusion list. Until that lands, **no production deployment should be
-attempted** — the failure mode is a crash loop, not a silent weakness, but it makes production
-impossible. The fix is in review as the independent PR `fix/runtime-production-env` (#126);
-this PR only reports the blocker.
+### R-2 — Legacy dev Bearer tokens are only refused by the deployment guard _(resolved by `fix/runtime-production-env`, #126, merged before this PR)_
 
-### R-2 — Legacy dev Bearer tokens are only refused by the deployment guard
-
-`loadDevAuthConfig()` refuses development tenant tokens only under `NODE_ENV=production`. On
-`NODE_ENV=staging` they load and authenticate `/v1/{agents,tasks,artifacts,approvals,commitments,consents}` —
-verified against the running code: with `NODE_ENV=staging` and a configured
-`EMBER_DEV_AUTH_TENANT_A_*` set, the loader reports `tenants: 1`.
-The only thing preventing that today is `preflight.mjs` (`E_DEV_TENANT_TOKEN`), which every
-deploy path calls, plus the smoke suite asserting `401` on the legacy routes.
-
-Proposed follow-up: extend the refusal to `NODE_ENV ∈ {production, staging}` inside
-`loadDevAuthConfig`, so the code fails closed on its own. That is a three-line change plus
-tests, but it edits an authentication boundary, so it belongs to a reviewed PR of its own
-rather than riding along with deployment work — see `fix/runtime-production-env` (#126).
+Historically `loadDevAuthConfig()` refused development tenant tokens only under
+`NODE_ENV=production`; on `NODE_ENV=staging` they loaded and authenticated
+`/v1/{agents,tasks,artifacts,approvals,commitments,consents}` (verified at the time:
+`tenants: 1`), and only `preflight.mjs` (`E_DEV_TENANT_TOKEN`) and the smoke suite stood in
+the way. The runtime now derives every development-surface gate from the deployment
+classification: `EMBER_ENV=staging` (or any non-development marker) denies the dev bearer
+tokens and `provider: "dev"` sign-in in the process itself. The deployment guard and the
+smoke `401` assertions remain as defence in depth.
 
 ### R-3 — No application-level rate limiting on the sign-in route
 

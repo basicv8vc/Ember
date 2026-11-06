@@ -178,11 +178,11 @@ export function evaluateStagingEnv(env, options = {}) {
       );
     }
 
-    if (emberEnv !== 'ci') {
+    if (emberEnv !== 'staging') {
       add(
         'E_EMBER_ENV',
         'EMBER_ENV',
-        `must be "ci" (got ${describe(emberEnv)}); it is the only non-production value the API enum accepts and the only one the Worker accepts for poll mode`,
+        `must be "staging" (got ${describe(emberEnv)}); the formal shared-deployment marker — "ci" is development-class and would misclassify this deployment, re-opening development surfaces`,
       );
     }
   }

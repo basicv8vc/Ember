@@ -194,18 +194,19 @@ BOOT    NODE_ENV=staging + dev tokens set    → tenants: 1
 BOOT    NODE_ENV=test + dev tokens (dev)     → tenants: 1
 ```
 
-Reported, not fixed here (any fix touches authentication semantics and goes in a separate
-PR — see `fix/runtime-production-env`, #126):
+Reported here, fixed by `fix/runtime-production-env` (#126, merged before this PR):
 
-- **R-1 — API cannot boot with `NODE_ENV=production` at all.** `loadDevAuthConfig()`
-  throws unconditionally on that marker, even with no dev credential configured. Staging
-  runs `NODE_ENV=staging` + `EMBER_ENV=ci` as a workaround because the API `EMBER_ENV`
-  enum still only accepts `local|test|ci`.
-- **R-2 — legacy dev bearer tokens are refused at runtime only under
-  `NODE_ENV=production`.** On `NODE_ENV=staging` the loader accepts them (probe above:
-  `tenants: 1`). The deployment layer closes this: `preflight` refuses the entire
-  `EMBER_DEV_AUTH_TENANT_*` set in every mode, and the smoke suite asserts `401` on the
-  legacy routes. The runtime should also fail closed on every shared marker.
+- **R-1 — API could not boot with `NODE_ENV=production`, and had no `staging` marker.**
+  `loadDevAuthConfig()` threw unconditionally on `NODE_ENV=production`, and the API
+  `EMBER_ENV` enum only accepted `local|test|ci`, so staging ran `NODE_ENV=staging` +
+  `EMBER_ENV=ci` as a workaround. The runtime now ships deployment classification:
+  `EMBER_ENV=staging` is first-class and the deployment declares it truthfully.
+- **R-2 — legacy dev bearer tokens were refused at runtime only under
+  `NODE_ENV=production`.** On `NODE_ENV=staging` the loader accepted them (probe above:
+  `tenants: 1`). The runtime now gates every development surface on the deployment
+  classification and fails closed on shared markers; the deployment layer still refuses
+  the entire `EMBER_DEV_AUTH_TENANT_*` set in every mode, and the smoke suite asserts
+  `401` on the legacy routes (defence in depth).
 - **R-3 — `EMBER_MODEL_EXECUTION=fake` is refused under staging/production markers** (B2
   boundary, by design: a live-marked deployment must never serve simulated replies). This
   is why the full-lifecycle E2E runs the documented `e2e` acceptance profile

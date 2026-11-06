@@ -74,6 +74,17 @@ describe('staging preflight guard', () => {
     expect(evaluateStagingEnv(env, { mode: 'local' }).violations).toEqual([]);
   });
 
+  it('requires the same formal staging marker in local mode', () => {
+    // The local profile verifies the staging configuration, so it must carry the formal
+    // shared-deployment marker too. `ci` is development-class and misclassifies a run
+    // that serves (or would serve) real clients.
+    const env = envFrom(LOCAL_ENV_EXAMPLE);
+    env.set('DATABASE_URL', `postgres://ember:${'q'.repeat(32)}@postgres:5432/ember`);
+    env.set('EMBER_ENV', 'ci');
+
+    expect(codes(evaluateStagingEnv(env, { mode: 'local' }))).toContain('E_EMBER_ENV');
+  });
+
   it('refuses the local profile as if it were staging', () => {
     // The relaxed mode must only relax hostnames. Everything that makes the deployment
     // dangerous is still refused when the same file is evaluated for real staging.
@@ -91,6 +102,9 @@ describe('staging preflight guard', () => {
     ['NODE_ENV', 'production', 'E_NODE_ENV'],
     ['NODE_ENV', 'development', 'E_NODE_ENV'],
     ['EMBER_ENV', 'production', 'E_EMBER_ENV'],
+    ['EMBER_ENV', 'ci', 'E_EMBER_ENV'],
+    ['EMBER_ENV', 'test', 'E_EMBER_ENV'],
+    ['EMBER_ENV', 'local', 'E_EMBER_ENV'],
     ['EMBER_LOG_LEVEL', 'debug', 'E_LOG_LEVEL'],
     ['EMBER_HOST', '127.0.0.1', 'E_API_HOST'],
     ['EMBER_ALLOW_NON_LOOPBACK_BIND', 'false', 'E_NON_LOOPBACK_OPT_IN'],
@@ -469,6 +483,15 @@ describe('staging environment templates', () => {
     expect(envFrom(LOCAL_ENV_EXAMPLE).get('EMBER_MODEL_EXECUTION')).toBe('disabled');
     expect(envFrom(E2E_ENV_EXAMPLE).get('EMBER_MODEL_EXECUTION')).toBe('fake');
     expect(envFrom(E2E_ENV_EXAMPLE).get('NODE_ENV')).toBe('test');
+  });
+
+  it('ship with the formal staging marker on every shared-deployment profile', () => {
+    // `EMBER_ENV=ci` was the historical workaround while the runtime enum lacked `staging`.
+    // The runtime classifies development surfaces off this marker, so a shared deployment
+    // must declare `staging` truthfully — both templates, no exceptions.
+    expect(envFrom(STAGING_ENV_EXAMPLE).get('EMBER_ENV')).toBe('staging');
+    expect(envFrom(LOCAL_ENV_EXAMPLE).get('EMBER_ENV')).toBe('staging');
+    expect(envFrom(E2E_ENV_EXAMPLE).get('EMBER_ENV')).toBe('test');
   });
 
   it('never disable TLS verification', () => {

@@ -113,11 +113,12 @@ to report healthy, and finishes with the smoke suite. It does not migrate.
 `infra/staging/env/staging.env.example`, which documents every variable. Three values are
 load-bearing and worth restating:
 
-| Variable                           | Value        | Why                                                                                                                                                                                                                                                     |
-| ---------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `NODE_ENV`                         | `staging`    | Closes every development-only code path. The dev sign-in provider denies `production` **and** `staging`; the preflight guard refuses the legacy dev bearer tokens outright.                                                                             |
-| `EMBER_ENV`                        | `ci`         | The API config enum only accepts `local \| test \| ci`, and the Worker refuses `poll` mode under `EMBER_ENV=production`. Staging therefore runs as `ci` while `NODE_ENV=staging` provides the safety. This is residual risk R-1 in the security report. |
-| `EMBER_WORKER_SIMULATED_EXECUTION` | `local-only` | The only value that permits `EMBER_WORKER_MODE=poll` today. It enables the deterministic executor — no network egress, no model provider.                                                                                                               |
+| Variable                           | Value        | Why                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `NODE_ENV`                         | `staging`    | Closes every development-only code path. The dev sign-in provider denies `production` **and** `staging`; the preflight guard refuses the legacy dev bearer tokens outright.                                                                                                                          |
+| `EMBER_ENV`                        | `ci`         | The API config enum only accepts `local \| test \| ci`, and the Worker refuses `poll` mode under `EMBER_ENV=production`. Staging therefore runs as `ci` while `NODE_ENV=staging` provides the safety. This is residual risk R-1 in the security report.                                              |
+| `EMBER_WORKER_SIMULATED_EXECUTION` | `local-only` | The only value that permits `EMBER_WORKER_MODE=poll` today. It enables the deterministic executor — no network egress, no model provider.                                                                                                                                                            |
+| `EMBER_MODEL_EXECUTION`            | `disabled`   | B2 Model Execution stays off: no model turn responder starts, a submitted Turn remains durably pending. `fake` is refused under staging markers (B2 boundary) and `real` is refused everywhere without a reviewed approval, an invoice-verified rate and a credential. Preflight enforces all three. |
 
 ## 5. Update (new release)
 
@@ -235,18 +236,18 @@ CA). The preflight guard refuses it in `--mode=staging`.
 
 ## 10. Troubleshooting
 
-| Symptom                                                          | Likely cause                                                                    | Check / fix                                                                                                |
-| ---------------------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `deploy.sh` stops at preflight                                   | an environment value weakens auth or points at a foreign estate                 | the guard prints `[violation] CODE VARIABLE: reason`; fix `staging.env` (or the SSM parameter)             |
-| api restarts with `api failed to start: … EMBER_APPLE_BUNDLE_ID` | audience missing or a placeholder                                               | set the real bundle id in SSM                                                                              |
-| api restarts with `Refusing to bind non-loopback host`           | `EMBER_ALLOW_NON_LOOPBACK_BIND` missing                                         | must be `true`; the guard enforces it                                                                      |
-| `/readyz` returns 503                                            | database unreachable or migrations never applied                                | `docker compose logs postgres`; `migrate.sh --confirm`; check the `db` network attachment                  |
-| edge returns 502                                                 | api container unhealthy or not on the `edge` network                            | `docker compose ps`; `curl 127.0.0.1:8787/healthz` on the host                                             |
-| ACME issuance fails                                              | DNS not propagated, port 80 blocked, or hostname mismatch                       | `docker compose logs edge \| grep -i acme`; `dig +short $EMBER_STAGING_HOSTNAME`; check the security group |
-| worker `unhealthy`                                               | database unreachable **or** overdue unleased backlog                            | `docker exec <worker> node apps/worker/worker-probe.mjs` prints the reason                                 |
-| turns stay `running` forever                                     | there is no model provider yet — the Worker only has the deterministic executor | expected on staging; `worker-health.sh` shows `pending_turns` growing once real traffic starts             |
-| `migrate.sh` hangs                                               | another migration holds the advisory lock                                       | `SELECT * FROM pg_locks WHERE locktype='advisory'`                                                         |
-| disk filling                                                     | container logs or PostgreSQL WAL                                                | `docker system df`; logs are capped, so check `pg_wal` and old images (`docker image prune`)               |
+| Symptom                                                          | Likely cause                                                                            | Check / fix                                                                                                               |
+| ---------------------------------------------------------------- | --------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `deploy.sh` stops at preflight                                   | an environment value weakens auth or points at a foreign estate                         | the guard prints `[violation] CODE VARIABLE: reason`; fix `staging.env` (or the SSM parameter)                            |
+| api restarts with `api failed to start: … EMBER_APPLE_BUNDLE_ID` | audience missing or a placeholder                                                       | set the real bundle id in SSM                                                                                             |
+| api restarts with `Refusing to bind non-loopback host`           | `EMBER_ALLOW_NON_LOOPBACK_BIND` missing                                                 | must be `true`; the guard enforces it                                                                                     |
+| `/readyz` returns 503                                            | database unreachable or migrations never applied                                        | `docker compose logs postgres`; `migrate.sh --confirm`; check the `db` network attachment                                 |
+| edge returns 502                                                 | api container unhealthy or not on the `edge` network                                    | `docker compose ps`; `curl 127.0.0.1:8787/healthz` on the host                                                            |
+| ACME issuance fails                                              | DNS not propagated, port 80 blocked, or hostname mismatch                               | `docker compose logs edge \| grep -i acme`; `dig +short $EMBER_STAGING_HOSTNAME`; check the security group                |
+| worker `unhealthy`                                               | database unreachable **or** overdue unleased backlog                                    | `docker exec <worker> node apps/worker/worker-probe.mjs` prints the reason                                                |
+| turns stay `running` forever                                     | `EMBER_MODEL_EXECUTION=disabled` is the staging contract — no model turn responder runs | expected on staging; `worker-health.sh` shows `pending_turns`; turning on a model is a reviewed change, never an env flip |
+| `migrate.sh` hangs                                               | another migration holds the advisory lock                                               | `SELECT * FROM pg_locks WHERE locktype='advisory'`                                                                        |
+| disk filling                                                     | container logs or PostgreSQL WAL                                                        | `docker system df`; logs are capped, so check `pg_wal` and old images (`docker image prune`)                              |
 
 ## 11. Local verification (no cloud account)
 
@@ -276,6 +277,21 @@ images run) by:
 node infra/staging/scripts/verify-durability.mjs \
   --admin-database-url postgres://ember:<password>@127.0.0.1:55433/ember_staging_verify
 ```
+
+The full-lifecycle HTTP E2E (sign-in, conversation, message, Worker turn through the B2
+Model Gateway's Fake Model, persisted reply, iOS read path, Worker restart recovery) runs
+the real containers and the TLS edge in a dedicated acceptance profile:
+
+```sh
+infra/staging/scripts/cloud-e2e.sh
+```
+
+That profile (`infra/staging/env/local-e2e.env.example`, `preflight --mode=e2e`) exists
+because the Worker refuses `EMBER_MODEL_EXECUTION=fake` under `NODE_ENV=staging` by design
+(B2 boundary: a live-marked process must never serve simulated replies). It differs from
+local-verify only in `NODE_ENV=test`, `EMBER_MODEL_EXECUTION=fake` and isolated volumes and
+ports. It can never be deployed: the guard refuses staging markers in this mode and refuses
+`fake` in every other mode.
 
 `--mode=local` relaxes **only** the public-hostname rules. Every authentication, credential,
 worker-mode and database rule still applies, which is what makes the local run evidence about

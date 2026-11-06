@@ -7,6 +7,7 @@
 #
 #   infra/staging/scripts/preflight.sh --env-file /etc/ember/staging.env
 #   infra/staging/scripts/preflight.sh --env-file ./env/local-verify.env --mode=local
+#   infra/staging/scripts/preflight.sh --env-file ./env/local-e2e.env --mode=e2e
 #
 # Exit codes: 0 = safe to deploy, 1 = violations, 2 = usage / unreadable input.
 
@@ -20,10 +21,11 @@ ENV_FILE=""
 for arg in "$@"; do
   case "$arg" in
     --mode=local) MODE="local" ;;
+    --mode=e2e) MODE="e2e" ;;
     --mode=staging) MODE="staging" ;;
     --env-file=*) ENV_FILE="${arg#--env-file=}" ;;
     -h|--help)
-      printf 'usage: %s [--env-file=PATH] [--mode=staging|local]\n' "$0"
+      printf 'usage: %s [--env-file=PATH] [--mode=staging|local|e2e]\n' "$0"
       exit 0
       ;;
     *) die "unknown argument: $arg" ;;

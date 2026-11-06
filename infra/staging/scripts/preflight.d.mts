@@ -29,7 +29,7 @@ export declare function parseEnvFile(text: string): Map<string, string>;
 
 export declare function evaluateStagingEnv(
   env: Map<string, string>,
-  options?: { readonly mode?: 'staging' | 'local' },
+  options?: { readonly mode?: 'staging' | 'local' | 'e2e' },
 ): GuardResult;
 
 export declare function formatReport(result: GuardResult, envFileLabel?: string): string;

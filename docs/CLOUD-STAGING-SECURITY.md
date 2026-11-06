@@ -107,7 +107,9 @@ one is a deliberate, reviewable decision, not an oversight.
 ### R-1 — The API has no `production`/`staging` runtime mode _(blocker for real production)_
 
 `apps/api/src/env.ts` accepts `EMBER_ENV` ∈ `local | test | ci`, and
-`loadDevAuthConfig()` throws when `NODE_ENV=production`. A process with
+`loadDevAuthConfig()` throws when `NODE_ENV=production` — verified against the running
+code: a `NODE_ENV=production` boot with **no** dev credential configured is still refused
+(`Dev tenant bearer tokens are local-development only`). A process with
 `NODE_ENV=production` therefore cannot start the API at all. Staging runs
 `NODE_ENV=staging` + `EMBER_ENV=ci`, which is a truthful safety combination (the dev provider
 denies `staging`) but a misleading label in logs.
@@ -116,19 +118,22 @@ Proposed follow-up, owned by the API owner, not this PR: split the dev-credentia
 of the production composition root and add `staging`/`production` to the enum and to the
 `ISOLATED_EMBER_ENVS` exclusion list. Until that lands, **no production deployment should be
 attempted** — the failure mode is a crash loop, not a silent weakness, but it makes production
-impossible.
+impossible. The fix is in review as the independent PR `fix/runtime-production-env` (#126);
+this PR only reports the blocker.
 
 ### R-2 — Legacy dev Bearer tokens are only refused by the deployment guard
 
 `loadDevAuthConfig()` refuses development tenant tokens only under `NODE_ENV=production`. On
-`NODE_ENV=staging` they would load and authenticate `/v1/{agents,tasks,artifacts,approvals,commitments,consents}`.
+`NODE_ENV=staging` they load and authenticate `/v1/{agents,tasks,artifacts,approvals,commitments,consents}` —
+verified against the running code: with `NODE_ENV=staging` and a configured
+`EMBER_DEV_AUTH_TENANT_A_*` set, the loader reports `tenants: 1`.
 The only thing preventing that today is `preflight.mjs` (`E_DEV_TENANT_TOKEN`), which every
-deploy path calls.
+deploy path calls, plus the smoke suite asserting `401` on the legacy routes.
 
 Proposed follow-up: extend the refusal to `NODE_ENV ∈ {production, staging}` inside
 `loadDevAuthConfig`, so the code fails closed on its own. That is a three-line change plus
 tests, but it edits an authentication boundary, so it belongs to a reviewed PR of its own
-rather than riding along with deployment work.
+rather than riding along with deployment work — see `fix/runtime-production-env` (#126).
 
 ### R-3 — No application-level rate limiting on the sign-in route
 
@@ -172,12 +177,29 @@ If egress to `appleid.apple.com:443` is blocked, every Apple sign-in fails close
 This is a availability dependency, not a security weakness, but it must be in the security
 group's allow-list.
 
-### R-9 — Turns accumulate as `running` until the Model Gateway lands
+### R-9 — Turns accumulate as `running` on staging by contract, and the Fake Model is a test-profile-only capability
 
-Deliberately no simulated responder on staging, so a submitted Turn remains durably `running`
-until a real executor exists. `worker-health.sh` reports `pending_turns` so this is visible
-rather than surprising. It also means staging cannot be used to demonstrate an assistant reply
-until Agent A's gateway is wired.
+The B2 Model Gateway is merged and the images ship it, but staging pins
+`EMBER_MODEL_EXECUTION=disabled`: no model turn responder runs, so a submitted Turn remains
+durably `running` until a reviewed real-model configuration exists. `worker-health.sh`
+reports `pending_turns` so this is visible rather than surprising.
+
+Two guards keep the alternatives off the table, both verified against the running code:
+
+- `EMBER_MODEL_EXECUTION=fake` is **refused under `NODE_ENV=staging`** (B2 boundary: a
+  process that claims to be a live deployment must never serve simulated replies). The
+  full-lifecycle E2E therefore runs the documented `e2e` acceptance profile
+  (`NODE_ENV=test`, same images, isolated volumes/ports) — `preflight --mode=e2e` allows
+  `fake` there and nowhere else, and refuses `real` in every mode.
+- `EMBER_MODEL_EXECUTION=real` cannot boot at all today (`model_not_approved`: the
+  code-owned approval registry is empty and no invoice-verified rate or credential exists).
+  There is no silent downgrade to `fake`.
+
+The E2E's session sign-in also deserves an explicit note: it runs `POST /v1/auth/session`
+on a one-shot container bound to loopback with the dev provider legally enabled (test
+markers + isolated opt-in + loopback listener, the complete R-9 gate). It is not reachable
+from the public listener (asserted `404` in smoke and E2E) and no development credential
+exists in any deployment environment file.
 
 ## 7. What this PR deliberately did not do
 
@@ -186,6 +208,7 @@ until Agent A's gateway is wired.
 - No domain purchased and no DNS record changed.
 - No secret written into the repository, the compose file or a CI log.
 - No change to `apps/api`, `apps/worker`, `packages/*` or `apps/ios`: the deployment owns
-  configuration and packaging only. Two runtime gaps were found and are reported as R-1/R-2
-  instead of being patched from here.
+  configuration and packaging only. The runtime gaps were found and are reported as R-1/R-2
+  and R-9 instead of being patched from here; the authentication fixes live in the
+  independent PR `fix/runtime-production-env` (#126).
 - No automatic migration, and no migration executed against any shared database.

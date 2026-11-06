@@ -55,6 +55,7 @@ COPY packages/contracts/package.json packages/contracts/package.json
 COPY packages/credentials/package.json packages/credentials/package.json
 COPY packages/domain/package.json packages/domain/package.json
 COPY packages/execution/package.json packages/execution/package.json
+COPY packages/model-gateway/package.json packages/model-gateway/package.json
 COPY packages/postgres/package.json packages/postgres/package.json
 COPY packages/telemetry/package.json packages/telemetry/package.json
 
@@ -78,6 +79,7 @@ COPY migrations ./migrations
 RUN pnpm build \
  && test -f apps/api/dist/index.js \
  && test -f apps/worker/dist/index.js \
+ && test -f packages/model-gateway/dist/index.js \
  && test -f packages/postgres/dist/cli/migrate.js
 
 # --------------------------------------------------------------------------------------

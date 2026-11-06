@@ -186,14 +186,16 @@ networks:
     internal: true
 
 volumes:
+  # `EMBER_VOLUME_PREFIX` lets a side-by-side E2E run own an isolated volume set while the
+  # default names stay stable for the staging host.
   ember-pgdata:
-    name: ember-staging-pgdata
+    name: ${EMBER_VOLUME_PREFIX:-ember-staging}-pgdata
   ember-blobs:
-    name: ember-staging-blobs
+    name: ${EMBER_VOLUME_PREFIX:-ember-staging}-blobs
   ember-caddy-data:
-    name: ember-staging-caddy-data
+    name: ${EMBER_VOLUME_PREFIX:-ember-staging}-caddy-data
   ember-caddy-config:
-    name: ember-staging-caddy-config
+    name: ${EMBER_VOLUME_PREFIX:-ember-staging}-caddy-config
 
 secrets:
   postgres_password:

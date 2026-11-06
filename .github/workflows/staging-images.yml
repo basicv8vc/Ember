@@ -180,3 +180,41 @@ jobs:
         run: |
           node infra/staging/scripts/verify-durability.mjs \
             --admin-database-url postgres://ember:ember_ci_only@127.0.0.1:5432/ember_ci_admin
+
+  lifecycle-e2e:
+    name: Full-lifecycle HTTP E2E (Fake Model)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Build API image
+        run: |
+          docker build \
+            --file infra/staging/docker/Dockerfile \
+            --target api \
+            --build-arg EMBER_IMAGE_VERSION="git-${GITHUB_SHA::12}" \
+            --tag ember-api:local-e2e \
+            .
+
+      - name: Build Worker image
+        run: |
+          docker build \
+            --file infra/staging/docker/Dockerfile \
+            --target worker \
+            --build-arg EMBER_IMAGE_VERSION="git-${GITHUB_SHA::12}" \
+            --tag ember-worker:local-e2e \
+            .
+
+      - name: Full-lifecycle HTTP E2E through the TLS edge
+        # Sign-in, conversation, message, Worker turn via the Model Gateway (fake), persisted
+        # Assistant reply, iOS read path, Worker restart recovery, auth negatives, redaction.
+        run: infra/staging/scripts/cloud-e2e.sh
+
+      - name: Container logs on failure
+        if: failure()
+        run: |
+          docker compose -p ember-staging-e2e --env-file /tmp/ember-staging-e2e.env \
+            -f infra/staging/compose.yaml logs --tail=200 || true

@@ -26,6 +26,8 @@ const DEV_AUTH_PREFIX = 'EMBER_DEV_AUTH_TENANT_';
 /**
  * Provider/secret variable fragments that must never appear in a staging environment.
  * Staging is deterministic-execution only: no model provider, no sandbox vendor.
+ * `MODEL_API_KEY` is listed explicitly because B2's `EMBER_MODEL_API_KEY` would otherwise
+ * slip past the provider-name fragments and let a paid call be configured.
  */
 const FORBIDDEN_KEY_FRAGMENTS = [
   'OPENAI',
@@ -37,6 +39,7 @@ const FORBIDDEN_KEY_FRAGMENTS = [
   'BEDROCK',
   'E2B',
   'MODEL_PROVIDER',
+  'MODEL_API_KEY',
   'PROVIDER_API_KEY',
 ];
 
@@ -101,14 +104,16 @@ function describe(value) {
  * Evaluate a staging environment file.
  *
  * @param {Map<string, string>} env
- * @param {{ mode?: 'staging' | 'local' }} [options]
+ * @param {{ mode?: 'staging' | 'local' | 'e2e' }} [options]
  *   `local` relaxes ONLY the public-hostname rules (so the same stack can be verified on a
- *   laptop with an internal CA). Every authentication, credential and database rule stays
- *   identical.
+ *   laptop with an internal CA). `e2e` is the acceptance profile for the full-lifecycle
+ *   HTTP E2E: it additionally allows the test runtime markers and the deterministic Fake
+ *   Model, and nothing else. Every authentication, credential and database rule stays
+ *   identical in all three modes.
  * @returns {{ ok: boolean, mode: string, violations: Array<{code: string, variable: string, message: string}>, warnings: Array<{code: string, message: string}> }}
  */
 export function evaluateStagingEnv(env, options = {}) {
-  const mode = options.mode === 'local' ? 'local' : 'staging';
+  const mode = options.mode === 'local' ? 'local' : options.mode === 'e2e' ? 'e2e' : 'staging';
   const violations = [];
   const warnings = [];
 
@@ -123,21 +128,37 @@ export function evaluateStagingEnv(env, options = {}) {
 
   // ---- 1. Runtime identity -------------------------------------------------------------
   const nodeEnv = get('NODE_ENV');
-  if (nodeEnv !== 'staging') {
-    add(
-      'E_NODE_ENV',
-      'NODE_ENV',
-      `must be "staging" (got ${describe(nodeEnv)}); "production" makes the API refuse to start and unset re-opens local defaults`,
-    );
-  }
-
   const emberEnv = get('EMBER_ENV');
-  if (emberEnv !== 'ci') {
-    add(
-      'E_EMBER_ENV',
-      'EMBER_ENV',
-      `must be "ci" (got ${describe(emberEnv)}); it is the only non-production value the API enum accepts and the only one the Worker accepts for poll mode`,
-    );
+  if (mode === 'e2e') {
+    // The acceptance profile runs the same images with test markers so the Worker's B2
+    // guard permits the deterministic Fake Model. Shared-deployment markers are still
+    // refused: this mode is for the E2E harness, never for a host that serves clients.
+    if (nodeEnv !== 'test') {
+      add(
+        'E_NODE_ENV',
+        'NODE_ENV',
+        `must be "test" in e2e mode (got ${describe(nodeEnv)}); staging/production markers refuse the Fake Model the E2E exercises`,
+      );
+    }
+    if (emberEnv !== 'test') {
+      add('E_EMBER_ENV', 'EMBER_ENV', `must be "test" in e2e mode (got ${describe(emberEnv)})`);
+    }
+  } else {
+    if (nodeEnv !== 'staging') {
+      add(
+        'E_NODE_ENV',
+        'NODE_ENV',
+        `must be "staging" (got ${describe(nodeEnv)}); "production" makes the API refuse to start and unset re-opens local defaults`,
+      );
+    }
+
+    if (emberEnv !== 'ci') {
+      add(
+        'E_EMBER_ENV',
+        'EMBER_ENV',
+        `must be "ci" (got ${describe(emberEnv)}); it is the only non-production value the API enum accepts and the only one the Worker accepts for poll mode`,
+      );
+    }
   }
 
   const logLevel = get('EMBER_LOG_LEVEL');
@@ -199,6 +220,34 @@ export function evaluateStagingEnv(env, options = {}) {
     }
   }
 
+  // ---- 3b. B2 model execution ----------------------------------------------------------
+  // `real` is refused in every mode: enabling a paid provider is a reviewed code change
+  // (approval registry, invoice-verified rate, credential) and never an environment switch.
+  // `fake` exists only in the e2e profile; a shared-deployment marker must never serve
+  // simulated replies. `disabled` is the staging contract.
+  const modelExecution = (get('EMBER_MODEL_EXECUTION') ?? 'disabled').trim();
+  if (modelExecution === 'real') {
+    add(
+      'E_MODEL_REAL',
+      'EMBER_MODEL_EXECUTION',
+      'is refused in every profile: paid model calls require a reviewed approval, an invoice-verified rate and a credential, none of which a deployment may enable by itself',
+    );
+  } else if (mode === 'e2e') {
+    if (modelExecution !== 'fake') {
+      add(
+        'E_MODEL_EXECUTION',
+        'EMBER_MODEL_EXECUTION',
+        `must be "fake" in e2e mode (got ${describe(modelExecution)}); the profile exists to exercise the deterministic Fake Model`,
+      );
+    }
+  } else if (modelExecution !== 'disabled') {
+    add(
+      'E_MODEL_EXECUTION',
+      'EMBER_MODEL_EXECUTION',
+      `must be "disabled" (got ${describe(modelExecution)}); "fake" is refused under staging markers and "real" is refused everywhere`,
+    );
+  }
+
   // ---- 4. Database boundary -------------------------------------------------------------
   const databaseUrl = get('DATABASE_URL');
   if (databaseUrl === undefined || databaseUrl === '') {
@@ -233,7 +282,7 @@ export function evaluateStagingEnv(env, options = {}) {
           'must not percent-encode credentials; generate a URL-safe password instead',
         );
       }
-      if (parsed.hostname !== 'postgres' && mode === 'staging') {
+      if (parsed.hostname !== 'postgres' && mode !== 'local') {
         add(
           'E_DATABASE_HOST',
           'DATABASE_URL',
@@ -324,7 +373,7 @@ export function evaluateStagingEnv(env, options = {}) {
   const hostname = get('EMBER_STAGING_HOSTNAME');
   if (hostname === undefined || hostname === '') {
     add('E_EDGE_HOSTNAME', 'EMBER_STAGING_HOSTNAME', 'is required for TLS');
-  } else if (mode === 'local') {
+  } else if (mode !== 'staging') {
     if (!LOCAL_HOSTNAMES.has(hostname)) {
       warn(
         'W_LOCAL_HOSTNAME',
@@ -350,7 +399,7 @@ export function evaluateStagingEnv(env, options = {}) {
       'must be "Caddyfile" (public ACME) on staging; the internal CA variant is for local verification only',
     );
   }
-  if (mode === 'local' && caddyConfig === 'Caddyfile') {
+  if (mode !== 'staging' && caddyConfig === 'Caddyfile') {
     warn('W_LOCAL_ACME', 'local verification normally uses EMBER_CADDY_CONFIG=Caddyfile.internal');
   }
 
@@ -408,11 +457,17 @@ export function formatReport(result, envFileLabel = 'environment') {
 function main(argv) {
   const args = argv.slice(2);
   const json = args.includes('--json');
-  const local = args.includes('--mode=local');
+  const modeArg = args.find((argument) => argument.startsWith('--mode=')) ?? '--mode=staging';
+  const mode = modeArg.slice('--mode='.length);
   const file = args.find((argument) => !argument.startsWith('--'));
 
+  if (!['staging', 'local', 'e2e'].includes(mode)) {
+    process.stderr.write(`unknown mode: ${mode}\n`);
+    return 2;
+  }
+
   if (file === undefined) {
-    process.stderr.write('usage: preflight.mjs <env-file> [--mode=local] [--json]\n');
+    process.stderr.write('usage: preflight.mjs <env-file> [--mode=staging|local|e2e] [--json]\n');
     return 2;
   }
 
@@ -424,7 +479,7 @@ function main(argv) {
     return 2;
   }
 
-  const result = evaluateStagingEnv(parseEnvFile(text), { mode: local ? 'local' : 'staging' });
+  const result = evaluateStagingEnv(parseEnvFile(text), { mode });
 
   if (json) {
     process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);

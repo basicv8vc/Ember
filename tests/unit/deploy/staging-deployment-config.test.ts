@@ -10,6 +10,7 @@ import {
 const REPO_ROOT = fileURLToPath(new URL('../../../', import.meta.url));
 const STAGING_ENV_EXAMPLE = `${REPO_ROOT}infra/staging/env/staging.env.example`;
 const LOCAL_ENV_EXAMPLE = `${REPO_ROOT}infra/staging/env/local-verify.env.example`;
+const E2E_ENV_EXAMPLE = `${REPO_ROOT}infra/staging/env/local-e2e.env.example`;
 const COMPOSE_FILE = `${REPO_ROOT}infra/staging/compose.yaml`;
 const DOCKERFILE = `${REPO_ROOT}infra/staging/docker/Dockerfile`;
 const CADDYFILE = `${REPO_ROOT}infra/staging/caddy/Caddyfile`;
@@ -96,6 +97,9 @@ describe('staging preflight guard', () => {
     ['EMBER_WORKER_SIMULATED_EXECUTION', 'disabled', 'E_WORKER_SIMULATED'],
     ['EMBER_WORKER_BLOB_ROOT', 'relative/blobs', 'E_WORKER_BLOB_ROOT'],
     ['EMBER_CADDY_CONFIG', 'Caddyfile.internal', 'E_EDGE_TLS_MODE'],
+    ['EMBER_MODEL_EXECUTION', 'real', 'E_MODEL_REAL'],
+    ['EMBER_MODEL_EXECUTION', 'fake', 'E_MODEL_EXECUTION'],
+    ['EMBER_MODEL_API_KEY', 'sk-not-a-real-key', 'E_PROVIDER_SECRET'],
   ])('refuses %s=%s', (variable, value, expectedCode) => {
     const env = resolvedStagingEnv();
     env.set(variable, value);
@@ -170,6 +174,75 @@ describe('staging preflight guard', () => {
   });
 });
 
+describe('e2e acceptance profile guard', () => {
+  /** The e2e template with its throwaway password replaced. */
+  function resolvedE2eEnv(): Map<string, string> {
+    const env = envFrom(E2E_ENV_EXAMPLE);
+    env.set('DATABASE_URL', `postgres://ember:${'q'.repeat(32)}@postgres:5432/ember`);
+    return env;
+  }
+
+  it('accepts the shipped e2e profile in e2e mode', () => {
+    const result = evaluateStagingEnv(resolvedE2eEnv(), { mode: 'e2e' });
+
+    expect(result.violations).toEqual([]);
+    expect(result.mode).toBe('e2e');
+  });
+
+  it('keeps every authentication refusal in e2e mode', () => {
+    // The e2e profile relaxes runtime identity and the Fake Model, nothing else. A
+    // development credential in this file must still be refused before anything starts.
+    const env = resolvedE2eEnv();
+    env.set('EMBER_DEV_PROVIDER_ENABLED', 'true');
+    env.set('EMBER_DEV_AUTH_TENANT_A_TOKEN', `${'a'.repeat(32)}`);
+    env.set('EMBER_MODEL_API_KEY', 'sk-not-a-real-key');
+
+    const found = evaluateStagingEnv(env, { mode: 'e2e' }).violations.map((v) => v.code);
+
+    expect(found).toContain('E_DEV_PROVIDER');
+    expect(found).toContain('E_DEV_TENANT_TOKEN');
+    expect(found).toContain('E_PROVIDER_SECRET');
+  });
+
+  it('refuses shared-deployment markers in e2e mode', () => {
+    for (const [variable, value] of [
+      ['NODE_ENV', 'staging'],
+      ['NODE_ENV', 'production'],
+      ['EMBER_ENV', 'ci'],
+    ] as const) {
+      const env = resolvedE2eEnv();
+      env.set(variable, value);
+      expect(codes(evaluateStagingEnv(env, { mode: 'e2e' })), `${variable}=${value}`).toContain(
+        variable === 'NODE_ENV' ? 'E_NODE_ENV' : 'E_EMBER_ENV',
+      );
+    }
+  });
+
+  it('refuses anything but the Fake Model in e2e mode', () => {
+    for (const value of ['real', 'disabled', 'nonsense']) {
+      const env = resolvedE2eEnv();
+      env.set('EMBER_MODEL_EXECUTION', value);
+      expect(codes(evaluateStagingEnv(env, { mode: 'e2e' })), value).toContain(
+        value === 'real' ? 'E_MODEL_REAL' : 'E_MODEL_EXECUTION',
+      );
+    }
+  });
+
+  it('refuses the e2e profile when evaluated as staging', () => {
+    // The Fake Model must be unreachable from any mode that could describe a deployment.
+    const env = envFrom(E2E_ENV_EXAMPLE);
+    env.set('DATABASE_URL', `postgres://ember:${'q'.repeat(32)}@postgres:5432/ember`);
+    env.set('EMBER_STAGING_HOSTNAME', 'staging.ember-cloud.net');
+    env.set('EMBER_ACME_EMAIL', 'ops@ember-cloud.net');
+
+    const refused = codes(evaluateStagingEnv(env, { mode: 'staging' }));
+
+    expect(refused).toContain('E_MODEL_EXECUTION');
+    expect(refused).toContain('E_NODE_ENV');
+    expect(refused).toContain('E_EMBER_ENV');
+  });
+});
+
 describe('staging compose topology', () => {
   const compose = read(COMPOSE_FILE);
 
@@ -225,6 +298,11 @@ describe('staging compose topology', () => {
     expect(compose).toMatch(/max-size: '10m'/);
     expect(compose).toMatch(/max-file: '5'/);
   });
+
+  it('keeps stable default volume names with an opt-in prefix for side runs', () => {
+    expect(compose).toContain('name: ${EMBER_VOLUME_PREFIX:-ember-staging}-pgdata');
+    expect(compose).toContain('name: ${EMBER_VOLUME_PREFIX:-ember-staging}-caddy-data');
+  });
 });
 
 describe('staging image build', () => {
@@ -254,7 +332,16 @@ describe('staging image build', () => {
   it('verifies the compiled entry points exist before the image is tagged', () => {
     expect(dockerfile).toContain('apps/api/dist/index.js');
     expect(dockerfile).toContain('apps/worker/dist/index.js');
+    expect(dockerfile).toContain('packages/model-gateway/dist/index.js');
     expect(dockerfile).toContain('packages/postgres/dist/cli/migrate.js');
+  });
+
+  it('resolves the model-gateway workspace manifest in the frozen install', () => {
+    // A frozen lockfile install compares the whole importer set: a missing manifest fails
+    // the build, and a missing package leaves the Worker without its B2 runtime.
+    expect(dockerfile).toContain(
+      'COPY packages/model-gateway/package.json packages/model-gateway/package.json',
+    );
   });
 });
 
@@ -281,7 +368,7 @@ describe('staging edge configuration', () => {
 
 describe('staging environment templates', () => {
   it('ship with every development capability switched off', () => {
-    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE]) {
+    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE, E2E_ENV_EXAMPLE]) {
       const env = envFrom(file);
 
       expect(env.get('EMBER_DEV_PROVIDER_ENABLED'), file).toBe('false');
@@ -293,17 +380,29 @@ describe('staging environment templates', () => {
   });
 
   it('contain no model-provider or sandbox credentials', () => {
-    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE]) {
+    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE, E2E_ENV_EXAMPLE]) {
       const env = envFrom(file);
 
       for (const key of env.keys()) {
-        expect(key, `${file}: ${key}`).not.toMatch(/OPENAI|ANTHROPIC|GEMINI|E2B|BEDROCK/i);
+        expect(key, `${file}: ${key}`).not.toMatch(
+          /OPENAI|ANTHROPIC|GEMINI|E2B|BEDROCK|MODEL_API_KEY/i,
+        );
       }
     }
   });
 
+  it('pin model execution off for deployments and to the Fake Model for e2e', () => {
+    // Real inference is a reviewed code change, never an environment switch. The e2e
+    // profile is the one place the deterministic adapter is allowed, and it is labelled
+    // simulated in every reply it publishes.
+    expect(envFrom(STAGING_ENV_EXAMPLE).get('EMBER_MODEL_EXECUTION')).toBe('disabled');
+    expect(envFrom(LOCAL_ENV_EXAMPLE).get('EMBER_MODEL_EXECUTION')).toBe('disabled');
+    expect(envFrom(E2E_ENV_EXAMPLE).get('EMBER_MODEL_EXECUTION')).toBe('fake');
+    expect(envFrom(E2E_ENV_EXAMPLE).get('NODE_ENV')).toBe('test');
+  });
+
   it('never disable TLS verification', () => {
-    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE]) {
+    for (const file of [STAGING_ENV_EXAMPLE, LOCAL_ENV_EXAMPLE, E2E_ENV_EXAMPLE]) {
       expect(envFrom(file).has('NODE_TLS_REJECT_UNAUTHORIZED'), file).toBe(false);
     }
   });

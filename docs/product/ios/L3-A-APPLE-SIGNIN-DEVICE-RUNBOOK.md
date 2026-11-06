@@ -58,7 +58,7 @@ rm -rf ~/Library/Developer/Xcode/DerivedData/Ember-*     # 可再生
 
 需要你：**Xcode → Settings → Accounts → + → Apple ID**，登录后完成双重认证。
 
-好消息：`IDEProvisioningTeamByIdentifier` 中 `teamID = 9RN3YNYN27`、`isFreeProvisioningTeam = 0`，说明这是**付费团队**，Sign in with Apple 可用；本机也已有 `Apple Development: Jia Li (HS8L97WQXN)` 与 `Apple Distribution` 两张有效证书。所以 B2 只是"登录态缺失"，不是资格缺失。
+好消息：`IDEProvisioningTeamByIdentifier` 中 `teamID = 9RN3YNYN27`、`isFreeProvisioningTeam = 0`，说明这是**付费团队**，Sign in with Apple 可用；本机钥匙串中 `Apple Development` 与 `Apple Distribution` 两张证书也都有效。所以 B2 只是"登录态缺失"，不是资格缺失。
 
 ### B3 · `com.basicv8vc.ember` 的 App ID 尚未启用该能力
 

@@ -314,7 +314,7 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
     );
   }
 
-  if (model.mode === 'fake' && productionProcess) {
+  if (model.mode === 'fake' && sharedDeployment) {
     throw new WorkerConfigError(
       'EMBER_MODEL_EXECUTION=fake is refused in production or staging: simulated replies must ' +
         'never be served by a process that claims to run a live model',

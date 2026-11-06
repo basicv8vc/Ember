@@ -40,6 +40,18 @@ describe('loadApiConfig', () => {
     expect(config.logLevel).toBe('debug');
   });
 
+  it('accepts the shared deployment environments', () => {
+    for (const env of ['staging', 'production'] as const) {
+      expect(loadApiConfig({ EMBER_ENV: env }).env).toBe(env);
+    }
+  });
+
+  it('rejects an environment it does not know', () => {
+    for (const env of ['prod', 'staging2', 'STAGING', '']) {
+      expect(() => loadApiConfig({ EMBER_ENV: env })).toThrow(ApiConfigError);
+    }
+  });
+
   it('accepts only an absolute API blob root', () => {
     expect(loadApiConfig({ EMBER_API_BLOB_ROOT: '/var/lib/ember/blobs' }).blobRoot).toBe(
       '/var/lib/ember/blobs',

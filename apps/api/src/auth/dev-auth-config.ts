@@ -1,6 +1,7 @@
 import { IdSchema } from '@ember/contracts';
 import type { AuthContext } from '@ember/domain';
 import { z } from 'zod';
+import { resolveDeploymentProfile, type EnvSource } from '../deployment.js';
 
 /**
  * Local-development tenant authentication (P0B-07a).
@@ -44,9 +45,21 @@ export const DEV_AUTH_ENV_PREFIX = 'EMBER_DEV_AUTH_TENANT_';
 export interface DevAuthConfig {
   /** Configured tenants. Empty is valid: every `/v1` request then fails closed with 401. */
   readonly tenants: readonly DevTenantCredential[];
+  /**
+   * True when the deployment itself forbids dev tenant bearer tokens (staging, production, or an
+   * unrecognised environment marker). When true `tenants` is always empty: the credentials are
+   * not parsed, not retained and cannot authenticate anything.
+   */
+  readonly disabled: boolean;
+  /** The marker that disabled them, e.g. `NODE_ENV=production`. `null` for a development run. */
+  readonly disabledBy: string | null;
+  /**
+   * Names — never values — of credential variables that were present and ignored because the
+   * deployment forbids them. A non-empty list means a secret was injected where it must not be,
+   * so the composition root reports it loudly.
+   */
+  readonly ignoredVariables: readonly string[];
 }
-
-type EnvSource = Readonly<Record<string, string | undefined>>;
 
 const TOKEN_MIN_CHARS = 16;
 const TOKEN_MAX_CHARS = 256;
@@ -84,14 +97,35 @@ function parsePolicyVersion(raw: string, variableName: string): number {
 /**
  * Load the dev tenant credentials from an explicit environment object.
  *
- * @throws {DevAuthConfigError} when `NODE_ENV=production`, when a slot is only partially
- * configured, when a value is malformed, or when two slots share one token.
+ * Staging and production have no dev tenant authentication. This is decided by the deployment
+ * classification, not by the presence of a flag: when the process is not a development run the
+ * credentials are never parsed, so no environment variable can re-open the path.
+ *
+ * Previously this function threw unconditionally on `NODE_ENV=production`, which made a
+ * production boot impossible even with no dev credentials configured at all. The refusal is now
+ * scoped to the thing that is actually unsafe: credential material. A shared deployment whose
+ * environment carries `EMBER_DEV_AUTH_TENANT_*` starts normally, ignores the values and reports
+ * their *names* through `ignoredVariables`; every request that presents one of those tokens is
+ * rejected with 401.
+ *
+ * @throws {DevAuthConfigError} in a development run, when a slot is only partially configured,
+ * when a value is malformed, or when two slots share one token.
  */
 export function loadDevAuthConfig(env: EnvSource = process.env): DevAuthConfig {
-  if (env.NODE_ENV === 'production') {
-    throw new DevAuthConfigError(
-      'Dev tenant bearer tokens are local-development only; refusing to load them with NODE_ENV=production',
-    );
+  const profile = resolveDeploymentProfile(env);
+
+  if (!profile.developmentSurfacesAllowed) {
+    const ignoredVariables = Object.keys(env)
+      .filter((name) => name.startsWith(DEV_AUTH_ENV_PREFIX))
+      .filter((name) => readValue(env, name) !== undefined)
+      .sort();
+
+    return Object.freeze({
+      tenants: Object.freeze([]),
+      disabled: true,
+      disabledBy: profile.declaredBy,
+      ignoredVariables: Object.freeze(ignoredVariables),
+    });
   }
 
   const tenants: DevTenantCredential[] = [];
@@ -171,5 +205,10 @@ export function loadDevAuthConfig(env: EnvSource = process.env): DevAuthConfig {
     );
   }
 
-  return Object.freeze({ tenants: Object.freeze(tenants) });
+  return Object.freeze({
+    tenants: Object.freeze(tenants),
+    disabled: false,
+    disabledBy: null,
+    ignoredVariables: Object.freeze([]),
+  });
 }

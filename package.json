@@ -32,7 +32,8 @@
     "dev:db:down": "docker compose -f infra/local/compose.yaml down",
     "db:migrate": "node --env-file-if-exists=.env.local --import tsx packages/postgres/src/cli/migrate.ts",
     "bench:local": "node --env-file-if-exists=.env.local --import tsx apps/benchmark/src/cli.ts",
-    "sandbox:smoke:local": "node --import tsx apps/cli/src/sandbox-smoke/cli.ts"
+    "sandbox:smoke:local": "node --import tsx apps/cli/src/sandbox-smoke/cli.ts",
+    "sandbox:smoke:daytona": "node --env-file-if-exists=.env.local --import tsx apps/cli/src/sandbox-smoke-daytona/cli.ts"
   },
   "devDependencies": {
     "@eslint/js": "9.39.5",

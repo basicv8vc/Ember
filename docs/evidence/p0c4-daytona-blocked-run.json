@@ -1,0 +1,115 @@
+{
+  "schemaVersion": "1.0",
+  "status": "BLOCKED",
+  "blockedReason": "DAYTONA_API_KEY is not set; no vendor call was attempted and no measurement exists",
+  "startedAt": "2026-11-06T03:32:59.909Z",
+  "finishedAt": "2026-11-06T03:32:59.917Z",
+  "elapsedMs": 0,
+  "environment": {
+    "sdkVersion": "0.230.0",
+    "pinnedSdkVersion": "0.230.0",
+    "nodeVersion": "v24.22.2",
+    "platform": "darwin/arm64",
+    "apiHost": "app.daytona.io",
+    "target": null,
+    "snapshot": "daytona-small",
+    "sandboxClass": "container",
+    "profileId": "container-small",
+    "owner": "daytona-poc:96f7d629",
+    "tenantA": "a3b4f224-5b75-4c29-9525-9b1d61011101",
+    "tenantB": "842bafd0-4380-40fe-808c-bbbb531870a1",
+    "tierNote": "tier is a dashboard fact, not an API field; new accounts are Tier 1 (10 vCPU / 10 GiB) with vendor-restricted egress",
+    "startedAt": "2026-11-06T03:32:59.909Z"
+  },
+  "steps": {
+    "preflight": {
+      "step": "preflight",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "create": {
+      "step": "create",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "waitReady": {
+      "step": "waitReady",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "execHello": {
+      "step": "execHello",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "kernelProbe": {
+      "step": "kernelProbe",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "fileRoundTrip": {
+      "step": "fileRoundTrip",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "execTimeout": {
+      "step": "execTimeout",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "cancel": {
+      "step": "cancel",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "egressProbe": {
+      "step": "egressProbe",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "isolationCrossTenant": {
+      "step": "isolationCrossTenant",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "crashRecovery": {
+      "step": "crashRecovery",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "usage": {
+      "step": "usage",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "stop": {
+      "step": "stop",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "destroy": {
+      "step": "destroy",
+      "status": "SKIP",
+      "durationMs": 0
+    },
+    "cleanupVerify": {
+      "step": "cleanupVerify",
+      "status": "SKIP",
+      "durationMs": 0
+    }
+  },
+  "measurements": null,
+  "isolation": null,
+  "cleanup": null,
+  "usage": null,
+  "cost": null,
+  "limits": {
+    "requestedCpu": 1,
+    "requestedMemoryMiB": 1024,
+    "maxLifetimeSec": 120,
+    "vendorTtlMinutes": 2,
+    "idleStopMinutes": 2,
+    "concurrencyCap": 2
+  },
+  "findings": []
+}

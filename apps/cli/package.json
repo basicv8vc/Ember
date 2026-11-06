@@ -12,6 +12,7 @@
     "@ember/domain": "workspace:*",
     "@ember/execution": "workspace:*",
     "@ember/postgres": "workspace:*",
+    "@ember/sandbox-daytona": "workspace:*",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",
     "zod": "4.6.7"

@@ -1,0 +1,30 @@
+────────────────────────────────────────────────────────────────────────
+Daytona sandbox smoke — BLOCKED
+────────────────────────────────────────────────────────────────────────
+profile      container-small
+snapshot     daytona-small (class container)
+sdk          0.230.0 (pinned 0.230.0)
+api host     app.daytona.io
+owner        daytona-poc:96f7d629
+elapsed      0.0s
+fingerprint  13a515aefac95f8b
+
+BLOCKED: DAYTONA_API_KEY is not set; no vendor call was attempted and no measurement exists
+
+steps
+  preflight              SKIP   0ms
+  create                 SKIP   0ms
+  waitReady              SKIP   0ms
+  execHello              SKIP   0ms
+  kernelProbe            SKIP   0ms
+  fileRoundTrip          SKIP   0ms
+  execTimeout            SKIP   0ms
+  cancel                 SKIP   0ms
+  egressProbe            SKIP   0ms
+  isolationCrossTenant   SKIP   0ms
+  crashRecovery          SKIP   0ms
+  usage                  SKIP   0ms
+  stop                   SKIP   0ms
+  destroy                SKIP   0ms
+  cleanupVerify          SKIP   0ms
+────────────────────────────────────────────────────────────────────────

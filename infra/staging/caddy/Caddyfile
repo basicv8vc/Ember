@@ -1,0 +1,60 @@
+# Automatic HTTPS for the Ember staging edge.
+#
+# Caddy obtains and renews a Let's Encrypt certificate for {$EMBER_STAGING_HOSTNAME} on
+# first boot, so the iPhone can talk to the API over ordinary public TLS with no trust
+# exception and no App Transport Security relaxation.
+#
+# Preconditions (both are user-supplied, see docs/CLOUD-STAGING-RESOURCE-REQUEST.md):
+#   * the DNS A/AAAA record for the hostname already points at this host;
+#   * inbound 80 and 443 reach the host (80 is used for the HTTP-01 challenge only).
+#
+# TLS 1.3/1.2 with the standard cipher suites is the Caddy default; nothing here widens it.
+
+{
+	email {$EMBER_ACME_EMAIL}
+	# Keep the admin API off the network: it can rewrite the running config.
+	admin off
+}
+
+{$EMBER_STAGING_HOSTNAME} {
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		# Do not advertise the proxy.
+		-Server
+	}
+
+	# Session bodies and message payloads are small; a large body is a signal, not traffic.
+	request_body {
+		max_size 2MB
+	}
+
+	# Access log to stdout, collected by the json-file driver with rotation.
+	log {
+		output stdout
+		format json
+	}
+
+	# No caching for API traffic: every response is authenticated and user-specific.
+	reverse_proxy api:8787 {
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {remote_host}
+		# Server-Sent Events (task progress) must not be buffered.
+		flush_interval -1
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+		}
+		health_uri /healthz
+		health_interval 15s
+		health_timeout 3s
+	}
+}
+
+# A request for any other Host is not proxied: Caddy has no matching site and fails closed.
+# The automatic :80 listener only issues the HTTP→HTTPS redirect for the configured name.

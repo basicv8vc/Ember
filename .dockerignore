@@ -1,0 +1,35 @@
+# Docker build context for the Ember staging images.
+#
+# The images only need manifests, TypeScript sources, tsconfigs and SQL migrations.
+# Everything else is excluded so the context stays small and no local secret can leak
+# into a layer.
+
+.git
+.gitignore
+.github
+.workbuddy
+
+node_modules
+**/node_modules
+**/dist
+**/*.tsbuildinfo
+
+# Local environment files: never sent to the daemon.
+.env
+.env.*
+.env.local
+**/.env
+**/.env.*
+
+# Not part of the runtime images. `infra/staging` stays in the context because the Worker
+# image ships its health probe from there. `apps/cli` and `apps/benchmark` stay because a
+# frozen workspace install validates every importer in pnpm-lock.yaml.
+apps/ios
+benchmarks
+tests
+docs
+infra/local
+*.md
+*.log
+coverage
+.data

@@ -1,0 +1,53 @@
+# Local-verification HTTPS edge.
+#
+# Identical policy to the Caddyfile next to it, except that certificates come from Caddy's
+# local CA instead of Let's Encrypt. Use it to prove the TLS termination, header and
+# proxying rules on a machine with no public DNS name:
+#
+#   EMBER_CADDY_CONFIG=Caddyfile.internal EMBER_STAGING_HOSTNAME=localhost \
+#     docker compose -f infra/staging/compose.yaml up -d edge
+#
+# The iPhone will NOT trust this certificate. It exists to verify configuration, not to
+# serve real devices — real devices need the ACME variant and a public hostname.
+
+{
+	email {$EMBER_ACME_EMAIL}
+	admin off
+	local_certs
+}
+
+{$EMBER_STAGING_HOSTNAME} {
+	tls internal
+	encode zstd gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		Cross-Origin-Opener-Policy "same-origin"
+		-Server
+	}
+
+	request_body {
+		max_size 2MB
+	}
+
+	log {
+		output stdout
+		format json
+	}
+
+	reverse_proxy api:8787 {
+		header_up X-Forwarded-Proto https
+		header_up X-Real-IP {remote_host}
+		flush_interval -1
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 30s
+		}
+		health_uri /healthz
+		health_interval 15s
+		health_timeout 3s
+	}
+}

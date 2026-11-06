@@ -116,6 +116,7 @@ describe('staging preflight guard', () => {
     ['EMBER_MODEL_EXECUTION', 'real', 'E_MODEL_REAL'],
     ['EMBER_MODEL_EXECUTION', 'fake', 'E_MODEL_EXECUTION'],
     ['EMBER_MODEL_API_KEY', 'sk-not-a-real-key', 'E_PROVIDER_SECRET'],
+    ['DAYTONA_API_KEY', 'dtn-not-a-real-key', 'E_PROVIDER_SECRET'],
   ])('refuses %s=%s', (variable, value, expectedCode) => {
     const env = resolvedStagingEnv();
     env.set(variable, value);
@@ -141,14 +142,38 @@ describe('staging preflight guard', () => {
     expect(codes(evaluateStagingEnv(env, { mode: 'local' }))).toContain('E_DEV_TENANT_TOKEN');
   });
 
-  it('refuses provider credentials so staging can never bill a model call', () => {
+  it('refuses provider credentials so staging can never bill a model call or a sandbox', () => {
     const env = resolvedStagingEnv();
     env.set('OPENAI_API_KEY', 'sk-not-a-real-key');
     env.set('E2B_API_KEY', 'e2b-not-a-real-key');
+    env.set('DAYTONA_API_KEY', 'dtn-not-a-real-key');
 
     const result = evaluateStagingEnv(env);
 
-    expect(codes(result).filter((code) => code === 'E_PROVIDER_SECRET')).toHaveLength(2);
+    expect(codes(result).filter((code) => code === 'E_PROVIDER_SECRET')).toHaveLength(3);
+  });
+
+  it('refuses Daytona sandbox-vendor variables in every mode', () => {
+    // A deployment must never carry a sandbox credential — the compose `env_file` would
+    // hand it straight to the container. A malicious or misconfigured file with
+    // DAYTONA_API_KEY (or any DAYTONA_* vendor surface) must fail the guard in every mode,
+    // including e2e: the acceptance run never talks to a sandbox vendor.
+    for (const mode of ['staging', 'local', 'e2e'] as const) {
+      for (const variable of ['DAYTONA_API_KEY', 'DAYTONA_API_URL']) {
+        const env = resolvedStagingEnv();
+        env.set(
+          variable,
+          variable === 'DAYTONA_API_KEY' ? 'dtn-not-a-real-key' : 'https://api.daytona.io',
+        );
+
+        const result = evaluateStagingEnv(env, { mode });
+
+        expect(
+          codes(result).filter((code) => code === 'E_PROVIDER_SECRET'),
+          `${variable} must be refused in ${mode} mode`,
+        ).toHaveLength(1);
+      }
+    }
   });
 
   it('refuses a database that is not the private compose service', () => {
@@ -469,7 +494,7 @@ describe('staging environment templates', () => {
 
       for (const key of env.keys()) {
         expect(key, `${file}: ${key}`).not.toMatch(
-          /OPENAI|ANTHROPIC|GEMINI|E2B|BEDROCK|MODEL_API_KEY/i,
+          /OPENAI|ANTHROPIC|GEMINI|E2B|DAYTONA|BEDROCK|MODEL_API_KEY/i,
         );
       }
     }

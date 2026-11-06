@@ -72,6 +72,49 @@ env_value() {
   ' "$file"
 }
 
+# Where the release bookkeeping lives. Overridable so tests can point at a scratch
+# directory; on a staging host it is /etc/ember.
+release_dir() {
+  printf '%s' "${EMBER_RELEASE_DIR:-/etc/ember}"
+}
+
+# record_release_tag TAG — make TAG the current release and keep the tag it replaced in
+# release.previous, so `rollback.sh --previous` always has a target without manual
+# bookkeeping. Called by deploy.sh and rollback.sh only after the run has fully
+# succeeded: a failed deploy or rollback never disturbs the record.
+record_release_tag() {
+  local tag="$1"
+  local dir previous=""
+  [[ -n "$tag" ]] || die "record_release_tag: empty release tag"
+  dir="$(release_dir)"
+  mkdir -p "$dir" 2>/dev/null || true
+  if [[ ! -w "$dir" ]]; then
+    log "WARNING: ${dir} is not writable; release ${tag} was NOT recorded (rollback.sh --previous will have no target)"
+    return 0
+  fi
+  if [[ -s "${dir}/release" ]]; then
+    previous="$(tr -d '[:space:]' < "${dir}/release")"
+    # Redeploying the same tag keeps the older previous: the version to roll back to
+    # does not change just because the same release was rebuilt.
+    if [[ -n "$previous" && "$previous" != "$tag" ]]; then
+      printf '%s\n' "$previous" > "${dir}/release.previous"
+      chmod 644 "${dir}/release.previous"
+    fi
+  fi
+  printf '%s\n' "$tag" > "${dir}/release"
+  chmod 644 "${dir}/release"
+  log "recorded release ${tag} in ${dir}/release (previous: ${previous:-none})"
+}
+
+# read_previous_release — the tag `rollback.sh --previous` rolls back to: the release that
+# was current before the last deploy or rollback changed it.
+read_previous_release() {
+  local file
+  file="$(release_dir)/release.previous"
+  [[ -s "$file" ]] || die "no previous release recorded in ${file}"
+  tr -d '[:space:]' < "$file"
+}
+
 compose() {
   local env_file="$1"
   shift

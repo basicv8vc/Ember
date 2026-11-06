@@ -26,7 +26,9 @@ const DEV_AUTH_PREFIX = 'EMBER_DEV_AUTH_TENANT_';
 
 /**
  * Provider/secret variable fragments that must never appear in a staging environment.
- * Staging is deterministic-execution only: no model provider, no sandbox vendor.
+ * Staging is deterministic-execution only: no model provider, no sandbox vendor
+ * (`E2B` and `DAYTONA` cover the sandbox vendors — a deployment never carries a sandbox
+ * credential, only the Daytona smoke harness does, and that is a CLI-side tool).
  * `MODEL_API_KEY` is listed explicitly because B2's `EMBER_MODEL_API_KEY` would otherwise
  * slip past the provider-name fragments and let a paid call be configured.
  */
@@ -39,6 +41,7 @@ const FORBIDDEN_KEY_FRAGMENTS = [
   'OPENROUTER',
   'BEDROCK',
   'E2B',
+  'DAYTONA',
   'MODEL_PROVIDER',
   'MODEL_API_KEY',
   'PROVIDER_API_KEY',
@@ -241,7 +244,7 @@ export function evaluateStagingEnv(env, options = {}) {
       add(
         'E_PROVIDER_SECRET',
         key,
-        `provider credential (${fragment}) is refused: staging must not be able to bill a model call`,
+        `provider credential (${fragment}) is refused: staging must not be able to bill a model call or a sandbox`,
       );
     }
   }

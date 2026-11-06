@@ -10,7 +10,9 @@
 #   infra/staging/scripts/deploy.sh --env-file /etc/ember/staging.env
 #   infra/staging/scripts/deploy.sh --env-file /etc/ember/staging.env --skip-build
 #
-# The release tag is recorded in /etc/ember/release for rollback.
+# The release tag is recorded in /etc/ember/release, and the tag it replaces is kept in
+# /etc/ember/release.previous — so `rollback.sh --previous` works without any manual
+# bookkeeping.
 
 set -euo pipefail
 SCRIPT_NAME="deploy"
@@ -72,11 +74,6 @@ compose "$ENV_FILE" ps
 log "smoke test"
 "${SCRIPT_DIR}/smoke.sh" "--env-file=${ENV_FILE}"
 
-mkdir -p /etc/ember 2>/dev/null || true
-if [[ -w /etc/ember ]]; then
-  printf '%s\n' "$RELEASE_TAG" > /etc/ember/release
-  chmod 644 /etc/ember/release
-  log "recorded release tag in /etc/ember/release"
-fi
+record_release_tag "$RELEASE_TAG"
 
 log "deploy complete: ${RELEASE_TAG}"

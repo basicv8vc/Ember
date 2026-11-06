@@ -9,7 +9,10 @@
 #   infra/staging/scripts/rollback.sh --env-file /etc/ember/staging.env --to=git-c6c9c3d650f9-202611061030
 #   infra/staging/scripts/rollback.sh --env-file /etc/ember/staging.env --previous
 #
-# `--previous` reads the tag recorded before the last deploy from /etc/ember/release.previous.
+# `--previous` reads the tag recorded before the last deploy or rollback from
+# /etc/ember/release.previous (both deploy.sh and rollback.sh maintain that record).
+# A successful rollback updates the bookkeeping too: the rolled-back-to tag becomes the
+# current release and the abandoned one becomes the new `release.previous`.
 
 set -euo pipefail
 SCRIPT_NAME="rollback"
@@ -33,14 +36,15 @@ for arg in "$@"; do
 done
 
 ENV_FILE="${ENV_FILE:-${EMBER_STAGING_ENV_FILE:-$DEFAULT_ENV_FILE}}"
-require_command docker
 
+# Resolve the target before touching Docker: `--previous` must fail fast and loudly when
+# no previous release was ever recorded.
 if [[ "$PREVIOUS" == "true" ]]; then
-  [[ -f /etc/ember/release.previous ]] || die "no previous release recorded in /etc/ember/release.previous"
-  TARGET="$(tr -d '[:space:]' < /etc/ember/release.previous)"
+  TARGET="$(read_previous_release)"
 fi
 
 [[ -n "$TARGET" ]] || die "specify --to=<tag> or --previous"
+require_command docker
 
 export EMBER_IMAGE_VERSION="$TARGET"
 export EMBER_API_IMAGE="ember-api:${TARGET}"
@@ -55,6 +59,10 @@ log "rolling back to ${TARGET}"
 compose "$ENV_FILE" up -d --no-build --remove-orphans --wait --wait-timeout 180
 
 "${SCRIPT_DIR}/smoke.sh" "--env-file=${ENV_FILE}"
+
+# The record now matches reality: this release is what runs, the one it replaced is the
+# new rollback target.
+record_release_tag "$TARGET"
 
 log "rollback complete: ${TARGET}"
 log "the database schema was not reverted; verify the release's migration compatibility before the next deploy"

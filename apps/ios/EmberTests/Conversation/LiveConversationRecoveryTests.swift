@@ -36,6 +36,50 @@ private enum LiveRecoveryJSON {
           "updated_at":"2026-11-06T00:00:02Z"
         }
         """
+    static let completedTurn = """
+        {
+          "turn_id":"88888888-8888-4888-8888-888888888888",
+          "conversation_id":"44444444-4444-4444-8444-444444444444",
+          "source_message_id":"55555555-5555-4555-8555-555555555555",
+          "status":"completed", "created_at":"2026-11-06T00:00:01Z",
+          "updated_at":"2026-11-06T00:00:03Z",
+          "response_message_id":"77777777-7777-4777-8777-777777777777",
+          "failure_reason":null
+        }
+        """
+
+    static let cancelledTurn = """
+        {
+          "turn_id":"88888888-8888-4888-8888-888888888888",
+          "conversation_id":"44444444-4444-4444-8444-444444444444",
+          "source_message_id":"55555555-5555-4555-8555-555555555555",
+          "status":"cancelled", "created_at":"2026-11-06T00:00:01Z",
+          "updated_at":"2026-11-06T00:00:03Z",
+          "response_message_id":null,"failure_reason":null
+        }
+        """
+
+    static func userPage(_ id: String, includesReply: Bool = false, simulated: Bool = false) -> String {
+        let assistant = includesReply ? """
+            ,{"message_id":"77777777-7777-4777-8777-777777777777",
+              "sequence":7,"created_at":"2026-11-06T00:00:03Z",
+              "kind":"ember","text":"A cloud reply",
+              "model_label":"test-gateway","simulated":\(simulated ? "true" : "false")}
+            """ : ""
+        return """
+            {
+              "conversation_id":"44444444-4444-4444-8444-444444444444",
+              "transcript_epoch":0,
+              "messages":[
+                {"message_id":"55555555-5555-4555-8555-555555555555",
+                 "sequence":6,"created_at":"2026-11-06T00:00:00Z",
+                 "kind":"user","text":"hello","client_submission_id":"\(id)"}
+                \(assistant)
+              ],
+              "next_after":\(includesReply ? 7 : 6),"has_more":false
+            }
+            """
+    }
 }
 
 private final class LiveRequestCapture: @unchecked Sendable {
@@ -317,6 +361,158 @@ final class LiveConversationRecoveryTests: XCTestCase {
         XCTAssertEqual(timestamps.count, 2)
         let gap = try XCTUnwrap(timestamps.last).timeIntervalSince(try XCTUnwrap(timestamps.first))
         XCTAssertGreaterThanOrEqual(gap, 0.9, "a second poll inside the same second violates the B1 bound")
+    }
+
+    /// L3-B: verified Live host projection, not a fake responder in the app.
+    /// URLProtocol serves B1-shaped data; the host must render server-issued IDs/replies.
+    func testLiveHostShowsAcknowledgedMessageAndCompletedRealReply() async throws {
+        let capture = LiveRequestCapture()
+        let setup = try make()
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path.hasSuffix("/messages") {
+                capture.recordPOST(request)
+                return .json(statusCode: 201,
+                    body: LiveRecoveryJSON.receipt(capture.sentIDs.last ?? ""))
+            }
+            if path.contains("/turns/") {
+                capture.recordTurn()
+                return .json(statusCode: 200, body: LiveRecoveryJSON.completedTurn)
+            }
+            if path.hasSuffix("/messages") {
+                capture.recordPage()
+                if let id = capture.sentIDs.first {
+                    return .json(statusCode: 200,
+                        body: LiveRecoveryJSON.userPage(id, includesReply: true))
+                }
+                return .json(statusCode: 200, body: LiveRecoveryJSON.emptyPage)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let repository = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth),
+            journal: LiveConversationJournal(directory: setup.directory))
+        let model = LiveConversationHostModel(repository: repository, auth: setup.auth)
+        await model.start()
+        XCTAssertTrue(model.screen.timeline.isEmpty)
+
+        await model.send("hello")
+        XCTAssertEqual(model.command, .acknowledged)
+
+        // Polling is async. Await the observable terminal state without assuming task ordering.
+        for _ in 0..<100 {
+            if model.status == "Completed by Ember Cloud." { break }
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(model.status, "Completed by Ember Cloud.")
+        XCTAssertEqual(model.reply, .idle)
+        let rows = model.screen.timeline.compactMap { entry -> String? in
+            guard case .message(let message) = entry else { return nil }
+            return message.text
+        }
+        XCTAssertEqual(rows, ["hello", "A cloud reply"])
+        XCTAssertFalse(rows.contains(where: { $0.contains("[SIMULATED]") }))
+        XCTAssertEqual(capture.sentIDs.count, 1)
+        XCTAssertEqual(capture.turnTimestamps.count, 1)
+        model.suspendForDisappearance()
+    }
+
+    /// The UI must not hallucinate a reply or submit a different intent after an ambiguous ACK.
+    func testLiveHostUnknownACKDisplaysFailureAndRecoversOriginalReceipt() async throws {
+        let capture = LiveRequestCapture()
+        let setup = try make()
+        register { request in
+            let path = request.url?.path ?? ""
+            if path.contains("/message-submissions/") {
+                capture.recordLookup()
+                return .json(statusCode: 200,
+                    body: LiveRecoveryJSON.receipt(capture.sentIDs.last ?? ""))
+            }
+            if request.httpMethod == "POST", path.hasSuffix("/messages") {
+                capture.recordPOST(request)
+                return .failure(URLError(.timedOut))
+            }
+            if path.contains("/turns/") {
+                return .json(statusCode: 200, body: LiveRecoveryJSON.runningTurn)
+            }
+            if path.hasSuffix("/messages") {
+                capture.recordPage()
+                if let id = capture.sentIDs.first {
+                    return .json(statusCode: 200, body: LiveRecoveryJSON.userPage(id))
+                }
+                return .json(statusCode: 200, body: LiveRecoveryJSON.emptyPage)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let repository = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth),
+            journal: LiveConversationJournal(directory: setup.directory))
+        let model = LiveConversationHostModel(repository: repository, auth: setup.auth)
+        await model.start()
+        await model.send("hello")
+        XCTAssertEqual(model.command, .unknownAcknowledgement)
+        if case .failed(_, let retryable) = model.reply {
+            XCTAssertTrue(retryable)
+        } else { XCTFail("ambiguous ACK should be visible as a recoverable failure") }
+        XCTAssertTrue(model.screen.timeline.isEmpty)
+        XCTAssertNotNil(try await repository.pending())
+
+        await model.retry()
+        XCTAssertEqual(model.command, .acknowledged)
+        XCTAssertNil(try await repository.pending())
+        XCTAssertEqual(capture.sentIDs.count, 1, "the UI must never mint a second POST ID")
+        XCTAssertEqual(capture.lookups, 1)
+        let rows = model.screen.timeline.compactMap { entry -> String? in
+            guard case .message(let message) = entry else { return nil }
+            return message.text
+        }
+        XCTAssertEqual(rows, ["hello"])
+        model.suspendForDisappearance()
+    }
+
+    func testLiveHostCancelUsesServerTurnAndShowsCancelledStatus() async throws {
+        let capture = LiveRequestCapture()
+        let cancels = Counter()
+        let setup = try make()
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path.hasSuffix("/messages") {
+                capture.recordPOST(request)
+                return .json(statusCode: 201,
+                    body: LiveRecoveryJSON.receipt(capture.sentIDs.last ?? ""))
+            }
+            if path.hasSuffix("/cancel"), request.httpMethod == "POST" {
+                cancels.increment()
+                return .json(statusCode: 200, body: LiveRecoveryJSON.cancelledTurn)
+            }
+            if path.contains("/turns/") {
+                capture.recordTurn()
+                return .json(statusCode: 200, body: LiveRecoveryJSON.runningTurn)
+            }
+            if path.hasSuffix("/messages") {
+                capture.recordPage()
+                if let id = capture.sentIDs.first {
+                    return .json(statusCode: 200, body: LiveRecoveryJSON.userPage(id))
+                }
+                return .json(statusCode: 200, body: LiveRecoveryJSON.emptyPage)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let repository = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth),
+            journal: LiveConversationJournal(directory: setup.directory))
+        let model = LiveConversationHostModel(repository: repository, auth: setup.auth)
+        await model.start()
+        await model.send("hello")
+        await model.stop()
+        XCTAssertEqual(cancels.value, 1)
+        XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertNil(try await repository.activeTurn())
+        model.suspendForDisappearance()
     }
 
     private func make(

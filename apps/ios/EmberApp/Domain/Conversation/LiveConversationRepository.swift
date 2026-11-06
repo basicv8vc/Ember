@@ -105,16 +105,17 @@ actor LiveConversationRepository {
             try await journal.discardPending(consumerID: me.consumerID)
             throw LiveB1Failure.staleEpoch
         }
-        let receipt: LiveB1Receipt
+        let found: LiveB1Receipt?
         do {
-            if let found = try await client.lookup(pending.clientSubmissionID) {
-                receipt = found
-            } else {
-                return try await dispatch(pending, consumerID: me.consumerID)
-            }
+            found = try await client.lookup(pending.clientSubmissionID)
         } catch {
             // A failed lookup is still ambiguous; do not issue a POST.
             throw LiveB1Failure.unknownAcknowledgement
+        }
+        // Only an authoritative 404 permits replay. Preserve a 409 from that POST as a
+        // terminal conflict, never mask it as an unknown lookup result.
+        guard let receipt = found else {
+            return try await dispatch(pending, consumerID: me.consumerID)
         }
         try validate(receipt, for: pending)
         try await journal.accepted(receipt, for: pending, consumerID: me.consumerID)

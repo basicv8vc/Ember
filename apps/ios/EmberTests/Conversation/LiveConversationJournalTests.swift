@@ -64,6 +64,33 @@ final class LiveConversationJournalTests: XCTestCase {
         XCTAssertNil(first)
     }
 
+    func testTerminal409SurvivesRelaunchAsDraftNotPending() async throws {
+        let consumer = UUID()
+        let original = LiveConversationJournal.Pending(
+            clientSubmissionID: UUID(), conversationID: UUID(),
+            transcriptEpoch: 2, text: "Preserve this draft")
+        let first = LiveConversationJournal(directory: directory)
+        try await first.bind(consumerID: consumer)
+        try await first.prepare(original, consumerID: consumer)
+        try await first.markConflict(original, consumerID: consumer)
+
+        let second = LiveConversationJournal(directory: directory)
+        let pending = try await second.pending(for: consumer)
+        let rejected = try await second.rejectedDraft(for: consumer)
+        XCTAssertNil(pending)
+        XCTAssertEqual(rejected, original)
+
+        // Only an explicit new send discards the old rejected draft.
+        let newIntent = LiveConversationJournal.Pending(
+            clientSubmissionID: UUID(), conversationID: original.conversationID,
+            transcriptEpoch: 3, text: "Deliberate new send")
+        try await second.prepare(newIntent, consumerID: consumer)
+        let newPending = try await second.pending(for: consumer)
+        let previousDraft = try await second.rejectedDraft(for: consumer)
+        XCTAssertEqual(newPending, newIntent)
+        XCTAssertNil(previousDraft)
+    }
+
     func testLogoutClearsPendingAndTurnCheckpoint() async throws {
         let store = LiveConversationJournal(directory: directory)
         let consumer = UUID()

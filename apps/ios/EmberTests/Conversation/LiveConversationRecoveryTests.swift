@@ -187,6 +187,57 @@ final class LiveConversationRecoveryTests: XCTestCase {
         XCTAssertNil(remaining)
     }
 
+    func testTerminal409DoesNotAutoRepostAfterRelaunchEvenWhenReceiptIs404() async throws {
+        let capture = LiveRequestCapture()
+        let setup = try make()
+        register { request in
+            if request.url?.path.contains("/message-submissions/") == true {
+                capture.recordLookup()
+                return .json(statusCode: 404, body: "{}")
+            }
+            if request.httpMethod == "POST" {
+                capture.recordPOST(request)
+                return .json(statusCode: 409, body: "{}")
+            }
+            return .json(statusCode: 200, body: LiveRecoveryJSON.emptyPage)
+        }
+
+        let first = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth),
+            journal: LiveConversationJournal(directory: setup.directory))
+        _ = try await first.bootstrap()
+        do {
+            _ = try await first.send(text: "hello")
+            XCTFail("409 must be terminal")
+        } catch let error as LiveB1Failure {
+            XCTAssertEqual(error, .conflict)
+        }
+        let rejected = try await first.rejectedDraft()
+        let original = try XCTUnwrap(rejected)
+        XCTAssertEqual(original.text, "hello")
+        XCTAssertEqual(capture.sentIDs.count, 1)
+
+        // The backend returns 404 for this original ID, but that cannot reopen
+        // the terminal 409. A fresh launch must never auto POST.
+        let lookup = try await LiveB1ConversationClient(auth: setup.auth)
+            .lookup(original.clientSubmissionID)
+        XCTAssertNil(lookup)
+
+        let relaunched = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth),
+            journal: LiveConversationJournal(directory: setup.directory))
+        let resolved = try await relaunched.reconcilePending()
+        XCTAssertNil(resolved)
+        let restored = try await relaunched.recoverAfterRelaunch()
+        XCTAssertTrue(restored.messages.isEmpty)
+        let pending = try await relaunched.pending()
+        let draft = try await relaunched.rejectedDraft()
+        XCTAssertNil(pending)
+        XCTAssertEqual(draft?.clientSubmissionID, original.clientSubmissionID)
+        XCTAssertEqual(capture.sentIDs.count, 1, "409 cannot cause automatic replay")
+        XCTAssertEqual(capture.lookups, 1, "startup must not reconcile terminal 409")
+    }
+
     func testOfflineBootstrapDoesNotGenerateMockReplyOrSend() async throws {
         let setup = try make(configure: { api in
             api.setBootstrapResults([.failure(.offline)])

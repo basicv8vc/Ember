@@ -13,7 +13,7 @@ The default App Root stays Mock. Live Alpha launch requires both `--ember-live-c
 - A fresh UUIDv4 `client_submission_id`, its exact text and the current epoch are persisted to a protected Application Support journal **before** the first POST.
 - `POST /v1/conversations/{id}/messages` is accepted only after verifying the server receipt matches the intent, consumer-scoped Conversation, text, ID and epoch.
 - A lost acknowledgement stays unresolved. On relaunch, bootstrap the latest epoch, then `GET /v1/message-submissions/{id}`. Only a confirmed 404 allows a POST with the **same** immutable id/body/epoch.
-- A 409 or stale transcript epoch is not automatically retried. Reconciled receipts and server-issued IDs are authoritative.
+- A definitive HTTP 409 transitions the original submission atomically from the pending outbox to a durable rejected draft. App relaunch neither looks up nor replays that terminal ID, even if the receipt endpoint would answer 404. A new UUID is minted only when the user explicitly sends another message. Reconciled receipts and server-issued IDs remain authoritative.
 - Paginated history uses `after` and `limit` from the frozen B1 schema; no locally generated message ID or sequence is displayed as canonical.
 - `GET /v1/conversations/{id}/turns/{id}` is limited to one poll per Conversation per second. Cancellation uses the frozen POST cancel route. The active Turn ID is saved across relaunch.
 - A response with `simulated: true` visibly carries the `[SIMULATED]` label. No local Mock responder is reachable from Live composition.
@@ -27,7 +27,7 @@ This branch deliberately leaves existing Mock UI, frozen backend contracts, clou
 
 ## Validation boundaries
 
-This change was authored through GitHub from a Linux environment without Xcode or an iOS Simulator. Local signed iOS Build, Unit, UI Tests and UI screenshots have **not** been executed in this environment and remain mandatory before merge.
+GitHub Actions `iOS L2 Validation` run `42145467363` on `01c51fd` executed signed iOS Simulator Build and **299/299 Unit Tests**, **9/9 UI Tests**, zero failures. The new terminal-409 regression requires a fresh run on the updated HEAD. Local Mac screenshot/recording and real iPhone staging E2E remain outstanding.
 
 Run the full signed iOS QA suite on the Mac, using the existing `.xctestrun` approach if necessary. Verify URLProtocol test fixtures, cold start recovery, concurrency, Keychain cleanup, strict concurrency compilation and real simulator Live-mode screenshot. The repository GitHub workflow is Node/TypeScript/PG17-only; its success does not certify Swift compilation.
 

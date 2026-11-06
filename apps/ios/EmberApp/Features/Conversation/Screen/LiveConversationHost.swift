@@ -18,6 +18,7 @@ final class LiveConversationHostModel {
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
     private(set) var requiresSignIn = false
+    private(set) var rejectedDraftText: String?
 
     init(repository: LiveConversationRepository, auth: LiveAuthSessionCoordinator) {
         self.repository = repository
@@ -37,6 +38,12 @@ final class LiveConversationHostModel {
                 snapshot = try await repository.recoverAfterRelaunch()
                 status = nil
                 reply = .idle
+                if let rejected = try await repository.rejectedDraft() {
+                    rejectedDraftText = rejected.text
+                    command = .rejected
+                    reply = .failed(message: "The previous message was rejected. Review before sending again.", retryable: false)
+                    status = "The rejected message will not be sent automatically."
+                }
                 if try await repository.activeTurn() != nil { beginPolling() }
             } catch {
                 command = .unknownAcknowledgement
@@ -76,6 +83,7 @@ final class LiveConversationHostModel {
         guard !isSubmitting else { return }
         isSubmitting = true
         command = .submitting
+        rejectedDraftText = nil
         defer { isSubmitting = false }
         do {
             _ = try await repository.send(text: text)
@@ -89,6 +97,7 @@ final class LiveConversationHostModel {
             reply = .failed(message: "Send result is unknown. Check receipt before retrying.", retryable: true)
             status = "Your original send ID was saved. Recovery will not duplicate the message."
         } catch let error as LiveB1Failure where error == .staleEpoch || error == .conflict {
+            rejectedDraftText = text
             command = .rejected
             reply = .failed(message: "Conversation changed. Review your draft before sending again.", retryable: false)
             status = "The server rejected this submission."
@@ -276,6 +285,10 @@ struct LiveConversationHost: View {
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
         .task { await model.start() }
+        .onChange(of: model.rejectedDraftText) { _, rejected in
+            // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
+            if let rejected, draft.isEmpty { draft = rejected }
+        }
         .onDisappear { model.suspendForDisappearance() }
     }
 }

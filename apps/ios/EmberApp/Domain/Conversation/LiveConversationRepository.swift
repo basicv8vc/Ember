@@ -76,6 +76,12 @@ actor LiveConversationRepository {
         return try await journal.turn(for: me.consumerID)
     }
 
+    /// A terminal 409 is retained solely for explicit user draft restoration.
+    func rejectedDraft() async throws -> LiveConversationJournal.Pending? {
+        let me = try await ensureProfile()
+        return try await journal.rejectedDraft(for: me.consumerID)
+    }
+
     /// A fresh UUIDv4 is created once, persisted with its exact body and epoch, then sent.
     func send(text: String) async throws -> LiveB1Receipt {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -173,7 +179,9 @@ actor LiveConversationRepository {
             try await journal.accepted(receipt, for: pending, consumerID: consumerID)
             return receipt
         } catch let error as LiveB1Failure where error == .conflict {
-            // Keep the original intent as an unsent draft. Never mint another id automatically.
+            // A known 409 is terminal (N-4/TE-3), NOT an unknown ACK: persist it
+            // outside pending so relaunch cannot query 404 and resend this intent.
+            try await journal.markConflict(pending, consumerID: consumerID)
             throw LiveB1Failure.conflict
         } catch let error as LiveB1Failure where error == .invalidResponse {
             // A malformed 2xx is ambiguous, even if we cannot adopt its body.

@@ -25,19 +25,23 @@ public struct EmberAuthenticatedRequest: Equatable, Sendable {
     public let body: Data?
     public let contentType: String?
     public let idempotency: EmberRequestIdempotency
+    /// Optional bounded query for B1 ascending history pages (after, limit).
+    public let queryItems: [URLQueryItem]
 
     public init(
         method: String,
         pathComponents: [String],
         body: Data? = nil,
         contentType: String? = nil,
-        idempotency: EmberRequestIdempotency
+        idempotency: EmberRequestIdempotency,
+        queryItems: [URLQueryItem] = []
     ) {
         self.method = method
         self.pathComponents = pathComponents
         self.body = body
         self.contentType = contentType
         self.idempotency = idempotency
+        self.queryItems = queryItems
     }
 
     /// Convenience for the common authenticated read.
@@ -80,7 +84,11 @@ public struct EmberAuthenticatedTransport: Sendable {
         }
         let root = components.path.hasSuffix("/") ? String(components.path.dropLast()) : components.path
         components.path = ([root] + request.pathComponents).joined(separator: "/")
-        components.query = nil
+        // Never allow unreviewed scope-bearing query parameters.
+        guard request.queryItems.allSatisfy({
+            ($0.name == "after" || $0.name == "limit") && $0.value != nil
+        }) else { throw AuthError.invalidRequest }
+        components.queryItems = request.queryItems.isEmpty ? nil : request.queryItems
         components.fragment = nil
 
         guard let url = components.url else { throw AuthError.invalidBaseURL }

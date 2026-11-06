@@ -1,0 +1,75 @@
+name: iOS L2 Validation
+
+on:
+  pull_request:
+    paths:
+      - 'apps/ios/**'
+      - '.github/workflows/ios-l2-compile.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  ios-build:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+      - name: Xcode and simulators
+        run: |
+          xcodebuild -version
+          xcrun simctl list devices available
+      - name: Build app and both test bundles (strict concurrency)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project apps/ios/Ember.xcodeproj \
+            -scheme Ember \
+            -configuration Debug \
+            -destination 'generic/platform=iOS Simulator' \
+            -derivedDataPath "$RUNNER_TEMP/EmberL2DerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" \
+            build-for-testing 2>&1 | tee "$RUNNER_TEMP/ember-ios-build.log"
+      - name: iOS Unit Tests (signed simulator)
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project apps/ios/Ember.xcodeproj \
+            -scheme Ember \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
+            -derivedDataPath "$RUNNER_TEMP/EmberL2SignedData" \
+            -parallel-testing-enabled NO \
+            -only-testing:EmberTests \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=- \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" \
+            test 2>&1 | tee "$RUNNER_TEMP/ember-ios-unit.log"
+      - name: iOS UI Tests
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project apps/ios/Ember.xcodeproj \
+            -scheme Ember \
+            -configuration Debug \
+            -destination 'platform=iOS Simulator,name=iPhone 17,OS=27.0' \
+            -derivedDataPath "$RUNNER_TEMP/EmberL2SignedData" \
+            -resultBundlePath "$RUNNER_TEMP/ember-l2-ui.xcresult" \
+            -parallel-testing-enabled NO \
+            -only-testing:EmberUITests \
+            CODE_SIGNING_ALLOWED=YES \
+            CODE_SIGN_IDENTITY=- \
+            SWIFT_STRICT_CONCURRENCY=complete \
+            OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox" \
+            test 2>&1 | tee "$RUNNER_TEMP/ember-ios-ui.log"
+
+      - name: Preserve Live UI screenshot XCResult
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ember-ios-l2-ui-screenshot-xcresult
+          path: ${{ runner.temp }}/ember-l2-ui.xcresult/
+          retention-days: 7

@@ -6,6 +6,7 @@
     { "path": "./packages/credentials/tsconfig.build.json" },
     { "path": "./packages/connectors/tsconfig.build.json" },
     { "path": "./packages/execution/tsconfig.build.json" },
+    { "path": "./packages/model-gateway/tsconfig.build.json" },
     { "path": "./packages/postgres/tsconfig.build.json" },
     { "path": "./packages/sandbox-daytona/tsconfig.build.json" },
     { "path": "./packages/telemetry/tsconfig.build.json" },

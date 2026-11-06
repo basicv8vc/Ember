@@ -58,6 +58,14 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         /// How early a token is rotated before it expires, so a request cannot start with a
         /// credential that dies in flight.
         public let refreshLeeway: TimeInterval
+        /// Cleanup that must be installed *before* any logout can execute.
+        ///
+        /// `registerSignOutCleanup` needs an `await` on this actor, so a caller that starts the view
+        /// first and registers afterwards leaves a window in which a logout would skip the hook. A
+        /// composition that owns a durable outbox therefore passes its cleanup here instead, and the
+        /// hooks exist from the instant the coordinator does. Registration order is a security
+        /// property, so it is not left to scheduling.
+        public let signOutCleanupHooks: [@Sendable () async -> Void]
 
         public init(
             api: EmberSessionAPI,
@@ -65,6 +73,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             store: EmberSessionStore,
             appleSignIn: AppleSignInAuthorizing,
             fence: SessionRecoveryFence = FileSessionRecoveryFence(),
+            signOutCleanupHooks: [@Sendable () async -> Void] = [],
             now: @escaping @Sendable () -> Date = { Date() },
             refreshLeeway: TimeInterval = 60
         ) {
@@ -73,6 +82,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             self.store = store
             self.appleSignIn = appleSignIn
             self.fence = fence
+            self.signOutCleanupHooks = signOutCleanupHooks
             self.now = now
             self.refreshLeeway = refreshLeeway
         }
@@ -121,7 +131,7 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
     /// A token the server minted but this device refused to keep. Revoked once, on the way out.
     private var orphanedToken: EmberAccessToken?
     private var isLoggingOut = false
-    private var cleanupHooks: [@Sendable () async -> Void] = []
+    private var cleanupHooks: [@Sendable () async -> Void]
 
     public init(dependencies: Dependencies) {
         self.api = dependencies.api
@@ -129,6 +139,8 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
         self.store = dependencies.store
         self.appleSignIn = dependencies.appleSignIn
         self.fence = dependencies.fence
+        // Installed at construction, not by a later `await`: see `signOutCleanupHooks`.
+        self.cleanupHooks = dependencies.signOutCleanupHooks
         self.now = dependencies.now
         self.refreshLeeway = dependencies.refreshLeeway
     }

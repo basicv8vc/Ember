@@ -25,6 +25,17 @@ private enum LiveRecoveryJSON {
           "transcript_epoch":0,"messages":[],"next_after":0,"has_more":false
         }
         """
+
+    static let runningTurn = """
+        {
+          "turn_id":"88888888-8888-4888-8888-888888888888",
+          "conversation_id":"44444444-4444-4444-8444-444444444444",
+          "source_message_id":"55555555-5555-4555-8555-555555555555",
+          "status":"running",
+          "created_at":"2026-11-06T00:00:01Z",
+          "updated_at":"2026-11-06T00:00:02Z"
+        }
+        """
 }
 
 private final class LiveRequestCapture: @unchecked Sendable {
@@ -32,6 +43,7 @@ private final class LiveRequestCapture: @unchecked Sendable {
     private var postIDs: [String] = []
     private var receiptLookups = 0
     private var bootstrapReads = 0
+    private var turnReads: [Date] = []
 
     func recordPOST(_ request: URLRequest) {
         let data = request.httpBody ?? Data()
@@ -41,10 +53,12 @@ private final class LiveRequestCapture: @unchecked Sendable {
 
     func recordLookup() { lock.withLock { receiptLookups += 1 } }
     func recordPage() { lock.withLock { bootstrapReads += 1 } }
+    func recordTurn() { lock.withLock { turnReads.append(Date()) } }
 
     var sentIDs: [String] { lock.withLock { postIDs } }
     var lookups: Int { lock.withLock { receiptLookups } }
     var pages: Int { lock.withLock { bootstrapReads } }
+    var turnTimestamps: [Date] { lock.withLock { turnReads } }
 }
 
 /// Exercise real URLProtocol transport with a persistent journal and an L1 session coordinator.
@@ -257,6 +271,52 @@ final class LiveConversationRecoveryTests: XCTestCase {
             XCTAssertEqual(error, .offline)
         }
         XCTAssertTrue(capture.sentIDs.isEmpty)
+    }
+
+    /// Annex §10 bounds Turn polling to one request per Conversation per second. The limiter lives in
+    /// the repository, so it is asserted here against real request timestamps rather than by reading
+    /// the implementation: two consecutive polls must not leave the device within the same second,
+    /// even when the caller does not wait between them.
+    func testTurnPollingIsSerializedToOneRequestPerSecond() async throws {
+        let capture = LiveRequestCapture()
+        let setup = try make()
+        register { request in
+            let path = request.url?.path ?? ""
+            if path.contains("/turns/") {
+                capture.recordTurn()
+                return .json(statusCode: 200, body: LiveRecoveryJSON.runningTurn)
+            }
+            capture.recordPage()
+            return .json(statusCode: 200, body: LiveRecoveryJSON.emptyPage)
+        }
+
+        let journal = LiveConversationJournal(directory: setup.directory)
+        try await journal.bind(consumerID: AuthFixture.consumerID)
+        let pending = LiveConversationJournal.Pending(
+            clientSubmissionID: UUID(),
+            conversationID: AuthFixture.conversationID,
+            transcriptEpoch: 0,
+            text: "hello")
+        try await journal.prepare(pending, consumerID: AuthFixture.consumerID)
+        let receipt = try JSONDecoder().decode(
+            LiveB1Receipt.self,
+            from: Data(LiveRecoveryJSON.receipt(
+                pending.clientSubmissionID.uuidString.lowercased()).utf8))
+        try await journal.accepted(receipt, for: pending, consumerID: AuthFixture.consumerID)
+
+        let repository = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: setup.auth), journal: journal)
+        _ = try await repository.bootstrap()
+
+        let first = try await repository.pollActiveTurn()
+        let second = try await repository.pollActiveTurn()
+
+        XCTAssertEqual(first?.status, .running)
+        XCTAssertEqual(second?.status, .running)
+        let timestamps = capture.turnTimestamps
+        XCTAssertEqual(timestamps.count, 2)
+        let gap = try XCTUnwrap(timestamps.last).timeIntervalSince(try XCTUnwrap(timestamps.first))
+        XCTAssertGreaterThanOrEqual(gap, 0.9, "a second poll inside the same second violates the B1 bound")
     }
 
     private func make(

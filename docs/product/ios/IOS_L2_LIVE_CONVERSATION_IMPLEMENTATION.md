@@ -17,7 +17,7 @@ The default App Root stays Mock. Live Alpha launch requires both `--ember-live-c
 - Paginated history uses `after` and `limit` from the frozen B1 schema; no locally generated message ID or sequence is displayed as canonical.
 - `GET /v1/conversations/{id}/turns/{id}` is limited to one poll per Conversation per second. Cancellation uses the frozen POST cancel route. The active Turn ID is saved across relaunch.
 - A response with `simulated: true` visibly carries the `[SIMULATED]` label. No local Mock responder is reachable from Live composition.
-- L1 logout invokes a narrow Journal cleanup hook to prevent previously unsent text from crossing sessions.
+- L1 logout invokes a narrow Journal cleanup hook to prevent previously unsent text from crossing sessions. That hook is passed to `LiveAuthSessionCoordinator.Dependencies.signOutCleanupHooks` **at construction**, so it exists before any logout can run; `registerSignOutCleanup` is only used afterwards for process-local caches, which are rebuilt by `bootstrap()`.
 
 ## Security and scope
 
@@ -27,8 +27,37 @@ This branch deliberately leaves existing Mock UI, frozen backend contracts, clou
 
 ## Validation boundaries
 
-GitHub Actions `iOS L2 Validation` run `42145467363` on `01c51fd` executed signed iOS Simulator Build and **299/299 Unit Tests**, **9/9 UI Tests**, zero failures. The new terminal-409 regression requires a fresh run on the updated HEAD. Local Mac screenshot/recording and real iPhone staging E2E remain outstanding.
+GitHub Actions `iOS L2 Validation` on `5c6e517` is green: strict-concurrency `build-for-testing`, signed Simulator
+**Unit Tests** and **UI Tests**, and the UI screenshot `.xcresult` artifact. It does **not** certify a real Mac run,
+a real Cloud origin, or a physical device.
 
-Run the full signed iOS QA suite on the Mac, using the existing `.xctestrun` approach if necessary. Verify URLProtocol test fixtures, cold start recovery, concurrency, Keychain cleanup, strict concurrency compilation and real simulator Live-mode screenshot. The repository GitHub workflow is Node/TypeScript/PG17-only; its success does not certify Swift compilation.
+### Local Mac QA (2026-11-06, `5c6e517` + this commit)
 
-For iPhone staging E2E, CTO must provide a deployed HTTPS origin, configured Apple Sign in entitlement/provisioning, valid session verification, the approved Fake Responder, and reachable B1 routes. The Apple account must be real, and `simulated: true` must stay visible.
+Run on Xcode 26.3 (17C529) / iOS 26.2 Simulator (build `23C52`), dedicated simulator `Ember-L2-Final-QA`,
+ad-hoc (`CODE_SIGN_IDENTITY=-`) signed so the Keychain tests are live:
+
+| Gate | Command shape | Result |
+| --- | --- | --- |
+| Strict concurrency build | `build-for-testing`, `SWIFT_STRICT_CONCURRENCY=complete` | passed |
+| Unit tests | `-only-testing:EmberTests`, signed | **304 executed, 0 failed, 0 skipped** |
+| UI tests | `-only-testing:EmberUITests`, signed | **10 executed, 0 failed, 0 skipped** |
+
+`OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox"` is required locally: without it the Swift macro plugin server
+cannot expand `@Observable` and the build dies with `produced malformed response`.
+
+The host Simulator runtime had to be re-matched before any destination resolved: the installed iOS 26.2 runtime is
+build `23C52` while the SDK expects `23C57`, so `xcodebuild` reported "iOS 26.2 is not installed" and enumerated
+zero simulator destinations for **every** project on the machine. `xcrun simctl runtime match set iphoneos26.2 23C52`
+fixed it. This is a host-environment repair, not a repository change; reverse it with
+`xcrun simctl runtime match set iphoneos26.2 --clear` once a matching runtime is installed.
+
+### What a simulator cannot prove
+
+Live chat states — sending, waiting for a Turn, failure, cancellation, and a real `simulated: true` reply — need an
+authenticated session. Sign in with Apple needs the `com.apple.developer.applesignin` entitlement and a development
+team, and **neither is configured in `Ember.xcodeproj`**; the verified screens therefore stop at the Live entry and
+configuration-failure screens. Do not read the UI screenshot as staging chat evidence.
+
+For iPhone staging E2E, CTO must provide a deployed HTTPS origin, configured Apple Sign in
+entitlement/provisioning, valid session verification, the approved Fake Responder, and reachable B1 routes. The Apple
+account must be real, and `simulated: true` must stay visible.

@@ -36,16 +36,22 @@ private enum LiveComposition {
         let client = EmberAPIClient()
         let api = try LiveEmberSessionAPI(baseURL: baseURL, client: client)
         let transport = try EmberAuthenticatedTransport(baseURL: baseURL, client: client)
+        // Built before the coordinator so the durable-intent cleanup can be handed to it at
+        // construction. Registering it afterwards would leave a window in which a logout clears the
+        // credential but leaves unsent private text on disk.
+        let journal = LiveConversationJournal()
         let auth = LiveAuthSessionCoordinator(dependencies: .init(
             api: api,
             transport: transport,
             store: KeychainSessionStore(),
-            appleSignIn: AppleSignInAuthorizer()
+            appleSignIn: AppleSignInAuthorizer(),
+            signOutCleanupHooks: [{ try? await journal.reset() }]
         ))
-        let journal = LiveConversationJournal()
         let repository = LiveConversationRepository(
             client: LiveB1ConversationClient(auth: auth), journal: journal
         )
+        // Process-local caches only: identity is re-established by `bootstrap()` on every entry, so
+        // this is not the security boundary and may settle asynchronously.
         Task { await auth.registerSignOutCleanup { await repository.clearOnLogout() } }
         return LiveConversationHostModel(repository: repository, auth: auth)
     }

@@ -291,6 +291,42 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
 
     // MARK: - Logout
 
+    /// A durable outbox must be cleared on every sign-out, including a logout that happens before any
+    /// later `registerSignOutCleanup` call could have run. Passing the hook at construction is what
+    /// removes that window, so this asserts the ordering property rather than just "hooks work".
+    func testSignOutCleanupSuppliedAtConstructionRunsOnFirstLogout() async throws {
+        let recorder = SignOutCleanupRecorder()
+        let built = try makeCoordinator(
+            storedRecord: AuthFixture.record(),
+            hooks: [{ await recorder.record() }]
+        )
+
+        let outcome = await built.coordinator.logout()
+
+        XCTAssertEqual(outcome, .revokedRemotely)
+        let runs = await recorder.count
+        XCTAssertEqual(runs, 1, "the journal cleanup must run even on the very first logout")
+    }
+
+    func testSignOutCleanupRunsAfterCredentialsAreRemoved() async throws {
+        let store = InMemoryEmberSessionStore(initialRecord: AuthFixture.record())
+        let recorder = SignOutCleanupRecorder()
+        let built = try makeCoordinator(store: store, hooks: [
+            {
+                // Ordering is the security property: unsent private text must not outlive the
+                // credential, so the hook has to observe an already signed-out device.
+                await recorder.record(recordStillStored: store.currentRecord() != nil)
+            }
+        ])
+
+        _ = await built.coordinator.logout()
+
+        let observed = await recorder.observedRecord
+        XCTAssertEqual(observed, false, "cleanup must observe a device that is already signed out")
+        let runs = await recorder.count
+        XCTAssertEqual(runs, 1)
+    }
+
     func testLogoutClearsLocalCredentialsAndReportsRemoteRevocation() async throws {
         let built = try makeCoordinator(storedRecord: AuthFixture.record())
 
@@ -1224,6 +1260,7 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
         storedRecord: EmberSessionRecord? = nil,
         store: InMemoryEmberSessionStore? = nil,
         fence: InMemorySessionRecoveryFence? = nil,
+        hooks: [@Sendable () async -> Void] = [],
         configure: (FakeEmberSessionAPI) -> Void = { _ in }
     ) throws -> CoordinatorFixture.Built {
         let built = try CoordinatorFixture.make(
@@ -1231,9 +1268,23 @@ final class LiveAuthSessionCoordinatorTests: XCTestCase {
             storedRecord: storedRecord,
             store: store,
             fence: fence,
+            signOutCleanupHooks: hooks,
             configure: configure
         )
         sessions.append(built.session)
         return built
+    }
+}
+
+/// Counts sign-out cleanups across the actor hops the coordinator performs.
+private actor SignOutCleanupRecorder {
+    private(set) var count = 0
+    private(set) var observedRecord: Bool?
+
+    func record() { count += 1 }
+
+    func record(recordStillStored: Bool) {
+        count += 1
+        observedRecord = recordStillStored
     }
 }

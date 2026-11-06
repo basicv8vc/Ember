@@ -36,11 +36,11 @@ a real Cloud origin, or a physical device.
 Run on Xcode 26.3 (17C529) / iOS 26.2 Simulator (build `23C52`), dedicated simulator `Ember-L2-Final-QA`,
 ad-hoc (`CODE_SIGN_IDENTITY=-`) signed so the Keychain tests are live:
 
-| Gate | Command shape | Result |
-| --- | --- | --- |
-| Strict concurrency build | `build-for-testing`, `SWIFT_STRICT_CONCURRENCY=complete` | passed |
-| Unit tests | `-only-testing:EmberTests`, signed | **304 executed, 0 failed, 0 skipped** |
-| UI tests | `-only-testing:EmberUITests`, signed | **10 executed, 0 failed, 0 skipped** |
+| Gate                     | Command shape                                            | Result                                |
+| ------------------------ | -------------------------------------------------------- | ------------------------------------- |
+| Strict concurrency build | `build-for-testing`, `SWIFT_STRICT_CONCURRENCY=complete` | passed                                |
+| Unit tests               | `-only-testing:EmberTests`, signed                       | **304 executed, 0 failed, 0 skipped** |
+| UI tests                 | `-only-testing:EmberUITests`, signed                     | **10 executed, 0 failed, 0 skipped**  |
 
 `OTHER_SWIFT_FLAGS="-Xfrontend -disable-sandbox"` is required locally: without it the Swift macro plugin server
 cannot expand `@Observable` and the build dies with `produced malformed response`.

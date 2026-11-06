@@ -100,6 +100,7 @@
 			isa = PBXGroup;
 			children = (
 				444444444444444444444444 /* EmberApp */,
+				C00000000000000000000001 /* Ember.entitlements */,
 				555555555555555555555555 /* EmberTests */,
 				666666666666666666666666 /* EmberUITests */,
 				333333333333333333333333 /* Products */,
@@ -186,7 +187,14 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
-					777777777777777777777777 = { CreatedOnToolsVersion = 26.3; };
+					777777777777777777777777 = {
+						CreatedOnToolsVersion = 26.3;
+						SystemCapabilities = {
+							com.apple.SignInWithApple = {
+								enabled = 1;
+							};
+						};
+					};
 					888888888888888888888888 = { CreatedOnToolsVersion = 26.3; TestTargetID = 777777777777777777777777; };
 					999999999999999999999999 = { CreatedOnToolsVersion = 26.3; TestTargetID = 777777777777777777777777; };
 				};
@@ -267,6 +275,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
 				ENABLE_TESTABILITY = YES;
+				CODE_SIGN_ENTITLEMENTS = Ember.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Ember;
@@ -286,6 +295,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = Ember.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Ember;
@@ -451,6 +461,15 @@
 /* End PBXSourcesBuildPhase section */
 
 
+
+/* Begin PBXFileReference section */
+		C00000000000000000000001 /* Ember.entitlements */ = {
+			isa = PBXFileReference;
+			lastKnownFileType = text.plist.entitlements;
+			path = Ember.entitlements;
+			sourceTree = "<group>";
+		};
+/* End PBXFileReference section */
 
 /* Begin PBXProduct section */
 		B00000000000000000000001 /* Ember.app */ = {

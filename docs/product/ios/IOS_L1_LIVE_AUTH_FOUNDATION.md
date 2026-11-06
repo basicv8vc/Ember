@@ -189,10 +189,13 @@ or because the network is reachable.
 
 These are deliberately **not** invented in this PR:
 
-1. **Entitlement.** `com.apple.developer.applesignin` (array `["Default"]`) in an
-   `EmberApp.entitlements` file, wired through `CODE_SIGN_ENTITLEMENTS`. It requires a real Apple
-   Developer team; adding it with the current identifier-less configuration would break every
-   unsigned/CI build, so it is left out and documented.
+1. **Entitlement.** `com.apple.developer.applesignin` (array `["Default"]`) in an entitlements file,
+   wired through `CODE_SIGN_ENTITLEMENTS`. ~~It requires a real Apple Developer team; adding it with
+   the current identifier-less configuration would break every unsigned/CI build, so it is left out
+   and documented.~~ **Superseded by L3-A:** the entitlement now lives at `apps/ios/Ember.entitlements`
+   (outside the `EmberApp` synchronized group) and is wired for Debug and Release. The predicted CI
+   breakage did not occur — `CODE_SIGNING_ALLOWED=NO` builds are unaffected, verified by a passing
+   simulator build. See `L3-A-APPLE-SIGNIN-DEVICE-RUNBOOK.md`.
 2. **Capability + provisioning.** The Sign in with Apple capability must be enabled on the App ID that
    matches `PRODUCT_BUNDLE_IDENTIFIER` (`com.basicv8vc.ember`) with a provisioning profile that
    includes it.

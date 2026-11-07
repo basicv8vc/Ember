@@ -413,19 +413,35 @@ is replaced, and the database is real PostgreSQL 17.
 
 ### 8.3 The run
 
-Recorded on the exact HEAD of this branch; command output pasted verbatim in the PR description.
+Measured on `b23726e7fc5b815fdae9306f832b798492d7d7fd` (the commit this PR points at), in this
+container, with PostgreSQL 17 reachable at `127.0.0.1:55432`.
 
-```text
-pnpm typecheck    clean
-pnpm lint         clean
-pnpm test:unit    1540 passed (2 pre-existing failures, see below)
-pnpm test:integration (b2-*)  all passed
-```
+| Command                         | Result                                                                | Verdict                           |
+| ------------------------------- | --------------------------------------------------------------------- | --------------------------------- |
+| `pnpm typecheck`                | clean                                                                 | —                                 |
+| `pnpm lint`                     | clean (after `prettier --write` on 9 files)                           | —                                 |
+| `pnpm test:unit`                | `86 files`: 84 passed, 2 failed; **1 539 passed / 2 failed of 1 541** | the 2 are pre-existing, see below |
+| `pnpm test:integration`         | `48 files`: 46 passed, 2 failed; **553 passed / 2 failed of 555**     | the 2 are pre-existing, see below |
+| `b2-mock-provider.test.ts`      | **9 / 9**                                                             | this branch's paid-path suite     |
+| `b2-model-turn-runtime.test.ts` | **26 / 26**                                                           | B2 runtime, unchanged contract    |
 
-Two unit tests fail on this machine **before and after** this branch, for reasons unrelated to it:
-`tests/unit/test-registration-guard.test.ts` (7 003 ms timeout while scanning the suite) and
-`tests/unit/local-blob-store.test.ts` ("idempotent for concurrent installations", timing-sensitive).
-Both were reproduced on a clean `main@db9fab1` checkout in the same environment.
+Four failures, zero of them caused by this branch. Each was reproduced on a clean `main@db9fab1`
+checkout in the same container, with the same commands and the same database:
+
+| Test                                                              | Failure                                                                                     | Cause                                                             |
+| ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| `tests/unit/test-registration-guard.test.ts`                      | 7 003 ms timeout while scanning the suite                                                   | slow scan, wall-clock                                             |
+| `tests/unit/local-blob-store.test.ts`                             | "idempotent for concurrent installations"                                                   | timing-sensitive concurrency assertion                            |
+| `tests/integration/http-task-sse.test.ts` → SIGTERM               | `API process did not log "message":"api listening"; API stdout: ; API stderr:`              | the spawned API child writes nothing under this sandbox           |
+| `tests/integration/result-commit.test.ts` → 24 concurrent commits | `Brokered link refused because the resolved path could not be revalidated before execution` | the host's `fs` shim refuses `link()` in `LocalBlobStore.install` |
+
+The last one is worth naming precisely because it is the most alarming to read: it is not Ember's
+committer failing, it is the sandbox's brokered filesystem refusing a hardlink that
+`packages/postgres/src/storage/local-blob-store.ts:119` issues on purpose, in order to get
+no-clobber install semantics. It fails identically on `main`.
+
+Nothing in this branch is covered only by a failing or skipped test: the 9 mock-provider cases, the
+22 guard cases, the 19 smoke-gate cases and the +9 gateway/responder cases all pass.
 
 ---
 

@@ -159,7 +159,10 @@ resource or plan remains gated on prior approval.
 
 ## References
 
+- [Cloudflare Workers limits (CPU time versus wall time)](https://developers.cloudflare.com/workers/platform/limits/)
 - [Cloudflare Hyperdrive supported databases and PostgreSQL features](https://developers.cloudflare.com/hyperdrive/reference/supported-databases-and-features/)
+- [Cloudflare Hyperdrive limits](https://developers.cloudflare.com/hyperdrive/platform/limits/)
+- [Cloudflare Hyperdrive connection pooling](https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/)
 - [Cloudflare Hyperdrive Neon connection guide](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/neon/)
 - [Cloudflare Hyperdrive Supabase connection guide](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/postgres-database-providers/supabase/)
 - [Cloudflare Hyperdrive pricing](https://developers.cloudflare.com/hyperdrive/platform/pricing/)

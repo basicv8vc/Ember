@@ -1,5 +1,9 @@
 # Ember Cloud Staging — Platform Comparison
 
+> **Earlier platform decision.** Issue #131 starts with the low-cost local Cloudflare Named
+> Tunnel in [CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
+> AWS is not ruled out for later scale, but paid resources need prior approval.
+
 The task asked for EC2 first, "unless a faster and equally safe option exists". This is the
 comparison that was promised, and it did not change the decision: EC2 + Docker Compose is the
 chosen platform.

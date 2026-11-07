@@ -16,6 +16,7 @@ const E2E_ENV_EXAMPLE = `${REPO_ROOT}infra/staging/env/local-e2e.env.example`;
 const COMPOSE_FILE = `${REPO_ROOT}infra/staging/compose.yaml`;
 const DOCKERFILE = `${REPO_ROOT}infra/staging/docker/Dockerfile`;
 const CADDYFILE = `${REPO_ROOT}infra/staging/caddy/Caddyfile`;
+const CADDY_TUNNEL_FILE = `${REPO_ROOT}infra/staging/caddy/Caddyfile.tunnel`;
 
 function read(path: string): string {
   return readFileSync(path, 'utf8');
@@ -30,7 +31,6 @@ function resolvedStagingEnv(): Map<string, string> {
   const env = envFrom(STAGING_ENV_EXAMPLE);
   env.set('DATABASE_URL', `postgres://ember:${'q'.repeat(32)}@postgres:5432/ember`);
   env.set('EMBER_STAGING_HOSTNAME', 'staging.ember-cloud.net');
-  env.set('EMBER_ACME_EMAIL', 'ops@ember-cloud.net');
   return env;
 }
 
@@ -109,10 +109,16 @@ describe('staging preflight guard', () => {
     ['EMBER_HOST', '127.0.0.1', 'E_API_HOST'],
     ['EMBER_ALLOW_NON_LOOPBACK_BIND', 'false', 'E_NON_LOOPBACK_OPT_IN'],
     ['EMBER_APPLE_BUNDLE_ID', 'com.example.app', 'E_APPLE_AUDIENCE'],
+    ['EMBER_APPLE_BUNDLE_ID', 'com.ember.mobile', 'E_APPLE_AUDIENCE'],
     ['EMBER_WORKER_MODE', 'poll', 'E_WORKER_MODE'],
     ['EMBER_WORKER_SIMULATED_EXECUTION', 'local-only', 'E_WORKER_SIMULATED'],
     ['EMBER_WORKER_BLOB_ROOT', 'relative/blobs', 'E_WORKER_BLOB_ROOT'],
     ['EMBER_CADDY_CONFIG', 'Caddyfile.internal', 'E_EDGE_TLS_MODE'],
+    ['EMBER_EDGE_BIND', '0.0.0.0', 'E_TUNNEL_EDGE_BIND'],
+    ['EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE', 'secrets/tunnel-token', 'E_TUNNEL_TOKEN_FILE'],
+    ['EMBER_CLOUDFLARE_TUNNEL_TOKEN', 'not-a-real-token', 'E_TUNNEL_TOKEN_ENV'],
+    ['CLOUDFLARE_API_TOKEN', 'not-a-real-api-token', 'E_PROVIDER_SECRET'],
+    ['EMBER_CLOUDFLARED_IMAGE', 'cloudflare/cloudflared:latest', 'E_TUNNEL_IMAGE'],
     ['EMBER_MODEL_EXECUTION', 'real', 'E_MODEL_REAL'],
     ['EMBER_MODEL_EXECUTION', 'fake', 'E_MODEL_EXECUTION'],
     ['EMBER_MODEL_API_KEY', 'sk-not-a-real-key', 'E_PROVIDER_SECRET'],
@@ -274,7 +280,6 @@ describe('e2e acceptance profile guard', () => {
     const env = envFrom(E2E_ENV_EXAMPLE);
     env.set('DATABASE_URL', `postgres://ember:${'q'.repeat(32)}@postgres:5432/ember`);
     env.set('EMBER_STAGING_HOSTNAME', 'staging.ember-cloud.net');
-    env.set('EMBER_ACME_EMAIL', 'ops@ember-cloud.net');
 
     const refused = codes(evaluateStagingEnv(env, { mode: 'staging' }));
 
@@ -377,10 +382,37 @@ describe('staging compose topology', () => {
     expect(api).toMatch(/'127\.0\.0\.1:\$\{EMBER_API_HOST_PORT:-8787\}:8787'/);
   });
 
+  it('defaults every host-published edge port to loopback', () => {
+    const edge = composeSection(compose, 'edge');
+
+    expect(edge).toContain('${EMBER_EDGE_BIND:-127.0.0.1}');
+    expect(edge).not.toContain('0.0.0.0');
+  });
+
   it('keeps the migration job out of the default `up`', () => {
     const migrate = composeSection(compose, 'migrate');
 
     expect(migrate).toMatch(/profiles: \['tools'\]/);
+  });
+
+  it('keeps the Cloudflare connector opt-in and token-file based', () => {
+    const cloudflared = composeSection(compose, 'cloudflared');
+
+    expect(cloudflared).toContain("profiles: ['tunnel']");
+    expect(cloudflared).toContain('--token-file');
+    expect(cloudflared).not.toMatch(/--token\s+[^-]/);
+    expect(cloudflared).not.toMatch(/^\s+ports:/m);
+    expect(cloudflared).toContain('read_only: true');
+    expect(cloudflared).toMatch(/cap_drop:\n\s+- ALL/);
+    expect(compose).toContain('cloudflare/cloudflared:2026.10.7');
+  });
+
+  it('keeps the tunnel connector on the edge network and its token out of app env files', () => {
+    const cloudflared = composeSection(compose, 'cloudflared');
+
+    expect(cloudflared).toMatch(/networks:\n\s+- edge/);
+    expect(cloudflared).not.toContain('env_file:');
+    expect(compose).toMatch(/cloudflare_tunnel_token:\n\s+# Store the remote tunnel token/);
   });
 
   it('runs the application containers read-only with all capabilities dropped', () => {
@@ -451,6 +483,25 @@ describe('staging image build', () => {
     expect(dockerfile).toContain(
       'COPY packages/model-gateway/package.json packages/model-gateway/package.json',
     );
+  });
+});
+
+describe('Cloudflare tunnel Caddy origin', () => {
+  const caddy = read(CADDY_TUNNEL_FILE);
+
+  it('serves only the configured hostname over the private HTTP origin listener', () => {
+    expect(caddy).toContain('http://{$EMBER_STAGING_HOSTNAME}');
+    expect(caddy).toContain('auto_https off');
+    expect(caddy).toContain('admin off');
+    expect(caddy).toContain('reverse_proxy api:8787');
+    expect(caddy).not.toMatch(/^\s*(?:tls\s+internal|acme)\b/im);
+  });
+
+  it('keeps the security headers, request-body bound and HSTS policy', () => {
+    expect(caddy).toContain('max_size 2MB');
+    expect(caddy).toContain('Strict-Transport-Security');
+    expect(caddy).toContain('-Server');
+    expect(caddy).toContain('X-Content-Type-Options');
   });
 });
 

@@ -42,6 +42,12 @@ if [[ -n "${PASSWORD_FILE}" && -f "${PASSWORD_FILE}" ]]; then
   require_private_file "$PASSWORD_FILE" "PostgreSQL password file"
 fi
 
+if [[ "$MODE" == "staging" && "$(env_value "$ENV_FILE" EMBER_CADDY_CONFIG || true)" == "Caddyfile.tunnel" ]]; then
+  TUNNEL_TOKEN_FILE="$(env_value "$ENV_FILE" EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE || true)"
+  [[ -n "$TUNNEL_TOKEN_FILE" ]] || die "EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE is required for the tunnel deployment"
+  require_private_file "$TUNNEL_TOKEN_FILE" "Cloudflare Tunnel token"
+fi
+
 log "evaluating ${ENV_FILE} (mode=${MODE})"
 
 # The staging host ships Docker, not Node. Prefer a local node if the operator has one

@@ -3,14 +3,16 @@
 # Topology
 # --------
 #
-#   Internet ──443──▶ edge (Caddy, TLS) ──▶ api (Ember Cloud API, :8787)
-#                                            │
-#   worker ─────────────────────────────────┼──▶ postgres (PostgreSQL 17, no published port)
-#   migrate (one-shot, opt-in profile) ──────┘
+#   iPhone ── HTTPS ──▶ Cloudflare ── Tunnel ──▶ cloudflared
+#                                                 │
+#                                  edge (Caddy HTTP origin) ──▶ api (:8787)
+#                                                                  │
+#   worker ────────────────────────────────────────────────────────┼──▶ postgres
+#   migrate (one-shot, opt-in profile) ────────────────────────────┘
 #
 # Published ports
-#   edge   : 80, 443   (public; 80 exists only for the ACME HTTP-01 challenge and redirect)
-#   api    127.0.0.1:8787 (loopback-only, operator debugging; never reachable from the Internet)
+#   edge   : loopback-only host ports; public traffic enters through the tunnel connector
+#   api    127.0.0.1:8787 (operator debugging; never reachable from the Internet)
 #   postgres none — it lives on an `internal: true` network with no host mapping.
 #
 # Usage (never run `up` without the preflight guard):
@@ -164,9 +166,9 @@ services:
     env_file:
       - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
     ports:
-      # Public on staging (0.0.0.0); loopback-only when the same stack is verified locally.
-      - '${EMBER_EDGE_BIND:-0.0.0.0}:${EMBER_EDGE_HTTP_PORT:-80}:80'
-      - '${EMBER_EDGE_BIND:-0.0.0.0}:${EMBER_EDGE_HTTPS_PORT:-443}:443'
+      # Host-published ports default to loopback; Cloudflare Tunnel reaches Caddy over Docker.
+      - '${EMBER_EDGE_BIND:-127.0.0.1}:${EMBER_EDGE_HTTP_PORT:-80}:80'
+      - '${EMBER_EDGE_BIND:-127.0.0.1}:${EMBER_EDGE_HTTPS_PORT:-443}:443'
     volumes:
       - ./caddy/${EMBER_CADDY_CONFIG:-Caddyfile}:/etc/caddy/Caddyfile:ro
       - ember-caddy-data:/data
@@ -174,6 +176,37 @@ services:
     depends_on:
       api:
         condition: service_healthy
+    logging: *default-logging
+
+  # Optional connector for a remotely-managed Cloudflare Named Tunnel. The tunnel token is
+  # mounted as a file and never enters the container environment or process arguments.
+  # Its published hostname and origin route are configured in the Cloudflare dashboard;
+  # point that route at http://edge:80 (the tunnel-only Caddy listener).
+  cloudflared:
+    profiles: ['tunnel']
+    image: ${EMBER_CLOUDFLARED_IMAGE:-cloudflare/cloudflared:2026.10.7}
+    <<: *hardening
+    user: '0:0'
+    command:
+      - tunnel
+      - --no-autoupdate
+      - --loglevel
+      - warn
+      - run
+      - --token-file
+      - /run/secrets/cloudflare_tunnel_token
+    networks:
+      - edge
+    secrets:
+      - cloudflare_tunnel_token
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    depends_on:
+      edge:
+        condition: service_started
     logging: *default-logging
 
 networks:
@@ -201,3 +234,6 @@ secrets:
   postgres_password:
     # Render this file with `infra/staging/scripts/render-env.sh` (mode 0600).
     file: ${EMBER_POSTGRES_PASSWORD_FILE:-./secrets/postgres_password}
+  cloudflare_tunnel_token:
+    # Store the remote tunnel token here with mode 0600; never put it in an env file.
+    file: ${EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE:-./secrets/cloudflare_tunnel_token.example}

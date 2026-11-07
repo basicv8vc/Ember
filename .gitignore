@@ -24,3 +24,4 @@ coverage/
 # staging secrets rendered on the host by infra/staging/scripts/render-env.sh
 infra/staging/secrets/*
 !infra/staging/secrets/README.md
+!infra/staging/secrets/cloudflare_tunnel_token.example

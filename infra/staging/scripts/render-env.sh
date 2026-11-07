@@ -10,7 +10,7 @@
 #
 #   /ember/staging/config/EMBER_STAGING_HOSTNAME      staging.ember.example.net
 #   /ember/staging/config/EMBER_ACME_EMAIL            ops@example.com
-#   /ember/staging/config/EMBER_APPLE_BUNDLE_ID       com.ember.mobile
+#   /ember/staging/config/EMBER_APPLE_BUNDLE_ID       com.basicv8vc.ember
 #   /ember/staging/secrets/POSTGRES_PASSWORD          SecureString, generated once
 #
 # Everything not present in SSM comes from the committed template

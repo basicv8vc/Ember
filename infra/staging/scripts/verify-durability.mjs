@@ -173,7 +173,7 @@ async function main() {
     EMBER_PORT: String(API_PORT),
     EMBER_DEV_PROVIDER_ENABLED: 'true',
     EMBER_DEV_PROVIDER_ISOLATED: 'true',
-    EMBER_APPLE_BUNDLE_ID: 'com.ember.mobile',
+    EMBER_APPLE_BUNDLE_ID: 'com.basicv8vc.ember',
   };
   const workerEnv = {
     ...baseEnv,

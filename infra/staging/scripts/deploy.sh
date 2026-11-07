@@ -36,6 +36,11 @@ done
 ENV_FILE="${ENV_FILE:-${EMBER_STAGING_ENV_FILE:-$DEFAULT_ENV_FILE}}"
 require_command docker
 require_private_file "$ENV_FILE" "environment file"
+TUNNEL_MODE="false"
+if is_tunnel_env "$ENV_FILE"; then
+  TUNNEL_MODE="true"
+  require_tunnel_token_file "$ENV_FILE"
+fi
 
 "${SCRIPT_DIR}/preflight.sh" "--env-file=${ENV_FILE}" --mode=staging
 
@@ -60,6 +65,9 @@ log "release ${RELEASE_TAG}"
 if [[ "$SKIP_BUILD" != "true" ]]; then
   log "pulling pinned base images"
   compose "$ENV_FILE" pull postgres edge
+  if [[ "$TUNNEL_MODE" == "true" ]]; then
+    compose "$ENV_FILE" --profile tunnel pull cloudflared
+  fi
 
   log "building images"
   compose "$ENV_FILE" build --pull api worker
@@ -71,8 +79,14 @@ compose "$ENV_FILE" up -d --remove-orphans --wait --wait-timeout 180
 log "container state"
 compose "$ENV_FILE" ps
 
+if [[ "$TUNNEL_MODE" == "true" ]]; then
+  start_tunnel_connector "$ENV_FILE"
+  wait_for_tunnel_health "$ENV_FILE"
+fi
+
 log "smoke test"
 "${SCRIPT_DIR}/smoke.sh" "--env-file=${ENV_FILE}"
+verify_tunnel_origin "$ENV_FILE"
 
 record_release_tag "$RELEASE_TAG"
 

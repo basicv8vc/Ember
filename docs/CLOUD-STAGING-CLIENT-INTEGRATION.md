@@ -3,26 +3,29 @@
 Audience: iOS Lead. This is the hand-off document for pointing the Ember client at the
 staging API. **This PR does not modify iOS code.**
 
-Status: the base URL below becomes valid once the staging host exists and a certificate has
-been issued. Until then, the same contract is exercised against `http://127.0.0.1:8787` on a
-developer machine (§6).
+Status: the base URL below becomes valid once the owner-authorized Cloudflare hostname and
+Named Tunnel are configured. Until then, the same contract is exercised against
+`http://127.0.0.1:8787` on a developer machine (§6). See
+[CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
 
 ---
 
 ## 1. Base URL
 
-| Environment | Base URL                           | Notes                                                                                                                                  |
-| ----------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Staging     | `https://<EMBER_STAGING_HOSTNAME>` | Public TLS (Let's Encrypt), issued automatically on first boot. The hostname is chosen by the account owner; see the resource request. |
-| Local       | `http://127.0.0.1:8787`            | Loopback dev sign-in only. Never a staging substitute.                                                                                 |
+| Environment | Base URL                           | Notes                                                                                                              |
+| ----------- | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| Staging     | `https://<EMBER_STAGING_HOSTNAME>` | Cloudflare-managed public TLS through the Named Tunnel. The hostname is chosen and authorized by the domain owner. |
+| Local       | `http://127.0.0.1:8787`            | Loopback dev sign-in only. Never a staging substitute.                                                             |
 
 Rules:
 
 - HTTPS only. Every request must go to `https://`, with no port suffix (443 implied).
-- No certificate pinning is required or supported at this stage: the certificate is
-  short-lived and renewed automatically. If pinning is added later, pin the CA, not the leaf.
+- No certificate pinning is required or supported at this stage: Cloudflare manages the
+  public certificate. If pinning is added later, pin the CA, not the leaf.
 - No App Transport Security exception is needed: TLS 1.2+ with standard cipher suites, HSTS
-  enabled (`Strict-Transport-Security: max-age=31536000; includeSubDomains`).
+  enabled (`Strict-Transport-Security: max-age=31536000; includeSubDomains`). TLS terminates
+  at Cloudflare; `cloudflared` uses its encrypted tunnel and the origin hop stays on the local
+  Docker bridge.
 - `Host` must be the configured hostname. A request with any other `Host` is not proxied.
 - Request bodies are capped at 2 MB at the edge; session bodies are capped at the application
   layer too.

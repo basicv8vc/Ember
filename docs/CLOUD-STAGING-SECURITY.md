@@ -1,5 +1,8 @@
 # Ember Cloud Staging — Security Review
 
+> This review describes the earlier EC2/ACME topology. For the Cloudflare Tunnel route and
+> its trust boundary, use [CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
+
 Scope: the deployment surface introduced by `feature/cloud-staging-deployment`. It does not
 review the application's domain logic, the Model Gateway (Agent A) or the iOS client (iOS
 Lead).

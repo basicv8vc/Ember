@@ -133,3 +133,63 @@ compose() {
   # preflight guard approved.
   ( cd "$REPO_ROOT" && EMBER_STAGING_ENV_FILE="$env_file" docker compose --env-file "$env_file" -f "$COMPOSE_FILE" "$@" )
 }
+
+is_tunnel_env() {
+  [[ "$(env_value "$1" EMBER_CADDY_CONFIG || true)" == "Caddyfile.tunnel" ]]
+}
+
+require_tunnel_token_file() {
+  local env_file="$1"
+  local token_file
+  token_file="$(env_value "$env_file" EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE || true)"
+  [[ -n "$token_file" ]] || die "EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE is required for the tunnel deployment"
+  require_private_file "$token_file" "Cloudflare Tunnel token"
+}
+
+staging_base_url() {
+  local env_file="$1"
+  local hostname config https_port
+  hostname="$(env_value "$env_file" EMBER_STAGING_HOSTNAME)"
+  config="$(env_value "$env_file" EMBER_CADDY_CONFIG || true)"
+  if [[ "$config" == "Caddyfile.tunnel" ]]; then
+    printf 'https://%s' "$hostname"
+    return
+  fi
+
+  https_port="$(env_value "$env_file" EMBER_EDGE_HTTPS_PORT || true)"
+  if [[ -n "$https_port" && "$https_port" != "443" ]]; then
+    printf 'https://%s:%s' "$hostname" "$https_port"
+  else
+    printf 'https://%s' "$hostname"
+  fi
+}
+
+start_tunnel_connector() {
+  local env_file="$1"
+  is_tunnel_env "$env_file" || return 0
+  require_tunnel_token_file "$env_file"
+  compose "$env_file" --profile tunnel up -d --no-build --wait --wait-timeout 90 cloudflared
+}
+
+wait_for_tunnel_health() {
+  local env_file="$1"
+  local base_url status attempt
+  base_url="$(staging_base_url "$env_file")"
+  require_command curl
+  for attempt in {1..30}; do
+    status="$(curl --silent --output /dev/null --max-time 5 -w '%{http_code}' \
+      "${base_url}/healthz" 2>/dev/null || true)"
+    [[ "$status" == "200" ]] && return 0
+    sleep 2
+  done
+  die "public tunnel health check did not reach HTTP 200 at ${base_url}/healthz"
+}
+
+verify_tunnel_origin() {
+  local env_file="$1"
+  local base_url
+  is_tunnel_env "$env_file" || return 0
+  base_url="$(staging_base_url "$env_file")"
+  "${SCRIPT_DIR}/verify-apple-jwks.sh" "--env-file=${env_file}"
+  "${SCRIPT_DIR}/verify-secret-redaction.sh" "--env-file=${env_file}" "--base-url=${base_url}"
+}

@@ -1,5 +1,9 @@
 # Ember Cloud Staging — Verification Evidence
 
+> This is historical local/internal-CA evidence. Its 14/14 result does not verify the
+> Cloudflare public hostname; Issue #131's tunnel smoke remains pending authorization and a
+> reachable host. See [CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
+
 What was actually executed for this PR, on 2026-11-06, and what it proves. Anything not
 verified here is called out as such instead of being implied.
 

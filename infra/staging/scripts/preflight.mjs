@@ -45,6 +45,8 @@ const FORBIDDEN_KEY_FRAGMENTS = [
   'MODEL_PROVIDER',
   'MODEL_API_KEY',
   'PROVIDER_API_KEY',
+  'CLOUDFLARE_API_TOKEN',
+  'CF_API_TOKEN',
 ];
 
 /** Hosts a staging DATABASE_URL may point at. Anything else is refused. */
@@ -54,6 +56,7 @@ const ALLOWED_DATABASE_HOSTS = new Set(['postgres', 'db', 'localhost', '127.0.0.
 const FORBIDDEN_VALUE_FRAGMENTS = ['shua'];
 
 const BUNDLE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9-]*(\.[A-Za-z0-9][A-Za-z0-9-]*)+$/;
+const EXPECTED_APPLE_BUNDLE_ID = 'com.basicv8vc.ember';
 const PLACEHOLDER_FRAGMENTS = ['example', 'placeholder', 'changeme', 'change-me', 'replace-me'];
 const HOSTNAME_PATTERN =
   /^(?=.{1,253}$)([A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}$/;
@@ -239,6 +242,13 @@ export function evaluateStagingEnv(env, options = {}) {
   // ---- 3. No paid model provider, no sandbox vendor -------------------------------------
   for (const key of env.keys()) {
     const upper = key.toUpperCase();
+    if (upper === 'TUNNEL_TOKEN' || upper.endsWith('_TUNNEL_TOKEN')) {
+      add(
+        'E_TUNNEL_TOKEN_ENV',
+        key,
+        'must not be stored in an environment variable; mount the token as a private file instead',
+      );
+    }
     const fragment = FORBIDDEN_KEY_FRAGMENTS.find((candidate) => upper.includes(candidate));
     if (fragment !== undefined) {
       add(
@@ -373,6 +383,13 @@ export function evaluateStagingEnv(env, options = {}) {
         `must be the real iOS bundle id (got ${describe(bundleId)})`,
       );
     }
+    if (bundleId !== EXPECTED_APPLE_BUNDLE_ID) {
+      add(
+        'E_APPLE_AUDIENCE',
+        'EMBER_APPLE_BUNDLE_ID',
+        `must match the iOS target's PRODUCT_BUNDLE_IDENTIFIER (${EXPECTED_APPLE_BUNDLE_ID}; got ${describe(bundleId)})`,
+      );
+    }
   }
 
   // ---- 7. Worker shape ------------------------------------------------------------------
@@ -454,12 +471,37 @@ export function evaluateStagingEnv(env, options = {}) {
   }
 
   const caddyConfig = get('EMBER_CADDY_CONFIG') ?? 'Caddyfile';
-  if (mode === 'staging' && caddyConfig !== 'Caddyfile') {
+  if (mode === 'staging' && caddyConfig !== 'Caddyfile.tunnel') {
     add(
       'E_EDGE_TLS_MODE',
       'EMBER_CADDY_CONFIG',
-      'must be "Caddyfile" (public ACME) on staging; the internal CA variant is for local verification only',
+      'must be "Caddyfile.tunnel" on staging; public TLS terminates at Cloudflare and the origin stays private',
     );
+  }
+  if (mode === 'staging' && get('EMBER_EDGE_BIND') !== '127.0.0.1') {
+    add(
+      'E_TUNNEL_EDGE_BIND',
+      'EMBER_EDGE_BIND',
+      `must be 127.0.0.1 for the tunnel deployment (got ${describe(get('EMBER_EDGE_BIND'))}); no origin port may bind to a public interface`,
+    );
+  }
+  if (mode === 'staging') {
+    const tokenFile = get('EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE');
+    if (tokenFile === undefined || !tokenFile.startsWith('/')) {
+      add(
+        'E_TUNNEL_TOKEN_FILE',
+        'EMBER_CLOUDFLARE_TUNNEL_TOKEN_FILE',
+        'must be an absolute path to a separately provisioned mode-0600 token file',
+      );
+    }
+    const cloudflaredImage = get('EMBER_CLOUDFLARED_IMAGE');
+    if (!/^cloudflare\/cloudflared:20\d{2}\.\d{1,2}\.\d+$/.test(cloudflaredImage ?? '')) {
+      add(
+        'E_TUNNEL_IMAGE',
+        'EMBER_CLOUDFLARED_IMAGE',
+        `must be a pinned Cloudflare cloudflared release image (got ${describe(cloudflaredImage)})`,
+      );
+    }
   }
   if (mode !== 'staging' && caddyConfig === 'Caddyfile') {
     warn('W_LOCAL_ACME', 'local verification normally uses EMBER_CADDY_CONFIG=Caddyfile.internal');

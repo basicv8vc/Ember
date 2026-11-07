@@ -50,6 +50,11 @@ fi
 # provider credentials, foreign database, TLS bypass). No Docker operation may start
 # before this passes.
 require_private_file "$ENV_FILE" "environment file"
+TUNNEL_MODE="false"
+if is_tunnel_env "$ENV_FILE"; then
+  TUNNEL_MODE="true"
+  require_tunnel_token_file "$ENV_FILE"
+fi
 "${SCRIPT_DIR}/preflight.sh" "--env-file=${ENV_FILE}" --mode=staging
 
 require_command docker
@@ -66,7 +71,13 @@ done
 log "rolling back to ${TARGET}"
 compose "$ENV_FILE" up -d --no-build --remove-orphans --wait --wait-timeout 180
 
+if [[ "$TUNNEL_MODE" == "true" ]]; then
+  start_tunnel_connector "$ENV_FILE"
+  wait_for_tunnel_health "$ENV_FILE"
+fi
+
 "${SCRIPT_DIR}/smoke.sh" "--env-file=${ENV_FILE}"
+verify_tunnel_origin "$ENV_FILE"
 
 # The record now matches reality: this release is what runs, the one it replaced is the
 # new rollback target.

@@ -1,9 +1,14 @@
 # Ember Cloud Staging — Resources and Permissions Needed
 
-Nothing in this list has been created. The task explicitly withholds authority to create
-billable resources, buy a domain or change DNS, so this document is the request: an approver
-can read it, confirm the account and the budget, and then either run the commands or grant the
-permissions.
+> **Not the Issue #131 deployment path.** That task uses the existing host and a Cloudflare
+> Named Tunnel; see [CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
+> AWS remains an option for future scale, but any paid resources require prior approval. The
+> domain owner must explicitly authorize the existing domain, Cloudflare account and staging
+> DNS change before a public route can be created.
+
+Nothing in this list has been created. This document records an earlier AWS proposal. Under
+the current CTO direction, any new paid resource requires prior approval; the Cloudflare
+Tunnel task separately requires the domain owner to authorize the account and DNS change.
 
 Everything below is **staging only** and is deliberately independent of the Shua estate: a
 separate AWS account or at minimum a separate VPC, separate credentials, separate database,
@@ -51,7 +56,7 @@ Not requested, and not used by this design: `rds:*`, `ecs:*`, `eks:*`, `elbv2:*`
 | Account             | new AWS account, or an isolated VPC in an existing one   | new account                                                  |
 | Hostname            | a subdomain of an existing domain, or a new registration | cannot proceed without one; ACME has no IP-based alternative |
 | Operator SSH source | corporate CIDR, or Session Manager only                  | Session Manager only (no inbound 22)                         |
-| Apple bundle id     | must equal the iOS app's bundle id                       | `com.ember.mobile`, as configured today                      |
+| Apple bundle id     | must equal the iOS app's bundle id                       | `com.basicv8vc.ember`, as configured in the iOS Xcode target |
 | Budget cap          | monthly ceiling for the budget alarm                     | $50                                                          |
 
 ## 4. What is needed from the iOS side

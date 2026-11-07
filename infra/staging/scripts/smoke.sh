@@ -42,13 +42,7 @@ fi
 [[ -f "$ENV_FILE" ]] || die "environment file not found: $ENV_FILE (pass --env-file)"
 
 if [[ -z "$BASE_URL" ]]; then
-  hostname="$(env_value "$ENV_FILE" EMBER_STAGING_HOSTNAME)"
-  https_port="$(env_value "$ENV_FILE" EMBER_EDGE_HTTPS_PORT || true)"
-  if [[ -n "$https_port" && "$https_port" != "443" ]]; then
-    BASE_URL="https://${hostname}:${https_port}"
-  else
-    BASE_URL="https://${hostname}"
-  fi
+  BASE_URL="$(staging_base_url "$ENV_FILE")"
 fi
 
 require_command curl
@@ -139,7 +133,16 @@ expect_body 'unknown route uses ErrorResponse' '"error"' "${BASE_URL}/v1/does-no
 
 # ---- 9. Edge does not advertise itself --------------------------------------------------
 headers="$(curl "${CURL_OPTS[@]}" -D - -o /dev/null "${BASE_URL}/healthz" || true)"
-if printf '%s' "$headers" | grep -qi '^server:'; then
+server_header="$(printf '%s' "$headers" | awk 'tolower($0) ~ /^server:/ { gsub(/\r/, ""); sub(/^[^:]*:[[:space:]]*/, ""); print tolower($0); exit }')"
+if is_tunnel_env "$ENV_FILE"; then
+  if [[ -z "$server_header" || "$server_header" == "cloudflare" ]]; then
+    printf 'PASS  %-46s no origin Server identity\n' 'edge hides origin identity'
+    PASS=$((PASS + 1))
+  else
+    printf 'FAIL  %-46s unexpected Server header: %s\n' 'edge hides origin identity' "$server_header"
+    FAIL=$((FAIL + 1))
+  fi
+elif [[ -n "$server_header" ]]; then
   printf 'FAIL  %-46s Server header present\n' 'edge hides server identity'
   FAIL=$((FAIL + 1))
 else
@@ -155,6 +158,11 @@ if [[ "$BASE_URL" == https://* ]]; then
     printf 'FAIL  %-46s HSTS missing\n' 'edge sends HSTS'
     FAIL=$((FAIL + 1))
   fi
+fi
+
+if is_tunnel_env "$ENV_FILE"; then
+  hostname="$(env_value "$ENV_FILE" EMBER_STAGING_HOSTNAME)"
+  check 'HTTP is redirected to HTTPS' '301|308' "http://${hostname}/healthz"
 fi
 
 printf '\n%s: %d passed, %d failed\n' "$SCRIPT_NAME" "$PASS" "$FAIL"

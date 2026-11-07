@@ -1,5 +1,10 @@
 # Ember Cloud Staging — Deployment Runbook
 
+> **Historical EC2/ACME profile.** Issue #131 starts with the low-cost local-host Cloudflare
+> Named Tunnel in [CLOUD-STAGING-CLOUDFLARE-TUNNEL.md](./CLOUD-STAGING-CLOUDFLARE-TUNNEL.md).
+> The newer CTO direction allows AWS for future scale, but paid resources require prior
+> approval; this task does not provision EC2, Elastic IPs or public inbound ports.
+
 Status: **reviewable configuration, not yet deployed.** No cloud resource has been created;
 see [CLOUD-STAGING-RESOURCE-REQUEST.md](./CLOUD-STAGING-RESOURCE-REQUEST.md) for what is
 needed from the account owner.

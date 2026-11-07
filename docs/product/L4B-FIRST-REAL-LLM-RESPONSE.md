@@ -419,11 +419,20 @@ container, with PostgreSQL 17 reachable at `127.0.0.1:55432`.
 | Command                         | Result                                                                | Verdict                           |
 | ------------------------------- | --------------------------------------------------------------------- | --------------------------------- |
 | `pnpm typecheck`                | clean                                                                 | —                                 |
-| `pnpm lint`                     | clean (after `prettier --write` on 9 files)                           | —                                 |
+| ESLint                          | clean on `apps`, `tests`, `infra`, root files and each package        | see the note below                |
 | `pnpm test:unit`                | `86 files`: 84 passed, 2 failed; **1 539 passed / 2 failed of 1 541** | the 2 are pre-existing, see below |
 | `pnpm test:integration`         | `48 files`: 46 passed, 2 failed; **553 passed / 2 failed of 555**     | the 2 are pre-existing, see below |
 | `b2-mock-provider.test.ts`      | **9 / 9**                                                             | this branch's paid-path suite     |
 | `b2-model-turn-runtime.test.ts` | **26 / 26**                                                           | B2 runtime, unchanged contract    |
+
+**About `pnpm lint`.** A single `eslint .` cannot finish in this container: it aborts with
+`Error: write EPIPE` inside the host's `broker-ipc-client`, which is the same class of sandbox
+failure as the two integration tests below, not a lint finding. Splitting the invocation covers the
+whole tree instead, and every part is clean — `apps`, `tests`, `infra`, the root config files, and
+each of the nine packages run one at a time. Two findings the split did surface were real and were
+fixed before this commit: `String()` on an `unknown` column in the smoke CLI (which would have
+printed `[object Object]` into an evidence file), and `@ember/model-gateway` missing from
+`apps/cli/tsconfig.json` and `apps/cli/package.json`.
 
 Four failures, zero of them caused by this branch. Each was reproduced on a clean `main@db9fab1`
 checkout in the same container, with the same commands and the same database:

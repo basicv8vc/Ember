@@ -8,12 +8,7 @@ import {
   type ModelBudgetCeilings,
   type ModelRateRow,
 } from '@ember/model-gateway';
-import {
-  B1_TURN_FAILURE_MESSAGE,
-  PostgresB1AssistantTurnRepository,
-  createPool,
-  loadDatabaseConfig,
-} from '@ember/postgres';
+import { B1_TURN_FAILURE_MESSAGE, PostgresB1AssistantTurnRepository } from '@ember/postgres';
 import { PostgresB1ConversationWriteRepository } from '../../packages/postgres/src/repositories/b1-conversation-write.js';
 import { PostgresModelTurnExecutionRepository } from '../../packages/postgres/src/repositories/b2-model-turn-execution-repository.js';
 import { createModelTurnResponder } from '../../apps/worker/src/b1/model-turn-responder.js';
@@ -125,8 +120,7 @@ function mockProvider(steps: readonly MockStep[]): MockProvider {
 
     if (step.kind === 'hold') {
       return new Promise((resolve) => {
-        release = (text) =>
-          resolve(reply(text, PROMPT_TOKENS, COMPLETION_TOKENS) as Awaited<ReturnType<FetchLike>>);
+        release = (text) => resolve(reply(text, PROMPT_TOKENS, COMPLETION_TOKENS));
       });
     }
 

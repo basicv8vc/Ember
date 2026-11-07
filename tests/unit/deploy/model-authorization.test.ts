@@ -187,9 +187,7 @@ describe('paid model authorization artifact', () => {
       const result = evaluateStagingEnv(realEnv(), {
         authorization: manifest(
           authorization(
-            'authorizedByPlaceholder' in override
-              ? { approvedBy: override.approvedBy }
-              : (override as Partial<ModelAuthorizationEntry>),
+            'authorizedByPlaceholder' in override ? { approvedBy: override.approvedBy } : override,
           ),
         ),
         now: TODAY,

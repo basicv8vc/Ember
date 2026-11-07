@@ -2,12 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createModelGateway } from '@ember/model-gateway';
 import {
   createPool,
   describeDatabaseTarget,
   formatDatabaseTarget,
   loadDatabaseConfig,
+  PostgresB1ConversationWriteRepository,
+  PostgresModelTurnExecutionRepository,
 } from '@ember/postgres';
+import { createModelTurnResponder } from '../../../worker/src/b1/model-turn-responder.js';
+import { loadWorkerConfig } from '../../../worker/src/config.js';
 
 /**
  * L4-B paid Smoke Test — the only command in this repository that may incur a real provider charge.
@@ -262,10 +267,39 @@ interface Row {
 }
 
 /**
- * Runs one Turn through the production responder against the configured database.
+ * Reads a column as text.
  *
- * `createModelGateway` / `createModelTurnResponder` / `loadWorkerConfig` are imported lazily so that
- * importing this module in a unit test has no side effects and needs no environment.
+ * `Row` holds `unknown` by design, because `pg` decides a JavaScript type per column; formatting one
+ * with `String()` would silently print `[object Object]` for anything unexpected. Only a scalar that
+ * has an unambiguous textual form is rendered, and anything else is a programming error rather than
+ * something to paste into an evidence file.
+ */
+function columnText(value: unknown): string {
+  if (typeof value === 'string') {
+    return value;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+  return JSON.stringify(value) ?? '';
+}
+
+function columnTextOrNull(value: unknown): string | null {
+  return value === null || value === undefined ? null : columnText(value);
+}
+
+function columnNumber(value: unknown): number {
+  if (typeof value === 'number') {
+    return value;
+  }
+  if (typeof value === 'string' && value.trim().length > 0) {
+    return Number(value);
+  }
+  return Number.NaN;
+}
+
+/**
+ * Runs one Turn through the production responder against the configured database.
  */
 export async function runPaidSmoke(
   args: ParsedSmokeArgs,
@@ -275,13 +309,6 @@ export async function runPaidSmoke(
     writeEvidence: (path, text) => writeFileSync(path, text, { mode: 0o600 }),
   },
 ): Promise<number> {
-  const { loadWorkerConfig } = await import('../../../worker/src/config.js');
-  const { createModelGateway } = await import('@ember/model-gateway');
-  const { createModelTurnResponder } =
-    await import('../../../worker/src/b1/model-turn-responder.js');
-  const { PostgresB1ConversationWriteRepository } = await import('@ember/postgres');
-  const { PostgresModelTurnExecutionRepository } = await import('@ember/postgres');
-
   const env = process.env;
   const model = loadWorkerConfig(env).model;
 
@@ -455,49 +482,31 @@ export async function runPaidSmoke(
       turnId: submitted.receipt.turn.turn_id,
       summary: summaries[0] ?? {},
       turn: {
-        status: String(turnRow?.['status'] ?? 'missing'),
-        failureReason:
-          turnRow?.['failure_reason'] === null || turnRow?.['failure_reason'] === undefined
-            ? null
-            : String(turnRow['failure_reason']),
-        responseMessageId:
-          turnRow?.['response_message_id'] === null ||
-          turnRow?.['response_message_id'] === undefined
-            ? null
-            : String(turnRow['response_message_id']),
+        status: columnText(turnRow?.['status'] ?? 'missing'),
+        failureReason: columnTextOrNull(turnRow?.['failure_reason']),
+        responseMessageId: columnTextOrNull(turnRow?.['response_message_id']),
       },
       reply:
         replyRow === undefined
           ? null
           : {
-              messageId: String(replyRow['id']),
-              modelLabel: String(replyRow['model_label']),
+              messageId: columnText(replyRow['id']),
+              modelLabel: columnText(replyRow['model_label']),
               simulated: replyRow['simulated'] === true,
-              characters: Number(replyRow['chars']),
+              characters: columnNumber(replyRow['chars']),
             },
       attempt:
         attemptRow === undefined
           ? null
           : {
-              attemptNo: Number(attemptRow['attempt_no']),
-              state: String(attemptRow['state']),
-              outcomeCode:
-                attemptRow['outcome_code'] === null || attemptRow['outcome_code'] === undefined
-                  ? null
-                  : String(attemptRow['outcome_code']),
-              reservedMicroUsd: String(attemptRow['reserved_micro_usd']),
-              appliedCostMicroUsd:
-                attemptRow['applied_cost_micro_usd'] === null
-                  ? null
-                  : String(attemptRow['applied_cost_micro_usd']),
-              observedCostMicroUsd:
-                attemptRow['observed_cost_micro_usd'] === null
-                  ? null
-                  : String(attemptRow['observed_cost_micro_usd']),
-              inputTokens:
-                attemptRow['input_tokens'] === null ? null : String(attemptRow['input_tokens']),
-              outputTokens:
-                attemptRow['output_tokens'] === null ? null : String(attemptRow['output_tokens']),
+              attemptNo: columnNumber(attemptRow['attempt_no']),
+              state: columnText(attemptRow['state']),
+              outcomeCode: columnTextOrNull(attemptRow['outcome_code']),
+              reservedMicroUsd: columnText(attemptRow['reserved_micro_usd']),
+              appliedCostMicroUsd: columnTextOrNull(attemptRow['applied_cost_micro_usd']),
+              observedCostMicroUsd: columnTextOrNull(attemptRow['observed_cost_micro_usd']),
+              inputTokens: columnTextOrNull(attemptRow['input_tokens']),
+              outputTokens: columnTextOrNull(attemptRow['output_tokens']),
             },
     });
 

@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env.local --import tsx --watch src/index.ts",
     "start": "node --env-file-if-exists=../../.env.local dist/index.js",
-    "build": "tsc -b tsconfig.build.json"
+    "build": "tsc -b tsconfig.build.json",
+    "dev:worker": "wrangler dev --config wrangler.jsonc",
+    "build:worker": "wrangler deploy --dry-run --config wrangler.jsonc",
+    "deploy:worker": "wrangler deploy --config wrangler.jsonc"
   },
   "dependencies": {
     "@ember/contracts": "workspace:*",
@@ -16,5 +19,8 @@
     "hono": "4.13.14",
     "jose": "6.1.3",
     "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "wrangler": "4.158.0"
   }
 }

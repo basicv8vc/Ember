@@ -2,12 +2,14 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "noEmit": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
       "@ember/contracts": ["../../packages/contracts/src/index.ts"],
       "@ember/domain": ["../../packages/domain/src/index.ts"],
-      "@ember/postgres": ["../../packages/postgres/src/index.ts"]
+      "@ember/postgres": ["../../packages/postgres/src/index.ts"],
+      "@ember/postgres/b1-worker": ["../../packages/postgres/src/b1-worker.ts"]
     }
   },
   "include": ["src/**/*.ts"]

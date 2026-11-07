@@ -12,6 +12,9 @@
   "scripts": {
     "dev": "pnpm --filter @ember/api --filter @ember/worker --parallel dev",
     "dev:api": "pnpm --filter @ember/api dev",
+    "dev:api:worker": "pnpm --filter @ember/api dev:worker",
+    "build:api:worker": "pnpm --filter @ember/api build:worker",
+    "deploy:api:worker": "pnpm --filter @ember/api deploy:worker",
     "start": "pnpm --filter @ember/api start",
     "dev:worker": "pnpm --filter @ember/worker dev",
     "start:worker": "pnpm --filter @ember/worker start",

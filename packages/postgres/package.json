@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./b1-worker": {
+      "types": "./dist/b1-worker.d.ts",
+      "default": "./dist/b1-worker.js"
     }
   },
   "files": [

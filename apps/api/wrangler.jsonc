@@ -1,0 +1,26 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ember-cloud-api",
+  "main": "src/cloudflare-worker.ts",
+  "compatibility_date": "2026-11-07",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": true,
+  "limits": {
+    "cpu_ms": 10,
+  },
+  "vars": {
+    "EMBER_ENV": "production",
+    "EMBER_APPLE_BUNDLE_ID": "com.ember.mobile",
+    "EMBER_APPLE_CLOCK_SKEW_SECONDS": "300",
+    "EMBER_APPLE_MAX_TOKEN_AGE_SECONDS": "600",
+    "EMBER_APPLE_JWKS_TIMEOUT_MS": "5000",
+    "EMBER_APPLE_JWKS_COOLDOWN_MS": "30000",
+    "EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS": "600000",
+  },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "00000000000000000000000000000000",
+    },
+  ],
+}

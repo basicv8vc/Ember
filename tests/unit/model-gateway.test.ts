@@ -19,7 +19,9 @@ import {
   createModelGateway,
   estimateCostMicroUsd,
   estimateTokensConservative,
+  evaluateApproval,
   isModelGatewayFailure,
+  isPastShutdown,
   isRetryableModelFailure,
   preflightConversationTurn,
   resolveModelExecution,
@@ -30,6 +32,17 @@ import {
 } from '@ember/model-gateway';
 
 const VALID_KEY = 'sk-test-abcdefghijklmnopqrstuvwxyz012345';
+
+/**
+ * A well-formed approval for the fixture model, deliberately dated far from the test's own clock so
+ * an "expired approval" case has to pass its own `now` instead of depending on the day CI runs.
+ */
+const TEST_APPROVAL = Object.freeze({
+  approvalId: 'TEST-A1',
+  approvedBy: 'test fixture',
+  approvedAt: '2026-01-01',
+  expiresAt: '2099-12-31',
+});
 
 const VERIFIED_RATE: ModelRateRow = Object.freeze({
   providerId: 'openai' as const,
@@ -42,7 +55,13 @@ const VERIFIED_RATE: ModelRateRow = Object.freeze({
 });
 
 const APPROVED_REGISTRY = Object.freeze({
-  models: Object.freeze([{ providerId: 'openai' as const, modelId: 'gpt-5-mini-2026-11-01' }]),
+  models: Object.freeze([
+    {
+      providerId: 'openai' as const,
+      modelId: 'gpt-5-mini-2026-11-01',
+      approval: TEST_APPROVAL,
+    },
+  ]),
   rates: Object.freeze([VERIFIED_RATE]),
 });
 
@@ -652,5 +671,144 @@ describe('status mapping', () => {
     for (const status of [400, 401, 403, 404, 408, 429, 500, 502, 599]) {
       expect(typeof statusToFailureCode(status)).toBe('string');
     }
+  });
+});
+
+describe('approval record as a gate (L4-B)', () => {
+  const RATE_WITH_SHUTDOWN: ModelRateRow = Object.freeze({
+    ...VERIFIED_RATE,
+    shutdownDate: '2027-01-14',
+  });
+
+  function registryWith(
+    approval: { approvalId: string; approvedBy: string; approvedAt: string; expiresAt: string },
+    rate: ModelRateRow = VERIFIED_RATE,
+  ) {
+    return {
+      models: [{ providerId: 'openai' as const, modelId: rate.modelId, approval }],
+      rates: [rate],
+    };
+  }
+
+  it('reports the four validity states without consulting the system clock', () => {
+    const approval = { ...TEST_APPROVAL, approvedAt: '2026-01-01', expiresAt: '2026-12-31' };
+
+    expect(evaluateApproval(approval, new Date('2025-12-31T23:59:59Z'))).toBe('not_yet_valid');
+    expect(evaluateApproval(approval, new Date('2026-01-01T00:00:00Z'))).toBe('effective');
+    // `expiresAt` is inclusive: the last day the reviewer signed is still covered.
+    expect(evaluateApproval(approval, new Date('2026-12-31T23:59:59Z'))).toBe('effective');
+    expect(evaluateApproval(approval, new Date('2027-01-01T00:00:00Z'))).toBe('expired');
+  });
+
+  it('treats a template id or an inverted window as malformed rather than valid', () => {
+    expect(
+      evaluateApproval({ ...TEST_APPROVAL, approvalId: 'PENDING-CTO' }, new Date('2026-11-07Z')),
+    ).toBe('malformed');
+    expect(evaluateApproval({ ...TEST_APPROVAL, approvedBy: '  ' }, new Date('2026-11-07Z'))).toBe(
+      'malformed',
+    );
+    expect(
+      evaluateApproval(
+        { ...TEST_APPROVAL, approvedAt: '2026-12-01', expiresAt: '2026-11-01' },
+        new Date('2026-11-07Z'),
+      ),
+    ).toBe('malformed');
+  });
+
+  it('refuses to boot real mode once the approval has expired', () => {
+    const resolution = resolveModelExecution(
+      { mode: 'real', providerId: 'openai', modelId: VERIFIED_RATE.modelId, apiKey: VALID_KEY },
+      registryWith({ ...TEST_APPROVAL, approvedAt: '2026-01-01', expiresAt: '2026-06-30' }),
+      new Date('2026-11-07T00:00:00Z'),
+    );
+
+    expect(resolution.ok).toBe(false);
+    expect(resolution).toMatchObject({ ok: false, reason: 'approval_not_effective' });
+  });
+
+  it('refuses a model whose approval has not started yet', () => {
+    const resolution = resolveModelExecution(
+      { mode: 'real', providerId: 'openai', modelId: VERIFIED_RATE.modelId, apiKey: VALID_KEY },
+      registryWith({ ...TEST_APPROVAL, approvedAt: '2027-01-01', expiresAt: '2027-06-30' }),
+      new Date('2026-11-07T00:00:00Z'),
+    );
+
+    expect(resolution).toMatchObject({ ok: false, reason: 'approval_not_effective' });
+  });
+
+  it('refuses a snapshot the provider has already retired', () => {
+    expect(isPastShutdown(RATE_WITH_SHUTDOWN, new Date('2027-01-13T23:59:59Z'))).toBe(false);
+    expect(isPastShutdown(RATE_WITH_SHUTDOWN, new Date('2027-01-14T00:00:00Z'))).toBe(true);
+
+    const resolution = resolveModelExecution(
+      { mode: 'real', providerId: 'openai', modelId: VERIFIED_RATE.modelId, apiKey: VALID_KEY },
+      registryWith(TEST_APPROVAL, RATE_WITH_SHUTDOWN),
+      new Date('2027-01-14T00:00:00Z'),
+    );
+
+    expect(resolution).toMatchObject({ ok: false, reason: 'model_shutdown' });
+  });
+
+  it('still opens real mode when the approval is effective and the snapshot is servable', () => {
+    const resolution = resolveModelExecution(
+      { mode: 'real', providerId: 'openai', modelId: VERIFIED_RATE.modelId, apiKey: VALID_KEY },
+      registryWith(TEST_APPROVAL, RATE_WITH_SHUTDOWN),
+      new Date('2026-11-07T00:00:00Z'),
+    );
+
+    expect(resolution.ok).toBe(true);
+  });
+});
+
+describe('pinned reasoning effort', () => {
+  it('is sent only when the rate row fixes it, and never as a caller input', async () => {
+    const withoutEffort = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+      ),
+    );
+
+    await new OpenAiModelGateway({
+      apiKey: VALID_KEY,
+      modelId: 'gpt-5-mini-2026-11-01',
+      rate: VERIFIED_RATE,
+      fetchImpl: withoutEffort.fetchImpl,
+    }).generateConversationTurn(input(), new AbortController().signal);
+
+    expect(JSON.parse(withoutEffort.calls[0]!.init.body)).not.toHaveProperty('reasoning_effort');
+
+    const withEffort = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1 },
+        }),
+      ),
+    );
+
+    await new OpenAiModelGateway({
+      apiKey: VALID_KEY,
+      modelId: 'gpt-5-mini-2026-11-01',
+      rate: { ...VERIFIED_RATE, reasoningEffort: 'minimal' },
+      fetchImpl: withEffort.fetchImpl,
+    }).generateConversationTurn(input(), new AbortController().signal);
+
+    const body = JSON.parse(withEffort.calls[0]!.init.body) as Record<string, unknown>;
+
+    expect(body['reasoning_effort']).toBe('minimal');
+    // The value comes from the reviewed row, and the call adds nothing else: the request shape is
+    // still the six fields the contract allows plus this one pinned property.
+    expect(Object.keys(body).sort()).toEqual([
+      'max_completion_tokens',
+      'messages',
+      'model',
+      'n',
+      'reasoning_effort',
+      'store',
+      'stream',
+    ]);
   });
 });

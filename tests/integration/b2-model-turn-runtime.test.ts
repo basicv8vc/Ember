@@ -777,7 +777,18 @@ describe('B2 real model Turn runtime on PostgreSQL 17', () => {
 
   it('10. refuses to boot real mode without a credential, an approved model or a verified rate', () => {
     const approvedOnly = {
-      models: [{ providerId: 'openai' as const, modelId: REAL_MODEL_LABEL }],
+      models: [
+        {
+          providerId: 'openai' as const,
+          modelId: REAL_MODEL_LABEL,
+          approval: {
+            approvalId: 'IT-A1',
+            approvedBy: 'integration fixture',
+            approvedAt: '2026-01-01',
+            expiresAt: '2099-12-31',
+          },
+        },
+      ],
       rates: [RATE],
     };
 

@@ -857,3 +857,40 @@ describe('B2 responder: budget halt (review P0-3)', () => {
     });
   });
 });
+
+describe('B2 responder: per-process concurrency gate', () => {
+  it('refuses a second concurrent pass before it can read, claim or reserve anything', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new HangingGateway();
+    const responder = realResponder(repository, gateway, { attemptTimeoutMs: 5_000 });
+
+    const first = responder.processOnce();
+    await gateway.entered;
+
+    // The first pass owns this instance's only paid slot, so the second does not even list Turns.
+    const second = await responder.processOnce();
+
+    expect(second).toMatchObject({ busy: true, examined: 0, completed: 0, skipped: 0 });
+    // One pass, one claim, one reservation: the gate cannot be crossed twice.
+    expect(repository.calls.filter((call) => call === 'claimTurn')).toHaveLength(1);
+    expect(repository.reserveCommands).toHaveLength(1);
+
+    // The first pass is still running normally; it is not a replacement for real work.
+    expect(first).toBeInstanceOf(Promise);
+    await expect(Promise.race([first, Promise.resolve('pending')])).resolves.toBe('pending');
+  });
+
+  it('releases the gate after a pass fails, so the next iteration can still make progress', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['ok']);
+    const responder = realResponder(repository, gateway);
+
+    await responder.processOnce();
+
+    repository.running = false;
+    const next = await responder.processOnce();
+
+    expect(next.busy).toBe(false);
+    expect(next.examined).toBe(0);
+  });
+});

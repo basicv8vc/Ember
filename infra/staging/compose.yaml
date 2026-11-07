@@ -110,6 +110,12 @@ services:
       - db
     env_file:
       - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    environment:
+      # The model credential is only ever needed by the worker, and `env_file` is shared by every
+      # service. Compose gives `environment` precedence over `env_file`, so this blanks the key
+      # inside a process that has no model gateway at all rather than leaving a billable secret
+      # readable in the API container.
+      EMBER_MODEL_API_KEY: ''
     # Loopback-only. The edge proxy reaches the API over the `edge` network; this mapping
     # exists so an operator can curl /healthz and /readyz on the host itself.
     ports:

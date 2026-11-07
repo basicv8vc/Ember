@@ -189,6 +189,16 @@ async function main(): Promise<void> {
         mode,
         providerId: config.model.settings.providerId,
         modelId: config.model.settings.modelId,
+        // Which reviewed decision this process is spending under, and when it lapses. Both are
+        // policy, not secrets: an operator reading a log should be able to answer "who allowed
+        // this, until when" without opening the repository.
+        ...(config.model.mode === 'real'
+          ? {
+              approvalId: config.model.approval.approvalId,
+              approvalExpiresAt: config.model.approval.expiresAt,
+              rateVersion: config.model.rate.rateVersion,
+            }
+          : {}),
         // Ceilings are policy, not secrets: logging them makes a misconfiguration visible.
         principalDailyMicroUsd: config.model.settings.ceilings.principalDailyMicroUsd,
         tenantDailyMicroUsd: config.model.settings.ceilings.tenantDailyMicroUsd,

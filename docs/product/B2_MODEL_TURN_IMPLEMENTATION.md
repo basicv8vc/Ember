@@ -319,6 +319,12 @@ The four `real` gates, each independent:
 3. an `invoice_verified` rate row for that exact model id — every shipped row is `unverified`;
 4. a usable credential (present, not a placeholder, `sk-` + ≥ 20 characters).
 
+> **Superseded in part by L4-B.** Each `APPROVED_REAL_MODELS` entry now carries a `ModelApprovalRecord`
+> (`approvalId`, `approvedBy`, `approvedAt`, `expiresAt`) that must be effective on the day the
+> process boots, and a rate row may carry a provider `shutdownDate` that refuses `real` once the
+> snapshot has been retired. So `real` has five gates, not four, and an approval expires. See
+> `docs/product/L4B-FIRST-REAL-LLM-RESPONSE.md` §2 and §4.
+
 Because gates 2 and 3 cannot be satisfied by any environment variable, `.env` file or tenant policy,
 `real` is off in **code**, not by configuration. Turning it on is a reviewed diff.
 

@@ -1,4 +1,5 @@
 import { createHash, generateKeyPairSync, randomUUID, type KeyObject } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import {
   createLocalJWKSet,
   exportJWK,
@@ -17,6 +18,7 @@ import {
   loadAppleVerifierConfig,
   type AppleVerifierConfig,
 } from '../../apps/api/src/auth/apple-identity.js';
+import { loadCloudflareAppleVerifierConfig } from '../../apps/api/src/cloudflare-worker-apple-config.js';
 
 /**
  * B1-2B Apple identity verification. Deterministic, locally signed RS256 JWT/JWKS fixtures:
@@ -24,6 +26,7 @@ import {
  */
 
 const AUDIENCE = 'com.ember.alpha.test';
+const IOS_BUNDLE_ID = 'com.basicv8vc.ember';
 const KEY_ID = 'ember-local-fixture-key';
 const SUBJECT = 'apple-sub-00123456789';
 const RAW_NONCE = `nonce-${randomUUID()}`;
@@ -105,6 +108,69 @@ function replaceHeader(token: string, header: Record<string, unknown>): string {
 }
 
 describe('Apple identity-token verification (B1-2B)', () => {
+  it('uses the iOS Bundle ID from the deployed Worker config and rejects invalid assertions', async () => {
+    const wranglerText = readFileSync(
+      new URL('../../apps/api/wrangler.jsonc', import.meta.url),
+      'utf8',
+    );
+    const wranglerConfig = JSON.parse(wranglerText.replace(/,\s*([}\]])/g, '$1')) as {
+      vars: { EMBER_APPLE_BUNDLE_ID: string };
+    };
+    const devVarsExample = readFileSync(
+      new URL('../../apps/api/.dev.vars.example', import.meta.url),
+      'utf8',
+    );
+    const iosProject = readFileSync(
+      new URL('../../apps/ios/Ember.xcodeproj/project.pbxproj', import.meta.url),
+      'utf8',
+    );
+
+    expect(iosProject).toContain(`PRODUCT_BUNDLE_IDENTIFIER = ${IOS_BUNDLE_ID};`);
+    expect(wranglerConfig.vars.EMBER_APPLE_BUNDLE_ID).toBe(IOS_BUNDLE_ID);
+    expect(devVarsExample).toContain(`EMBER_APPLE_BUNDLE_ID=${IOS_BUNDLE_ID}`);
+
+    const runtimeConfig = loadCloudflareAppleVerifierConfig(
+      {
+        EMBER_APPLE_BUNDLE_ID: wranglerConfig.vars.EMBER_APPLE_BUNDLE_ID,
+      },
+      fixture.keyResolver,
+    );
+    const runtimeVerifier = createAppleIdentityVerifier({
+      ...runtimeConfig,
+      now: () => FIXED_NOW,
+    });
+
+    expect(runtimeConfig.audience).toBe(IOS_BUNDLE_ID);
+    await expect(
+      runtimeVerifier.verify(assertion(await signToken({ claims: { aud: IOS_BUNDLE_ID } }))),
+    ).resolves.toEqual({ provider: 'apple', providerSubject: SUBJECT });
+    await expect(
+      runtimeVerifier.verify(assertion(await signToken({ claims: { aud: 'com.ember.mobile' } }))),
+    ).resolves.toBeNull();
+    await expect(
+      runtimeVerifier.verify(
+        assertion(
+          await signToken({ claims: { exp: FIXED_NOW_SECONDS - 301, aud: IOS_BUNDLE_ID } }),
+        ),
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      runtimeVerifier.verify(
+        assertion(
+          await signToken({
+            claims: { aud: IOS_BUNDLE_ID },
+            privateKey: secondFixture.privateKey,
+          }),
+        ),
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      runtimeVerifier.verify(
+        assertion(await signToken({ claims: { iss: 'https://evil.test', aud: IOS_BUNDLE_ID } })),
+      ),
+    ).resolves.toBeNull();
+  });
+
   it('accepts a correctly signed token and returns only the stable sub claim', async () => {
     const token = await signToken();
     const result = await verifier().verify(assertion(token));

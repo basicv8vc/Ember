@@ -10,7 +10,7 @@
   },
   "vars": {
     "EMBER_ENV": "production",
-    "EMBER_APPLE_BUNDLE_ID": "com.ember.mobile",
+    "EMBER_APPLE_BUNDLE_ID": "com.basicv8vc.ember",
     "EMBER_APPLE_CLOCK_SKEW_SECONDS": "300",
     "EMBER_APPLE_MAX_TOKEN_AGE_SECONDS": "600",
     "EMBER_APPLE_JWKS_TIMEOUT_MS": "5000",

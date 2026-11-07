@@ -13,7 +13,6 @@ import {
   APPLE_DEFAULT_JWKS_COOLDOWN_MS,
   APPLE_DEFAULT_JWKS_TIMEOUT_MS,
   APPLE_JWKS_URL,
-  loadAppleVerifierConfig,
 } from './auth/apple-identity.js';
 import type { B1SessionRuntime } from './auth/b1-auth-runtime.js';
 import { createDevTokenAuthenticator } from './auth/bearer-authenticator.js';
@@ -26,6 +25,7 @@ import {
   createCloudflareAppleNonceReplayStore,
   createCloudflareAppleNonceVerifier,
 } from './cloudflare-apple-replay.js';
+import { loadCloudflareAppleVerifierConfig } from './cloudflare-worker-apple-config.js';
 import { createRemoteJWKSet } from 'jose';
 import type { JWTVerifyGetKey } from 'jose';
 
@@ -66,17 +66,6 @@ const DENY_DEV_PROVIDER: DevProviderPolicy = Object.freeze({
     ] as const),
   }),
 });
-
-function authEnvironment(bindings: CloudflareApiBindings): NodeJS.ProcessEnv {
-  return {
-    EMBER_APPLE_BUNDLE_ID: bindings.EMBER_APPLE_BUNDLE_ID,
-    EMBER_APPLE_CLOCK_SKEW_SECONDS: bindings.EMBER_APPLE_CLOCK_SKEW_SECONDS,
-    EMBER_APPLE_MAX_TOKEN_AGE_SECONDS: bindings.EMBER_APPLE_MAX_TOKEN_AGE_SECONDS,
-    EMBER_APPLE_JWKS_TIMEOUT_MS: bindings.EMBER_APPLE_JWKS_TIMEOUT_MS,
-    EMBER_APPLE_JWKS_COOLDOWN_MS: bindings.EMBER_APPLE_JWKS_COOLDOWN_MS,
-    EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS: bindings.EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS,
-  };
-}
 
 function createWorkerPool(bindings: CloudflareApiBindings): WorkerPool {
   return createPool(
@@ -119,10 +108,7 @@ function createWorkerApp(pool: WorkerPool, bindings: CloudflareApiBindings) {
     sessions: new PostgresB1ConsumerSessionRepository(pool),
     me: new PostgresB1MeProjectionReader(pool),
   };
-  const apple = {
-    ...loadAppleVerifierConfig(authEnvironment(bindings)),
-    keyResolver: APPLE_KEY_RESOLVER,
-  };
+  const apple = loadCloudflareAppleVerifierConfig(bindings, APPLE_KEY_RESOLVER);
   const sessionRuntime = createB1SessionRuntime({
     ports,
     apple,

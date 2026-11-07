@@ -41,6 +41,38 @@ describe('Cloudflare Apple nonce replay fence', () => {
     expect((insertCall?.[1]?.[0] as Buffer).toString('utf8')).not.toContain('one-time-raw-nonce');
   });
 
+  it('allows exactly one winner for concurrent exchanges of the same nonce', async () => {
+    const accepted = new Set<string>();
+    const pool = {
+      query: vi.fn((sql: string, values?: readonly unknown[]) => {
+        if (sql.includes('DELETE FROM')) {
+          return Promise.resolve({ rows: [] });
+        }
+
+        const digest = values?.[0] as Buffer;
+        const key = digest.toString('hex');
+        if (accepted.has(key)) {
+          return Promise.resolve({ rows: [] });
+        }
+        accepted.add(key);
+        return Promise.resolve({ rows: [{ nonce_digest: digest }] });
+      }),
+    };
+    const store = createCloudflareAppleNonceReplayStore(pool as unknown as Pick<Pool, 'query'>);
+
+    const results = await Promise.all(
+      Array.from({ length: 32 }, () => store.consume('concurrent-one-time-nonce')),
+    );
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    expect(results.filter((result) => !result)).toHaveLength(31);
+    const insertCalls = pool.query.mock.calls.filter(([sql]) => sql.includes('INSERT INTO'));
+    expect(insertCalls).toHaveLength(32);
+    expect(insertCalls.every(([sql]) => /ON CONFLICT \(nonce_digest\) DO NOTHING/.test(sql))).toBe(
+      true,
+    );
+  });
+
   it('does not consume a nonce for an invalid Apple assertion', async () => {
     const base: IdentityVerifier = {
       provider: 'apple',

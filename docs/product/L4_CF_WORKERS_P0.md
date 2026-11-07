@@ -1,8 +1,9 @@
 # Cloudflare-first PostgreSQL API PoC
 
-Status: source-level compatibility and local checks only. No Cloudflare, Supabase, Neon, or AWS
-account was accessed, no remote resource was created, and no live CPU, latency, or billing data has
-been measured.
+Status (2026-11-07): P0 implementation and local regressions are complete. Cloudflare CLI
+authentication was verified read-only; no Worker, Hyperdrive config, database, or other remote
+resource has been created. Remote deployment is blocked because Agent D's PR #139 reports no live
+Neon/Supabase test database or connection yet. No CPU, latency, or billing data has been measured.
 
 ## CTO architecture decision
 
@@ -64,7 +65,7 @@ choosing a production plan.
 | Cloudflare supports Neon through Hyperdrive and recommends a direct connection with `pg`                    | Pass (documentation review) | Hyperdrive provider guide and Neon integration guide.                                                                                                                                                          |
 | B1 transactions and locks fit Hyperdrive transaction pooling                                                | Pass (source review)        | B1 repositories use `BEGIN` plus `pg_advisory_xact_lock`; no session advisory lock, `LISTEN`, or `NOTIFY` is imported into the Worker entry. The migration runner's session lock is outside the Worker bundle. |
 | Current migrations use PostgreSQL rather than Supabase Data API or service-role features                    | Pass (source review)        | Runtime accesses PostgreSQL directly; private nonce schema and grants are provider-neutral. The runtime role must be created using the provider's role UI/API where SQL role creation is restricted.           |
-| Apply migrations and run B1 integration suites against Neon PG17 through Cloudflare Hyperdrive              | Not run                     | Requires an authorized disposable Neon project and Cloudflare account; no resource was created.                                                                                                                |
+| Apply migrations and run B1 integration suites against Neon PG17 through Cloudflare Hyperdrive              | Blocked                     | Agent D's PR #139 reports that it did not create a live provider resource; the required PG17 test database is not available yet.                                                                               |
 | Compare Supabase and Neon cold/warm p50/p95, retry/isolation behavior, statements, CPU, storage, and egress | Not run                     | Run the same B1 suite and request mix on both providers before choosing production.                                                                                                                            |
 
 This is a positive compatibility review, not a live Neon validation. A passing source review does
@@ -126,13 +127,35 @@ providers solely to avoid a quota that has not been reached.
 | Neon/Supabase provider parity                                                     | PostgreSQL and Hyperdrive source review            | Neon and Supabase suites not run |
 | 10 ms CPU and Free quotas                                                         | Config pins the 10 ms CPU limit; no measured value | Not run                          |
 
+## Agent C deployment attempt (2026-11-07)
+
+### Local validation
+
+| Check                                                      | Result                                                                      |
+| ---------------------------------------------------------- | --------------------------------------------------------------------------- |
+| `pnpm test:unit`                                           | Pass — 86 files, 1,500 tests.                                               |
+| `pnpm typecheck`                                           | Pass.                                                                       |
+| ESLint on changed TypeScript files                         | Pass.                                                                       |
+| Prettier on changed TypeScript/JSONC/Markdown files        | Pass.                                                                       |
+| `pnpm --filter @ember/api build:worker` (Wrangler dry-run) | Pass — 1,323.88 KiB upload / 236.75 KiB gzip; no cloud deployment occurred. |
+
+| Evidence                                                                                                                                                  | Result                                                                                                                                                                                                                                                                    |
+| --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cloudflare CLI account auth                                                                                                                               | Verified read-only. Account identity is omitted from this evidence.                                                                                                                                                                                                       |
+| Workers Free test deployment / `workers.dev` URL                                                                                                          | **NOT CREATED**; blocked on Agent D's disposable PostgreSQL 17 database and secure connection handoff.                                                                                                                                                                    |
+| Hyperdrive test config ID                                                                                                                                 | **NOT CREATED**; no database connection details are available.                                                                                                                                                                                                            |
+| PostgreSQL provider/version                                                                                                                               | **NOT VERIFIED**; Agent D's PR #139 reports local PostgreSQL 17.11 validation only, with no live Neon/Supabase resource.                                                                                                                                                  |
+| Health/readiness, Apple API, session, conversation, message, Unknown ACK, tenant isolation, DB outage/recovery, remote concurrency and HTTP compatibility | **NOT VERIFIED remotely**. Local tests do not substitute for the requested cloud acceptance.                                                                                                                                                                              |
+| Workers CPU and request P50/P95; Hyperdrive query latency; cold start/recovery; idle/low concurrency                                                      | **NOT VERIFIED**. The configured 10 ms CPU limit is a ceiling, not an observed CPU measurement; request wall time is distinct.                                                                                                                                            |
+| Credentials, production data, DNS, paid plans/resources                                                                                                   | No credentials were added to GitHub; no production data or DNS was touched; no paid resource was created.                                                                                                                                                                 |
+| Next action                                                                                                                                               | Agent D must provide the authorized PG17 Free test database through a secure credential path. Then apply migrations over a separate direct connection (never Hyperdrive), create one uncached Hyperdrive config, deploy one Worker, and run the remote acceptance matrix. |
+
 ## Current go/no-go
 
-No live iPhone traffic until an authorized disposable PostgreSQL provider and Cloudflare account pass
-the remote transaction, retry, recovery, tenant-isolation, latency, and CPU checks. This is a
-deployable Cloudflare-first candidate with a provider-portable PostgreSQL boundary, not production
-readiness evidence. The P0 does not force a $0 ceiling; any new paid resource or plan remains gated
-on prior approval.
+No live iPhone traffic until the authorized test database is provisioned and the Worker passes the
+remote transaction, retry, recovery, tenant-isolation, latency, and CPU checks. This branch has not
+yet met the real-cloud completion definition. The P0 does not force a $0 ceiling; any new paid
+resource or plan remains gated on prior approval.
 
 ## References
 

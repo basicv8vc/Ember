@@ -30,3 +30,4 @@ minimumReleaseAgeExclude:
   - '@daytona/api-client@0.230.0'
   - '@daytona/toolbox-api-client@0.230.0'
   - '@daytonaio/sdk@0.230.0'
+  - '@cloudflare/workers-types@5.20261107.1'

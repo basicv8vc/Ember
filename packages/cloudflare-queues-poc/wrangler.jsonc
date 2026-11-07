@@ -1,0 +1,30 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ember-queues-workflows-poc-local-only",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-11-07",
+  "workers_dev": false,
+  "preview_urls": false,
+  "limits": { "cpu_ms": 10 },
+  "queues": {
+    "producers": [{ "binding": "TASK_QUEUE", "queue": "ember-poc-task-dispatch" }],
+    "consumers": [
+      {
+        "queue": "ember-poc-task-dispatch",
+        "max_batch_size": 10,
+        "max_batch_timeout": 1,
+        "max_retries": 3,
+        "dead_letter_queue": "ember-poc-task-dispatch-dlq",
+      },
+      { "queue": "ember-poc-task-dispatch-dlq", "max_batch_size": 10, "max_batch_timeout": 1 },
+    ],
+  },
+  "workflows": [
+    {
+      "name": "ember-poc-task-run",
+      "binding": "TASK_WORKFLOW",
+      "class_name": "TaskWorkflow",
+    },
+  ],
+  "kv_namespaces": [{ "binding": "POC_STATE", "id": "00000000000000000000000000000001" }],
+}

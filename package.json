@@ -24,6 +24,7 @@
     "format:check": "prettier --check .",
     "test": "pnpm run test:unit && pnpm run test:integration && pnpm run test:chaos && pnpm run test:e2e",
     "test:unit": "vitest run --config vitest.unit.config.ts",
+    "test:cf-poc": "pnpm --filter @ember/cloudflare-queues-poc test",
     "test:integration": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.integration.config.ts",
     "test:chaos": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.chaos.config.ts",
     "test:e2e": "node --env-file-if-exists=.env.local ./node_modules/vitest/vitest.mjs run --config vitest.e2e.config.ts",

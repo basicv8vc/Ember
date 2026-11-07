@@ -1,9 +1,10 @@
 # Cloudflare-first PostgreSQL API PoC
 
-Status (2026-11-07): P0 implementation and local regressions are complete. Cloudflare CLI
-authentication was verified read-only; no Worker, Hyperdrive config, database, or other remote
-resource has been created. Remote deployment is blocked because Agent D's PR #139 reports no live
-Neon/Supabase test database or connection yet. No CPU, latency, or billing data has been measured.
+Status (2026-11-07): P0 implementation, local regressions, and the remote smoke runner are prepared.
+Cloudflare CLI authentication was verified read-only; no Worker, Hyperdrive config, database, or
+other remote resource has been created. Remote deployment is blocked because Agent D's PR #139
+reports no live Neon/Supabase test database or connection yet. No CPU, latency, or billing data has
+been measured.
 
 ## CTO architecture decision
 
@@ -138,6 +139,7 @@ providers solely to avoid a quota that has not been reached.
 | ESLint on changed TypeScript files                         | Pass.                                                                       |
 | Prettier on changed TypeScript/JSONC/Markdown files        | Pass.                                                                       |
 | `pnpm --filter @ember/api build:worker` (Wrangler dry-run) | Pass — 1,323.88 KiB upload / 236.75 KiB gzip; no cloud deployment occurred. |
+| Cloudflare remote smoke runner                             | Prepared; Node syntax/help checks pass. No live endpoint was exercised.     |
 
 | Evidence                                                                                                                                                  | Result                                                                                                                                                                                                                                                                    |
 | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |

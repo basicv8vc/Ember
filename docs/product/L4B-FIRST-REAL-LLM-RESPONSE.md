@@ -443,6 +443,11 @@ no-clobber install semantics. It fails identically on `main`.
 Nothing in this branch is covered only by a failing or skipped test: the 9 mock-provider cases, the
 22 guard cases, the 19 smoke-gate cases and the +9 gateway/responder cases all pass.
 
+Only documentation changed after `b23726e`, so the numbers above are still the branch's numbers.
+Re-run at the PR tip to say so out loud: the four branch-owned unit files are **121 / 121**
+(`model-gateway` 48, `model-authorization` 22, `model-turn-responder` 32, `model-smoke-gate` 19) and
+`b2-mock-provider` is **9 / 9**.
+
 ---
 
 ## 9. Known limits, stated rather than hidden

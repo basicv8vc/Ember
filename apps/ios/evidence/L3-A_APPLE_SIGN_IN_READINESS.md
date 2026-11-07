@@ -24,8 +24,8 @@
 - 实体设备构建：退出码 65。登录后对 Team `9RN3YNYN27` 执行 `xcodebuild -allowProvisioningUpdates -allowProvisioningDeviceRegistration`，Xcode 报 `com.basicv8vc.ember` 不能注册到该 Team（Bundle ID 当前不可用），并报告通配 profile 不含 Sign in with Apple capability/entitlement。没有生成可安装的签名产物。
 - XR 已连接、解锁且可用，但尚未安装 App。失败发生在 Apple Developer 自动签名/App ID 阶段；没有运行真实 Apple ID 系统授权。
 - 本机模拟器构建：退出码 65，因启动卷空间不足，Xcode 无法写入 build database。
-- GitHub Actions iOS L2 Validation（run `42230975104`）：构建 App 与两个测试 bundle、iOS Unit Tests、iOS UI Tests 均通过；截图 XCResult artifact 步骤通过。该截图属于 CI 模拟器，不是真机证据。完整结果：[iOS CI run](https://github.com/basicv8vc/Ember/actions/runs/42230975104)。
-- GitHub Actions Verify（Node 24 LTS + PostgreSQL 17，run `42230974944`）：lint、格式、typecheck、unit、build、迁移、PostgreSQL integration/chaos、HTTP/E2E 和 Demo CLI 均通过。完整结果：[后端 CI run](https://github.com/basicv8vc/Ember/actions/runs/42230974944)。
+- GitHub Actions 在被测代码 SHA `82725ec8caec924ce16750d9ce3939e0ded5a916` 上通过：iOS L2 Validation（run `42232185080`，App 与两个测试 bundle 构建、Unit/UI Tests、XCResult 截图步骤）和 Verify（run `42232185056`，lint、格式、typecheck、unit、build、迁移、PostgreSQL integration/chaos、HTTP/E2E、Demo CLI）。CI 截图是模拟器证据，不是真机证据。
+- 文档更新提交 SHA `8119934035f852b825911e417fc3fdbbe64b9c5c` 的自动 CI run `42356171389`（iOS）与 `42356171423`（backend）在 runner 启动前被 GitHub 拒绝：账号近期付款失败或 spending limit 需提高；jobs 没有执行任何 step。需仓库/组织账单管理员处理付款或额度后重跑，不能把它当作代码测试结果。
 - 未安装本分支 App，未运行真实 Apple ID 系统授权、Cloud Session、Keychain 持久化或 Logout；没有启用 Fake Model。
 - 脱敏真机截图：未采集。当前没有签名构建可安装；CI 模拟器截图不作为本分支真机证据。
 

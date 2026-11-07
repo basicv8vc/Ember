@@ -413,17 +413,18 @@ is replaced, and the database is real PostgreSQL 17.
 
 ### 8.3 The run
 
-Measured on `b23726e7fc5b815fdae9306f832b798492d7d7fd` (the commit this PR points at), in this
-container, with PostgreSQL 17 reachable at `127.0.0.1:55432`.
+Measured in this container on the tip of this branch, with PostgreSQL 17 reachable at
+`127.0.0.1:55432`. The exact commit is recorded in the PR description rather than here, so this
+table cannot go stale when a later commit touches only prose.
 
-| Command                         | Result                                                                | Verdict                           |
-| ------------------------------- | --------------------------------------------------------------------- | --------------------------------- |
-| `pnpm typecheck`                | clean                                                                 | —                                 |
-| ESLint                          | clean on `apps`, `tests`, `infra`, root files and each package        | see the note below                |
-| `pnpm test:unit`                | `86 files`: 84 passed, 2 failed; **1 539 passed / 2 failed of 1 541** | the 2 are pre-existing, see below |
-| `pnpm test:integration`         | `48 files`: 46 passed, 2 failed; **553 passed / 2 failed of 555**     | the 2 are pre-existing, see below |
-| `b2-mock-provider.test.ts`      | **9 / 9**                                                             | this branch's paid-path suite     |
-| `b2-model-turn-runtime.test.ts` | **26 / 26**                                                           | B2 runtime, unchanged contract    |
+| Command                         | Result                                                                | Verdict                            |
+| ------------------------------- | --------------------------------------------------------------------- | ---------------------------------- |
+| `pnpm typecheck`                | clean                                                                 | —                                  |
+| ESLint                          | clean on `apps`, `tests`, `infra`, root files and each package        | see the note below                 |
+| `pnpm test:unit`                | `86 files`: 84 passed, 2 failed; **1 539 passed / 2 failed of 1 541** | the 2 are pre-existing, see below  |
+| `pnpm test:integration`         | `48 files`: 45 passed, 3 failed; **552 passed / 3 failed of 555**     | the 3 are environmental, see below |
+| `b2-mock-provider.test.ts`      | **9 / 9**                                                             | this branch's paid-path suite      |
+| `b2-model-turn-runtime.test.ts` | **26 / 26**                                                           | B2 runtime, unchanged contract     |
 
 **About `pnpm lint`.** A single `eslint .` cannot finish in this container: it aborts with
 `Error: write EPIPE` inside the host's `broker-ipc-client`, which is the same class of sandbox
@@ -434,15 +435,17 @@ fixed before this commit: `String()` on an `unknown` column in the smoke CLI (wh
 printed `[object Object]` into an evidence file), and `@ember/model-gateway` missing from
 `apps/cli/tsconfig.json` and `apps/cli/package.json`.
 
-Four failures, zero of them caused by this branch. Each was reproduced on a clean `main@db9fab1`
-checkout in the same container, with the same commands and the same database:
+Five failures in total, zero of them caused by this branch. Four reproduce on a clean `main@db9fab1`
+checkout in the same container, with the same commands and the same database; the fifth is a
+30-second timeout that passes when the file is run alone.
 
 | Test                                                              | Failure                                                                                     | Cause                                                             |
 | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------------------------------- |
-| `tests/unit/test-registration-guard.test.ts`                      | 7 003 ms timeout while scanning the suite                                                   | slow scan, wall-clock                                             |
-| `tests/unit/local-blob-store.test.ts`                             | "idempotent for concurrent installations"                                                   | timing-sensitive concurrency assertion                            |
+| `tests/unit/test-registration-guard.test.ts`                      | a 5 000 ms per-test timeout while scanning the suite                                        | slow scan, wall-clock                                             |
+| `tests/unit/local-blob-store.test.ts`                             | "idempotent for concurrent installations" — `Brokered link refused …`                       | the same `fs` shim, same `link()` call                            |
 | `tests/integration/http-task-sse.test.ts` → SIGTERM               | `API process did not log "message":"api listening"; API stdout: ; API stderr:`              | the spawned API child writes nothing under this sandbox           |
 | `tests/integration/result-commit.test.ts` → 24 concurrent commits | `Brokered link refused because the resolved path could not be revalidated before execution` | the host's `fs` shim refuses `link()` in `LocalBlobStore.install` |
+| `tests/integration/benchmark-smoke.test.ts` → CLI entry point     | `Test timed out in 30000ms` under 48 parallel workers                                       | spawn-heavy test; passes alone in 15 s                            |
 
 The last one is worth naming precisely because it is the most alarming to read: it is not Ember's
 committer failing, it is the sandbox's brokered filesystem refusing a hardlink that
@@ -452,10 +455,9 @@ no-clobber install semantics. It fails identically on `main`.
 Nothing in this branch is covered only by a failing or skipped test: the 9 mock-provider cases, the
 22 guard cases, the 19 smoke-gate cases and the +9 gateway/responder cases all pass.
 
-Only documentation changed after `b23726e`, so the numbers above are still the branch's numbers.
-Re-run at the PR tip to say so out loud: the four branch-owned unit files are **121 / 121**
-(`model-gateway` 48, `model-authorization` 22, `model-turn-responder` 32, `model-smoke-gate` 19) and
-`b2-mock-provider` is **9 / 9**.
+Two of the four failures are the same sandbox bug wearing different clothes: the brokered `fs` shim
+refuses `link()`, and both `LocalBlobStore.install`'s no-clobber path and the 24-way concurrent
+commit go through it. Neither is Ember misbehaving.
 
 ---
 

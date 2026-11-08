@@ -55,7 +55,7 @@ The PR #138 full integration suite has four stale assertions expecting 16 migrat
 
 ## P2 — Cloudflare Hyperdrive
 
-Wrangler authentication is available. A temporary Neon Hyperdrive config was created with caching disabled and the Free default origin limit of 20; a temporary diagnostic Worker was deployed under Workers Free. Neither project credentials nor the connection URL are in source. The repo's PR #138 placeholder config was not modified. Hyperdrive is included in Workers Free; the Free plan limit is 100,000 database statements/day.
+Wrangler authentication is available. A temporary Neon Hyperdrive config was created with caching disabled and the Free default origin limit of 20; a temporary diagnostic Worker was deployed under Workers Free. Neither project credentials nor the connection URL are in source. The repo's PR #138 placeholder config was not modified. The temporary Worker and Hyperdrive config were deleted after testing. Hyperdrive is included in Workers Free; the Free plan limit is 100,000 database statements/day.
 
 For each provider, use the **direct/unpooled** database URL as the Hyperdrive origin. Cloudflare's provider guides recommend direct PostgreSQL URLs for both Neon and Supabase, because Hyperdrive supplies the connection pool. Hyperdrive transaction-pools and does not support session-level advisory locks; keep migrations on a separate direct connection. The Neon migrator lock was verified on direct connections, never through Hyperdrive.
 

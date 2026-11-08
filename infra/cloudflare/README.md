@@ -5,8 +5,10 @@ It does not create resources, alter DNS, or run migrations. PR #138 must remain 
 
 ## Deployment configuration
 
-`apps/api/wrangler.jsonc` is the source of truth for Worker name, `workers.dev`, CPU ceiling, and
-non-secret Apple verifier settings. It currently contains an all-zero Hyperdrive ID placeholder.
+`apps/api/wrangler.jsonc` is the source of truth for Worker name, `workers.dev`, and non-secret Apple
+verifier settings. It currently contains an all-zero Hyperdrive ID placeholder. The config leaves
+`limits.cpu_ms` unset: Workers Free uses its 10 ms CPU default, while an explicit limit was rejected
+by Cloudflare with error 100328 in the prior Free-plan probe.
 After the authorized test database is available, create exactly one Hyperdrive config and replace
 that placeholder with its ID before deployment. The test config must use the PG17 runtime role
 `ember_worker`, a direct/unpooled PostgreSQL origin connection, and disabled query caching.

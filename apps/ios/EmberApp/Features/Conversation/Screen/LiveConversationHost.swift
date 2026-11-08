@@ -8,6 +8,7 @@ final class LiveConversationHostModel {
     private let repository: LiveConversationRepository
     private let auth: LiveAuthSessionCoordinator
     private var pollTask: Task<Void, Never>?
+    private var currentPollSessionID = UUID()
 
     private(set) var profile: EmberMeDTO?
     private(set) var snapshot: ConversationSnapshot?
@@ -45,7 +46,10 @@ final class LiveConversationHostModel {
                     reply = .failed(message: "The previous message was rejected. Review before sending again.", retryable: false)
                     status = "The rejected message will not be sent automatically."
                 }
-                if try await repository.activeTurn() != nil { beginPolling() }
+                if try await repository.activeTurn() != nil {
+                    reply = .generating
+                    beginPolling()
+                }
             } catch {
                 command = .unknownAcknowledgement
                 reply = .failed(
@@ -85,8 +89,13 @@ final class LiveConversationHostModel {
         isSigningOut = true
         defer { isSigningOut = false }
 
-        pollTask?.cancel()
+        let previousTask = pollTask
+        previousTask?.cancel()
         pollTask = nil
+        currentPollSessionID = UUID()
+        if let previousTask {
+            _ = await previousTask.value
+        }
 
         switch await auth.logout() {
         case .revokedRemotely, .alreadyInvalidated:
@@ -153,7 +162,10 @@ final class LiveConversationHostModel {
                 }
             } else {
                 snapshot = try await repository.load()
-                if try await repository.activeTurn() != nil { beginPolling() }
+                if try await repository.activeTurn() != nil {
+                    reply = .generating
+                    beginPolling()
+                }
             }
         } catch {
             reply = .failed(message: "Could not confirm the previous send. Try again later.", retryable: true)
@@ -163,8 +175,13 @@ final class LiveConversationHostModel {
 
     func stop() async {
         guard !isSubmitting else { return }
-        pollTask?.cancel()
+        let previousTask = pollTask
+        previousTask?.cancel()
         pollTask = nil
+        currentPollSessionID = UUID()
+        if let previousTask {
+            _ = await previousTask.value
+        }
 
         do {
             let result = try await repository.cancelActiveTurn()
@@ -225,28 +242,47 @@ final class LiveConversationHostModel {
     }
 
     private func beginPolling() {
-        pollTask?.cancel()
+        guard !requiresSignIn else { return }
+        let previousTask = pollTask
+        previousTask?.cancel()
+        pollTask = nil
+
+        let sessionID = UUID()
+        currentPollSessionID = sessionID
+
         pollTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
+            if let previousTask {
+                _ = await previousTask.value
+            }
+            guard let self, currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+            while !Task.isCancelled && !requiresSignIn {
                 do {
                     guard let turn = try await repository.pollActiveTurn() else {
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         reply = .idle
                         return
                     }
+                    guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     switch turn.status {
-                    case .running: reply = .generating
+                    case .running:
+                        reply = .generating
                     case .completed:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .idle
                         status = "Completed by Ember Cloud."
                         return
                     case .failed:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .failed(message: "Cloud turn failed.", retryable: false)
                         return
                     case .cancelled:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .idle
                         status = "Turn cancelled."
                         return
@@ -254,7 +290,7 @@ final class LiveConversationHostModel {
                 } catch is CancellationError {
                     return
                 } catch {
-                    guard !Task.isCancelled else { return }
+                    guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     reply = .failed(message: "Cloud connection lost. Resume polling when online.", retryable: true)
                     return
                 }

@@ -51,7 +51,7 @@ The growth point intentionally models always-on Neon compute to make a scale com
 
 ### Neon lease-claim concurrency diagnostic
 
-`scripts/neon-claim-diagnostic.ts` reproduces the original 16+16 test twice with queue pools of 32 and 2, then runs a single-pool matrix of max pool sizes 2/8/16/32 at concurrency 16/32. It creates 10 temporary schemas and submits 256 synthetic claim attempts in total, without a sustained load phase. The reproduction uses a 5-second statement timeout from the prior probe; the matrix uses the repository default of 10 seconds. Both use the repository's 5-second connection-acquire timeout.
+PR #135 records 18/32 successful claims and 14 timeouts in the earlier Neon run; the exact SQL diagnostics were not retained. The pool-wait hypothesis is therefore unconfirmed. `scripts/neon-claim-diagnostic.ts` reproduces the original 16+16 test twice with queue pools of 32 and 2, then runs a single-pool matrix of max pool sizes 2/8/16/32 at concurrency 16/32. It creates 10 temporary schemas and submits 256 synthetic claim attempts in total, without a sustained load phase. The reproduction uses a 5-second statement timeout from the prior probe; the matrix uses the repository default of 10 seconds. Both use the repository's 5-second connection-acquire timeout.
 
 The runner accepts only the direct, unpooled Neon `ember_test_owner` URL for database `ember_test`. Store it in a mode-600 temporary environment file outside the checkout, then invoke:
 
@@ -108,6 +108,8 @@ For each provider, preserve the output with the exact commit SHA, region, endpoi
 PR #135 records real disposable Workers → Hyperdrive → Neon and Supabase probes, including TLS, transaction-level advisory locks, origin-pool behavior, and idle recovery. The temporary Workers and Hyperdrive configs were removed after testing. These provider probes do not substitute for a deploy of the current API adapter in PR #138. Agent C should configure one uncached Hyperdrive origin with the direct `ember_worker` URL, deploy only on Workers Free, and run the no-secret preflight as soon as the rotated owner connection is safely available and the runtime role is configured. Do not wait for the L4-D concurrency matrix to begin that deployment.
 
 ## Least-privilege outline
+
+Neon-specific constraint: PR #135 confirmed that the Neon administrative role could create `ember_worker` and apply table grants, but Neon rejected the script's explicit `ALTER ROLE ... NOSUPERUSER` with SQLSTATE `42501`. Do not run the generic role-setup script unchanged on Neon. Create a separate login with only the default non-admin attributes (and `NOINHERIT`), grant only the required database/schema/table access, exclude `schema_migrations`, set a bounded statement timeout, then verify role flags and a password-authenticated connection. PR #135's earlier catalog/grant check passed, but `SET ROLE` was denied and the actual runtime login was not tested; L4-D must complete that login check.
 
 1. Create separate migration and runtime roles with the target provider's admin console or administrative SQL session. PR #139's provider-neutral smoke uses `ember_migrator`/`ember_runtime`; the Workers API in PR #138 uses `ember_worker`.
 2. Run [the PostgreSQL role setup SQL](../../infra/postgres/sql/least-privilege-roles.sql) once while connected to the target database. It uses current_database(), creates the private ember schema owned by the migrator, and sets per-database search paths/timeouts.

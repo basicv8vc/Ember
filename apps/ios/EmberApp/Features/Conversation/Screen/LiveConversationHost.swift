@@ -14,6 +14,7 @@ final class LiveConversationHostModel {
     private(set) var isLoading = false
     private(set) var isSubmitting = false
     private(set) var isSigningIn = false
+    private(set) var isSigningOut = false
     private(set) var command: ConversationCommandStatus = .idle
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
@@ -77,6 +78,35 @@ final class LiveConversationHostModel {
         } catch {
             status = "Could not sign in to Live Cloud."
         }
+    }
+
+    func signOut() async {
+        guard !isSigningOut else { return }
+        isSigningOut = true
+        defer { isSigningOut = false }
+
+        pollTask?.cancel()
+        pollTask = nil
+
+        switch await auth.logout() {
+        case .revokedRemotely, .alreadyInvalidated:
+            clearLiveState()
+            status = String(localized: "conversation.live.signed_out", table: "Conversation")
+        case .remoteUnconfirmed:
+            clearLiveState()
+            status = String(localized: "conversation.live.sign_out_unconfirmed", table: "Conversation")
+        case .localCleanupFailed:
+            status = String(localized: "conversation.live.sign_out_local_error", table: "Conversation")
+        }
+    }
+
+    private func clearLiveState() {
+        profile = nil
+        snapshot = nil
+        requiresSignIn = true
+        rejectedDraftText = nil
+        command = .idle
+        reply = .idle
     }
 
     func send(_ text: String) async {
@@ -235,6 +265,7 @@ final class LiveConversationHostModel {
 struct LiveConversationHost: View {
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
+    @State private var isConfirmingSignOut = false
 
     init(model: LiveConversationHostModel) {
         _model = State(initialValue: model)
@@ -260,9 +291,20 @@ struct LiveConversationHost: View {
                 .padding()
             } else {
                 VStack(spacing: 0) {
-                    Text("LIVE CLOUD")
-                        .font(.caption.weight(.semibold))
-                        .accessibilityIdentifier("live-cloud-mode")
+                    HStack {
+                        Text("LIVE CLOUD")
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("live-cloud-mode")
+                        Spacer()
+                        Button {
+                            isConfirmingSignOut = true
+                        } label: {
+                            Text("conversation.live.sign_out", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
+                        .accessibilityIdentifier("live-conversation-sign-out")
+                    }
                     if let status = model.status {
                         Text(status)
                             .font(.caption)
@@ -279,11 +321,30 @@ struct LiveConversationHost: View {
                             },
                             retry: { Task { await model.retry() } },
                             stopGenerating: { Task { await model.stop() } },
-                            selectPrompt: { draft = $0 }))
+                            selectPrompt: { draft = $0 }),
+                        composerNote: "conversation.composer.cloud_note")
                 }
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .alert(
+            Text("conversation.live.sign_out_confirm_title", tableName: "Conversation"),
+            isPresented: $isConfirmingSignOut
+        ) {
+            Button(role: .cancel) {} label: {
+                Text("conversation.live.cancel", tableName: "Conversation")
+            }
+            Button(role: .destructive) {
+                Task {
+                    await model.signOut()
+                    if model.requiresSignIn { draft = "" }
+                }
+            } label: {
+                Text("conversation.live.sign_out", tableName: "Conversation")
+            }
+        } message: {
+            Text("conversation.live.sign_out_confirm_message", tableName: "Conversation")
+        }
         .task { await model.start() }
         .onChange(of: model.rejectedDraftText) { _, rejected in
             // Do not overwrite user edits. Only an explicit Send may create a fresh ID.

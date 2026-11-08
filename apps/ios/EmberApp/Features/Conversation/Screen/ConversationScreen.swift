@@ -4,6 +4,7 @@ struct ConversationScreen: View {
     let state: ConversationScreenState
     @Binding var draft: String
     let actions: ConversationScreenActions
+    var composerNote: LocalizedStringKey = "conversation.composer.local_note"
 
     @FocusState private var composerIsFocused: Bool
 
@@ -39,6 +40,7 @@ struct ConversationScreen: View {
                 draft: $draft,
                 focused: $composerIsFocused,
                 isGenerating: isGenerating,
+                note: composerNote,
                 onSend: actions.send
             )
         }

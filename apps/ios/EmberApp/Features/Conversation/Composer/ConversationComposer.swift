@@ -4,6 +4,7 @@ struct ConversationComposer: View {
     @Binding var draft: String
     var focused: FocusState<Bool>.Binding
     let isGenerating: Bool
+    var note: LocalizedStringKey = "conversation.composer.local_note"
     let onSend: (String) -> Void
 
     private var submission: ConversationComposerSubmission? {
@@ -31,7 +32,7 @@ struct ConversationComposer: View {
             .accessibilityIdentifier("conversation-composer-input")
 
             HStack(alignment: .center, spacing: 12) {
-                Text("conversation.composer.local_note", tableName: "Conversation")
+                Text(note, tableName: "Conversation")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

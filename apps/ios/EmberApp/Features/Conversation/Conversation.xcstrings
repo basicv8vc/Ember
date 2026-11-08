@@ -13,6 +13,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "消息仅保留在本地演示中。" } }
       }
     },
+    "conversation.composer.cloud_note" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sent messages are saved in your Ember Cloud conversation." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已发送的消息会保存在 Ember 云端对话中。" } }
+      }
+    },
     "conversation.composer.placeholder" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Message Ember…" } },
@@ -29,6 +35,48 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Send this message to Ember." } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "将这条消息发送给 Ember。" } }
+      }
+    },
+    "conversation.live.sign_out" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign out" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "退出登录" } }
+      }
+    },
+    "conversation.live.cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "conversation.live.sign_out_confirm_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign out of Ember Cloud?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要退出 Ember 云端登录吗？" } }
+      }
+    },
+    "conversation.live.sign_out_confirm_message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your conversation will stay in Ember Cloud. This device's session will be cleared." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对话会保留在 Ember 云端，此设备上的登录会话将被清除。" } }
+      }
+    },
+    "conversation.live.signed_out" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Signed out. Sign in again with Apple to continue." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已退出登录。请重新使用 Apple 登录。" } }
+      }
+    },
+    "conversation.live.sign_out_unconfirmed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This device is signed out, but Cloud revocation could not be confirmed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此设备已退出登录，但无法确认云端会话是否撤销。" } }
+      }
+    },
+    "conversation.live.sign_out_local_error" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not clear this device's session. Try again before continuing." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法清除此设备的登录会话，请重试后再继续。" } }
       }
     },
     "conversation.activity.commitment" : {

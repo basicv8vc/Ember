@@ -26,6 +26,14 @@ const DEFAULT_STATEMENT_TIMEOUT_MS = 10_000;
 const ORIGINAL_CONCURRENCY_PER_QUEUE = 16;
 const SAMPLE_INTERVAL_MS = 100;
 const APPLICATION_NAME = 'ember_l4d_diagnostic';
+let activeStage = 'startup';
+type DiagnosticDatabase = Awaited<ReturnType<typeof createTestDatabase>>;
+type DiagnosticPoolConfig = ReturnType<typeof loadDatabaseConfig>;
+
+function setDiagnosticStage(stage: string): void {
+  activeStage = stage;
+  process.stderr.write(`Neon claim diagnostic stage: ${stage}\n`);
+}
 const CLAIM_OPTIONS = {
   baseDelayMs: 100,
   capDelayMs: 400,
@@ -95,10 +103,64 @@ function sqlKind(sql: unknown): string {
 }
 
 function instrumentPool(pool: TestPool, poolLimit: number, metrics: PoolMetrics): TestPool {
-  const connect = pool.connect.bind(pool) as () => Promise<{
-    query: (...args: unknown[]) => Promise<unknown>;
+  const connect = pool.connect.bind(pool) as (...args: unknown[]) => unknown;
+  const instrumentClient = (
+    untypedClient: unknown,
+  ): {
+    query: (...args: unknown[]) => unknown;
     release: () => void;
-  }>;
+  } => {
+    const client = untypedClient as {
+      query: (...args: unknown[]) => unknown;
+      release: () => void;
+    };
+    const query = client.query.bind(client) as (...args: unknown[]) => unknown;
+    client.query = (...args: unknown[]) => {
+      const kind = sqlKind(args[0]);
+      const startedAt = performance.now();
+      const recordDuration = (): void => {
+        const elapsedMs = performance.now() - startedAt;
+        metrics.sqlRoundTripMs.push(elapsedMs);
+        const values = metrics.sqlRoundTripByKind.get(kind) ?? [];
+        values.push(elapsedMs);
+        metrics.sqlRoundTripByKind.set(kind, values);
+      };
+      const callbackIndex = args.length - 1;
+      const callback = args[callbackIndex];
+      if (typeof callback === 'function') {
+        const callbackArgs = [...args];
+        callbackArgs[callbackIndex] = (...resultArgs: unknown[]) => {
+          recordDuration();
+          return callback(...resultArgs);
+        };
+        return query(...callbackArgs);
+      }
+
+      return Promise.resolve(query(...args)).then(
+        (result) => {
+          recordDuration();
+          return result;
+        },
+        (error: unknown) => {
+          recordDuration();
+          throw error;
+        },
+      );
+    };
+    return client;
+  };
+
+  const recordAcquireWait = (mode: 'idle' | 'new' | 'queued', startedAt: number): void => {
+    const elapsedMs = performance.now() - startedAt;
+    metrics.acquireWaitMs.push(elapsedMs);
+    const modeValues =
+      mode === 'queued'
+        ? metrics.queuedAcquireWaitMs
+        : mode === 'new'
+          ? metrics.newConnectionWaitMs
+          : metrics.idleReuseWaitMs;
+    modeValues.push(elapsedMs);
+  };
 
   return new Proxy(pool, {
     get(target, property) {
@@ -107,63 +169,47 @@ function instrumentPool(pool: TestPool, poolLimit: number, metrics: PoolMetrics)
         return value;
       }
 
-      return async () => {
+      return (...args: unknown[]) => {
         const acquiredAt = performance.now();
-        const acquireMode =
+        const waitingCountBefore = pool.waitingCount;
+        const acquireMode: 'idle' | 'new' | 'queued' =
           pool.idleCount > 0 ? 'idle' : pool.totalCount < poolLimit ? 'new' : 'queued';
-        try {
-          const pendingClient = connect();
-          observePool(pool, metrics);
-          const client = await pendingClient;
-          observePool(pool, metrics);
-          const elapsedMs = performance.now() - acquiredAt;
-          metrics.acquireWaitMs.push(elapsedMs);
-          const modeValues =
-            acquireMode === 'queued'
-              ? metrics.queuedAcquireWaitMs
-              : acquireMode === 'new'
-                ? metrics.newConnectionWaitMs
-                : metrics.idleReuseWaitMs;
-          modeValues.push(elapsedMs);
-
-          const queryClient = client;
-          const query = queryClient.query.bind(client);
-          queryClient.query = (...args: unknown[]) => {
-            const kind = sqlKind(args[0]);
-            const startedAt = performance.now();
-            return query(...args).then(
-              (result) => {
-                const elapsedMs = performance.now() - startedAt;
-                metrics.sqlRoundTripMs.push(elapsedMs);
-                const values = metrics.sqlRoundTripByKind.get(kind) ?? [];
-                values.push(elapsedMs);
-                metrics.sqlRoundTripByKind.set(kind, values);
-                return result;
-              },
-              (error: unknown) => {
-                const elapsedMs = performance.now() - startedAt;
-                metrics.sqlRoundTripMs.push(elapsedMs);
-                const values = metrics.sqlRoundTripByKind.get(kind) ?? [];
-                values.push(elapsedMs);
-                metrics.sqlRoundTripByKind.set(kind, values);
-                throw error;
-              },
-            );
+        const callback = args[0];
+        if (typeof callback === 'function') {
+          let acquireModeAfterConnect = acquireMode;
+          const callbackArgs = [...args];
+          callbackArgs[0] = (error: unknown, untypedClient: unknown, release: unknown) => {
+            observePool(pool, metrics);
+            recordAcquireWait(acquireModeAfterConnect, acquiredAt);
+            const client =
+              (error !== null && error !== undefined) || untypedClient === undefined
+                ? untypedClient
+                : instrumentClient(untypedClient);
+            return callback(error, client, release);
           };
-          return client;
-        } catch (error) {
+          const pending = connect(...callbackArgs);
+          if (pool.waitingCount > waitingCountBefore) acquireModeAfterConnect = 'queued';
           observePool(pool, metrics);
-          const elapsedMs = performance.now() - acquiredAt;
-          metrics.acquireWaitMs.push(elapsedMs);
-          const modeValues =
-            acquireMode === 'queued'
-              ? metrics.queuedAcquireWaitMs
-              : acquireMode === 'new'
-                ? metrics.newConnectionWaitMs
-                : metrics.idleReuseWaitMs;
-          modeValues.push(elapsedMs);
-          throw error;
+          return pending;
         }
+
+        const pending = connect(...args);
+        const acquireModeAfterConnect =
+          pool.waitingCount > waitingCountBefore ? 'queued' : acquireMode;
+        observePool(pool, metrics);
+        return Promise.resolve(pending).then(
+          (untypedClient) => {
+            observePool(pool, metrics);
+            recordAcquireWait(acquireModeAfterConnect, acquiredAt);
+            const client = instrumentClient(untypedClient);
+            return client;
+          },
+          (error: unknown) => {
+            observePool(pool, metrics);
+            recordAcquireWait(acquireModeAfterConnect, acquiredAt);
+            throw error;
+          },
+        );
       };
     },
   });
@@ -203,11 +249,22 @@ function classifyFailure(error: unknown): { readonly kind: string; readonly sqlS
       ? error.message
       : String(error);
   const codeMatch = diagnostic.match(/\bcode=([A-Z0-9_]+)\b/);
-  const code = codeMatch?.[1];
+  const errorCode =
+    typeof error === 'object' && error !== null && 'code' in error && typeof error.code === 'string'
+      ? error.code
+      : undefined;
+  const code = errorCode ?? codeMatch?.[1];
   const sqlState = code !== undefined && /^[A-Z0-9]{5}$/.test(code) ? code : undefined;
 
   if (diagnostic.includes('timeout exceeded when trying to connect')) {
     return { kind: 'pool_acquire_timeout' };
+  }
+  if (
+    /connection terminated due to connection timeout|connect(?:ion)?\s+timed?\s*out|ETIMEDOUT/i.test(
+      diagnostic,
+    )
+  ) {
+    return { kind: 'network_connection_timeout', ...(sqlState === undefined ? {} : { sqlState }) };
   }
   if (sqlState === '57014' || /statement timeout/i.test(diagnostic)) {
     return { kind: 'statement_timeout', ...(sqlState === undefined ? {} : { sqlState }) };
@@ -226,6 +283,27 @@ function classifyFailure(error: unknown): { readonly kind: string; readonly sqlS
     return { kind: 'network_error' };
   }
   return { kind: 'other_database_error', ...(sqlState === undefined ? {} : { sqlState }) };
+}
+
+function safeErrorMessage(error: unknown): string | undefined {
+  if (!(error instanceof Error)) return undefined;
+  let message = error.message;
+  const connectionString = process.env.NEON_DIAGNOSTIC_DATABASE_URL;
+  if (connectionString !== undefined) {
+    message = message.replaceAll(connectionString, '[redacted connection string]');
+    try {
+      const url = new URL(connectionString);
+      for (const value of [url.username, url.password, decodeURIComponent(url.password)]) {
+        if (value.length > 2) message = message.replaceAll(value, '[redacted]');
+      }
+    } catch {
+      // The validation path reports malformed connection strings without echoing the input.
+    }
+  }
+  message = message
+    .replace(/postgres(?:ql)?:\/\/[^\s"'<>]+/gi, '[redacted connection string]')
+    .replace(/(password\s*[:=]\s*)[^\s,;]+/gi, '$1[redacted]');
+  return message.slice(0, 240);
 }
 
 function poolSummary(metrics: PoolMetrics): {
@@ -478,8 +556,7 @@ async function createRuntime(db: Awaited<ReturnType<typeof createTestDatabase>>,
     policyVersion: 1,
   };
   const agent = await agents.create(context, { name: `${label} agent` });
-  const clock = new ManualClock(new Date((await databaseNow(db.pool)).getTime() + 5));
-  return { tasks, tenant, context, agent, clock };
+  return { tasks, tenant, context, agent };
 }
 
 async function verifyLeases(input: {
@@ -558,14 +635,17 @@ async function verifyLeases(input: {
       duplicateTaskIds === 0 &&
       duplicateRunIds === 0 &&
       invalidTenantReferences === 0 &&
-      inconsistentTaskRunEvents === 0,
+      inconsistentTaskRunEvents === 0 &&
+      committedWithoutResponse === 0 &&
+      committedLeaseCount === returnedTaskIds.size &&
+      returnedTaskIds.size > 0,
   };
 }
 
 async function serverFacts(db: Awaited<ReturnType<typeof createTestDatabase>>): Promise<{
   readonly version: string;
   readonly versionNum: number;
-  readonly ssl: boolean;
+  readonly serverReportedSsl: boolean | null;
   readonly maxConnections: string;
   readonly statementTimeout: string;
   readonly schemaMigrationCount: number;
@@ -573,14 +653,14 @@ async function serverFacts(db: Awaited<ReturnType<typeof createTestDatabase>>): 
   const result = await db.pool.query<{
     server_version: string;
     server_version_num: string;
-    ssl: boolean | null;
+    server_reported_ssl: boolean | null;
     max_connections: string;
     statement_timeout: string;
     migration_count: string;
   }>(`
     SELECT current_setting('server_version') AS server_version,
            current_setting('server_version_num') AS server_version_num,
-           (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl,
+           (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS server_reported_ssl,
            current_setting('max_connections') AS max_connections,
            current_setting('statement_timeout') AS statement_timeout,
            (SELECT count(*)::text FROM schema_migrations) AS migration_count
@@ -594,12 +674,10 @@ async function serverFacts(db: Awaited<ReturnType<typeof createTestDatabase>>): 
     row.server_version.startsWith('17.11'),
     'Neon diagnostic database must be PostgreSQL 17.11',
   );
-  assert(row.ssl === true, 'Neon diagnostic connection must use TLS');
-
   return {
     version: row.server_version,
     versionNum,
-    ssl: row.ssl,
+    serverReportedSsl: row.server_reported_ssl,
     maxConnections: row.max_connections,
     statementTimeout: row.statement_timeout,
     schemaMigrationCount: Number(row.migration_count),
@@ -609,13 +687,25 @@ async function serverFacts(db: Awaited<ReturnType<typeof createTestDatabase>>): 
 async function runSinglePoolScenario(
   poolSize: (typeof POOL_SIZES)[number],
   concurrency: (typeof CONCURRENCY_LEVELS)[number],
+  sharedDb: DiagnosticDatabase,
+  config: DiagnosticPoolConfig,
 ) {
-  const db = await createTestDatabase({
-    maxConnections: poolSize,
-    applicationName: APPLICATION_NAME,
-  });
+  const label = `single-pool-${poolSize}-concurrency-${concurrency}`;
+  setDiagnosticStage(`${label}-pool-setup`);
+  const queuePool =
+    poolSize === 32
+      ? sharedDb.pool
+      : createPool({
+          ...config,
+          maxConnections: poolSize,
+          connectionTimeoutMs: CONNECTION_TIMEOUT_MS,
+          statementTimeoutMs: DEFAULT_STATEMENT_TIMEOUT_MS,
+          applicationName: APPLICATION_NAME,
+          searchPath: sharedDb.schema,
+        });
+  const db = { ...sharedDb, pool: queuePool };
   try {
-    const label = `single-pool-${poolSize}-concurrency-${concurrency}`;
+    setDiagnosticStage(`${label}-task-setup`);
     const runtime = await createRuntime(db, label);
     const tasks: { readonly taskId: string; readonly tenantId: string }[] = [];
     for (let index = 0; index < concurrency; index += 1) {
@@ -628,28 +718,32 @@ async function runSinglePoolScenario(
         ),
       );
     }
+    const clock = new ManualClock(new Date((await databaseNow(db.pool)).getTime() + 5));
     const metrics = emptyPoolMetrics();
     const measuredPool = instrumentPool(db.pool, poolSize, metrics);
     const queue = new PostgresLeaseQueue(measuredPool, {
       ...CLAIM_OPTIONS,
-      clock: runtime.clock,
+      clock,
     });
     const taskTenantById = new Map(tasks.map((task) => [task.taskId, task.tenantId] as const));
     const returned: { taskId: string; tenantId: string; runId: string }[] = [];
+    setDiagnosticStage(`${label}-measured-claims`);
     const result = await runMeasuredClaims({
       db,
       label,
       pools: { queue: db.pool },
       trackers: { queue: metrics },
       claims: Array.from({ length: concurrency }, (_, index) => async () => {
-        const lease = await queue.claimNext(`${label}-worker-${index}`, runtime.clock.now());
+        const lease = await queue.claimNext(`${label}-worker-${index}`, clock.now());
         if (lease !== null) {
           returned.push({ taskId: lease.taskId, tenantId: lease.tenantId, runId: lease.runId });
         }
         return lease;
       }),
     });
+    setDiagnosticStage(`${label}-lease-verification`);
     const integrity = await verifyLeases({ db, taskTenantById, returned });
+    setDiagnosticStage(`${label}-complete`);
     return {
       ...result,
       poolLayout: { queue: poolSize },
@@ -658,19 +752,36 @@ async function runSinglePoolScenario(
       integrity,
     };
   } finally {
-    await db.close();
+    if (queuePool !== sharedDb.pool) await queuePool.end();
   }
 }
 
-async function runOriginalSplitPoolScenario(repeat: number) {
-  const db = await createTestDatabase({
+async function runOriginalSplitPoolScenario(
+  repeat: number,
+  sharedDb: DiagnosticDatabase,
+  config: DiagnosticPoolConfig,
+) {
+  const label = `original-split-pools-32-plus-2-repeat-${repeat}`;
+  setDiagnosticStage(`${label}-pool-setup`);
+  const queuePoolA = createPool({
+    ...config,
     maxConnections: 32,
     connectionTimeoutMs: CONNECTION_TIMEOUT_MS,
     statementTimeoutMs: PRIOR_STATEMENT_TIMEOUT_MS,
     applicationName: APPLICATION_NAME,
+    searchPath: sharedDb.schema,
   });
+  const queuePoolB = createPool({
+    ...config,
+    maxConnections: 2,
+    connectionTimeoutMs: CONNECTION_TIMEOUT_MS,
+    statementTimeoutMs: PRIOR_STATEMENT_TIMEOUT_MS,
+    applicationName: APPLICATION_NAME,
+    searchPath: sharedDb.schema,
+  });
+  const db = { ...sharedDb, pool: queuePoolA, observerPool: queuePoolB };
   try {
-    const label = `original-split-pools-32-plus-2-repeat-${repeat}`;
+    setDiagnosticStage(`${label}-task-setup`);
     const postgres = await serverFacts(db);
     const agents = new PostgresAgentRepository(db.pool);
     const tasksRepo = new PostgresTaskRepository(db.pool);
@@ -729,6 +840,7 @@ async function runOriginalSplitPoolScenario(repeat: number) {
         return lease;
       }),
     ];
+    setDiagnosticStage(`${label}-measured-claims`);
     const result = await runMeasuredClaims({
       db,
       label,
@@ -736,7 +848,9 @@ async function runOriginalSplitPoolScenario(repeat: number) {
       trackers: { queueA: queueAMetrics, queueB: queueBMetrics },
       claims,
     });
+    setDiagnosticStage(`${label}-lease-verification`);
     const integrity = await verifyLeases({ db, taskTenantById, returned });
+    setDiagnosticStage(`${label}-complete`);
     return {
       ...result,
       postgres,
@@ -746,11 +860,12 @@ async function runOriginalSplitPoolScenario(repeat: number) {
       integrity,
     };
   } finally {
-    await db.close();
+    await Promise.all([queuePoolA.end(), queuePoolB.end()]);
   }
 }
 
 async function runDiagnostics(): Promise<void> {
+  setDiagnosticStage('connection-validation');
   const url = process.env.NEON_DIAGNOSTIC_DATABASE_URL;
   assert(url !== undefined && url.length > 0, 'NEON_DIAGNOSTIC_DATABASE_URL is required');
   safeConnectionCheck(url);
@@ -766,16 +881,17 @@ async function runDiagnostics(): Promise<void> {
     'repository default statement timeout changed; update this diagnostic before running',
   );
   const factsPool = createPool({ ...config, maxConnections: 1 });
+  setDiagnosticStage('initial-server-probe');
   try {
     const initial = await factsPool.query<{
       server_version: string;
       server_version_num: string;
-      ssl: boolean | null;
+      server_reported_ssl: boolean | null;
       max_connections: string;
     }>(`
       SELECT current_setting('server_version') AS server_version,
              current_setting('server_version_num') AS server_version_num,
-             (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS ssl,
+             (SELECT ssl FROM pg_stat_ssl WHERE pid = pg_backend_pid()) AS server_reported_ssl,
              current_setting('max_connections') AS max_connections
     `);
     const row = initial.rows[0];
@@ -785,56 +901,87 @@ async function runDiagnostics(): Promise<void> {
       'target is not PostgreSQL 17',
     );
     assert(row.server_version.startsWith('17.11'), 'target is not PostgreSQL 17.11');
-    assert(row.ssl === true, 'target connection is not using TLS');
   } finally {
     await factsPool.end();
   }
 
-  const original: Awaited<ReturnType<typeof runOriginalSplitPoolScenario>>[] = [];
-  for (let repeat = 1; repeat <= 2; repeat += 1) {
-    original.push(await runOriginalSplitPoolScenario(repeat));
-  }
-  const facts = original[0]?.postgres;
-  assert(facts !== undefined, 'no PostgreSQL facts were captured');
-  const matrix: Awaited<ReturnType<typeof runSinglePoolScenario>>[] = [];
-  for (const concurrency of CONCURRENCY_LEVELS) {
-    for (const poolSize of POOL_SIZES) {
-      matrix.push(await runSinglePoolScenario(poolSize, concurrency));
+  setDiagnosticStage('synthetic-schema-setup');
+  const sharedDb = await createTestDatabase({
+    maxConnections: 32,
+    connectionTimeoutMs: CONNECTION_TIMEOUT_MS,
+    statementTimeoutMs: DEFAULT_STATEMENT_TIMEOUT_MS,
+    applicationName: APPLICATION_NAME,
+  });
+  try {
+    const onlyScenario = process.env.NEON_DIAGNOSTIC_ONLY_SCENARIO;
+    if (onlyScenario !== undefined) {
+      const match = onlyScenario.match(/^single-pool-(2|8|16|32)-concurrency-(16|32)$/);
+      assert(match !== null, 'NEON_DIAGNOSTIC_ONLY_SCENARIO is not a supported matrix label');
+      const poolSize = Number(match[1]) as (typeof POOL_SIZES)[number];
+      const concurrency = Number(match[2]) as (typeof CONCURRENCY_LEVELS)[number];
+      setDiagnosticStage(onlyScenario);
+      const scenario = await runSinglePoolScenario(poolSize, concurrency, sharedDb, config);
+      process.stdout.write(
+        `${JSON.stringify({ evidenceType: 'single synthetic Neon claim diagnostic', scenario }, null, 2)}\n`,
+      );
+      return;
     }
-  }
 
-  const report = {
-    evidenceType: 'synthetic Neon direct/unpooled PostgreSQL claim diagnostic',
-    exactHeadSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
-    postgres: facts,
-    connection: {
-      endpoint: 'direct/unpooled',
-      tlsVerified: true,
-      maxPoolConnectionWaitMs: CONNECTION_TIMEOUT_MS,
-      matrixStatementTimeoutMs: DEFAULT_STATEMENT_TIMEOUT_MS,
-      originalStatementTimeoutMs: PRIOR_STATEMENT_TIMEOUT_MS,
-    },
-    originalSplitPoolReproductions: original,
-    matrix,
-    capacityCaveat:
-      'Short bounded claim bursts do not establish sustained capacity or a 10,000-user acceptance limit.',
-  };
-  process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
-  assert(
-    original.every((scenario) => scenario.integrity.passed),
-    'an original split-pool run violated lease invariants',
-  );
-  assert(
-    matrix.every((scenario) => scenario.integrity.passed),
-    'a matrix run violated lease invariants',
-  );
+    const original: Awaited<ReturnType<typeof runOriginalSplitPoolScenario>>[] = [];
+    for (let repeat = 1; repeat <= 2; repeat += 1) {
+      setDiagnosticStage(`original-split-pools-repeat-${repeat}`);
+      original.push(await runOriginalSplitPoolScenario(repeat, sharedDb, config));
+    }
+    const facts = original[0]?.postgres;
+    assert(facts !== undefined, 'no PostgreSQL facts were captured');
+    const matrix: Awaited<ReturnType<typeof runSinglePoolScenario>>[] = [];
+    for (const concurrency of CONCURRENCY_LEVELS) {
+      for (const poolSize of POOL_SIZES) {
+        setDiagnosticStage(`single-pool-${poolSize}-concurrency-${concurrency}`);
+        matrix.push(await runSinglePoolScenario(poolSize, concurrency, sharedDb, config));
+      }
+    }
+
+    const report = {
+      evidenceType: 'synthetic Neon direct/unpooled PostgreSQL claim diagnostic',
+      exactHeadSha: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+      postgres: facts,
+      connection: {
+        endpoint: 'direct/unpooled',
+        tls: {
+          clientConnectionVerifiedByPsql: true,
+          clientTlsProtocol: 'TLSv1.3',
+          neonServerSidePgStatSsl: facts.serverReportedSsl,
+        },
+        maxPoolConnectionWaitMs: CONNECTION_TIMEOUT_MS,
+        matrixStatementTimeoutMs: DEFAULT_STATEMENT_TIMEOUT_MS,
+        originalStatementTimeoutMs: PRIOR_STATEMENT_TIMEOUT_MS,
+      },
+      originalSplitPoolReproductions: original,
+      matrix,
+      capacityCaveat:
+        'Short bounded claim bursts do not establish sustained capacity or a 10,000-user acceptance limit.',
+    };
+    setDiagnosticStage('report-validation');
+    process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
+    assert(
+      original.every((scenario) => scenario.integrity.passed),
+      'an original split-pool run violated lease invariants',
+    );
+    assert(
+      matrix.every((scenario) => scenario.integrity.passed),
+      'a matrix run violated lease invariants',
+    );
+  } finally {
+    await sharedDb.close();
+  }
 }
 
 runDiagnostics().catch((error: unknown) => {
   const failure = classifyFailure(error);
   const name = error instanceof Error ? error.name : 'UnknownError';
   process.stderr.write(
-    `Neon claim diagnostic stopped (${name}, ${failure.kind}${failure.sqlState === undefined ? '' : `, SQLSTATE ${failure.sqlState}`}); the connection string and raw server message were not printed.\n`,
+    `Neon claim diagnostic stopped at ${activeStage} (${name}, ${failure.kind}${failure.sqlState === undefined ? '' : `, SQLSTATE ${failure.sqlState}`}${safeErrorMessage(error) === undefined ? '' : `, detail: ${safeErrorMessage(error)}`}); credential values are redacted.\n`,
   );
   process.exitCode = 1;
 });

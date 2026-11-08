@@ -1,6 +1,7 @@
 import { isIP } from 'node:net';
 import { isAbsolute } from 'node:path';
 import { z } from 'zod';
+import { resolveDeploymentProfile } from './deployment.js';
 
 export class ApiConfigError extends Error {
   override readonly name = 'ApiConfigError';
@@ -26,6 +27,8 @@ export interface ApiConfig {
   readonly allowNonLoopbackBind: boolean;
   /** Shared controlled blob root; null keeps Artifact reads fail-closed and unavailable. */
   readonly blobRoot: string | null;
+  /** Development expires overdue Turns on poll; shared APIs leave terminalization to a responder or cancel. */
+  readonly expireTurnsOnRead: boolean;
 }
 
 const LOOPBACK_HOSTNAMES = new Set(['localhost']);
@@ -151,5 +154,6 @@ export function loadApiConfig(env: NodeJS.ProcessEnv = process.env): ApiConfig {
     logLevel: values.EMBER_LOG_LEVEL,
     allowNonLoopbackBind,
     blobRoot,
+    expireTurnsOnRead: resolveDeploymentProfile(env).deployment === 'development',
   };
 }

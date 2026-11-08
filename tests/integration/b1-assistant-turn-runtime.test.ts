@@ -391,6 +391,51 @@ EXECUTE FUNCTION force_one_test_turn_update_failure()`);
     expect(messages[0]?.text).toBe(B1_ASSISTANT_TURN_FAILURE_MESSAGE);
   });
 
+  it('keeps an expired Turn pending on shared API reads when execution is disabled', async () => {
+    const fixture = await createFixture();
+    const sharedApiRepository = new PostgresB1AssistantTurnRepository(db.pool, {
+      expireOnRead: false,
+    });
+    await db.pool.query(
+      "UPDATE assistant_turns SET deadline_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+      [fixture.turnId],
+    );
+
+    const turn = await sharedApiRepository.getTurn(identity(fixture));
+    const messages = await readAssistantMessages(fixture);
+
+    expect(turn).toMatchObject({
+      status: 'running',
+      response_message_id: null,
+      failure_reason: null,
+    });
+    expect(messages).toHaveLength(0);
+
+    // Keep the shared schema's global responder scan isolated for later tests.
+    expect((await sharedApiRepository.cancelTurn(identity(fixture))).status).toBe('cancelled');
+  });
+
+  it('lets explicit shared API cancellation win after the deadline without a timeout reply', async () => {
+    const fixture = await createFixture();
+    const sharedApiRepository = new PostgresB1AssistantTurnRepository(db.pool, {
+      expireOnRead: false,
+    });
+    await db.pool.query(
+      "UPDATE assistant_turns SET deadline_at = clock_timestamp() - interval '1 second' WHERE id = $1",
+      [fixture.turnId],
+    );
+
+    const turn = await sharedApiRepository.cancelTurn(identity(fixture));
+    const messages = await readAssistantMessages(fixture);
+
+    expect(turn).toMatchObject({
+      status: 'cancelled',
+      response_message_id: null,
+      failure_reason: null,
+    });
+    expect(messages).toHaveLength(0);
+  });
+
   it('sweeps an abandoned expired Turn without waiting for its 60-second deadline', async () => {
     const fixture = await createFixture();
     await db.pool.query(

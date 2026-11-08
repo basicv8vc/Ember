@@ -29,6 +29,16 @@ export {
 
 export const B1_ASSISTANT_TURN_BATCH_LIMIT = 100;
 
+export interface PostgresB1AssistantTurnRepositoryOptions {
+  /**
+   * Whether a read of an overdue running Turn should terminalize it as a timeout. Shared APIs
+   * disable this so polling cannot synthesize a reply; worker repositories keep the default
+   * because their responder owns timeout terminalization. With this disabled, an explicit cancel
+   * wins even after the deadline.
+   */
+  readonly expireOnRead?: boolean;
+}
+
 /**
  * B1-5 durable Turn lifecycle repository.
  *
@@ -41,7 +51,14 @@ export const B1_ASSISTANT_TURN_BATCH_LIMIT = 100;
  * here by construction.
  */
 export class PostgresB1AssistantTurnRepository implements B1AssistantTurnRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly expireOnRead: boolean;
+
+  constructor(
+    private readonly pool: pg.Pool,
+    options: PostgresB1AssistantTurnRepositoryOptions = {},
+  ) {
+    this.expireOnRead = options.expireOnRead ?? true;
+  }
 
   async getTurn(command: {
     readonly tenantId: Id;
@@ -57,7 +74,7 @@ export class PostgresB1AssistantTurnRepository implements B1AssistantTurnReposit
         return null;
       }
 
-      if (locked.status === 'running' && (await isExpired(client, locked))) {
+      if (this.expireOnRead && locked.status === 'running' && (await isExpired(client, locked))) {
         return expireTurn(client, identity);
       }
 
@@ -130,7 +147,7 @@ export class PostgresB1AssistantTurnRepository implements B1AssistantTurnReposit
         return toTurnDto(locked);
       }
 
-      if (await isExpired(client, locked)) {
+      if (this.expireOnRead && (await isExpired(client, locked))) {
         return expireTurn(client, identity);
       }
 
@@ -145,9 +162,10 @@ UPDATE assistant_turns t
        updated_at = decision.now
   FROM decision
  WHERE t.tenant_id = $1 AND t.conversation_id = $2 AND t.id = $3
-   AND t.status = 'running' AND t.deadline_at > decision.now
+   AND t.status = 'running'
+   AND ($4::boolean OR t.deadline_at > decision.now)
 RETURNING ${turnColumns('t')}`,
-        [identity.tenantId, identity.conversationId, identity.turnId],
+        [identity.tenantId, identity.conversationId, identity.turnId, !this.expireOnRead],
       );
       const row = updated.rows[0];
 

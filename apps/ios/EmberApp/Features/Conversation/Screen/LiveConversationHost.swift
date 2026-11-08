@@ -8,12 +8,14 @@ final class LiveConversationHostModel {
     private let repository: LiveConversationRepository
     private let auth: LiveAuthSessionCoordinator
     private var pollTask: Task<Void, Never>?
+    private var currentPollSessionID = UUID()
 
     private(set) var profile: EmberMeDTO?
     private(set) var snapshot: ConversationSnapshot?
     private(set) var isLoading = false
     private(set) var isSubmitting = false
     private(set) var isSigningIn = false
+    private(set) var isSigningOut = false
     private(set) var command: ConversationCommandStatus = .idle
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
@@ -44,7 +46,10 @@ final class LiveConversationHostModel {
                     reply = .failed(message: "The previous message was rejected. Review before sending again.", retryable: false)
                     status = "The rejected message will not be sent automatically."
                 }
-                if try await repository.activeTurn() != nil { beginPolling() }
+                if try await repository.activeTurn() != nil {
+                    reply = .generating
+                    beginPolling()
+                }
             } catch {
                 command = .unknownAcknowledgement
                 reply = .failed(
@@ -77,6 +82,40 @@ final class LiveConversationHostModel {
         } catch {
             status = "Could not sign in to Live Cloud."
         }
+    }
+
+    func signOut() async {
+        guard !isSigningOut else { return }
+        isSigningOut = true
+        defer { isSigningOut = false }
+
+        let previousTask = pollTask
+        previousTask?.cancel()
+        pollTask = nil
+        currentPollSessionID = UUID()
+        if let previousTask {
+            _ = await previousTask.value
+        }
+
+        switch await auth.logout() {
+        case .revokedRemotely, .alreadyInvalidated:
+            clearLiveState()
+            status = String(localized: "conversation.live.signed_out", table: "Conversation")
+        case .remoteUnconfirmed:
+            clearLiveState()
+            status = String(localized: "conversation.live.sign_out_unconfirmed", table: "Conversation")
+        case .localCleanupFailed:
+            status = String(localized: "conversation.live.sign_out_local_error", table: "Conversation")
+        }
+    }
+
+    private func clearLiveState() {
+        profile = nil
+        snapshot = nil
+        requiresSignIn = true
+        rejectedDraftText = nil
+        command = .idle
+        reply = .idle
     }
 
     func send(_ text: String) async {
@@ -123,7 +162,10 @@ final class LiveConversationHostModel {
                 }
             } else {
                 snapshot = try await repository.load()
-                if try await repository.activeTurn() != nil { beginPolling() }
+                if try await repository.activeTurn() != nil {
+                    reply = .generating
+                    beginPolling()
+                }
             }
         } catch {
             reply = .failed(message: "Could not confirm the previous send. Try again later.", retryable: true)
@@ -133,13 +175,19 @@ final class LiveConversationHostModel {
 
     func stop() async {
         guard !isSubmitting else { return }
+        let previousTask = pollTask
+        previousTask?.cancel()
+        pollTask = nil
+        currentPollSessionID = UUID()
+        if let previousTask {
+            _ = await previousTask.value
+        }
+
         do {
             let result = try await repository.cancelActiveTurn()
             if result?.status == .cancelled {
                 reply = .idle
                 status = "Turn cancelled on Ember Cloud."
-                pollTask?.cancel()
-                pollTask = nil
             } else {
                 status = "Cancellation requested; checking server state."
                 beginPolling()
@@ -194,28 +242,47 @@ final class LiveConversationHostModel {
     }
 
     private func beginPolling() {
-        pollTask?.cancel()
+        guard !requiresSignIn else { return }
+        let previousTask = pollTask
+        previousTask?.cancel()
+        pollTask = nil
+
+        let sessionID = UUID()
+        currentPollSessionID = sessionID
+
         pollTask = Task { [weak self] in
-            guard let self else { return }
-            while !Task.isCancelled {
+            if let previousTask {
+                _ = await previousTask.value
+            }
+            guard let self, currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+            while !Task.isCancelled && !requiresSignIn {
                 do {
                     guard let turn = try await repository.pollActiveTurn() else {
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         reply = .idle
                         return
                     }
+                    guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     switch turn.status {
-                    case .running: reply = .generating
+                    case .running:
+                        reply = .generating
                     case .completed:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .idle
                         status = "Completed by Ember Cloud."
                         return
                     case .failed:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .failed(message: "Cloud turn failed.", retryable: false)
                         return
                     case .cancelled:
-                        snapshot = try await repository.load()
+                        let loaded = try await repository.load()
+                        guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                        snapshot = loaded
                         reply = .idle
                         status = "Turn cancelled."
                         return
@@ -223,6 +290,7 @@ final class LiveConversationHostModel {
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     reply = .failed(message: "Cloud connection lost. Resume polling when online.", retryable: true)
                     return
                 }
@@ -235,6 +303,7 @@ final class LiveConversationHostModel {
 struct LiveConversationHost: View {
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
+    @State private var isConfirmingSignOut = false
 
     init(model: LiveConversationHostModel) {
         _model = State(initialValue: model)
@@ -260,9 +329,20 @@ struct LiveConversationHost: View {
                 .padding()
             } else {
                 VStack(spacing: 0) {
-                    Text("LIVE CLOUD")
-                        .font(.caption.weight(.semibold))
-                        .accessibilityIdentifier("live-cloud-mode")
+                    HStack {
+                        Text("LIVE CLOUD")
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("live-cloud-mode")
+                        Spacer()
+                        Button {
+                            isConfirmingSignOut = true
+                        } label: {
+                            Text("conversation.live.sign_out", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
+                        .accessibilityIdentifier("live-conversation-sign-out")
+                    }
                     if let status = model.status {
                         Text(status)
                             .font(.caption)
@@ -279,11 +359,34 @@ struct LiveConversationHost: View {
                             },
                             retry: { Task { await model.retry() } },
                             stopGenerating: { Task { await model.stop() } },
-                            selectPrompt: { draft = $0 }))
+                            selectPrompt: { draft = $0 }),
+                        composerNote: "conversation.composer.cloud_note",
+                        showsSubmissionAcknowledgement: false,
+                        replyPreparingText: "conversation.reply.waiting_for_cloud",
+                        replyStopText: "conversation.reply.cancel_cloud_turn",
+                        emberMessageAuthorText: "conversation.message.ember_cloud")
                 }
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .alert(
+            Text("conversation.live.sign_out_confirm_title", tableName: "Conversation"),
+            isPresented: $isConfirmingSignOut
+        ) {
+            Button(role: .cancel) {} label: {
+                Text("conversation.live.cancel", tableName: "Conversation")
+            }
+            Button(role: .destructive) {
+                Task {
+                    await model.signOut()
+                    if model.requiresSignIn { draft = "" }
+                }
+            } label: {
+                Text("conversation.live.sign_out", tableName: "Conversation")
+            }
+        } message: {
+            Text("conversation.live.sign_out_confirm_message", tableName: "Conversation")
+        }
         .task { await model.start() }
         .onChange(of: model.rejectedDraftText) { _, rejected in
             // Do not overwrite user edits. Only an explicit Send may create a fresh ID.

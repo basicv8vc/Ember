@@ -176,8 +176,12 @@ final class StubURLProtocol: URLProtocol {
 
     override func stopLoading() {
         stateLock.lock()
+        let wasStopped = stopped
         stopped = true
         stateLock.unlock()
+        if !wasStopped {
+            client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+        }
     }
 
     private func claimDelivery() -> Bool {

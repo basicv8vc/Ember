@@ -32,6 +32,9 @@ export interface TestDatabase {
 
 export interface TestDatabaseOptions {
   readonly maxConnections?: number;
+  readonly connectionTimeoutMs?: number;
+  readonly statementTimeoutMs?: number;
+  readonly applicationName?: string;
 }
 
 /**
@@ -102,6 +105,12 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
   }
 
   const baseConfig: DatabaseConfig = loadDatabaseConfig({ DATABASE_URL: testDatabaseUrl });
+  const testConfig: DatabaseConfig = {
+    ...baseConfig,
+    connectionTimeoutMs: options.connectionTimeoutMs ?? baseConfig.connectionTimeoutMs,
+    statementTimeoutMs: options.statementTimeoutMs ?? baseConfig.statementTimeoutMs,
+    applicationName: options.applicationName ?? baseConfig.applicationName,
+  };
   const adminPool = createPool({ ...baseConfig, maxConnections: 2 });
   const schema = `ember_it_${randomBytes(6).toString('hex')}`;
 
@@ -119,11 +128,11 @@ export async function createTestDatabase(options: TestDatabaseOptions = {}): Pro
   try {
     await adminPool.query(`CREATE SCHEMA "${schema}"`);
     pool = createPool({
-      ...baseConfig,
+      ...testConfig,
       maxConnections: options.maxConnections ?? 12,
       searchPath: schema,
     });
-    observerPool = createPool({ ...baseConfig, maxConnections: 2, searchPath: schema });
+    observerPool = createPool({ ...testConfig, maxConnections: 2, searchPath: schema });
 
     await runMigrations(pool, migrationsDir);
 

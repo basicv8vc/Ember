@@ -32,6 +32,7 @@
     "dev:db:down": "docker compose -f infra/local/compose.yaml down",
     "db:migrate": "node --env-file-if-exists=.env.local --import tsx packages/postgres/src/cli/migrate.ts",
     "db:smoke:cloud-postgres": "node --import tsx scripts/cloud-postgres-smoke.ts",
+    "db:diagnose:neon-claims": "node --import tsx scripts/neon-claim-diagnostic.ts",
     "bench:local": "node --env-file-if-exists=.env.local --import tsx apps/benchmark/src/cli.ts",
     "sandbox:smoke:local": "node --import tsx apps/cli/src/sandbox-smoke/cli.ts",
     "sandbox:smoke:daytona": "node --env-file-if-exists=.env.local --import tsx apps/cli/src/sandbox-smoke-daytona/cli.ts"

@@ -139,6 +139,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember · 模拟回复" } }
       }
     },
+    "conversation.message.ember_cloud" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember" } }
+      }
+    },
     "conversation.message.you" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "You" } },
@@ -193,6 +199,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备模拟回复" } }
       }
     },
+    "conversation.reply.waiting_for_cloud" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for Ember Cloud to process this turn" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待 Ember Cloud 处理此轮消息" } }
+      }
+    },
     "conversation.reply.retry" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again" } },
@@ -203,6 +215,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop reply" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止回复" } }
+      }
+    },
+    "conversation.reply.cancel_cloud_turn" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel turn" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消此轮" } }
       }
     },
     "conversation.reply.stop_detail" : {

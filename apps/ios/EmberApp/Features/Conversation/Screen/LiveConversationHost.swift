@@ -322,7 +322,11 @@ struct LiveConversationHost: View {
                             retry: { Task { await model.retry() } },
                             stopGenerating: { Task { await model.stop() } },
                             selectPrompt: { draft = $0 }),
-                        composerNote: "conversation.composer.cloud_note")
+                        composerNote: "conversation.composer.cloud_note",
+                        showsSubmissionAcknowledgement: false,
+                        replyPreparingText: "conversation.reply.waiting_for_cloud",
+                        replyStopText: "conversation.reply.cancel_cloud_turn",
+                        emberMessageAuthorText: "conversation.message.ember_cloud")
                 }
             }
         }

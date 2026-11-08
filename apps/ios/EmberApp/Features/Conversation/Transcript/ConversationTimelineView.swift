@@ -6,6 +6,9 @@ struct ConversationTimelineView: View {
     let onPromptSelected: (String) -> Void
     let onRetry: () -> Void
     let onStopGenerating: () -> Void
+    let replyPreparingText: LocalizedStringKey
+    let replyStopText: LocalizedStringKey
+    let emberMessageAuthorText: LocalizedStringKey
 
     private let bottomAnchor = "conversation-timeline-bottom"
 
@@ -31,7 +34,9 @@ struct ConversationTimelineView: View {
                     ConversationReplyStatusView(
                         state: state.replyState,
                         onRetry: onRetry,
-                        onStopGenerating: onStopGenerating
+                        onStopGenerating: onStopGenerating,
+                        preparingText: replyPreparingText,
+                        stopText: replyStopText
                     )
 
                     Color.clear
@@ -67,7 +72,7 @@ struct ConversationTimelineView: View {
     private func timelineRow(_ entry: ConversationTimelineEntry) -> some View {
         switch entry {
         case .message(let message):
-            ConversationMessageBubble(message: message)
+            ConversationMessageBubble(message: message, authorText: emberMessageAuthorText)
         case .activity(let activity):
             ConversationActivityRow(activity: activity)
         case .inlineContent(let content):
@@ -146,6 +151,7 @@ private struct ConversationEmptyStateView: View {
 
 private struct ConversationMessageBubble: View {
     let message: ConversationMessagePresentation
+    let authorText: LocalizedStringKey
 
     private var isUser: Bool {
         message.author == .user
@@ -163,7 +169,7 @@ private struct ConversationMessageBubble: View {
                         Image(systemName: "sparkle")
                             .font(.caption2.weight(.semibold))
                             .accessibilityHidden(true)
-                        Text("conversation.message.ember_mock", tableName: "Conversation")
+                        Text(authorText, tableName: "Conversation")
                     } else {
                         Text("conversation.message.you", tableName: "Conversation")
                     }
@@ -258,6 +264,8 @@ private struct ConversationReplyStatusView: View {
     let state: ConversationReplyState
     let onRetry: () -> Void
     let onStopGenerating: () -> Void
+    let preparingText: LocalizedStringKey
+    let stopText: LocalizedStringKey
 
     @ViewBuilder
     var body: some View {
@@ -270,14 +278,14 @@ private struct ConversationReplyStatusView: View {
                     .foregroundStyle(Color.accentColor)
                     .accessibilityHidden(true)
 
-                Text("conversation.reply.preparing", tableName: "Conversation")
+                Text(preparingText, tableName: "Conversation")
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button(action: onStopGenerating) {
                     Label {
-                        Text("conversation.reply.stop", tableName: "Conversation")
+                        Text(stopText, tableName: "Conversation")
                     } icon: {
                         Image(systemName: "stop.fill")
                     }

@@ -5,6 +5,10 @@ struct ConversationScreen: View {
     @Binding var draft: String
     let actions: ConversationScreenActions
     var composerNote: LocalizedStringKey = "conversation.composer.local_note"
+    var showsSubmissionAcknowledgement = true
+    var replyPreparingText: LocalizedStringKey = "conversation.reply.preparing"
+    var replyStopText: LocalizedStringKey = "conversation.reply.stop"
+    var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
 
     @FocusState private var composerIsFocused: Bool
 
@@ -16,7 +20,7 @@ struct ConversationScreen: View {
         VStack(spacing: 0) {
             header
 
-            if state.commandStatus == .acknowledged {
+            if state.commandStatus == .acknowledged && showsSubmissionAcknowledgement {
                 Text("conversation.submission.acknowledged", tableName: "Conversation")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
@@ -31,7 +35,10 @@ struct ConversationScreen: View {
                 showsSuggestions: state.showsEmptyState && state.timeline.isEmpty && !composerIsFocused,
                 onPromptSelected: selectPrompt,
                 onRetry: actions.retry,
-                onStopGenerating: actions.stopGenerating
+                onStopGenerating: actions.stopGenerating,
+                replyPreparingText: replyPreparingText,
+                replyStopText: replyStopText,
+                emberMessageAuthorText: emberMessageAuthorText
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

@@ -1,6 +1,6 @@
 # Ember Alpha PostgreSQL Service Validation — Neon vs Supabase
 
-**Status:** In progress; not yet a provider selection. **Evidence date:** 2026-11-08. **Application baseline:** PR #138 exact HEAD `7385bb18d791c4265ae1c53b618776cd61c07002`.
+**Status:** In progress; not yet a provider selection. **Evidence date:** 2026-11-08. **Current PR #138 HEAD:** `b090dffd39336a7374a2febb8a8f32077f384ce5`; live Neon behavior probes ran at `7385bb18d791c4265ae1c53b618776cd61c07002`. The intervening PR diff contains no changes under `migrations/`, `packages/postgres/`, or `tests/integration/`; the current migration SQL and integration-test sources are unchanged.
 
 ## Provisional decision
 
@@ -8,21 +8,21 @@ Do not finalize the Alpha database choice until Supabase, least-privilege, backu
 
 The user confirmed a global audience. The Neon project is in Singapore; the Supabase form is set to Singapore solely to match this test. Neither choice recommends a production region. The test Worker request was served by Cloudflare's SIN edge, so these latency results describe one test path only, not global user latency. Select production placement from real traffic and multi-region measurements.
 
-Neon P0 migrations, normalized schema comparison, exact-HEAD migration checksums, Workers → Hyperdrive → Neon compatibility, a controlled scale-to-zero/wake cycle, and synthetic export/restore have passed. Neon Free includes PostgreSQL 17, 5-minute scale-to-zero, a 6-hour/1 GB restore history window, and one manual snapshot. Supabase remains untested because its test password and project creation require the user to complete the console form. No final service selection is made yet.
+Neon P0 migrations, normalized schema comparison, current-HEAD-equivalent migration checksums, Workers → Hyperdrive → Neon compatibility, a controlled scale-to-zero/wake cycle, and synthetic export/restore have passed. Neon Free includes PostgreSQL 17, 5-minute scale-to-zero, a 6-hour/1 GB restore history window, and one manual snapshot. The approved Supabase Free project has been created in Singapore and is provisioning; its exact PostgreSQL version and all live tests remain pending. No final service selection is made yet.
 
 ## Exact-HEAD and local baseline
 
 | Check | Result |
 | --- | --- |
-| PR #138 source | Tested at exact HEAD `7385bb18d791c4265ae1c53b618776cd61c07002`; worktree clean. |
+| PR #138 source | Current remote HEAD is `b090dffd39336a7374a2febb8a8f32077f384ce5`. Neon database behavior probes used `7385bb18d791c4265ae1c53b618776cd61c07002`; a diff to current HEAD confirms no changes to migrations, `packages/postgres/`, or `tests/integration/`. |
 | Migration history | `migrations/0001`–`0016` are byte-for-byte unchanged against `main`. No historical migration semantics were edited. |
-| PR #138 migration `0017_apple_nonce_replay.sql` | SHA-256 `bd8f88e89d3178e5472c4af03e3b719a7a2c51c09406fb9bbf822bec2d35d169`; this matches the checksum stored by the exact-HEAD local PG run. |
+| PR #138 migration `0017_apple_nonce_replay.sql` | SHA-256 `bd8f88e89d3178e5472c4af03e3b719a7a2c51c09406fb9bbf822bec2d35d169`; this matches the checksum stored by the local PG run and is unchanged at current PR #138 HEAD. |
 | Local PostgreSQL | Homebrew PostgreSQL 17.11. This is a local baseline, not provider evidence. |
 | Migration runner, first run | 17 applied, 0 already applied. |
 | Migration runner, second run | 0 applied, 17 already applied. |
 | Provider checksums | All 17 Neon `(id, name, checksum)` rows match the exact-HEAD migration files byte-for-byte. |
 | Normalized schema diff | Neon vs local PostgreSQL 17.11 matched for `public` and `ember_private` (SHA-256 `48956655484740217b1460de413a2ce973a59a469ee1eeaee1f2446245500f11`). |
-| Unit tests | 86 files, 1,498 tests passed. |
+| Unit tests | Exact current PR #138 HEAD: 86 files, 1,500 tests passed with the repository's local Vitest CLI. The `pnpm` wrapper could not run because installed pnpm 11.25.0 is below the repository's `>=12.0.0` engine requirement. |
 | Build | `pnpm build` passed. |
 | Integration suite | 47 files, 546 tests: 542 passed; 4 failed only because `tests/integration/migrations.test.ts` still hard-codes 16 migrations at lines 125, 257, 327, and 499. With `0017`, the expected count is 17. This stale assertion is also relevant to the provider runs and has been shared with Agent C on PR #138. |
 
@@ -33,9 +33,9 @@ The provider projects are isolated test resources and must contain synthetic dat
 | Provider | Project/setup | Engine version | Migration state |
 | --- | --- | --- | --- |
 | Neon | One Neon Free project in Singapore, PostgreSQL only; `ember_test` database and `ember_test_owner` role; direct/unpooled endpoint. Singapore is only for a matched provider comparison. | Server reports PostgreSQL `17.11 (9045acd)`. | Exact PR #138 migrations 0001–0017 applied; first run 17 applied, second run 0 applied/17 already. Migration 0017 stored SHA-256 matches exact-HEAD source. Normalized `public` and `ember_private` schema diff matches local PG17.11; all 17 provider checksums match exact-HEAD files. |
-| Supabase | Free organization had no projects and no quota warning. The form is prepared for `ember-issue132-supabase-free`, Singapore, Data API off, and Postgres DEFAULT. The user must set/retain the masked database password and submit Create. | Creation UI has no version selector; `Postgres DEFAULT` selected. Actual version must be queried after creation. | Project not created; migrations and provider checks pending. |
+| Supabase | One approved Free project `ember-issue132-supabase-free` was created in the `10k FREE` organization, Singapore, with Data API disabled and Postgres DEFAULT/Nano selected. The console showed `Coming up...` after creation; waiting for provisioning before opening the direct connection settings. A second account's `SlowFast FREE` organization could not create another project because its member had reached the two-project Free limit. | Creation UI has no version selector; `Postgres DEFAULT` selected. Actual version must be queried after provisioning. | Project created; migrations, checksums, schema comparison, and provider tests pending a ready database connection. |
 
-Run all migrations from PR #138 against each provider's **direct** endpoint. Neon has completed both runs; Supabase is pending project creation. The migrator uses session-level `pg_advisory_lock`; do not run it through transaction-pooling Hyperdrive. Require 17 rows on the first run and no changes on the second. Compare normalized `public` and `ember_private` schema dumps and verify every migration checksum at the same source HEAD.
+Run all migrations from current PR #138 against each provider's **direct** endpoint. Neon has completed both runs; Supabase is provisioning. The migrator uses session-level `pg_advisory_lock`; do not run it through transaction-pooling Hyperdrive. Require 17 rows on the first run and no changes on the second. Compare normalized `public` and `ember_private` schema dumps and verify every migration checksum at the same source HEAD.
 
 `0017` adds `ember_private.apple_identity_nonce_replays` with a unique SHA-256 nonce digest. It is additive and does not expose raw nonces or identity tokens. Its source checksum is recorded above; Neon application and a concurrent replay test passed, while Supabase remains pending.
 
@@ -51,7 +51,7 @@ Neon was tested against exact PR #138 HEAD with synthetic data. The passing `b1-
 - Direct `pg_terminate_backend` recovery succeeded: the checked-out client failed as expected, and the pool issued a successful query again about 2.2–2.7 seconds later. This models backend termination, not a full network partition.
 - `psql` confirmed TLS to the direct Neon endpoint. The same backend's `pg_stat_ssl` row reported `false`; proxy-side TLS semantics remain unresolved. The PR #138 role script created `ember_worker` but failed at `ALTER ROLE ... NOSUPERUSER`, which Neon denies to a non-superuser admin. Applying its table grants separately succeeded. Catalog checks confirmed a non-superuser role without CREATEDB, CREATEROLE, REPLICATION, or BYPASSRLS; no public-schema CREATE; expected B1 table privileges; and no task or migration-table access. The admin could not `SET ROLE ember_worker`, so password-authenticated login was not tested. The test role and grants were dropped after inspection.
 
-The PR #138 full integration suite has four stale assertions expecting 16 migrations although exact HEAD contains 17. Do not weaken or change an already-applied migration to work around this test mismatch. Supabase tests remain pending.
+The PR #138 full integration suite has four stale assertions expecting 16 migrations although current HEAD contains 17. Do not weaken or change an already-applied migration to work around this test mismatch. Supabase tests remain pending.
 
 ## P2 — Cloudflare Hyperdrive
 
@@ -116,7 +116,7 @@ Plan-level baseline (verify against the linked current plan terms before choosin
 
 1. The Neon role password was pasted into the chat by the user and must be rotated after testing. Do not repeat or publish the value. All URLs, IDs, and credentials must stay out of Git, CI logs, PR comments, and screenshots.
 2. Neon lease-claim concurrency is not validated at 32 simultaneous direct claims: 14/32 timed out, while 16/16 passed. The transaction-wait observer did not see the expected `pg_stat_activity` lock state, even with a 10-second window; the foreign-key rejection occurred after about 3 seconds. Keep both as unresolved Neon Free risks.
-3. Supabase project creation, PG version, migrations, business tests, Hyperdrive, TLS, role, backup, and restore remain pending the user's password entry and Create action.
+3. Supabase is provisioning. Its PG version, migrations, business tests, Hyperdrive, TLS, least-privilege role, backup, and restore remain unverified until the database becomes ready and the direct connection can be tested.
 4. Neon TLS client-to-endpoint is confirmed; the `pg_stat_ssl` discrepancy needs provider-aware interpretation. The role's table-level privileges are verified by catalog queries, but login as that role remains untested.
 5. The user specified a global audience. Singapore is only the matched test region; the single SIN edge result does not determine production database placement.
 6. The current PR #138 migration integration test asserts 16 migrations in four places although exact HEAD contains 17. Agent C should update the test expectations and add a `0017` assertion on its own Draft PR.

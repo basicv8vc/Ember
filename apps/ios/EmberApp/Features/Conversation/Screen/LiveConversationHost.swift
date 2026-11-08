@@ -163,13 +163,14 @@ final class LiveConversationHostModel {
 
     func stop() async {
         guard !isSubmitting else { return }
+        pollTask?.cancel()
+        pollTask = nil
+
         do {
             let result = try await repository.cancelActiveTurn()
             if result?.status == .cancelled {
                 reply = .idle
                 status = "Turn cancelled on Ember Cloud."
-                pollTask?.cancel()
-                pollTask = nil
             } else {
                 status = "Cancellation requested; checking server state."
                 beginPolling()
@@ -253,6 +254,7 @@ final class LiveConversationHostModel {
                 } catch is CancellationError {
                     return
                 } catch {
+                    guard !Task.isCancelled else { return }
                     reply = .failed(message: "Cloud connection lost. Resume polling when online.", retryable: true)
                     return
                 }

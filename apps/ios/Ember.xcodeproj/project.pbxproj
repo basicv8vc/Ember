@@ -186,7 +186,12 @@
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 2630;
 				TargetAttributes = {
-					777777777777777777777777 = { CreatedOnToolsVersion = 26.3; };
+				777777777777777777777777 = {
+					CreatedOnToolsVersion = 26.3;
+					SystemCapabilities = {
+						com.apple.SignInWithApple = { enabled = 1; };
+					};
+				};
 					888888888888888888888888 = { CreatedOnToolsVersion = 26.3; TestTargetID = 777777777777777777777777; };
 					999999999999999999999999 = { CreatedOnToolsVersion = 26.3; TestTargetID = 777777777777777777777777; };
 				};
@@ -266,6 +271,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = EmberApp/Ember.entitlements;
 				ENABLE_TESTABILITY = YES;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -286,6 +292,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
+				CODE_SIGN_ENTITLEMENTS = EmberApp/Ember.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = Ember;

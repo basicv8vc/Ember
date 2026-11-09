@@ -7,6 +7,8 @@ import SwiftUI
 final class LiveConversationHostModel {
     private let repository: LiveConversationRepository
     private let auth: LiveAuthSessionCoordinator
+    private let pollingWindow: Duration
+    private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     private var pollTask: Task<Void, Never>?
     private var currentPollSessionID = UUID()
 
@@ -16,15 +18,25 @@ final class LiveConversationHostModel {
     private(set) var isSubmitting = false
     private(set) var isSigningIn = false
     private(set) var isSigningOut = false
+    private(set) var isPollingPaused = false
+    private(set) var isViewVisible = false
+    private(set) var isSceneActive = true
     private(set) var command: ConversationCommandStatus = .idle
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
     private(set) var requiresSignIn = false
     private(set) var rejectedDraftText: String?
 
-    init(repository: LiveConversationRepository, auth: LiveAuthSessionCoordinator) {
+    init(
+        repository: LiveConversationRepository,
+        auth: LiveAuthSessionCoordinator,
+        pollingWindow: Duration = .seconds(60),
+        monotonicNow: @Sendable @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }
+    ) {
         self.repository = repository
         self.auth = auth
+        self.pollingWindow = pollingWindow
+        self.monotonicNow = monotonicNow
     }
 
     func start() async {
@@ -48,7 +60,9 @@ final class LiveConversationHostModel {
                 }
                 if try await repository.activeTurn() != nil {
                     reply = .generating
-                    beginPolling()
+                    if isViewVisible && isSceneActive {
+                        beginPolling()
+                    }
                 }
             } catch {
                 command = .unknownAcknowledgement
@@ -92,6 +106,7 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
             _ = await previousTask.value
@@ -116,6 +131,7 @@ final class LiveConversationHostModel {
         rejectedDraftText = nil
         command = .idle
         reply = .idle
+        isPollingPaused = false
     }
 
     func send(_ text: String) async {
@@ -164,7 +180,9 @@ final class LiveConversationHostModel {
                 snapshot = try await repository.load()
                 if try await repository.activeTurn() != nil {
                     reply = .generating
-                    beginPolling()
+                    if isViewVisible && isSceneActive {
+                        beginPolling()
+                    }
                 }
             }
         } catch {
@@ -178,6 +196,7 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
             _ = await previousTask.value
@@ -199,8 +218,54 @@ final class LiveConversationHostModel {
         }
     }
 
+    func resumePolling() {
+        guard !requiresSignIn else { return }
+        guard reply == .generating || isPollingPaused else { return }
+        isPollingPaused = false
+        status = String(localized: "conversation.live.checking_status", table: "Conversation")
+        beginPolling()
+    }
+
+    func handleViewAppeared() {
+        isViewVisible = true
+        if isSceneActive && !requiresSignIn && (reply == .generating || isPollingPaused) && pollTask == nil {
+            isPollingPaused = false
+            beginPolling()
+        }
+    }
+
+    func handleViewDisappeared() {
+        isViewVisible = false
+        suspendForDisappearance()
+    }
+
+    func handleSceneActive() {
+        isSceneActive = true
+        guard isViewVisible && !requiresSignIn else { return }
+        guard reply == .generating || isPollingPaused else { return }
+        guard pollTask == nil else { return }
+        isPollingPaused = false
+        beginPolling()
+    }
+
+    func handleSceneInactive() {
+        isSceneActive = false
+        suspendForDisappearance()
+    }
+
+    func handleScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .active:
+            handleSceneActive()
+        case .inactive, .background:
+            handleSceneInactive()
+        @unknown default:
+            break
+        }
+    }
+
     func suspendForDisappearance() {
-        // Disappearance stops only observation. It must not cancel the durable server Turn.
+        // Disappearance or inactive state stops only observation. It must not cancel the durable server Turn.
         pollTask?.cancel()
         pollTask = nil
     }
@@ -242,13 +307,15 @@ final class LiveConversationHostModel {
     }
 
     private func beginPolling() {
-        guard !requiresSignIn else { return }
+        guard isViewVisible && isSceneActive && !requiresSignIn else { return }
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        isPollingPaused = false
 
         let sessionID = UUID()
         currentPollSessionID = sessionID
+        let startTime = monotonicNow()
 
         pollTask = Task { [weak self] in
             if let previousTask {
@@ -256,28 +323,48 @@ final class LiveConversationHostModel {
             }
             guard let self, currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
             while !Task.isCancelled && !requiresSignIn {
+                if monotonicNow() - startTime >= pollingWindow {
+                    guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
+                    pollTask = nil
+                    isPollingPaused = true
+                    status = String(localized: "conversation.live.waiting_for_cloud", table: "Conversation")
+                    return
+                }
+
                 do {
                     guard let turn = try await repository.pollActiveTurn() else {
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         reply = .idle
+                        pollTask = nil
+                        isPollingPaused = false
                         return
                     }
                     guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     switch turn.status {
                     case .running:
                         reply = .generating
+                        if monotonicNow() - startTime >= pollingWindow {
+                            pollTask = nil
+                            isPollingPaused = true
+                            status = String(localized: "conversation.live.waiting_for_cloud", table: "Conversation")
+                            return
+                        }
                     case .completed:
                         let loaded = try await repository.load()
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         snapshot = loaded
                         reply = .idle
                         status = "Completed by Ember Cloud."
+                        pollTask = nil
+                        isPollingPaused = false
                         return
                     case .failed:
                         let loaded = try await repository.load()
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         snapshot = loaded
                         reply = .failed(message: "Cloud turn failed.", retryable: false)
+                        pollTask = nil
+                        isPollingPaused = false
                         return
                     case .cancelled:
                         let loaded = try await repository.load()
@@ -285,6 +372,8 @@ final class LiveConversationHostModel {
                         snapshot = loaded
                         reply = .idle
                         status = "Turn cancelled."
+                        pollTask = nil
+                        isPollingPaused = false
                         return
                     }
                 } catch is CancellationError {
@@ -292,6 +381,8 @@ final class LiveConversationHostModel {
                 } catch {
                     guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     reply = .failed(message: "Cloud connection lost. Resume polling when online.", retryable: true)
+                    pollTask = nil
+                    isPollingPaused = false
                     return
                 }
             }
@@ -301,6 +392,7 @@ final class LiveConversationHostModel {
 
 /// Reuses the existing ConversationScreen. The default App Root never instantiates this view.
 struct LiveConversationHost: View {
+    @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
     @State private var isConfirmingSignOut = false
@@ -349,6 +441,19 @@ struct LiveConversationHost: View {
                             .foregroundStyle(.secondary)
                             .accessibilityIdentifier("live-conversation-status")
                     }
+                    if model.isPollingPaused {
+                        Button {
+                            model.resumePolling()
+                        } label: {
+                            Label(
+                                String(localized: "conversation.live.check_again", table: "Conversation"),
+                                systemImage: "arrow.clockwise"
+                            )
+                            .font(.caption.weight(.semibold))
+                        }
+                        .accessibilityIdentifier("live-conversation-resume-polling")
+                        .padding(.vertical, 4)
+                    }
                     ConversationScreen(
                         state: model.screen,
                         draft: $draft,
@@ -388,10 +493,17 @@ struct LiveConversationHost: View {
             Text("conversation.live.sign_out_confirm_message", tableName: "Conversation")
         }
         .task { await model.start() }
+        .onAppear {
+            model.handleScenePhase(scenePhase)
+            model.handleViewAppeared()
+        }
+        .onDisappear { model.handleViewDisappeared() }
         .onChange(of: model.rejectedDraftText) { _, rejected in
             // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
             if let rejected, draft.isEmpty { draft = rejected }
         }
-        .onDisappear { model.suspendForDisappearance() }
+        .onChange(of: scenePhase) { _, newPhase in
+            model.handleScenePhase(newPhase)
+        }
     }
 }

@@ -258,6 +258,24 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Task unavailable" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关联任务暂不可用" } }
       }
+    },
+    "conversation.live.check_again" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Check again" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重新检查" } }
+      }
+    },
+    "conversation.live.checking_status" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking Ember Cloud…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检查 Ember Cloud…" } }
+      }
+    },
+    "conversation.live.waiting_for_cloud" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Still waiting for Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仍在等待 Ember Cloud…" } }
+      }
     }
   },
   "version" : "1.0"

@@ -4,8 +4,15 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createPool, loadDatabaseConfig, MigrationError, runMigrations } from '@ember/postgres';
+import {
+  createPool,
+  loadDatabaseConfig,
+  loadMigrations,
+  MigrationError,
+  runMigrations,
+} from '@ember/postgres';
 import { createDatabaseReadiness } from '../../apps/api/src/readiness.js';
+import { createCloudflareAppleNonceReplayStore } from '../../apps/api/src/cloudflare-apple-replay.js';
 
 const migrationsDir = fileURLToPath(new URL('../../migrations', import.meta.url));
 const schemaPattern = /^ember_it_[a-f0-9]{12}$/;
@@ -120,27 +127,13 @@ describe('PostgreSQL migrations (real database)', () => {
   });
 
   it('applies migrations from an empty schema and records the version', async () => {
+    const migrationFiles = await loadMigrations(migrationsDir);
     const result = await runMigrations(requirePool(), migrationsDir);
 
-    expect(result.applied).toHaveLength(16);
-    expect(result.applied.map((migration) => migration.id)).toEqual([
-      '0001',
-      '0002',
-      '0003',
-      '0004',
-      '0005',
-      '0006',
-      '0007',
-      '0008',
-      '0009',
-      '0010',
-      '0011',
-      '0012',
-      '0013',
-      '0014',
-      '0015',
-      '0016',
-    ]);
+    expect(result.applied).toHaveLength(migrationFiles.length);
+    expect(result.applied.map((migration) => migration.id)).toEqual(
+      migrationFiles.map((migration) => migration.id),
+    );
     expect(result.applied[1]?.name).toBe('0002_durable_task_inbox.sql');
     expect(result.applied[2]?.name).toBe('0003_tasks_current_run_tenant_fk.sql');
     expect(result.applied[3]?.name).toBe('0004_lease_fencing_and_retry.sql');
@@ -156,6 +149,14 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(result.applied[13]?.name).toBe('0014_model_execution.sql');
     expect(result.applied[14]?.name).toBe('0015_model_budget_safety.sql');
     expect(result.applied[15]?.name).toBe('0016_model_budget_incident_usage_missing.sql');
+    const appliedIds = result.applied.map((migration) => migration.id);
+    const nonceMigrationIndex = appliedIds.indexOf('0017');
+    const outboxMigrationIndex = appliedIds.indexOf('0018');
+
+    expect(nonceMigrationIndex).toBeGreaterThan(appliedIds.indexOf('0016'));
+    expect(result.applied[nonceMigrationIndex]?.name).toBe('0017_apple_nonce_replay.sql');
+    expect(outboxMigrationIndex).toBe(nonceMigrationIndex + 1);
+    expect(result.applied[outboxMigrationIndex]?.name).toBe('0018_b1_turn_dispatch_outbox.sql');
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{
@@ -165,25 +166,10 @@ describe('PostgreSQL migrations (real database)', () => {
       execution_ms: number;
     }>('SELECT id, name, checksum, execution_ms FROM schema_migrations ORDER BY id');
 
-    expect(versions.rows).toHaveLength(16);
-    expect(versions.rows.map((row) => row.id)).toEqual([
-      '0001',
-      '0002',
-      '0003',
-      '0004',
-      '0005',
-      '0006',
-      '0007',
-      '0008',
-      '0009',
-      '0010',
-      '0011',
-      '0012',
-      '0013',
-      '0014',
-      '0015',
-      '0016',
-    ]);
+    expect(versions.rows).toHaveLength(migrationFiles.length);
+    expect(versions.rows.map((row) => row.id)).toEqual(
+      migrationFiles.map((migration) => migration.id),
+    );
     for (const row of versions.rows) {
       expect(row.checksum).toMatch(/^[a-f0-9]{64}$/);
       expect(row.execution_ms).toBeGreaterThanOrEqual(0);
@@ -254,7 +240,7 @@ describe('PostgreSQL migrations (real database)', () => {
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(16);
+    expect(result.alreadyApplied).toBe(18);
     const after = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
@@ -263,7 +249,7 @@ describe('PostgreSQL migrations (real database)', () => {
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('16');
+    expect(versions.rows[0]?.count).toBe('18');
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -324,7 +310,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('16');
+      expect(versions.rows[0]?.count).toBe('18');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -496,9 +482,20 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('16');
+      expect(versions.rows[0]?.count).toBe('18');
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
+  });
+
+  it('applies the Apple nonce replay fence with one winner under concurrent use', async () => {
+    const nonce = `integration-${randomBytes(32).toString('hex')}`;
+    const replayStore = createCloudflareAppleNonceReplayStore(requirePool());
+    const outcomes = await Promise.all(
+      Array.from({ length: 32 }, () => replayStore.consume(nonce)),
+    );
+
+    expect(outcomes.filter(Boolean)).toHaveLength(1);
+    expect(outcomes.filter((accepted) => !accepted)).toHaveLength(31);
   });
 });

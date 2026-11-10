@@ -1,0 +1,4 @@
+# Copy to .dev.vars only if you need to override non-secret local vars.
+# For local database access, export CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE in
+# the shell that starts Wrangler; use a disposable database and never point at production.
+EMBER_APPLE_BUNDLE_ID=com.basicv8vc.ember

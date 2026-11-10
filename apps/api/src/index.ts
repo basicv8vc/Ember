@@ -154,7 +154,9 @@ export function createApiApplication(options: ApiApplicationOptions) {
 
   const b1ConversationWriteRepository = new PostgresB1ConversationWriteRepository(pool);
   const b1ConversationReadRepository = new PostgresB1ConversationReadRepository(pool);
-  const b1AssistantTurnRepository = new PostgresB1AssistantTurnRepository(pool);
+  const b1AssistantTurnRepository = new PostgresB1AssistantTurnRepository(pool, {
+    expireOnRead: apiConfig.expireTurnsOnRead,
+  });
 
   return createApp({
     readiness: createDatabaseReadiness(pool),

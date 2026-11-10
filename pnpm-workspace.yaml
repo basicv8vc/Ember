@@ -6,6 +6,8 @@ packages:
 # so a fresh `pnpm install` behaves identically on every machine.
 allowBuilds:
   esbuild: true
+  # Wrangler's local Workers runtime downloads its matching native workerd binary.
+  workerd: true
   # Pulled in transitively by @opentelemetry through @daytonaio/sdk. Its postinstall only
   # builds the pbjs/pbts CLI shims, which the sandbox adapter never calls, so the script is
   # denied rather than allowed to run on every install.

@@ -120,6 +120,12 @@ load-bearing and worth restating:
 | `EMBER_WORKER_SIMULATED_EXECUTION` | `disabled` | Shared deployments run `EMBER_WORKER_MODE=reaper-only` (lease reaping, the commitment scheduler, and the B2 turn responder when model execution is on). The task poll lane's deterministic executor is a local/test capability and the runtime refuses it in staging/production until P0B-06 provides durable execution results (#126). Preflight enforces both values. |
 | `EMBER_MODEL_EXECUTION`            | `disabled` | B2 Model Execution stays off: no model turn responder starts, a submitted Turn remains durably pending. `fake` is refused under staging markers (B2 boundary) and `real` is refused everywhere without a reviewed approval, an official-price-reviewed (or invoice-verified) rate and a credential. Preflight enforces all three.                                       |
 
+In shared deployments, polling an overdue Turn is read-only: it does not create a timeout reply or
+change `running` to `failed`. With both the B1 fake responder and B2 model execution disabled, the
+Turn therefore remains pending until execution is deliberately enabled or the user cancels it.
+Development runs retain the existing on-read timeout behavior; enabled responders own timeout
+terminalization in shared deployments.
+
 ## 5. Update (new release)
 
 ```sh

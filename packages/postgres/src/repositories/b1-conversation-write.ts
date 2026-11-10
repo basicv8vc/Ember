@@ -10,6 +10,7 @@ import { DomainError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { z } from 'zod';
 import type { B1ConversationRepository } from './b1-interfaces.js';
+import { insertB1TurnDispatchOutbox } from './b1-turn-dispatch-outbox.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 
 /**
@@ -20,6 +21,13 @@ import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
  * integration, so this class is typed as the `Pick` below rather than claiming the frozen interface.
  */
 export type B1ConversationWriteRepository = Pick<B1ConversationRepository, 'submitUserMessage'>;
+
+export interface PostgresB1ConversationWriteRepositoryOptions {
+  /** Create the durable Queue wake-up record in the same transaction as the Message and Turn. */
+  readonly writeTurnDispatchOutbox?: boolean;
+  /** Best-effort notification after the transaction commits; failures never change the B1 receipt. */
+  readonly onTurnCommitted?: (event: { readonly tenantId: Id; readonly turnId: string }) => void;
+}
 
 /** Annex §7.1 T-1: one Alpha turn budget, measured from the database clock at commit. */
 export const B1_TURN_DEADLINE_SECONDS = 60;
@@ -223,7 +231,10 @@ function buildReceipt(row: SubmissionRow, transcriptEpoch: number): B1SendMessag
  * `DomainError.diagnostic`, which is never serialised (G-1, G-2, G-4).
  */
 export class PostgresB1ConversationWriteRepository implements B1ConversationWriteRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly options: PostgresB1ConversationWriteRepositoryOptions = {},
+  ) {}
 
   async submitUserMessage(command: {
     readonly tenantId: Id;
@@ -235,9 +246,22 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
     const request = this.parseRequest(command.request);
 
     try {
-      return await withTransaction(this.pool, (client) =>
+      const outcome = await withTransaction(this.pool, (client) =>
         this.submit(client, command.tenantId, command.conversationId, request),
       );
+
+      if (!outcome.replayed && this.options.onTurnCommitted !== undefined) {
+        try {
+          this.options.onTurnCommitted({
+            tenantId: command.tenantId,
+            turnId: outcome.receipt.turn.turn_id,
+          });
+        } catch {
+          // The committed outbox row is the recovery path when an ephemeral Queue wake-up fails.
+        }
+      }
+
+      return outcome;
     } catch (error) {
       throw asDomainError(error);
     }
@@ -321,6 +345,10 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
       request,
     );
     const turnRow = await this.insertAssistantTurn(client, tenantId, conversationId, messageRow.id);
+
+    if (this.options.writeTurnDispatchOutbox === true) {
+      await insertB1TurnDispatchOutbox(client, { tenantId, turnId: turnRow.id });
+    }
 
     return {
       replayed: false,

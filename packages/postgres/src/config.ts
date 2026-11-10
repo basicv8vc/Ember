@@ -19,6 +19,8 @@ export interface DatabaseConfig {
   readonly idleTimeoutMs: number;
   /** Server-side statement timeout applied to every connection. */
   readonly statementTimeoutMs: number;
+  /** Skip `options=-c statement_timeout=...` when the database role supplies this default. */
+  readonly statementTimeoutOnConnect?: boolean;
   /** Optional `search_path` used to isolate test schemas. */
   readonly searchPath?: string;
   /** `application_name` reported to PostgreSQL. */

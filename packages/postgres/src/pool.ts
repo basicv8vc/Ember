@@ -15,7 +15,10 @@ export interface PoolHooks {
  * which keeps process startup and liveness independent from database uptime.
  */
 export function createPool(config: DatabaseConfig, hooks: PoolHooks = {}): pg.Pool {
-  const serverOptions = [`-c statement_timeout=${config.statementTimeoutMs}`];
+  const serverOptions =
+    config.statementTimeoutOnConnect === false
+      ? []
+      : [`-c statement_timeout=${config.statementTimeoutMs}`];
 
   if (config.searchPath !== undefined) {
     if (!POSTGRES_IDENTIFIER.test(config.searchPath)) {
@@ -24,14 +27,19 @@ export function createPool(config: DatabaseConfig, hooks: PoolHooks = {}): pg.Po
     serverOptions.push(`-c search_path=${config.searchPath}`);
   }
 
-  const pool = new pg.Pool({
+  const poolOptions: pg.PoolConfig = {
     connectionString: config.connectionString,
     max: config.maxConnections,
     connectionTimeoutMillis: config.connectionTimeoutMs,
     idleTimeoutMillis: config.idleTimeoutMs,
     application_name: config.applicationName,
-    options: serverOptions.join(' '),
-  });
+  };
+
+  if (serverOptions.length > 0) {
+    poolOptions.options = serverOptions.join(' ');
+  }
+
+  const pool = new pg.Pool(poolOptions);
 
   // pg.Pool removes its idle-client error listener while a client is checked out. If the
   // PostgreSQL socket then closes, pg.Client emits `error`; without a listener, Node treats the

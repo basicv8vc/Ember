@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawn, type ChildProcess } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
 import { createServer } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import {
@@ -167,6 +168,67 @@ function auth(token: string): Record<string, string> {
   return { authorization: `Bearer ${token}` };
 }
 
+/** Commit a message upstream, consume the API response, then reset the waiting client socket. */
+async function postAndDropResponse(
+  targetUrl: string,
+  token: string,
+  body: object,
+): Promise<{
+  readonly upstreamStatus: number;
+  readonly upstreamCompleted: boolean;
+  readonly clientConnectionDropped: boolean;
+}> {
+  let upstreamStatus = 0;
+  let upstreamCompleted = false;
+  const proxy = createHttpServer((incoming, outgoing) => {
+    void (async () => {
+      incoming.setEncoding('utf8');
+      const chunks: string[] = [];
+      for await (const chunk of incoming) {
+        if (typeof chunk !== 'string') throw new Error('ACK proxy expected a JSON text body');
+        chunks.push(chunk);
+      }
+
+      const upstream = await fetch(targetUrl, {
+        method: 'POST',
+        headers: { ...auth(token), 'content-type': 'application/json' },
+        body: chunks.join(''),
+        signal: AbortSignal.timeout(10_000),
+      });
+      upstreamStatus = upstream.status;
+      await upstream.arrayBuffer();
+      upstreamCompleted = true;
+      outgoing.destroy();
+    })().catch(() => outgoing.destroy());
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    proxy.once('error', reject);
+    proxy.listen(0, '127.0.0.1', resolve);
+  });
+
+  let clientConnectionDropped = false;
+  try {
+    const address = proxy.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('loopback ACK proxy did not bind a TCP port');
+    }
+    const response = await fetch(`http://127.0.0.1:${address.port}/drop-ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(10_000),
+    });
+    await response.arrayBuffer();
+  } catch {
+    clientConnectionDropped = true;
+  } finally {
+    await new Promise<void>((resolve) => proxy.close(() => resolve()));
+  }
+
+  return { upstreamStatus, upstreamCompleted, clientConnectionDropped };
+}
+
 async function waitForCompletedTurn(
   baseUrl: string,
   token: string,
@@ -257,13 +319,18 @@ describe('B1 Cloud Chat runtime over real HTTP and PostgreSQL 17', () => {
       transcript_epoch: me.conversation.transcript_epoch,
     };
     const sendUrl = `${api.baseUrl}/v1/conversations/${me.conversation.conversation_id}/messages`;
-    const send = await fetch(sendUrl, {
-      method: 'POST',
-      headers: { ...auth(firstSession.access_token), 'content-type': 'application/json' },
-      body: JSON.stringify(request),
+    const droppedAck = await postAndDropResponse(sendUrl, firstSession.access_token, request);
+    expect(droppedAck).toEqual({
+      upstreamStatus: 201,
+      upstreamCompleted: true,
+      clientConnectionDropped: true,
     });
-    expect(send.status).toBe(201);
-    const receipt = B1SendMessageReceiptSchema.parse(await send.json());
+    const lookupAfterDisconnect = await fetch(
+      `${api.baseUrl}/v1/message-submissions/${request.client_submission_id}`,
+      { headers: auth(firstSession.access_token) },
+    );
+    expect(lookupAfterDisconnect.status).toBe(200);
+    const receipt = B1SendMessageReceiptSchema.parse(await lookupAfterDisconnect.json());
     expect(receipt.turn.status).toBe('running');
 
     const committed = await db.observerPool.query<{ status: string; message_count: string }>(

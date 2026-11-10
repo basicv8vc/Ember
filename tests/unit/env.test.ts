@@ -23,6 +23,7 @@ describe('loadApiConfig', () => {
       logLevel: 'info',
       allowNonLoopbackBind: false,
       blobRoot: null,
+      expireTurnsOnRead: true,
     });
   });
 
@@ -42,8 +43,27 @@ describe('loadApiConfig', () => {
 
   it('accepts the shared deployment environments', () => {
     for (const env of ['staging', 'production'] as const) {
-      expect(loadApiConfig({ EMBER_ENV: env }).env).toBe(env);
+      const config = loadApiConfig({ EMBER_ENV: env });
+      expect(config.env).toBe(env);
+      expect(config.expireTurnsOnRead).toBe(false);
     }
+  });
+
+  it('keeps staging Turns pending when both responder modes are disabled', () => {
+    const config = loadApiConfig({
+      EMBER_ENV: 'staging',
+      NODE_ENV: 'staging',
+      EMBER_B1_FAKE_RESPONDER_ENABLED: 'false',
+      EMBER_MODEL_EXECUTION: 'disabled',
+    });
+
+    expect(config.expireTurnsOnRead).toBe(false);
+  });
+
+  it('fails closed when NODE_ENV marks a shared deployment', () => {
+    const config = loadApiConfig({ EMBER_ENV: 'local', NODE_ENV: 'staging' });
+
+    expect(config.expireTurnsOnRead).toBe(false);
   });
 
   it('rejects an environment it does not know', () => {

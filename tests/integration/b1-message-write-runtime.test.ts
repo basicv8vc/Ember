@@ -223,6 +223,123 @@ describe('B1-3A: atomic Conversation message submission on PostgreSQL 17', () =>
     expect(after.updated_at.getTime()).toBeGreaterThan(before.updated_at.getTime());
   });
 
+  it('writes one dispatch outbox row atomically and notifies only after commit', async () => {
+    const conversation = await createIsolatedConversation('dispatch outbox commit');
+    const submission = request({ text: 'durable dispatch wake' });
+    const notifications: Array<{ readonly tenantId: string; readonly turnId: string }> = [];
+    let visibleOutboxFromObserver: Promise<number> | undefined;
+    const dispatchWriter = new PostgresB1ConversationWriteRepository(db.pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: (event) => {
+        notifications.push(event);
+        visibleOutboxFromObserver = countRows(
+          `SELECT count(*) FROM b1_turn_dispatch_outbox
+            WHERE tenant_id = $1 AND turn_id = $2`,
+          [event.tenantId, event.turnId],
+        );
+      },
+    });
+    const command = {
+      tenantId: conversation.tenantId,
+      conversationId: conversation.conversationId,
+      request: submission,
+    };
+
+    const first = await dispatchWriter.submitUserMessage(command);
+    expect(first.replayed).toBe(false);
+    expect(notifications).toEqual([
+      { tenantId: conversation.tenantId, turnId: first.receipt.turn.turn_id },
+    ]);
+    if (visibleOutboxFromObserver === undefined) {
+      throw new Error('post-commit notification did not run');
+    }
+    expect(await visibleOutboxFromObserver).toBe(1);
+
+    const replay = await dispatchWriter.submitUserMessage(command);
+    expect(replay).toEqual({ ...first, replayed: true });
+    expect(notifications).toHaveLength(1);
+    expect(
+      await countRows(
+        `SELECT count(*) FROM b1_turn_dispatch_outbox
+          WHERE tenant_id = $1 AND turn_id = $2`,
+        [conversation.tenantId, first.receipt.turn.turn_id],
+      ),
+    ).toBe(1);
+  });
+
+  it('preserves a committed B1 receipt when the post-commit Queue wake fails', async () => {
+    const conversation = await createIsolatedConversation('dispatch wake failure');
+    const dispatchWriter = new PostgresB1ConversationWriteRepository(db.pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: () => {
+        throw new Error('simulated Queue failure');
+      },
+    });
+
+    const outcome = await submit(dispatchWriter, conversation, { text: 'wake failure receipt' });
+
+    expect(outcome.replayed).toBe(false);
+    expect(
+      await countRows(
+        `SELECT count(*) FROM b1_turn_dispatch_outbox
+          WHERE tenant_id = $1 AND turn_id = $2`,
+        [conversation.tenantId, outcome.receipt.turn.turn_id],
+      ),
+    ).toBe(1);
+  });
+
+  it('rolls back the Message and Turn when the transactional outbox insert fails', async () => {
+    const conversation = await createIsolatedConversation('dispatch outbox rollback');
+    let wakeCount = 0;
+    const dispatchWriter = new PostgresB1ConversationWriteRepository(db.pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: () => {
+        wakeCount += 1;
+      },
+    });
+
+    await db.pool.query(`
+CREATE FUNCTION ember_test_fail_outbox_insert() RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  RAISE EXCEPTION 'forced outbox insert failure';
+END
+$fn$;
+CREATE TRIGGER ember_test_fail_outbox_insert
+  BEFORE INSERT ON b1_turn_dispatch_outbox FOR EACH ROW
+  EXECUTE FUNCTION ember_test_fail_outbox_insert()
+`);
+
+    try {
+      await expectDomainError(
+        submit(dispatchWriter, conversation, { text: 'outbox failure rolls back the receipt' }),
+        'DB_UNAVAILABLE',
+      );
+
+      expect((await readConversationRow(conversation.conversationId)).last_sequence).toBe(0);
+      expect(
+        await countRows('SELECT count(*) FROM conversation_messages WHERE tenant_id = $1', [
+          conversation.tenantId,
+        ]),
+      ).toBe(0);
+      expect(
+        await countRows('SELECT count(*) FROM assistant_turns WHERE tenant_id = $1', [
+          conversation.tenantId,
+        ]),
+      ).toBe(0);
+      expect(
+        await countRows('SELECT count(*) FROM b1_turn_dispatch_outbox WHERE tenant_id = $1', [
+          conversation.tenantId,
+        ]),
+      ).toBe(0);
+      expect(wakeCount).toBe(0);
+    } finally {
+      await db.pool.query(
+        `DROP TRIGGER ember_test_fail_outbox_insert ON b1_turn_dispatch_outbox;
+         DROP FUNCTION ember_test_fail_outbox_insert()`,
+      );
+    }
+  });
+
   it('2. returns the exact canonical receipt structure, and only those fields', async () => {
     const conversation = await createConversation(tenantA, 'receipt shape');
     const outcome = await submit(writerA, conversation, { text: 'shape probe' });

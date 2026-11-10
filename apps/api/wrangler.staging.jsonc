@@ -1,12 +1,12 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "ember-cloud-api",
+  "name": "ember-cloud-api-staging",
   "main": "src/cloudflare-worker.ts",
   "compatibility_date": "2026-11-07",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "vars": {
-    "EMBER_ENV": "production",
+    "EMBER_ENV": "staging",
     "EMBER_APPLE_BUNDLE_ID": "com.basicv8vc.ember",
     "EMBER_APPLE_CLOCK_SKEW_SECONDS": "300",
     "EMBER_APPLE_MAX_TOKEN_AGE_SECONDS": "600",
@@ -17,14 +17,14 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "a331dbebe08c4f4e9ec7eac2d2baf5a3",
+      "id": "REPLACE_WITH_STAGING_API_HYPERDRIVE_ID",
     },
   ],
   "queues": {
     "producers": [
       {
         "binding": "TURN_DISPATCH_QUEUE",
-        "queue": "ember-assistant-turns",
+        "queue": "ember-staging-assistant-turns",
       },
     ],
   },

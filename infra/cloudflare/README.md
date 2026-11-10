@@ -1,9 +1,9 @@
 # Cloudflare Workers deployment and smoke test
 
-This runbook covers the existing Workers Free + Neon Hyperdrive test deployment and the B1 API
-integration based on PR #138. The API remains PostgreSQL-first; Cloudflare Queues carry wake-up
-envelopes only, while the PostgreSQL outbox is authoritative. No D1 binding or model execution is
-introduced. Keep both the existing PR #138 and the new API integration PR in Draft until reviewed.
+This runbook covers the isolated Staging configuration for PR #146. The API remains
+PostgreSQL-first; Cloudflare Queues carry wake-up envelopes only, while the PostgreSQL outbox is
+authoritative. No D1 binding or model execution is introduced. The active `ember-cloud-api` Worker
+and its existing Hyperdrive are not deployment targets for this PR.
 
 ## Current environment evidence (2026-11-10)
 
@@ -16,33 +16,39 @@ introduced. Keep both the existing PR #138 and the new API integration PR in Dra
   and DELETE privileges. The probe returned no connection string and did not use the rotated test
   owner credential.
 - Migration `0018_b1_turn_dispatch_outbox.sql` is in the API branch but has not been applied to the
-  remote database. Migrations must use a separate authorized direct migration connection, never
+  Staging database. Migrations must use a separate authorized direct migration connection, never
   Hyperdrive. Do not deploy the outbox writer before `0018` and its minimal runtime grant are applied.
-- The Cloudflare Queue list is empty. The API config declares producer binding
-  `TURN_DISPATCH_QUEUE` for `ember-assistant-turns`; create that Queue only on the Free plan before
-  deploying. No Queue or new Worker resource has been created by this branch.
+- Agent D created the isolated Queues `ember-staging-assistant-turns` and
+  `ember-staging-assistant-turns-dlq`. A read-only Wrangler inventory showed zero producers and
+  consumers on both. The existing `ember-assistant-turns` Queue already has a producer and consumer;
+  Staging must not attach to it.
+- No Staging API Hyperdrive exists in the current read-only inventory. The Staging Wrangler config
+  uses a non-deployable ID placeholder until a dedicated API Hyperdrive for `ember_staging` is
+  provisioned and verified.
 - The signed Apple flow, nonce replay, tenant isolation, and message/Turn smoke still require fresh
   assertions from two disposable Apple test accounts. The iOS Lead owns that final live acceptance.
 
 ## Deployment configuration
 
-`apps/api/wrangler.jsonc` is the source of truth for the Worker name, existing Hyperdrive binding,
-Apple audience `com.basicv8vc.ember`, and Queue producer binding. The existing Hyperdrive config
-uses Neon, the least-privilege `ember_worker` role, and disabled query caching. The config leaves
-`limits.cpu_ms` unset; Workers Free uses its default CPU limit.
+`apps/api/wrangler.staging.jsonc` names the separate Worker `ember-cloud-api-staging`, sets
+`EMBER_ENV=staging`, keeps Apple audience `com.basicv8vc.ember`, and binds
+`TURN_DISPATCH_QUEUE` to `ember-staging-assistant-turns`. Its `HYPERDRIVE` binding must use a
+dedicated Staging API Hyperdrive; the current ID is deliberately a placeholder. The package's
+`dev:worker`, `build:worker`, and `deploy:worker` scripts all use this Staging config. No command in
+this PR targets the active `ember-cloud-api` Worker.
 
-Use the Workers Free plan only. Check the final `workers.dev` URL before running the smoke test. If
-Cloudflare presents a paid upgrade or any billable add-on, stop before accepting it or proceeding.
+Check the final `workers.dev` URL before running the smoke test. This PR creates no cloud resource,
+changes no plan, and calls no model.
 
 ## Secret inventory
 
 | Value                                                                                                                                                                     | Secret?          | Location/use                                                                                                                             |
 | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| `EMBER_ENV=production`                                                                                                                                                    | No               | Wrangler `vars`; keeps the Worker on the production-policy path with dev sign-in denied.                                                 |
+| `EMBER_ENV=staging`                                                                                                                                                       | No               | Staging Wrangler `vars`; shared environment policy denies development sign-in.                                                           |
 | `EMBER_APPLE_BUNDLE_ID=com.basicv8vc.ember`                                                                                                                               | No               | Wrangler `vars`; public iOS Bundle ID used as the exact token audience.                                                                  |
 | `EMBER_APPLE_CLOCK_SKEW_SECONDS`, `EMBER_APPLE_MAX_TOKEN_AGE_SECONDS`, `EMBER_APPLE_JWKS_TIMEOUT_MS`, `EMBER_APPLE_JWKS_COOLDOWN_MS`, `EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS` | No               | Wrangler `vars`; bounded verifier settings, no credentials.                                                                              |
 | Worker-level secrets                                                                                                                                                      | None required    | Current API runtime does not need a separate application secret binding.                                                                 |
-| `HYPERDRIVE.connectionString`                                                                                                                                             | Yes              | Private Hyperdrive binding to the test database; not exposed as a plaintext Worker `var`.                                                |
+| `HYPERDRIVE.connectionString`                                                                                                                                             | Yes              | Dedicated Staging API Hyperdrive binding to `ember_staging`; not exposed as a plaintext Worker `var`.                                    |
 | PostgreSQL migration credential                                                                                                                                           | Yes              | Separate controlled direct connection for migrations only. Never configure it in the Worker or Hyperdrive.                               |
 | Apple identity token and raw nonce for smoke                                                                                                                              | Yes, short-lived | Passed to the smoke process through stdin, held in memory, and never printed or written to a report. Use a dedicated test Apple account. |
 | Ember `ems_` session token                                                                                                                                                | Yes              | Created in memory by the smoke process; never printed or written to a report.                                                            |
@@ -66,14 +72,14 @@ and [Queues pricing and included operations](https://developers.cloudflare.com/q
 
 ## Smoke test
 
-The smoke runner accepts only an HTTPS `ember-cloud-api.*.workers.dev` URL. It does not disable TLS
+The smoke runner accepts only an HTTPS `ember-cloud-api-staging.*.workers.dev` URL. It does not disable TLS
 verification, accept a custom domain, print response bodies, or log tokens, nonces, message text, or
 database identifiers. Each result includes HTTP wall time; this is not Worker CPU time.
 
 First run the no-credential preflight after deploy:
 
 ```sh
-pnpm smoke:cloudflare -- --base-url https://ember-cloud-api.<account-subdomain>.workers.dev --mode preflight
+pnpm smoke:cloudflare -- --base-url https://ember-cloud-api-staging.<account-subdomain>.workers.dev --mode preflight
 ```
 
 Then run the B1 flow with two distinct test Apple accounts. Obtain each fresh identity token and the
@@ -87,7 +93,7 @@ read -rs SECONDARY_APPLE_TOKEN
 read -rs SECONDARY_RAW_NONCE
 printf '{"primary":{"identity_token":"%s","nonce":"%s"},"secondary":{"identity_token":"%s","nonce":"%s"}}' \
   "$PRIMARY_APPLE_TOKEN" "$PRIMARY_RAW_NONCE" "$SECONDARY_APPLE_TOKEN" "$SECONDARY_RAW_NONCE" \
-  | pnpm smoke:cloudflare -- --base-url https://ember-cloud-api.<account-subdomain>.workers.dev --mode full
+  | pnpm smoke:cloudflare -- --base-url https://ember-cloud-api-staging.<account-subdomain>.workers.dev --mode full
 unset PRIMARY_APPLE_TOKEN PRIMARY_RAW_NONCE SECONDARY_APPLE_TOKEN SECONDARY_RAW_NONCE
 ```
 
@@ -106,15 +112,17 @@ separate checks; a smoke pass does not claim those results.
 
 ## Deployment sequence
 
-1. Obtain an authorized direct migration connection for the existing disposable Neon test database;
-   do not use the rotated owner credential or the Worker/Hyperdrive connection.
+1. Obtain an authorized direct migration connection for the isolated Staging Neon database; do not
+   use the old owner credential or the Worker/Hyperdrive connection.
 2. Apply `0018_b1_turn_dispatch_outbox.sql`, then apply the `ember_worker` role bootstrap so it gains
    only `INSERT` on `public.b1_turn_dispatch_outbox`. Confirm the migration history and grants over
    the direct connection.
-3. Create the Free Queue `ember-assistant-turns`; do not accept a paid upgrade. Keep the outbox relay
-   and B2 Turn executor in Agent B's runtime, not in the API Worker.
-4. Run `pnpm --filter @ember/api build:worker` (dry-run), deploy the API Worker, and verify the
-   runtime role again through the exact Hyperdrive binding.
+3. Use the existing isolated Queues `ember-staging-assistant-turns` and
+   `ember-staging-assistant-turns-dlq`; keep the outbox relay and B2 Turn executor in Agent B's
+   runtime, not in the API Worker.
+4. Provision a dedicated Staging API Hyperdrive for `ember_staging`, replace the placeholder ID in
+   `wrangler.staging.jsonc`, then run `pnpm --filter @ember/api build:worker` (dry-run). Deploy only
+   the Worker named `ember-cloud-api-staging` and verify its runtime role through that Hyperdrive.
 5. Run `preflight`, then have the iOS Lead perform `full` with two disposable Apple test accounts.
    Record only redacted resource identifiers and HTTP statuses; collect latency/recovery metrics in
    a later bounded run.

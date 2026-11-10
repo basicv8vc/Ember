@@ -9,7 +9,7 @@ const results = [];
 
 function usage() {
   process.stdout.write(
-    'Usage: pnpm smoke:cloudflare -- --base-url https://ember-cloud-api.<account>.workers.dev --mode preflight|full\n',
+    'Usage: pnpm smoke:cloudflare -- --base-url https://ember-cloud-api-staging.<account>.workers.dev --mode preflight|full\n',
   );
 }
 
@@ -45,14 +45,14 @@ function parseArgs(args) {
   if (
     url.protocol !== 'https:' ||
     !url.hostname.endsWith('.workers.dev') ||
-    !url.hostname.startsWith('ember-cloud-api.') ||
+    !url.hostname.startsWith('ember-cloud-api-staging.') ||
     url.username !== '' ||
     url.password !== '' ||
     url.pathname !== '/' ||
     url.search !== '' ||
     url.hash !== ''
   ) {
-    throw new Error('base URL must be the HTTPS ember-cloud-api workers.dev origin');
+    throw new Error('base URL must be the HTTPS ember-cloud-api-staging workers.dev origin');
   }
 
   return { ...options, baseUrl: url.origin };

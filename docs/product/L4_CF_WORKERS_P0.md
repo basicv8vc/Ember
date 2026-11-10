@@ -114,8 +114,10 @@ providers solely to avoid a quota that has not been reached.
 2. Create a Hyperdrive configuration from the database's direct/unpooled connection string. Use the
    `ember_worker` role and disable query caching. Keep the connection string out of source and
    Wrangler vars.
-3. Replace the all-zero local placeholder in `apps/api/wrangler.jsonc` with an authorized
-   Hyperdrive id. Do not add a Supabase service-role key, Apple private key, or model key to `vars`.
+3. Configure `apps/api/wrangler.staging.jsonc` with a dedicated Staging Hyperdrive id for
+   `ember_staging`. The default API deploy script targets `ember-cloud-api-staging`; do not bind it
+   to the existing `ember-cloud-api` Worker or its Hyperdrive. Do not add a Supabase service-role
+   key, Apple private key, or model key to `vars`.
 4. For local Wrangler testing, set `CLOUDFLARE_HYPERDRIVE_LOCAL_CONNECTION_STRING_HYPERDRIVE` in
    the shell to a disposable PostgreSQL database. This direct local connection does not exercise
    Hyperdrive pooling or caching. Never use a production database for local write tests.

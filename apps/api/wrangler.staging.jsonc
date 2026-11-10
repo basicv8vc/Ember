@@ -2,9 +2,10 @@
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "ember-cloud-api-staging",
   "main": "src/cloudflare-worker.ts",
-  "compatibility_date": "2026-11-07",
+  "compatibility_date": "2026-11-10",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "observability": { "enabled": true },
   "vars": {
     "EMBER_ENV": "staging",
     "EMBER_APPLE_BUNDLE_ID": "com.basicv8vc.ember",
@@ -17,7 +18,7 @@
   "hyperdrive": [
     {
       "binding": "HYPERDRIVE",
-      "id": "REPLACE_WITH_STAGING_API_HYPERDRIVE_ID",
+      "id": "REPLACE_WITH_STAGING_HYPERDRIVE_ID",
     },
   ],
   "queues": {

@@ -1,0 +1,54 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "ember-assistant-turn-runtime-staging",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "observability": { "enabled": true },
+  "limits": { "cpu_ms": 30000 },
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "REPLACE_WITH_STAGING_HYPERDRIVE_ID",
+    },
+  ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TURN_DISPATCH_QUEUE",
+        "queue": "ember-staging-assistant-turns",
+      },
+    ],
+    "consumers": [
+      {
+        "queue": "ember-staging-assistant-turns",
+        "max_batch_size": 1,
+        "max_retries": 5,
+        "max_concurrency": 4,
+        "dead_letter_queue": "ember-staging-assistant-turns-dlq",
+      },
+      {
+        "queue": "ember-staging-assistant-turns-dlq",
+        "max_batch_size": 10,
+        "max_retries": 1,
+      },
+    ],
+  },
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
+  "vars": {
+    "EMBER_ENV": "staging",
+    "EMBER_MODEL_EXECUTION": "disabled",
+    "EMBER_MODEL_PROVIDER": "openai",
+    "EMBER_MODEL_TURN_LEASE_MS": "30000",
+    "EMBER_MODEL_ATTEMPT_TIMEOUT_MS": "20000",
+    "EMBER_MODEL_MAX_ATTEMPTS": "2",
+    "EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD": "5000",
+    "EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD": "250000",
+    "EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD": "1000000",
+    "EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD": "5000000",
+    "EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS": "60",
+  },
+}

@@ -133,6 +133,13 @@ export class OpenAiModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
+    // `reasoning_effort` is not a caller input: it comes from the pinned rate row, so the only way
+    // to change it is to edit reviewed code. It exists because the reasoning tokens of a reasoning
+    // model are charged against `max_completion_tokens` *and* billed as output — a 512-token cap
+    // with the provider's default effort produces an empty reply that the caller would still pay
+    // for. Absent for a non-reasoning model, in which case the field is not sent at all.
+    const reasoningEffort = this.#rate.reasoningEffort;
+
     const body = JSON.stringify({
       model: this.#modelId,
       messages: [
@@ -144,6 +151,7 @@ export class OpenAiModelGateway implements ModelGateway {
       stream: false,
       // Keeps the provider from storing the conversation when the account allows it.
       store: false,
+      ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     });
 
     let response: FetchResponseLike;

@@ -42,7 +42,10 @@ export interface PendingModelTurn {
  * call, which is the one rule that keeps a slow provider from becoming a database outage.
  */
 export interface ModelTurnExecutionPort {
-  listRunningTurns(limit?: number): Promise<readonly PendingModelTurn[]>;
+  listRunningTurns(
+    limit?: number,
+    onlyTurn?: PendingModelTurn,
+  ): Promise<readonly PendingModelTurn[]>;
   claimTurn(command: {
     readonly turn: PendingModelTurn;
     readonly workerId: string;
@@ -118,6 +121,14 @@ export interface ModelTurnResponderSummary {
   readonly fenced: number;
   readonly expired: number;
   readonly skipped: number;
+  /**
+   * The pass did nothing because another pass was already running in this process.
+   *
+   * It exists so a concurrent entry is visible in the loop's own output instead of looking like an
+   * empty poll — an empty poll would be indistinguishable from "no work", which is how a
+   * concurrency bug hides.
+   */
+  readonly busy: boolean;
 }
 
 export interface ModelTurnResponderOptions {
@@ -132,6 +143,8 @@ export interface ModelTurnResponderOptions {
   readonly attemptTimeoutMs: number;
   /** Required in `real` mode; absent in `fake` mode, which has no priced call. */
   readonly rate: ModelRateRow | null;
+  /** Optional exact scope for one-shot operator tools such as `pnpm model:smoke`. */
+  readonly onlyTurn?: PendingModelTurn;
   readonly batchSize?: number;
   readonly intervalMs?: number;
   readonly errorBackoffMs?: number;
@@ -202,7 +215,10 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
     throw new TypeError('real mode requires a pinned rate row');
   }
 
-  const counters = (): Record<ModelTurnOutcome, number> & { examined: number } => ({
+  const counters = (): Record<ModelTurnOutcome, number> & {
+    examined: number;
+    busy: boolean;
+  } => ({
     examined: 0,
     completed: 0,
     failed: 0,
@@ -212,7 +228,23 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
     fenced: 0,
     expired: 0,
     skipped: 0,
+    busy: false,
   });
+
+  /**
+   * Per-process concurrency gate for paid work.
+   *
+   * One responder instance runs at most one Turn at a time. `processOnce` is written sequentially, so
+   * today this can only trip when the same instance is entered twice — a second `start()`, or a
+   * caller racing the loop. That is exactly the case that would otherwise put two paid requests in
+   * flight from one process and double the spend the ledger reserved for one.
+   *
+   * It is deliberately *not* a distributed semaphore. Across replicas, concurrency is bounded by the
+   * money ledger (a reservation that does not fit is refused) and by claim leasing (one owner per
+   * Turn), not by a counter here. A cross-process cap would need a row of its own and is out of scope
+   * for L4-B; the review document states this rather than implying a guarantee.
+   */
+  let passInFlight = false;
 
   /**
    * Worst-case reservation for one attempt, or a refusal.
@@ -505,9 +537,9 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
     return await terminalFailure(lease, 'internal_error');
   };
 
-  const processOnce = async (signal?: AbortSignal): Promise<ModelTurnResponderSummary> => {
+  const runPass = async (signal?: AbortSignal): Promise<ModelTurnResponderSummary> => {
     const summary = counters();
-    const candidates = await options.repository.listRunningTurns(batchSize);
+    const candidates = await options.repository.listRunningTurns(batchSize, options.onlyTurn);
 
     for (const candidate of candidates) {
       if (signal?.aborted === true) {
@@ -561,6 +593,27 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
     }
 
     return Object.freeze(summary);
+  };
+
+  /**
+   * One pass over the batch, or an explicit `busy` no-op.
+   *
+   * The gate is taken *before* the candidate list is read, so a concurrent entry cannot even observe
+   * a Turn, let alone claim, reserve or send one. That ordering is the point: a gate taken after the
+   * claim would still let two passes contend for the same money.
+   */
+  const processOnce = async (signal?: AbortSignal): Promise<ModelTurnResponderSummary> => {
+    if (passInFlight) {
+      return Object.freeze({ ...counters(), busy: true });
+    }
+
+    passInFlight = true;
+
+    try {
+      return await runPass(signal);
+    } finally {
+      passInFlight = false;
+    }
   };
 
   const start = (parentSignal?: AbortSignal): ModelTurnResponderRunner => {

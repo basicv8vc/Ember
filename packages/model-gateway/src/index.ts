@@ -46,10 +46,18 @@ export {
   APPROVED_REAL_MODELS,
   MODEL_ID_PLACEHOLDER,
   MODEL_RATE_ROWS,
+  PENDING_MODEL_CANDIDATES,
   estimateCostMicroUsd,
+  evaluateApproval,
   findRateRow,
+  isPastShutdown,
+  utcDay,
+  type ApprovalValidity,
   type ApprovedModel,
+  type ModelApprovalRecord,
+  type ModelCandidate,
   type ModelRateRow,
+  type ModelReasoningEffort,
 } from './rates.js';
 export {
   MODEL_CREDENTIAL_PLACEHOLDER,

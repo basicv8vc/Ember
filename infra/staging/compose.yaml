@@ -88,6 +88,10 @@ services:
       - db
     env_file:
       - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    environment:
+      # The shared env file may hold the approved project key for the worker. Migrations never
+      # call a model provider, so keep the credential out of this one-shot container.
+      EMBER_MODEL_API_KEY: ''
     command: ['node', 'packages/postgres/dist/cli/migrate.js']
     depends_on:
       postgres:
@@ -110,6 +114,12 @@ services:
       - db
     env_file:
       - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    environment:
+      # The model credential is only ever needed by the worker, and `env_file` is shared by every
+      # service. Compose gives `environment` precedence over `env_file`, so this blanks the key
+      # inside a process that has no model gateway at all rather than leaving a billable secret
+      # readable in the API container.
+      EMBER_MODEL_API_KEY: ''
     # Loopback-only. The edge proxy reaches the API over the `edge` network; this mapping
     # exists so an operator can curl /healthz and /readyz on the host itself.
     ports:
@@ -163,6 +173,9 @@ services:
       - edge
     env_file:
       - ${EMBER_STAGING_ENV_FILE:-./env/staging.env}
+    environment:
+      # The public proxy does not call a model provider and must not receive the worker's key.
+      EMBER_MODEL_API_KEY: ''
     ports:
       # Public on staging (0.0.0.0); loopback-only when the same stack is verified locally.
       - '${EMBER_EDGE_BIND:-0.0.0.0}:${EMBER_EDGE_HTTP_PORT:-80}:80'

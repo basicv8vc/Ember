@@ -147,11 +147,23 @@ export class PostgresModelTurnExecutionRepository {
   constructor(private readonly pool: pg.Pool) {}
 
   /** Candidate scan: running, not currently leased, not past its deadline. */
-  async listRunningTurns(limit = B2_TURN_CANDIDATE_LIMIT): Promise<PendingAssistantTurn[]> {
+  async listRunningTurns(
+    limit = B2_TURN_CANDIDATE_LIMIT,
+    onlyTurn?: {
+      readonly tenantId: string;
+      readonly conversationId: string;
+      readonly turnId: string;
+    },
+  ): Promise<PendingAssistantTurn[]> {
     const parsed = listSchema.safeParse({ limit });
+    const parsedTurn = onlyTurn === undefined ? null : identitySchema.safeParse(onlyTurn);
 
     if (!parsed.success) {
       throw toInvalidArgumentError(parsed.error);
+    }
+
+    if (parsedTurn !== null && !parsedTurn.success) {
+      throw toInvalidArgumentError(parsedTurn.error);
     }
 
     try {
@@ -166,9 +178,18 @@ SELECT tenant_id, conversation_id, id AS turn_id
  WHERE status = 'running'
    AND deadline_at > clock_timestamp()
    AND (lease_expires_at IS NULL OR lease_expires_at <= clock_timestamp())
+   AND (
+     $2::uuid IS NULL
+     OR (tenant_id = $2::uuid AND conversation_id = $3::uuid AND id = $4::uuid)
+   )
  ORDER BY deadline_at ASC, created_at ASC, id ASC
  LIMIT $1::int`,
-        [parsed.data.limit],
+        [
+          parsed.data.limit,
+          parsedTurn?.data.tenantId ?? null,
+          parsedTurn?.data.conversationId ?? null,
+          parsedTurn?.data.turnId ?? null,
+        ],
       );
 
       return result.rows.map((row) => ({

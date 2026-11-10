@@ -5,8 +5,11 @@ import {
   APPROVED_REAL_MODELS,
   MODEL_ID_PLACEHOLDER,
   MODEL_RATE_ROWS,
+  evaluateApproval,
   findRateRow,
+  isPastShutdown,
   type ApprovedModel,
+  type ModelApprovalRecord,
   type ModelRateRow,
 } from './rates.js';
 import type { ModelExecutionMode, ModelProviderId } from './types.js';
@@ -43,6 +46,8 @@ export type ModelBootRefusalReason =
   | 'mode_invalid'
   | 'provider_not_approved'
   | 'model_not_approved'
+  | 'approval_not_effective'
+  | 'model_shutdown'
   | 'rate_not_verified'
   | CredentialRefusal
   | 'budget_config_invalid';
@@ -85,6 +90,13 @@ export type ModelExecutionResolution =
       readonly mode: 'real';
       readonly settings: ModelExecutionSettings;
       readonly rate: ModelRateRow;
+      /**
+       * The record that authorised this process to spend.
+       *
+       * Carried so an operator tool can restate *which* decision it is acting under (the paid smoke
+       * test compares it to what it was told on the command line). It is a decision id, not a secret.
+       */
+      readonly approval: ModelApprovalRecord;
       readonly credential: ModelCredential;
     }
   | {
@@ -164,11 +176,16 @@ function boundedInteger(
 /**
  * Resolve the configured execution mode into either a runnable setting or an explicit refusal.
  *
- * `real` requires four independent gates, and no configuration can substitute one for another:
+ * `real` requires five independent gates, and no configuration can substitute one for another:
  * 1. the provider is in the code-owned allowlist;
  * 2. the model id is in the code-owned allowlist (empty in the merged tree);
- * 3. an `invoice_verified` rate row exists for that exact model id;
- * 4. a usable credential is bound.
+ * 3. that entry carries an approval record that is effective **today** — dated, named, unexpired;
+ * 4. a price row exists for that exact model id with official published pricing explicitly
+ *    reviewed (or an invoice has been verified), and the snapshot's shutdown day has not arrived;
+ * 5. a usable credential is bound.
+ *
+ * Gate 3 is what keeps "approved" from decaying into "approved once, forever": the record expires,
+ * so a running Alpha re-proves its permission instead of inheriting it.
  *
  * There is deliberately no branch that turns `real` into `fake`: a process configured for real
  * inference that cannot deliver it must be dead and visible, never silently canned.
@@ -176,6 +193,7 @@ function boundedInteger(
 export function resolveModelExecution(
   input: ModelExecutionInput,
   registry: ModelApprovalRegistry = DEFAULT_MODEL_APPROVAL_REGISTRY,
+  now: Date = new Date(),
 ): ModelExecutionResolution {
   const mode = resolveMode(input.mode);
   const ceilings = resolveCeilings(input.ceilings);
@@ -232,18 +250,32 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_not_approved' };
   }
 
-  const modelApproved = registry.models.some(
+  const modelApproved = registry.models.find(
     (entry) => entry.providerId === provider && entry.modelId === modelId,
   );
 
-  if (!modelApproved) {
+  if (modelApproved === undefined) {
     return { ok: false, mode, settings, reason: 'model_not_approved' };
+  }
+
+  // The allowlist entry is a *record*, not a flag: it must name who decided, when, and until when.
+  if (evaluateApproval(modelApproved.approval, now) !== 'effective') {
+    return { ok: false, mode, settings, reason: 'approval_not_effective' };
   }
 
   const rate = findRateRow(registry.rates, provider, modelId);
 
-  if (rate === null || rate.provenance !== 'invoice_verified') {
+  if (
+    rate === null ||
+    (rate.provenance !== 'official_price_verified' && rate.provenance !== 'invoice_verified')
+  ) {
     return { ok: false, mode, settings, reason: 'rate_not_verified' };
+  }
+
+  // A snapshot the provider has already retired cannot serve a request, so paying for the attempt is
+  // pointless: refuse before egress rather than discover it as a 404 after a reservation.
+  if (isPastShutdown(rate, now)) {
+    return { ok: false, mode, settings, reason: 'model_shutdown' };
   }
 
   const credential = ModelCredential.parse(input.apiKey);
@@ -257,6 +289,7 @@ export function resolveModelExecution(
     mode,
     settings: Object.freeze({ ...settings, mode, modelId }),
     rate,
+    approval: modelApproved.approval,
     credential: credential.credential,
   };
 }

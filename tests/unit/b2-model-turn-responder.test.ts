@@ -89,6 +89,7 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   readonly publishes: PublishRecord[] = [];
   readonly charges: B2AttemptCharge[] = [];
   readonly reserveCommands: Array<{ reservedMicroUsd: number; modelLabel: string }> = [];
+  readonly requestedTurnScopes: Array<PendingModelTurn | undefined> = [];
 
   running = true;
   deadlineExpired = false;
@@ -104,9 +105,20 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
 
   attemptsIssued = 0;
 
-  listRunningTurns(): Promise<readonly PendingModelTurn[]> {
+  listRunningTurns(
+    _limit?: number,
+    onlyTurn?: PendingModelTurn,
+  ): Promise<readonly PendingModelTurn[]> {
     this.calls.push('listRunningTurns');
-    return Promise.resolve(this.running ? [{ tenantId, conversationId, turnId }] : []);
+    this.requestedTurnScopes.push(onlyTurn);
+    const candidate = { tenantId, conversationId, turnId };
+    const matchesScope =
+      onlyTurn === undefined ||
+      (onlyTurn.tenantId === candidate.tenantId &&
+        onlyTurn.conversationId === candidate.conversationId &&
+        onlyTurn.turnId === candidate.turnId);
+
+    return Promise.resolve(this.running && matchesScope ? [candidate] : []);
   }
 
   expireTurnIfDue(): Promise<B1AssistantTurnDto | null> {
@@ -357,6 +369,18 @@ describe('B2 responder: the happy path', () => {
       modelLabel: REAL_MODEL_LABEL,
       simulated: false,
     });
+  });
+
+  it('passes an exact one-turn scope to the repository before any paid work', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['ok']);
+    const onlyTurn = { tenantId, conversationId, turnId };
+
+    const summary = await realResponder(repository, gateway, { onlyTurn }).processOnce();
+
+    expect(summary.completed).toBe(1);
+    expect(repository.requestedTurnScopes).toStrictEqual([onlyTurn]);
+    expect(gateway.inputs).toHaveLength(1);
   });
 
   it('sends the bounded transcript and caps the completion at the limit', async () => {
@@ -855,5 +879,42 @@ describe('B2 responder: budget halt (review P0-3)', () => {
       status: 'failed',
       failureReason: 'internal_error',
     });
+  });
+});
+
+describe('B2 responder: per-process concurrency gate', () => {
+  it('refuses a second concurrent pass before it can read, claim or reserve anything', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new HangingGateway();
+    const responder = realResponder(repository, gateway, { attemptTimeoutMs: 5_000 });
+
+    const first = responder.processOnce();
+    await gateway.entered;
+
+    // The first pass owns this instance's only paid slot, so the second does not even list Turns.
+    const second = await responder.processOnce();
+
+    expect(second).toMatchObject({ busy: true, examined: 0, completed: 0, skipped: 0 });
+    // One pass, one claim, one reservation: the gate cannot be crossed twice.
+    expect(repository.calls.filter((call) => call === 'claimTurn')).toHaveLength(1);
+    expect(repository.reserveCommands).toHaveLength(1);
+
+    // The first pass is still running normally; it is not a replacement for real work.
+    expect(first).toBeInstanceOf(Promise);
+    await expect(Promise.race([first, Promise.resolve('pending')])).resolves.toBe('pending');
+  });
+
+  it('releases the gate after a pass fails, so the next iteration can still make progress', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['ok']);
+    const responder = realResponder(repository, gateway);
+
+    await responder.processOnce();
+
+    repository.running = false;
+    const next = await responder.processOnce();
+
+    expect(next.busy).toBe(false);
+    expect(next.examined).toBe(0);
   });
 });

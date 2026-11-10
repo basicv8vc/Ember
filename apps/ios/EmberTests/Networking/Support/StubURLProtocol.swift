@@ -12,6 +12,9 @@ struct URLProtocolStubResponse: @unchecked Sendable {
     var error: Error?
     var delayNanoseconds: UInt64 = 0
     var deliveryProbe: URLProtocolDeliveryProbe?
+    var onStartLoading: (@Sendable () -> Void)?
+    var onFinishLoading: (@Sendable () -> Void)?
+    var requestBarrier: (@Sendable () async -> Void)?
 
     static func json(
         statusCode: Int,
@@ -107,6 +110,15 @@ final class StubURLProtocol: URLProtocol {
     // These values are protected by stateLock. No client callback runs while it is held.
     private var stopped = false
     private var deliveryStarted = false
+    private var finishLoadingCallback: (@Sendable () -> Void)?
+
+    private func notifyFinishLoading() {
+        stateLock.lock()
+        let onFinish = finishLoadingCallback
+        finishLoadingCallback = nil
+        stateLock.unlock()
+        onFinish?()
+    }
 
     static func register(
         _ handler: @escaping Handler,
@@ -134,9 +146,19 @@ final class StubURLProtocol: URLProtocol {
         do {
             let handlerRequest = try requestWithReadableBody(request)
             let stub = try handler(handlerRequest)
-            if stub.delayNanoseconds > 0 {
+            stateLock.lock()
+            finishLoadingCallback = stub.onFinishLoading
+            stateLock.unlock()
+            stub.onStartLoading?()
+
+            let reference = WeakReference(self)
+            if let barrier = stub.requestBarrier {
+                Task { [reference, stub] in
+                    await barrier()
+                    reference.value?.deliver(stub)
+                }
+            } else if stub.delayNanoseconds > 0 {
                 let boundedDelay = Int(min(stub.delayNanoseconds, UInt64(Int.max)))
-                let reference = WeakReference(self)
                 DispatchQueue.global().asyncAfter(deadline: .now() + .nanoseconds(boundedDelay)) { [reference, stub] in
                     reference.value?.deliver(stub)
                 }
@@ -176,8 +198,13 @@ final class StubURLProtocol: URLProtocol {
 
     override func stopLoading() {
         stateLock.lock()
+        let wasStopped = stopped
         stopped = true
         stateLock.unlock()
+        if !wasStopped {
+            notifyFinishLoading()
+            client?.urlProtocol(self, didFailWithError: URLError(.cancelled))
+        }
     }
 
     private func claimDelivery() -> Bool {
@@ -198,6 +225,7 @@ final class StubURLProtocol: URLProtocol {
         let reference = WeakReference(self)
         lifecycleQueue.async { [reference] in
             guard let instance = reference.value, instance.claimDelivery() else { return }
+            instance.notifyFinishLoading()
             instance.client?.urlProtocol(instance, didFailWithError: error)
         }
     }
@@ -206,6 +234,7 @@ final class StubURLProtocol: URLProtocol {
         let reference = WeakReference(self)
         lifecycleQueue.async { [reference, stub] in
             guard let instance = reference.value, instance.claimDelivery() else { return }
+            instance.notifyFinishLoading()
             stub.deliveryProbe?.recordDelivery()
 
             if let error = stub.error {

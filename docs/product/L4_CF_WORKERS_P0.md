@@ -1,5 +1,9 @@
 # Cloudflare-first PostgreSQL API PoC
 
+> This document records the original 2026-11-07 PoC snapshot. The current deployment status,
+> remote role verification, migration dependency, and smoke results are maintained in
+> [the Cloudflare runbook](../../infra/cloudflare/README.md) (updated 2026-11-10).
+
 Status (2026-11-07): P0 implementation, local regressions, and the remote smoke runner are prepared.
 Cloudflare CLI authentication was verified read-only; no Worker, Hyperdrive config, database, or
 other remote resource has been created. Remote deployment is blocked because Agent D's PR #139
@@ -74,11 +78,11 @@ not prove transaction-pool behavior, provider permissions, recovery, or producti
 
 ## Cost and expansion path
 
-| Layer               | Low-cost starting point                                                                                                | Expansion without changing B1 contracts                                                                                                                                                                                                                                       |
-| ------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Layer               | Low-cost starting point                                                                                                                               | Expansion without changing B1 contracts                                                                                                                                                                                                                                       |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | API compute         | Cloudflare Workers Free: 100,000 requests/day and 10 ms CPU per invocation; the Worker config leaves `limits.cpu_ms` unset and uses the Free default. | Workers Standard currently starts at $5/month with 10 million requests and 30 million CPU milliseconds included. Raise measured CPU limits when approved. Hyperdrive is included in both plans; its free database statement limit is 100,000/day and paid limit is unlimited. |
-| PostgreSQL          | Compare Supabase Free and Neon Free on a disposable environment.                                                       | Upgrade the selected database on its existing provider; Neon Launch supports usage billing, while Supabase Pro removes inactivity pausing and raises included capacity.                                                                                                       |
-| Alternative hosting | Keep Cloudflare first for this PoC.                                                                                    | AWS Lambda with the existing Node/Hono runtime and RDS/Aurora are valid future candidates if measured cost, compliance, region, or operational needs favor AWS.                                                                                                               |
+| PostgreSQL          | Compare Supabase Free and Neon Free on a disposable environment.                                                                                      | Upgrade the selected database on its existing provider; Neon Launch supports usage billing, while Supabase Pro removes inactivity pausing and raises included capacity.                                                                                                       |
+| Alternative hosting | Keep Cloudflare first for this PoC.                                                                                                                   | AWS Lambda with the existing Node/Hono runtime and RDS/Aurora are valid future candidates if measured cost, compliance, region, or operational needs favor AWS.                                                                                                               |
 
 Before approving a paid step, collect request volume, database statements per request, Worker CPU,
 database compute/storage/egress, cold-start latency, and recovery requirements. Do not migrate

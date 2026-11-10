@@ -41,3 +41,4 @@ GRANT SELECT, INSERT, UPDATE ON TABLE public.conversations TO ember_worker;
 GRANT SELECT, INSERT ON TABLE public.conversation_messages TO ember_worker;
 GRANT SELECT, INSERT, UPDATE ON TABLE public.assistant_turns TO ember_worker;
 GRANT SELECT, INSERT, DELETE ON TABLE ember_private.apple_identity_nonce_replays TO ember_worker;
+GRANT INSERT ON TABLE public.b1_turn_dispatch_outbox TO ember_worker;

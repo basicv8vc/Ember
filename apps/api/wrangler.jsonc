@@ -20,4 +20,12 @@
       "id": "a331dbebe08c4f4e9ec7eac2d2baf5a3",
     },
   ],
+  "queues": {
+    "producers": [
+      {
+        "binding": "TURN_DISPATCH_QUEUE",
+        "queue": "ember-assistant-turns",
+      },
+    ],
+  },
 }

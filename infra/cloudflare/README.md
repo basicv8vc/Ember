@@ -1,17 +1,35 @@
 # Cloudflare Workers deployment and smoke test
 
-This directory prepares the approved Workers Free + Hyperdrive test deployment for Issue #134.
-It does not create resources, alter DNS, or run migrations. PR #138 must remain Draft.
+This runbook covers the existing Workers Free + Neon Hyperdrive test deployment and the B1 API
+integration based on PR #138. The API remains PostgreSQL-first; Cloudflare Queues carry wake-up
+envelopes only, while the PostgreSQL outbox is authoritative. No D1 binding or model execution is
+introduced. Keep both the existing PR #138 and the new API integration PR in Draft until reviewed.
+
+## Current environment evidence (2026-11-10)
+
+- The existing Worker at `https://ember-cloud-api.10kpaper.workers.dev` passed the seven-check
+  preflight. This is the previously deployed PR #138 version, not the branch described by the new
+  API integration PR.
+- A temporary remote Worker using the configured Hyperdrive binding connected to PostgreSQL 17.11
+  as `ember_worker` (`session_user` matched), with `statement_timeout=5s`, no superuser flag, and no
+  `neon_superuser` membership. The `0017` nonce schema/table exists and the role has nonce INSERT
+  and DELETE privileges. The probe returned no connection string and did not use the rotated test
+  owner credential.
+- Migration `0018_b1_turn_dispatch_outbox.sql` is in the API branch but has not been applied to the
+  remote database. Migrations must use a separate authorized direct migration connection, never
+  Hyperdrive. Do not deploy the outbox writer before `0018` and its minimal runtime grant are applied.
+- The Cloudflare Queue list is empty. The API config declares producer binding
+  `TURN_DISPATCH_QUEUE` for `ember-assistant-turns`; create that Queue only on the Free plan before
+  deploying. No Queue or new Worker resource has been created by this branch.
+- The signed Apple flow, nonce replay, tenant isolation, and message/Turn smoke still require fresh
+  assertions from two disposable Apple test accounts. The iOS Lead owns that final live acceptance.
 
 ## Deployment configuration
 
-`apps/api/wrangler.jsonc` is the source of truth for Worker name, `workers.dev`, and non-secret Apple
-verifier settings. It currently contains an all-zero Hyperdrive ID placeholder. The config leaves
-`limits.cpu_ms` unset: Workers Free uses its 10 ms CPU default, while an explicit limit was rejected
-by Cloudflare with error 100328 in the prior Free-plan probe.
-After the authorized test database is available, create exactly one Hyperdrive config and replace
-that placeholder with its ID before deployment. The test config must use the PG17 runtime role
-`ember_worker`, a direct/unpooled PostgreSQL origin connection, and disabled query caching.
+`apps/api/wrangler.jsonc` is the source of truth for the Worker name, existing Hyperdrive binding,
+Apple audience `com.basicv8vc.ember`, and Queue producer binding. The existing Hyperdrive config
+uses Neon, the least-privilege `ember_worker` role, and disabled query caching. The config leaves
+`limits.cpu_ms` unset; Workers Free uses its default CPU limit.
 
 Use the Workers Free plan only. Check the final `workers.dev` URL before running the smoke test. If
 Cloudflare presents a paid upgrade or any billable add-on, stop before accepting it or proceeding.
@@ -43,7 +61,8 @@ credential in process arguments and are not suitable for this handoff.
 
 Official references: [Workers Secrets](https://developers.cloudflare.com/workers/configuration/secrets/),
 [Hyperdrive connection](https://developers.cloudflare.com/hyperdrive/get-started/), and
-[Hyperdrive transaction pooling](https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/).
+[Hyperdrive transaction pooling](https://developers.cloudflare.com/hyperdrive/concepts/connection-pooling/),
+and [Queues pricing and included operations](https://developers.cloudflare.com/queues/platform/pricing/).
 
 ## Smoke test
 
@@ -73,11 +92,12 @@ unset PRIMARY_APPLE_TOKEN PRIMARY_RAW_NONCE SECONDARY_APPLE_TOKEN SECONDARY_RAW_
 ```
 
 `full` runs preflight, submits the primary Apple assertion concurrently twice (one session must win,
-one must be rejected), verifies replay rejection and `/v1/me`, writes one synthetic B1 message,
-retries its submission concurrently, reads the Unknown ACK receipt and transcript, then proves a
-second Apple tenant sees the first tenant's conversation/submission as `NOT_FOUND`. The first
-Apple-authenticated bootstrap provisions the main Conversation; there is no separate create
-Conversation route. The message and running Turn remain as synthetic test rows in the test database.
+one must be rejected), verifies replay rejection and `/v1/me`, rotates the Cloud Session, writes one
+synthetic B1 message and deliberately drops the client connection after commit, recovers the Unknown
+ACK, retries the exact submission, reads/cancels the Turn and transcript, then proves a second Apple
+tenant sees the first tenant's Conversation/submission as `NOT_FOUND`. The first Apple-authenticated
+bootstrap provisions the main Conversation; there is no separate create Conversation route. The
+synthetic Message and cancelled Turn remain in the test database; no model is invoked.
 
 Without a secondary identity, the runner reports tenant isolation as `NOT VERIFIED` and exits 2.
 The runner does not inject a dev identity or bypass Apple verification. Cloud DB interruption/recovery,
@@ -86,12 +106,15 @@ separate checks; a smoke pass does not claim those results.
 
 ## Deployment sequence
 
-1. Confirm Agent D's PG17 Free test database and securely obtain its direct connection details.
-2. Apply migrations `0001`–`0017` and the least-privilege role bootstrap on a separate direct
-   connection. Never migrate through Hyperdrive transaction pooling.
-3. Create exactly one uncached Hyperdrive config using the `ember_worker` role and update the
-   placeholder binding ID in `apps/api/wrangler.jsonc`.
-4. Run `pnpm --filter @ember/api build:worker` (dry-run), then deploy the one Worker with
-   `pnpm deploy:api:worker`. Record the HTTPS `workers.dev` URL and redacted resource identifiers.
-5. Run `preflight`, then `full`; only after core B1 and Apple checks pass, collect Cloudflare CPU,
-   wall latency percentiles, Hyperdrive query latency, recovery, and low-concurrency measurements.
+1. Obtain an authorized direct migration connection for the existing disposable Neon test database;
+   do not use the rotated owner credential or the Worker/Hyperdrive connection.
+2. Apply `0018_b1_turn_dispatch_outbox.sql`, then apply the `ember_worker` role bootstrap so it gains
+   only `INSERT` on `public.b1_turn_dispatch_outbox`. Confirm the migration history and grants over
+   the direct connection.
+3. Create the Free Queue `ember-assistant-turns`; do not accept a paid upgrade. Keep the outbox relay
+   and B2 Turn executor in Agent B's runtime, not in the API Worker.
+4. Run `pnpm --filter @ember/api build:worker` (dry-run), deploy the API Worker, and verify the
+   runtime role again through the exact Hyperdrive binding.
+5. Run `preflight`, then have the iOS Lead perform `full` with two disposable Apple test accounts.
+   Record only redacted resource identifiers and HTTP statuses; collect latency/recovery metrics in
+   a later bounded run.

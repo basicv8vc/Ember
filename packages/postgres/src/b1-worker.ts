@@ -17,7 +17,11 @@ export type {
   B1SessionRotationResult,
 } from './repositories/b1-interfaces.js';
 export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
+export { insertB1TurnDispatchOutbox } from './repositories/b1-turn-dispatch-outbox.js';
 export { PostgresB1ConversationReadRepository } from './repositories/b1-conversation-read.js';
-export { PostgresB1ConversationWriteRepository } from './repositories/b1-conversation-write.js';
+export {
+  PostgresB1ConversationWriteRepository,
+  type PostgresB1ConversationWriteRepositoryOptions,
+} from './repositories/b1-conversation-write.js';
 export { PostgresB1ConsumerProvisioningRepository } from './repositories/b1-session-provisioning-repository.js';
 export { PostgresB1ConsumerSessionRepository } from './repositories/b1-session-repository.js';

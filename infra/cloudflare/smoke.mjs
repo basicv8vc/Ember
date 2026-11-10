@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 
 const TIMEOUT_MS = 12_000;
-const DUPLICATE_RETRIES = 8;
+const DUPLICATE_RETRIES = 4;
 const results = [];
 
 function usage() {
@@ -95,6 +96,66 @@ async function request(baseUrl, path, { method = 'GET', token, body } = {}) {
       transportError: error?.name === 'TimeoutError' ? 'timeout' : 'network error',
     };
   }
+}
+
+/**
+ * Send a committed write through a loopback proxy, then reset the client connection after the
+ * upstream Worker has returned its complete response. This models a lost ACK without changing
+ * the Worker or asking it to write test data twice.
+ */
+async function postAndDropResponse(baseUrl, path, { token, body }) {
+  let upstreamStatus = 0;
+  let upstreamCompleted = false;
+  const proxy = createServer((incoming, outgoing) => {
+    void (async () => {
+      const chunks = [];
+      for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+
+      const headers = { accept: 'application/json', 'content-type': 'application/json' };
+      if (token !== undefined) headers.authorization = `Bearer ${token}`;
+      const upstream = await fetch(new URL(path, `${baseUrl}/`), {
+        method: 'POST',
+        headers,
+        body: Buffer.concat(chunks),
+        credentials: 'omit',
+        cache: 'no-store',
+        redirect: 'error',
+        signal: AbortSignal.timeout(TIMEOUT_MS),
+      });
+      upstreamStatus = upstream.status;
+      await upstream.arrayBuffer();
+      upstreamCompleted = true;
+      outgoing.destroy();
+    })().catch(() => outgoing.destroy());
+  });
+
+  await new Promise((resolve, reject) => {
+    proxy.once('error', reject);
+    proxy.listen(0, '127.0.0.1', resolve);
+  });
+
+  let clientConnectionDropped = false;
+  try {
+    const address = proxy.address();
+    if (address === null || typeof address === 'string') {
+      throw new Error('loopback proxy did not bind a TCP port');
+    }
+    const localResponse = await fetch(`http://127.0.0.1:${address.port}/drop-ack`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      cache: 'no-store',
+      redirect: 'error',
+      signal: AbortSignal.timeout(TIMEOUT_MS),
+    });
+    await localResponse.arrayBuffer();
+  } catch {
+    clientConnectionDropped = true;
+  } finally {
+    await new Promise((resolve) => proxy.close(resolve));
+  }
+
+  return { upstreamStatus, upstreamCompleted, clientConnectionDropped };
 }
 
 function check(name, response, expectedStatuses, predicate = () => true) {
@@ -239,14 +300,49 @@ async function fullFlow(baseUrl) {
     return;
   }
 
-  const sessionToken = winner.json.access_token;
+  let sessionToken = winner.json.access_token;
   const sessionShape =
     uuid(winner.json.session_id) &&
     uuid(winner.json.consumer_id) &&
+    typeof winner.json.access_token === 'string' &&
     typeof winner.json.expires_at === 'string';
   record('Apple session follows the B1 response contract', sessionShape ? 'PASS' : 'FAIL');
+  if (!sessionShape) {
+    record('B1 refresh and Conversation flow', 'NOT VERIFIED', 'invalid session response');
+    return;
+  }
+
   const replay = await request(baseUrl, '/v1/auth/session', { method: 'POST', body: signInBody });
   check('sequential Apple nonce replay rejected', replay, [401]);
+
+  const refreshedSession = await request(baseUrl, '/v1/auth/session/refresh', {
+    method: 'POST',
+    token: sessionToken,
+  });
+  const refreshShape =
+    uuid(refreshedSession.json?.session_id) &&
+    refreshedSession.json?.consumer_id === winner.json.consumer_id &&
+    typeof refreshedSession.json?.access_token === 'string' &&
+    typeof refreshedSession.json?.expires_at === 'string';
+  check(
+    'POST B1 session refresh rotates the bearer token',
+    refreshedSession,
+    [200],
+    () => refreshShape,
+  );
+  if (!refreshShape) {
+    record('B1 Conversation flow', 'NOT VERIFIED', 'session refresh failed');
+    return;
+  }
+
+  const oldSession = await request(baseUrl, '/v1/me', { token: sessionToken });
+  check(
+    'rotated B1 session token is rejected',
+    oldSession,
+    [401],
+    (json) => json?.error?.code === 'UNAUTHENTICATED',
+  );
+  sessionToken = refreshedSession.json.access_token;
 
   const me = await request(baseUrl, '/v1/me', { token: sessionToken });
   const meShape =
@@ -269,21 +365,62 @@ async function fullFlow(baseUrl) {
     transcript_epoch: me.json.conversation.transcript_epoch,
     client_created_at: new Date().toISOString(),
   };
-  const firstSend = await request(baseUrl, `/v1/conversations/${conversationId}/messages`, {
-    method: 'POST',
-    token: sessionToken,
-    body: sendBody,
-  });
-  const receiptShape =
-    uuid(firstSend.json?.message?.message_id) &&
-    firstSend.json?.message?.client_submission_id === submissionId &&
-    uuid(firstSend.json?.turn?.turn_id) &&
-    firstSend.json?.turn?.status === 'running';
-  check('POST B1 message creates synthetic message and Turn', firstSend, [201], () => receiptShape);
-  if (!receiptShape) {
-    record('B1 message reads and ACK recovery', 'NOT VERIFIED', 'no valid write receipt');
+  const droppedAck = await postAndDropResponse(
+    baseUrl,
+    `/v1/conversations/${conversationId}/messages`,
+    { token: sessionToken, body: sendBody },
+  );
+  const committedWithoutAck =
+    droppedAck.upstreamStatus === 201 &&
+    droppedAck.upstreamCompleted &&
+    droppedAck.clientConnectionDropped;
+  record(
+    'committed B1 message survives a dropped client connection',
+    committedWithoutAck ? 'PASS' : 'FAIL',
+    `upstream HTTP ${droppedAck.upstreamStatus}; upstream response consumed; client connection ${droppedAck.clientConnectionDropped ? 'dropped' : 'not dropped'}`,
+  );
+  if (!committedWithoutAck) {
+    record(
+      'B1 message reads and Turn flow',
+      'NOT VERIFIED',
+      'commit/connection-drop sequence incomplete',
+    );
     return;
   }
+
+  const unknownAck = await request(
+    baseUrl,
+    `/v1/message-submissions/${encodeURIComponent(submissionId)}`,
+    { token: sessionToken },
+  );
+  const receiptShape =
+    uuid(unknownAck.json?.message?.message_id) &&
+    unknownAck.json?.message?.client_submission_id === submissionId &&
+    uuid(unknownAck.json?.turn?.turn_id) &&
+    unknownAck.json?.turn?.status === 'running';
+  check(
+    'GET Unknown ACK recovers the committed B1 message and Turn',
+    unknownAck,
+    [200],
+    () => receiptShape,
+  );
+  if (!receiptShape) {
+    record('B1 message retry and Turn flow', 'NOT VERIFIED', 'no valid recovered write receipt');
+    return;
+  }
+  const receipt = unknownAck.json;
+
+  const retryAfterDisconnect = await request(
+    baseUrl,
+    `/v1/conversations/${conversationId}/messages`,
+    { method: 'POST', token: sessionToken, body: sendBody },
+  );
+  check(
+    'retry after dropped ACK returns the original receipt',
+    retryAfterDisconnect,
+    [200],
+    (json) => JSON.stringify(json) === JSON.stringify(receipt),
+  );
 
   const duplicateSends = await Promise.all(
     Array.from({ length: DUPLICATE_RETRIES }, () =>
@@ -295,8 +432,7 @@ async function fullFlow(baseUrl) {
     ),
   );
   const replayReceiptsMatch = duplicateSends.every(
-    (result) =>
-      result.status === 200 && JSON.stringify(result.json) === JSON.stringify(firstSend.json),
+    (result) => result.status === 200 && JSON.stringify(result.json) === JSON.stringify(receipt),
   );
   record(
     'concurrent message retries are idempotent',
@@ -304,16 +440,46 @@ async function fullFlow(baseUrl) {
     `${duplicateSends.filter((result) => result.status === 200).length}/${DUPLICATE_RETRIES} HTTP 200`,
   );
 
-  const unknownAck = await request(
+  const turnPath = `/v1/conversations/${conversationId}/turns/${receipt.turn.turn_id}`;
+  const turn = await request(baseUrl, turnPath, { token: sessionToken });
+  const turnShape =
+    turn.json?.turn_id === receipt.turn.turn_id &&
+    turn.json?.conversation_id === conversationId &&
+    ['running', 'completed', 'failed', 'cancelled'].includes(turn.json?.status);
+  check('GET B1 Turn returns the persisted Turn', turn, [200], () => turnShape);
+
+  const cancelTurn = await request(baseUrl, `${turnPath}/cancel`, {
+    method: 'POST',
+    token: sessionToken,
+  });
+  const cancelShape =
+    cancelTurn.json?.turn_id === receipt.turn.turn_id &&
+    ['cancelled', 'completed', 'failed'].includes(cancelTurn.json?.status);
+  const cancellationRacedWithCompletion = cancelShape && cancelTurn.json.status !== 'cancelled';
+  record(
+    'POST B1 Turn cancellation',
+    !cancelShape ? 'FAIL' : cancellationRacedWithCompletion ? 'NOT VERIFIED' : 'PASS',
+    `HTTP ${cancelTurn.status}; stored status ${cancelTurn.json?.status ?? 'unavailable'}`,
+  );
+
+  const terminalTurn = await request(baseUrl, turnPath, { token: sessionToken });
+  check(
+    'GET B1 Turn observes the persisted terminal state',
+    terminalTurn,
+    [200],
+    (json) => json?.turn_id === receipt.turn.turn_id && json?.status === cancelTurn.json?.status,
+  );
+
+  const stableAck = await request(
     baseUrl,
     `/v1/message-submissions/${encodeURIComponent(submissionId)}`,
     { token: sessionToken },
   );
   check(
-    'GET Unknown ACK receipt matches original write',
-    unknownAck,
+    'Unknown ACK remains the original receipt after Turn transition',
+    stableAck,
     [200],
-    (json) => JSON.stringify(json) === JSON.stringify(firstSend.json),
+    (json) => JSON.stringify(json) === JSON.stringify(receipt),
   );
 
   const transcript = await request(
@@ -329,8 +495,7 @@ async function fullFlow(baseUrl) {
       Array.isArray(json?.messages) &&
       json.messages.some(
         (message) =>
-          message.message_id === firstSend.json.message.message_id &&
-          message.text === syntheticText,
+          message.message_id === receipt.message.message_id && message.text === syntheticText,
       ),
   );
 

@@ -33,8 +33,18 @@ export interface CloudflareHyperdriveBinding {
   readonly connectionString: string;
 }
 
+export interface CloudflareTurnDispatchQueueBinding {
+  send(message: {
+    readonly schemaVersion: 1;
+    readonly eventId: string;
+    readonly tenantId: string;
+    readonly turnId: string;
+  }): Promise<void>;
+}
+
 export interface CloudflareApiBindings {
   readonly HYPERDRIVE: CloudflareHyperdriveBinding;
+  readonly TURN_DISPATCH_QUEUE?: CloudflareTurnDispatchQueueBinding;
   readonly EMBER_APPLE_BUNDLE_ID: string;
   readonly EMBER_APPLE_CLOCK_SKEW_SECONDS?: string;
   readonly EMBER_APPLE_MAX_TOKEN_AGE_SECONDS?: string;
@@ -102,7 +112,11 @@ function createWorkerLogger(): ReturnType<typeof createLogger> {
   });
 }
 
-function createWorkerApp(pool: WorkerPool, bindings: CloudflareApiBindings) {
+function createWorkerApp(
+  pool: WorkerPool,
+  bindings: CloudflareApiBindings,
+  context: WorkerExecutionContext,
+) {
   const ports: B1SessionPorts = {
     provisioning: new PostgresB1ConsumerProvisioningRepository(pool),
     sessions: new PostgresB1ConsumerSessionRepository(pool),
@@ -122,18 +136,47 @@ function createWorkerApp(pool: WorkerPool, bindings: CloudflareApiBindings) {
     ),
   });
   const logger = createWorkerLogger();
+  const dispatchQueue = bindings.TURN_DISPATCH_QUEUE;
+  const wakeTurnRuntime = (event: { readonly tenantId: string; readonly turnId: string }): void => {
+    if (dispatchQueue === undefined) return;
 
-  // The API exposes the same B1 HTTP routes and SQL repositories as Node. It has no background
-  // responder, model credential, or Fake Model path; model completion remains the PR #130 seam.
+    const envelope = {
+      schemaVersion: 1 as const,
+      eventId: event.turnId,
+      tenantId: event.tenantId,
+      turnId: event.turnId,
+    };
+
+    try {
+      context.waitUntil(
+        dispatchQueue.send(envelope).catch(() => {
+          // PostgreSQL outbox relay is authoritative; keep Queue diagnostics free of body/credentials.
+          logger.warn('Assistant Turn Queue wake failed', { category: 'queue_send_failed' });
+        }),
+      );
+    } catch {
+      logger.warn('Assistant Turn Queue wake could not be scheduled', {
+        category: 'queue_send_failed',
+      });
+    }
+  };
+
+  // The API exposes the same B1 HTTP routes and SQL repositories as Node. Turn reads must remain
+  // read-only in this shared cloud environment; Agent B's executor owns timeout and publication.
   return createApp({
     readiness: createDatabaseReadiness(pool),
     serviceVersion: 'cloudflare-poc',
     logger,
     authenticator: createDevTokenAuthenticator([]),
     b1Session,
-    b1ConversationWriteRepository: new PostgresB1ConversationWriteRepository(pool),
+    b1ConversationWriteRepository: new PostgresB1ConversationWriteRepository(pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: wakeTurnRuntime,
+    }),
     b1ConversationReadRepository: new PostgresB1ConversationReadRepository(pool),
-    b1AssistantTurnRepository: new PostgresB1AssistantTurnRepository(pool),
+    b1AssistantTurnRepository: new PostgresB1AssistantTurnRepository(pool, {
+      expireOnRead: false,
+    }),
   });
 }
 
@@ -146,7 +189,7 @@ export default {
     const pool = createWorkerPool(bindings);
 
     try {
-      return await createWorkerApp(pool, bindings).fetch(request);
+      return await createWorkerApp(pool, bindings, context).fetch(request);
     } finally {
       // Hyperdrive owns the cross-isolate pool; do not hold a client socket in the isolate.
       // The request response is already determined by the awaited route before this cleanup.

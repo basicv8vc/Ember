@@ -96,6 +96,23 @@ Therefore the current system does not meet the no-Mac backend or asynchronous Tu
 `0014`–`0016`; if the cloud executor needs them, provide a separate least-privilege identity and
 grants rather than broadening the API role.
 
+The HTTP acceptance contract from the current API is:
+
+| Call | Expected result |
+| --- | --- |
+| `GET /healthz` | 200 liveness response. |
+| `GET /readyz` | 200 only when the database readiness query succeeds. |
+| `GET /v1/me` without a session | 401. |
+| `POST /v1/auth/session` | Accept a valid Apple identity token for audience `com.basicv8vc.ember`; reject nonce replay. |
+| `POST /v1/conversations/{conversationId}/messages` | 201 for a new submission; 200 for an identical `client_submission_id` replay. Message and durable Turn are committed atomically. |
+| `GET /v1/message-submissions/{clientSubmissionId}` and `GET /v1/conversations/{conversationId}/messages` | Resolve an Unknown ACK and confirm the message is persisted. |
+| `GET /v1/conversations/{conversation_id}/turns/{turn_id}` | Read the persisted Turn state. A `running` row alone is not proof of async execution. |
+| Second tenant reads first tenant's submission/conversation | 404. |
+
+The API does not currently promise an assistant completion when model execution is disabled.
+Agent A must define the durable disabled-state and executor-trigger behavior before the Turn
+acceptance is considered complete.
+
 ## 5. Repeatable release procedure
 
 Run this only after the integration inputs above are complete and the required operation has

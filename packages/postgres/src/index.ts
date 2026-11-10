@@ -60,6 +60,14 @@ export type {
 } from './repositories/b1-interfaces.js';
 export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
 export {
+  insertB1TurnDispatchOutbox,
+  parseB1TurnDispatchEnvelope,
+  PostgresB1TurnDispatchOutboxRepository,
+  type B1TurnDispatchEnvelope,
+  type B1TurnDispatchEvent,
+  type B1TurnDispatchStatus,
+} from './repositories/b1-turn-dispatch-outbox.js';
+export {
   PostgresModelTurnExecutionRepository,
   B2_TURN_CANDIDATE_LIMIT,
 } from './repositories/b2-model-turn-execution-repository.js';

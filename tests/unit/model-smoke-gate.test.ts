@@ -4,6 +4,7 @@ import {
   MAX_SMOKE_TURNS,
   buildEvidence,
   evaluateSmokePreconditions,
+  hasIsolatedSmokeDatabase,
   parseSmokeArgs,
   type SmokePlan,
   type SmokePreconditions,
@@ -137,6 +138,35 @@ describe('paid smoke arguments', () => {
   });
 });
 
+describe('paid smoke database isolation', () => {
+  it('requires a separate PostgreSQL database from the resident worker target', () => {
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember_smoke',
+        'postgres://worker:secret@localhost:5432/ember',
+      ),
+    ).toBe(true);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost/ember',
+        'postgres://worker:other@localhost:5432/ember',
+      ),
+    ).toBe(false);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember_smoke',
+        'postgres://worker:secret@localhost:5432/ember_smoke',
+      ),
+    ).toBe(false);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember',
+        'postgres://worker:secret@db.internal:5432/ember',
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('paid smoke evidence', () => {
   const base = {
     startedAt: new Date('2026-11-08T00:00:00Z'),
@@ -145,7 +175,8 @@ describe('paid smoke evidence', () => {
     tenantId: 'tenant-1',
     conversationId: 'conversation-1',
     turnId: 'turn-1',
-    summary: { completed: 1 },
+    summary: { completed: 1, examined: 1 },
+    attemptCount: 1,
     turn: { status: 'completed', failureReason: null, responseMessageId: 'message-1' },
     reply: { messageId: 'message-1', modelLabel: PLAN.modelId, simulated: false, characters: 42 },
     attempt: {
@@ -184,8 +215,15 @@ describe('paid smoke evidence', () => {
       'settled as unknown_billed',
     ],
     ['no attempt row', { attempt: null }, 'no attempt row'],
+    ['multiple provider attempts', { attemptCount: 2 }, 'exactly one'],
+    ['a non-first attempt', { attempt: { ...base.attempt, attemptNo: 2 } }, 'instead of 1'],
     ['a failed turn', { turn: { ...base.turn, status: 'failed' } }, 'status is failed'],
     ['a responder that did nothing', { summary: { completed: 0 } }, 'exactly one completed'],
+    [
+      'a responder that examined other Turns',
+      { summary: { completed: 1, examined: 2 } },
+      'exactly the one scoped',
+    ],
   ])('fails the verdict on %s', (_label, override, expectedReason) => {
     const evidence = buildEvidence({ ...base, ...override });
 

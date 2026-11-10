@@ -1,6 +1,7 @@
-import type { ModelExecutionResolution } from './config.js';
+import { isModelExecutionAuthorized, type ModelExecutionResolution } from './config.js';
 import { FakeModelGateway, type FakeModelGatewayOptions } from './fake.js';
 import { OpenAiModelGateway, type FetchLike } from './providers/openai.js';
+import { OpenRouterModelGateway } from './providers/openrouter.js';
 import type { ModelGateway } from './types.js';
 
 export interface CreateModelGatewayOptions {
@@ -37,13 +38,30 @@ export function createModelGateway(
     throw new Error('real mode requires a pinned model id');
   }
 
-  return resolution.credential.use(
-    (apiKey) =>
-      new OpenAiModelGateway({
+  const isAuthorized = (): boolean => isModelExecutionAuthorized(resolution);
+
+  return resolution.credential.use((apiKey) => {
+    if (resolution.settings.providerId === 'openai') {
+      return new OpenAiModelGateway({
         apiKey,
         modelId,
         rate: resolution.rate,
+        isAuthorized,
         ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
-      }),
-  );
+      });
+    }
+
+    if (resolution.openRouterRouting === null) {
+      throw new Error('OpenRouter requires a reviewed provider routing policy');
+    }
+
+    return new OpenRouterModelGateway({
+      apiKey,
+      modelId,
+      rate: resolution.rate,
+      routing: resolution.openRouterRouting,
+      isAuthorized,
+      ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    });
+  });
 }

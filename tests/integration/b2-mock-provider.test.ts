@@ -160,6 +160,7 @@ function gatewayFor(mock: MockProvider) {
     apiKey: API_KEY,
     modelId: PINNED_MODEL,
     rate: RATE,
+    isAuthorized: () => true,
     fetchImpl: mock.fetchImpl,
   });
 }

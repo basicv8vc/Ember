@@ -60,7 +60,7 @@ export interface ModelTurnExecutionPort {
     readonly ceilings: ModelBudgetCeilings;
     readonly reservedMicroUsd: number;
     readonly rateVersion: string;
-    readonly providerId: 'openai';
+    readonly providerId: 'openai' | 'openrouter';
     readonly modelLabel: string;
   }): Promise<B2ReserveOutcome>;
   markAttemptSent(command: {
@@ -214,6 +214,13 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
   if (options.mode === 'real' && options.rate === null) {
     throw new TypeError('real mode requires a pinned rate row');
   }
+
+  if (options.mode === 'real' && options.gateway.providerId === 'fake') {
+    throw new TypeError('real mode requires a real provider gateway');
+  }
+
+  const reservationProviderId: 'openai' | 'openrouter' =
+    options.gateway.providerId === 'openrouter' ? 'openrouter' : 'openai';
 
   const counters = (): Record<ModelTurnOutcome, number> & {
     examined: number;
@@ -422,7 +429,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         ceilings: options.ceilings,
         reservedMicroUsd,
         rateVersion: rate.rateVersion,
-        providerId: 'openai',
+        providerId: reservationProviderId,
         modelLabel: options.gateway.modelLabel,
       });
 
@@ -505,6 +512,17 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       }
 
       const shutdown = signal?.aborted === true;
+
+      if (result.code === 'not_sent') {
+        // The provider adapter's final authorization fence refused before fetch. No bytes left the
+        // process, so return the reservation in full and never retry an expired approval.
+        await settle(lease, attemptNo, { state: 'released', outcomeCode: 'not_sent' });
+        options.logger?.warn('model provider request refused before egress', {
+          turnId: lease.turnId,
+          reason: 'not_sent',
+        });
+        return await terminalFailure(lease, 'internal_error');
+      }
 
       // A request that may have been sent keeps its reservation: an unknown charge is not a free one.
       await settle(lease, attemptNo, {

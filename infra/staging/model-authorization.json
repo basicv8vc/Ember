@@ -1,5 +1,5 @@
 {
   "schemaVersion": 1,
-  "note": "Reviewed authorization for paid model egress in a staging deployment. An empty list means staging may not reach a model provider at all, which is the merged default. Adding an entry here is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select a different one. An entry must include an official OpenAI HTTPS priceSource reviewed for A2; packages/model-gateway/src/rates.ts must independently approve the same model id, and a unit test asserts the two agree.",
+  "note": "Reviewed authorization for paid model egress in a staging deployment. An empty list means staging may not reach a model provider at all, which is the merged default. Adding an entry here is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select a different one. An entry must include the selected provider's official HTTPS model/pricing page; packages/model-gateway/src/rates.ts must independently pin the same model id, price and provider policy. OpenRouter entries require a reviewed route, no provider fallback, data_collection=deny and ZDR.",
   "authorizations": []
 }

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { CONVERSATION_SYSTEM_PROMPT } from '../context.js';
-import { ModelGatewayFailure } from '../errors.js';
+import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
 import { MODEL_LIMITS } from '../limits.js';
 import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
 import type {
@@ -100,6 +100,8 @@ export interface OpenAiGatewayOptions {
   readonly apiKey: string;
   readonly modelId: string;
   readonly rate: ModelRateRow;
+  /** Re-evaluated immediately before each outbound request. */
+  readonly isAuthorized: () => boolean;
   /** Injected only by tests; CI must never resolve a provider hostname. */
   readonly fetchImpl?: FetchLike;
 }
@@ -120,12 +122,14 @@ export class OpenAiModelGateway implements ModelGateway {
   readonly #modelId: string;
   readonly #rate: ModelRateRow;
   readonly #fetch: FetchLike;
+  readonly #isAuthorized: () => boolean;
 
   constructor(options: OpenAiGatewayOptions) {
     this.#apiKey = options.apiKey;
     this.#modelId = options.modelId;
     this.#rate = options.rate;
     this.#fetch = options.fetchImpl ?? defaultFetch;
+    this.#isAuthorized = options.isAuthorized;
     this.modelLabel = options.modelId;
   }
 
@@ -153,6 +157,12 @@ export class OpenAiModelGateway implements ModelGateway {
       store: false,
       ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
     });
+
+    // The approval is dated and can expire while this process stays up. This synchronous check is
+    // deliberately adjacent to fetch so no retry or later Turn can use the boot-time decision.
+    if (!this.#isAuthorized()) {
+      throw new ModelAuthorizationRefused();
+    }
 
     let response: FetchResponseLike;
 

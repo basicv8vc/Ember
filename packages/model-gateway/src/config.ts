@@ -11,6 +11,7 @@ import {
   type ApprovedModel,
   type ModelApprovalRecord,
   type ModelRateRow,
+  type OpenRouterRoutingPolicy,
 } from './rates.js';
 import type { ModelExecutionMode, ModelProviderId } from './types.js';
 
@@ -49,6 +50,7 @@ export type ModelBootRefusalReason =
   | 'approval_not_effective'
   | 'model_shutdown'
   | 'rate_not_verified'
+  | 'provider_routing_not_approved'
   | CredentialRefusal
   | 'budget_config_invalid';
 
@@ -97,6 +99,7 @@ export type ModelExecutionResolution =
        * test compares it to what it was told on the command line). It is a decision id, not a secret.
        */
       readonly approval: ModelApprovalRecord;
+      readonly openRouterRouting: OpenRouterRoutingPolicy | null;
       readonly credential: ModelCredential;
     }
   | {
@@ -197,10 +200,12 @@ export function resolveModelExecution(
 ): ModelExecutionResolution {
   const mode = resolveMode(input.mode);
   const ceilings = resolveCeilings(input.ceilings);
+  const configuredProvider = input.providerId?.trim() ?? 'openai';
+  const providerId: ModelProviderId = configuredProvider === 'openrouter' ? 'openrouter' : 'openai';
 
   const settings: ModelExecutionSettings = Object.freeze({
     mode: mode ?? 'disabled',
-    providerId: 'openai',
+    providerId,
     modelId: input.modelId?.trim() ?? null,
     ceilings: ceilings ?? DEFAULT_MODEL_CEILINGS,
     maxAttempts: boundedInteger(
@@ -238,7 +243,7 @@ export function resolveModelExecution(
   }
 
   // ---- mode === 'real': every gate below is required ----
-  const provider = input.providerId?.trim() ?? 'openai';
+  const provider = configuredProvider;
 
   if (!APPROVED_MODEL_PROVIDERS.includes(provider)) {
     return { ok: false, mode, settings, reason: 'provider_not_approved' };
@@ -256,6 +261,22 @@ export function resolveModelExecution(
 
   if (modelApproved === undefined) {
     return { ok: false, mode, settings, reason: 'model_not_approved' };
+  }
+
+  if (
+    provider === 'openrouter' &&
+    (!modelApproved.openRouterRouting ||
+      modelApproved.openRouterRouting.allowFallbacks !== false ||
+      modelApproved.openRouterRouting.dataCollection !== 'deny' ||
+      modelApproved.openRouterRouting.zdr !== true ||
+      modelApproved.openRouterRouting.requireParameters !== true ||
+      !Array.isArray(modelApproved.openRouterRouting.only) ||
+      modelApproved.openRouterRouting.only.length === 0 ||
+      modelApproved.openRouterRouting.only.some(
+        (route) => typeof route !== 'string' || route.trim().length === 0,
+      ))
+  ) {
+    return { ok: false, mode, settings, reason: 'provider_routing_not_approved' };
   }
 
   // The allowlist entry is a *record*, not a flag: it must name who decided, when, and until when.
@@ -287,11 +308,30 @@ export function resolveModelExecution(
   return {
     ok: true,
     mode,
-    settings: Object.freeze({ ...settings, mode, modelId }),
+    settings: Object.freeze({
+      ...settings,
+      mode,
+      providerId: provider as ModelProviderId,
+      modelId,
+    }),
     rate,
     approval: modelApproved.approval,
+    openRouterRouting: modelApproved.openRouterRouting ?? null,
     credential: credential.credential,
   };
+}
+
+/** Dynamic spend permission used at each provider boundary, including retries in a long-lived Worker. */
+export function isModelExecutionAuthorized(
+  resolution: Extract<ModelExecutionResolution, { readonly ok: true; readonly mode: 'real' }>,
+  now: Date = new Date(),
+): boolean {
+  return (
+    evaluateApproval(resolution.approval, now) === 'effective' &&
+    (resolution.rate.provenance === 'official_price_verified' ||
+      resolution.rate.provenance === 'invoice_verified') &&
+    !isPastShutdown(resolution.rate, now)
+  );
 }
 
 /** True when a resolution may issue paid provider calls. */

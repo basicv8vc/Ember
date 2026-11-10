@@ -51,6 +51,22 @@ export class ModelGatewayFailure extends Error {
   }
 }
 
+/**
+ * A real-provider request refused at the final egress boundary because its dated approval expired.
+ * It reuses `not_sent`: no provider bytes left the process, so the reservation is safe to release.
+ */
+export class ModelAuthorizationRefused extends ModelGatewayFailure {
+  readonly reason = 'approval_expired' as const;
+
+  constructor() {
+    super('not_sent');
+  }
+}
+
+export function isModelAuthorizationRefused(value: unknown): value is ModelAuthorizationRefused {
+  return value instanceof ModelAuthorizationRefused;
+}
+
 export function isModelGatewayFailure(value: unknown): value is ModelGatewayFailure {
   return value instanceof ModelGatewayFailure;
 }

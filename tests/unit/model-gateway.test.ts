@@ -14,12 +14,17 @@ import {
   ModelInputRefused,
   OPENAI_CHAT_COMPLETIONS_URL,
   OPENAI_ORIGIN,
+  OPENROUTER_CHAT_COMPLETIONS_URL,
+  OPENROUTER_ORIGIN,
   OpenAiModelGateway,
+  OpenRouterModelGateway,
   buildBoundedContext,
   createModelGateway,
   estimateCostMicroUsd,
   estimateTokensConservative,
   evaluateApproval,
+  isModelAuthorizationRefused,
+  isModelExecutionAuthorized,
   isModelGatewayFailure,
   isPastShutdown,
   isRetryableModelFailure,
@@ -29,6 +34,7 @@ import {
   type FetchLike,
   type FetchRequestInitLike,
   type ModelRateRow,
+  type OpenRouterRoutingPolicy,
 } from '@ember/model-gateway';
 
 const VALID_KEY = 'sk-test-abcdefghijklmnopqrstuvwxyz012345';
@@ -63,6 +69,18 @@ const APPROVED_REGISTRY = Object.freeze({
     },
   ]),
   rates: Object.freeze([VERIFIED_RATE]),
+});
+
+const OPENROUTER_RATE = MODEL_RATE_ROWS.find(
+  (row) => row.providerId === 'openrouter' && row.modelId === 'openai/gpt-5.6-luna',
+)!;
+
+const OPENROUTER_ROUTING: OpenRouterRoutingPolicy = Object.freeze({
+  only: Object.freeze(['openai']),
+  allowFallbacks: false,
+  dataCollection: 'deny',
+  zdr: true,
+  requireParameters: true,
 });
 
 function input(overrides: { readonly text?: string } = {}) {
@@ -135,8 +153,8 @@ describe('model gateway limits and pricing', () => {
   it('ships no approved real model, which is what keeps real mode closed by default', () => {
     expect(APPROVED_REAL_MODELS).toHaveLength(0);
     expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(0);
-    // The shipped rate table is unverified by construction.
-    expect(MODEL_RATE_ROWS.every((row) => row.provenance === 'unverified')).toBe(true);
+    // A reviewed catalog price never authorizes egress: that still needs an approval record.
+    expect(OPENROUTER_RATE.provenance).toBe('official_price_verified');
   });
 });
 
@@ -492,6 +510,7 @@ describe('openai adapter', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
+      isAuthorized: () => true,
       fetchImpl: stub.fetchImpl,
     });
 
@@ -509,6 +528,22 @@ describe('openai adapter', () => {
     expect(result.modelLabel).not.toMatch(/-(fake|echo)-/);
   });
 
+  it('re-checks live authorization before each outbound OpenAI request', async () => {
+    const stub = stubFetch(() => Promise.resolve(response(200, {})));
+    const gateway = new OpenAiModelGateway({
+      apiKey: VALID_KEY,
+      modelId: 'gpt-5.6-luna',
+      rate: VERIFIED_RATE,
+      isAuthorized: () => false,
+      fetchImpl: stub.fetchImpl,
+    });
+
+    await expect(
+      gateway.generateConversationTurn(input(), new AbortController().signal),
+    ).rejects.toSatisfy(isModelAuthorizationRefused);
+    expect(stub.calls).toHaveLength(0);
+  });
+
   it('sends only the fields the contract needs, with the system prompt first', async () => {
     const stub = stubFetch(() =>
       Promise.resolve(
@@ -523,6 +558,7 @@ describe('openai adapter', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
+      isAuthorized: () => true,
       fetchImpl: stub.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 
@@ -561,6 +597,7 @@ describe('openai adapter', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
+      isAuthorized: () => true,
       fetchImpl: stub.fetchImpl,
     })
       .generateConversationTurn(input(), new AbortController().signal)
@@ -588,6 +625,7 @@ describe('openai adapter', () => {
           apiKey: VALID_KEY,
           modelId: 'gpt-5.6-luna',
           rate: VERIFIED_RATE,
+          isAuthorized: () => true,
           fetchImpl: stub.fetchImpl,
         }).generateConversationTurn(input(), new AbortController().signal),
       ).rejects.toSatisfy(
@@ -604,6 +642,7 @@ describe('openai adapter', () => {
         apiKey: VALID_KEY,
         modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
+        isAuthorized: () => true,
         fetchImpl: reset.fetchImpl,
       }).generateConversationTurn(input(), new AbortController().signal),
     ).rejects.toSatisfy(
@@ -619,6 +658,7 @@ describe('openai adapter', () => {
         apiKey: VALID_KEY,
         modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
+        isAuthorized: () => true,
         fetchImpl: aborted.fetchImpl,
       }).generateConversationTurn(input(), controller.signal),
     ).rejects.toSatisfy(
@@ -640,6 +680,7 @@ describe('openai adapter', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
+      isAuthorized: () => true,
       fetchImpl: stub.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 
@@ -673,6 +714,7 @@ describe('openai adapter', () => {
         apiKey: VALID_KEY,
         modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
+        isAuthorized: () => true,
         fetchImpl: stub.fetchImpl,
       }).generateConversationTurn(input(), new AbortController().signal);
 
@@ -681,6 +723,224 @@ describe('openai adapter', () => {
       expect(result.usage).toBeNull();
       expect(result.simulated).toBe(false);
     }
+  });
+});
+
+describe('openrouter adapter', () => {
+  const modelId = 'openai/gpt-5.6-luna';
+
+  function openRouterGateway(
+    fetchImpl: FetchLike,
+    isAuthorized: () => boolean = () => true,
+  ): OpenRouterModelGateway {
+    return new OpenRouterModelGateway({
+      apiKey: VALID_KEY,
+      modelId,
+      rate: OPENROUTER_RATE,
+      routing: OPENROUTER_ROUTING,
+      isAuthorized,
+      fetchImpl,
+    });
+  }
+
+  it('pins the origin, exact model and provider route, with no model fallback', async () => {
+    const stub = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          model: modelId,
+          choices: [{ message: { content: 'hi' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 10, completion_tokens: 2, cost: 0.000012 },
+        }),
+      ),
+    );
+
+    const result = await openRouterGateway(stub.fetchImpl).generateConversationTurn(
+      input(),
+      new AbortController().signal,
+    );
+    const { url, init } = stub.calls[0]!;
+    const body = JSON.parse(init.body) as Record<string, unknown>;
+
+    expect(stub.calls).toHaveLength(1);
+    expect(url).toBe(OPENROUTER_CHAT_COMPLETIONS_URL);
+    expect(url.startsWith(OPENROUTER_ORIGIN)).toBe(true);
+    expect(init.redirect).toBe('error');
+    expect(init.credentials).toBe('omit');
+    expect(init.headers.authorization).toBe(`Bearer ${VALID_KEY}`);
+    expect(init.body).not.toContain(VALID_KEY);
+    expect(body['model']).toBe(modelId);
+    expect(body['models']).toBeUndefined();
+    expect(body['provider']).toStrictEqual({
+      only: ['openai'],
+      allow_fallbacks: false,
+      data_collection: 'deny',
+      zdr: true,
+      require_parameters: true,
+      max_price: { prompt: 0.2, completion: 1.2 },
+    });
+    expect(body['prompt_cache_options']).toStrictEqual({ mode: 'explicit' });
+    expect(body['stream']).toBe(false);
+    expect(body['store']).toBe(false);
+    expect(result).toMatchObject({
+      modelLabel: modelId,
+      simulated: false,
+      usage: {
+        inputTokens: 10,
+        outputTokens: 2,
+        costMicroUsd: 12,
+        rateVersion: OPENROUTER_RATE.rateVersion,
+      },
+    });
+  });
+
+  it('rounds a provider USD cost upward to whole micro-USD', async () => {
+    const stub = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          model: modelId,
+          choices: [{ message: { content: 'hi' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 2, cost: 0.0000001 },
+        }),
+      ),
+    );
+    const result = await openRouterGateway(stub.fetchImpl).generateConversationTurn(
+      input(),
+      new AbortController().signal,
+    );
+
+    expect(result.usage?.costMicroUsd).toBe(1);
+  });
+
+  it('uses the pinned token prices when provider usage omits its cost field', async () => {
+    const stub = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          model: modelId,
+          choices: [{ message: { content: 'hi' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 2 },
+        }),
+      ),
+    );
+    const result = await openRouterGateway(stub.fetchImpl).generateConversationTurn(
+      input(),
+      new AbortController().signal,
+    );
+
+    expect(result.usage?.costMicroUsd).toBe(5);
+  });
+
+  it('marks missing or malformed usage unknown instead of zero', async () => {
+    const badUsageCases: unknown[] = [
+      undefined,
+      {},
+      { prompt_tokens: '10', completion_tokens: 2 },
+      { prompt_tokens: 10, completion_tokens: 2, cost: 'not-a-number' },
+    ];
+
+    for (const usage of badUsageCases) {
+      const stub = stubFetch(() =>
+        Promise.resolve(
+          response(200, {
+            model: modelId,
+            choices: [{ message: { content: 'hi' } }],
+            usage,
+          }),
+        ),
+      );
+      const result = await openRouterGateway(stub.fetchImpl).generateConversationTurn(
+        input(),
+        new AbortController().signal,
+      );
+
+      expect(result.usage).toBeNull();
+    }
+  });
+
+  it.each([
+    [401, 'model_auth_failed', false],
+    [403, 'model_auth_failed', false],
+    [429, 'model_rate_limited', true],
+    [408, 'model_timeout', true],
+    [500, 'model_unavailable', true],
+    [503, 'model_unavailable', true],
+    [400, 'model_invalid_output', false],
+  ] as const)(
+    'maps HTTP %i to %s without leaking response data',
+    async (status, code, retryable) => {
+      const stub = stubFetch(() => Promise.resolve(response(status, { error: VALID_KEY })));
+      const error = await openRouterGateway(stub.fetchImpl)
+        .generateConversationTurn(input(), new AbortController().signal)
+        .catch((caught: unknown) => caught);
+
+      expect(isModelGatewayFailure(error)).toBe(true);
+      if (!isModelGatewayFailure(error)) {
+        throw new Error('expected a gateway failure');
+      }
+      expect(error.code).toBe(code);
+      expect(error.retryable).toBe(retryable);
+      expect(error.message).not.toContain(VALID_KEY);
+    },
+  );
+
+  it('rejects malformed or misrouted model responses', async () => {
+    for (const body of [
+      {},
+      { model: 'openai/gpt-other', choices: [{ message: { content: 'hi' } }] },
+      { model: modelId, choices: [] },
+      { model: modelId, choices: [{ message: { content: '   ' } }] },
+    ]) {
+      const stub = stubFetch(() => Promise.resolve(response(200, body)));
+
+      await expect(
+        openRouterGateway(stub.fetchImpl).generateConversationTurn(
+          input(),
+          new AbortController().signal,
+        ),
+      ).rejects.toSatisfy(
+        (error: unknown) => isModelGatewayFailure(error) && error.code === 'model_invalid_output',
+      );
+    }
+  });
+
+  it('maps transport failures and aborts into the closed error taxonomy', async () => {
+    const reset = stubFetch(() => Promise.reject(new Error(`socket reset ${VALID_KEY}`)));
+    await expect(
+      openRouterGateway(reset.fetchImpl).generateConversationTurn(
+        input(),
+        new AbortController().signal,
+      ),
+    ).rejects.toSatisfy(
+      (error: unknown) => isModelGatewayFailure(error) && error.code === 'model_unavailable',
+    );
+
+    const abort = new AbortController();
+    abort.abort();
+    const cancelled = stubFetch(() => Promise.reject(new Error('aborted')));
+    await expect(
+      openRouterGateway(cancelled.fetchImpl).generateConversationTurn(input(), abort.signal),
+    ).rejects.toSatisfy(
+      (error: unknown) => isModelGatewayFailure(error) && error.code === 'model_timeout',
+    );
+  });
+
+  it('refuses before fetch after expiry and repeats the check for each request', async () => {
+    let authorized = true;
+    const stub = stubFetch(() => {
+      authorized = false;
+      return Promise.resolve(response(429, {}));
+    });
+    const gateway = openRouterGateway(stub.fetchImpl, () => authorized);
+
+    await expect(
+      gateway.generateConversationTurn(input(), new AbortController().signal),
+    ).rejects.toSatisfy(
+      (error: unknown) => isModelGatewayFailure(error) && error.code === 'model_rate_limited',
+    );
+    await expect(
+      gateway.generateConversationTurn(input(), new AbortController().signal),
+    ).rejects.toSatisfy(isModelAuthorizationRefused);
+
+    expect(stub.calls).toHaveLength(1);
   });
 });
 
@@ -778,6 +1038,90 @@ describe('approval record as a gate (L4-B)', () => {
   });
 });
 
+describe('OpenRouter approval and live expiry fence', () => {
+  const approval = { ...TEST_APPROVAL, expiresAt: '2026-11-10' };
+
+  function registry(routing: OpenRouterRoutingPolicy = OPENROUTER_ROUTING) {
+    return {
+      models: [
+        {
+          providerId: 'openrouter' as const,
+          modelId: OPENROUTER_RATE.modelId,
+          approval,
+          openRouterRouting: routing,
+        },
+      ],
+      rates: [OPENROUTER_RATE],
+    };
+  }
+
+  it('resolves the exact OpenRouter ID only with the pinned provider-routing policy', () => {
+    const resolution = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: OPENROUTER_RATE.modelId,
+        apiKey: VALID_KEY,
+      },
+      registry(),
+      new Date('2026-11-10T12:00:00Z'),
+    );
+
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok || resolution.mode !== 'real') {
+      throw new Error('expected an approved OpenRouter fixture resolution');
+    }
+    expect(resolution.settings.modelId).toBe('openai/gpt-5.6-luna');
+    expect(resolution.openRouterRouting?.allowFallbacks).toBe(false);
+  });
+
+  it('refuses an OpenRouter approval with provider failover enabled or malformed routes', () => {
+    const unsafe = {
+      ...OPENROUTER_ROUTING,
+      allowFallbacks: true,
+    } as unknown as OpenRouterRoutingPolicy;
+    const malformed = {
+      ...OPENROUTER_ROUTING,
+      only: undefined,
+    } as unknown as OpenRouterRoutingPolicy;
+
+    for (const route of [unsafe, malformed]) {
+      const resolution = resolveModelExecution(
+        {
+          mode: 'real',
+          providerId: 'openrouter',
+          modelId: OPENROUTER_RATE.modelId,
+          apiKey: VALID_KEY,
+        },
+        registry(route),
+        new Date('2026-11-10T12:00:00Z'),
+      );
+
+      expect(resolution).toMatchObject({ ok: false, reason: 'provider_routing_not_approved' });
+    }
+  });
+
+  it('permits the inclusive expiry day, then denies new execution on the next UTC day', () => {
+    const resolution = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: OPENROUTER_RATE.modelId,
+        apiKey: VALID_KEY,
+      },
+      registry(),
+      new Date('2026-11-10T12:00:00Z'),
+    );
+
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok || resolution.mode !== 'real') {
+      throw new Error('expected a currently approved OpenRouter resolution');
+    }
+    expect(isModelExecutionAuthorized(resolution, new Date('2026-11-10T23:59:59.999Z'))).toBe(true);
+    expect(isModelExecutionAuthorized(resolution, new Date('2026-11-11T00:00:00Z'))).toBe(false);
+  });
+});
+
 describe('pinned reasoning effort', () => {
   it('is sent only when the rate row fixes it, and never as a caller input', async () => {
     const withoutEffort = stubFetch(() =>
@@ -793,6 +1137,7 @@ describe('pinned reasoning effort', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
+      isAuthorized: () => true,
       fetchImpl: withoutEffort.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 
@@ -814,6 +1159,7 @@ describe('pinned reasoning effort', () => {
       apiKey: VALID_KEY,
       modelId: 'gpt-5.6-luna',
       rate: lunaRate!,
+      isAuthorized: () => true,
       fetchImpl: withEffort.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 

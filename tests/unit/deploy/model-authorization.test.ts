@@ -26,6 +26,7 @@ const MANIFEST_FILE = `${REPO_ROOT}infra/staging/model-authorization.json`;
 const TODAY = new Date('2026-11-07T09:00:00Z');
 
 const MODEL_ID = 'gpt-5.6-luna';
+const OPENROUTER_MODEL_ID = 'openai/gpt-5.6-luna';
 const AUTHORIZED_KEY = 'sk-live-AbCdEf0123456789AbCdEf0123456789';
 
 function stagingEnv(): Map<string, string> {
@@ -53,6 +54,18 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     maxPaidSmokeTurns: 1,
     ...overrides,
   };
+}
+
+function openRouterAuthorization(
+  overrides: Partial<ModelAuthorizationEntry> = {},
+): ModelAuthorizationEntry {
+  return authorization({
+    providerId: 'openrouter',
+    modelId: OPENROUTER_MODEL_ID,
+    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    priceSource: 'https://openrouter.ai/openai/gpt-5.6-luna',
+    ...overrides,
+  });
 }
 
 function manifest(...entries: ModelAuthorizationEntry[]): ModelAuthorizationManifest {
@@ -100,6 +113,47 @@ describe('paid model authorization artifact', () => {
     expect(codes(result)).not.toContain('E_PROVIDER_SECRET');
     expect(codes(result)).not.toContain('E_MODEL_CREDENTIAL');
     expect(result.ok).toBe(true);
+  });
+
+  it('accepts OpenRouter only with its own official catalog page for the exact model', () => {
+    const env = realEnv('openrouter');
+    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+
+    const result = evaluateStagingEnv(env, {
+      authorization: manifest(openRouterAuthorization()),
+      now: TODAY,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain('E_MODEL_REAL');
+    expect(codes(result)).not.toContain('E_PROVIDER_SECRET');
+  });
+
+  it('does not accept an OpenAI price citation as OpenRouter pricing approval', () => {
+    const env = realEnv('openrouter');
+    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+
+    const result = evaluateStagingEnv(env, {
+      authorization: manifest(
+        openRouterAuthorization({
+          priceSource: 'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
+        }),
+      ),
+      now: TODAY,
+    });
+
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('incomplete');
+  });
+
+  it('fails closed on a prototype-looking provider id in the authorization file', () => {
+    const result = findModelAuthorization(manifest(authorization({ providerId: '__proto__' })), {
+      providerId: '__proto__',
+      modelId: MODEL_ID,
+      today: '2026-11-07',
+    });
+
+    expect(result.status).toBe('malformed_authorization');
   });
 
   it('admits the credential variable only together with an authorization, never on its own', () => {
@@ -299,12 +353,24 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     // The code-side allowlist must be empty for the same reason the artifact is: L4-B ships the
     // gate, not the permission. Enabling real inference is one reviewed diff in both places.
     expect(APPROVED_REAL_MODELS).toEqual([]);
-    expect(MODEL_RATE_ROWS.every((row) => row.provenance === 'unverified')).toBe(true);
+    expect(
+      MODEL_RATE_ROWS.filter((row) => row.provenance !== 'unverified').map((row) => [
+        row.providerId,
+        row.modelId,
+      ]),
+    ).toEqual([['openrouter', OPENROUTER_MODEL_ID]]);
   });
 
   it('names a candidate that is not approved and cannot resolve', () => {
-    expect(PENDING_MODEL_CANDIDATES).toHaveLength(1);
-    expect(PENDING_MODEL_CANDIDATES[0]?.modelId).toBe(MODEL_ID);
+    expect(PENDING_MODEL_CANDIDATES).toHaveLength(2);
+    const openRouterCandidate = PENDING_MODEL_CANDIDATES.find(
+      (candidate) => candidate.providerId === 'openrouter',
+    );
+    expect(openRouterCandidate).toMatchObject({
+      providerId: 'openrouter',
+      modelId: OPENROUTER_MODEL_ID,
+    });
+    expect(openRouterCandidate?.rationale.length).toBeGreaterThan(0);
 
     const approvedIds = new Set(APPROVED_REAL_MODELS.map((entry) => entry.modelId));
     for (const candidate of PENDING_MODEL_CANDIDATES) {
@@ -324,6 +390,17 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     expect(candidateRate?.source).toContain(
       'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
     );
+
+    const openRouterRate = MODEL_RATE_ROWS.find(
+      (row) => row.providerId === 'openrouter' && row.modelId === OPENROUTER_MODEL_ID,
+    );
+    expect(openRouterRate).toMatchObject({
+      inputMicroUsdPerMillion: 200_000,
+      outputMicroUsdPerMillion: 1_200_000,
+      provenance: 'official_price_verified',
+      promptCacheMode: 'explicit',
+    });
+    expect(openRouterRate?.source).toContain('https://openrouter.ai/openai/gpt-5.6-luna');
 
     const retiredGpt5Mini = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5-mini-2025-08-07');
     expect(retiredGpt5Mini?.shutdownDate).toBe('2026-12-11');

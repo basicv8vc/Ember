@@ -61,10 +61,13 @@ export const MODEL_AUTHORIZATION_PATH = new URL('../model-authorization.json', i
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const AUTHORIZATION_PLACEHOLDER = /pending|todo|tbd|replace|example|placeholder|changeme/i;
-const OFFICIAL_OPENAI_PRICE_HOSTS = new Set(['developers.openai.com', 'platform.openai.com']);
+const OFFICIAL_PRICE_HOSTS = new Map([
+  ['openai', new Set(['developers.openai.com', 'platform.openai.com'])],
+  ['openrouter', new Set(['openrouter.ai'])],
+]);
 
 /** The authorization must cite a first-party HTTPS model/pricing page, never an aggregator. */
-function isOfficialPriceSource(value) {
+function isOfficialPriceSource(value, providerId) {
   if (typeof value !== 'string' || value.trim().length === 0) {
     return false;
   }
@@ -72,9 +75,11 @@ function isOfficialPriceSource(value) {
   try {
     const source = new URL(value);
 
+    const allowedHosts = OFFICIAL_PRICE_HOSTS.get(providerId);
+
     return (
       source.protocol === 'https:' &&
-      OFFICIAL_OPENAI_PRICE_HOSTS.has(source.hostname) &&
+      allowedHosts?.has(source.hostname) === true &&
       source.username.length === 0 &&
       source.password.length === 0
     );
@@ -282,7 +287,7 @@ export function findModelAuthorization(manifest, query) {
   if (
     typeof entry.authorizationId !== 'string' ||
     typeof entry.approvedBy !== 'string' ||
-    !isOfficialPriceSource(entry.priceSource) ||
+    !isOfficialPriceSource(entry.priceSource, entry.providerId) ||
     !ISO_DAY.test(entry.approvedAt ?? '') ||
     !ISO_DAY.test(entry.expiresAt ?? '') ||
     entry.authorizationId.trim().length === 0 ||
@@ -327,7 +332,7 @@ const AUTHORIZATION_FAILURE_MESSAGE = Object.freeze({
   duplicate_authorization:
     'more than one authorization covers this provider and model id, so which ceiling applies is ambiguous; remove the duplicate',
   malformed_authorization:
-    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, an official OpenAI HTTPS priceSource, ISO approvedAt/expiresAt and every ceiling as a positive integer',
+    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, an official HTTPS priceSource for the selected provider, ISO approvedAt/expiresAt and every ceiling as a positive integer',
   not_yet_valid: 'the matching authorization does not start until a future date',
   expired:
     'the matching authorization has expired; a fresh dated approval must be merged before paid egress resumes',

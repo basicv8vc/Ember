@@ -3,7 +3,8 @@
  * thing B2 does. No input carries a model, a temperature, a system prompt, a tool list, a stop
  * sequence or a provider, so a later feature cannot smuggle capability in through a parameter.
  */
-export type ModelProviderId = 'fake' | 'openai';
+export type ModelProviderId = 'fake' | 'openai' | 'openrouter';
+export type RealModelProviderId = Exclude<ModelProviderId, 'fake'>;
 
 export type ModelOperation = 'conversation.turn';
 

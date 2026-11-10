@@ -152,11 +152,16 @@ describe('PostgreSQL migrations (real database)', () => {
     const appliedIds = result.applied.map((migration) => migration.id);
     const nonceMigrationIndex = appliedIds.indexOf('0017');
     const outboxMigrationIndex = appliedIds.indexOf('0018');
+    const modelProviderMigrationIndex = appliedIds.indexOf('0019');
 
     expect(nonceMigrationIndex).toBeGreaterThan(appliedIds.indexOf('0016'));
     expect(result.applied[nonceMigrationIndex]?.name).toBe('0017_apple_nonce_replay.sql');
     expect(outboxMigrationIndex).toBe(nonceMigrationIndex + 1);
     expect(result.applied[outboxMigrationIndex]?.name).toBe('0018_b1_turn_dispatch_outbox.sql');
+    expect(modelProviderMigrationIndex).toBe(outboxMigrationIndex + 1);
+    expect(result.applied[modelProviderMigrationIndex]?.name).toBe(
+      '0019_model_openrouter_provider.sql',
+    );
     expect(result.alreadyApplied).toBe(0);
 
     const versions = await requirePool().query<{

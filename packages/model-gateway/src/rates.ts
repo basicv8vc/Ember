@@ -1,4 +1,4 @@
-import type { ModelProviderId } from './types.js';
+import type { RealModelProviderId } from './types.js';
 
 /**
  * A pin, not a preference.
@@ -29,9 +29,19 @@ export interface ModelApprovalRecord {
 }
 
 export interface ApprovedModel {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
+  readonly providerId: RealModelProviderId;
   readonly modelId: string;
   readonly approval: ModelApprovalRecord;
+  /** Required for OpenRouter models; this policy is part of the reviewed model decision. */
+  readonly openRouterRouting?: OpenRouterRoutingPolicy;
+}
+
+export interface OpenRouterRoutingPolicy {
+  readonly only: readonly string[];
+  readonly allowFallbacks: false;
+  readonly dataCollection: 'deny';
+  readonly zdr: true;
+  readonly requireParameters: true;
 }
 
 /** Approved and effective. **Empty in this tree**: L4-B ships the gate, not the permission. */
@@ -47,7 +57,7 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([]);
  * never intersect.
  */
 export interface ModelCandidate {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
+  readonly providerId: RealModelProviderId;
   readonly modelId: string;
   /** One sentence the review document expands; kept short so it cannot drift into a claim. */
   readonly rationale: string;
@@ -60,6 +70,12 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
     rationale:
       'officially listed at $0.20/$1.20 per 1M tokens, with Chat Completions and reasoning_effort none',
   }),
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'openai/gpt-5.6-luna',
+    rationale:
+      'OpenRouter lists $0.20/$1.20 per 1M tokens; proposed route pins OpenAI, denies data collection, and requires ZDR',
+  }),
 ]);
 
 /**
@@ -68,7 +84,7 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
  * Kept separate from the model allowlist so that "no model approved yet" reports
  * `model_not_approved` rather than masking the real reason as a provider problem.
  */
-export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai']);
+export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai', 'openrouter']);
 
 /** Documented placeholder: boot refuses any model id containing it. */
 export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
@@ -84,7 +100,7 @@ export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
 export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
 
 export interface ModelRateRow {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
+  readonly providerId: RealModelProviderId;
   readonly modelId: string;
   /** Micro-USD per one million input tokens (i.e. $0.25/1M → 250000). */
   readonly inputMicroUsdPerMillion: number;
@@ -108,6 +124,8 @@ export interface ModelRateRow {
   readonly shutdownDate?: string | null;
   /** Pinned reasoning budget, or absent for a non-reasoning model (the field is then not sent). */
   readonly reasoningEffort?: ModelReasoningEffort;
+  /** OpenRouter request-level cache policy for models whose published pricing has cache tiers. */
+  readonly promptCacheMode?: 'explicit';
 }
 
 const UNVERIFIED_SOURCE =
@@ -134,11 +152,15 @@ const GPT_4_DEPRECATION_SOURCE =
 const GPT_5_6_LUNA_DOCS_SOURCE =
   'https://developers.openai.com/api/docs/models/gpt-5.6-luna, read 2026-11-10 — official published pricing; CTO review remains required';
 
+const OPENROUTER_GPT_5_6_LUNA_SOURCE =
+  'https://openrouter.ai/openai/gpt-5.6-luna, read 2026-11-10 — OpenRouter catalog price; CTO approval remains required';
+
 /**
  * Rate rows known to this tree.
  *
  * **No row here authorises a paid call.** `provenance` is the only field the resolver trusts, and
- * every row below is `unverified`, so no combination of them can enable `real` mode on its own.
+ * The OpenRouter candidate has a verified catalog price, but no combination of rate rows can
+ * enable `real` mode without a separate approval record in `APPROVED_REAL_MODELS`.
  * Approval item A2 requires explicitly reviewing official published pricing for the exact model id
  * before enablement; an invoice may be used instead. Provider usage is reconciled after the first call.
  *
@@ -147,6 +169,18 @@ const GPT_5_6_LUNA_DOCS_SOURCE =
  * announced after they were added, so the resolver refuses them on its own once that day arrives.
  */
 export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'openai/gpt-5.6-luna',
+    inputMicroUsdPerMillion: 200_000,
+    outputMicroUsdPerMillion: 1_200_000,
+    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    provenance: 'official_price_verified' as const,
+    source: OPENROUTER_GPT_5_6_LUNA_SOURCE,
+    shutdownDate: null,
+    reasoningEffort: 'none' as const,
+    promptCacheMode: 'explicit' as const,
+  }),
   Object.freeze({
     providerId: 'openai' as const,
     modelId: 'gpt-5.6-luna',

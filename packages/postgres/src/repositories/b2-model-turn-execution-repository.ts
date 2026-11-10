@@ -1322,7 +1322,7 @@ const reserveSchema = z.strictObject({
   }),
   reservedMicroUsd: z.number().int().min(1).max(5_000),
   rateVersion: z.string().min(1).max(128),
-  providerId: z.literal('openai'),
+  providerId: z.enum(['openai', 'openrouter']),
   modelLabel: z.string().min(1).max(120),
 });
 

@@ -76,7 +76,7 @@ let writer: PostgresB1ConversationWriteRepository;
 
 /** Deterministic stand-in for the provider. No network, no clock, no environment. */
 class ScriptedGateway implements ModelGateway {
-  readonly providerId = 'openai' as const;
+  readonly providerId: 'openai' | 'openrouter';
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
   readonly operations = ['conversation.turn'] as const;
@@ -87,8 +87,10 @@ class ScriptedGateway implements ModelGateway {
   constructor(
     script: Array<ModelFailureCode | 'ok'>,
     private readonly text = 'a live reply',
+    providerId: 'openai' | 'openrouter' = 'openai',
   ) {
     this.#script = [...script];
+    this.providerId = providerId;
   }
 
   generateConversationTurn(
@@ -180,6 +182,7 @@ function makeResponder(
     readonly mode?: 'fake' | 'real';
     readonly batchSize?: number;
     readonly onlyTurn?: PendingModelTurn;
+    readonly rate?: ModelRateRow;
   } = {},
 ) {
   return createModelTurnResponder({
@@ -191,7 +194,7 @@ function makeResponder(
     ceilings: options.ceilings ?? CEILINGS,
     maxAttempts: 2,
     attemptTimeoutMs: 20_000,
-    rate: RATE,
+    rate: options.rate ?? RATE,
     batchSize: options.batchSize ?? 5,
     ...(options.onlyTurn === undefined ? {} : { onlyTurn: options.onlyTurn }),
   });
@@ -438,12 +441,40 @@ describe('B2 real model Turn runtime on PostgreSQL 17', () => {
     expect((await readTurnRow(unrelated)).status).toBe('running');
     expect(await readAttempts(unrelated)).toHaveLength(0);
     expect(await readEmberMessages(unrelated)).toHaveLength(0);
+    expect(await readAttempts(requested)).toMatchObject([{ attempt_no: 1, provider_id: 'openai' }]);
 
     // The file shares one isolated schema across its tests. Remove the deliberately pending Turn
     // after proving it was untouched so it cannot be picked up by a later unscoped responder pass.
     await db.pool.query('DELETE FROM assistant_turns WHERE tenant_id = $1 AND id = $2', [
       unrelated.tenantId,
       unrelated.turnId,
+    ]);
+  });
+
+  it('records OpenRouter as the selected audited provider without using the network', async () => {
+    await clearGlobalSpend();
+    const fixture = await createFixture();
+    const openRouterRate: ModelRateRow = {
+      ...RATE,
+      providerId: 'openrouter',
+      modelId: 'openai/gpt-5.6-luna',
+      rateVersion: 'openrouter-db-mock-rate-v1',
+      source: 'mock fixture',
+    };
+    const gateway = new ScriptedGateway(['ok'], 'mock OpenRouter reply', 'openrouter');
+
+    const summary = await makeResponder(gateway, { rate: openRouterRate }).processOnce();
+    const attempts = await readAttempts(fixture);
+
+    expect(summary.completed).toBe(1);
+    expect(attempts).toMatchObject([
+      {
+        attempt_no: 1,
+        provider_id: 'openrouter',
+        model_label: 'gpt-test-pinned-2026-11-03',
+        rate_version: 'openrouter-db-mock-rate-v1',
+        state: 'settled',
+      },
     ]);
   });
 

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { B1TurnDispatchEvent } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
 import { resolveCloudRuntimeModelConfig } from '../../apps/cloud-async-runtime/src/config.js';
+import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
 import {
   consumeTurnDispatchMessage,
   parseB1TurnDispatchEnvelope,
@@ -64,6 +65,79 @@ class MemoryOutbox implements TurnDispatchOutboxPort {
 }
 
 describe('Cloud Async Runtime dispatch', () => {
+  it('routes the configured Staging Queue to the consumer and still ACKs unknown Queues', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = {
+      HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+      TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+      EMBER_TURN_DISPATCH_QUEUE_NAME: 'ember-staging-assistant-turns',
+      EMBER_TURN_DISPATCH_DLQ_NAME: 'ember-staging-assistant-turns-dlq',
+      EMBER_ENV: 'staging',
+      EMBER_MODEL_EXECUTION: 'disabled',
+    };
+
+    try {
+      const stagingMessage = new Message(null);
+      await cloudAsyncRuntime.queue(
+        { queue: 'ember-staging-assistant-turns', messages: [stagingMessage] },
+        env,
+      );
+
+      expect(stagingMessage.ack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'discarded malformed Assistant Turn dispatch envelope',
+        expect.objectContaining({ category: 'invalid_envelope' }),
+      );
+      expect(warn).not.toHaveBeenCalledWith(
+        'discarded Assistant Turn message from an unexpected Queue',
+        expect.anything(),
+      );
+
+      const stagingDlqMessage = new Message(null);
+      await cloudAsyncRuntime.queue(
+        { queue: 'ember-staging-assistant-turns-dlq', messages: [stagingDlqMessage] },
+        env,
+      );
+
+      expect(stagingDlqMessage.ack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'discarded malformed Assistant Turn DLQ envelope',
+        expect.objectContaining({ category: 'invalid_envelope' }),
+      );
+
+      const defaultEnv = {
+        ...env,
+        EMBER_TURN_DISPATCH_QUEUE_NAME: undefined,
+        EMBER_TURN_DISPATCH_DLQ_NAME: undefined,
+      };
+      const defaultMessage = new Message(null);
+      await cloudAsyncRuntime.queue(
+        { queue: 'ember-assistant-turns', messages: [defaultMessage] },
+        defaultEnv,
+      );
+
+      expect(defaultMessage.ack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'discarded malformed Assistant Turn dispatch envelope',
+        expect.objectContaining({ category: 'invalid_envelope' }),
+      );
+
+      const unexpectedMessage = new Message();
+      await cloudAsyncRuntime.queue(
+        { queue: 'ember-unconfigured-assistant-turns', messages: [unexpectedMessage] },
+        env,
+      );
+
+      expect(unexpectedMessage.ack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'discarded Assistant Turn message from an unexpected Queue',
+        expect.objectContaining({ category: 'unexpected_queue' }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it('parses only the closed, prompt-free Queue envelope', () => {
     expect(parseB1TurnDispatchEnvelope(envelope())).toMatchObject({ eventId: TURN_ID });
     expect(parseB1TurnDispatchEnvelope({ ...envelope(), text: 'private transcript' })).toBeNull();

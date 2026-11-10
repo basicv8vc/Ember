@@ -24,6 +24,9 @@ type QueueBinding = TurnDispatchQueuePort;
 interface RuntimeEnv {
   readonly HYPERDRIVE: HyperdriveBinding;
   readonly TURN_DISPATCH_QUEUE: QueueBinding;
+  /** Optional names for isolated environments that bind a dedicated Queue/DLQ pair. */
+  readonly EMBER_TURN_DISPATCH_QUEUE_NAME?: string;
+  readonly EMBER_TURN_DISPATCH_DLQ_NAME?: string;
   readonly EMBER_ENV?: string;
   readonly NODE_ENV?: string;
   readonly EMBER_MODEL_EXECUTION?: string;
@@ -81,9 +84,11 @@ function runtimeWorkerId(): string {
 async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> {
   const pool = createPool(env);
   const outbox = createTurnDispatchOutbox(pool);
+  const dispatchQueueName = env.EMBER_TURN_DISPATCH_QUEUE_NAME?.trim() || TURN_DISPATCH_QUEUE_NAME;
+  const dispatchDlqName = env.EMBER_TURN_DISPATCH_DLQ_NAME?.trim() || TURN_DISPATCH_DLQ_NAME;
 
   try {
-    if (batch.queue === TURN_DISPATCH_DLQ_NAME) {
+    if (batch.queue === dispatchDlqName) {
       for (const message of batch.messages) {
         try {
           await recoverDeadLetter(message, outbox, logger);
@@ -97,7 +102,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
       return;
     }
 
-    if (batch.queue !== TURN_DISPATCH_QUEUE_NAME) {
+    if (batch.queue !== dispatchQueueName) {
       for (const message of batch.messages) {
         logger.warn('discarded Assistant Turn message from an unexpected Queue', {
           category: 'unexpected_queue',

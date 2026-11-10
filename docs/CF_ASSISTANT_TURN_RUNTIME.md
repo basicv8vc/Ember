@@ -21,6 +21,10 @@ Use two database identities:
 
 The runtime is a trusted cross-tenant service, so it can scan the outbox. Queue fields never establish tenant authority: the consumer compares the supplied tenant and Turn IDs to the outbox row, then passes only the PostgreSQL-derived identity to B2. B2 queries remain tenant-qualified. Do not give the API identity the runtime grants. Hyperdrive supports the `pg` driver used here ([PostgreSQL with Hyperdrive](https://developers.cloudflare.com/hyperdrive/examples/connect-to-postgres/)).
 
+## Queue names
+
+The default PoC names are `ember-assistant-turns` and `ember-assistant-turns-dlq`. An isolated deployment may override the consumer's expected names with the non-secret Wrangler variables `EMBER_TURN_DISPATCH_QUEUE_NAME` and `EMBER_TURN_DISPATCH_DLQ_NAME`. Leave either variable unset to use its default. The runtime's Queue producer/consumer bindings and the API's producer binding must use the same queue names; the values only select the consumer path and do not change the PostgreSQL outbox or message contract.
+
 ## Provision and deploy
 
 1. Confirm the Cloudflare account uses Workers Paid Standard. Apply repository migrations, including `0018_b1_turn_dispatch_outbox.sql`, using the normal database migration identity. The migration creates only the outbox table, its tenant-qualified foreign key, and dispatch indexes.

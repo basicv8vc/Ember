@@ -30,6 +30,18 @@ The API and runtime share the Staging database through one `HYPERDRIVE` binding 
 
 Do not put passwords, connection URIs, API tokens, or signing keys in these files, Git, PR descriptions, or logs. Set secrets with `wrangler secret put` from a protected local file or secure stdin.
 
+## Verify provisioned resources
+
+These checks are read-only. Create a resource only if the check shows it is absent; never recreate or repoint Production or PoC resources.
+
+```sh
+pnpm exec wrangler queues info ember-staging-assistant-turns
+pnpm exec wrangler queues info ember-staging-assistant-turns-dlq
+pnpm exec wrangler hyperdrive list
+```
+
+If a Staging Queue is missing, create only that named Staging Queue with `wrangler queues create <name>`. Create Hyperdrive `ember-staging-neon-hyperdrive` once from the protected runtime credential, with TLS `verify-full`, query caching disabled, and an origin connection limit appropriate to the Neon Free compute. Record its ID, then set that same ID as `HYPERDRIVE` in both Worker configs. Do not put the credential on a logged command line or in source control.
+
 ## Deploy and verify
 
 From the repository root, validate and deploy each Worker separately:
@@ -41,7 +53,15 @@ pnpm exec wrangler deploy --config apps/api/wrangler.staging.jsonc
 pnpm exec wrangler deploy --config apps/cloud-async-runtime/wrangler.staging.jsonc
 ```
 
-Deploy the API before enabling the queue consumer. Keep `EMBER_MODEL_EXECUTION=disabled` in the deployed Runtime. Record the Git SHA, Worker version IDs, and HTTPS hostname. Check `GET /healthz`, `GET /readyz`, and anonymous `GET /v1/me` (expected `401`). Verify the deployed API's Apple audience and database readiness, then run the isolated Fake Model queue flow against the Staging database and Queue. Restore and redeploy `EMBER_ENV=staging` plus `EMBER_MODEL_EXECUTION=disabled` immediately after that test. Never add a real provider key or run a paid model call as part of this runbook.
+Deploy the API before enabling the queue consumer. Keep `EMBER_MODEL_EXECUTION=disabled` in the deployed Runtime. Record the Git SHA, Worker version IDs, and HTTPS hostname. Check `GET /healthz`, `GET /readyz`, and anonymous `GET /v1/me` (expected `401`):
+
+```sh
+curl -i https://<STAGING_WORKERS_DEV_HOST>/healthz
+curl -i https://<STAGING_WORKERS_DEV_HOST>/readyz
+curl -i https://<STAGING_WORKERS_DEV_HOST>/v1/me
+```
+
+Verify the deployed API's Apple audience and database readiness, then run the isolated Fake Model queue flow against the Staging database and Queue. Restore and redeploy `EMBER_ENV=staging` plus `EMBER_MODEL_EXECUTION=disabled` immediately after that test. Never add a real provider key or run a paid model call as part of this runbook.
 
 ## Update and rollback
 

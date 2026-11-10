@@ -17,7 +17,10 @@ import { createPool, loadDatabaseConfig } from '@ember/postgres';
 import { PostgresB1AssistantTurnRepository } from '../../packages/postgres/src/repositories/b1-assistant-turn-repository.js';
 import { PostgresB1ConversationWriteRepository } from '../../packages/postgres/src/repositories/b1-conversation-write.js';
 import { PostgresModelTurnExecutionRepository } from '../../packages/postgres/src/repositories/b2-model-turn-execution-repository.js';
-import { createModelTurnResponder } from '../../apps/worker/src/b1/model-turn-responder.js';
+import {
+  createModelTurnResponder,
+  type PendingModelTurn,
+} from '../../apps/worker/src/b1/model-turn-responder.js';
 import { loadWorkerConfig } from '../../apps/worker/src/config.js';
 import { backendPid, createTestDatabase, type TestDatabase } from './support/database.js';
 
@@ -176,6 +179,7 @@ function makeResponder(
     readonly repository?: PostgresModelTurnExecutionRepository;
     readonly mode?: 'fake' | 'real';
     readonly batchSize?: number;
+    readonly onlyTurn?: PendingModelTurn;
   } = {},
 ) {
   return createModelTurnResponder({
@@ -189,6 +193,7 @@ function makeResponder(
     attemptTimeoutMs: 20_000,
     rate: RATE,
     batchSize: options.batchSize ?? 5,
+    ...(options.onlyTurn === undefined ? {} : { onlyTurn: options.onlyTurn }),
   });
 }
 
@@ -418,6 +423,30 @@ afterAll(async () => {
 });
 
 describe('B2 real model Turn runtime on PostgreSQL 17', () => {
+  it('processes only the requested Turn when unrelated running Turns exist', async () => {
+    await clearGlobalSpend();
+    const unrelated = await createFixture();
+    const requested = await createFixture();
+    const gateway = new ScriptedGateway(['ok'], 'the requested smoke reply');
+
+    const summary = await makeResponder(gateway, { onlyTurn: identity(requested) }).processOnce();
+
+    expect(summary.examined).toBe(1);
+    expect(summary.completed).toBe(1);
+    expect(gateway.inputs).toHaveLength(1);
+    expect((await readTurnRow(requested)).status).toBe('completed');
+    expect((await readTurnRow(unrelated)).status).toBe('running');
+    expect(await readAttempts(unrelated)).toHaveLength(0);
+    expect(await readEmberMessages(unrelated)).toHaveLength(0);
+
+    // The file shares one isolated schema across its tests. Remove the deliberately pending Turn
+    // after proving it was untouched so it cannot be picked up by a later unscoped responder pass.
+    await db.pool.query('DELETE FROM assistant_turns WHERE tenant_id = $1 AND id = $2', [
+      unrelated.tenantId,
+      unrelated.turnId,
+    ]);
+  });
+
   it('1. publishes one live reply marked simulated:false and books its real cost', async () => {
     await clearGlobalSpend();
     const fixture = await createFixture();

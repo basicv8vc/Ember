@@ -259,6 +259,8 @@ Because the preflight fails closed above `maxInputTokens = 8 000`, the largest r
 hold is bounded by 8 000 input tokens plus 512 output tokens:
 
 ```text
+gpt-5.6-luna (L4-B published rate $0.20/1M in, $1.20/1M out)
+  ceil((8 000 × 200 000 + 512 × 1 200 000) / 1 000 000) = 2 215 µUSD = $0.002215
 gpt-5-mini   (unverified row $0.25/1M in, $2.00/1M out)
   ceil((8 000 × 250 000 + 512 × 2 000 000) / 1 000 000) = 3 024 µUSD = $0.003024
 gpt-4.1-mini ceil((8 000 × 400 000 + 512 × 1 600 000) / 1 000 000) = 4 020 µUSD = $0.004020
@@ -270,7 +272,8 @@ could not fit would be **refused before egress** rather than clamped to the cap 
 
 There is deliberately **no per-Turn cap**: a Turn may reserve up to `maxAttempts × perAttempt` = $0.010,
 which is the bound approval item C5 asks the CTO to accept. This is arithmetic on a proposed price sheet,
-not a quote: approval item A2 requires an invoice-verified row before any real call.
+not a quote. L4-B allows A2 to review the official published model price before the first call; usage
+and charges are reconciled against provider billing afterward. A2 still requires a human sign-off.
 
 **No part of this bounds an invoice.** A tokenizer that disagrees with the estimate, a price change applied
 mid-day, or cached-token accounting can all make the actual charge larger than the reservation. That is why
@@ -316,7 +319,8 @@ The four `real` gates, each independent:
 
 1. provider in the code-owned `APPROVED_MODEL_PROVIDERS` (`['openai']`);
 2. model id in the code-owned `APPROVED_REAL_MODELS` — **empty in this tree**;
-3. an `invoice_verified` rate row for that exact model id — every shipped row is `unverified`;
+3. a rate row for that exact model id verified against official published pricing or a provider invoice
+   (`official_price_verified` or `invoice_verified`); every shipped row remains `unverified`;
 4. a usable credential (present, not a placeholder, `sk-` + ≥ 20 characters).
 
 > **Superseded in part by L4-B.** Each `APPROVED_REAL_MODELS` entry now carries a `ModelApprovalRecord`
@@ -341,7 +345,7 @@ Additional boot guards:
 | ---------------------------------------------- | ---------- | ------------------------------------------------------------------ |
 | `EMBER_MODEL_EXECUTION`                        | `disabled` | `disabled` \| `fake` \| `real`                                     |
 | `EMBER_MODEL_PROVIDER`                         | `openai`   | must match a code-owned allowlist entry                            |
-| `EMBER_MODEL_ID`                               | unset      | pinned dated id; required for `real`                               |
+| `EMBER_MODEL_ID`                               | unset      | pinned provider model id; required for `real`                      |
 | `EMBER_MODEL_API_KEY`                          | unset      | credential; never logged, never persisted, never sent to a sandbox |
 | `EMBER_MODEL_TURN_LEASE_MS`                    | `30000`    | 1 000 … 60 000                                                     |
 | `EMBER_MODEL_ATTEMPT_TIMEOUT_MS`               | `20000`    | 1 000 … 30 000, further clamped by the Turn deadline               |
@@ -362,8 +366,8 @@ Nothing below is done. This is the checklist the enablement PR must satisfy, in 
 
 | #   | Change                                                                                                        | Where                                 |
 | --- | ------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
-| 1   | Add the dated model id to `APPROVED_REAL_MODELS`                                                              | `packages/model-gateway/src/rates.ts` |
-| 2   | Replace the matching rate row with `provenance: 'invoice_verified'` and the invoice source                    | same file                             |
+| 1   | Add the pinned model id to `APPROVED_REAL_MODELS`                                                             | `packages/model-gateway/src/rates.ts` |
+| 2   | Review the official price page, then set `provenance: 'official_price_verified'` and record its URL           | same file                             |
 | 3   | Set `EMBER_MODEL_EXECUTION=real`, `EMBER_MODEL_ID`, `EMBER_MODEL_API_KEY` in the deployment secret store only | deployment config, not the repo       |
 | 4   | Confirm the four ceiling variables are at or below the approved A3 values                                     | deployment config                     |
 | 5   | Confirm `EMBER_B1_FAKE_RESPONDER_ENABLED` is absent or `false`                                                | deployment config                     |
@@ -372,8 +376,8 @@ Nothing below is done. This is the checklist the enablement PR must satisfy, in 
 
 | ID  | Decision still owed                                                                                       | Blocks                    |
 | --- | --------------------------------------------------------------------------------------------------------- | ------------------------- |
-| A1  | Provider and pinned dated model id                                                                        | gates 2 and 3             |
-| A2  | Invoice-grade price sheet for that exact id                                                               | gate 3, and every ceiling |
+| A1  | Provider and pinned model id                                                                              | gates 2 and 3             |
+| A2  | Official published price reviewed and recorded for that exact id; reconcile billing after the first call  | gate 3, and every ceiling |
 | A3  | Ceilings confirmed as $0.005 / $0.25 / $1 / $5 and 60 turns per principal                                 | this PR's defaults        |
 | A4  | Named owner of the global ceiling and the kill-switch runbook                                             | first day of real traffic |
 | A5  | Alert destination for `model_auth_failed`, **unresolved `model_budget_incidents`** and daily spend ≥ 80 % | incident response         |
@@ -455,7 +459,7 @@ chaos 30 passed, e2e 39 passed.
 
 | Limit                                                                      | Consequence                                                                                                                                                      |
 | -------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The rate sheet is not invoice-grade                                        | every ceiling is arithmetic on a secondary source; gate 3 exists precisely for this                                                                              |
+| Rates remain `unverified` by default                                       | L4-B requires CTO review of the official published model price before the first call; actual usage is reconciled against provider billing afterward              |
 | Token counts are estimated locally, never proved                           | the reservation can be wrong in either direction; the estimate is deliberately pessimistic, and an overage is recorded and halts spend rather than being clipped |
 | A wrong reservation stops paid traffic until a human resolves it           | `model_budget_incidents` has no automatic expiry on purpose: an unreviewed overage is the failure mode being prevented                                           |
 | A crash after the provider received the request keeps the full reservation | one Turn may cost up to 2 × per-attempt cap; bounded by `attempt_no ≤ 2`                                                                                         |

@@ -112,8 +112,9 @@ export interface WorkerConfig {
    * B2 Assistant Turn execution.
    *
    * Resolved, not raw: `disabled` and `fake` are always `ok`, while `real` is only `ok` when the
-   * provider, the pinned model, an invoice-verified rate row and a usable credential are all
-   * present. A refused `real` mode is a startup error — there is no silent downgrade to `fake`.
+   * provider, the pinned model, an officially reviewed price row (or invoice-verified row) and a
+   * usable credential are all present. A refused `real` mode is a startup error — there is no
+   * silent downgrade to `fake`.
    */
   readonly model: ModelExecutionResolution;
 }

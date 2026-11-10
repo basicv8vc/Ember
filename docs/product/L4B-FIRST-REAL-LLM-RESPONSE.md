@@ -4,7 +4,7 @@
 | ----------------------- | ------------------------------------------------------------------------- |
 | status                  | **Draft PR. `real` is implemented as a reviewed gate and is NOT enabled** |
 | branch                  | `feature/l4b-first-real-llm-response`                                     |
-| base                    | `main@db9fab1` (merge of PR #123)                                         |
+| base                    | `main@8c84e4b` (latest main at integration)                               |
 | migrations added        | none                                                                      |
 | paid spend in this tree | **$0.** No provider account, key, model approval or price approval exists |
 | real Turn evidence      | **not produced.** Blocked on approvals A1/A2 (see §7), by design          |
@@ -22,16 +22,16 @@ Approval ids are the proposal's: A1–A5, B1–B4, C5, C6.
 
 ## 1. What this branch does, in one page
 
-| #   | Change                                                                                          | Why it was necessary                                                                                                                     |
-| --- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | `ModelApprovalRecord` on `APPROVED_REAL_MODELS`, with `approvedBy` / `approvedAt` / `expiresAt` | "Approved" had no owner and no expiry, so one merged diff would have been a permanent permission. Expiry is now a boot gate.             |
-| 2   | `PENDING_MODEL_CANDIDATES`: the nominated id, in code, **not** approved                         | The review needs a code-side anchor that a reviewer can diff and a test can prove unusable.                                              |
-| 3   | `shutdownDate` on `ModelRateRow` + `model_shutdown` refusal                                     | The tree's whole price sheet turned out to be deprecated (§3). A retired snapshot must be refused before egress, not after a 404.        |
-| 4   | `reasoningEffort` pinned on the rate row and sent by the adapter                                | The 512-token output cap silently means "empty reply, still billed" on a reasoning model (§3.3).                                         |
-| 5   | `infra/staging/model-authorization.json` + guard rule 3b rewritten                              | PR #123's guard refused `real` and provider credentials unconditionally. Any future real deployment would have had to delete a check.    |
-| 6   | `EMBER_MODEL_API_KEY` blanked inside the `api` container                                        | The staging `env_file` is shared by every service; only the worker has a model gateway.                                                  |
-| 7   | Per-process concurrency gate in the responder, reported as `busy`                               | Concurrency was implicitly one because the loop is sequential. Now it is structural, so a future parallel loop cannot quietly double it. |
-| 8   | `pnpm model:smoke` — the only executable that may spend, gated five ways                        | §6. Without it, the evidence step would be an ad-hoc script with no audit trail.                                                         |
+| #   | Change                                                                                             | Why it was necessary                                                                                                                     |
+| --- | -------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | `ModelApprovalRecord` on `APPROVED_REAL_MODELS`, with `approvedBy` / `approvedAt` / `expiresAt`    | "Approved" had no owner and no expiry, so one merged diff would have been a permanent permission. Expiry is now a boot gate.             |
+| 2   | `PENDING_MODEL_CANDIDATES`: the nominated id, in code, **not** approved                            | The review needs a code-side anchor that a reviewer can diff and a test can prove unusable.                                              |
+| 3   | `shutdownDate` on `ModelRateRow` + `model_shutdown` refusal                                        | The tree's whole price sheet turned out to be deprecated (§3). A retired snapshot must be refused before egress, not after a 404.        |
+| 4   | `reasoningEffort: 'none'` pinned on the rate row and sent by the adapter                           | GPT-5.6 Luna supports this effort and the existing 512-token cap; the caller cannot change it.                                           |
+| 5   | `infra/staging/model-authorization.json` + guard rule 3b rewritten                                 | PR #123's guard refused `real` and provider credentials unconditionally. Any future real deployment would have had to delete a check.    |
+| 6   | `EMBER_MODEL_API_KEY` blanked in `api`, `migrate` and `edge`                                       | The staging `env_file` is shared; only the worker has a model gateway and needs the key.                                                 |
+| 7   | Per-process concurrency gate in the responder, reported as `busy`                                  | Concurrency was implicitly one because the loop is sequential. Now it is structural, so a future parallel loop cannot quietly double it. |
+| 8   | `pnpm model:smoke` — the only executable that may spend, exactly one Turn and one provider attempt | §6. It scopes processing to the new Turn and writes content-free evidence.                                                               |
 
 Deliberately **not** changed: the B1 HTTP contract, the B1 Turn state machine, migrations, the
 Sentinel policy surface, the Agent tool surface, Daytona, and the `disabled` default.
@@ -59,23 +59,19 @@ Reviewed at `main@db9fab1`: `packages/model-gateway/*`, `apps/worker/src/b1/mode
 
 ### 2.2 Findings
 
-**F-1 — every priced snapshot in the tree is deprecated.** See §3.2. The rate sheet this project
-wrote on 2026-11-03 named `gpt-5-mini`, `gpt-4.1-mini` and `gpt-4o-mini`; on 2026-10-14 the provider
-announced that every one of those dated snapshots stops serving on 2027-01-14. Nothing in the code
-would have noticed: a pinned Alpha would have died eleven weeks after enablement.
+**F-1 — the nominated GPT-5 mini snapshot has a shutdown date.** OpenAI lists
+`gpt-5-mini-2025-08-07` for shutdown on 2026-12-11; the gpt-4.1 and gpt-4o mini snapshots in the
+historical price rows shut down on 2027-01-14. The new candidate is `gpt-5.6-luna`.
 
 **F-2 — "approved" had no owner and no expiry.** `APPROVED_REAL_MODELS` was a list of
 `{providerId, modelId}`. Adding a string was the entire enablement procedure, and nothing recorded who
 decided, when, or for how long. An approval that never expires is not an approval, it is a merge.
 _Fixed_: `ModelApprovalRecord` + `approval_not_effective`.
 
-**F-3 — the output cap assumes a non-reasoning model.** `maxOutputTokens = 512` is passed as
-`max_completion_tokens`. On a reasoning model the reasoning tokens are billed as **output** and are
-charged against that same allowance, so the provider can spend the whole 512 on hidden reasoning and
-return `content: ""` — which the adapter correctly rejects as `model_invalid_output`, after the money
-is spent. The tree's only non-deprecated candidate is a reasoning model (§3.3), so this had to be
-fixed rather than documented. _Fixed_: `reasoningEffort` is pinned per model in reviewed code and sent
-by the adapter; it is not a caller input, and a test asserts the request shape cannot grow otherwise.
+**F-3 — reasoning effort must match the output cap.** `maxOutputTokens = 512` is passed as
+`max_completion_tokens`, which includes reasoning tokens. GPT-5.6 Luna supports
+`reasoning_effort: "none"`; the rate row pins and sends it. The adapter test asserts both parameters
+and the Chat Completions request shape.
 
 **F-4 — no retirement awareness.** `ModelRateRow` recorded a price and a provenance but not whether
 the provider still serves the snapshot. _Fixed_: `shutdownDate` + `model_shutdown`.
@@ -87,10 +83,8 @@ deploy real inference: delete the rule. _Fixed_ in §4 by adding a reviewed arti
 no rule removed, one narrow door with a lock.
 
 **F-6 — the credential reached containers that cannot use it.** `compose.yaml` gives `api`, `worker`,
-`migrate` and `edge` the same `env_file`. A model credential in that file would be readable inside the
-API process, which has no model gateway at all. _Fixed_: `EMBER_MODEL_API_KEY: ''` in the `api`
-service (Compose gives `environment` precedence over `env_file`). Residual: `edge` and `migrate` still
-receive it; noted in §9.
+`migrate` and `edge` the same `env_file`. _Fixed_: Compose explicitly blanks `EMBER_MODEL_API_KEY` in
+`api`, `migrate` and `edge`; only the worker receives the project-scoped key.
 
 **F-7 — concurrency was incidental, not enforced.** `processOnce` is a sequential `for` loop, so one
 responder instance makes one paid call at a time — but only because nobody has parallelised it yet,
@@ -113,47 +107,36 @@ read, surfaced as `busy` in the summary so a concurrent entry cannot masquerade 
 
 ### 3.1 Constraint
 
-The adapter is OpenAI Chat Completions only (`APPROVED_MODEL_PROVIDERS = ['openai']`). A second
+The adapter stays on OpenAI Chat Completions (`APPROVED_MODEL_PROVIDERS = ['openai']`). A second
 provider means a second credential, a second retention review and a second failure taxonomy — no
-Alpha value, and out of scope. So the candidate must be reachable at `POST /v1/chat/completions` with
-`max_completion_tokens`, be pinnable to a dated snapshot, and be priced low enough that the existing
-$0.005-per-attempt ceiling can hold a worst-case reservation.
+Alpha value, and out of scope. The requested model must support `POST /v1/chat/completions`,
+`max_completion_tokens` and the pinned `reasoning_effort`, and its current price must fit the existing
+$0.005-per-attempt ceiling.
 
-### 3.2 Evidence actually obtained (2026-11-07)
+### 3.2 Official evidence obtained (2026-11-10)
 
-Primary price pages answer HTTP 403 from this environment; the evidence below is the provider's own
-documentation **as returned by a search index**, plus the deprecations page, which was reachable
-directly.
+| Official OpenAI source                                                                                                                  | Verified fact                                                                                                                                  |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| [GPT-5.6 Luna model page](https://developers.openai.com/api/docs/models/gpt-5.6-luna)                                                   | Model ID `gpt-5.6-luna`; $0.20 input / $1.20 output per 1M tokens; `reasoning.effort` supports `none`; Chat Completions endpoint is supported. |
+| [Chat Completions create reference](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create) | `max_completion_tokens` includes visible and reasoning tokens; `reasoning_effort` includes `none`.                                             |
+| [Deprecations](https://developers.openai.com/api/docs/deprecations)                                                                     | `gpt-5-mini-2025-08-07` shutdown 2026-12-11; listed gpt-4o-mini and gpt-4.1-mini snapshots shutdown 2027-01-14.                                |
 
-| Source                                                             | Read       | Says                                                                                                                                                                                                                 |
-| ------------------------------------------------------------------ | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `developers.openai.com/api/docs/deprecations`                      | 2026-11-07 | 2026-10-14 notice: `gpt-4o-mini-2024-07-18`, `gpt-4.1-2025-04-14`, `gpt-4.1-mini-2025-04-14` **shut down 2027-01-14**.                                                                                               |
-| `platform.openai.com/docs/models/gpt-5-mini` (search excerpt)      | 2026-11-07 | `$0.25` input / `$2.00` output per 1M, cached input `$0.025`; 400 000 context; 128 000 max output; **Reasoning**; Chat Completions supported; snapshots `gpt-5-mini`, `gpt-5-mini-2025-08-07`; **no shutdown date**. |
-| `platform.openai.com/docs/models/gpt-4.1-mini` (search excerpt)    | 2026-11-07 | `$0.40` / `$1.60`; marked **Deprecated**, snapshot `gpt-4.1-mini-2025-04-14` marked **Deprecated**.                                                                                                                  |
-| `openai.com/index/introducing-gpt-5-for-developers`                | 2026-11-07 | GPT-5 mini `$0.25` / `$2.00`; supports `reasoning_effort`.                                                                                                                                                           |
-| Secondary aggregators (`howmanytokens.io`, `costperprompt.com`, …) | 2026-10/11 | Same numbers for 4.1-mini / 4o-mini; **not invoice-grade**.                                                                                                                                                          |
+This is official published-price evidence. CTO explicitly reviews and signs A2 against the model page
+before the first call. An actual provider invoice is not a prerequisite; persisted usage is reconciled
+against billing after the smoke. The account's access and project-specific settings still need review.
 
-**This is not invoice-grade evidence.** It is dated, sourced and consistent across four independent
-reads, which is enough to nominate a candidate and to cost it — not enough to enable spending.
-Approval **A2** (an invoice-grade price sheet for the exact id) is still owed, exactly as the B2
-proposal said.
+### 3.3 Why `gpt-5.6-luna`
 
-### 3.3 Why `gpt-5-mini-2025-08-07`
+| Candidate                 | Price in/out per 1M | Shutdown    | Reasoning | Verdict                                      |
+| ------------------------- | ------------------- | ----------- | --------- | -------------------------------------------- |
+| `gpt-4o-mini-2024-07-18`  | $0.15 / $0.60       | 2027-01-14  | no        | **rejected** — deprecated                    |
+| `gpt-4.1-mini-2025-04-14` | $0.40 / $1.60       | 2027-01-14  | no        | **rejected** — deprecated                    |
+| `gpt-5-mini-2025-08-07`   | $0.25 / $2.00       | 2026-12-11  | yes       | **rejected** — near-term shutdown            |
+| `gpt-5.6-luna`            | $0.20 / $1.20       | none listed | yes       | **nominated**, with `reasoning_effort: none` |
 
-| Candidate                 | Price in/out per 1M | Shutdown   | Reasoning | Verdict                                      |
-| ------------------------- | ------------------- | ---------- | --------- | -------------------------------------------- |
-| `gpt-4o-mini-2024-07-18`  | $0.15 / $0.60       | 2027-01-14 | no        | **rejected** — dies 68 days after this PR    |
-| `gpt-4.1-mini-2025-04-14` | $0.40 / $1.60       | 2027-01-14 | no        | **rejected** — same shutdown, 1.6× the price |
-| `gpt-5-mini-2025-08-07`   | $0.25 / $2.00       | none       | **yes**   | **nominated** — the only servable snapshot   |
-
-The two cheaper models are the ones a cost-only comparison picks, and both are already retired by the
-provider's own schedule. Choosing either would have produced a green smoke test and a dead Alpha in
-January.
-
-The nominated model is a **reasoning** model, which is why F-3 had to be fixed in the same change: at
-`reasoning_effort = 'minimal'` the hidden-reasoning charge against the 512-token cap is small, and the
-reply has room to exist. The effort is pinned next to the price (`reasoningEffort: 'minimal'` on the
-rate row) so the two cannot drift apart, and the adapter sends it only when the row sets it.
+The older rate rows stay in the table as history and are not candidates for new calls. GPT-5.6 Luna's
+official model page lists the model ID without a dated snapshot. Its `none` effort is pinned beside the
+published price in the code-owned rate row and sent by the adapter; the caller cannot override it.
 
 ### 3.4 Credential required
 
@@ -225,7 +208,8 @@ two exact names, together, and only while the entry matches.
 - Changing it requires a commit, a review and a merge — the same bar as changing the code allowlist.
 - An entry is **necessary but not sufficient**: `packages/model-gateway/src/rates.ts` must
   independently approve the same id (and itself requires an unexpired `ModelApprovalRecord` and an
-  `invoice_verified` rate row). A unit test asserts the artifact and the code agree, so the two cannot
+  `official_price_verified` or `invoice_verified` rate row). The manifest includes an official
+  `priceSource` URL reviewed in A2. A unit test asserts the artifact and the code agree, so the two cannot
   drift into "the guard says yes, the worker refuses to boot".
 - The guard stays dependency-free (`node:fs` + `JSON.parse`), so it still runs on a host with Docker
   but no TypeScript toolchain.
@@ -237,7 +221,7 @@ two exact names, together, and only while the entry matches.
 ```text
 EMBER_MODEL_EXECUTION=real
 EMBER_MODEL_PROVIDER=openai
-EMBER_MODEL_ID=gpt-5-mini-2025-08-07
+EMBER_MODEL_ID=gpt-5.6-luna
 EMBER_MODEL_API_KEY=<SSM SecureString → 0600 env file>
 EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD=5000
 EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD=250000
@@ -266,38 +250,39 @@ this branch.
 Configuration may only lower them; `resolveModelExecution` refuses a negative, fractional, inverted or
 above-absolute budget in every mode, not only when a paid call is about to happen.
 
-### 5.2 What one Turn can cost at $0.25 / $2.00 per 1M
+### 5.2 What one Turn can cost at $0.20 / $1.20 per 1M
 
 The reservation is the worst case, priced before the request is built:
 
 | Case                                 | input tokens | output tokens | reservation                  |
 | ------------------------------------ | ------------ | ------------- | ---------------------------- |
-| Maximum the preflight admits         | 8 000        | 512           | 3 024 µUSD = **$0.003024**   |
-| Typical Alpha turn (short follow-up) | ~770         | ~220          | ~633 µUSD = **$0.00063**     |
-| Two attempts on the same Turn        | 8 000        | 512 × 2       | ≤ 6 048 µUSD = **$0.006048** |
+| Maximum reservation per attempt      | 8 000        | 512           | 2 215 µUSD = **$0.002215**   |
+| Typical Alpha turn (short follow-up) | ~770         | ~220          | ~418 µUSD = **$0.000418**    |
+| Two attempts on the same Turn        | 16 000       | 1 024         | ≤ 4 430 µUSD = **$0.004430** |
 
-Both fit under the $0.005 per-attempt cap, so a worst-case Turn can be reserved honestly rather than
-clamped (the P0-2 defect class). A Turn may hold up to `maxAttempts × perAttempt` = $0.010, which is
-approval item C5.
+Each attempt's worst-case reservation is under the $0.005 per-attempt cap, so it can be reserved
+honestly rather than clamped (the P0-2 defect class). The estimated total for both attempts is
+$0.004430; the hard bound remains `maxAttempts × perAttempt` = $0.010, which is approval item C5.
 
 ### 5.3 Monthly envelope
 
 | Assumption                                 | Monthly cost                                      |
 | ------------------------------------------ | ------------------------------------------------- |
-| 25 users × 20 Turns/day × 30 days, typical | 15 000 Turns × $0.00063 ≈ **$9.45**               |
-| Same volume at the absolute worst case     | 15 000 Turns × $0.003024 ≈ **$45.36**             |
+| 25 users × 20 Turns/day × 30 days, typical | 15 000 Turns × $0.000418 ≈ **$6.27**              |
+| Same volume at estimated worst case        | 15 000 Turns × $0.004430 ≈ **$66.45**             |
 | Hard stop: the $5/day global ceiling       | **$150/month**, and no configuration can raise it |
 
 The binding financial control is the global ceiling, not the per-Turn arithmetic.
 
 ### 5.4 Smoke test budget
 
-| Item                 | Bound                                                        |
-| -------------------- | ------------------------------------------------------------ |
-| Turns per run        | 1 (default) … 5 (`--max-turns`, hard maximum in code)        |
-| Worst case per run   | 5 × $0.006048 ≈ **$0.030**                                   |
-| Authorized aggregate | `maxPaidSmokeTurns` in the manifest, ≤ 50, per authorization |
-| Expected real spend  | ≈ **$0.0006–$0.003** for a single short turn                 |
+| Item                 | Bound                                  |
+| -------------------- | -------------------------------------- |
+| Turns per run        | exactly 1 (`--max-turns=1`)            |
+| Provider attempts    | exactly 1 for the first paid smoke     |
+| Worst-case estimate  | $0.002215                              |
+| Authorized aggregate | `maxPaidSmokeTurns: 1` in the manifest |
+| Expected real spend  | ≈ **$0.000418** for one short turn     |
 
 ---
 
@@ -306,19 +291,20 @@ The binding financial control is the global ceiling, not the per-Turn arithmetic
 `pnpm model:smoke` (`apps/cli/src/model-smoke/cli.ts`) is the only executable in the repository that
 can produce a real provider charge, and it refuses unless **all five** hold:
 
-1. `EMBER_MODEL_EXECUTION=real` **resolves** — which already requires the code allowlist entry, an
-   unexpired `ModelApprovalRecord`, an `invoice_verified` rate row and a usable credential;
+1. `EMBER_MODEL_EXECUTION=real` **resolves** — which requires the code allowlist entry, an unexpired
+   `ModelApprovalRecord`, an `official_price_verified` or `invoice_verified` rate row and a usable
+   credential;
 2. `EMBER_MODEL_SMOKE_APPROVAL` names that same approval id (an operator restates the decision;
    "the config was real" is not "I was asked to spend now");
-3. `--max-turns` is 1…5;
-4. no other Turn is `running` in the target database — otherwise the responder could claim somebody
-   else's Turn and bill for it;
+3. `--max-turns` is exactly 1;
+4. no other Turn is `running` at the initial database check, and the responder's candidate query is
+   scoped to the new Turn's tenant/conversation/id so a concurrent or historical Turn cannot be billed;
 5. `--confirm` is passed. Without it the command prints the plan and exits 2.
 
 It provisions a disposable tenant, submits one user message, runs **one** `processOnce()` through the
-production responder and the production adapter, reads the Turn, the reply row and the attempt row
-back, and writes a content-free evidence document (ids, model identity, booked cost, timings; never
-the prompt, the reply or the key) to `--evidence=<path>` with mode 0600.
+production responder and adapter with **one provider attempt**, reads the exact Turn, reply and usage
+rows back, and writes a content-free evidence document (ids, model identity, booked cost, timings;
+never prompt, reply or key) to `--evidence=<path>` with mode 0600.
 
 Because approvals A1 and A2 are not signed, this branch contains **no** `docs/evidence/l4b-*.json`.
 That file is the expected output of the command in §7.3, not something that can be produced today.
@@ -329,16 +315,16 @@ That file is the expected output of the command in §7.3, not something that can
 
 ### 7.1 Blocking A1/A2
 
-| ID     | Decision                                                                                                            | Owner     | Blocks                           |
-| ------ | ------------------------------------------------------------------------------------------------------------------- | --------- | -------------------------------- |
-| **A1** | Approve provider `openai` and pinned model id `gpt-5-mini-2025-08-07`                                               | CTO / Jia | the code allowlist entry         |
-| **A2** | Confirm $0.25 input / $2.00 output per 1M for that exact id from an invoice-grade source                            | CTO / Jia | `provenance: 'invoice_verified'` |
-| **A3** | Confirm the ceilings $0.005 / $0.25 / $1 / $5 and 60 Turns per principal                                            | CTO / Jia | unchanged defaults               |
-| **A5** | Name the alert destination for `model_auth_failed`, unresolved `model_budget_incidents` and ≥80 % of the global day | CTO / Jia | incident response                |
-| **C5** | Accept ≤ 2 attempts per Turn, ≤ $0.010 per Turn                                                                     | CTO / Jia | the retry policy                 |
-| **C6** | Confirm "refuse to boot" is the right failure for a misconfigured `real`                                            | CTO / Jia | §2.1                             |
-| **B1** | Accept that ≤ 8 messages of one conversation leave the platform, and state it in the privacy copy                   | Product   | any real user                    |
-| **B2** | Provider retention and training terms, named source, dated                                                          | CTO / Jia | any real user                    |
+| ID     | Decision                                                                                                            | Owner     | Blocks                                  |
+| ------ | ------------------------------------------------------------------------------------------------------------------- | --------- | --------------------------------------- |
+| **A1** | Approve provider `openai` and model id `gpt-5.6-luna`                                                               | CTO / Jia | the code allowlist entry                |
+| **A2** | Review $0.20 input / $1.20 output per 1M against OpenAI's official model page; record its URL                       | CTO / Jia | `provenance: 'official_price_verified'` |
+| **A3** | Confirm the ceilings $0.005 / $0.25 / $1 / $5 and 60 Turns per principal                                            | CTO / Jia | unchanged defaults                      |
+| **A5** | Name the alert destination for `model_auth_failed`, unresolved `model_budget_incidents` and ≥80 % of the global day | CTO / Jia | incident response                       |
+| **C5** | Accept ≤ 2 attempts per Turn, ≤ $0.010 per Turn                                                                     | CTO / Jia | the retry policy                        |
+| **C6** | Confirm "refuse to boot" is the right failure for a misconfigured `real`                                            | CTO / Jia | §2.1                                    |
+| **B1** | Accept that ≤ 8 messages of one conversation leave the platform, and state it in the privacy copy                   | Product   | any real user                           |
+| **B2** | Provider retention and training terms, named source, dated                                                          | CTO / Jia | any real user                           |
 
 Sign-off sheet: `docs/product/L4B-MODEL-APPROVAL-REQUEST.md`.
 
@@ -349,17 +335,17 @@ Sign-off sheet: `docs/product/L4B-MODEL-APPROVAL-REQUEST.md`.
 export const APPROVED_REAL_MODELS = [
   {
     providerId: 'openai',
-    modelId: 'gpt-5-mini-2025-08-07',
+    modelId: 'gpt-5.6-luna',
     approval: { approvalId: 'L4B-A1', approvedBy: '…', approvedAt: '…', expiresAt: '…' },
   },
 ];
 
-// the existing rate row: `provenance: 'unverified'` → `'invoice_verified'`, `source` → the invoice
+// the existing rate row: `provenance: 'unverified'` → 'official_price_verified'
+// Keep the official model-page URL in source; reconcile invoice usage after the first call.
 ```
 
-plus one entry in `infra/staging/model-authorization.json` and the eight environment variables in
-§4.4. Five files, no migration, no schema change — and a unit test fails until the artifact and the
-code agree.
+plus one entry in `infra/staging/model-authorization.json`, including `priceSource` with the official
+OpenAI model-page URL. The entry must use the same model/rate/approval and `maxPaidSmokeTurns: 1`.
 
 ### 7.3 Commands that must be run by a human, once, after A1/A2
 
@@ -463,27 +449,24 @@ commit go through it. Neither is Ember misbehaving.
 
 ## 9. Known limits, stated rather than hidden
 
-**R-1 — a reasoning model's hidden tokens are still unobservable.** `reasoning_effort: 'minimal'`
-bounds the exposure but does not make it zero; the provider does not report reasoning tokens
-separately in a way this ledger books. The overage path is what actually protects the ceiling.
+**R-1 — the token reservation is an estimate.** GPT-5.6 Luna is pinned to `reasoning_effort: 'none'`,
+but the offline tokenizer estimate is not a provider guarantee. The overage incident path remains the
+protection if the actual charge exceeds the reservation.
 
 **R-2 — concurrency is not capped across replicas.** N worker containers can make N paid calls at
 once, each on a different Turn. The bound is the money ledger plus claim leasing, not a counter. A
 distributed semaphore would need its own row; it is not in L4-B.
 
-**R-3 — the staging `env_file` still reaches `edge` and `migrate`.** Only the `api` service is blanked.
-Splitting the file per service is the real fix and touches PR #123's deployment shape, so it is
-proposed rather than done.
-
-**R-4 — the approval artifact and the code allowlist are two records of one decision.** A test keeps
+**R-3 — the approval artifact and the code allowlist are two records of one decision.** A test keeps
 them in step, but they are still two edits. Collapsing them would require the guard to import
 TypeScript, which it cannot do on a host without a toolchain.
 
-**R-5 — price evidence is not invoice-grade.** §3.2 cites what this environment could actually read.
-A2 exists precisely because that is not enough.
+**R-4 — the first-call price source is the official published model page.** Project access, regional
+availability and provider-side spend settings must be confirmed before the smoke; reported usage is
+reconciled against billing afterward.
 
-**R-6 — the smoke test asserts a Turn the database reports, not a charge the provider confirms.**
-Reconciliation against the invoice line is a manual step in §7.3 and stays manual.
+**R-5 — the smoke test asserts a Turn the database reports, not a charge the provider confirms.**
+Reconciliation against billing is a manual step in §7.3 and stays manual.
 
 ---
 

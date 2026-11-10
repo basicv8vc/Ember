@@ -22,20 +22,20 @@ import { loadWorkerConfig } from '../../../worker/src/config.js';
  * already satisfied in the environment it is given:
  *
  *   1. `EMBER_MODEL_EXECUTION=real` resolves — which by itself requires the code-owned allowlist
- *      entry, an **unexpired dated approval record**, an `invoice_verified` rate row and a usable
- *      credential (see `resolveModelExecution`);
+ *      entry, an **unexpired dated approval record**, an explicitly reviewed official-price or
+ *      invoice rate row and a usable credential (see `resolveModelExecution`);
  *   2. `EMBER_MODEL_SMOKE_APPROVAL` names that same approval id — an operator must restate the
  *      decision, because "the config was real" is not the same as "I was asked to spend now";
- *   3. `--max-turns` is 1..5 — five is the ceiling the review document authorises, not a default;
- *   4. exactly one Turn is `running` in the database, and it is the one this run created, so the
- *      responder cannot pick up somebody else's Turn and bill for it;
+ *   3. `--max-turns` is exactly 1 — this command creates exactly one requested Turn;
+ *   4. the responder is scoped to that exact Turn id, so concurrent or historical Turns cannot be
+ *      picked up and billed by this run;
  *   5. `--confirm` is passed. Without it the command prints the plan and exits.
  *
  * Override `EMBER_MODEL_SMOKE_DATABASE_URL` only when the smoke must target a database other than
  * `DATABASE_URL`; it is never used by the worker.
  */
 
-export const MAX_SMOKE_TURNS = 5;
+export const MAX_SMOKE_TURNS = 1;
 
 export interface SmokePlan {
   readonly approvalId: string;
@@ -110,7 +110,7 @@ const REFUSAL_TEXT: Readonly<Record<SmokeRefusal, string>> = Object.freeze({
   approval_mismatch:
     'EMBER_MODEL_SMOKE_APPROVAL does not match the approval recorded for the configured model. ' +
     'Refusing: the id in the environment and the id in code must be the same decision.',
-  max_turns_invalid: `--max-turns must be an integer between 1 and ${MAX_SMOKE_TURNS}.`,
+  max_turns_invalid: '--max-turns must be exactly 1 for a paid smoke run.',
   not_confirmed: 'Refusing to spend without --confirm. The plan above is what would have run.',
 });
 
@@ -140,7 +140,7 @@ export function parseSmokeArgs(argv: readonly string[]): ParsedSmokeArgs {
     if (argument === '--confirm') {
       confirm = true;
     } else if (argument.startsWith('--max-turns=')) {
-      maxTurns = Number.parseInt(argument.slice('--max-turns='.length), 10);
+      maxTurns = Number(argument.slice('--max-turns='.length));
     } else if (argument.startsWith('--text=')) {
       text = argument.slice('--text='.length);
     } else if (argument.startsWith('--evidence=')) {
@@ -360,9 +360,7 @@ export async function runPaidSmoke(
   deps.log(`  rate            ${plan.rateVersion}`);
   deps.log(`  database        ${plan.database}`);
   deps.log(`  max turns       ${plan.maxTurns}`);
-  deps.log(
-    `  worst-case cost ${(model.settings.ceilings.perAttemptMicroUsd * plan.maxTurns) / 1_000_000} USD`,
-  );
+  deps.log(`  per-attempt ceiling ${model.settings.ceilings.perAttemptMicroUsd / 1_000_000} USD`);
 
   const pool = createPool(databaseConfig);
   const startedAt = deps.now();
@@ -423,9 +421,16 @@ export async function runPaidSmoke(
       workerId: 'l4b-paid-smoke',
       leaseMs: model.settings.leaseMs,
       ceilings: model.settings.ceilings,
-      maxAttempts: model.settings.maxAttempts,
+      // The first paid smoke has one provider attempt. A failed call is reconciled before any
+      // human decides whether to run another smoke; the normal worker keeps its two-attempt bound.
+      maxAttempts: 1,
       attemptTimeoutMs: model.settings.attemptTimeoutMs,
       rate: model.rate,
+      onlyTurn: {
+        tenantId,
+        conversationId,
+        turnId: submitted.receipt.turn.turn_id,
+      },
       batchSize: 1,
       intervalMs: 1_000,
     });

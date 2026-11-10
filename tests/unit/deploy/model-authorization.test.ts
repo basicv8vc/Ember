@@ -25,7 +25,7 @@ const MANIFEST_FILE = `${REPO_ROOT}infra/staging/model-authorization.json`;
 /** The day the review document is written, so an "expired" case does not depend on the CI clock. */
 const TODAY = new Date('2026-11-07T09:00:00Z');
 
-const MODEL_ID = 'gpt-5-mini-2025-08-07';
+const MODEL_ID = 'gpt-5.6-luna';
 const AUTHORIZED_KEY = 'sk-live-AbCdEf0123456789AbCdEf0123456789';
 
 function stagingEnv(): Map<string, string> {
@@ -41,16 +41,16 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     authorizationId: 'L4B-A1',
     providerId: 'openai',
     modelId: MODEL_ID,
-    rateVersion: 'openai-gpt-5-mini-2025-08-07-invoice-2026-11-07',
+    rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
     approvedBy: 'CTO / Jia',
     approvedAt: '2026-11-07',
     expiresAt: '2027-02-07',
-    invoiceSource: 'OpenAI console invoice INV-TEST',
+    priceSource: 'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
     maxPerAttemptMicroUsd: 5_000,
     maxPrincipalDailyMicroUsd: 250_000,
     maxTenantDailyMicroUsd: 1_000_000,
     maxGlobalDailyMicroUsd: 5_000_000,
-    maxPaidSmokeTurns: 5,
+    maxPaidSmokeTurns: 1,
     ...overrides,
   };
 }
@@ -181,6 +181,7 @@ describe('paid model authorization artifact', () => {
       { authorizationId: 'PENDING-CTO-SIGNOFF' },
       { authorizedByPlaceholder: true, approvedBy: 'TODO' },
       { expiresAt: 'not-a-date' },
+      { priceSource: 'https://third-party.example/models/gpt-5.6-luna' },
       { maxPerAttemptMicroUsd: 0 },
       { maxPaidSmokeTurns: 500 },
     ]) {
@@ -311,12 +312,24 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     }
   });
 
-  it('prices the candidate, and records the shutdown day of every deprecated snapshot', () => {
+  it('prices the candidate and records shutdown dates for deprecated snapshots', () => {
     const candidateRate = MODEL_RATE_ROWS.find((row) => row.modelId === MODEL_ID);
 
     expect(candidateRate).toBeDefined();
     expect(candidateRate?.shutdownDate).toBeNull();
-    expect(candidateRate?.reasoningEffort).toBe('minimal');
+    expect(candidateRate?.inputMicroUsdPerMillion).toBe(200_000);
+    expect(candidateRate?.outputMicroUsdPerMillion).toBe(1_200_000);
+    expect(candidateRate?.reasoningEffort).toBe('none');
+    expect(candidateRate?.provenance).toBe('unverified');
+    expect(candidateRate?.source).toContain(
+      'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
+    );
+
+    const retiredGpt5Mini = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5-mini-2025-08-07');
+    expect(retiredGpt5Mini?.shutdownDate).toBe('2026-12-11');
+    expect(MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5-mini')?.shutdownDate).toBe(
+      '2026-12-11',
+    );
 
     for (const row of MODEL_RATE_ROWS) {
       if (row.modelId.startsWith('gpt-4')) {
@@ -338,11 +351,18 @@ describe('authorization artifact ↔ code allowlist parity', () => {
 });
 
 describe('compose secret exposure', () => {
-  it('blanks the model key inside the api container, which has no model gateway', () => {
+  it('blanks the model key in every container other than the worker', () => {
     const compose = readFileSync(COMPOSE_FILE, 'utf8');
+    const migrateService = compose.slice(
+      compose.indexOf('\n  migrate:'),
+      compose.indexOf('\n  api:'),
+    );
     const apiService = compose.slice(compose.indexOf('\n  api:'), compose.indexOf('\n  worker:'));
+    const edgeService = compose.slice(compose.indexOf('\n  edge:'), compose.indexOf('\nnetworks:'));
 
+    expect(migrateService).toContain("EMBER_MODEL_API_KEY: ''");
     expect(apiService).toContain("EMBER_MODEL_API_KEY: ''");
+    expect(edgeService).toContain("EMBER_MODEL_API_KEY: ''");
   });
 
   it('passes the model variables to the worker through the shared environment file', () => {

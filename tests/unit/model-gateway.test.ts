@@ -46,19 +46,19 @@ const TEST_APPROVAL = Object.freeze({
 
 const VERIFIED_RATE: ModelRateRow = Object.freeze({
   providerId: 'openai' as const,
-  modelId: 'gpt-5-mini-2026-11-01',
-  inputMicroUsdPerMillion: 250_000,
-  outputMicroUsdPerMillion: 2_000_000,
-  rateVersion: 'test-rate-v1',
-  provenance: 'invoice_verified' as const,
-  source: 'test fixture',
+  modelId: 'gpt-5.6-luna',
+  inputMicroUsdPerMillion: 200_000,
+  outputMicroUsdPerMillion: 1_200_000,
+  rateVersion: 'test-official-price-rate-v1',
+  provenance: 'official_price_verified' as const,
+  source: 'official OpenAI model page, test fixture',
 });
 
 const APPROVED_REGISTRY = Object.freeze({
   models: Object.freeze([
     {
       providerId: 'openai' as const,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       approval: TEST_APPROVAL,
     },
   ]),
@@ -109,9 +109,27 @@ describe('model gateway limits and pricing', () => {
   });
 
   it('computes a micro-USD cost from a pinned rate row without floats', () => {
-    // 3130 input + 512 output tokens at $0.25/$2.00 per million ≈ $0.00181.
-    expect(estimateCostMicroUsd(VERIFIED_RATE, 3_130, 512)).toBe(1_807);
+    // 3130 input + 512 output tokens at $0.20/$1.20 per million ≈ $0.001241.
+    expect(estimateCostMicroUsd(VERIFIED_RATE, 3_130, 512)).toBe(1_241);
     expect(Number.isInteger(estimateCostMicroUsd(VERIFIED_RATE, 1, 1))).toBe(true);
+  });
+
+  it('keeps the GPT-5.6 Luna maximum reservation under the existing per-attempt ceiling', () => {
+    const rate = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5.6-luna');
+
+    expect(rate).toBeDefined();
+    const worstCasePerAttempt = estimateCostMicroUsd(
+      rate!,
+      MODEL_LIMITS.maxInputTokens,
+      MODEL_LIMITS.maxOutputTokens,
+    );
+
+    expect(worstCasePerAttempt).toBe(2_215);
+    expect(worstCasePerAttempt).toBeLessThanOrEqual(MODEL_LIMITS.maxReservedMicroUsdPerAttempt);
+    expect(worstCasePerAttempt * MODEL_LIMITS.maxAttemptsPerTurn).toBe(4_430);
+    expect(worstCasePerAttempt * MODEL_LIMITS.maxAttemptsPerTurn).toBeLessThanOrEqual(
+      MODEL_LIMITS.maxReservedMicroUsdPerAttempt,
+    );
   });
 
   it('ships no approved real model, which is what keeps real mode closed by default', () => {
@@ -283,7 +301,7 @@ describe('mode resolution and boot gates', () => {
     const resolution = resolveModelExecution({
       mode: 'real',
       providerId: 'openai',
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       apiKey: VALID_KEY,
     });
 
@@ -304,16 +322,16 @@ describe('mode resolution and boot gates', () => {
     const provider = resolveModelExecution({
       mode: 'real',
       providerId: 'anthropic',
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       apiKey: VALID_KEY,
     });
     expect(provider.ok).toBe(false);
     expect(provider).toMatchObject({ ok: false, reason: 'provider_not_approved' });
   });
 
-  it('requires an invoice-verified rate row for the exact pinned model', () => {
+  it('requires an officially reviewed or invoice-verified rate row for the exact pinned model', () => {
     const resolution = resolveModelExecution(
-      { mode: 'real', providerId: 'openai', modelId: 'gpt-5-mini-2026-11-01', apiKey: VALID_KEY },
+      { mode: 'real', providerId: 'openai', modelId: 'gpt-5.6-luna', apiKey: VALID_KEY },
       { models: APPROVED_REGISTRY.models, rates: MODEL_RATE_ROWS },
     );
 
@@ -323,7 +341,7 @@ describe('mode resolution and boot gates', () => {
 
   it('requires a usable credential even when everything else is approved', () => {
     const missing = resolveModelExecution(
-      { mode: 'real', providerId: 'openai', modelId: 'gpt-5-mini-2026-11-01', apiKey: undefined },
+      { mode: 'real', providerId: 'openai', modelId: 'gpt-5.6-luna', apiKey: undefined },
       APPROVED_REGISTRY,
     );
     expect(missing.ok).toBe(false);
@@ -333,7 +351,7 @@ describe('mode resolution and boot gates', () => {
       {
         mode: 'real',
         providerId: 'openai',
-        modelId: 'gpt-5-mini-2026-11-01',
+        modelId: 'gpt-5.6-luna',
         apiKey: 'sk-REPLACE-WITH-REAL-KEY-000000',
       },
       APPROVED_REGISTRY,
@@ -342,7 +360,7 @@ describe('mode resolution and boot gates', () => {
     expect(placeholder).toMatchObject({ ok: false, reason: 'credential_placeholder' });
 
     const malformed = resolveModelExecution(
-      { mode: 'real', providerId: 'openai', modelId: 'gpt-5-mini-2026-11-01', apiKey: 'short' },
+      { mode: 'real', providerId: 'openai', modelId: 'gpt-5.6-luna', apiKey: 'short' },
       APPROVED_REGISTRY,
     );
     expect(malformed.ok).toBe(false);
@@ -351,7 +369,7 @@ describe('mode resolution and boot gates', () => {
 
   it('opens real mode only when all four gates pass, and then carries the rate and credential', () => {
     const resolution = resolveModelExecution(
-      { mode: 'real', providerId: 'openai', modelId: 'gpt-5-mini-2026-11-01', apiKey: VALID_KEY },
+      { mode: 'real', providerId: 'openai', modelId: 'gpt-5.6-luna', apiKey: VALID_KEY },
       APPROVED_REGISTRY,
     );
 
@@ -361,8 +379,8 @@ describe('mode resolution and boot gates', () => {
       throw new Error('expected an approved real resolution');
     }
 
-    expect(resolution.rate.rateVersion).toBe('test-rate-v1');
-    expect(resolution.settings.modelId).toBe('gpt-5-mini-2026-11-01');
+    expect(resolution.rate.rateVersion).toBe('test-official-price-rate-v1');
+    expect(resolution.settings.modelId).toBe('gpt-5.6-luna');
   });
 
   it('rejects budgets that exceed the database ceilings or invert the hierarchy', () => {
@@ -472,7 +490,7 @@ describe('openai adapter', () => {
     );
     const gateway = new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
       fetchImpl: stub.fetchImpl,
     });
@@ -487,7 +505,7 @@ describe('openai adapter', () => {
     expect(call.init.credentials).toBe('omit');
     expect(call.init.method).toBe('POST');
     expect(result.simulated).toBe(false);
-    expect(result.modelLabel).toBe('gpt-5-mini-2026-11-01');
+    expect(result.modelLabel).toBe('gpt-5.6-luna');
     expect(result.modelLabel).not.toMatch(/-(fake|echo)-/);
   });
 
@@ -503,7 +521,7 @@ describe('openai adapter', () => {
 
     await new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
       fetchImpl: stub.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
@@ -541,7 +559,7 @@ describe('openai adapter', () => {
 
     const error = await new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
       fetchImpl: stub.fetchImpl,
     })
@@ -568,7 +586,7 @@ describe('openai adapter', () => {
       await expect(
         new OpenAiModelGateway({
           apiKey: VALID_KEY,
-          modelId: 'gpt-5-mini-2026-11-01',
+          modelId: 'gpt-5.6-luna',
           rate: VERIFIED_RATE,
           fetchImpl: stub.fetchImpl,
         }).generateConversationTurn(input(), new AbortController().signal),
@@ -584,7 +602,7 @@ describe('openai adapter', () => {
     await expect(
       new OpenAiModelGateway({
         apiKey: VALID_KEY,
-        modelId: 'gpt-5-mini-2026-11-01',
+        modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
         fetchImpl: reset.fetchImpl,
       }).generateConversationTurn(input(), new AbortController().signal),
@@ -599,7 +617,7 @@ describe('openai adapter', () => {
     await expect(
       new OpenAiModelGateway({
         apiKey: VALID_KEY,
-        modelId: 'gpt-5-mini-2026-11-01',
+        modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
         fetchImpl: aborted.fetchImpl,
       }).generateConversationTurn(input(), controller.signal),
@@ -620,7 +638,7 @@ describe('openai adapter', () => {
 
     const result = await new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
       fetchImpl: stub.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
@@ -628,8 +646,8 @@ describe('openai adapter', () => {
     expect(result.usage).not.toBeNull();
     expect(result.usage!.inputTokens).toBe(3_130);
     expect(result.usage!.outputTokens).toBe(512);
-    expect(result.usage!.costMicroUsd).toBe(1_807);
-    expect(result.usage!.rateVersion).toBe('test-rate-v1');
+    expect(result.usage!.costMicroUsd).toBe(1_241);
+    expect(result.usage!.rateVersion).toBe('test-official-price-rate-v1');
     expect(result.output.finishReason).toBe('length');
   });
 
@@ -653,7 +671,7 @@ describe('openai adapter', () => {
 
       const result = await new OpenAiModelGateway({
         apiKey: VALID_KEY,
-        modelId: 'gpt-5-mini-2026-11-01',
+        modelId: 'gpt-5.6-luna',
         rate: VERIFIED_RATE,
         fetchImpl: stub.fetchImpl,
       }).generateConversationTurn(input(), new AbortController().signal);
@@ -773,7 +791,7 @@ describe('pinned reasoning effort', () => {
 
     await new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
+      modelId: 'gpt-5.6-luna',
       rate: VERIFIED_RATE,
       fetchImpl: withoutEffort.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
@@ -789,16 +807,21 @@ describe('pinned reasoning effort', () => {
       ),
     );
 
+    const lunaRate = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5.6-luna');
+    expect(lunaRate).toBeDefined();
+
     await new OpenAiModelGateway({
       apiKey: VALID_KEY,
-      modelId: 'gpt-5-mini-2026-11-01',
-      rate: { ...VERIFIED_RATE, reasoningEffort: 'minimal' },
+      modelId: 'gpt-5.6-luna',
+      rate: lunaRate!,
       fetchImpl: withEffort.fetchImpl,
     }).generateConversationTurn(input(), new AbortController().signal);
 
     const body = JSON.parse(withEffort.calls[0]!.init.body) as Record<string, unknown>;
 
-    expect(body['reasoning_effort']).toBe('minimal');
+    expect(body['model']).toBe('gpt-5.6-luna');
+    expect(body['reasoning_effort']).toBe('none');
+    expect(body['max_completion_tokens']).toBe(256);
     // The value comes from the reviewed row, and the call adds nothing else: the request shape is
     // still the six fields the contract allows plus this one pinned property.
     expect(Object.keys(body).sort()).toEqual([

@@ -89,6 +89,7 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   readonly publishes: PublishRecord[] = [];
   readonly charges: B2AttemptCharge[] = [];
   readonly reserveCommands: Array<{ reservedMicroUsd: number; modelLabel: string }> = [];
+  readonly requestedTurnScopes: Array<PendingModelTurn | undefined> = [];
 
   running = true;
   deadlineExpired = false;
@@ -104,9 +105,20 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
 
   attemptsIssued = 0;
 
-  listRunningTurns(): Promise<readonly PendingModelTurn[]> {
+  listRunningTurns(
+    _limit?: number,
+    onlyTurn?: PendingModelTurn,
+  ): Promise<readonly PendingModelTurn[]> {
     this.calls.push('listRunningTurns');
-    return Promise.resolve(this.running ? [{ tenantId, conversationId, turnId }] : []);
+    this.requestedTurnScopes.push(onlyTurn);
+    const candidate = { tenantId, conversationId, turnId };
+    const matchesScope =
+      onlyTurn === undefined ||
+      (onlyTurn.tenantId === candidate.tenantId &&
+        onlyTurn.conversationId === candidate.conversationId &&
+        onlyTurn.turnId === candidate.turnId);
+
+    return Promise.resolve(this.running && matchesScope ? [candidate] : []);
   }
 
   expireTurnIfDue(): Promise<B1AssistantTurnDto | null> {
@@ -357,6 +369,18 @@ describe('B2 responder: the happy path', () => {
       modelLabel: REAL_MODEL_LABEL,
       simulated: false,
     });
+  });
+
+  it('passes an exact one-turn scope to the repository before any paid work', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['ok']);
+    const onlyTurn = { tenantId, conversationId, turnId };
+
+    const summary = await realResponder(repository, gateway, { onlyTurn }).processOnce();
+
+    expect(summary.completed).toBe(1);
+    expect(repository.requestedTurnScopes).toStrictEqual([onlyTurn]);
+    expect(gateway.inputs).toHaveLength(1);
   });
 
   it('sends the bounded transcript and caps the completion at the limit', async () => {

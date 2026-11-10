@@ -37,7 +37,8 @@ export interface ModelAuthorizationEntry {
   readonly approvedBy: string;
   readonly approvedAt: string;
   readonly expiresAt: string;
-  readonly invoiceSource: string;
+  /** Official provider pricing URL reviewed before the first call; invoices are reconciled later. */
+  readonly priceSource: string;
   readonly maxPerAttemptMicroUsd: number;
   readonly maxPrincipalDailyMicroUsd: number;
   readonly maxTenantDailyMicroUsd: number;

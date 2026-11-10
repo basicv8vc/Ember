@@ -61,6 +61,27 @@ export const MODEL_AUTHORIZATION_PATH = new URL('../model-authorization.json', i
 
 const ISO_DAY = /^\d{4}-\d{2}-\d{2}$/;
 const AUTHORIZATION_PLACEHOLDER = /pending|todo|tbd|replace|example|placeholder|changeme/i;
+const OFFICIAL_OPENAI_PRICE_HOSTS = new Set(['developers.openai.com', 'platform.openai.com']);
+
+/** The authorization must cite a first-party HTTPS model/pricing page, never an aggregator. */
+function isOfficialPriceSource(value) {
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    return false;
+  }
+
+  try {
+    const source = new URL(value);
+
+    return (
+      source.protocol === 'https:' &&
+      OFFICIAL_OPENAI_PRICE_HOSTS.has(source.hostname) &&
+      source.username.length === 0 &&
+      source.password.length === 0
+    );
+  } catch {
+    return false;
+  }
+}
 
 /**
  * How a paid-model deployment is bounded by its approval.
@@ -261,6 +282,7 @@ export function findModelAuthorization(manifest, query) {
   if (
     typeof entry.authorizationId !== 'string' ||
     typeof entry.approvedBy !== 'string' ||
+    !isOfficialPriceSource(entry.priceSource) ||
     !ISO_DAY.test(entry.approvedAt ?? '') ||
     !ISO_DAY.test(entry.expiresAt ?? '') ||
     entry.authorizationId.trim().length === 0 ||
@@ -305,7 +327,7 @@ const AUTHORIZATION_FAILURE_MESSAGE = Object.freeze({
   duplicate_authorization:
     'more than one authorization covers this provider and model id, so which ceiling applies is ambiguous; remove the duplicate',
   malformed_authorization:
-    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, ISO approvedAt/expiresAt and every ceiling as a positive integer',
+    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, an official OpenAI HTTPS priceSource, ISO approvedAt/expiresAt and every ceiling as a positive integer',
   not_yet_valid: 'the matching authorization does not start until a future date',
   expired:
     'the matching authorization has expired; a fresh dated approval must be merged before paid egress resumes',

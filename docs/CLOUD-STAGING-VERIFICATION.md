@@ -211,8 +211,8 @@ Reported here, fixed by `fix/runtime-production-env` (#126, merged before this P
   boundary, by design: a live-marked deployment must never serve simulated replies). This
   is why the full-lifecycle E2E runs the documented `e2e` acceptance profile
   (`NODE_ENV=test`), never the staging profile. On staging, `disabled` is the contract and
-  `real` cannot boot without a reviewed approval, an invoice-verified rate and a
-  credential.
+  `real` cannot boot without a reviewed approval, a rate row verified against official published
+  pricing or a provider invoice, and a credential.
 
 ## 8. Configuration guard
 

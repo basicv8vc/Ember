@@ -20,8 +20,8 @@ import {
 const PLAN: SmokePlan = {
   approvalId: 'L4B-A1',
   providerId: 'openai',
-  modelId: 'gpt-5-mini-2025-08-07',
-  rateVersion: 'openai-gpt-5-mini-2025-08-07-invoice-2026-11-07',
+  modelId: 'gpt-5.6-luna',
+  rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
   maxTurns: 1,
   database: 'postgres:5432/ember',
 };
@@ -29,9 +29,9 @@ const PLAN: SmokePlan = {
 function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePreconditions {
   return {
     modelMode: 'real',
-    modelId: 'gpt-5-mini-2025-08-07',
+    modelId: 'gpt-5.6-luna',
     providerId: 'openai',
-    rateVersion: 'openai-gpt-5-mini-2025-08-07-invoice-2026-11-07',
+    rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
     approvalIdFromConfig: 'L4B-A1',
     approvalIdFromEnv: 'L4B-A1',
     maxTurns: 1,
@@ -122,7 +122,7 @@ describe('paid smoke arguments', () => {
 
   it('reads an explicit turn count, prompt and evidence path', () => {
     const args = parseSmokeArgs([
-      '--max-turns=3',
+      '--max-turns=1',
       '--confirm',
       '--text=hello',
       '--evidence=/tmp/e.json',
@@ -130,7 +130,7 @@ describe('paid smoke arguments', () => {
 
     expect(args).toStrictEqual({
       confirm: true,
-      maxTurns: 3,
+      maxTurns: 1,
       text: 'hello',
       evidencePath: '/tmp/e.json',
     });

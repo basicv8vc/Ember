@@ -188,7 +188,7 @@ Two guards keep the alternatives off the table, both verified against the runnin
   never runs a pre-test `down --volumes`, and tears down only the resources the run
   itself created.
 - `EMBER_MODEL_EXECUTION=real` cannot boot at all today (`model_not_approved`: the
-  code-owned approval registry is empty and no invoice-verified rate or credential exists).
+  code-owned approval registry is empty and no reviewed price row or credential exists).
   There is no silent downgrade to `fake`.
 
 The E2E's session sign-in also deserves an explicit note: it runs `POST /v1/auth/session`

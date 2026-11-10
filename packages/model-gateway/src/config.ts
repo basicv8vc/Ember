@@ -180,8 +180,8 @@ function boundedInteger(
  * 1. the provider is in the code-owned allowlist;
  * 2. the model id is in the code-owned allowlist (empty in the merged tree);
  * 3. that entry carries an approval record that is effective **today** — dated, named, unexpired;
- * 4. an `invoice_verified` rate row exists for that exact model id, and the snapshot's announced
- *    shutdown day has not arrived;
+ * 4. a price row exists for that exact model id with official published pricing explicitly
+ *    reviewed (or an invoice has been verified), and the snapshot's shutdown day has not arrived;
  * 5. a usable credential is bound.
  *
  * Gate 3 is what keeps "approved" from decaying into "approved once, forever": the record expires,
@@ -265,7 +265,10 @@ export function resolveModelExecution(
 
   const rate = findRateRow(registry.rates, provider, modelId);
 
-  if (rate === null || rate.provenance !== 'invoice_verified') {
+  if (
+    rate === null ||
+    (rate.provenance !== 'official_price_verified' && rate.provenance !== 'invoice_verified')
+  ) {
     return { ok: false, mode, settings, reason: 'rate_not_verified' };
   }
 

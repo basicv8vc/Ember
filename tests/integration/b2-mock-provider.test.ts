@@ -28,21 +28,21 @@ import { createTestDatabase, type TestDatabase } from './support/database.js';
  * than an assertion about an in-memory object.
  */
 
-const PINNED_MODEL = 'gpt-5-mini-2025-08-07';
+const PINNED_MODEL = 'gpt-5.6-luna';
 const API_KEY = 'sk-mock-provider-not-a-real-key-0001';
 const SOURCE_TEXT = 'what is the point of a bounded context window';
 
-/** $0.25 / $2.00 per 1M — the row L4-B nominates, priced exactly like the shipped one. */
+/** The official GPT-5.6 Luna price row, with its published price reviewed for this mock fixture. */
 const RATE: ModelRateRow = Object.freeze({
   providerId: 'openai' as const,
   modelId: PINNED_MODEL,
-  inputMicroUsdPerMillion: 250_000,
-  outputMicroUsdPerMillion: 2_000_000,
-  rateVersion: 'openai-gpt-5-mini-2025-08-07-mock-2026-11-07',
-  provenance: 'invoice_verified' as const,
-  source: 'mock provider fixture',
+  inputMicroUsdPerMillion: 200_000,
+  outputMicroUsdPerMillion: 1_200_000,
+  rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
+  provenance: 'official_price_verified' as const,
+  source: 'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
   shutdownDate: null,
-  reasoningEffort: 'minimal' as const,
+  reasoningEffort: 'none' as const,
 });
 
 const CEILINGS: ModelBudgetCeilings = {
@@ -55,8 +55,8 @@ const CEILINGS: ModelBudgetCeilings = {
 
 const PROMPT_TOKENS = 40;
 const COMPLETION_TOKENS = 20;
-/** ceil((40 × 250 000 + 20 × 2 000 000) / 1 000 000) — the adapter's own arithmetic. */
-const OBSERVED_COST = 50;
+/** ceil((40 × 200 000 + 20 × 1 200 000) / 1 000 000) — the adapter's own arithmetic. */
+const OBSERVED_COST = 32;
 
 interface Fixture {
   readonly tenantId: string;
@@ -352,7 +352,8 @@ describe('B2 Mock Provider — production adapter, stubbed transport, real datab
     // The request is built by the production adapter: pinned model, pinned origin, no caller knobs.
     const body = JSON.parse(mock.calls[0]!.body) as Record<string, unknown>;
     expect(body['model']).toBe(PINNED_MODEL);
-    expect(body['reasoning_effort']).toBe('minimal');
+    expect(body['reasoning_effort']).toBe('none');
+    expect(body['max_completion_tokens']).toBe(512);
     expect(body['stream']).toBe(false);
     expect(body['store']).toBe(false);
     expect(mock.calls[0]!.headers['authorization']).toBe(`Bearer ${API_KEY}`);
@@ -429,7 +430,7 @@ describe('B2 Mock Provider — production adapter, stubbed transport, real datab
     const fixture = await createFixture();
     const mock = mockProvider([{ kind: 'reply', text: 'must never be sent' }]);
 
-    // The priced worst case for this context is ~1.1 mUSD; a 100 µUSD ceiling cannot hold it.
+    // The priced worst case for this context is ~0.7 mUSD; a 100 µUSD ceiling cannot hold it.
     const summary = await makeResponder(mock, {
       ceilings: { ...CEILINGS, perAttemptMicroUsd: 100 },
     }).processOnce();

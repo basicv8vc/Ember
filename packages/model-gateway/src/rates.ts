@@ -56,10 +56,9 @@ export interface ModelCandidate {
 export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze([
   Object.freeze({
     providerId: 'openai' as const,
-    modelId: 'gpt-5-mini-2025-08-07',
+    modelId: 'gpt-5.6-luna',
     rationale:
-      'the only snapshot on the shortlist with no announced shutdown, and the lowest-priced ' +
-      'non-deprecated id the existing Chat Completions adapter can address',
+      'officially listed at $0.20/$1.20 per 1M tokens, with Chat Completions and reasoning_effort none',
   }),
 ]);
 
@@ -72,7 +71,7 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
 export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai']);
 
 /** Documented placeholder: boot refuses any model id containing it. */
-export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-DATED-MODEL-ID';
+export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
 
 /**
  * How much hidden reasoning a pinned model is allowed to spend inside `max_completion_tokens`.
@@ -82,7 +81,7 @@ export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-DATED-MODEL-ID';
  * as output *and* are charged against the same completion allowance, so the gateway's 512-token cap
  * silently becomes "512 tokens of thinking and an empty reply" unless the effort is pinned too.
  */
-export type ModelReasoningEffort = 'minimal' | 'low' | 'medium' | 'high';
+export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
 
 export interface ModelRateRow {
   readonly providerId: Extract<ModelProviderId, 'openai'>;
@@ -93,10 +92,11 @@ export interface ModelRateRow {
   /** Stable string stored per attempt, so historical spend keeps the price it was booked at. */
   readonly rateVersion: string;
   /**
-   * `unverified` rows are recorded for arithmetic and provenance only. A `real` call requires an
-   * `invoice_verified` row for the exact pinned model id.
+   * `unverified` rows are recorded for arithmetic and provenance only. A `real` call requires a
+   * `official_price_verified` or `invoice_verified` row for the exact pinned model id. Official
+   * published pricing may be reviewed before the first call; an invoice is reconciled afterward.
    */
-  readonly provenance: 'unverified' | 'invoice_verified';
+  readonly provenance: 'unverified' | 'official_price_verified' | 'invoice_verified';
   readonly source: string;
   /**
    * Provider-announced retirement day for this exact snapshot (`YYYY-MM-DD`), or `null`/absent when
@@ -116,30 +116,31 @@ const UNVERIFIED_SOURCE =
 /**
  * Provider documentation read on **2026-11-07**: the `gpt-5-mini` model page states $0.25 input /
  * $2.00 output per 1M tokens, a 400 000-token context and Chat Completions support, and lists
- * `gpt-5-mini-2025-08-07` as a servable snapshot with no shutdown date. That page answers 403 to a
- * direct fetch from this environment and was read as a search-result excerpt, so this is **not** an
- * invoice-grade source: approval item A2 remains owed.
+ * `gpt-5-mini-2025-08-07` as a servable snapshot with no shutdown date. OpenAI later listed that
+ * snapshot with a 2026-12-11 shutdown. The original page answered 403 to a direct fetch when first
+ * read and was recorded as a search-result excerpt; this entry is now historical price provenance.
  */
 const GPT_5_MINI_DOCS_SOURCE =
-  'platform.openai.com/docs/models/gpt-5-mini, read 2026-11-07 via search excerpt — ' +
-  'not invoice-grade, see docs/product/L4B-FIRST-REAL-LLM-RESPONSE.md §3';
+  'platform.openai.com/docs/models/gpt-5-mini, read 2026-11-07 via search excerpt — historical price';
 
 /**
- * The provider deprecations page read on **2026-11-07**: on 2026-10-14 OpenAI announced that
- * `gpt-4o-mini-2024-07-18`, `gpt-4.1-2025-04-14` and `gpt-4.1-mini-2025-04-14` stop serving on
- * **2027-01-14**. Every priced snapshot this tree carried before L4-B is one of those, which is why
- * none of them can be the Alpha pin.
+ * The provider deprecations page read on **2026-11-07**: on 2026-10-14 OpenAI announced that the
+ * listed gpt-4o-mini and gpt-4.1-mini snapshots stop serving on **2027-01-14**. The older price rows
+ * remain for historical accounting but are not Alpha candidates.
  */
 const GPT_4_DEPRECATION_SOURCE =
   'developers.openai.com/api/docs/deprecations, read 2026-11-07 — shutdown 2027-01-14';
+
+const GPT_5_6_LUNA_DOCS_SOURCE =
+  'https://developers.openai.com/api/docs/models/gpt-5.6-luna, read 2026-11-10 — official published pricing; CTO review remains required';
 
 /**
  * Rate rows known to this tree.
  *
  * **No row here authorises a paid call.** `provenance` is the only field the resolver trusts, and
  * every row below is `unverified`, so no combination of them can enable `real` mode on its own.
- * Approval item A2 requires replacing the relevant row with an `invoice_verified` one for the exact
- * dated model id before enablement.
+ * Approval item A2 requires explicitly reviewing official published pricing for the exact model id
+ * before enablement; an invoice may be used instead. Provider usage is reconciled after the first call.
  *
  * The legacy rows are kept rather than deleted: they are the price history of models that may
  * already have been billed, and historical spend is not rewritten. They carry the retirement date
@@ -148,13 +149,26 @@ const GPT_4_DEPRECATION_SOURCE =
 export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
   Object.freeze({
     providerId: 'openai' as const,
+    modelId: 'gpt-5.6-luna',
+    inputMicroUsdPerMillion: 200_000,
+    outputMicroUsdPerMillion: 1_200_000,
+    rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
+    provenance: 'unverified' as const,
+    source: GPT_5_6_LUNA_DOCS_SOURCE,
+    shutdownDate: null,
+    reasoningEffort: 'none' as const,
+  }),
+  Object.freeze({
+    providerId: 'openai' as const,
     modelId: 'gpt-5-mini-2025-08-07',
     inputMicroUsdPerMillion: 250_000,
     outputMicroUsdPerMillion: 2_000_000,
     rateVersion: 'openai-gpt-5-mini-2025-08-07-unverified-2026-11-07',
     provenance: 'unverified' as const,
     source: GPT_5_MINI_DOCS_SOURCE,
-    shutdownDate: null,
+    // This snapshot was recorded without a shutdown date on 2026-11-07. OpenAI later announced
+    // shutdown on 2026-12-11; keep its original price row for history but refuse new calls.
+    shutdownDate: '2026-12-11',
     reasoningEffort: 'minimal' as const,
   }),
   Object.freeze({
@@ -165,7 +179,7 @@ export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
     rateVersion: 'openai-gpt-5-mini-unverified-2026-11-03',
     provenance: 'unverified' as const,
     source: UNVERIFIED_SOURCE,
-    shutdownDate: null,
+    shutdownDate: '2026-12-11',
     reasoningEffort: 'minimal' as const,
   }),
   Object.freeze({
@@ -190,7 +204,7 @@ export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
   }),
 ]);
 
-/** Exact-match lookup: a pinned dated id never silently borrows a family-name price. */
+/** Exact-match lookup: a pinned model id never silently borrows a family-name price. */
 export function findRateRow(
   rows: readonly ModelRateRow[],
   providerId: string,

@@ -42,7 +42,10 @@ export interface PendingModelTurn {
  * call, which is the one rule that keeps a slow provider from becoming a database outage.
  */
 export interface ModelTurnExecutionPort {
-  listRunningTurns(limit?: number): Promise<readonly PendingModelTurn[]>;
+  listRunningTurns(
+    limit?: number,
+    onlyTurn?: PendingModelTurn,
+  ): Promise<readonly PendingModelTurn[]>;
   claimTurn(command: {
     readonly turn: PendingModelTurn;
     readonly workerId: string;
@@ -140,6 +143,8 @@ export interface ModelTurnResponderOptions {
   readonly attemptTimeoutMs: number;
   /** Required in `real` mode; absent in `fake` mode, which has no priced call. */
   readonly rate: ModelRateRow | null;
+  /** Optional exact scope for one-shot operator tools such as `pnpm model:smoke`. */
+  readonly onlyTurn?: PendingModelTurn;
   readonly batchSize?: number;
   readonly intervalMs?: number;
   readonly errorBackoffMs?: number;
@@ -534,7 +539,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
 
   const runPass = async (signal?: AbortSignal): Promise<ModelTurnResponderSummary> => {
     const summary = counters();
-    const candidates = await options.repository.listRunningTurns(batchSize);
+    const candidates = await options.repository.listRunningTurns(batchSize, options.onlyTurn);
 
     for (const candidate of candidates) {
       if (signal?.aborted === true) {

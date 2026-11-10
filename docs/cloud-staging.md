@@ -8,11 +8,11 @@ This is the isolated Cloudflare Workers + Queues + Hyperdrive + Neon deployment 
 | -------------------- | ------------------------------------------------------------------------ |
 | Neon project         | `ember-cloudflare-free-experiment` (`silent-boat-95177889`)              |
 | Neon branch          | `staging` (`br-sparkling-bird-a1cfzgxs`), schema-only child branch       |
-| PostgreSQL database  | `ember_staging`                                                          |
+| PostgreSQL database  | `ember_staging` (OID `24578`)                                            |
 | Migration version    | `0018` (applied in order from an empty database; `0019` is not applied)  |
 | API Worker           | `ember-cloud-api-staging`                                                |
 | Async Runtime Worker | `ember-assistant-turn-runtime-staging`                                   |
-| Hyperdrive           | `ember-staging-neon-hyperdrive` (ID is set after creation)               |
+| Hyperdrive           | `ember-staging-neon-hyperdrive` (`f7da9cff26b843fda8187764f9b81b25`)     |
 | Queue                | `ember-staging-assistant-turns` (`6de4ce5b63424458bf707322c9e84e3d`)     |
 | Dead-letter Queue    | `ember-staging-assistant-turns-dlq` (`5fd4f3b60a19462996e208447bde9e91`) |
 | Model execution      | `disabled`                                                               |
@@ -24,7 +24,7 @@ The API and runtime share the Staging database through one `HYPERDRIVE` binding 
 
 1. Confirm `wrangler whoami` reports the intended Cloudflare account and Workers Paid is active.
 2. Create a Neon SQL-scoped read/write role for `ember_staging`, with no `neon_superuser` membership, and grant only application DML on `public` and `ember_private`. Do not use the Console-created `ember_staging_runtime` role as an application identity; Neon assigns Console-created roles `neon_superuser` privileges.
-3. Verify its `LOGIN` role has no `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, or `BYPASSRLS` attributes and is not a member of `neon_superuser`.
+3. Verify `ember_staging_runtime_app` has no `SUPERUSER`, `CREATEDB`, `CREATEROLE`, `REPLICATION`, or `BYPASSRLS` attributes and is not a member of `neon_superuser`.
 4. Create the Hyperdrive config against the Neon `staging` branch and `ember_staging`, require TLS, and use the scoped runtime credential. Set `HYPERDRIVE_ID` in both Staging configs only after the config exists.
 5. Verify the Queue and DLQ exist and have no Production/PoC consumers before deploying either Worker.
 
@@ -40,7 +40,7 @@ pnpm exec wrangler queues info ember-staging-assistant-turns-dlq
 pnpm exec wrangler hyperdrive list
 ```
 
-If a Staging Queue is missing, create only that named Staging Queue with `wrangler queues create <name>`. Create Hyperdrive `ember-staging-neon-hyperdrive` once from the protected runtime credential, with TLS `verify-full`, query caching disabled, and an origin connection limit appropriate to the Neon Free compute. Record its ID, then set that same ID as `HYPERDRIVE` in both Worker configs. Do not put the credential on a logged command line or in source control.
+If a Staging Queue is missing, create only that named Staging Queue with `wrangler queues create <name>`. Create Hyperdrive `ember-staging-neon-hyperdrive` once from the protected runtime credential, with TLS `require` (encrypted; Cloudflare validates the server certificate with WebPKI), query caching disabled, and origin connection limit `5`. Cloudflare verify modes require uploading a CA certificate; they are not configured for this deployment. Record its ID, then set that same ID as `HYPERDRIVE` in both Worker configs. Do not put the credential on a logged command line or in source control.
 
 ## Deploy and verify
 

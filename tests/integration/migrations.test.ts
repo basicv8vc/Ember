@@ -234,13 +234,14 @@ describe('PostgreSQL migrations (real database)', () => {
   });
 
   it('is idempotent on a repeated run', async () => {
+    const migrationFiles = await loadMigrations(migrationsDir);
     const before = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(18);
+    expect(result.alreadyApplied).toBe(migrationFiles.length);
     const after = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
@@ -249,11 +250,12 @@ describe('PostgreSQL migrations (real database)', () => {
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('18');
+    expect(versions.rows[0]?.count).toBe(String(migrationFiles.length));
   });
 
   it('rejects a renamed migration with identical contents', async () => {
     const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
+    const migrationCount = (await loadMigrations(migrationsDir)).length;
 
     try {
       await writeFile(
@@ -310,7 +312,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('18');
+      expect(versions.rows[0]?.count).toBe(String(migrationCount));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -462,6 +464,7 @@ describe('PostgreSQL migrations (real database)', () => {
 
   it('rejects an edited migration checksum and leaves applied state untouched', async () => {
     const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
+    const migrationCount = (await loadMigrations(migrationsDir)).length;
 
     try {
       const filenames = (await readdir(migrationsDir)).filter((name) => name.endsWith('.sql'));
@@ -482,7 +485,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('18');
+      expect(versions.rows[0]?.count).toBe(String(migrationCount));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

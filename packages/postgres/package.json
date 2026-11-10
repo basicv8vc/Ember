@@ -13,6 +13,10 @@
     "./b1-worker": {
       "types": "./dist/b1-worker.d.ts",
       "default": "./dist/b1-worker.js"
+    },
+    "./b2-worker": {
+      "types": "./dist/b2-worker.d.ts",
+      "default": "./dist/b2-worker.js"
     }
   },
   "files": [

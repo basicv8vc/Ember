@@ -18,7 +18,7 @@ This is the isolated Cloudflare Workers + Queues + Hyperdrive + Neon deployment 
 | Model execution      | `disabled`                                                               |
 | Apple audience       | `com.basicv8vc.ember`                                                    |
 
-The API and runtime share the Staging database through one `HYPERDRIVE` binding and use the dedicated Staging Queue pair. Never copy IDs from the Production or Free Runtime configs. No custom DNS route is configured; the API uses its Cloudflare `workers.dev` hostname.
+The API and runtime share the Staging database through one `HYPERDRIVE` binding and use the dedicated Staging Queue pair. The Runtime config sets `EMBER_TURN_DISPATCH_QUEUE_NAME` and `EMBER_TURN_DISPATCH_DLQ_NAME` to those same queue names; defaults still preserve the Free Runtime PoC contract. Never copy IDs from the Production or Free Runtime configs. No custom DNS route is configured; the API uses its Cloudflare `workers.dev` hostname.
 
 ## Prerequisites
 
@@ -53,7 +53,7 @@ pnpm exec wrangler deploy --config apps/api/wrangler.staging.jsonc
 pnpm exec wrangler deploy --config apps/cloud-async-runtime/wrangler.staging.jsonc
 ```
 
-Deploy the API before enabling the queue consumer. Keep `EMBER_MODEL_EXECUTION=disabled` in the deployed Runtime. Record the Git SHA, Worker version IDs, and HTTPS hostname. Check `GET /healthz`, `GET /readyz`, and anonymous `GET /v1/me` (expected `401`):
+Deploy the API before enabling the queue consumer. Keep `EMBER_MODEL_EXECUTION=disabled` in the deployed Runtime. Its configured Queue/DLQ name variables must match the Wrangler consumer bindings exactly. Record the Git SHA, Worker version IDs, and HTTPS hostname. Check `GET /healthz`, `GET /readyz`, and anonymous `GET /v1/me` (expected `401`):
 
 ```sh
 curl -i https://<STAGING_WORKERS_DEV_HOST>/healthz

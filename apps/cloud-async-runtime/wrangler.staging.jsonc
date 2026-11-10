@@ -41,6 +41,8 @@
   "vars": {
     "EMBER_ENV": "staging",
     "EMBER_MODEL_EXECUTION": "disabled",
+    "EMBER_TURN_DISPATCH_QUEUE_NAME": "ember-staging-assistant-turns",
+    "EMBER_TURN_DISPATCH_DLQ_NAME": "ember-staging-assistant-turns-dlq",
     "EMBER_MODEL_PROVIDER": "openai",
     "EMBER_MODEL_TURN_LEASE_MS": "30000",
     "EMBER_MODEL_ATTEMPT_TIMEOUT_MS": "20000",

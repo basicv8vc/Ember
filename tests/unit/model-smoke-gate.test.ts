@@ -19,10 +19,10 @@ import {
  */
 
 const PLAN: SmokePlan = {
-  approvalId: 'L4B-A1',
-  providerId: 'openai',
-  modelId: 'gpt-5.6-luna',
-  rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
+  approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+  providerId: 'openrouter',
+  modelId: 'openai/gpt-5.6-luna',
+  rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
   maxTurns: 1,
   database: 'postgres:5432/ember',
 };
@@ -30,11 +30,11 @@ const PLAN: SmokePlan = {
 function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePreconditions {
   return {
     modelMode: 'real',
-    modelId: 'gpt-5.6-luna',
-    providerId: 'openai',
-    rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
-    approvalIdFromConfig: 'L4B-A1',
-    approvalIdFromEnv: 'L4B-A1',
+    modelId: 'openai/gpt-5.6-luna',
+    providerId: 'openrouter',
+    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    approvalIdFromConfig: 'L4C3-B2-OPENROUTER-2026-11-11',
+    approvalIdFromEnv: 'L4C3-B2-OPENROUTER-2026-11-11',
     maxTurns: 1,
     confirmed: true,
     ...overrides,
@@ -45,7 +45,7 @@ describe('paid smoke gate', () => {
   it('passes only when the mode is real, the id matches and the run was confirmed', () => {
     expect(evaluateSmokePreconditions(preconditions())).toStrictEqual({
       ok: true,
-      approvalId: 'L4B-A1',
+      approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
     });
   });
 
@@ -69,7 +69,7 @@ describe('paid smoke gate', () => {
 
   it('refuses an approval id that is not the one recorded for the model', () => {
     expect(
-      evaluateSmokePreconditions(preconditions({ approvalIdFromEnv: 'L4B-A2' })),
+      evaluateSmokePreconditions(preconditions({ approvalIdFromEnv: 'OTHER-APPROVAL' })),
     ).toStrictEqual({ ok: false, refusal: 'approval_mismatch' });
 
     expect(evaluateSmokePreconditions(preconditions({ approvalIdFromConfig: null }))).toStrictEqual(

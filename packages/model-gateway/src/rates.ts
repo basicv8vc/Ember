@@ -3,10 +3,10 @@ import type { RealModelProviderId } from './types.js';
 /**
  * A pin, not a preference.
  *
- * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`, and that list is
- * **empty in the merged tree**. Enabling real inference is therefore a reviewed code change
- * accompanied by a CTO decision, never an environment variable: no deploy, no `.env` file and no
- * per-tenant policy can turn on provider egress on its own.
+ * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`. The OpenRouter
+ * approval below is limited to one UTC date window, one exact model and one reviewed upstream route.
+ * It does not enable execution: runtime configuration still defaults to `disabled`, and smoke
+ * execution has its own one-turn, one-attempt gate.
  */
 
 /**
@@ -44,8 +44,26 @@ export interface OpenRouterRoutingPolicy {
   readonly requireParameters: true;
 }
 
-/** Approved and effective. **Empty in this tree**: L4-B ships the gate, not the permission. */
-export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([]);
+/** One time-limited CTO-approved model route. Runtime execution remains disabled by default. */
+export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'openai/gpt-5.6-luna',
+    approval: Object.freeze({
+      approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+      approvedBy: 'CTO',
+      approvedAt: '2026-11-11',
+      expiresAt: '2026-11-12',
+    }),
+    openRouterRouting: Object.freeze({
+      only: Object.freeze(['openai']),
+      allowFallbacks: false,
+      dataCollection: 'deny' as const,
+      zdr: true,
+      requireParameters: true,
+    }),
+  }),
+]);
 
 /**
  * A nominated model that is **not** approved.
@@ -68,13 +86,7 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
     providerId: 'openai' as const,
     modelId: 'gpt-5.6-luna',
     rationale:
-      'officially listed at $0.20/$1.20 per 1M tokens, with Chat Completions and reasoning_effort none',
-  }),
-  Object.freeze({
-    providerId: 'openrouter' as const,
-    modelId: 'openai/gpt-5.6-luna',
-    rationale:
-      'OpenRouter lists $0.20/$1.20 per 1M tokens; proposed route pins OpenAI, denies data collection, and requires ZDR',
+      'direct OpenAI routing has not been approved; the current approval is OpenRouter-only',
   }),
 ]);
 
@@ -153,7 +165,7 @@ const GPT_5_6_LUNA_DOCS_SOURCE =
   'https://developers.openai.com/api/docs/models/gpt-5.6-luna, read 2026-11-10 — official published pricing; CTO review remains required';
 
 const OPENROUTER_GPT_5_6_LUNA_SOURCE =
-  'https://openrouter.ai/openai/gpt-5.6-luna, read 2026-11-10 — OpenRouter catalog price; CTO approval remains required';
+  'https://openrouter.ai/openai/gpt-5.6-luna, read 2026-11-10 — OpenRouter catalog price; OpenAI-only ZDR eligibility remains blocked';
 
 /**
  * Rate rows known to this tree.

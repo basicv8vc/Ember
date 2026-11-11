@@ -1,5 +1,21 @@
 {
   "schemaVersion": 1,
-  "note": "Reviewed authorization for paid model egress in a staging deployment. An empty list means staging may not reach a model provider at all, which is the merged default. Adding an entry here is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select a different one. An entry must include the selected provider's official HTTPS model/pricing page; packages/model-gateway/src/rates.ts must independently pin the same model id, price and provider policy. OpenRouter entries require a reviewed route, no provider fallback, data_collection=deny and ZDR.",
-  "authorizations": []
+  "note": "A missing or expired entry refuses paid egress. The dated L4C3 entry below covers one exact OpenRouter model and route; execution remains disabled by default. This is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select another approval. Each entry must include the provider's official HTTPS model/pricing page and match the model, price and policy in packages/model-gateway/src/rates.ts. OpenRouter entries require the reviewed upstream route, no provider fallback, data_collection=deny and ZDR.",
+  "authorizations": [
+    {
+      "authorizationId": "L4C3-B2-OPENROUTER-2026-11-11",
+      "providerId": "openrouter",
+      "modelId": "openai/gpt-5.6-luna",
+      "rateVersion": "openrouter-openai-gpt-5.6-luna-standard-2026-11-10",
+      "approvedBy": "CTO",
+      "approvedAt": "2026-11-11",
+      "expiresAt": "2026-11-12",
+      "priceSource": "https://openrouter.ai/openai/gpt-5.6-luna",
+      "maxPerAttemptMicroUsd": 5000,
+      "maxPrincipalDailyMicroUsd": 5000,
+      "maxTenantDailyMicroUsd": 5000,
+      "maxGlobalDailyMicroUsd": 5000,
+      "maxPaidSmokeTurns": 1
+    }
+  ]
 }

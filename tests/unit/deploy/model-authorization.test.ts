@@ -23,7 +23,7 @@ const COMPOSE_FILE = `${REPO_ROOT}infra/staging/compose.yaml`;
 const MANIFEST_FILE = `${REPO_ROOT}infra/staging/model-authorization.json`;
 
 /** The day the review document is written, so an "expired" case does not depend on the CI clock. */
-const TODAY = new Date('2026-11-07T09:00:00Z');
+const TODAY = new Date('2026-11-11T09:00:00Z');
 
 const MODEL_ID = 'gpt-5.6-luna';
 const OPENROUTER_MODEL_ID = 'openai/gpt-5.6-luna';
@@ -60,10 +60,19 @@ function openRouterAuthorization(
   overrides: Partial<ModelAuthorizationEntry> = {},
 ): ModelAuthorizationEntry {
   return authorization({
+    authorizationId: 'L4C3-B2-OPENROUTER-2026-11-11',
     providerId: 'openrouter',
     modelId: OPENROUTER_MODEL_ID,
     rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    approvedBy: 'CTO',
+    approvedAt: '2026-11-11',
+    expiresAt: '2026-11-12',
     priceSource: 'https://openrouter.ai/openai/gpt-5.6-luna',
+    maxPerAttemptMicroUsd: 5_000,
+    maxPrincipalDailyMicroUsd: 5_000,
+    maxTenantDailyMicroUsd: 5_000,
+    maxGlobalDailyMicroUsd: 5_000,
+    maxPaidSmokeTurns: 1,
     ...overrides,
   });
 }
@@ -91,11 +100,18 @@ function messages(result: GuardResult): string {
 }
 
 describe('paid model authorization artifact', () => {
-  it('ships empty, so the merged default still refuses real inference', () => {
+  it('records the exact CTO route while the Staging Runtime remains disabled by default', () => {
     const onDisk = loadModelAuthorizationManifest();
 
     expect(onDisk.readable).toBe(true);
-    expect(onDisk.entries).toEqual([]);
+    expect(onDisk.entries).toHaveLength(1);
+    expect(onDisk.entries[0]).toMatchObject(openRouterAuthorization());
+
+    const normalStagingEnv = stagingEnv();
+    expect(normalStagingEnv.get('EMBER_MODEL_EXECUTION')).toBe('disabled');
+    expect(evaluateStagingEnv(normalStagingEnv, { authorization: onDisk, now: TODAY }).ok).toBe(
+      true,
+    );
 
     const result = evaluateStagingEnv(realEnv(), { authorization: onDisk, now: TODAY });
 
@@ -127,6 +143,22 @@ describe('paid model authorization artifact', () => {
     expect(result.ok).toBe(true);
     expect(codes(result)).not.toContain('E_MODEL_REAL');
     expect(codes(result)).not.toContain('E_PROVIDER_SECRET');
+  });
+
+  it('accepts the committed OpenRouter approval only for its exact provider and model', () => {
+    const env = realEnv('openrouter');
+    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+
+    const result = evaluateStagingEnv(env, {
+      authorization: loadModelAuthorizationManifest(),
+      now: TODAY,
+    });
+
+    expect(result.ok).toBe(true);
+    expect(codes(result)).not.toContain('E_MODEL_REAL');
+    expect(result.warnings.map((warning) => warning.code)).toContain(
+      'W_MODEL_AUTHORIZATION_EXPIRING',
+    );
   });
 
   it('does not accept an OpenAI price citation as OpenRouter pricing approval', () => {
@@ -342,17 +374,34 @@ describe('paid model authorization artifact', () => {
 });
 
 describe('authorization artifact ↔ code allowlist parity', () => {
-  it('reads the committed manifest without a syntax error and keeps it empty', () => {
+  it('reads the committed manifest and matches the code-side OpenRouter approval', () => {
     const parsed = JSON.parse(readFileSync(MANIFEST_FILE, 'utf8')) as {
       schemaVersion: number;
       authorizations: ModelAuthorizationEntry[];
     };
 
     expect(parsed.schemaVersion).toBe(1);
-    expect(parsed.authorizations).toEqual([]);
-    // The code-side allowlist must be empty for the same reason the artifact is: L4-B ships the
-    // gate, not the permission. Enabling real inference is one reviewed diff in both places.
-    expect(APPROVED_REAL_MODELS).toEqual([]);
+    expect(parsed.authorizations).toHaveLength(1);
+    expect(parsed.authorizations[0]).toMatchObject(openRouterAuthorization());
+    expect(APPROVED_REAL_MODELS).toMatchObject([
+      {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        approval: {
+          approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+          approvedBy: 'CTO',
+          approvedAt: '2026-11-11',
+          expiresAt: '2026-11-12',
+        },
+        openRouterRouting: {
+          only: ['openai'],
+          allowFallbacks: false,
+          dataCollection: 'deny',
+          zdr: true,
+          requireParameters: true,
+        },
+      },
+    ]);
     expect(
       MODEL_RATE_ROWS.filter((row) => row.provenance !== 'unverified').map((row) => [
         row.providerId,
@@ -361,21 +410,20 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     ).toEqual([['openrouter', OPENROUTER_MODEL_ID]]);
   });
 
-  it('names a candidate that is not approved and cannot resolve', () => {
-    expect(PENDING_MODEL_CANDIDATES).toHaveLength(2);
-    const openRouterCandidate = PENDING_MODEL_CANDIDATES.find(
-      (candidate) => candidate.providerId === 'openrouter',
-    );
-    expect(openRouterCandidate).toMatchObject({
-      providerId: 'openrouter',
-      modelId: OPENROUTER_MODEL_ID,
+  it('leaves direct OpenAI routing unapproved', () => {
+    expect(PENDING_MODEL_CANDIDATES).toHaveLength(1);
+    const openAiCandidate = PENDING_MODEL_CANDIDATES[0];
+    expect(openAiCandidate).toMatchObject({
+      providerId: 'openai',
+      modelId: MODEL_ID,
     });
-    expect(openRouterCandidate?.rationale.length).toBeGreaterThan(0);
+    expect(openAiCandidate?.rationale.length).toBeGreaterThan(0);
 
     const approvedIds = new Set(APPROVED_REAL_MODELS.map((entry) => entry.modelId));
     for (const candidate of PENDING_MODEL_CANDIDATES) {
       expect(approvedIds.has(candidate.modelId)).toBe(false);
     }
+    expect(approvedIds).toEqual(new Set([OPENROUTER_MODEL_ID]));
   });
 
   it('prices the candidate and records shutdown dates for deprecated snapshots', () => {

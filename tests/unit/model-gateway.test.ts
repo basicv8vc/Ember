@@ -150,10 +150,20 @@ describe('model gateway limits and pricing', () => {
     );
   });
 
-  it('ships no approved real model, which is what keeps real mode closed by default', () => {
-    expect(APPROVED_REAL_MODELS).toHaveLength(0);
-    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(0);
-    // A reviewed catalog price never authorizes egress: that still needs an approval record.
+  it('ships only the time-limited OpenRouter route approved by the CTO', () => {
+    expect(APPROVED_REAL_MODELS).toMatchObject([
+      {
+        providerId: 'openrouter',
+        modelId: 'openai/gpt-5.6-luna',
+        approval: {
+          approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+          approvedAt: '2026-11-11',
+          expiresAt: '2026-11-12',
+        },
+        openRouterRouting: OPENROUTER_ROUTING,
+      },
+    ]);
+    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(1);
     expect(OPENROUTER_RATE.provenance).toBe('official_price_verified');
   });
 });
@@ -315,7 +325,7 @@ describe('mode resolution and boot gates', () => {
     expect(resolution.settings.modelId).toBeNull();
   });
 
-  it('refuses real mode against the shipped empty allowlist', () => {
+  it('refuses direct OpenAI real mode because only the OpenRouter model route is approved', () => {
     const resolution = resolveModelExecution({
       mode: 'real',
       providerId: 'openai',
@@ -325,6 +335,24 @@ describe('mode resolution and boot gates', () => {
 
     expect(resolution.ok).toBe(false);
     expect(resolution).toMatchObject({ ok: false, reason: 'model_not_approved' });
+  });
+
+  it('resolves only the approved OpenRouter model and exact upstream policy', () => {
+    const resolution = resolveModelExecution({
+      mode: 'real',
+      providerId: 'openrouter',
+      modelId: 'openai/gpt-5.6-luna',
+      apiKey: VALID_KEY,
+    });
+
+    expect(resolution.ok).toBe(true);
+    if (!resolution.ok || resolution.mode !== 'real') {
+      throw new Error('expected the approved OpenRouter route to resolve');
+    }
+
+    expect(resolution.openRouterRouting).toEqual(OPENROUTER_ROUTING);
+    expect(resolution.rate.reasoningEffort).toBe('none');
+    expect(resolution.settings.mode).toBe('real');
   });
 
   it('refuses a placeholder model id and an unapproved provider', () => {

@@ -1,5 +1,7 @@
 # L4-B — First Real LLM Response
 
+> **Status update (2026-11-11):** This document records the earlier direct-OpenAI candidate review. The CTO has since authorized only the exact OpenRouter route `openai/gpt-5.6-luna`, with a date-only inclusive expiry on 2026-11-12; see [OpenRouter Adapter and P1 Security Gates](OPENROUTER-AND-P1-SECURITY.md). That route remains blocked because current endpoint metadata does not show an eligible OpenAI ZDR endpoint. No real call has been made, and Staging remains disabled.
+
 | field                   | value                                                                     |
 | ----------------------- | ------------------------------------------------------------------------- |
 | status                  | **Draft PR. `real` is implemented as a reviewed gate and is NOT enabled** |

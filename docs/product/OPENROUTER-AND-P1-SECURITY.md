@@ -2,24 +2,24 @@
 
 | field                          | value                                                         |
 | ------------------------------ | ------------------------------------------------------------- |
-| status                         | Draft implementation; real execution remains disabled         |
+| status                         | CTO route recorded; paid smoke blocked on ZDR eligibility     |
 | provider ID                    | `openrouter`                                                  |
-| candidate model ID             | `openai/gpt-5.6-luna` (exact OpenRouter catalog ID)           |
+| approved model ID              | `openai/gpt-5.6-luna` (exact OpenRouter catalog ID)           |
 | candidate price checked        | 2026-11-10: $0.20 / 1M input tokens; $1.20 / 1M output tokens |
-| approved model IDs             | none                                                          |
+| approval window                | 2026-11-11 through 2026-11-12 UTC, inclusive                  |
 | paid calls made by this change | none                                                          |
 
-This document supplements `L4B-FIRST-REAL-LLM-RESPONSE.md`. A verified catalog price and a working adapter do not approve a paid call. `APPROVED_REAL_MODELS` and `infra/staging/model-authorization.json` stay empty, and staging continues to default to `EMBER_MODEL_EXECUTION=disabled`.
+This document supplements `L4B-FIRST-REAL-LLM-RESPONSE.md`. The CTO's date-limited authorization is recorded in `APPROVED_REAL_MODELS` and `infra/staging/model-authorization.json`, with a $0.005 per-attempt ceiling and one smoke Turn. The date-only UTC expiry is inclusive through 2026-11-12; any later smoke needs a new approval. It does not enable execution: staging remains `EMBER_MODEL_EXECUTION=disabled`. The route has not passed ZDR eligibility: current public endpoint metadata lists the exact model's ZDR endpoint under Azure and no OpenAI ZDR endpoint, so the required OpenAI-only plus ZDR route cannot be used until that is resolved.
 
 ## Provider and model policy
 
-The adapter accepts an exact model ID from the server configuration. Its endpoint is pinned to OpenRouter's Chat Completions URL; the API key is sent only as a server-side bearer header. Redirects and ambient credentials are disabled. The adapter sends no model list, tool declarations, streaming request, caller-controlled model choice, or automatic paid-model fallback.
+The adapter accepts an exact model ID from the server configuration. Its endpoint is pinned to OpenRouter's Chat Completions URL; the API key is sent only as a server-side bearer header. Redirects and ambient credentials are disabled. The adapter sends no model list, tool declarations, streaming request, caller-controlled model choice, or automatic paid-model fallback. Reasoning effort is pinned to `none`.
 
-The candidate OpenRouter route is recorded in the model approval as `only: ["openai"]`, `allow_fallbacks: false`, `data_collection: "deny"`, `zdr: true`, and `require_parameters: true`. The adapter also derives OpenRouter's `max_price` prompt/completion caps from the pinned rate row. This leaves OpenRouter's transport in place while restricting inference to eligible OpenAI endpoints at or below the reviewed rates. If no endpoint satisfies the reviewed policy, the request fails. OpenRouter documents these routing and data-handling controls in its [provider routing guide](https://openrouter.ai/docs/guides/routing/provider-selection) and [data-residency guide](https://openrouter.ai/blog/insights/ai-data-residency/).
+The approved OpenRouter route is recorded in the model approval as `only: ["openai"]`, `allow_fallbacks: false`, `data_collection: "deny"`, `zdr: true`, and `require_parameters: true`. The adapter also derives OpenRouter's `max_price` prompt/completion caps from the pinned rate row. This leaves OpenRouter's transport in place while restricting inference to eligible OpenAI endpoints at or below the reviewed rates. If no endpoint satisfies the reviewed policy, the request fails. OpenRouter documents these routing and data-handling controls in its [provider routing guide](https://openrouter.ai/docs/guides/routing/provider-selection) and [data-residency guide](https://openrouter.ai/blog/insights/ai-data-residency/).
 
-OpenRouter's current catalog lists `openai/gpt-5.6-luna` at $0.20 per million input tokens and $1.20 per million output tokens ([model page](https://openrouter.ai/openai/gpt-5.6-luna)). The rate row records this price as provenance, not permission. The adapter disables automatic prompt-cache breakpoints for this rate row and uses OpenRouter's reported response cost when present, rounded upward to micro-USD; if its usage is absent or malformed, the existing responder books the full reservation as unknown usage. The rate-based estimate remains the fallback when a valid token count is returned without a provider cost.
+OpenRouter's catalog snapshot checked on 2026-11-10 lists `openai/gpt-5.6-luna` at $0.20 per million input tokens and $1.20 per million output tokens ([model page](https://openrouter.ai/openai/gpt-5.6-luna)). The adapter uses OpenRouter's reported response cost when present, rounded upward to micro-USD; if its usage is absent or malformed, the existing responder books the full reservation as unknown usage. The rate-based estimate remains the fallback when a valid token count is returned without a provider cost.
 
-Before adding an approval, the CTO must confirm the selected provider endpoint is available under the account and acceptable for the intended prompts. OpenRouter sends requests to the selected inference provider, whose terms govern provider processing; OpenRouter's privacy statement says it does not train on API inputs/outputs, but that does not replace the routed provider's terms ([privacy](https://openrouter.ai/pt-BR/privacy), [terms](https://openrouter.ai/zh-CN/terms)). `thinkingmachines/inkling-2-small:free` is not a chat candidate; do not use it for ordinary chat unless its current usage terms are re-reviewed and explicitly approved.
+OpenRouter sends requests to the selected inference provider, whose terms govern provider processing; OpenRouter's privacy statement says it does not train on API inputs/outputs, but that does not replace the routed provider's terms ([privacy](https://openrouter.ai/pt-BR/privacy), [terms](https://openrouter.ai/zh-CN/terms)). Agent D's current metadata check found no OpenAI ZDR endpoint for this exact model, which blocks the approved route. `thinkingmachines/inkling-2-small:free` is not a chat candidate; do not use it for ordinary chat unless its current usage terms are re-reviewed and explicitly approved.
 
 ## Server configuration
 
@@ -34,7 +34,7 @@ EMBER_MODEL_API_KEY=<secret-store reference; worker only>
 
 The API key must be provisioned only in the server Worker execution environment. Do not put it in iOS configuration, client logs, application logs, checked-in files, or client-visible evidence. Compose continues to blank the credential for API, migration, and edge containers. Keep the OpenRouter key in the deployment secret store and pass it through the existing `EMBER_MODEL_API_KEY` variable.
 
-Switching to `real` is still refused unless all of the existing gates pass: exact code-side approval with dates, exact provider/model price row, provider-specific routing policy, valid server credential, and budget ceilings. The first live smoke also requires a matching `EMBER_MODEL_SMOKE_APPROVAL`. Do not add approval records or turn on `real` as part of adapter implementation.
+Switching to `real` is still refused unless all of the existing gates pass: exact code-side approval with dates, exact provider/model price row, provider-specific routing policy, valid server credential, and budget ceilings. The first live smoke also requires a matching `EMBER_MODEL_SMOKE_APPROVAL`. Keep the resident Staging Runtime disabled. Do not run a smoke while the OpenAI-only ZDR route is ineligible, and do not extend the dated authorization without a new CTO approval.
 
 ## P1-A — re-check authorization at every outbound boundary
 
@@ -52,9 +52,9 @@ A normal Worker uses `DATABASE_URL`; never point it at the smoke database. Provi
 
 Every item must be recorded before the operator runs the smoke:
 
-1. Approve exact provider `openrouter`, exact model ID `openai/gpt-5.6-luna`, dated expiry, official price source, and the complete provider route (`openai` only, no provider fallback, `data_collection=deny`, ZDR required).
-2. Re-check current price, endpoint eligibility, OpenRouter and upstream provider terms, expected data handling, and account limits. Confirm the intended prompt is allowed by both providers.
-3. Add the same decision to `APPROVED_REAL_MODELS` and `infra/staging/model-authorization.json`; keep all ceilings at or below the existing $0.005 per-attempt and one-smoke-Turn limits. Do not list another model as a fallback.
+1. The CTO decision is recorded for provider `openrouter`, model `openai/gpt-5.6-luna`, expiry 2026-11-12 UTC inclusive, and route (`openai` only, no provider fallback, `data_collection=deny`, ZDR required). Confirm the exact record remains current before any smoke.
+2. Re-check current price, endpoint eligibility, OpenRouter and upstream provider terms, expected data handling, and account limits. Confirm the intended prompt is allowed by both providers. ZDR eligibility is currently a blocker.
+3. The code and manifest records match and cap each attempt and the global daily budget at $0.005, with one paid Smoke Turn. Do not add another route or model fallback.
 4. Store the OpenRouter key in the Worker server secret store. Confirm it is absent from iOS bundles, API/edge/migration environments, logs, and Git.
 5. Provision a fresh isolated PostgreSQL database, apply migrations through `0019`, set `EMBER_MODEL_SMOKE_DATABASE_URL`, and confirm it differs from runtime `DATABASE_URL`. Confirm it contains zero `assistant_turns` and no Worker is connected.
 6. Review the printed plan (approval ID, provider/model, price version, database target, one Turn and per-attempt ceiling). The person executing must restate the approval ID in `EMBER_MODEL_SMOKE_APPROVAL` and pass `--confirm`.

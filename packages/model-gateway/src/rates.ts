@@ -4,7 +4,8 @@ import type { RealModelProviderId } from './types.js';
  * A pin, not a preference.
  *
  * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`. The OpenRouter
- * approval below is limited to one UTC date window, one exact model and one reviewed upstream route.
+ * approval below uses date-granularity UTC bounds with an inclusive `expiresAt`, for one exact
+ * model and one reviewed upstream route.
  * It does not enable execution: runtime configuration still defaults to `disabled`, and smoke
  * execution has its own one-turn, one-attempt gate.
  */

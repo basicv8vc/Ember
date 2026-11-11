@@ -90,7 +90,7 @@ function toUsage(usage: unknown, rate: ModelRateRow): Omit<ModelUsage, 'rateVers
 export interface OpenRouterModelGatewayOptions {
   /** OpenRouter key; held only in this adapter's closure. */
   readonly apiKey: string;
-  /** Exact OpenRouter catalog ID, for example `openai/gpt-5.6-luna`. */
+  /** Exact OpenRouter catalog ID, for example `nvidia/nemotron-3.5-lightning`. */
   readonly modelId: string;
   readonly rate: ModelRateRow;
   readonly routing: OpenRouterRoutingPolicy;
@@ -153,7 +153,9 @@ export class OpenRouterModelGateway implements ModelGateway {
         : { prompt_cache_options: { mode: this.#rate.promptCacheMode } }),
       ...(this.#rate.reasoningEffort === undefined
         ? {}
-        : { reasoning_effort: this.#rate.reasoningEffort }),
+        : this.#rate.reasoningEffort === 'none'
+          ? { reasoning: { enabled: false } }
+          : { reasoning: { effort: this.#rate.reasoningEffort } }),
       provider: {
         only: [...this.#routing.only],
         allow_fallbacks: this.#routing.allowFallbacks,

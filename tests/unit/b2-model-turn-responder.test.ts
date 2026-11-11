@@ -56,9 +56,9 @@ const ceilings: ModelBudgetCeilings = {
 const REAL_MODEL_LABEL = 'gpt-test-pinned-2026-11-03';
 const OPENROUTER_RATE = {
   providerId: 'openrouter' as const,
-  modelId: 'openai/gpt-5.6-luna',
-  inputMicroUsdPerMillion: 200_000,
-  outputMicroUsdPerMillion: 1_200_000,
+  modelId: 'nvidia/nemotron-3.5-lightning',
+  inputMicroUsdPerMillion: 60_000,
+  outputMicroUsdPerMillion: 160_000,
   rateVersion: 'openrouter-test-rate',
   provenance: 'official_price_verified' as const,
   source: 'mock fixture',
@@ -558,7 +558,7 @@ describe('B2 responder: provider failures', () => {
       modelId: OPENROUTER_RATE.modelId,
       rate: OPENROUTER_RATE,
       routing: {
-        only: ['openai'],
+        only: ['deepinfra'],
         allowFallbacks: false,
         dataCollection: 'deny',
         zdr: true,

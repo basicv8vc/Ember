@@ -26,7 +26,7 @@ const MANIFEST_FILE = `${REPO_ROOT}infra/staging/model-authorization.json`;
 const TODAY = new Date('2026-11-11T09:00:00Z');
 
 const MODEL_ID = 'gpt-5.6-luna';
-const OPENROUTER_MODEL_ID = 'openai/gpt-5.6-luna';
+const OPENROUTER_MODEL_ID = 'nvidia/nemotron-3.5-lightning';
 const AUTHORIZED_KEY = 'sk-live-AbCdEf0123456789AbCdEf0123456789';
 
 function stagingEnv(): Map<string, string> {
@@ -60,14 +60,14 @@ function openRouterAuthorization(
   overrides: Partial<ModelAuthorizationEntry> = {},
 ): ModelAuthorizationEntry {
   return authorization({
-    authorizationId: 'L4C3-B2-OPENROUTER-2026-11-11',
+    authorizationId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     providerId: 'openrouter',
     modelId: OPENROUTER_MODEL_ID,
-    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
     approvedBy: 'CTO',
     approvedAt: '2026-11-11',
     expiresAt: '2026-11-12',
-    priceSource: 'https://openrouter.ai/openai/gpt-5.6-luna',
+    priceSource: 'https://openrouter.ai/nvidia/nemotron-3.5-lightning/providers',
     maxPerAttemptMicroUsd: 5_000,
     maxPrincipalDailyMicroUsd: 5_000,
     maxTenantDailyMicroUsd: 5_000,
@@ -388,13 +388,13 @@ describe('authorization artifact ↔ code allowlist parity', () => {
         providerId: 'openrouter',
         modelId: OPENROUTER_MODEL_ID,
         approval: {
-          approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+          approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
           approvedBy: 'CTO',
           approvedAt: '2026-11-11',
           expiresAt: '2026-11-12',
         },
         openRouterRouting: {
-          only: ['openai'],
+          only: ['deepinfra'],
           allowFallbacks: false,
           dataCollection: 'deny',
           zdr: true,
@@ -443,12 +443,14 @@ describe('authorization artifact ↔ code allowlist parity', () => {
       (row) => row.providerId === 'openrouter' && row.modelId === OPENROUTER_MODEL_ID,
     );
     expect(openRouterRate).toMatchObject({
-      inputMicroUsdPerMillion: 200_000,
-      outputMicroUsdPerMillion: 1_200_000,
+      inputMicroUsdPerMillion: 60_000,
+      outputMicroUsdPerMillion: 160_000,
       provenance: 'official_price_verified',
-      promptCacheMode: 'explicit',
+      reasoningEffort: 'none',
     });
-    expect(openRouterRate?.source).toContain('https://openrouter.ai/openai/gpt-5.6-luna');
+    expect(openRouterRate?.source).toContain(
+      'https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints',
+    );
 
     const retiredGpt5Mini = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5-mini-2025-08-07');
     expect(retiredGpt5Mini?.shutdownDate).toBe('2026-12-11');

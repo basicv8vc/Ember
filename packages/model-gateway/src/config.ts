@@ -181,7 +181,7 @@ function boundedInteger(
  *
  * `real` requires five independent gates, and no configuration can substitute one for another:
  * 1. the provider is in the code-owned allowlist;
- * 2. the model id is in the code-owned allowlist (empty in the merged tree);
+ * 2. the model id is in the code-owned allowlist as one exact approved entry;
  * 3. that entry carries an approval record that is effective **today** — dated, named, unexpired;
  * 4. a price row exists for that exact model id with official published pricing explicitly
  *    reviewed (or an invoice has been verified), and the snapshot's shutdown day has not arrived;

@@ -72,11 +72,11 @@ const APPROVED_REGISTRY = Object.freeze({
 });
 
 const OPENROUTER_RATE = MODEL_RATE_ROWS.find(
-  (row) => row.providerId === 'openrouter' && row.modelId === 'openai/gpt-5.6-luna',
+  (row) => row.providerId === 'openrouter' && row.modelId === 'nvidia/nemotron-3.5-lightning',
 )!;
 
 const OPENROUTER_ROUTING: OpenRouterRoutingPolicy = Object.freeze({
-  only: Object.freeze(['openai']),
+  only: Object.freeze(['deepinfra']),
   allowFallbacks: false,
   dataCollection: 'deny',
   zdr: true,
@@ -150,13 +150,28 @@ describe('model gateway limits and pricing', () => {
     );
   });
 
+  it('keeps the approved DeepInfra route maximum reservation below $0.005 per attempt', () => {
+    const rate = OPENROUTER_RATE;
+    const worstCasePerAttempt = estimateCostMicroUsd(
+      rate,
+      MODEL_LIMITS.maxInputTokens,
+      MODEL_LIMITS.maxOutputTokens,
+    );
+
+    expect(rate.modelId).toBe('nvidia/nemotron-3.5-lightning');
+    expect(rate.inputMicroUsdPerMillion).toBe(60_000);
+    expect(rate.outputMicroUsdPerMillion).toBe(160_000);
+    expect(worstCasePerAttempt).toBe(562);
+    expect(worstCasePerAttempt).toBeLessThanOrEqual(MODEL_LIMITS.maxReservedMicroUsdPerAttempt);
+  });
+
   it('ships only the time-limited OpenRouter route approved by the CTO', () => {
     expect(APPROVED_REAL_MODELS).toMatchObject([
       {
         providerId: 'openrouter',
-        modelId: 'openai/gpt-5.6-luna',
+        modelId: 'nvidia/nemotron-3.5-lightning',
         approval: {
-          approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+          approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
           approvedAt: '2026-11-11',
           expiresAt: '2026-11-12',
         },
@@ -341,7 +356,7 @@ describe('mode resolution and boot gates', () => {
     const resolution = resolveModelExecution({
       mode: 'real',
       providerId: 'openrouter',
-      modelId: 'openai/gpt-5.6-luna',
+      modelId: 'nvidia/nemotron-3.5-lightning',
       apiKey: VALID_KEY,
     });
 
@@ -755,7 +770,7 @@ describe('openai adapter', () => {
 });
 
 describe('openrouter adapter', () => {
-  const modelId = 'openai/gpt-5.6-luna';
+  const modelId = 'nvidia/nemotron-3.5-lightning';
 
   function openRouterGateway(
     fetchImpl: FetchLike,
@@ -799,14 +814,16 @@ describe('openrouter adapter', () => {
     expect(body['model']).toBe(modelId);
     expect(body['models']).toBeUndefined();
     expect(body['provider']).toStrictEqual({
-      only: ['openai'],
+      only: ['deepinfra'],
       allow_fallbacks: false,
       data_collection: 'deny',
       zdr: true,
       require_parameters: true,
-      max_price: { prompt: 0.2, completion: 1.2 },
+      max_price: { prompt: 0.06, completion: 0.16 },
     });
-    expect(body['prompt_cache_options']).toStrictEqual({ mode: 'explicit' });
+    expect(body['reasoning']).toStrictEqual({ enabled: false });
+    expect(body['reasoning_effort']).toBeUndefined();
+    expect(body['prompt_cache_options']).toBeUndefined();
     expect(body['stream']).toBe(false);
     expect(body['store']).toBe(false);
     expect(result).toMatchObject({
@@ -854,7 +871,7 @@ describe('openrouter adapter', () => {
       new AbortController().signal,
     );
 
-    expect(result.usage?.costMicroUsd).toBe(5);
+    expect(result.usage?.costMicroUsd).toBe(1);
   });
 
   it('marks missing or malformed usage unknown instead of zero', async () => {
@@ -1099,7 +1116,7 @@ describe('OpenRouter approval and live expiry fence', () => {
     if (!resolution.ok || resolution.mode !== 'real') {
       throw new Error('expected an approved OpenRouter fixture resolution');
     }
-    expect(resolution.settings.modelId).toBe('openai/gpt-5.6-luna');
+    expect(resolution.settings.modelId).toBe('nvidia/nemotron-3.5-lightning');
     expect(resolution.openRouterRouting?.allowFallbacks).toBe(false);
   });
 

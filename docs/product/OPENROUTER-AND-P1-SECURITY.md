@@ -1,25 +1,27 @@
 # OpenRouter Adapter and P1 Security Gates
 
-| field                          | value                                                         |
-| ------------------------------ | ------------------------------------------------------------- |
-| status                         | CTO route recorded; paid smoke blocked on ZDR eligibility     |
-| provider ID                    | `openrouter`                                                  |
-| approved model ID              | `openai/gpt-5.6-luna` (exact OpenRouter catalog ID)           |
-| candidate price checked        | 2026-11-10: $0.20 / 1M input tokens; $1.20 / 1M output tokens |
-| approval window                | 2026-11-11 through 2026-11-12 UTC, inclusive                  |
-| paid calls made by this change | none                                                          |
+| field                          | value                                                                                |
+| ------------------------------ | ------------------------------------------------------------------------------------ |
+| status                         | CTO-selected route recorded; paid Smoke remains blocked on remaining preflight gates |
+| provider ID                    | `openrouter`                                                                         |
+| approved model ID              | `nvidia/nemotron-3.5-lightning` (exact OpenRouter catalog ID; paid base model)       |
+| upstream                       | DeepInfra only (`deepinfra`)                                                         |
+| published price checked        | 2026-11-11: $0.06 / 1M input tokens; $0.16 / 1M output tokens                        |
+| maximum B2 attempt estimate    | $0.000562 at 8,000 input / 512 output tokens                                         |
+| approval window                | 2026-11-11 through 2026-11-12 UTC, inclusive                                         |
+| paid calls made by this change | none                                                                                 |
 
-This document supplements `L4B-FIRST-REAL-LLM-RESPONSE.md`. The CTO's date-limited authorization is recorded in `APPROVED_REAL_MODELS` and `infra/staging/model-authorization.json`, with a $0.005 per-attempt ceiling and one smoke Turn. The date-only UTC expiry is inclusive through 2026-11-12; any later smoke needs a new approval. It does not enable execution: staging remains `EMBER_MODEL_EXECUTION=disabled`. The route has not passed ZDR eligibility: current public endpoint metadata lists the exact model's ZDR endpoint under Azure and no OpenAI ZDR endpoint, so the required OpenAI-only plus ZDR route cannot be used until that is resolved.
+This document supplements `L4B-FIRST-REAL-LLM-RESPONSE.md`. The time-limited CTO record is present in `APPROVED_REAL_MODELS` and `infra/staging/model-authorization.json`. The request pins `deepinfra`, disables provider fallback, sets `data_collection: "deny"`, requires `zdr: true`, and disables model reasoning. OpenRouter's current exact-model endpoint APIs list the DeepInfra endpoint in the ZDR catalog and list its price at $0.06/M input and $0.16/M output. At the B2 caps of 8,000 input and 512 output tokens, the rounded-up estimate is 562 micro-USD ($0.000562), below the $0.005 per-attempt ceiling. These are catalog facts, not account-specific qualification or proof of a completed request ([model endpoint list](https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints), [ZDR endpoint list](https://openrouter.ai/api/v1/endpoints/zdr), [provider pricing page](https://openrouter.ai/nvidia/nemotron-3.5-lightning/providers)).
+
+The route's public provider metadata currently marks DeepInfra as no-training and zero-retention ([OpenRouter provider directory](https://openrouter.ai/providers)). The request also applies OpenRouter's per-request `data_collection: "deny"` and `zdr: true` filters. However, DeepInfra's [Terms of Service](https://deepinfra.com/terms) say its ZDR promise applies to models it hosts, while data sent to a third-party model made available through its service is governed by third-party terms. The public text does not clearly state whether that exception covers this NVIDIA model served on DeepInfra. Treat the route-level ZDR listing as verified metadata, but do not treat contractual no-training/ZDR applicability as verified until DeepInfra confirms the classification for this exact endpoint. Endpoint policy and price can change, so both must be checked again immediately before any real Smoke. This authorization does not enable execution: all resident Staging configuration stays `EMBER_MODEL_EXECUTION=disabled`.
 
 ## Provider and model policy
 
-The adapter accepts an exact model ID from the server configuration. Its endpoint is pinned to OpenRouter's Chat Completions URL; the API key is sent only as a server-side bearer header. Redirects and ambient credentials are disabled. The adapter sends no model list, tool declarations, streaming request, caller-controlled model choice, or automatic paid-model fallback. Reasoning effort is pinned to `none`.
+The adapter accepts an exact model ID from server configuration and pins the request to OpenRouter's Chat Completions URL. The API key is sent only as a server-side bearer header. Redirects and ambient credentials are disabled. The adapter sends one model ID, no model list, no tool declarations, no streaming request, and no automatic paid-model fallback. The approved reasoning setting is `none`, sent as `reasoning: { enabled: false }`.
 
-The approved OpenRouter route is recorded in the model approval as `only: ["openai"]`, `allow_fallbacks: false`, `data_collection: "deny"`, `zdr: true`, and `require_parameters: true`. The adapter also derives OpenRouter's `max_price` prompt/completion caps from the pinned rate row. This leaves OpenRouter's transport in place while restricting inference to eligible OpenAI endpoints at or below the reviewed rates. If no endpoint satisfies the reviewed policy, the request fails. OpenRouter documents these routing and data-handling controls in its [provider routing guide](https://openrouter.ai/docs/guides/routing/provider-selection) and [data-residency guide](https://openrouter.ai/blog/insights/ai-data-residency/).
+The approved route is `only: ["deepinfra"]`, `allow_fallbacks: false`, `data_collection: "deny"`, `zdr: true`, and `require_parameters: true`. The adapter derives OpenRouter's `max_price` prompt/completion caps from the pinned DeepInfra rate row. If no endpoint satisfies the exact provider, data, ZDR, parameter, and price policy, the request must fail. See OpenRouter's [provider routing guide](https://openrouter.ai/docs/guides/routing/provider-selection) and [ZDR endpoint API](https://openrouter.ai/docs/api/api-reference/endpoints/list-endpoints-zdr).
 
-OpenRouter's catalog snapshot checked on 2026-11-10 lists `openai/gpt-5.6-luna` at $0.20 per million input tokens and $1.20 per million output tokens ([model page](https://openrouter.ai/openai/gpt-5.6-luna)). The adapter uses OpenRouter's reported response cost when present, rounded upward to micro-USD; if its usage is absent or malformed, the existing responder books the full reservation as unknown usage. The rate-based estimate remains the fallback when a valid token count is returned without a provider cost.
-
-OpenRouter sends requests to the selected inference provider, whose terms govern provider processing; OpenRouter's privacy statement says it does not train on API inputs/outputs, but that does not replace the routed provider's terms ([privacy](https://openrouter.ai/pt-BR/privacy), [terms](https://openrouter.ai/zh-CN/terms)). Agent D's current metadata check found no OpenAI ZDR endpoint for this exact model, which blocks the approved route. `thinkingmachines/inkling-2-small:free` is not a chat candidate; do not use it for ordinary chat unless its current usage terms are re-reviewed and explicitly approved.
+The exact endpoint metadata returned on 2026-11-11 identifies DeepInfra's `nvidia/nemotron-3.5-lightning` endpoint, `bf16` quantization, and prices of $0.06/M input and $0.16/M output. The adapter uses the provider-reported response cost when present, rounded upward to micro-USD. If usage is absent or malformed, the responder books the full reservation as unknown usage; if a valid token count is returned without provider cost, the estimate uses the pinned rate row.
 
 ## Server configuration
 
@@ -28,38 +30,38 @@ The configuration contract remains provider-neutral:
 ```dotenv
 EMBER_MODEL_EXECUTION=disabled
 EMBER_MODEL_PROVIDER=openrouter
-EMBER_MODEL_ID=openai/gpt-5.6-luna
-EMBER_MODEL_API_KEY=<secret-store reference; worker only>
+EMBER_MODEL_ID=nvidia/nemotron-3.5-lightning
+EMBER_MODEL_API_KEY=<secret-store reference; isolated Smoke environment only>
 ```
 
-The API key must be provisioned only in the server Worker execution environment. Do not put it in iOS configuration, client logs, application logs, checked-in files, or client-visible evidence. Compose continues to blank the credential for API, migration, and edge containers. Keep the OpenRouter key in the deployment secret store and pass it through the existing `EMBER_MODEL_API_KEY` variable.
+Do not put the key in iOS configuration, client logs, application logs, checked-in files, or client-visible evidence. The normal Staging Worker must not receive or use the Smoke key. Configure the key only in the isolated Smoke execution environment after secure delivery and all other preflight gates pass. Compose continues to blank the credential for API, migration, and edge containers.
 
-Switching to `real` is still refused unless all of the existing gates pass: exact code-side approval with dates, exact provider/model price row, provider-specific routing policy, valid server credential, and budget ceilings. The first live smoke also requires a matching `EMBER_MODEL_SMOKE_APPROVAL`. Keep the resident Staging Runtime disabled. Do not run a smoke while the OpenAI-only ZDR route is ineligible, and do not extend the dated authorization without a new CTO approval.
+Switching any isolated process to `real` is still refused unless the exact dated code approval, exact provider/model price row, route policy, valid server credential, and budget ceilings all pass. The first real Smoke also requires a matching `EMBER_MODEL_SMOKE_APPROVAL`. Keep the resident Staging Runtime disabled. Do not extend the dated authorization without a new CTO approval.
 
 ## P1-A — re-check authorization at every outbound boundary
 
-Boot-time resolution is not a permanent grant. Both real adapters call the live authorization callback synchronously immediately before `fetch`. The callback re-evaluates the approval's UTC-day expiry, price provenance, and model shutdown date. A retry or subsequent provider attempt passes through the same check.
+Boot-time resolution is not a permanent grant. Both real adapters synchronously re-check the live authorization immediately before `fetch`. The callback re-evaluates the approval's UTC-day expiry, price provenance, and model shutdown date. A retry or subsequent provider attempt passes through the same check.
 
-If approval expires after an attempt row is reserved but before the request is sent, the adapter returns `not_sent`; the responder releases that reservation and terminates the Turn without retrying. If a request already left the process before expiry, its outcome remains billed or unknown-billed under the existing audit rules; expiry blocks new requests, not settlement of a request already in flight.
+If approval expires after an attempt row is reserved but before the request is sent, the adapter returns `not_sent`; the responder releases that reservation and terminates the Turn without retrying. If a request already left the process before expiry, its outcome remains billed or unknown-billed under the existing audit rules; expiry blocks new requests, not settlement of an in-flight request.
 
-## P1-B — isolate the first real smoke
+## P1-B — isolate the first real Smoke
 
-The `model:smoke` command is one-shot and does not start the resident Worker loop. It requires a dedicated `EMBER_MODEL_SMOKE_DATABASE_URL` with a database name different from `DATABASE_URL`, rejects a smoke database containing any assistant Turn, and refuses if an `ember` or `ember-worker` connection is present. It then creates one Turn, passes that exact Turn identity as `onlyTurn`, sets the responder's attempt ceiling to one, and runs one responder pass. Evidence is marked failed unless exactly one Turn was examined and exactly one attempt numbered 1 was written and settled.
+The `model:smoke` command is one-shot and does not start the resident Worker loop. It requires a dedicated `EMBER_MODEL_SMOKE_DATABASE_URL` whose database name differs from `DATABASE_URL`, rejects a Smoke database containing any assistant Turn, and refuses if an `ember` or `ember-worker` connection is present. It then creates one Turn, passes that exact Turn identity as `onlyTurn`, sets the responder's attempt ceiling to one, and runs one responder pass. Evidence fails unless exactly one Turn was examined and exactly one attempt numbered 1 was written and settled.
 
-A normal Worker uses `DATABASE_URL`; never point it at the smoke database. Provision and migrate a fresh dedicated database before the run. The database check is intentionally stricter than choosing a separate schema: a separate schema in a Worker-visible database would not isolate candidate polling.
+A normal Worker uses `DATABASE_URL`; never point it at the Smoke database. Provision and migrate a fresh dedicated database before the run. A separate schema in a Worker-visible database is not sufficient isolation because the candidate poller can still see pending Turns.
 
-## CTO checklist for a future first real smoke
+## CTO checklist for a future first real Smoke
 
-Every item must be recorded before the operator runs the smoke:
+Every item must be recorded before the operator runs the Smoke:
 
-1. The CTO decision is recorded for provider `openrouter`, model `openai/gpt-5.6-luna`, expiry 2026-11-12 UTC inclusive, and route (`openai` only, no provider fallback, `data_collection=deny`, ZDR required). Confirm the exact record remains current before any smoke.
-2. Re-check current price, endpoint eligibility, OpenRouter and upstream provider terms, expected data handling, and account limits. Confirm the intended prompt is allowed by both providers. ZDR eligibility is currently a blocker.
-3. The code and manifest records match and cap each attempt and the global daily budget at $0.005, with one paid Smoke Turn. Do not add another route or model fallback.
-4. Store the OpenRouter key in the Worker server secret store. Confirm it is absent from iOS bundles, API/edge/migration environments, logs, and Git.
-5. Provision a fresh isolated PostgreSQL database, apply migrations through `0019`, set `EMBER_MODEL_SMOKE_DATABASE_URL`, and confirm it differs from runtime `DATABASE_URL`. Confirm it contains zero `assistant_turns` and no Worker is connected.
-6. Review the printed plan (approval ID, provider/model, price version, database target, one Turn and per-attempt ceiling). The person executing must restate the approval ID in `EMBER_MODEL_SMOKE_APPROVAL` and pass `--confirm`.
-7. Run only `pnpm model:smoke -- --max-turns=1 --confirm`. Stop after the result. Reconcile the provider dashboard/invoice with the single attempt and attach content-free evidence; do not automatically rerun a failed smoke.
+1. Confirm the exact current approval ID, model `nvidia/nemotron-3.5-lightning`, upstream `deepinfra` only, expiry 2026-11-12 UTC inclusive, no provider fallback, `data_collection=deny`, ZDR required, and reasoning disabled.
+2. Re-check the exact DeepInfra endpoint's ZDR eligibility, price, and supported parameters. Obtain authoritative confirmation that DeepInfra's no-training/ZDR commitments apply to its hosted `nvidia/nemotron-3.5-lightning` endpoint despite the third-party-model clause; also verify OpenRouter account eligibility, balance, and the dedicated key's cumulative $1 spending limit without exposing the key in chat, logs, or Git.
+3. Pass the complete Unit, PostgreSQL 17 Integration, and E2E suites; obtain independent PR review; verify the exact reviewed HEAD and current code/manifest parity.
+4. Confirm the 8,000-input / 512-output worst-case reservation is $0.000562, below $0.005, and that the Smoke allows one paid Turn and exactly one provider attempt.
+5. Configure `EMBER_MODEL_API_KEY` only in an isolated Smoke environment. Provision a fresh PostgreSQL 17 Smoke database, apply required migrations, verify it differs from `DATABASE_URL`, contains no assistant Turns, and has no resident Worker connections. Confirm the normal Worker cannot access it.
+6. Keep the normal Staging Runtime at `EMBER_MODEL_EXECUTION=disabled`. Review the printed Smoke plan (approval ID, provider/model, price version, database target, one Turn, one attempt, and cost ceiling). The operator must restate the approval ID in `EMBER_MODEL_SMOKE_APPROVAL` and pass `--confirm`.
+7. Only after all checks pass, submit `PREFLIGHT_PASS` to the CTO. Then run exactly `pnpm model:smoke -- --max-turns=1 --confirm`. Stop after the result, reconcile the provider dashboard with the single attempt, and attach content-free evidence. Never automatically rerun an uncertain or failed Smoke.
 
 ## Verification covered by this Draft
 
-Mock-only adapter tests cover the fixed origin and model, provider routing, credentials placement, reported and estimated usage, malformed usage, invalid response bodies, HTTP 401/403/408/429/5xx mapping, transport failure, abort, and authorization changes between attempts. Responder tests cover retry refusal and reservation release; PostgreSQL integration tests cover provider ID audit persistence, budget hard refusal, and exact-turn scoping. The E2E path uses no real model request. No `model:smoke` command was run.
+Mock-only adapter tests cover the fixed origin, exact model and provider route, credentials placement, reported and estimated usage, malformed usage, invalid response bodies, HTTP 401/403/408/429/5xx mapping, transport failure, abort, and authorization changes between attempts. Responder tests cover retry refusal and reservation release; PostgreSQL integration tests cover provider ID audit persistence, budget hard refusal, and exact-Turn scoping. The E2E path uses no real model request. No `model:smoke` command was run.

@@ -49,15 +49,15 @@ export interface OpenRouterRoutingPolicy {
 export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
   Object.freeze({
     providerId: 'openrouter' as const,
-    modelId: 'openai/gpt-5.6-luna',
+    modelId: 'nvidia/nemotron-3.5-lightning',
     approval: Object.freeze({
-      approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
       approvedBy: 'CTO',
       approvedAt: '2026-11-11',
       expiresAt: '2026-11-12',
     }),
     openRouterRouting: Object.freeze({
-      only: Object.freeze(['openai']),
+      only: Object.freeze(['deepinfra']),
       allowFallbacks: false,
       dataCollection: 'deny' as const,
       zdr: true,
@@ -94,8 +94,8 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
 /**
  * Providers this build can construct an adapter for. Checked against **code**, not against tenant
  * policy: a misconfigured policy must not be able to point the gateway at a host nobody reviewed.
- * Kept separate from the model allowlist so that "no model approved yet" reports
- * `model_not_approved` rather than masking the real reason as a provider problem.
+ * Kept separate from the model allowlist so an unapproved model reports `model_not_approved`
+ * rather than masking the real reason as a provider problem.
  */
 export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai', 'openrouter']);
 
@@ -165,15 +165,15 @@ const GPT_4_DEPRECATION_SOURCE =
 const GPT_5_6_LUNA_DOCS_SOURCE =
   'https://developers.openai.com/api/docs/models/gpt-5.6-luna, read 2026-11-10 — official published pricing; CTO review remains required';
 
-const OPENROUTER_GPT_5_6_LUNA_SOURCE =
-  'https://openrouter.ai/openai/gpt-5.6-luna, read 2026-11-10 — OpenRouter catalog price; OpenAI-only ZDR eligibility remains blocked';
+const OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE =
+  'https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints and https://openrouter.ai/api/v1/endpoints/zdr, read 2026-11-11 — exact DeepInfra endpoint is listed for this model in the ZDR endpoint catalog; $0.06/M input and $0.16/M output';
 
 /**
  * Rate rows known to this tree.
  *
  * **No row here authorises a paid call.** `provenance` is the only field the resolver trusts, and
- * The OpenRouter candidate has a verified catalog price, but no combination of rate rows can
- * enable `real` mode without a separate approval record in `APPROVED_REAL_MODELS`.
+ * The approved OpenRouter route has a verified catalog price, but no combination of rate rows can
+ * enable `real` mode without its separate, dated approval record in `APPROVED_REAL_MODELS`.
  * Approval item A2 requires explicitly reviewing official published pricing for the exact model id
  * before enablement; an invoice may be used instead. Provider usage is reconciled after the first call.
  *
@@ -184,15 +184,14 @@ const OPENROUTER_GPT_5_6_LUNA_SOURCE =
 export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
   Object.freeze({
     providerId: 'openrouter' as const,
-    modelId: 'openai/gpt-5.6-luna',
-    inputMicroUsdPerMillion: 200_000,
-    outputMicroUsdPerMillion: 1_200_000,
-    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+    modelId: 'nvidia/nemotron-3.5-lightning',
+    inputMicroUsdPerMillion: 60_000,
+    outputMicroUsdPerMillion: 160_000,
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
     provenance: 'official_price_verified' as const,
-    source: OPENROUTER_GPT_5_6_LUNA_SOURCE,
+    source: OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE,
     shutdownDate: null,
     reasoningEffort: 'none' as const,
-    promptCacheMode: 'explicit' as const,
   }),
   Object.freeze({
     providerId: 'openai' as const,

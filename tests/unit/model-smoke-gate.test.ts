@@ -19,10 +19,10 @@ import {
  */
 
 const PLAN: SmokePlan = {
-  approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+  approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
   providerId: 'openrouter',
-  modelId: 'openai/gpt-5.6-luna',
-  rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
+  modelId: 'nvidia/nemotron-3.5-lightning',
+  rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
   maxTurns: 1,
   database: 'postgres:5432/ember',
 };
@@ -30,11 +30,11 @@ const PLAN: SmokePlan = {
 function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePreconditions {
   return {
     modelMode: 'real',
-    modelId: 'openai/gpt-5.6-luna',
+    modelId: 'nvidia/nemotron-3.5-lightning',
     providerId: 'openrouter',
-    rateVersion: 'openrouter-openai-gpt-5.6-luna-standard-2026-11-10',
-    approvalIdFromConfig: 'L4C3-B2-OPENROUTER-2026-11-11',
-    approvalIdFromEnv: 'L4C3-B2-OPENROUTER-2026-11-11',
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
+    approvalIdFromConfig: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    approvalIdFromEnv: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     maxTurns: 1,
     confirmed: true,
     ...overrides,
@@ -45,7 +45,7 @@ describe('paid smoke gate', () => {
   it('passes only when the mode is real, the id matches and the run was confirmed', () => {
     expect(evaluateSmokePreconditions(preconditions())).toStrictEqual({
       ok: true,
-      approvalId: 'L4C3-B2-OPENROUTER-2026-11-11',
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     });
   });
 

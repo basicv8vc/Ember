@@ -29,10 +29,24 @@ export interface ModelApprovalRecord {
   readonly expiresAt: string;
 }
 
+/** Runtime spend ceilings reviewed together with a model approval. */
+export interface ModelApprovalBudgetCeilings {
+  readonly perAttemptMicroUsd: number;
+  readonly principalDailyMicroUsd: number;
+  readonly tenantDailyMicroUsd: number;
+  readonly globalDailyMicroUsd: number;
+  readonly principalDailyTurns: number;
+}
+
 export interface ApprovedModel {
   readonly providerId: RealModelProviderId;
   readonly modelId: string;
   readonly approval: ModelApprovalRecord;
+  /** A smoke-only approval cannot authorize a resident Worker. */
+  readonly executionScope: 'resident' | 'smoke_only';
+  readonly budgetCeilings: ModelApprovalBudgetCeilings;
+  /** Turn count for `model:smoke`; independent of the principal's daily Turn budget. */
+  readonly maxPaidSmokeTurns: number;
   /** Required for OpenRouter models; this policy is part of the reviewed model decision. */
   readonly openRouterRouting?: OpenRouterRoutingPolicy;
 }
@@ -56,6 +70,15 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
       approvedAt: '2026-11-11',
       expiresAt: '2026-11-12',
     }),
+    executionScope: 'smoke_only' as const,
+    budgetCeilings: Object.freeze({
+      perAttemptMicroUsd: 5_000,
+      principalDailyMicroUsd: 5_000,
+      tenantDailyMicroUsd: 5_000,
+      globalDailyMicroUsd: 5_000,
+      principalDailyTurns: 1,
+    }),
+    maxPaidSmokeTurns: 1,
     openRouterRouting: Object.freeze({
       only: Object.freeze(['deepinfra']),
       allowFallbacks: false,

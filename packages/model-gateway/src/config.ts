@@ -9,6 +9,7 @@ import {
   findRateRow,
   isPastShutdown,
   type ApprovedModel,
+  type ModelApprovalBudgetCeilings,
   type ModelApprovalRecord,
   type ModelRateRow,
   type OpenRouterRoutingPolicy,
@@ -51,8 +52,12 @@ export type ModelBootRefusalReason =
   | 'model_shutdown'
   | 'rate_not_verified'
   | 'provider_routing_not_approved'
+  | 'execution_scope_refused'
+  | 'budget_approval_exceeded'
   | CredentialRefusal
   | 'budget_config_invalid';
+
+export type ModelExecutionPurpose = 'resident_worker' | 'paid_smoke';
 
 /** Code-owned allowlists. Tests may supply their own registry; the process root never does. */
 export interface ModelApprovalRegistry {
@@ -70,6 +75,8 @@ export interface ModelExecutionInput {
   readonly providerId?: string | undefined;
   readonly modelId?: string | undefined;
   readonly apiKey?: string | undefined;
+  /** Supplied by trusted code call sites only; never read from process environment or CLI args. */
+  readonly executionPurpose?: ModelExecutionPurpose | undefined;
   readonly ceilings?: Partial<ModelBudgetCeilings> | undefined;
   readonly maxAttempts?: number | undefined;
   readonly attemptTimeoutMs?: number | undefined;
@@ -99,6 +106,8 @@ export type ModelExecutionResolution =
        * test compares it to what it was told on the command line). It is a decision id, not a secret.
        */
       readonly approval: ModelApprovalRecord;
+      readonly executionScope: ApprovedModel['executionScope'];
+      readonly maxPaidSmokeTurns: number;
       readonly openRouterRouting: OpenRouterRoutingPolicy | null;
       readonly credential: ModelCredential;
     }
@@ -121,8 +130,9 @@ function resolveMode(raw: string | undefined): ModelExecutionMode | null {
 
 function resolveCeilings(
   overrides: Partial<ModelBudgetCeilings> | undefined,
+  defaults: ModelBudgetCeilings = DEFAULT_MODEL_CEILINGS,
 ): ModelBudgetCeilings | null {
-  const merged: ModelBudgetCeilings = { ...DEFAULT_MODEL_CEILINGS, ...overrides };
+  const merged: ModelBudgetCeilings = { ...defaults, ...overrides };
 
   const entries: readonly (readonly [keyof ModelBudgetCeilings, number])[] = [
     ['perAttemptMicroUsd', merged.perAttemptMicroUsd],
@@ -157,6 +167,19 @@ function resolveCeilings(
   }
 
   return Object.freeze(merged);
+}
+
+function exceedsApprovedCeilings(
+  runtime: ModelBudgetCeilings,
+  approved: ModelApprovalBudgetCeilings,
+): boolean {
+  return (
+    runtime.perAttemptMicroUsd > approved.perAttemptMicroUsd ||
+    runtime.principalDailyMicroUsd > approved.principalDailyMicroUsd ||
+    runtime.tenantDailyMicroUsd > approved.tenantDailyMicroUsd ||
+    runtime.globalDailyMicroUsd > approved.globalDailyMicroUsd ||
+    runtime.principalDailyTurns > approved.principalDailyTurns
+  );
 }
 
 function boundedInteger(
@@ -199,8 +222,17 @@ export function resolveModelExecution(
   now: Date = new Date(),
 ): ModelExecutionResolution {
   const mode = resolveMode(input.mode);
-  const ceilings = resolveCeilings(input.ceilings);
   const configuredProvider = input.providerId?.trim() ?? 'openai';
+  const configuredModelId = input.modelId?.trim() ?? '';
+  const executionPurpose = input.executionPurpose ?? 'resident_worker';
+  const modelApproval = registry.models.find(
+    (entry) => entry.providerId === configuredProvider && entry.modelId === configuredModelId,
+  );
+  const smokeApprovalDefaults =
+    executionPurpose === 'paid_smoke' && modelApproval?.executionScope === 'smoke_only'
+      ? modelApproval.budgetCeilings
+      : DEFAULT_MODEL_CEILINGS;
+  const ceilings = resolveCeilings(input.ceilings, smokeApprovalDefaults);
   const providerId: ModelProviderId = configuredProvider === 'openrouter' ? 'openrouter' : 'openai';
 
   const settings: ModelExecutionSettings = Object.freeze({
@@ -255,12 +287,14 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_not_approved' };
   }
 
-  const modelApproved = registry.models.find(
-    (entry) => entry.providerId === provider && entry.modelId === modelId,
-  );
+  const modelApproved = modelApproval;
 
   if (modelApproved === undefined) {
     return { ok: false, mode, settings, reason: 'model_not_approved' };
+  }
+
+  if (modelApproved.executionScope === 'smoke_only' && executionPurpose !== 'paid_smoke') {
+    return { ok: false, mode, settings, reason: 'execution_scope_refused' };
   }
 
   if (
@@ -299,6 +333,10 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_shutdown' };
   }
 
+  if (ceilings === null || exceedsApprovedCeilings(ceilings, modelApproved.budgetCeilings)) {
+    return { ok: false, mode, settings, reason: 'budget_approval_exceeded' };
+  }
+
   const credential = ModelCredential.parse(input.apiKey);
 
   if (!credential.ok) {
@@ -316,6 +354,8 @@ export function resolveModelExecution(
     }),
     rate,
     approval: modelApproved.approval,
+    executionScope: modelApproved.executionScope,
+    maxPaidSmokeTurns: modelApproved.maxPaidSmokeTurns,
     openRouterRouting: modelApproved.openRouterRouting ?? null,
     credential: credential.credential,
   };

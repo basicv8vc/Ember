@@ -91,7 +91,7 @@ function isOfficialPriceSource(value, providerId) {
 /**
  * How a paid-model deployment is bounded by its approval.
  *
- * The ceilings mirror the four the Worker already enforces. They are duplicated here on purpose:
+ * The ceilings mirror the spend limits the Worker already enforces. They are duplicated here on purpose:
  * the guard runs on the host before Docker and cannot import TypeScript, so the approved *limits*
  * are restated in the artifact a reviewer signs. They may only lower the code defaults.
  */
@@ -100,15 +100,25 @@ const AUTHORIZATION_CEILING_KEYS = [
   'maxPrincipalDailyMicroUsd',
   'maxTenantDailyMicroUsd',
   'maxGlobalDailyMicroUsd',
+  'maxPrincipalDailyTurns',
   'maxPaidSmokeTurns',
 ];
+const AUTHORIZATION_CEILING_MAXIMUMS = Object.freeze({
+  maxPerAttemptMicroUsd: 5_000,
+  maxPrincipalDailyMicroUsd: 250_000,
+  maxTenantDailyMicroUsd: 1_000_000,
+  maxGlobalDailyMicroUsd: 5_000_000,
+  maxPrincipalDailyTurns: 60,
+  maxPaidSmokeTurns: 50,
+});
 
-/** Environment ceiling variable → the authorization field that bounds it. */
+/** Runtime defaults mirror apps/worker/src/config.ts when a deployment omits a budget variable. */
 const MODEL_CEILING_VARIABLES = Object.freeze([
-  ['EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', 'maxPerAttemptMicroUsd'],
-  ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', 'maxPrincipalDailyMicroUsd'],
-  ['EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', 'maxTenantDailyMicroUsd'],
-  ['EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', 'maxGlobalDailyMicroUsd'],
+  ['EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', 'maxPerAttemptMicroUsd', 5_000],
+  ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', 'maxPrincipalDailyMicroUsd', 250_000],
+  ['EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', 'maxTenantDailyMicroUsd', 1_000_000],
+  ['EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', 'maxGlobalDailyMicroUsd', 5_000_000],
+  ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', 'maxPrincipalDailyTurns', 60],
 ]);
 
 /** Whole days from `from` to `to`, both `YYYY-MM-DD` in UTC. Negative when `to` is in the past. */
@@ -287,6 +297,7 @@ export function findModelAuthorization(manifest, query) {
   if (
     typeof entry.authorizationId !== 'string' ||
     typeof entry.approvedBy !== 'string' ||
+    !['resident', 'smoke_only'].includes(entry.executionScope) ||
     !isOfficialPriceSource(entry.priceSource, entry.providerId) ||
     !ISO_DAY.test(entry.approvedAt ?? '') ||
     !ISO_DAY.test(entry.expiresAt ?? '') ||
@@ -303,13 +314,9 @@ export function findModelAuthorization(manifest, query) {
   }
 
   for (const key of AUTHORIZATION_CEILING_KEYS) {
-    if (!isPositiveInteger(entry[key], 10_000_000)) {
+    if (!isPositiveInteger(entry[key], AUTHORIZATION_CEILING_MAXIMUMS[key])) {
       return Object.freeze({ status: 'malformed_authorization' });
     }
-  }
-
-  if (entry.maxPaidSmokeTurns > 50) {
-    return Object.freeze({ status: 'malformed_authorization' });
   }
 
   if (today < entry.approvedAt) {
@@ -332,7 +339,7 @@ const AUTHORIZATION_FAILURE_MESSAGE = Object.freeze({
   duplicate_authorization:
     'more than one authorization covers this provider and model id, so which ceiling applies is ambiguous; remove the duplicate',
   malformed_authorization:
-    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, an official HTTPS priceSource for the selected provider, ISO approvedAt/expiresAt and every ceiling as a positive integer',
+    'the matching authorization is incomplete: it needs an authorizationId, a named approvedBy, executionScope, an official HTTPS priceSource for the selected provider, ISO approvedAt/expiresAt, every spend ceiling, maxPrincipalDailyTurns and maxPaidSmokeTurns',
   not_yet_valid: 'the matching authorization does not start until a future date',
   expired:
     'the matching authorization has expired; a fresh dated approval must be merged before paid egress resumes',
@@ -513,6 +520,14 @@ export function evaluateStagingEnv(env, options = {}) {
       const entry = authorization.entry;
       const apiKey = get('EMBER_MODEL_API_KEY');
 
+      if (entry.executionScope === 'smoke_only') {
+        add(
+          'E_MODEL_REAL',
+          'EMBER_MODEL_EXECUTION',
+          `authorization ${entry.authorizationId} is smoke_only and cannot enable a resident Staging Worker`,
+        );
+      }
+
       if (apiKey === undefined || apiKey.trim().length === 0) {
         add(
           'E_MODEL_CREDENTIAL',
@@ -521,14 +536,16 @@ export function evaluateStagingEnv(env, options = {}) {
         );
       }
 
-      for (const [variable, ceilingKey] of MODEL_CEILING_VARIABLES) {
+      for (const [variable, ceilingKey, defaultValue] of MODEL_CEILING_VARIABLES) {
         const raw = get(variable);
-        if (raw === undefined || raw === '') {
-          continue;
-        }
-        const value = Number(raw);
-        if (!Number.isSafeInteger(value) || value < 0) {
-          add('E_MODEL_BUDGET', variable, `must be a non-negative integer (got ${describe(raw)})`);
+        const value = raw === undefined ? defaultValue : Number(raw);
+        const minValue = variable === 'EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD' ? 1 : 0;
+        if (!Number.isSafeInteger(value) || value < minValue) {
+          add(
+            'E_MODEL_BUDGET',
+            variable,
+            `must be an integer >= ${minValue} (got ${describe(raw)})`,
+          );
           continue;
         }
         if (value > entry[ceilingKey]) {

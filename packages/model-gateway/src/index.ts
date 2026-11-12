@@ -57,6 +57,7 @@ export {
   utcDay,
   type ApprovalValidity,
   type ApprovedModel,
+  type ModelApprovalBudgetCeilings,
   type ModelApprovalRecord,
   type ModelCandidate,
   type ModelRateRow,
@@ -78,6 +79,7 @@ export {
   type ModelBootRefusalReason,
   type ModelBudgetCeilings,
   type ModelExecutionInput,
+  type ModelExecutionPurpose,
   type ModelExecutionResolution,
   type ModelExecutionSettings,
 } from './config.js';

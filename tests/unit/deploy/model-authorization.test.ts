@@ -42,6 +42,7 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     authorizationId: 'L4B-A1',
     providerId: 'openai',
     modelId: MODEL_ID,
+    executionScope: 'resident',
     rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
     approvedBy: 'CTO / Jia',
     approvedAt: '2026-11-07',
@@ -51,6 +52,7 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     maxPrincipalDailyMicroUsd: 250_000,
     maxTenantDailyMicroUsd: 1_000_000,
     maxGlobalDailyMicroUsd: 5_000_000,
+    maxPrincipalDailyTurns: 60,
     maxPaidSmokeTurns: 1,
     ...overrides,
   };
@@ -68,10 +70,12 @@ function openRouterAuthorization(
     approvedAt: '2026-11-11',
     expiresAt: '2026-11-12',
     priceSource: 'https://openrouter.ai/nvidia/nemotron-3.5-lightning/providers',
+    executionScope: 'smoke_only',
     maxPerAttemptMicroUsd: 5_000,
     maxPrincipalDailyMicroUsd: 5_000,
     maxTenantDailyMicroUsd: 5_000,
     maxGlobalDailyMicroUsd: 5_000,
+    maxPrincipalDailyTurns: 1,
     maxPaidSmokeTurns: 1,
     ...overrides,
   });
@@ -88,6 +92,12 @@ function realEnv(provider = 'openai'): Map<string, string> {
   env.set('EMBER_MODEL_PROVIDER', provider);
   env.set('EMBER_MODEL_ID', MODEL_ID);
   env.set('EMBER_MODEL_API_KEY', AUTHORIZED_KEY);
+  return env;
+}
+
+function openRouterRealEnv(): Map<string, string> {
+  const env = realEnv('openrouter');
+  env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
   return env;
 }
 
@@ -131,21 +141,17 @@ describe('paid model authorization artifact', () => {
     expect(result.ok).toBe(true);
   });
 
-  it('accepts OpenRouter only with its own official catalog page for the exact model', () => {
-    const env = realEnv('openrouter');
-    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
-
-    const result = evaluateStagingEnv(env, {
-      authorization: manifest(openRouterAuthorization()),
-      now: TODAY,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(codes(result)).not.toContain('E_MODEL_REAL');
-    expect(codes(result)).not.toContain('E_PROVIDER_SECRET');
+  it('recognizes OpenRouter only with its own official catalog page for the exact model', () => {
+    expect(
+      findModelAuthorization(manifest(openRouterAuthorization()), {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        today: '2026-11-11',
+      }),
+    ).toMatchObject({ status: 'authorized' });
   });
 
-  it('accepts the committed OpenRouter approval only for its exact provider and model', () => {
+  it('keeps the committed OpenRouter smoke-only approval unavailable to a resident deployment', () => {
     const env = realEnv('openrouter');
     env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
 
@@ -154,8 +160,15 @@ describe('paid model authorization artifact', () => {
       now: TODAY,
     });
 
-    expect(result.ok).toBe(true);
-    expect(codes(result)).not.toContain('E_MODEL_REAL');
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('smoke_only');
+    expect(
+      findModelAuthorization(loadModelAuthorizationManifest(), {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        today: '2026-11-11',
+      }),
+    ).toMatchObject({ status: 'authorized' });
     expect(result.warnings.map((warning) => warning.code)).toContain(
       'W_MODEL_AUTHORIZATION_EXPIRING',
     );
@@ -266,9 +279,11 @@ describe('paid model authorization artifact', () => {
     for (const override of [
       { authorizationId: 'PENDING-CTO-SIGNOFF' },
       { authorizedByPlaceholder: true, approvedBy: 'TODO' },
+      { executionScope: 'resident_worker' as ModelAuthorizationEntry['executionScope'] },
       { expiresAt: 'not-a-date' },
       { priceSource: 'https://third-party.example/models/gpt-5.6-luna' },
       { maxPerAttemptMicroUsd: 0 },
+      { maxPrincipalDailyTurns: 0 },
       { maxPaidSmokeTurns: 500 },
     ]) {
       const result = evaluateStagingEnv(realEnv(), {
@@ -332,6 +347,73 @@ describe('paid model authorization artifact', () => {
     expect(codes(result)).toContain('E_MODEL_BUDGET');
   });
 
+  it('compares every effective Worker budget default to the authorization', () => {
+    const result = evaluateStagingEnv(openRouterRealEnv(), {
+      authorization: manifest(openRouterAuthorization()),
+      now: TODAY,
+    });
+
+    const budgetVariables = result.violations
+      .filter((violation) => violation.code === 'E_MODEL_BUDGET')
+      .map((violation) => violation.variable);
+
+    expect(budgetVariables).toEqual([
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS',
+    ]);
+  });
+
+  it('rejects explicit dollar and principal Turn budgets above their separate approvals', () => {
+    for (const [variable, value] of [
+      ['EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', 2],
+    ] as const) {
+      const env = openRouterRealEnv();
+      env.set('EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', '1');
+      env.set(variable, String(value));
+
+      const result = evaluateStagingEnv(env, {
+        authorization: manifest(openRouterAuthorization()),
+        now: TODAY,
+      });
+
+      expect(
+        result.violations.some(
+          (violation) => violation.code === 'E_MODEL_BUDGET' && violation.variable === variable,
+        ),
+        `${variable}=${value}`,
+      ).toBe(true);
+    }
+  });
+
+  it('accepts lower runtime budgets while keeping principal daily Turns distinct from Smoke Turns', () => {
+    const env = openRouterRealEnv();
+    env.set('EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', '1');
+
+    const result = evaluateStagingEnv(env, {
+      authorization: manifest(openRouterAuthorization({ maxPrincipalDailyTurns: 2 })),
+      now: TODAY,
+    });
+
+    expect(codes(result)).not.toContain('E_MODEL_BUDGET');
+    // Smoke-only scope still blocks this resident deployment profile.
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('smoke_only');
+  });
+
   it('accepts a deployment that only lowers an authorized ceiling', () => {
     const env = realEnv();
     env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '250000');
@@ -393,6 +475,15 @@ describe('authorization artifact ↔ code allowlist parity', () => {
           approvedAt: '2026-11-11',
           expiresAt: '2026-11-12',
         },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+        maxPaidSmokeTurns: 1,
         openRouterRouting: {
           only: ['deepinfra'],
           allowFallbacks: false,

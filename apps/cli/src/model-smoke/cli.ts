@@ -50,6 +50,7 @@ export type SmokeRefusal =
   | 'approval_not_real'
   | 'approval_missing'
   | 'approval_mismatch'
+  | 'authorization_scope'
   | 'max_turns_invalid'
   | 'not_confirmed';
 
@@ -60,6 +61,8 @@ export interface SmokePreconditions {
   readonly rateVersion: string | null;
   readonly approvalIdFromConfig: string | null;
   readonly approvalIdFromEnv: string | undefined;
+  readonly executionScope: 'resident' | 'smoke_only' | null;
+  readonly maxPaidSmokeTurns: number;
   readonly maxTurns: number;
   readonly confirmed: boolean;
 }
@@ -116,7 +119,18 @@ export function evaluateSmokePreconditions(
     return { ok: false, refusal: 'approval_mismatch' };
   }
 
-  if (!Number.isInteger(input.maxTurns) || input.maxTurns < 1 || input.maxTurns > MAX_SMOKE_TURNS) {
+  if (input.executionScope !== 'smoke_only') {
+    return { ok: false, refusal: 'authorization_scope' };
+  }
+
+  if (
+    !Number.isInteger(input.maxPaidSmokeTurns) ||
+    input.maxPaidSmokeTurns < 1 ||
+    !Number.isInteger(input.maxTurns) ||
+    input.maxTurns < 1 ||
+    input.maxTurns > MAX_SMOKE_TURNS ||
+    input.maxTurns > input.maxPaidSmokeTurns
+  ) {
     return { ok: false, refusal: 'max_turns_invalid' };
   }
 
@@ -137,6 +151,8 @@ const REFUSAL_TEXT: Readonly<Record<SmokeRefusal, string>> = Object.freeze({
   approval_mismatch:
     'EMBER_MODEL_SMOKE_APPROVAL does not match the approval recorded for the configured model. ' +
     'Refusing: the id in the environment and the id in code must be the same decision.',
+  authorization_scope:
+    'the configured approval is not scoped for the dedicated paid Smoke execution purpose.',
   max_turns_invalid: '--max-turns must be exactly 1 for a paid smoke run.',
   not_confirmed: 'Refusing to spend without --confirm. The plan above is what would have run.',
 });
@@ -351,7 +367,8 @@ export async function runPaidSmoke(
   },
 ): Promise<number> {
   const env = process.env;
-  const model = loadWorkerConfig(env).model;
+  // This is a trusted call site. The purpose is not read from env or parsed smoke arguments.
+  const model = loadWorkerConfig(env, 'paid_smoke').model;
 
   if (!model.ok) {
     deps.log(`refused: model execution resolution failed (${model.reason})`);
@@ -365,6 +382,8 @@ export async function runPaidSmoke(
     rateVersion: model.mode === 'real' ? model.rate.rateVersion : null,
     approvalIdFromConfig: model.mode === 'real' ? model.approval.approvalId : null,
     approvalIdFromEnv: env['EMBER_MODEL_SMOKE_APPROVAL'],
+    executionScope: model.mode === 'real' ? model.executionScope : null,
+    maxPaidSmokeTurns: model.mode === 'real' ? model.maxPaidSmokeTurns : 0,
     maxTurns: args.maxTurns,
     confirmed: args.confirm,
   });

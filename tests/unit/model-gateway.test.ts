@@ -66,6 +66,15 @@ const APPROVED_REGISTRY = Object.freeze({
       providerId: 'openai' as const,
       modelId: 'gpt-5.6-luna',
       approval: TEST_APPROVAL,
+      executionScope: 'resident' as const,
+      budgetCeilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 250_000,
+        tenantDailyMicroUsd: 1_000_000,
+        globalDailyMicroUsd: 5_000_000,
+        principalDailyTurns: 60,
+      },
+      maxPaidSmokeTurns: 1,
     },
   ]),
   rates: Object.freeze([VERIFIED_RATE]),
@@ -175,6 +184,15 @@ describe('model gateway limits and pricing', () => {
           approvedAt: '2026-11-11',
           expiresAt: '2026-11-12',
         },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+        maxPaidSmokeTurns: 1,
         openRouterRouting: OPENROUTER_ROUTING,
       },
     ]);
@@ -352,7 +370,7 @@ describe('mode resolution and boot gates', () => {
     expect(resolution).toMatchObject({ ok: false, reason: 'model_not_approved' });
   });
 
-  it('resolves only the approved OpenRouter model and exact upstream policy', () => {
+  it('refuses the Smoke-only OpenRouter approval for the resident Worker', () => {
     const resolution = resolveModelExecution({
       mode: 'real',
       providerId: 'openrouter',
@@ -360,14 +378,35 @@ describe('mode resolution and boot gates', () => {
       apiKey: VALID_KEY,
     });
 
+    expect(resolution).toMatchObject({ ok: false, reason: 'execution_scope_refused' });
+  });
+
+  it('resolves only the approved OpenRouter model for trusted paid Smoke with its approved limits', () => {
+    const resolution = resolveModelExecution({
+      mode: 'real',
+      providerId: 'openrouter',
+      modelId: 'nvidia/nemotron-3.5-lightning',
+      apiKey: VALID_KEY,
+      executionPurpose: 'paid_smoke',
+    });
+
     expect(resolution.ok).toBe(true);
     if (!resolution.ok || resolution.mode !== 'real') {
-      throw new Error('expected the approved OpenRouter route to resolve');
+      throw new Error('expected the approved OpenRouter route to resolve for paid Smoke');
     }
 
     expect(resolution.openRouterRouting).toEqual(OPENROUTER_ROUTING);
     expect(resolution.rate.reasoningEffort).toBe('none');
     expect(resolution.settings.mode).toBe('real');
+    expect(resolution.executionScope).toBe('smoke_only');
+    expect(resolution.maxPaidSmokeTurns).toBe(1);
+    expect(resolution.settings.ceilings).toEqual({
+      perAttemptMicroUsd: 5_000,
+      principalDailyMicroUsd: 5_000,
+      tenantDailyMicroUsd: 5_000,
+      globalDailyMicroUsd: 5_000,
+      principalDailyTurns: 1,
+    });
   });
 
   it('refuses a placeholder model id and an unapproved provider', () => {
@@ -442,6 +481,81 @@ describe('mode resolution and boot gates', () => {
 
     expect(resolution.rate.rateVersion).toBe('test-official-price-rate-v1');
     expect(resolution.settings.modelId).toBe('gpt-5.6-luna');
+  });
+
+  it('applies every code-owned approval budget to effective runtime ceilings', () => {
+    const approval = {
+      ...APPROVED_REGISTRY.models[0]!,
+      budgetCeilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 5_000,
+        tenantDailyMicroUsd: 5_000,
+        globalDailyMicroUsd: 5_000,
+        principalDailyTurns: 1,
+      },
+    };
+    const registry = { models: [approval], rates: [VERIFIED_RATE] };
+    const baseInput = {
+      mode: 'real',
+      providerId: 'openai',
+      modelId: 'gpt-5.6-luna',
+      apiKey: VALID_KEY,
+    } as const;
+
+    // An omitted override means the runtime's larger defaults, not an absent limit.
+    expect(resolveModelExecution(baseInput, registry)).toMatchObject({
+      ok: false,
+      reason: 'budget_approval_exceeded',
+    });
+
+    expect(
+      resolveModelExecution(
+        {
+          ...baseInput,
+          ceilings: {
+            perAttemptMicroUsd: 5_000,
+            principalDailyMicroUsd: 5_000,
+            tenantDailyMicroUsd: 5_000,
+            globalDailyMicroUsd: 5_000,
+            principalDailyTurns: 1,
+          },
+        },
+        registry,
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      resolveModelExecution(
+        {
+          ...baseInput,
+          ceilings: {
+            perAttemptMicroUsd: 5_000,
+            principalDailyMicroUsd: 5_000,
+            tenantDailyMicroUsd: 5_000,
+            globalDailyMicroUsd: 5_000,
+            // Principal daily Turns are independent of maxPaidSmokeTurns.
+            principalDailyTurns: 2,
+          },
+        },
+        registry,
+      ),
+    ).toMatchObject({ ok: false, reason: 'budget_approval_exceeded' });
+
+    expect(
+      resolveModelExecution(
+        {
+          ...baseInput,
+          ceilings: {
+            perAttemptMicroUsd: 4_000,
+            principalDailyMicroUsd: 4_000,
+            tenantDailyMicroUsd: 4_000,
+            globalDailyMicroUsd: 4_000,
+            principalDailyTurns: 1,
+          },
+        },
+        registry,
+      ).ok,
+    ).toBe(true);
   });
 
   it('rejects budgets that exceed the database ceilings or invert the hierarchy', () => {
@@ -1008,7 +1122,22 @@ describe('approval record as a gate (L4-B)', () => {
     rate: ModelRateRow = VERIFIED_RATE,
   ) {
     return {
-      models: [{ providerId: 'openai' as const, modelId: rate.modelId, approval }],
+      models: [
+        {
+          providerId: 'openai' as const,
+          modelId: rate.modelId,
+          approval,
+          executionScope: 'resident' as const,
+          budgetCeilings: {
+            perAttemptMicroUsd: 5_000,
+            principalDailyMicroUsd: 250_000,
+            tenantDailyMicroUsd: 1_000_000,
+            globalDailyMicroUsd: 5_000_000,
+            principalDailyTurns: 60,
+          },
+          maxPaidSmokeTurns: 1,
+        },
+      ],
       rates: [rate],
     };
   }
@@ -1093,6 +1222,15 @@ describe('OpenRouter approval and live expiry fence', () => {
           providerId: 'openrouter' as const,
           modelId: OPENROUTER_RATE.modelId,
           approval,
+          executionScope: 'smoke_only' as const,
+          budgetCeilings: {
+            perAttemptMicroUsd: 5_000,
+            principalDailyMicroUsd: 5_000,
+            tenantDailyMicroUsd: 5_000,
+            globalDailyMicroUsd: 5_000,
+            principalDailyTurns: 1,
+          },
+          maxPaidSmokeTurns: 1,
           openRouterRouting: routing,
         },
       ],
@@ -1107,6 +1245,7 @@ describe('OpenRouter approval and live expiry fence', () => {
         providerId: 'openrouter',
         modelId: OPENROUTER_RATE.modelId,
         apiKey: VALID_KEY,
+        executionPurpose: 'paid_smoke',
       },
       registry(),
       new Date('2026-11-10T12:00:00Z'),
@@ -1137,6 +1276,7 @@ describe('OpenRouter approval and live expiry fence', () => {
           providerId: 'openrouter',
           modelId: OPENROUTER_RATE.modelId,
           apiKey: VALID_KEY,
+          executionPurpose: 'paid_smoke',
         },
         registry(route),
         new Date('2026-11-10T12:00:00Z'),
@@ -1153,6 +1293,7 @@ describe('OpenRouter approval and live expiry fence', () => {
         providerId: 'openrouter',
         modelId: OPENROUTER_RATE.modelId,
         apiKey: VALID_KEY,
+        executionPurpose: 'paid_smoke',
       },
       registry(),
       new Date('2026-11-10T12:00:00Z'),

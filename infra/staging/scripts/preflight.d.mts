@@ -33,6 +33,7 @@ export interface ModelAuthorizationEntry {
   readonly authorizationId: string;
   readonly providerId: string;
   readonly modelId: string;
+  readonly executionScope: 'resident' | 'smoke_only';
   readonly rateVersion: string;
   readonly approvedBy: string;
   readonly approvedAt: string;
@@ -43,6 +44,7 @@ export interface ModelAuthorizationEntry {
   readonly maxPrincipalDailyMicroUsd: number;
   readonly maxTenantDailyMicroUsd: number;
   readonly maxGlobalDailyMicroUsd: number;
+  readonly maxPrincipalDailyTurns: number;
   readonly maxPaidSmokeTurns: number;
 }
 

@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { resolveModelExecution } from '@ember/model-gateway';
 import {
   DEFAULT_SMOKE_PROMPT,
   MAX_SMOKE_TURNS,
@@ -35,6 +36,8 @@ function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePrecon
     rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
     approvalIdFromConfig: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     approvalIdFromEnv: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    executionScope: 'smoke_only',
+    maxPaidSmokeTurns: 1,
     maxTurns: 1,
     confirmed: true,
     ...overrides,
@@ -44,6 +47,43 @@ function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePrecon
 describe('paid smoke gate', () => {
   it('passes only when the mode is real, the id matches and the run was confirmed', () => {
     expect(evaluateSmokePreconditions(preconditions())).toStrictEqual({
+      ok: true,
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    });
+  });
+
+  it('accepts the exact code-approved model through the trusted Smoke purpose and one-turn gate', () => {
+    const model = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: 'nvidia/nemotron-3.5-lightning',
+        apiKey: 'sk-test-smoke-abcdefghijklmnopqrstuvwxyz',
+        executionPurpose: 'paid_smoke',
+      },
+      undefined,
+      new Date('2026-11-12T23:59:59.999Z'),
+    );
+
+    expect(model.ok).toBe(true);
+    if (!model.ok || model.mode !== 'real') {
+      throw new Error('expected the approved paid Smoke resolution');
+    }
+
+    expect(
+      evaluateSmokePreconditions({
+        modelMode: model.mode,
+        modelId: model.settings.modelId,
+        providerId: model.settings.providerId,
+        rateVersion: model.rate.rateVersion,
+        approvalIdFromConfig: model.approval.approvalId,
+        approvalIdFromEnv: model.approval.approvalId,
+        executionScope: model.executionScope,
+        maxPaidSmokeTurns: model.maxPaidSmokeTurns,
+        maxTurns: 1,
+        confirmed: true,
+      }),
+    ).toStrictEqual({
       ok: true,
       approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     });
@@ -77,6 +117,12 @@ describe('paid smoke gate', () => {
     );
   });
 
+  it('refuses to use a resident-scoped approval through the paid Smoke command', () => {
+    expect(evaluateSmokePreconditions(preconditions({ executionScope: 'resident' }))).toStrictEqual(
+      { ok: false, refusal: 'authorization_scope' },
+    );
+  });
+
   it('refuses a turn count outside the authorised range', () => {
     for (const maxTurns of [0, -1, MAX_SMOKE_TURNS + 1, 1.5]) {
       expect(evaluateSmokePreconditions(preconditions({ maxTurns }))).toStrictEqual({
@@ -86,6 +132,10 @@ describe('paid smoke gate', () => {
     }
 
     expect(evaluateSmokePreconditions(preconditions({ maxTurns: MAX_SMOKE_TURNS })).ok).toBe(true);
+    expect(evaluateSmokePreconditions(preconditions({ maxPaidSmokeTurns: 0 }))).toStrictEqual({
+      ok: false,
+      refusal: 'max_turns_invalid',
+    });
   });
 
   it('refuses to spend without an explicit confirmation', () => {
@@ -103,6 +153,8 @@ describe('paid smoke gate', () => {
       rateVersion: null,
       approvalIdFromConfig: null,
       approvalIdFromEnv: undefined,
+      executionScope: null,
+      maxPaidSmokeTurns: 0,
       maxTurns: 99,
       confirmed: false,
     });

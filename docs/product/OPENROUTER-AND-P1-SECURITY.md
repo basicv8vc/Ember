@@ -23,6 +23,12 @@ The approved route is `only: ["deepinfra"]`, `allow_fallbacks: false`, `data_col
 
 The exact endpoint metadata returned on 2026-11-11 identifies DeepInfra's `nvidia/nemotron-3.5-lightning` endpoint, `bf16` quantization, and prices of $0.06/M input and $0.16/M output. The adapter uses the provider-reported response cost when present, rounded upward to micro-USD. If usage is absent or malformed, the responder books the full reservation as unknown usage; if a valid token count is returned without provider cost, the estimate uses the pinned rate row.
 
+## Authorization scope and effective budget
+
+The code-owned approval marks this route `executionScope: "smoke_only"`. `loadWorkerConfig()` defaults to the trusted `resident_worker` purpose, so `apps/worker/src/index.ts` cannot resolve this model for the resident B2 responder. The dedicated `model:smoke` call site supplies `paid_smoke` directly in code; the purpose is not read from an environment variable, CLI option, or database value. The CLI hard-caps one Turn and also checks the approval's `maxPaidSmokeTurns` before it opens the Smoke database. The attempt ledger's `principalDailyTurns` is a separate daily budget.
+
+The approval caps are $0.005 per attempt, $0.005 principal daily, $0.005 tenant daily, $0.005 global daily, and one principal Turn per UTC day. `maxPaidSmokeTurns: 1` is an independent CLI run limit. Runtime resolution checks all five budget dimensions against the code-owned caps. When Smoke budget variables are absent, the resolver uses the Smoke-only approval caps. For a resident Worker, absent variables still resolve to the existing Worker defaults ($0.25 principal, $1 tenant, $5 global, 60 principal Turns); those defaults exceed this approval and are refused. Staging preflight likewise evaluates absent variables at their actual Worker defaults and refuses values above the approval. Setting lower explicit limits is accepted.
+
 ## Server configuration
 
 The configuration contract remains provider-neutral:
@@ -56,8 +62,8 @@ Every item must be recorded before the operator runs the Smoke:
 
 1. Confirm the exact current approval ID, model `nvidia/nemotron-3.5-lightning`, upstream `deepinfra` only, expiry 2026-11-12 UTC inclusive, no provider fallback, `data_collection=deny`, ZDR required, and reasoning disabled.
 2. Re-check the exact DeepInfra endpoint's ZDR eligibility, price, and supported parameters. Obtain authoritative confirmation that DeepInfra's no-training/ZDR commitments apply to its hosted `nvidia/nemotron-3.5-lightning` endpoint despite the third-party-model clause; also verify OpenRouter account eligibility, balance, and the dedicated key's cumulative $1 spending limit without exposing the key in chat, logs, or Git.
-3. Pass the complete Unit, PostgreSQL 17 Integration, and E2E suites; obtain independent PR review; verify the exact reviewed HEAD and current code/manifest parity.
-4. Confirm the 8,000-input / 512-output worst-case reservation is $0.000562, below $0.005, and that the Smoke allows one paid Turn and exactly one provider attempt.
+3. Pass the complete Unit, PostgreSQL 17 Integration, and E2E suites; obtain independent PR review; verify the exact reviewed HEAD and current code/manifest parity, including `smoke_only` scope and all five budget ceilings.
+4. Confirm the 8,000-input / 512-output worst-case reservation is $0.000562, below $0.005, and that the Smoke permits one run Turn, one principal Turn per UTC day, and exactly one provider attempt.
 5. Configure `EMBER_MODEL_API_KEY` only in an isolated Smoke environment. Provision a fresh PostgreSQL 17 Smoke database, apply required migrations, verify it differs from `DATABASE_URL`, contains no assistant Turns, and has no resident Worker connections. Confirm the normal Worker cannot access it.
 6. Keep the normal Staging Runtime at `EMBER_MODEL_EXECUTION=disabled`. Review the printed Smoke plan (approval ID, provider/model, price version, database target, one Turn, one attempt, and cost ceiling). The operator must restate the approval ID in `EMBER_MODEL_SMOKE_APPROVAL` and pass `--confirm`.
 7. Only after all checks pass, submit `PREFLIGHT_PASS` to the CTO. Then run exactly `pnpm model:smoke -- --max-turns=1 --confirm`. Stop after the result, reconcile the provider dashboard with the single attempt, and attach content-free evidence. Never automatically rerun an uncertain or failed Smoke.

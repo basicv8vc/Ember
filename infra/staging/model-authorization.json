@@ -6,6 +6,7 @@
       "authorizationId": "L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11",
       "providerId": "openrouter",
       "modelId": "nvidia/nemotron-3.5-lightning",
+      "executionScope": "smoke_only",
       "rateVersion": "openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11",
       "approvedBy": "CTO",
       "approvedAt": "2026-11-11",
@@ -15,6 +16,7 @@
       "maxPrincipalDailyMicroUsd": 5000,
       "maxTenantDailyMicroUsd": 5000,
       "maxGlobalDailyMicroUsd": 5000,
+      "maxPrincipalDailyTurns": 1,
       "maxPaidSmokeTurns": 1
     }
   ]

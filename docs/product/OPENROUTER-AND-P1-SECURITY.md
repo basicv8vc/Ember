@@ -56,6 +56,8 @@ The `model:smoke` command is one-shot and does not start the resident Worker loo
 
 A normal Worker uses `DATABASE_URL`; never point it at the Smoke database. Provision and migrate a fresh dedicated database before the run. A separate schema in a Worker-visible database is not sufficient isolation because the candidate poller can still see pending Turns.
 
+Because the approval is not globally consumed across Smoke databases, operators must treat it as one-shot and obtain fresh CTO approval before any second Smoke, including on a new or reset database.
+
 ## CTO checklist for a future first real Smoke
 
 Every item must be recorded before the operator runs the Smoke:

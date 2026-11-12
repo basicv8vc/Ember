@@ -39,6 +39,9 @@ export interface B2AttemptReservation {
   readonly reservedMicroUsd: number;
 }
 
+/** Providers whose identifiers are persisted with model attempt audit rows. */
+export type B2ModelProviderId = 'openai' | 'openrouter';
+
 export type B2ReserveOutcome =
   | { readonly kind: 'reserved'; readonly attempt: B2AttemptReservation }
   | { readonly kind: 'attempts_exhausted' }
@@ -119,7 +122,7 @@ export interface B2ReserveAttemptCommand {
   readonly ceilings: B2BudgetCeilings;
   readonly reservedMicroUsd: number;
   readonly rateVersion: string;
-  readonly providerId: 'openai';
+  readonly providerId: B2ModelProviderId;
   readonly modelLabel: string;
 }
 

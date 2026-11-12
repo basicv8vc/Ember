@@ -1,5 +1,7 @@
 # L4-B — First Real LLM Response
 
+> **Status update (2026-11-11):** This document records the earlier direct-OpenAI candidate review. The CTO has since selected the exact OpenRouter route `nvidia/nemotron-3.5-lightning` through DeepInfra, with a date-only inclusive expiry on 2026-11-12; see [OpenRouter Adapter and P1 Security Gates](OPENROUTER-AND-P1-SECURITY.md). The exact DeepInfra endpoint is currently listed in OpenRouter's ZDR catalog. The rest of preflight is incomplete; no real call has been made, and Staging remains disabled.
+
 | field                   | value                                                                     |
 | ----------------------- | ------------------------------------------------------------------------- |
 | status                  | **Draft PR. `real` is implemented as a reviewed gate and is NOT enabled** |

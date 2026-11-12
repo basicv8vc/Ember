@@ -5,8 +5,8 @@
  * - streaming (B1 T-3 chose polling; a stream is a second wire contract);
  * - tool/function calling (every tool call is a denied egress category);
  * - internal retries (they multiply spend and hide failures; the Turn owns the attempt policy);
- * - a model registry or routing (routing is a cost decision nobody has approved);
- * - a second provider (doubles credential, egress and retention review for zero Alpha value);
+ * - model fallback or caller-selected routing (the exact model and route are approval-bound);
+ * - provider hosts selected by configuration (the OpenAI and OpenRouter adapters pin their origins);
  * - response caching (a second copy of the transcript we would then have to delete).
  */
 export {
@@ -19,6 +19,8 @@ export {
   MODEL_FAILURE_CODES,
   ModelGatewayFailure,
   ModelInputRefused,
+  ModelAuthorizationRefused,
+  isModelAuthorizationRefused,
   isModelGatewayFailure,
   isRetryableModelFailure,
   type ModelFailureCode,
@@ -32,6 +34,7 @@ export type {
   ModelMessage,
   ModelOperation,
   ModelProviderId,
+  RealModelProviderId,
   ModelUsage,
 } from './types.js';
 export {
@@ -54,10 +57,12 @@ export {
   utcDay,
   type ApprovalValidity,
   type ApprovedModel,
+  type ModelApprovalBudgetCeilings,
   type ModelApprovalRecord,
   type ModelCandidate,
   type ModelRateRow,
   type ModelReasoningEffort,
+  type OpenRouterRoutingPolicy,
 } from './rates.js';
 export {
   MODEL_CREDENTIAL_PLACEHOLDER,
@@ -68,11 +73,13 @@ export {
   DEFAULT_MODEL_APPROVAL_REGISTRY,
   DEFAULT_MODEL_CEILINGS,
   isRealExecution,
+  isModelExecutionAuthorized,
   resolveModelExecution,
   type ModelApprovalRegistry,
   type ModelBootRefusalReason,
   type ModelBudgetCeilings,
   type ModelExecutionInput,
+  type ModelExecutionPurpose,
   type ModelExecutionResolution,
   type ModelExecutionSettings,
 } from './config.js';
@@ -93,4 +100,11 @@ export {
   type FetchResponseLike,
   type OpenAiGatewayOptions,
 } from './providers/openai.js';
+export {
+  OPENROUTER_CHAT_COMPLETIONS_PATH,
+  OPENROUTER_CHAT_COMPLETIONS_URL,
+  OPENROUTER_ORIGIN,
+  OpenRouterModelGateway,
+  type OpenRouterModelGatewayOptions,
+} from './providers/openrouter.js';
 export { createModelGateway, type CreateModelGatewayOptions } from './gateway.js';

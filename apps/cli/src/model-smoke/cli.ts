@@ -31,8 +31,8 @@ import { loadWorkerConfig } from '../../../worker/src/config.js';
  *      picked up and billed by this run;
  *   5. `--confirm` is passed. Without it the command prints the plan and exits.
  *
- * Override `EMBER_MODEL_SMOKE_DATABASE_URL` only when the smoke must target a database other than
- * `DATABASE_URL`; it is never used by the worker.
+ * `EMBER_MODEL_SMOKE_DATABASE_URL` is mandatory and must target a dedicated database distinct from
+ * `DATABASE_URL`. The smoke refuses any existing assistant Turns or resident Worker connection.
  */
 
 export const MAX_SMOKE_TURNS = 1;
@@ -50,6 +50,7 @@ export type SmokeRefusal =
   | 'approval_not_real'
   | 'approval_missing'
   | 'approval_mismatch'
+  | 'authorization_scope'
   | 'max_turns_invalid'
   | 'not_confirmed';
 
@@ -60,8 +61,37 @@ export interface SmokePreconditions {
   readonly rateVersion: string | null;
   readonly approvalIdFromConfig: string | null;
   readonly approvalIdFromEnv: string | undefined;
+  readonly executionScope: 'resident' | 'smoke_only' | null;
+  readonly maxPaidSmokeTurns: number;
   readonly maxTurns: number;
   readonly confirmed: boolean;
+}
+
+/** Require separate host/port/database identity; credentials are intentionally ignored. */
+export function hasIsolatedSmokeDatabase(
+  smokeDatabaseUrl: string,
+  runtimeDatabaseUrl: string,
+): boolean {
+  const smoke = describeDatabaseTarget(smokeDatabaseUrl);
+  const runtime = describeDatabaseTarget(runtimeDatabaseUrl);
+
+  if (
+    smoke.host === null ||
+    smoke.database === null ||
+    runtime.host === null ||
+    runtime.database === null
+  ) {
+    return false;
+  }
+
+  // Database names must differ even when the URLs use aliases for the same PostgreSQL host.
+  if (smoke.database === runtime.database) {
+    return false;
+  }
+
+  const smokeKey = `${smoke.host.toLowerCase()}:${smoke.port ?? 5432}/${smoke.database}`;
+  const runtimeKey = `${runtime.host.toLowerCase()}:${runtime.port ?? 5432}/${runtime.database}`;
+  return smokeKey !== runtimeKey;
 }
 
 /**
@@ -89,7 +119,18 @@ export function evaluateSmokePreconditions(
     return { ok: false, refusal: 'approval_mismatch' };
   }
 
-  if (!Number.isInteger(input.maxTurns) || input.maxTurns < 1 || input.maxTurns > MAX_SMOKE_TURNS) {
+  if (input.executionScope !== 'smoke_only') {
+    return { ok: false, refusal: 'authorization_scope' };
+  }
+
+  if (
+    !Number.isInteger(input.maxPaidSmokeTurns) ||
+    input.maxPaidSmokeTurns < 1 ||
+    !Number.isInteger(input.maxTurns) ||
+    input.maxTurns < 1 ||
+    input.maxTurns > MAX_SMOKE_TURNS ||
+    input.maxTurns > input.maxPaidSmokeTurns
+  ) {
     return { ok: false, refusal: 'max_turns_invalid' };
   }
 
@@ -110,6 +151,8 @@ const REFUSAL_TEXT: Readonly<Record<SmokeRefusal, string>> = Object.freeze({
   approval_mismatch:
     'EMBER_MODEL_SMOKE_APPROVAL does not match the approval recorded for the configured model. ' +
     'Refusing: the id in the environment and the id in code must be the same decision.',
+  authorization_scope:
+    'the configured approval is not scoped for the dedicated paid Smoke execution purpose.',
   max_turns_invalid: '--max-turns must be exactly 1 for a paid smoke run.',
   not_confirmed: 'Refusing to spend without --confirm. The plan above is what would have run.',
 });
@@ -172,6 +215,7 @@ export interface SmokeEvidence {
   readonly conversationId: string;
   readonly turnId: string;
   readonly summary: Readonly<Record<string, number | boolean>>;
+  readonly attemptCount: number;
   readonly turn: {
     readonly status: string;
     readonly failureReason: string | null;
@@ -205,6 +249,7 @@ export function buildEvidence(input: {
   readonly conversationId: string;
   readonly turnId: string;
   readonly summary: Readonly<Record<string, number | boolean>>;
+  readonly attemptCount: number;
   readonly turn: SmokeEvidence['turn'];
   readonly reply: SmokeEvidence['reply'];
   readonly attempt: SmokeEvidence['attempt'];
@@ -213,6 +258,9 @@ export function buildEvidence(input: {
 
   if (input.summary['completed'] !== 1) {
     reasons.push('the responder did not report exactly one completed Turn');
+  }
+  if (input.summary['examined'] !== 1) {
+    reasons.push('the responder did not examine exactly the one scoped smoke Turn');
   }
   if (input.turn.status !== 'completed') {
     reasons.push(`the persisted Turn status is ${input.turn.status}`);
@@ -230,10 +278,18 @@ export function buildEvidence(input: {
       reasons.push('the persisted reply is empty');
     }
   }
+  if (input.attemptCount !== 1) {
+    reasons.push(`the smoke wrote ${input.attemptCount} provider attempts instead of exactly one`);
+  }
   if (input.attempt === null) {
     reasons.push('no attempt row was written');
-  } else if (input.attempt.state !== 'settled') {
-    reasons.push(`the attempt settled as ${input.attempt.state}`);
+  } else {
+    if (input.attempt.attemptNo !== 1) {
+      reasons.push(`the smoke attempt number is ${input.attempt.attemptNo} instead of 1`);
+    }
+    if (input.attempt.state !== 'settled') {
+      reasons.push(`the attempt settled as ${input.attempt.state}`);
+    }
   }
 
   return {
@@ -250,6 +306,7 @@ export function buildEvidence(input: {
     conversationId: input.conversationId,
     turnId: input.turnId,
     summary: input.summary,
+    attemptCount: input.attemptCount,
     turn: input.turn,
     reply: input.reply,
     attempt: input.attempt,
@@ -310,7 +367,8 @@ export async function runPaidSmoke(
   },
 ): Promise<number> {
   const env = process.env;
-  const model = loadWorkerConfig(env).model;
+  // This is a trusted call site. The purpose is not read from env or parsed smoke arguments.
+  const model = loadWorkerConfig(env, 'paid_smoke').model;
 
   if (!model.ok) {
     deps.log(`refused: model execution resolution failed (${model.reason})`);
@@ -324,6 +382,8 @@ export async function runPaidSmoke(
     rateVersion: model.mode === 'real' ? model.rate.rateVersion : null,
     approvalIdFromConfig: model.mode === 'real' ? model.approval.approvalId : null,
     approvalIdFromEnv: env['EMBER_MODEL_SMOKE_APPROVAL'],
+    executionScope: model.mode === 'real' ? model.executionScope : null,
+    maxPaidSmokeTurns: model.mode === 'real' ? model.maxPaidSmokeTurns : 0,
     maxTurns: args.maxTurns,
     confirmed: args.confirm,
   });
@@ -339,9 +399,21 @@ export async function runPaidSmoke(
     return 2;
   }
 
-  const databaseConfig = loadDatabaseConfig({
-    DATABASE_URL: env['EMBER_MODEL_SMOKE_DATABASE_URL'] ?? env['DATABASE_URL'],
-  });
+  const smokeDatabaseUrl = env['EMBER_MODEL_SMOKE_DATABASE_URL']?.trim() ?? '';
+  const runtimeDatabaseUrl = env['DATABASE_URL']?.trim() ?? '';
+
+  if (
+    smokeDatabaseUrl.length === 0 ||
+    runtimeDatabaseUrl.length === 0 ||
+    !hasIsolatedSmokeDatabase(smokeDatabaseUrl, runtimeDatabaseUrl)
+  ) {
+    deps.log(
+      'refused: EMBER_MODEL_SMOKE_DATABASE_URL must point to a separate dedicated database from DATABASE_URL.',
+    );
+    return 3;
+  }
+
+  const databaseConfig = loadDatabaseConfig({ DATABASE_URL: smokeDatabaseUrl });
   // Host/port/database only: `formatDatabaseTarget` never prints the credential.
   const database = formatDatabaseTarget(describeDatabaseTarget(databaseConfig.connectionString));
 
@@ -366,15 +438,28 @@ export async function runPaidSmoke(
   const startedAt = deps.now();
 
   try {
-    const running = await pool.query<{ readonly count: string }>(
-      "SELECT count(*)::text AS count FROM assistant_turns WHERE status = 'running'",
+    const residentWorkers = await pool.query<{ readonly count: string }>(
+      `SELECT count(*)::text AS count
+         FROM pg_stat_activity
+        WHERE datname = current_database()
+          AND application_name IN ('ember', 'ember-worker')
+          AND pid <> pg_backend_pid()`,
     );
 
-    if (Number(running.rows[0]?.count ?? '0') > 0) {
+    if (Number(residentWorkers.rows[0]?.count ?? '0') > 0) {
       deps.log(
-        'refused: at least one Turn is already running in this database. The responder claims the ' +
-          "oldest running Turn, so a smoke run here could pay for somebody else's work. Run it " +
-          'against an idle database.',
+        'refused: an Ember Worker is connected to the smoke database. Stop it or select a dedicated database.',
+      );
+      return 3;
+    }
+
+    const existingTurns = await pool.query<{ readonly count: string }>(
+      'SELECT count(*)::text AS count FROM assistant_turns',
+    );
+
+    if (Number(existingTurns.rows[0]?.count ?? '0') > 0) {
+      deps.log(
+        'refused: the dedicated smoke database already contains assistant Turns. Use an empty isolated database.',
       );
       return 3;
     }
@@ -464,19 +549,19 @@ export async function runPaidSmoke(
       [tenantId, conversationId],
     );
 
-    const attempt = await pool.query<Row>(
+    const attempts = await pool.query<Row>(
       `SELECT attempt_no, state, outcome_code, reserved_micro_usd::text, 
               applied_cost_micro_usd::text, observed_cost_micro_usd::text,
               input_tokens::text, output_tokens::text
          FROM model_turn_attempts
         WHERE tenant_id = $1 AND turn_id = $2
-        ORDER BY attempt_no LIMIT 1`,
+        ORDER BY attempt_no`,
       [tenantId, submitted.receipt.turn.turn_id],
     );
 
     const turnRow = turn.rows[0];
     const replyRow = reply.rows[0];
-    const attemptRow = attempt.rows[0];
+    const attemptRow = attempts.rows[0];
 
     const evidence = buildEvidence({
       startedAt,
@@ -486,6 +571,7 @@ export async function runPaidSmoke(
       conversationId,
       turnId: submitted.receipt.turn.turn_id,
       summary: summaries[0] ?? {},
+      attemptCount: attempts.rows.length,
       turn: {
         status: columnText(turnRow?.['status'] ?? 'missing'),
         failureReason: columnTextOrNull(turnRow?.['failure_reason']),

@@ -23,9 +23,10 @@ const COMPOSE_FILE = `${REPO_ROOT}infra/staging/compose.yaml`;
 const MANIFEST_FILE = `${REPO_ROOT}infra/staging/model-authorization.json`;
 
 /** The day the review document is written, so an "expired" case does not depend on the CI clock. */
-const TODAY = new Date('2026-11-07T09:00:00Z');
+const TODAY = new Date('2026-11-11T09:00:00Z');
 
 const MODEL_ID = 'gpt-5.6-luna';
+const OPENROUTER_MODEL_ID = 'nvidia/nemotron-3.5-lightning';
 const AUTHORIZED_KEY = 'sk-live-AbCdEf0123456789AbCdEf0123456789';
 
 function stagingEnv(): Map<string, string> {
@@ -41,6 +42,7 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     authorizationId: 'L4B-A1',
     providerId: 'openai',
     modelId: MODEL_ID,
+    executionScope: 'resident',
     rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
     approvedBy: 'CTO / Jia',
     approvedAt: '2026-11-07',
@@ -50,9 +52,33 @@ function authorization(overrides: Partial<ModelAuthorizationEntry> = {}): ModelA
     maxPrincipalDailyMicroUsd: 250_000,
     maxTenantDailyMicroUsd: 1_000_000,
     maxGlobalDailyMicroUsd: 5_000_000,
+    maxPrincipalDailyTurns: 60,
     maxPaidSmokeTurns: 1,
     ...overrides,
   };
+}
+
+function openRouterAuthorization(
+  overrides: Partial<ModelAuthorizationEntry> = {},
+): ModelAuthorizationEntry {
+  return authorization({
+    authorizationId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    providerId: 'openrouter',
+    modelId: OPENROUTER_MODEL_ID,
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
+    approvedBy: 'CTO',
+    approvedAt: '2026-11-11',
+    expiresAt: '2026-11-12',
+    priceSource: 'https://openrouter.ai/nvidia/nemotron-3.5-lightning/providers',
+    executionScope: 'smoke_only',
+    maxPerAttemptMicroUsd: 5_000,
+    maxPrincipalDailyMicroUsd: 5_000,
+    maxTenantDailyMicroUsd: 5_000,
+    maxGlobalDailyMicroUsd: 5_000,
+    maxPrincipalDailyTurns: 1,
+    maxPaidSmokeTurns: 1,
+    ...overrides,
+  });
 }
 
 function manifest(...entries: ModelAuthorizationEntry[]): ModelAuthorizationManifest {
@@ -69,6 +95,12 @@ function realEnv(provider = 'openai'): Map<string, string> {
   return env;
 }
 
+function openRouterRealEnv(): Map<string, string> {
+  const env = realEnv('openrouter');
+  env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+  return env;
+}
+
 function codes(result: GuardResult): string[] {
   return result.violations.map((violation) => violation.code);
 }
@@ -78,11 +110,18 @@ function messages(result: GuardResult): string {
 }
 
 describe('paid model authorization artifact', () => {
-  it('ships empty, so the merged default still refuses real inference', () => {
+  it('records the exact CTO route while the Staging Runtime remains disabled by default', () => {
     const onDisk = loadModelAuthorizationManifest();
 
     expect(onDisk.readable).toBe(true);
-    expect(onDisk.entries).toEqual([]);
+    expect(onDisk.entries).toHaveLength(1);
+    expect(onDisk.entries[0]).toMatchObject(openRouterAuthorization());
+
+    const normalStagingEnv = stagingEnv();
+    expect(normalStagingEnv.get('EMBER_MODEL_EXECUTION')).toBe('disabled');
+    expect(evaluateStagingEnv(normalStagingEnv, { authorization: onDisk, now: TODAY }).ok).toBe(
+      true,
+    );
 
     const result = evaluateStagingEnv(realEnv(), { authorization: onDisk, now: TODAY });
 
@@ -100,6 +139,66 @@ describe('paid model authorization artifact', () => {
     expect(codes(result)).not.toContain('E_PROVIDER_SECRET');
     expect(codes(result)).not.toContain('E_MODEL_CREDENTIAL');
     expect(result.ok).toBe(true);
+  });
+
+  it('recognizes OpenRouter only with its own official catalog page for the exact model', () => {
+    expect(
+      findModelAuthorization(manifest(openRouterAuthorization()), {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        today: '2026-11-11',
+      }),
+    ).toMatchObject({ status: 'authorized' });
+  });
+
+  it('keeps the committed OpenRouter smoke-only approval unavailable to a resident deployment', () => {
+    const env = realEnv('openrouter');
+    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+
+    const result = evaluateStagingEnv(env, {
+      authorization: loadModelAuthorizationManifest(),
+      now: TODAY,
+    });
+
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('smoke_only');
+    expect(
+      findModelAuthorization(loadModelAuthorizationManifest(), {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        today: '2026-11-11',
+      }),
+    ).toMatchObject({ status: 'authorized' });
+    expect(result.warnings.map((warning) => warning.code)).toContain(
+      'W_MODEL_AUTHORIZATION_EXPIRING',
+    );
+  });
+
+  it('does not accept an OpenAI price citation as OpenRouter pricing approval', () => {
+    const env = realEnv('openrouter');
+    env.set('EMBER_MODEL_ID', OPENROUTER_MODEL_ID);
+
+    const result = evaluateStagingEnv(env, {
+      authorization: manifest(
+        openRouterAuthorization({
+          priceSource: 'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
+        }),
+      ),
+      now: TODAY,
+    });
+
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('incomplete');
+  });
+
+  it('fails closed on a prototype-looking provider id in the authorization file', () => {
+    const result = findModelAuthorization(manifest(authorization({ providerId: '__proto__' })), {
+      providerId: '__proto__',
+      modelId: MODEL_ID,
+      today: '2026-11-07',
+    });
+
+    expect(result.status).toBe('malformed_authorization');
   });
 
   it('admits the credential variable only together with an authorization, never on its own', () => {
@@ -180,9 +279,11 @@ describe('paid model authorization artifact', () => {
     for (const override of [
       { authorizationId: 'PENDING-CTO-SIGNOFF' },
       { authorizedByPlaceholder: true, approvedBy: 'TODO' },
+      { executionScope: 'resident_worker' as ModelAuthorizationEntry['executionScope'] },
       { expiresAt: 'not-a-date' },
       { priceSource: 'https://third-party.example/models/gpt-5.6-luna' },
       { maxPerAttemptMicroUsd: 0 },
+      { maxPrincipalDailyTurns: 0 },
       { maxPaidSmokeTurns: 500 },
     ]) {
       const result = evaluateStagingEnv(realEnv(), {
@@ -246,6 +347,73 @@ describe('paid model authorization artifact', () => {
     expect(codes(result)).toContain('E_MODEL_BUDGET');
   });
 
+  it('compares every effective Worker budget default to the authorization', () => {
+    const result = evaluateStagingEnv(openRouterRealEnv(), {
+      authorization: manifest(openRouterAuthorization()),
+      now: TODAY,
+    });
+
+    const budgetVariables = result.violations
+      .filter((violation) => violation.code === 'E_MODEL_BUDGET')
+      .map((violation) => violation.variable);
+
+    expect(budgetVariables).toEqual([
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD',
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS',
+    ]);
+  });
+
+  it('rejects explicit dollar and principal Turn budgets above their separate approvals', () => {
+    for (const [variable, value] of [
+      ['EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', 5_001],
+      ['EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', 2],
+    ] as const) {
+      const env = openRouterRealEnv();
+      env.set('EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '5000');
+      env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', '1');
+      env.set(variable, String(value));
+
+      const result = evaluateStagingEnv(env, {
+        authorization: manifest(openRouterAuthorization()),
+        now: TODAY,
+      });
+
+      expect(
+        result.violations.some(
+          (violation) => violation.code === 'E_MODEL_BUDGET' && violation.variable === variable,
+        ),
+        `${variable}=${value}`,
+      ).toBe(true);
+    }
+  });
+
+  it('accepts lower runtime budgets while keeping principal daily Turns distinct from Smoke Turns', () => {
+    const env = openRouterRealEnv();
+    env.set('EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '4000');
+    env.set('EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS', '1');
+
+    const result = evaluateStagingEnv(env, {
+      authorization: manifest(openRouterAuthorization({ maxPrincipalDailyTurns: 2 })),
+      now: TODAY,
+    });
+
+    expect(codes(result)).not.toContain('E_MODEL_BUDGET');
+    // Smoke-only scope still blocks this resident deployment profile.
+    expect(codes(result)).toContain('E_MODEL_REAL');
+    expect(messages(result)).toContain('smoke_only');
+  });
+
   it('accepts a deployment that only lowers an authorized ceiling', () => {
     const env = realEnv();
     env.set('EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD', '250000');
@@ -288,28 +456,65 @@ describe('paid model authorization artifact', () => {
 });
 
 describe('authorization artifact ↔ code allowlist parity', () => {
-  it('reads the committed manifest without a syntax error and keeps it empty', () => {
+  it('reads the committed manifest and matches the code-side OpenRouter approval', () => {
     const parsed = JSON.parse(readFileSync(MANIFEST_FILE, 'utf8')) as {
       schemaVersion: number;
       authorizations: ModelAuthorizationEntry[];
     };
 
     expect(parsed.schemaVersion).toBe(1);
-    expect(parsed.authorizations).toEqual([]);
-    // The code-side allowlist must be empty for the same reason the artifact is: L4-B ships the
-    // gate, not the permission. Enabling real inference is one reviewed diff in both places.
-    expect(APPROVED_REAL_MODELS).toEqual([]);
-    expect(MODEL_RATE_ROWS.every((row) => row.provenance === 'unverified')).toBe(true);
+    expect(parsed.authorizations).toHaveLength(1);
+    expect(parsed.authorizations[0]).toMatchObject(openRouterAuthorization());
+    expect(APPROVED_REAL_MODELS).toMatchObject([
+      {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_MODEL_ID,
+        approval: {
+          approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+          approvedBy: 'CTO',
+          approvedAt: '2026-11-11',
+          expiresAt: '2026-11-12',
+        },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+        maxPaidSmokeTurns: 1,
+        openRouterRouting: {
+          only: ['deepinfra'],
+          allowFallbacks: false,
+          dataCollection: 'deny',
+          zdr: true,
+          requireParameters: true,
+        },
+      },
+    ]);
+    expect(
+      MODEL_RATE_ROWS.filter((row) => row.provenance !== 'unverified').map((row) => [
+        row.providerId,
+        row.modelId,
+      ]),
+    ).toEqual([['openrouter', OPENROUTER_MODEL_ID]]);
   });
 
-  it('names a candidate that is not approved and cannot resolve', () => {
+  it('leaves direct OpenAI routing unapproved', () => {
     expect(PENDING_MODEL_CANDIDATES).toHaveLength(1);
-    expect(PENDING_MODEL_CANDIDATES[0]?.modelId).toBe(MODEL_ID);
+    const openAiCandidate = PENDING_MODEL_CANDIDATES[0];
+    expect(openAiCandidate).toMatchObject({
+      providerId: 'openai',
+      modelId: MODEL_ID,
+    });
+    expect(openAiCandidate?.rationale.length).toBeGreaterThan(0);
 
     const approvedIds = new Set(APPROVED_REAL_MODELS.map((entry) => entry.modelId));
     for (const candidate of PENDING_MODEL_CANDIDATES) {
       expect(approvedIds.has(candidate.modelId)).toBe(false);
     }
+    expect(approvedIds).toEqual(new Set([OPENROUTER_MODEL_ID]));
   });
 
   it('prices the candidate and records shutdown dates for deprecated snapshots', () => {
@@ -323,6 +528,19 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     expect(candidateRate?.provenance).toBe('unverified');
     expect(candidateRate?.source).toContain(
       'https://developers.openai.com/api/docs/models/gpt-5.6-luna',
+    );
+
+    const openRouterRate = MODEL_RATE_ROWS.find(
+      (row) => row.providerId === 'openrouter' && row.modelId === OPENROUTER_MODEL_ID,
+    );
+    expect(openRouterRate).toMatchObject({
+      inputMicroUsdPerMillion: 60_000,
+      outputMicroUsdPerMillion: 160_000,
+      provenance: 'official_price_verified',
+      reasoningEffort: 'none',
+    });
+    expect(openRouterRate?.source).toContain(
+      'https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints',
     );
 
     const retiredGpt5Mini = MODEL_RATE_ROWS.find((row) => row.modelId === 'gpt-5-mini-2025-08-07');

@@ -9,8 +9,10 @@ import {
   findRateRow,
   isPastShutdown,
   type ApprovedModel,
+  type ModelApprovalBudgetCeilings,
   type ModelApprovalRecord,
   type ModelRateRow,
+  type OpenRouterRoutingPolicy,
 } from './rates.js';
 import type { ModelExecutionMode, ModelProviderId } from './types.js';
 
@@ -49,8 +51,13 @@ export type ModelBootRefusalReason =
   | 'approval_not_effective'
   | 'model_shutdown'
   | 'rate_not_verified'
+  | 'provider_routing_not_approved'
+  | 'execution_scope_refused'
+  | 'budget_approval_exceeded'
   | CredentialRefusal
   | 'budget_config_invalid';
+
+export type ModelExecutionPurpose = 'resident_worker' | 'paid_smoke';
 
 /** Code-owned allowlists. Tests may supply their own registry; the process root never does. */
 export interface ModelApprovalRegistry {
@@ -68,6 +75,8 @@ export interface ModelExecutionInput {
   readonly providerId?: string | undefined;
   readonly modelId?: string | undefined;
   readonly apiKey?: string | undefined;
+  /** Supplied by trusted code call sites only; never read from process environment or CLI args. */
+  readonly executionPurpose?: ModelExecutionPurpose | undefined;
   readonly ceilings?: Partial<ModelBudgetCeilings> | undefined;
   readonly maxAttempts?: number | undefined;
   readonly attemptTimeoutMs?: number | undefined;
@@ -97,6 +106,9 @@ export type ModelExecutionResolution =
        * test compares it to what it was told on the command line). It is a decision id, not a secret.
        */
       readonly approval: ModelApprovalRecord;
+      readonly executionScope: ApprovedModel['executionScope'];
+      readonly maxPaidSmokeTurns: number;
+      readonly openRouterRouting: OpenRouterRoutingPolicy | null;
       readonly credential: ModelCredential;
     }
   | {
@@ -118,8 +130,9 @@ function resolveMode(raw: string | undefined): ModelExecutionMode | null {
 
 function resolveCeilings(
   overrides: Partial<ModelBudgetCeilings> | undefined,
+  defaults: ModelBudgetCeilings = DEFAULT_MODEL_CEILINGS,
 ): ModelBudgetCeilings | null {
-  const merged: ModelBudgetCeilings = { ...DEFAULT_MODEL_CEILINGS, ...overrides };
+  const merged: ModelBudgetCeilings = { ...defaults, ...overrides };
 
   const entries: readonly (readonly [keyof ModelBudgetCeilings, number])[] = [
     ['perAttemptMicroUsd', merged.perAttemptMicroUsd],
@@ -156,6 +169,19 @@ function resolveCeilings(
   return Object.freeze(merged);
 }
 
+function exceedsApprovedCeilings(
+  runtime: ModelBudgetCeilings,
+  approved: ModelApprovalBudgetCeilings,
+): boolean {
+  return (
+    runtime.perAttemptMicroUsd > approved.perAttemptMicroUsd ||
+    runtime.principalDailyMicroUsd > approved.principalDailyMicroUsd ||
+    runtime.tenantDailyMicroUsd > approved.tenantDailyMicroUsd ||
+    runtime.globalDailyMicroUsd > approved.globalDailyMicroUsd ||
+    runtime.principalDailyTurns > approved.principalDailyTurns
+  );
+}
+
 function boundedInteger(
   value: number | undefined,
   fallback: number,
@@ -178,7 +204,7 @@ function boundedInteger(
  *
  * `real` requires five independent gates, and no configuration can substitute one for another:
  * 1. the provider is in the code-owned allowlist;
- * 2. the model id is in the code-owned allowlist (empty in the merged tree);
+ * 2. the model id is in the code-owned allowlist as one exact approved entry;
  * 3. that entry carries an approval record that is effective **today** — dated, named, unexpired;
  * 4. a price row exists for that exact model id with official published pricing explicitly
  *    reviewed (or an invoice has been verified), and the snapshot's shutdown day has not arrived;
@@ -196,11 +222,22 @@ export function resolveModelExecution(
   now: Date = new Date(),
 ): ModelExecutionResolution {
   const mode = resolveMode(input.mode);
-  const ceilings = resolveCeilings(input.ceilings);
+  const configuredProvider = input.providerId?.trim() ?? 'openai';
+  const configuredModelId = input.modelId?.trim() ?? '';
+  const executionPurpose = input.executionPurpose ?? 'resident_worker';
+  const modelApproval = registry.models.find(
+    (entry) => entry.providerId === configuredProvider && entry.modelId === configuredModelId,
+  );
+  const smokeApprovalDefaults =
+    executionPurpose === 'paid_smoke' && modelApproval?.executionScope === 'smoke_only'
+      ? modelApproval.budgetCeilings
+      : DEFAULT_MODEL_CEILINGS;
+  const ceilings = resolveCeilings(input.ceilings, smokeApprovalDefaults);
+  const providerId: ModelProviderId = configuredProvider === 'openrouter' ? 'openrouter' : 'openai';
 
   const settings: ModelExecutionSettings = Object.freeze({
     mode: mode ?? 'disabled',
-    providerId: 'openai',
+    providerId,
     modelId: input.modelId?.trim() ?? null,
     ceilings: ceilings ?? DEFAULT_MODEL_CEILINGS,
     maxAttempts: boundedInteger(
@@ -238,7 +275,7 @@ export function resolveModelExecution(
   }
 
   // ---- mode === 'real': every gate below is required ----
-  const provider = input.providerId?.trim() ?? 'openai';
+  const provider = configuredProvider;
 
   if (!APPROVED_MODEL_PROVIDERS.includes(provider)) {
     return { ok: false, mode, settings, reason: 'provider_not_approved' };
@@ -250,12 +287,30 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_not_approved' };
   }
 
-  const modelApproved = registry.models.find(
-    (entry) => entry.providerId === provider && entry.modelId === modelId,
-  );
+  const modelApproved = modelApproval;
 
   if (modelApproved === undefined) {
     return { ok: false, mode, settings, reason: 'model_not_approved' };
+  }
+
+  if (modelApproved.executionScope === 'smoke_only' && executionPurpose !== 'paid_smoke') {
+    return { ok: false, mode, settings, reason: 'execution_scope_refused' };
+  }
+
+  if (
+    provider === 'openrouter' &&
+    (!modelApproved.openRouterRouting ||
+      modelApproved.openRouterRouting.allowFallbacks !== false ||
+      modelApproved.openRouterRouting.dataCollection !== 'deny' ||
+      modelApproved.openRouterRouting.zdr !== true ||
+      modelApproved.openRouterRouting.requireParameters !== true ||
+      !Array.isArray(modelApproved.openRouterRouting.only) ||
+      modelApproved.openRouterRouting.only.length === 0 ||
+      modelApproved.openRouterRouting.only.some(
+        (route) => typeof route !== 'string' || route.trim().length === 0,
+      ))
+  ) {
+    return { ok: false, mode, settings, reason: 'provider_routing_not_approved' };
   }
 
   // The allowlist entry is a *record*, not a flag: it must name who decided, when, and until when.
@@ -278,6 +333,10 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_shutdown' };
   }
 
+  if (ceilings === null || exceedsApprovedCeilings(ceilings, modelApproved.budgetCeilings)) {
+    return { ok: false, mode, settings, reason: 'budget_approval_exceeded' };
+  }
+
   const credential = ModelCredential.parse(input.apiKey);
 
   if (!credential.ok) {
@@ -287,11 +346,32 @@ export function resolveModelExecution(
   return {
     ok: true,
     mode,
-    settings: Object.freeze({ ...settings, mode, modelId }),
+    settings: Object.freeze({
+      ...settings,
+      mode,
+      providerId: provider as ModelProviderId,
+      modelId,
+    }),
     rate,
     approval: modelApproved.approval,
+    executionScope: modelApproved.executionScope,
+    maxPaidSmokeTurns: modelApproved.maxPaidSmokeTurns,
+    openRouterRouting: modelApproved.openRouterRouting ?? null,
     credential: credential.credential,
   };
+}
+
+/** Dynamic spend permission used at each provider boundary, including retries in a long-lived Worker. */
+export function isModelExecutionAuthorized(
+  resolution: Extract<ModelExecutionResolution, { readonly ok: true; readonly mode: 'real' }>,
+  now: Date = new Date(),
+): boolean {
+  return (
+    evaluateApproval(resolution.approval, now) === 'effective' &&
+    (resolution.rate.provenance === 'official_price_verified' ||
+      resolution.rate.provenance === 'invoice_verified') &&
+    !isPastShutdown(resolution.rate, now)
+  );
 }
 
 /** True when a resolution may issue paid provider calls. */

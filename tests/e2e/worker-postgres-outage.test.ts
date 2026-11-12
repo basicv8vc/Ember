@@ -76,7 +76,7 @@ async function waitForActiveCompletionQuery(): Promise<number> {
       `SELECT pid
          FROM pg_stat_activity
         WHERE datname = $1
-          AND application_name = 'ember'
+          AND application_name = 'ember-worker'
           AND state = 'active'
           AND wait_event = 'PgSleep'
           AND query LIKE '%UPDATE assistant_turns%'`,
@@ -99,7 +99,7 @@ async function blockDatabaseConnections(activePid: number): Promise<void> {
   const terminated = await adminPool.query<{ pid: number; terminated: boolean }>(
     `SELECT pid, pg_terminate_backend(pid) AS terminated
        FROM pg_stat_activity
-      WHERE datname = $1 AND application_name = 'ember' AND pid <> pg_backend_pid()`,
+      WHERE datname = $1 AND application_name = 'ember-worker' AND pid <> pg_backend_pid()`,
     [databaseName],
   );
 

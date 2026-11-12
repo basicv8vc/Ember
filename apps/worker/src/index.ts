@@ -77,13 +77,16 @@ async function main(): Promise<void> {
   const config = loadWorkerConfig();
   const databaseConfig = loadDatabaseConfig();
   const logger = createWorkerLogger({ level: config.logLevel });
-  const pool = createPool(databaseConfig, {
-    onClientError: (error) => {
-      logger.warn('database client connection error', {
-        category: safeWorkerErrorCategory(error),
-      });
+  const pool = createPool(
+    { ...databaseConfig, applicationName: 'ember-worker' },
+    {
+      onClientError: (error) => {
+        logger.warn('database client connection error', {
+          category: safeWorkerErrorCategory(error),
+        });
+      },
     },
-  });
+  );
 
   // Claim eligibility is derived from the handler's own capability list, so the worker can
   // never claim a Task kind it has no deterministic branch for.

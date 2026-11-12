@@ -33,16 +33,18 @@ export interface ModelAuthorizationEntry {
   readonly authorizationId: string;
   readonly providerId: string;
   readonly modelId: string;
+  readonly executionScope: 'resident' | 'smoke_only';
   readonly rateVersion: string;
   readonly approvedBy: string;
   readonly approvedAt: string;
   readonly expiresAt: string;
-  /** Official provider pricing URL reviewed before the first call; invoices are reconciled later. */
+  /** Official provider catalog pricing URL reviewed before the first call; invoices are reconciled later. */
   readonly priceSource: string;
   readonly maxPerAttemptMicroUsd: number;
   readonly maxPrincipalDailyMicroUsd: number;
   readonly maxTenantDailyMicroUsd: number;
   readonly maxGlobalDailyMicroUsd: number;
+  readonly maxPrincipalDailyTurns: number;
   readonly maxPaidSmokeTurns: number;
 }
 

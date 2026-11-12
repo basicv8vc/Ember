@@ -1,12 +1,13 @@
-import type { ModelProviderId } from './types.js';
+import type { RealModelProviderId } from './types.js';
 
 /**
  * A pin, not a preference.
  *
- * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`, and that list is
- * **empty in the merged tree**. Enabling real inference is therefore a reviewed code change
- * accompanied by a CTO decision, never an environment variable: no deploy, no `.env` file and no
- * per-tenant policy can turn on provider egress on its own.
+ * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`. The OpenRouter
+ * approval below uses date-granularity UTC bounds with an inclusive `expiresAt`, for one exact
+ * model and one reviewed upstream route.
+ * It does not enable execution: runtime configuration still defaults to `disabled`, and smoke
+ * execution has its own one-turn, one-attempt gate.
  */
 
 /**
@@ -28,14 +29,65 @@ export interface ModelApprovalRecord {
   readonly expiresAt: string;
 }
 
-export interface ApprovedModel {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
-  readonly modelId: string;
-  readonly approval: ModelApprovalRecord;
+/** Runtime spend ceilings reviewed together with a model approval. */
+export interface ModelApprovalBudgetCeilings {
+  readonly perAttemptMicroUsd: number;
+  readonly principalDailyMicroUsd: number;
+  readonly tenantDailyMicroUsd: number;
+  readonly globalDailyMicroUsd: number;
+  readonly principalDailyTurns: number;
 }
 
-/** Approved and effective. **Empty in this tree**: L4-B ships the gate, not the permission. */
-export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([]);
+export interface ApprovedModel {
+  readonly providerId: RealModelProviderId;
+  readonly modelId: string;
+  readonly approval: ModelApprovalRecord;
+  /** A smoke-only approval cannot authorize a resident Worker. */
+  readonly executionScope: 'resident' | 'smoke_only';
+  readonly budgetCeilings: ModelApprovalBudgetCeilings;
+  /** Turn count for `model:smoke`; independent of the principal's daily Turn budget. */
+  readonly maxPaidSmokeTurns: number;
+  /** Required for OpenRouter models; this policy is part of the reviewed model decision. */
+  readonly openRouterRouting?: OpenRouterRoutingPolicy;
+}
+
+export interface OpenRouterRoutingPolicy {
+  readonly only: readonly string[];
+  readonly allowFallbacks: false;
+  readonly dataCollection: 'deny';
+  readonly zdr: true;
+  readonly requireParameters: true;
+}
+
+/** One time-limited CTO-approved model route. Runtime execution remains disabled by default. */
+export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'nvidia/nemotron-3.5-lightning',
+    approval: Object.freeze({
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+      approvedBy: 'CTO',
+      approvedAt: '2026-11-11',
+      expiresAt: '2026-11-12',
+    }),
+    executionScope: 'smoke_only' as const,
+    budgetCeilings: Object.freeze({
+      perAttemptMicroUsd: 5_000,
+      principalDailyMicroUsd: 5_000,
+      tenantDailyMicroUsd: 5_000,
+      globalDailyMicroUsd: 5_000,
+      principalDailyTurns: 1,
+    }),
+    maxPaidSmokeTurns: 1,
+    openRouterRouting: Object.freeze({
+      only: Object.freeze(['deepinfra']),
+      allowFallbacks: false,
+      dataCollection: 'deny' as const,
+      zdr: true,
+      requireParameters: true,
+    }),
+  }),
+]);
 
 /**
  * A nominated model that is **not** approved.
@@ -47,7 +99,7 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([]);
  * never intersect.
  */
 export interface ModelCandidate {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
+  readonly providerId: RealModelProviderId;
   readonly modelId: string;
   /** One sentence the review document expands; kept short so it cannot drift into a claim. */
   readonly rationale: string;
@@ -58,17 +110,17 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
     providerId: 'openai' as const,
     modelId: 'gpt-5.6-luna',
     rationale:
-      'officially listed at $0.20/$1.20 per 1M tokens, with Chat Completions and reasoning_effort none',
+      'direct OpenAI routing has not been approved; the current approval is OpenRouter-only',
   }),
 ]);
 
 /**
  * Providers this build can construct an adapter for. Checked against **code**, not against tenant
  * policy: a misconfigured policy must not be able to point the gateway at a host nobody reviewed.
- * Kept separate from the model allowlist so that "no model approved yet" reports
- * `model_not_approved` rather than masking the real reason as a provider problem.
+ * Kept separate from the model allowlist so an unapproved model reports `model_not_approved`
+ * rather than masking the real reason as a provider problem.
  */
-export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai']);
+export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai', 'openrouter']);
 
 /** Documented placeholder: boot refuses any model id containing it. */
 export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
@@ -84,7 +136,7 @@ export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
 export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high';
 
 export interface ModelRateRow {
-  readonly providerId: Extract<ModelProviderId, 'openai'>;
+  readonly providerId: RealModelProviderId;
   readonly modelId: string;
   /** Micro-USD per one million input tokens (i.e. $0.25/1M → 250000). */
   readonly inputMicroUsdPerMillion: number;
@@ -108,6 +160,8 @@ export interface ModelRateRow {
   readonly shutdownDate?: string | null;
   /** Pinned reasoning budget, or absent for a non-reasoning model (the field is then not sent). */
   readonly reasoningEffort?: ModelReasoningEffort;
+  /** OpenRouter request-level cache policy for models whose published pricing has cache tiers. */
+  readonly promptCacheMode?: 'explicit';
 }
 
 const UNVERIFIED_SOURCE =
@@ -134,11 +188,15 @@ const GPT_4_DEPRECATION_SOURCE =
 const GPT_5_6_LUNA_DOCS_SOURCE =
   'https://developers.openai.com/api/docs/models/gpt-5.6-luna, read 2026-11-10 — official published pricing; CTO review remains required';
 
+const OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE =
+  'https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints and https://openrouter.ai/api/v1/endpoints/zdr, read 2026-11-11 — exact DeepInfra endpoint is listed for this model in the ZDR endpoint catalog; $0.06/M input and $0.16/M output';
+
 /**
  * Rate rows known to this tree.
  *
  * **No row here authorises a paid call.** `provenance` is the only field the resolver trusts, and
- * every row below is `unverified`, so no combination of them can enable `real` mode on its own.
+ * The approved OpenRouter route has a verified catalog price, but no combination of rate rows can
+ * enable `real` mode without its separate, dated approval record in `APPROVED_REAL_MODELS`.
  * Approval item A2 requires explicitly reviewing official published pricing for the exact model id
  * before enablement; an invoice may be used instead. Provider usage is reconciled after the first call.
  *
@@ -147,6 +205,17 @@ const GPT_5_6_LUNA_DOCS_SOURCE =
  * announced after they were added, so the resolver refuses them on its own once that day arrives.
  */
 export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'nvidia/nemotron-3.5-lightning',
+    inputMicroUsdPerMillion: 60_000,
+    outputMicroUsdPerMillion: 160_000,
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
+    provenance: 'official_price_verified' as const,
+    source: OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE,
+    shutdownDate: null,
+    reasoningEffort: 'none' as const,
+  }),
   Object.freeze({
     providerId: 'openai' as const,
     modelId: 'gpt-5.6-luna',

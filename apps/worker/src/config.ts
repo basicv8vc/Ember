@@ -4,7 +4,12 @@ import {
   SENTINEL_POLICY_VERSION,
   type BudgetPolicy,
 } from '@ember/execution';
-import { resolveModelExecution, type ModelExecutionResolution } from '@ember/model-gateway';
+import {
+  resolveModelExecution,
+  type ModelBudgetCeilings,
+  type ModelExecutionPurpose,
+  type ModelExecutionResolution,
+} from '@ember/model-gateway';
 import { z } from 'zod';
 
 export class WorkerConfigError extends Error {
@@ -240,7 +245,10 @@ function formatIssues(error: z.ZodError): string {
  * Validate worker process settings. The worker id is an operational label, not a credential.
  * Lease/retry bounds are validated by the same `LeaseQueue` configuration used in production.
  */
-export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerConfig {
+export function loadWorkerConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  executionPurpose: ModelExecutionPurpose = 'resident_worker',
+): WorkerConfig {
   const parsed = workerEnvSchema.safeParse(env);
 
   if (!parsed.success) {
@@ -283,18 +291,33 @@ export function loadWorkerConfig(env: NodeJS.ProcessEnv = process.env): WorkerCo
 
   // B2 execution resolution. Every branch below is a hard startup failure rather than a warning:
   // a process that cannot deliver the mode it was configured for must be dead and visible.
+  // Preserve only explicit budget overrides here. The Model Gateway applies effective defaults
+  // from the trusted execution purpose and checks them against the code-owned approval.
+  const modelCeilings: Partial<ModelBudgetCeilings> = {
+    ...(env.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD === undefined
+      ? {}
+      : { perAttemptMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD }),
+    ...(env.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD === undefined
+      ? {}
+      : { principalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD }),
+    ...(env.EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD === undefined
+      ? {}
+      : { tenantDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD }),
+    ...(env.EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD === undefined
+      ? {}
+      : { globalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD }),
+    ...(env.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS === undefined
+      ? {}
+      : { principalDailyTurns: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS }),
+  };
+
   const model = resolveModelExecution({
     mode: parsed.data.EMBER_MODEL_EXECUTION,
     providerId: parsed.data.EMBER_MODEL_PROVIDER,
     modelId: parsed.data.EMBER_MODEL_ID,
     apiKey: parsed.data.EMBER_MODEL_API_KEY,
-    ceilings: {
-      perAttemptMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD,
-      principalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD,
-      tenantDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD,
-      globalDailyMicroUsd: parsed.data.EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD,
-      principalDailyTurns: parsed.data.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS,
-    },
+    executionPurpose,
+    ceilings: modelCeilings,
     maxAttempts: parsed.data.EMBER_MODEL_MAX_ATTEMPTS,
     attemptTimeoutMs: parsed.data.EMBER_MODEL_ATTEMPT_TIMEOUT_MS,
     leaseMs: parsed.data.EMBER_MODEL_TURN_LEASE_MS,

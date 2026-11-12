@@ -1,9 +1,11 @@
 import { describe, expect, it } from 'vitest';
+import { resolveModelExecution } from '@ember/model-gateway';
 import {
   DEFAULT_SMOKE_PROMPT,
   MAX_SMOKE_TURNS,
   buildEvidence,
   evaluateSmokePreconditions,
+  hasIsolatedSmokeDatabase,
   parseSmokeArgs,
   type SmokePlan,
   type SmokePreconditions,
@@ -18,10 +20,10 @@ import {
  */
 
 const PLAN: SmokePlan = {
-  approvalId: 'L4B-A1',
-  providerId: 'openai',
-  modelId: 'gpt-5.6-luna',
-  rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
+  approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+  providerId: 'openrouter',
+  modelId: 'nvidia/nemotron-3.5-lightning',
+  rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
   maxTurns: 1,
   database: 'postgres:5432/ember',
 };
@@ -29,11 +31,13 @@ const PLAN: SmokePlan = {
 function preconditions(overrides: Partial<SmokePreconditions> = {}): SmokePreconditions {
   return {
     modelMode: 'real',
-    modelId: 'gpt-5.6-luna',
-    providerId: 'openai',
-    rateVersion: 'openai-gpt-5.6-luna-published-2026-11-10',
-    approvalIdFromConfig: 'L4B-A1',
-    approvalIdFromEnv: 'L4B-A1',
+    modelId: 'nvidia/nemotron-3.5-lightning',
+    providerId: 'openrouter',
+    rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
+    approvalIdFromConfig: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    approvalIdFromEnv: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    executionScope: 'smoke_only',
+    maxPaidSmokeTurns: 1,
     maxTurns: 1,
     confirmed: true,
     ...overrides,
@@ -44,7 +48,44 @@ describe('paid smoke gate', () => {
   it('passes only when the mode is real, the id matches and the run was confirmed', () => {
     expect(evaluateSmokePreconditions(preconditions())).toStrictEqual({
       ok: true,
-      approvalId: 'L4B-A1',
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
+    });
+  });
+
+  it('accepts the exact code-approved model through the trusted Smoke purpose and one-turn gate', () => {
+    const model = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: 'nvidia/nemotron-3.5-lightning',
+        apiKey: 'sk-test-smoke-abcdefghijklmnopqrstuvwxyz',
+        executionPurpose: 'paid_smoke',
+      },
+      undefined,
+      new Date('2026-11-12T23:59:59.999Z'),
+    );
+
+    expect(model.ok).toBe(true);
+    if (!model.ok || model.mode !== 'real') {
+      throw new Error('expected the approved paid Smoke resolution');
+    }
+
+    expect(
+      evaluateSmokePreconditions({
+        modelMode: model.mode,
+        modelId: model.settings.modelId,
+        providerId: model.settings.providerId,
+        rateVersion: model.rate.rateVersion,
+        approvalIdFromConfig: model.approval.approvalId,
+        approvalIdFromEnv: model.approval.approvalId,
+        executionScope: model.executionScope,
+        maxPaidSmokeTurns: model.maxPaidSmokeTurns,
+        maxTurns: 1,
+        confirmed: true,
+      }),
+    ).toStrictEqual({
+      ok: true,
+      approvalId: 'L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11',
     });
   });
 
@@ -68,11 +109,17 @@ describe('paid smoke gate', () => {
 
   it('refuses an approval id that is not the one recorded for the model', () => {
     expect(
-      evaluateSmokePreconditions(preconditions({ approvalIdFromEnv: 'L4B-A2' })),
+      evaluateSmokePreconditions(preconditions({ approvalIdFromEnv: 'OTHER-APPROVAL' })),
     ).toStrictEqual({ ok: false, refusal: 'approval_mismatch' });
 
     expect(evaluateSmokePreconditions(preconditions({ approvalIdFromConfig: null }))).toStrictEqual(
       { ok: false, refusal: 'approval_mismatch' },
+    );
+  });
+
+  it('refuses to use a resident-scoped approval through the paid Smoke command', () => {
+    expect(evaluateSmokePreconditions(preconditions({ executionScope: 'resident' }))).toStrictEqual(
+      { ok: false, refusal: 'authorization_scope' },
     );
   });
 
@@ -85,6 +132,10 @@ describe('paid smoke gate', () => {
     }
 
     expect(evaluateSmokePreconditions(preconditions({ maxTurns: MAX_SMOKE_TURNS })).ok).toBe(true);
+    expect(evaluateSmokePreconditions(preconditions({ maxPaidSmokeTurns: 0 }))).toStrictEqual({
+      ok: false,
+      refusal: 'max_turns_invalid',
+    });
   });
 
   it('refuses to spend without an explicit confirmation', () => {
@@ -102,6 +153,8 @@ describe('paid smoke gate', () => {
       rateVersion: null,
       approvalIdFromConfig: null,
       approvalIdFromEnv: undefined,
+      executionScope: null,
+      maxPaidSmokeTurns: 0,
       maxTurns: 99,
       confirmed: false,
     });
@@ -137,6 +190,35 @@ describe('paid smoke arguments', () => {
   });
 });
 
+describe('paid smoke database isolation', () => {
+  it('requires a separate PostgreSQL database from the resident worker target', () => {
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember_smoke',
+        'postgres://worker:secret@localhost:5432/ember',
+      ),
+    ).toBe(true);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost/ember',
+        'postgres://worker:other@localhost:5432/ember',
+      ),
+    ).toBe(false);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember_smoke',
+        'postgres://worker:secret@localhost:5432/ember_smoke',
+      ),
+    ).toBe(false);
+    expect(
+      hasIsolatedSmokeDatabase(
+        'postgres://smoke:secret@localhost:5432/ember',
+        'postgres://worker:secret@db.internal:5432/ember',
+      ),
+    ).toBe(false);
+  });
+});
+
 describe('paid smoke evidence', () => {
   const base = {
     startedAt: new Date('2026-11-08T00:00:00Z'),
@@ -145,7 +227,8 @@ describe('paid smoke evidence', () => {
     tenantId: 'tenant-1',
     conversationId: 'conversation-1',
     turnId: 'turn-1',
-    summary: { completed: 1 },
+    summary: { completed: 1, examined: 1 },
+    attemptCount: 1,
     turn: { status: 'completed', failureReason: null, responseMessageId: 'message-1' },
     reply: { messageId: 'message-1', modelLabel: PLAN.modelId, simulated: false, characters: 42 },
     attempt: {
@@ -184,8 +267,15 @@ describe('paid smoke evidence', () => {
       'settled as unknown_billed',
     ],
     ['no attempt row', { attempt: null }, 'no attempt row'],
+    ['multiple provider attempts', { attemptCount: 2 }, 'exactly one'],
+    ['a non-first attempt', { attempt: { ...base.attempt, attemptNo: 2 } }, 'instead of 1'],
     ['a failed turn', { turn: { ...base.turn, status: 'failed' } }, 'status is failed'],
     ['a responder that did nothing', { summary: { completed: 0 } }, 'exactly one completed'],
+    [
+      'a responder that examined other Turns',
+      { summary: { completed: 1, examined: 2 } },
+      'exactly the one scoped',
+    ],
   ])('fails the verdict on %s', (_label, override, expectedReason) => {
     const evidence = buildEvidence({ ...base, ...override });
 

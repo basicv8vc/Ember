@@ -1,5 +1,7 @@
 # B2 — Real Assistant Turn: implementation, failure matrix and enablement gates
 
+> **Status update (2026-11-11):** The implementation description below is the original B2 baseline. PR #145 adds one date-limited OpenRouter approval while keeping execution disabled by default. The current route and its ZDR blocker are documented in [OpenRouter Adapter and P1 Security Gates](OPENROUTER-AND-P1-SECURITY.md).
+
 | field                   | value                                                                                          |
 | ----------------------- | ---------------------------------------------------------------------------------------------- |
 | status                  | **implemented, `real` mode disabled in code** — this PR is a Draft                             |

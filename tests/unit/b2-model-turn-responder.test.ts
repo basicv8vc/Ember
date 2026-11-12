@@ -5,8 +5,10 @@ import {
   FakeModelGateway,
   MODEL_LIMITS,
   ModelGatewayFailure,
+  OpenRouterModelGateway,
   type ConversationTurnInput,
   type ConversationTurnOutput,
+  type FetchLike,
   type ModelBudgetCeilings,
   type ModelCallResult,
   type ModelFailureCode,
@@ -52,6 +54,17 @@ const ceilings: ModelBudgetCeilings = {
 };
 
 const REAL_MODEL_LABEL = 'gpt-test-pinned-2026-11-03';
+const OPENROUTER_RATE = {
+  providerId: 'openrouter' as const,
+  modelId: 'nvidia/nemotron-3.5-lightning',
+  inputMicroUsdPerMillion: 60_000,
+  outputMicroUsdPerMillion: 160_000,
+  rateVersion: 'openrouter-test-rate',
+  provenance: 'official_price_verified' as const,
+  source: 'mock fixture',
+  reasoningEffort: 'none' as const,
+  promptCacheMode: 'explicit' as const,
+};
 
 const contextRows: readonly B2TurnContextRow[] = [
   { sequence: 1, kind: 'user', text: 'hello there' },
@@ -525,6 +538,48 @@ describe('B2 responder: provider failures', () => {
     // Between attempts the Turn stays running: exactly one publication, at the very end.
     expect(repository.publishes).toHaveLength(1);
     expect(repository.calls.filter((call) => call === 'publishCompletion')).toHaveLength(1);
+  });
+
+  it('stops the retry loop when authorization expires between provider attempts', async () => {
+    const repository = new MemoryExecutionPort();
+    let authorized = true;
+    let providerRequests = 0;
+    const fetchImpl: FetchLike = () => {
+      providerRequests += 1;
+      authorized = false;
+      return Promise.resolve({
+        status: 429,
+        ok: false,
+        json: () => Promise.resolve({}),
+      });
+    };
+    const gateway = new OpenRouterModelGateway({
+      apiKey: 'sk-test-mock-openrouter-credential-0001',
+      modelId: OPENROUTER_RATE.modelId,
+      rate: OPENROUTER_RATE,
+      routing: {
+        only: ['deepinfra'],
+        allowFallbacks: false,
+        dataCollection: 'deny',
+        zdr: true,
+        requireParameters: true,
+      },
+      isAuthorized: () => authorized,
+      fetchImpl,
+    });
+
+    const summary = await realResponder(repository, gateway, {
+      rate: OPENROUTER_RATE,
+    }).processOnce();
+
+    expect(summary.failed).toBe(1);
+    expect(providerRequests).toBe(1);
+    expect(repository.attemptsIssued).toBe(2);
+    expect(repository.charges.map((charge) => charge.state)).toStrictEqual([
+      'unknown_billed',
+      'released',
+    ]);
+    expect(repository.charges[1]).toMatchObject({ outcomeCode: 'not_sent' });
   });
 
   it('does not retry a non-retryable auth failure', async () => {

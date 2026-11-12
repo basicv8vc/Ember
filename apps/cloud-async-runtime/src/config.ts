@@ -39,7 +39,7 @@ const runtimeEnvSchema = z.object({
   EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: z.coerce.number().int().min(0).max(60).optional(),
   EMBER_MODEL_ALPHA_TENANT_ID: z.string().trim().uuid().optional(),
   EMBER_MODEL_ALPHA_CONVERSATION_ID: z.string().trim().uuid().optional(),
-  EMBER_MODEL_ALPHA_TURN_ID: z.string().trim().uuid().optional(),
+  EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: z.string().datetime({ offset: true }).optional(),
 });
 
 export type CloudAsyncRuntimeEnv = z.input<typeof runtimeEnvSchema>;
@@ -62,16 +62,18 @@ export type CloudRuntimeModelConfig =
         ModelExecutionResolution,
         { readonly ok: true; readonly mode: 'real' }
       >;
-      readonly onlyTurn: {
+      readonly onlyConversation: {
         readonly tenantId: string;
         readonly conversationId: string;
-        readonly turnId: string;
+        /** PostgreSQL created_at watermark; only the first Turn after it is authorized. */
+        readonly turnCreatedAfter: string;
       };
     };
 
 export function isAuthorizedCloudModelTurn(
   model: CloudRuntimeModelConfig,
   event: { readonly tenantId: string; readonly conversationId: string; readonly turnId: string },
+  firstTurnIdAfterWatermark?: string | null,
 ): boolean {
   if (model.kind !== 'enabled') {
     return false;
@@ -80,9 +82,25 @@ export function isAuthorizedCloudModelTurn(
     return true;
   }
   return (
-    event.tenantId === model.onlyTurn.tenantId &&
-    event.conversationId === model.onlyTurn.conversationId &&
-    event.turnId === model.onlyTurn.turnId
+    event.tenantId === model.onlyConversation.tenantId &&
+    event.conversationId === model.onlyConversation.conversationId &&
+    event.turnId === firstTurnIdAfterWatermark
+  );
+}
+
+export function isCloudModelConversationAuthorized(
+  model: CloudRuntimeModelConfig,
+  event: { readonly tenantId: string; readonly conversationId: string },
+): boolean {
+  if (model.kind !== 'enabled') {
+    return false;
+  }
+  if (model.mode === 'fake') {
+    return true;
+  }
+  return (
+    event.tenantId === model.onlyConversation.tenantId &&
+    event.conversationId === model.onlyConversation.conversationId
   );
 }
 
@@ -120,16 +138,16 @@ export function resolveCloudRuntimeModelConfig(
     return { kind: 'refused', reason: 'staging_alpha_environment_required' };
   }
 
-  const onlyTurn = {
+  const onlyConversation = {
     tenantId: values.EMBER_MODEL_ALPHA_TENANT_ID,
     conversationId: values.EMBER_MODEL_ALPHA_CONVERSATION_ID,
-    turnId: values.EMBER_MODEL_ALPHA_TURN_ID,
+    turnCreatedAfter: values.EMBER_MODEL_ALPHA_TURN_CREATED_AFTER,
   };
   if (
     stagingAlphaReal &&
-    (onlyTurn.tenantId === undefined ||
-      onlyTurn.conversationId === undefined ||
-      onlyTurn.turnId === undefined)
+    (onlyConversation.tenantId === undefined ||
+      onlyConversation.conversationId === undefined ||
+      onlyConversation.turnCreatedAfter === undefined)
   ) {
     return { kind: 'refused', reason: 'staging_alpha_turn_scope_required' };
   }
@@ -193,9 +211,9 @@ export function resolveCloudRuntimeModelConfig(
     if (
       values.EMBER_ENV !== 'staging' ||
       values.NODE_ENV?.trim().toLowerCase() === 'production' ||
-      onlyTurn.tenantId === undefined ||
-      onlyTurn.conversationId === undefined ||
-      onlyTurn.turnId === undefined
+      onlyConversation.tenantId === undefined ||
+      onlyConversation.conversationId === undefined ||
+      onlyConversation.turnCreatedAfter === undefined
     ) {
       return { kind: 'refused', reason: 'staging_alpha_turn_scope_required' };
     }
@@ -203,10 +221,10 @@ export function resolveCloudRuntimeModelConfig(
       kind: 'enabled',
       mode: 'real',
       resolution,
-      onlyTurn: {
-        tenantId: onlyTurn.tenantId,
-        conversationId: onlyTurn.conversationId,
-        turnId: onlyTurn.turnId,
+      onlyConversation: {
+        tenantId: onlyConversation.tenantId,
+        conversationId: onlyConversation.conversationId,
+        turnCreatedAfter: onlyConversation.turnCreatedAfter,
       },
     };
   }

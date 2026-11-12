@@ -34,7 +34,7 @@ interface RuntimeEnv {
   readonly EMBER_MODEL_ID?: string;
   readonly EMBER_MODEL_ALPHA_TENANT_ID?: string;
   readonly EMBER_MODEL_ALPHA_CONVERSATION_ID?: string;
-  readonly EMBER_MODEL_ALPHA_TURN_ID?: string;
+  readonly EMBER_MODEL_ALPHA_TURN_CREATED_AFTER?: string;
   readonly EMBER_MODEL_API_KEY?: string;
   readonly EMBER_MODEL_TURN_LEASE_MS?: string;
   readonly EMBER_MODEL_ATTEMPT_TIMEOUT_MS?: string;
@@ -137,7 +137,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
         const executor =
           event === null || event.status !== 'running'
             ? null
-            : createTurnExecutor({
+            : await createTurnExecutor({
                 pool,
                 model,
                 event,

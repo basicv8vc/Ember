@@ -119,6 +119,44 @@ export async function insertB1TurnDispatchOutbox(
 export class PostgresB1TurnDispatchOutboxRepository {
   constructor(private readonly pool: pg.Pool) {}
 
+  /**
+   * Select the one Turn a pre-authorized Staging Alpha conversation may execute. This deliberately
+   * includes terminal Turns: once the first Turn after the approval watermark exists, no later Turn
+   * in that Conversation can become authorized after completion, cancellation, or queue recovery.
+   */
+  async getFirstTurnCreatedAfter(command: {
+    readonly tenantId: string;
+    readonly conversationId: string;
+    readonly createdAfter: string;
+  }): Promise<string | null> {
+    const parsed = z
+      .strictObject({
+        tenantId: z.string().regex(UUID_PATTERN),
+        conversationId: z.string().regex(UUID_PATTERN),
+        createdAfter: z.string().datetime({ offset: true }),
+      })
+      .safeParse(command);
+    if (!parsed.success) {
+      throw new DomainError('INVALID_ARGUMENT', 'invalid Assistant Turn authorization scope');
+    }
+
+    try {
+      const result = await this.pool.query<{ readonly id: string }>(
+        `SELECT id
+           FROM assistant_turns
+          WHERE tenant_id = $1
+            AND conversation_id = $2
+            AND created_at > $3::timestamptz
+          ORDER BY created_at ASC, id ASC
+          LIMIT 1`,
+        [parsed.data.tenantId, parsed.data.conversationId, parsed.data.createdAfter],
+      );
+      return result.rows[0]?.id ?? null;
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
   async getEvent(eventId: string): Promise<B1TurnDispatchEvent | null> {
     const parsed = z.string().regex(UUID_PATTERN).safeParse(eventId);
     if (!parsed.success) {

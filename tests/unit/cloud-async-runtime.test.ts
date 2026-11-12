@@ -19,6 +19,7 @@ const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849303';
 const CONVERSATION_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849304';
 const TEST_MODEL_KEY = 'sk-test-cloud-staging-alpha-abcdefghijklmnopqrstuvwxyz';
 const ALPHA_NOW = new Date('2026-11-12T12:00:00.000Z');
+const TURN_CREATED_AFTER = '2026-11-12T11:00:00.000Z';
 
 function stagingAlphaEnv(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -29,7 +30,7 @@ function stagingAlphaEnv(overrides: Record<string, unknown> = {}): Record<string
     EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
     EMBER_MODEL_ALPHA_TENANT_ID: TENANT_ID,
     EMBER_MODEL_ALPHA_CONVERSATION_ID: CONVERSATION_ID,
-    EMBER_MODEL_ALPHA_TURN_ID: TURN_ID,
+    EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: TURN_CREATED_AFTER,
     ...overrides,
   };
 }
@@ -186,13 +187,17 @@ describe('Cloud Async Runtime dispatch', () => {
     });
   });
 
-  it('allows only the code-selected staging Alpha purpose and exact server-configured Turn', () => {
+  it('allows only the code-selected staging Alpha purpose and first Turn in the approved Conversation', () => {
     const model = resolveCloudRuntimeModelConfig(stagingAlphaEnv(), 'staging_alpha', ALPHA_NOW);
 
     expect(model).toMatchObject({
       kind: 'enabled',
       mode: 'real',
-      onlyTurn: { tenantId: TENANT_ID, conversationId: CONVERSATION_ID, turnId: TURN_ID },
+      onlyConversation: {
+        tenantId: TENANT_ID,
+        conversationId: CONVERSATION_ID,
+        turnCreatedAfter: TURN_CREATED_AFTER,
+      },
       resolution: {
         executionScope: 'staging_alpha',
         maxStagingAlphaTurns: 1,
@@ -202,19 +207,21 @@ describe('Cloud Async Runtime dispatch', () => {
     });
     if (model.kind !== 'enabled' || model.mode !== 'real') return;
 
-    expect(isAuthorizedCloudModelTurn(model, event())).toBe(true);
+    expect(isAuthorizedCloudModelTurn(model, event(), TURN_ID)).toBe(true);
+    expect(isAuthorizedCloudModelTurn(model, event(), null)).toBe(false);
+    expect(isAuthorizedCloudModelTurn(model, event(), CONVERSATION_ID)).toBe(false);
     for (const mismatch of [
       { tenantId: CONVERSATION_ID },
       { conversationId: TENANT_ID },
       { turnId: CONVERSATION_ID, eventId: CONVERSATION_ID },
     ]) {
-      expect(isAuthorizedCloudModelTurn(model, event(mismatch))).toBe(false);
+      expect(isAuthorizedCloudModelTurn(model, event(mismatch), TURN_ID)).toBe(false);
     }
   });
 
-  it('refuses missing target identity, environment-selected purpose and production execution', () => {
+  it('refuses a missing Conversation watermark, environment-selected purpose and production execution', () => {
     const scoped = stagingAlphaEnv();
-    delete scoped.EMBER_MODEL_ALPHA_TURN_ID;
+    delete scoped.EMBER_MODEL_ALPHA_TURN_CREATED_AFTER;
     expect(resolveCloudRuntimeModelConfig(scoped, 'staging_alpha', ALPHA_NOW)).toMatchObject({
       kind: 'refused',
       reason: 'staging_alpha_turn_scope_required',
@@ -222,7 +229,10 @@ describe('Cloud Async Runtime dispatch', () => {
 
     expect(
       resolveCloudRuntimeModelConfig(
-        stagingAlphaEnv({ EMBER_MODEL_EXECUTION_PURPOSE: 'staging_alpha' }),
+        stagingAlphaEnv({
+          EMBER_MODEL_EXECUTION_PURPOSE: 'staging_alpha',
+          EMBER_MODEL_ALPHA_TURN_ID: TURN_ID,
+        }),
         'resident_worker',
         ALPHA_NOW,
       ),

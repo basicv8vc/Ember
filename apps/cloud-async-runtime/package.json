@@ -1,0 +1,24 @@
+{
+  "name": "@ember/cloud-async-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsc -b tsconfig.build.json",
+    "deploy": "wrangler deploy --config wrangler.jsonc",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "@ember/model-gateway": "workspace:*",
+    "@ember/postgres": "workspace:*",
+    "@ember/worker": "workspace:*",
+    "pg": "8.23.1",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261107.1",
+    "@types/pg": "8.23.1",
+    "typescript": "5.9.3",
+    "wrangler": "4.158.0"
+  }
+}

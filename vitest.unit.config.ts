@@ -24,6 +24,9 @@ export default defineConfig({
       '@ember/model-gateway': fileURLToPath(
         new URL('./packages/model-gateway/src/index.ts', import.meta.url),
       ),
+      '@ember/postgres/b2-worker': fileURLToPath(
+        new URL('./packages/postgres/src/b2-worker.ts', import.meta.url),
+      ),
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),

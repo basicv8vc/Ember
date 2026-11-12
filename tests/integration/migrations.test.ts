@@ -234,13 +234,14 @@ describe('PostgreSQL migrations (real database)', () => {
   });
 
   it('is idempotent on a repeated run', async () => {
+    const migrationFiles = await loadMigrations(migrationsDir);
     const before = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
     const result = await runMigrations(requirePool(), migrationsDir);
 
     expect(result.applied).toHaveLength(0);
-    expect(result.alreadyApplied).toBe(18);
+    expect(result.alreadyApplied).toBe(migrationFiles.length);
     const after = await requirePool().query<{ id: string; checksum: string }>(
       'SELECT id, checksum FROM schema_migrations ORDER BY id',
     );
@@ -249,7 +250,7 @@ describe('PostgreSQL migrations (real database)', () => {
     const versions = await requirePool().query<{ count: string }>(
       'SELECT count(*)::text AS count FROM schema_migrations',
     );
-    expect(versions.rows[0]?.count).toBe('18');
+    expect(versions.rows[0]?.count).toBe(String(migrationFiles.length));
   });
 
   it('rejects a renamed migration with identical contents', async () => {
@@ -310,7 +311,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('18');
+      expect(versions.rows[0]?.count).toBe(String((await loadMigrations(migrationsDir)).length));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -482,7 +483,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe('18');
+      expect(versions.rows[0]?.count).toBe(String((await loadMigrations(migrationsDir)).length));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

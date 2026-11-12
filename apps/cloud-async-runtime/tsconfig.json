@@ -1,0 +1,14 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["@cloudflare/workers-types", "node"],
+    "baseUrl": ".",
+    "paths": {
+      "@ember/model-gateway": ["../../packages/model-gateway/src/index.ts"],
+      "@ember/postgres/b2-worker": ["../../packages/postgres/src/b2-worker.ts"],
+      "@ember/worker/b1/model-turn-responder": ["../../apps/worker/src/b1/model-turn-responder.ts"]
+    }
+  },
+  "include": ["src/**/*.ts", "test/**/*.ts"]
+}

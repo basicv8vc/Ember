@@ -11,6 +11,7 @@
     { "path": "./packages/sandbox-daytona/tsconfig.build.json" },
     { "path": "./packages/telemetry/tsconfig.build.json" },
     { "path": "./apps/api/tsconfig.build.json" },
-    { "path": "./apps/worker/tsconfig.build.json" }
+    { "path": "./apps/worker/tsconfig.build.json" },
+    { "path": "./apps/cloud-async-runtime/tsconfig.build.json" }
   ]
 }

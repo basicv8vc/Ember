@@ -53,11 +53,12 @@ export type ModelBootRefusalReason =
   | 'rate_not_verified'
   | 'provider_routing_not_approved'
   | 'execution_scope_refused'
+  | 'attempt_limit_approval_exceeded'
   | 'budget_approval_exceeded'
   | CredentialRefusal
   | 'budget_config_invalid';
 
-export type ModelExecutionPurpose = 'resident_worker' | 'paid_smoke';
+export type ModelExecutionPurpose = 'resident_worker' | 'paid_smoke' | 'staging_alpha';
 
 /** Code-owned allowlists. Tests may supply their own registry; the process root never does. */
 export interface ModelApprovalRegistry {
@@ -106,8 +107,9 @@ export type ModelExecutionResolution =
        * test compares it to what it was told on the command line). It is a decision id, not a secret.
        */
       readonly approval: ModelApprovalRecord;
-      readonly executionScope: ApprovedModel['executionScope'];
+      readonly executionScope: ApprovedModel['executionScope'] | 'staging_alpha';
       readonly maxPaidSmokeTurns: number;
+      readonly maxStagingAlphaTurns: number;
       readonly openRouterRouting: OpenRouterRoutingPolicy | null;
       readonly credential: ModelCredential;
     }
@@ -228,11 +230,31 @@ export function resolveModelExecution(
   const modelApproval = registry.models.find(
     (entry) => entry.providerId === configuredProvider && entry.modelId === configuredModelId,
   );
-  const smokeApprovalDefaults =
-    executionPurpose === 'paid_smoke' && modelApproval?.executionScope === 'smoke_only'
+  const stagingAlphaApproval =
+    executionPurpose === 'staging_alpha' ? modelApproval?.stagingAlpha : undefined;
+  const modelAuthorization =
+    modelApproval === undefined
+      ? undefined
+      : stagingAlphaApproval === undefined
+        ? {
+            ...modelApproval,
+            maxProviderAttemptsPerTurn: MODEL_LIMITS.maxAttemptsPerTurn,
+            maxStagingAlphaTurns: 0,
+          }
+        : {
+            ...modelApproval,
+            approval: stagingAlphaApproval.approval,
+            executionScope: 'staging_alpha' as const,
+            budgetCeilings: stagingAlphaApproval.budgetCeilings,
+            maxProviderAttemptsPerTurn: stagingAlphaApproval.maxProviderAttemptsPerTurn,
+            maxStagingAlphaTurns: stagingAlphaApproval.maxTurns,
+          };
+  const budgetDefaults =
+    stagingAlphaApproval?.budgetCeilings ??
+    (executionPurpose === 'paid_smoke' && modelApproval?.executionScope === 'smoke_only'
       ? modelApproval.budgetCeilings
-      : DEFAULT_MODEL_CEILINGS;
-  const ceilings = resolveCeilings(input.ceilings, smokeApprovalDefaults);
+      : DEFAULT_MODEL_CEILINGS);
+  const ceilings = resolveCeilings(input.ceilings, budgetDefaults);
   const providerId: ModelProviderId = configuredProvider === 'openrouter' ? 'openrouter' : 'openai';
 
   const settings: ModelExecutionSettings = Object.freeze({
@@ -242,7 +264,7 @@ export function resolveModelExecution(
     ceilings: ceilings ?? DEFAULT_MODEL_CEILINGS,
     maxAttempts: boundedInteger(
       input.maxAttempts,
-      MODEL_LIMITS.maxAttemptsPerTurn,
+      modelAuthorization?.maxProviderAttemptsPerTurn ?? MODEL_LIMITS.maxAttemptsPerTurn,
       1,
       MODEL_LIMITS.maxAttemptsPerTurn,
     ),
@@ -287,14 +309,22 @@ export function resolveModelExecution(
     return { ok: false, mode, settings, reason: 'model_not_approved' };
   }
 
-  const modelApproved = modelApproval;
+  const modelApproved = modelAuthorization;
 
   if (modelApproved === undefined) {
     return { ok: false, mode, settings, reason: 'model_not_approved' };
   }
 
+  if (executionPurpose === 'staging_alpha' && stagingAlphaApproval === undefined) {
+    return { ok: false, mode, settings, reason: 'execution_scope_refused' };
+  }
+
   if (modelApproved.executionScope === 'smoke_only' && executionPurpose !== 'paid_smoke') {
     return { ok: false, mode, settings, reason: 'execution_scope_refused' };
+  }
+
+  if (settings.maxAttempts > modelApproved.maxProviderAttemptsPerTurn) {
+    return { ok: false, mode, settings, reason: 'attempt_limit_approval_exceeded' };
   }
 
   if (
@@ -356,6 +386,7 @@ export function resolveModelExecution(
     approval: modelApproved.approval,
     executionScope: modelApproved.executionScope,
     maxPaidSmokeTurns: modelApproved.maxPaidSmokeTurns,
+    maxStagingAlphaTurns: modelApproved.maxStagingAlphaTurns,
     openRouterRouting: modelApproved.openRouterRouting ?? null,
     credential: credential.credential,
   };

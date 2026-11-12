@@ -32,6 +32,9 @@ interface RuntimeEnv {
   readonly EMBER_MODEL_EXECUTION?: string;
   readonly EMBER_MODEL_PROVIDER?: string;
   readonly EMBER_MODEL_ID?: string;
+  readonly EMBER_MODEL_ALPHA_TENANT_ID?: string;
+  readonly EMBER_MODEL_ALPHA_CONVERSATION_ID?: string;
+  readonly EMBER_MODEL_ALPHA_TURN_ID?: string;
   readonly EMBER_MODEL_API_KEY?: string;
   readonly EMBER_MODEL_TURN_LEASE_MS?: string;
   readonly EMBER_MODEL_ATTEMPT_TIMEOUT_MS?: string;
@@ -112,7 +115,8 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
       return;
     }
 
-    const model = resolveCloudRuntimeModelConfig(env);
+    // This purpose is selected by the trusted Cloud Runtime callsite, never by Worker env or Queue data.
+    const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
     if (model.kind === 'refused') {
       logger.warn('Assistant Turn model execution refused by runtime configuration', {
         category: model.reason,
@@ -155,7 +159,8 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
 }
 
 async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
-  const model = resolveCloudRuntimeModelConfig(env);
+  // The Cron relay shares the same code-owned Alpha authorization and remains off by default.
+  const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
   if (model.kind !== 'enabled') {
     if (model.kind === 'refused') {
       logger.warn('Assistant Turn outbox relay is paused by runtime configuration', {

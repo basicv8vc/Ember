@@ -409,6 +409,74 @@ describe('mode resolution and boot gates', () => {
     });
   });
 
+  it('resolves the separate one-turn Staging Alpha grant only for its trusted purpose', () => {
+    const now = new Date('2026-11-12T12:00:00.000Z');
+    const resolution = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: 'nvidia/nemotron-3.5-lightning',
+        apiKey: VALID_KEY,
+        executionPurpose: 'staging_alpha',
+        maxAttempts: 1,
+      },
+      undefined,
+      now,
+    );
+
+    expect(resolution).toMatchObject({
+      ok: true,
+      mode: 'real',
+      executionScope: 'staging_alpha',
+      maxStagingAlphaTurns: 1,
+      approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12' },
+      settings: {
+        maxAttempts: 1,
+        ceilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+      },
+    });
+    if (resolution.ok && resolution.mode === 'real') {
+      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-13T23:59:59.999Z'))).toBe(
+        true,
+      );
+      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-14T00:00:00.000Z'))).toBe(
+        false,
+      );
+    }
+    expect(
+      resolveModelExecution(
+        {
+          mode: 'real',
+          providerId: 'openrouter',
+          modelId: 'nvidia/nemotron-3.5-lightning',
+          apiKey: VALID_KEY,
+        },
+        undefined,
+        now,
+      ),
+    ).toMatchObject({ ok: false, reason: 'execution_scope_refused' });
+    expect(
+      resolveModelExecution(
+        {
+          mode: 'real',
+          providerId: 'openrouter',
+          modelId: 'nvidia/nemotron-3.5-lightning',
+          apiKey: VALID_KEY,
+          executionPurpose: 'staging_alpha',
+          maxAttempts: 2,
+        },
+        undefined,
+        now,
+      ),
+    ).toMatchObject({ ok: false, reason: 'attempt_limit_approval_exceeded' });
+  });
+
   it('refuses a placeholder model id and an unapproved provider', () => {
     const placeholder = resolveModelExecution({
       mode: 'real',

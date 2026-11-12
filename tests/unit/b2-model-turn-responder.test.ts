@@ -162,6 +162,7 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   }
 
   reserveAttempt(command: {
+    readonly maxAttempts: number;
     readonly reservedMicroUsd: number;
     readonly modelLabel: string;
   }): Promise<B2ReserveOutcome> {
@@ -178,7 +179,7 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
     const attemptNo = this.attemptsIssued + 1;
 
     // Same absolute ceiling the table enforces with `attempt_no BETWEEN 1 AND maxAttempts`.
-    if (attemptNo > MODEL_LIMITS.maxAttemptsPerTurn) {
+    if (attemptNo > command.maxAttempts) {
       return Promise.resolve({ kind: 'attempts_exhausted' });
     }
 
@@ -607,6 +608,26 @@ describe('B2 responder: provider failures', () => {
     expect(summary.failed).toBe(1);
     expect(gateway.inputs).toHaveLength(MODEL_LIMITS.maxAttemptsPerTurn);
     expect(repository.attemptsIssued).toBe(MODEL_LIMITS.maxAttemptsPerTurn);
+  });
+
+  it('keeps the one-attempt authorization across a later Queue delivery', async () => {
+    const repository = new MemoryExecutionPort();
+    const gateway = new ScriptedGateway(['model_unavailable', 'ok']);
+    const responder = realResponder(repository, gateway, { maxAttempts: 1 });
+
+    const firstDelivery = await responder.processOnce();
+    // Simulate a Worker crash after the failed provider attempt but before terminal publication.
+    // The Turn stays running and its lease later expires, while the attempt ledger survives.
+    repository.running = true;
+    repository.leaseBusy = false;
+    const redelivery = await responder.processOnce();
+
+    expect(firstDelivery.failed).toBe(1);
+    expect(redelivery.failed).toBe(1);
+    expect(gateway.inputs).toHaveLength(1);
+    expect(repository.attemptsIssued).toBe(1);
+    expect(repository.reserveCommands).toHaveLength(2);
+    expect(repository.publishes).toHaveLength(2);
   });
 
   it('fails the turn when the repository has no attempts left', async () => {

@@ -6,7 +6,7 @@ import {
 } from '@ember/postgres/b2-worker';
 import { createModelTurnResponder } from '@ember/worker/b1/model-turn-responder';
 import type pg from 'pg';
-import type { CloudRuntimeModelConfig } from './config.js';
+import { isAuthorizedCloudModelTurn, type CloudRuntimeModelConfig } from './config.js';
 import type { TurnExecutionPort } from './dispatch.js';
 
 export function createTurnDispatchOutbox(pool: pg.Pool): PostgresB1TurnDispatchOutboxRepository {
@@ -21,7 +21,7 @@ export function createTurnExecutor(input: {
   /** Test seam; production callers always construct the approved gateway from its resolution. */
   readonly gateway?: ModelGateway;
 }): TurnExecutionPort | null {
-  if (input.model.kind !== 'enabled') {
+  if (input.model.kind !== 'enabled' || !isAuthorizedCloudModelTurn(input.model, input.event)) {
     return null;
   }
 

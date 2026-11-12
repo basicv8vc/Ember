@@ -255,7 +255,6 @@ describe('PostgreSQL migrations (real database)', () => {
 
   it('rejects a renamed migration with identical contents', async () => {
     const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
-    const migrationCount = (await loadMigrations(migrationsDir)).length;
 
     try {
       await writeFile(
@@ -312,7 +311,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe(String(migrationCount));
+      expect(versions.rows[0]?.count).toBe(String((await loadMigrations(migrationsDir)).length));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }
@@ -464,7 +463,6 @@ describe('PostgreSQL migrations (real database)', () => {
 
   it('rejects an edited migration checksum and leaves applied state untouched', async () => {
     const tempMigrationsDir = await mkdtemp(path.join(tmpdir(), 'ember-migrations-'));
-    const migrationCount = (await loadMigrations(migrationsDir)).length;
 
     try {
       const filenames = (await readdir(migrationsDir)).filter((name) => name.endsWith('.sql'));
@@ -485,7 +483,7 @@ describe('PostgreSQL migrations (real database)', () => {
       const versions = await requirePool().query<{ count: string }>(
         'SELECT count(*)::text AS count FROM schema_migrations',
       );
-      expect(versions.rows[0]?.count).toBe(String(migrationCount));
+      expect(versions.rows[0]?.count).toBe(String((await loadMigrations(migrationsDir)).length));
     } finally {
       await rm(tempMigrationsDir, { recursive: true, force: true });
     }

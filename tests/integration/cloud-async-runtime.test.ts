@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { FAKE_MODEL_LABEL, FAKE_REPLY_PREFIX, type ModelGateway } from '@ember/model-gateway';
 import { PostgresB1AssistantTurnRepository } from '../../packages/postgres/src/repositories/b1-assistant-turn-repository.js';
 import { PostgresB1ConversationReadRepository } from '../../packages/postgres/src/repositories/b1-conversation-read.js';
@@ -9,11 +9,11 @@ import {
   PostgresB1TurnDispatchOutboxRepository,
 } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
 import { resolveCloudRuntimeModelConfig } from '../../apps/cloud-async-runtime/src/config.js';
+import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
 import {
   consumeTurnDispatchMessage,
   type TurnDispatchQueueMessage,
 } from '../../apps/cloud-async-runtime/src/dispatch.js';
-import { publishDueTurnDispatches } from '../../apps/cloud-async-runtime/src/relay.js';
 import { createTurnExecutor } from '../../apps/cloud-async-runtime/src/runtime.js';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 
@@ -27,6 +27,7 @@ class QueueDelivery implements TurnDispatchQueueMessage {
   readonly attempts = 1;
   ackCount = 0;
   retryCount = 0;
+  retryOptions: { readonly delaySeconds?: number } | undefined;
 
   constructor(readonly body: unknown) {}
 
@@ -34,8 +35,9 @@ class QueueDelivery implements TurnDispatchQueueMessage {
     this.ackCount += 1;
   }
 
-  retry(): void {
+  retry(options?: { readonly delaySeconds?: number }): void {
     this.retryCount += 1;
+    this.retryOptions = options;
   }
 }
 
@@ -81,6 +83,10 @@ async function createFixture(): Promise<Fixture> {
 }
 
 async function enqueueOutbox(fixture: Fixture): Promise<void> {
+  if ((await outbox.getEvent(fixture.turnId)) !== null) {
+    return;
+  }
+
   const client = await db.pool.connect();
   try {
     await client.query('BEGIN');
@@ -97,26 +103,6 @@ async function enqueueOutbox(fixture: Fixture): Promise<void> {
   }
 }
 
-function executorFor(fixture: Fixture, gateway?: ModelGateway) {
-  if (model.kind !== 'enabled') {
-    throw new Error(`fake test model was unexpectedly refused: ${model.kind}`);
-  }
-
-  return outbox.getEvent(fixture.turnId).then((event) => {
-    if (event === null) {
-      throw new Error('outbox event was not found');
-    }
-
-    return createTurnExecutor({
-      pool: db.pool,
-      model,
-      event,
-      workerId: 'cloud-runtime-integration',
-      ...(gateway === undefined ? {} : { gateway }),
-    });
-  });
-}
-
 async function readAssistantMessages(fixture: Fixture) {
   const page = await conversations.readMessages({
     tenantId: fixture.tenantId,
@@ -127,12 +113,58 @@ async function readAssistantMessages(fixture: Fixture) {
   return page.messages.filter((message) => message.kind === 'ember');
 }
 
+function cloudRuntimeEnv(sent: unknown[]) {
+  const databaseUrl = process.env.TEST_DATABASE_URL;
+  if (databaseUrl === undefined || databaseUrl.length === 0) {
+    throw new Error('TEST_DATABASE_URL is required for the cloud runtime integration test');
+  }
+
+  const connectionUrl = new URL(databaseUrl);
+  const existingOptions = connectionUrl.searchParams.get('options');
+  connectionUrl.searchParams.set(
+    'options',
+    [existingOptions, `-c search_path=${db.schema}`].filter(Boolean).join(' '),
+  );
+
+  return {
+    HYPERDRIVE: { connectionString: connectionUrl.toString() },
+    TURN_DISPATCH_QUEUE: {
+      send: (message: unknown) => {
+        sent.push(message);
+        return Promise.resolve();
+      },
+    },
+    EMBER_ENV: 'test',
+    NODE_ENV: 'test',
+    EMBER_MODEL_EXECUTION: 'fake',
+    EMBER_TURN_DISPATCH_QUEUE_NAME: 'ember-test-assistant-turns',
+    EMBER_TURN_DISPATCH_DLQ_NAME: 'ember-test-assistant-turns-dlq',
+  };
+}
+
+async function runScheduledRelay(env: ReturnType<typeof cloudRuntimeEnv>): Promise<void> {
+  let scheduledWork: Promise<unknown> | undefined;
+  cloudAsyncRuntime.scheduled({ cron: '* * * * *', scheduledTime: Date.now() }, env, {
+    waitUntil(promise) {
+      scheduledWork = promise;
+    },
+  });
+
+  if (scheduledWork === undefined) {
+    throw new Error('the Worker did not register its scheduled relay');
+  }
+
+  await scheduledWork;
+}
+
 beforeAll(async () => {
   db = await createTestDatabase({ maxConnections: 12 });
   outbox = new PostgresB1TurnDispatchOutboxRepository(db.pool);
   turns = new PostgresB1AssistantTurnRepository(db.pool);
   conversations = new PostgresB1ConversationReadRepository(db.pool);
-  writer = new PostgresB1ConversationWriteRepository(db.pool);
+  writer = new PostgresB1ConversationWriteRepository(db.pool, {
+    writeTurnDispatchOutbox: true,
+  });
 }, 30_000);
 
 afterAll(async () => {
@@ -140,25 +172,95 @@ afterAll(async () => {
 });
 
 describe('Cloud Async Runtime on PostgreSQL', () => {
-  it('self-heals an outbox gap, executes one Turn and returns the reply through B1 reads', async () => {
+  it('runs the Worker relay and Queue entrypoints with Fake Model and B1 reads', async () => {
     const fixture = await createFixture();
-    const sent: unknown[] = [];
-    const relay = await publishDueTurnDispatches({
-      outbox,
-      queue: {
-        send: (body) => {
-          sent.push(body);
-          return Promise.resolve();
-        },
-      },
-      workerId: 'cloud-runtime-relay',
+    const persistedEvent = await outbox.getEvent(fixture.turnId);
+    expect(persistedEvent).toMatchObject({
+      eventId: fixture.turnId,
+      tenantId: fixture.tenantId,
+      turnId: fixture.turnId,
     });
-    expect(relay).toMatchObject({ claimed: 1, enqueued: 1, failed: 0 });
-    expect(sent).toHaveLength(1);
 
-    const executor = await executorFor(fixture);
-    const delivery = new QueueDelivery(sent[0]);
-    await consumeTurnDispatchMessage(delivery, { outbox, executor });
+    // Exercise the relay's reconciliation path after the transactional outbox row disappears.
+    // Current API writes insert it atomically with the Turn; this protects old writers/recovery.
+    await db.pool.query(
+      'DELETE FROM b1_turn_dispatch_outbox WHERE tenant_id = $1 AND turn_id = $2',
+      [fixture.tenantId, fixture.turnId],
+    );
+    expect(await outbox.getEvent(fixture.turnId)).toBeNull();
+
+    const sent: unknown[] = [];
+    const env = cloudRuntimeEnv(sent);
+    await runScheduledRelay(env);
+    expect(sent).toHaveLength(1);
+    const queuedEnvelope = sent[0] as {
+      readonly schemaVersion: number;
+      readonly eventId: string;
+      readonly tenantId: string;
+      readonly turnId: string;
+    };
+    expect(queuedEnvelope).toEqual({
+      schemaVersion: 1,
+      eventId: fixture.turnId,
+      tenantId: fixture.tenantId,
+      turnId: fixture.turnId,
+    });
+    expect(JSON.stringify(queuedEnvelope)).not.toContain('local test message');
+
+    // A valid event ID cannot borrow a different tenant ID from the Queue body.
+    const wrongTenant = new QueueDelivery({ ...queuedEnvelope, tenantId: randomUUID() });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      await cloudAsyncRuntime.queue(
+        { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [wrongTenant] },
+        env,
+      );
+    } finally {
+      warn.mockRestore();
+    }
+    expect(wrongTenant.ackCount).toBe(1);
+    expect(
+      (
+        await turns.getTurn({
+          tenantId: fixture.tenantId,
+          conversationId: fixture.conversationId,
+          turnId: fixture.turnId,
+        })
+      )?.status,
+    ).toBe('running');
+    expect(await readAssistantMessages(fixture)).toHaveLength(0);
+
+    // A live PostgreSQL lease causes a real Queue retry. Once that lease expires, redelivery
+    // claims the same Turn and completes it through the Worker handler.
+    await db.pool.query(
+      `UPDATE assistant_turns
+          SET lease_epoch = 1,
+              lease_owner = 'integration-held-lease',
+              lease_expires_at = clock_timestamp() + interval '5 seconds'
+        WHERE tenant_id = $1 AND id = $2`,
+      [fixture.tenantId, fixture.turnId],
+    );
+    const waiting = new QueueDelivery(queuedEnvelope);
+    await cloudAsyncRuntime.queue(
+      { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [waiting] },
+      env,
+    );
+    expect(waiting.ackCount).toBe(0);
+    expect(waiting.retryCount).toBe(1);
+    expect(waiting.retryOptions?.delaySeconds).toBeGreaterThan(0);
+    expect(await readAssistantMessages(fixture)).toHaveLength(0);
+
+    await db.pool.query(
+      `UPDATE assistant_turns
+          SET lease_expires_at = clock_timestamp() - interval '1 second'
+        WHERE tenant_id = $1 AND id = $2`,
+      [fixture.tenantId, fixture.turnId],
+    );
+    const delivery = new QueueDelivery(queuedEnvelope);
+    await cloudAsyncRuntime.queue(
+      { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [delivery] },
+      env,
+    );
 
     const turn = await turns.getTurn({
       tenantId: fixture.tenantId,
@@ -175,8 +277,11 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
     expect(assistantMessages[0]?.text.startsWith(FAKE_REPLY_PREFIX)).toBe(true);
     expect(delivery.ackCount).toBe(1);
 
-    const duplicate = new QueueDelivery(sent[0]);
-    await consumeTurnDispatchMessage(duplicate, { outbox, executor });
+    const duplicate = new QueueDelivery(queuedEnvelope);
+    await cloudAsyncRuntime.queue(
+      { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [duplicate] },
+      env,
+    );
     expect(await readAssistantMessages(fixture)).toHaveLength(1);
     expect(duplicate.ackCount).toBe(1);
   });

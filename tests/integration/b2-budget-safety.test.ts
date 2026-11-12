@@ -555,6 +555,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
       const reservation = await repository.reserveAttempt({
         lease,
         ceilings: CEILINGS,
+        maxAttempts: 2,
         reservedMicroUsd: 2_000,
         rateVersion: RATE.rateVersion,
         providerId: 'openai',
@@ -614,6 +615,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
       const reservation = await repository.reserveAttempt({
         lease,
         ceilings: CEILINGS,
+        maxAttempts: 2,
         reservedMicroUsd: 100,
         rateVersion: RATE.rateVersion,
         providerId: 'openai',
@@ -687,6 +689,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
       await repository.reserveAttempt({
         lease,
         ceilings: CEILINGS,
+        maxAttempts: 2,
         reservedMicroUsd: 5_000,
         rateVersion: RATE.rateVersion,
         providerId: 'openai',
@@ -726,6 +729,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
       await repository.reserveAttempt({
         lease,
         ceilings: CEILINGS,
+        maxAttempts: 2,
         reservedMicroUsd: 100,
         rateVersion: RATE.rateVersion,
         providerId: 'openai',
@@ -786,6 +790,35 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
     });
   });
 
+  describe('per-Turn attempt authorization ceiling', () => {
+    it('allows only one concurrent reservation when the trusted runtime grants one attempt', async () => {
+      await resetGlobalSpend();
+      const fixture = await createFixture();
+      const lease = await claim(fixture);
+      const request = {
+        lease,
+        ceilings: CEILINGS,
+        maxAttempts: 1,
+        reservedMicroUsd: 100,
+        rateVersion: RATE.rateVersion,
+        providerId: 'openrouter' as const,
+        modelLabel: MODEL_LABEL,
+      };
+
+      const outcomes = await Promise.all([
+        repository.reserveAttempt(request),
+        repository.reserveAttempt(request),
+      ]);
+
+      expect(outcomes.map((outcome) => outcome.kind).sort()).toStrictEqual([
+        'attempts_exhausted',
+        'reserved',
+      ]);
+      expect(await readAttempts(fixture)).toHaveLength(1);
+      expect(await readGlobal()).toMatchObject({ reserved: 100, consumed: 0 });
+    });
+  });
+
   // -------------------------------------------------------------------------
   // P0-2 (second review) — TOCTOU between findOutstandingHalt and reserveAttempt.
   //
@@ -822,6 +855,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
           .reserveAttempt({
             lease,
             ceilings: CEILINGS,
+            maxAttempts: 2,
             reservedMicroUsd: 100,
             rateVersion: RATE.rateVersion,
             providerId: 'openai',
@@ -873,6 +907,7 @@ describe('B2 budget safety on PostgreSQL 17 (CTO review of PR #124)', () => {
           .reserveAttempt({
             lease,
             ceilings: CEILINGS,
+            maxAttempts: 2,
             reservedMicroUsd: 100,
             rateVersion: RATE.rateVersion,
             providerId: 'openai',

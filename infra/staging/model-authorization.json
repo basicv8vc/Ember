@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "note": "A missing or expired entry refuses paid egress. The dated L4C3 entry below covers one exact OpenRouter model and route; execution remains disabled by default. This is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select another approval. Each entry must include the provider's official HTTPS model/pricing page and match the model, price and policy in packages/model-gateway/src/rates.ts. OpenRouter entries require the reviewed upstream route, no provider fallback, data_collection=deny and ZDR.",
+  "note": "A missing or expired entry refuses paid egress. The dated L4C3 entry below covers one exact OpenRouter model and route; execution remains disabled by default. Its separate stagingAlpha record authorizes only the Cloud Staging Alpha scope and does not widen Smoke or resident Worker authorization. This is a code-reviewed decision, not a deployment setting: the guard reads this file from its own module path, so no --env-file or host variable can select another approval. Each entry must include the provider's official HTTPS model/pricing page and match the model, price and policy in packages/model-gateway/src/rates.ts. OpenRouter entries require the reviewed upstream route, no provider fallback, data_collection=deny and ZDR.",
   "authorizations": [
     {
       "authorizationId": "L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11",
@@ -17,7 +17,25 @@
       "maxTenantDailyMicroUsd": 5000,
       "maxGlobalDailyMicroUsd": 5000,
       "maxPrincipalDailyTurns": 1,
-      "maxPaidSmokeTurns": 1
+      "maxPaidSmokeTurns": 1,
+      "stagingAlpha": {
+        "approval": {
+          "approvalId": "L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12",
+          "approvedBy": "CTO",
+          "approvedAt": "2026-11-12",
+          "expiresAt": "2026-11-13"
+        },
+        "budgetCeilings": {
+          "perAttemptMicroUsd": 5000,
+          "principalDailyMicroUsd": 5000,
+          "tenantDailyMicroUsd": 5000,
+          "globalDailyMicroUsd": 5000,
+          "principalDailyTurns": 1
+        },
+        "externalApiKeySpendLimitUsd": 1,
+        "maxTurns": 1,
+        "maxProviderAttemptsPerTurn": 1
+      }
     }
   ]
 }

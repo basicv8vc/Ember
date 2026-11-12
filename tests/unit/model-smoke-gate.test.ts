@@ -69,6 +69,7 @@ describe('paid smoke gate', () => {
     if (!model.ok || model.mode !== 'real') {
       throw new Error('expected the approved paid Smoke resolution');
     }
+    expect(model.executionScope).not.toBe('staging_alpha');
 
     expect(
       evaluateSmokePreconditions({
@@ -78,7 +79,7 @@ describe('paid smoke gate', () => {
         rateVersion: model.rate.rateVersion,
         approvalIdFromConfig: model.approval.approvalId,
         approvalIdFromEnv: model.approval.approvalId,
-        executionScope: model.executionScope,
+        executionScope: model.executionScope === 'staging_alpha' ? null : model.executionScope,
         maxPaidSmokeTurns: model.maxPaidSmokeTurns,
         maxTurns: 1,
         confirmed: true,

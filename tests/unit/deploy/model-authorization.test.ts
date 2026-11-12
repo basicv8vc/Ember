@@ -77,6 +77,24 @@ function openRouterAuthorization(
     maxGlobalDailyMicroUsd: 5_000,
     maxPrincipalDailyTurns: 1,
     maxPaidSmokeTurns: 1,
+    stagingAlpha: {
+      approval: {
+        approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12',
+        approvedBy: 'CTO',
+        approvedAt: '2026-11-12',
+        expiresAt: '2026-11-13',
+      },
+      budgetCeilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 5_000,
+        tenantDailyMicroUsd: 5_000,
+        globalDailyMicroUsd: 5_000,
+        principalDailyTurns: 1,
+      },
+      externalApiKeySpendLimitUsd: 1,
+      maxTurns: 1,
+      maxProviderAttemptsPerTurn: 1,
+    },
     ...overrides,
   });
 }

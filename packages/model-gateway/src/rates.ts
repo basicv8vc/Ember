@@ -38,6 +38,16 @@ export interface ModelApprovalBudgetCeilings {
   readonly principalDailyTurns: number;
 }
 
+/** Separate one-turn Cloud Staging Alpha grant for a model whose primary grant is Smoke-only. */
+export interface StagingAlphaModelAuthorization {
+  readonly approval: ModelApprovalRecord;
+  readonly budgetCeilings: ModelApprovalBudgetCeilings;
+  /** Required provider-side lifetime key limit; it is an operator gate, not an app-side ledger. */
+  readonly externalApiKeySpendLimitUsd: 1;
+  readonly maxTurns: 1;
+  readonly maxProviderAttemptsPerTurn: 1;
+}
+
 export interface ApprovedModel {
   readonly providerId: RealModelProviderId;
   readonly modelId: string;
@@ -47,6 +57,8 @@ export interface ApprovedModel {
   readonly budgetCeilings: ModelApprovalBudgetCeilings;
   /** Turn count for `model:smoke`; independent of the principal's daily Turn budget. */
   readonly maxPaidSmokeTurns: number;
+  /** Explicit Cloud Staging Alpha scope; never inherited by the resident Worker or Smoke CLI. */
+  readonly stagingAlpha?: StagingAlphaModelAuthorization;
   /** Required for OpenRouter models; this policy is part of the reviewed model decision. */
   readonly openRouterRouting?: OpenRouterRoutingPolicy;
 }
@@ -79,6 +91,24 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
       principalDailyTurns: 1,
     }),
     maxPaidSmokeTurns: 1,
+    stagingAlpha: Object.freeze({
+      approval: Object.freeze({
+        approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12',
+        approvedBy: 'CTO',
+        approvedAt: '2026-11-12',
+        expiresAt: '2026-11-13',
+      }),
+      budgetCeilings: Object.freeze({
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 5_000,
+        tenantDailyMicroUsd: 5_000,
+        globalDailyMicroUsd: 5_000,
+        principalDailyTurns: 1,
+      }),
+      externalApiKeySpendLimitUsd: 1 as const,
+      maxTurns: 1 as const,
+      maxProviderAttemptsPerTurn: 1 as const,
+    }),
     openRouterRouting: Object.freeze({
       only: Object.freeze(['deepinfra']),
       allowFallbacks: false,

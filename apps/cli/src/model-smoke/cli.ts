@@ -382,7 +382,10 @@ export async function runPaidSmoke(
     rateVersion: model.mode === 'real' ? model.rate.rateVersion : null,
     approvalIdFromConfig: model.mode === 'real' ? model.approval.approvalId : null,
     approvalIdFromEnv: env['EMBER_MODEL_SMOKE_APPROVAL'],
-    executionScope: model.mode === 'real' ? model.executionScope : null,
+    executionScope:
+      model.mode === 'real' && model.executionScope !== 'staging_alpha'
+        ? model.executionScope
+        : null,
     maxPaidSmokeTurns: model.mode === 'real' ? model.maxPaidSmokeTurns : 0,
     maxTurns: args.maxTurns,
     confirmed: args.confirm,

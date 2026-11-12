@@ -333,7 +333,8 @@ SELECT m.sequence, m.kind, m.text
       throw toInvalidArgumentError(parsed.error);
     }
 
-    const { lease, ceilings, reservedMicroUsd, rateVersion, providerId, modelLabel } = parsed.data;
+    const { lease, ceilings, maxAttempts, reservedMicroUsd, rateVersion, providerId, modelLabel } =
+      parsed.data;
 
     try {
       return await transaction(this.pool, async (client) => {
@@ -388,7 +389,7 @@ SELECT m.sequence, m.kind, m.text
         );
         const attemptNo = (existing.rows[0]?.current ?? 0) + 1;
 
-        if (attemptNo > 2) {
+        if (attemptNo > maxAttempts) {
           throw new Refusal({ kind: 'attempts_exhausted' });
         }
 
@@ -1313,6 +1314,7 @@ const contextSchema = z.strictObject({
 
 const reserveSchema = z.strictObject({
   lease: leaseSchema,
+  maxAttempts: z.number().int().min(1).max(2),
   ceilings: z.strictObject({
     perAttemptMicroUsd: z.number().int().min(1).max(5_000),
     principalDailyMicroUsd: z.number().int().min(0).max(250_000),

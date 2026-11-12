@@ -46,6 +46,24 @@ export interface ModelAuthorizationEntry {
   readonly maxGlobalDailyMicroUsd: number;
   readonly maxPrincipalDailyTurns: number;
   readonly maxPaidSmokeTurns: number;
+  readonly stagingAlpha?: {
+    readonly approval: {
+      readonly approvalId: string;
+      readonly approvedBy: string;
+      readonly approvedAt: string;
+      readonly expiresAt: string;
+    };
+    readonly budgetCeilings: {
+      readonly perAttemptMicroUsd: number;
+      readonly principalDailyMicroUsd: number;
+      readonly tenantDailyMicroUsd: number;
+      readonly globalDailyMicroUsd: number;
+      readonly principalDailyTurns: number;
+    };
+    readonly externalApiKeySpendLimitUsd: 1;
+    readonly maxTurns: 1;
+    readonly maxProviderAttemptsPerTurn: 1;
+  };
 }
 
 export interface ModelAuthorizationManifest {

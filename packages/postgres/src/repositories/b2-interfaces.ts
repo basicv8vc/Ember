@@ -120,6 +120,8 @@ export interface B2TurnContextRow {
 export interface B2ReserveAttemptCommand {
   readonly lease: B2TurnLease;
   readonly ceilings: B2BudgetCeilings;
+  /** Effective per-Turn provider attempt ceiling resolved from the trusted runtime authorization. */
+  readonly maxAttempts: number;
   readonly reservedMicroUsd: number;
   readonly rateVersion: string;
   readonly providerId: B2ModelProviderId;

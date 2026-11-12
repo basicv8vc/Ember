@@ -63,6 +63,7 @@ export {
   type ModelRateRow,
   type ModelReasoningEffort,
   type OpenRouterRoutingPolicy,
+  type StagingAlphaModelAuthorization,
 } from './rates.js';
 export {
   MODEL_CREDENTIAL_PLACEHOLDER,

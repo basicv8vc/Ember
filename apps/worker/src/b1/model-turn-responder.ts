@@ -58,6 +58,7 @@ export interface ModelTurnExecutionPort {
   reserveAttempt(command: {
     readonly lease: B2TurnLease;
     readonly ceilings: ModelBudgetCeilings;
+    readonly maxAttempts: number;
     readonly reservedMicroUsd: number;
     readonly rateVersion: string;
     readonly providerId: 'openai' | 'openrouter';
@@ -427,6 +428,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       const reservation = await options.repository.reserveAttempt({
         lease,
         ceilings: options.ceilings,
+        maxAttempts: options.maxAttempts,
         reservedMicroUsd,
         rateVersion: rate.rateVersion,
         providerId: reservationProviderId,

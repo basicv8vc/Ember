@@ -6,22 +6,43 @@ import {
 } from '@ember/postgres/b2-worker';
 import { createModelTurnResponder } from '@ember/worker/b1/model-turn-responder';
 import type pg from 'pg';
-import { isAuthorizedCloudModelTurn, type CloudRuntimeModelConfig } from './config.js';
+import {
+  isAuthorizedCloudModelTurn,
+  isCloudModelConversationAuthorized,
+  type CloudRuntimeModelConfig,
+} from './config.js';
 import type { TurnExecutionPort } from './dispatch.js';
 
 export function createTurnDispatchOutbox(pool: pg.Pool): PostgresB1TurnDispatchOutboxRepository {
   return new PostgresB1TurnDispatchOutboxRepository(pool);
 }
 
-export function createTurnExecutor(input: {
+export async function createTurnExecutor(input: {
   readonly pool: pg.Pool;
   readonly model: CloudRuntimeModelConfig;
   readonly event: B1TurnDispatchEvent;
   readonly workerId: string;
   /** Test seam; production callers always construct the approved gateway from its resolution. */
   readonly gateway?: ModelGateway;
-}): TurnExecutionPort | null {
-  if (input.model.kind !== 'enabled' || !isAuthorizedCloudModelTurn(input.model, input.event)) {
+}): Promise<TurnExecutionPort | null> {
+  if (
+    input.model.kind !== 'enabled' ||
+    !isCloudModelConversationAuthorized(input.model, input.event)
+  ) {
+    return null;
+  }
+
+  let firstTurnIdAfterWatermark: string | null | undefined;
+  if (input.model.mode === 'real') {
+    firstTurnIdAfterWatermark = await new PostgresB1TurnDispatchOutboxRepository(
+      input.pool,
+    ).getFirstTurnCreatedAfter({
+      tenantId: input.model.onlyConversation.tenantId,
+      conversationId: input.model.onlyConversation.conversationId,
+      createdAfter: input.model.onlyConversation.turnCreatedAfter,
+    });
+  }
+  if (!isAuthorizedCloudModelTurn(input.model, input.event, firstTurnIdAfterWatermark)) {
     return null;
   }
 

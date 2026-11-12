@@ -1,7 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { FAKE_MODEL_LABEL, FAKE_REPLY_PREFIX, type ModelGateway } from '@ember/model-gateway';
-import { PostgresB1AssistantTurnRepository } from '../../packages/postgres/src/repositories/b1-assistant-turn-repository.js';
+import {
+  B1_ASSISTANT_TURN_MODEL_LABEL,
+  PostgresB1AssistantTurnRepository,
+} from '../../packages/postgres/src/repositories/b1-assistant-turn-repository.js';
 import { PostgresB1ConversationReadRepository } from '../../packages/postgres/src/repositories/b1-conversation-read.js';
 import { PostgresB1ConversationWriteRepository } from '../../packages/postgres/src/repositories/b1-conversation-write.js';
 import {
@@ -51,6 +54,7 @@ const model = resolveCloudRuntimeModelConfig({
   NODE_ENV: 'test',
   EMBER_MODEL_EXECUTION: 'fake',
 });
+const TEST_MODEL_KEY = 'sk-test-cloud-staging-alpha-abcdefghijklmnopqrstuvwxyz';
 
 async function createFixture(): Promise<Fixture> {
   const tenantId = randomUUID();
@@ -172,6 +176,114 @@ afterAll(async () => {
 });
 
 describe('Cloud Async Runtime on PostgreSQL', () => {
+  it('authorizes only the first post-watermark Turn in one approved Conversation', async () => {
+    const fixture = await createFixture();
+    await db.pool.query(
+      `UPDATE assistant_turns
+          SET created_at = clock_timestamp() - interval '1 minute'
+        WHERE tenant_id = $1 AND conversation_id = $2 AND id = $3`,
+      [fixture.tenantId, fixture.conversationId, fixture.turnId],
+    );
+    const watermarkResult = await db.pool.query<{ readonly created_after: Date }>(
+      `SELECT clock_timestamp() - interval '1 second' AS created_after`,
+    );
+    const createdAfter = watermarkResult.rows[0]?.created_after.toISOString();
+    if (createdAfter === undefined) throw new Error('database watermark was not returned');
+
+    const submitAfterWatermark = async (text: string): Promise<string> => {
+      const submitted = await writer.submitUserMessage({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        request: {
+          client_submission_id: randomUUID(),
+          text,
+          transcript_epoch: 0,
+        },
+      });
+      return submitted.receipt.turn.turn_id;
+    };
+    const firstApprovedTurnId = await submitAfterWatermark('First synthetic Alpha Turn.');
+    const laterTurnId = await submitAfterWatermark('Later synthetic Alpha Turn.');
+
+    const alphaModel = resolveCloudRuntimeModelConfig(
+      {
+        EMBER_ENV: 'staging',
+        NODE_ENV: 'staging',
+        EMBER_MODEL_EXECUTION: 'real',
+        EMBER_MODEL_PROVIDER: 'openrouter',
+        EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
+        EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
+        EMBER_MODEL_ALPHA_TENANT_ID: fixture.tenantId,
+        EMBER_MODEL_ALPHA_CONVERSATION_ID: fixture.conversationId,
+        EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: createdAfter,
+      },
+      'staging_alpha',
+      new Date('2026-11-12T12:00:00.000Z'),
+    );
+    expect(alphaModel.kind).toBe('enabled');
+    if (alphaModel.kind !== 'enabled' || alphaModel.mode !== 'real') return;
+
+    const neverCalledGateway: ModelGateway = {
+      providerId: 'openrouter',
+      modelLabel: 'nvidia/nemotron-3.5-lightning',
+      simulated: false,
+      operations: ['conversation.turn'],
+      generateConversationTurn() {
+        throw new Error('the integration test must not call a Provider');
+      },
+    };
+    const makeExecutor = async (turnId: string) => {
+      const persistedEvent = await outbox.getEvent(turnId);
+      if (persistedEvent === null) throw new Error('outbox event was not found');
+      return createTurnExecutor({
+        pool: db.pool,
+        model: alphaModel,
+        event: persistedEvent,
+        workerId: 'cloud-runtime-alpha-authorization',
+        gateway: neverCalledGateway,
+      });
+    };
+
+    expect(
+      await outbox.getFirstTurnCreatedAfter({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        createdAfter,
+      }),
+    ).toBe(firstApprovedTurnId);
+    expect(await makeExecutor(fixture.turnId)).toBeNull();
+    expect(await makeExecutor(firstApprovedTurnId)).not.toBeNull();
+    expect(await makeExecutor(laterTurnId)).toBeNull();
+
+    await turns.finishTurn({
+      tenantId: fixture.tenantId,
+      conversationId: fixture.conversationId,
+      turnId: firstApprovedTurnId,
+      result: {
+        status: 'completed',
+        text: 'Local integration fixture only.',
+        modelLabel: B1_ASSISTANT_TURN_MODEL_LABEL,
+        simulated: true,
+      },
+    });
+    expect(
+      await outbox.getFirstTurnCreatedAfter({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        createdAfter,
+      }),
+    ).toBe(firstApprovedTurnId);
+    expect(await makeExecutor(laterTurnId)).toBeNull();
+
+    for (const turnId of [fixture.turnId, laterTurnId]) {
+      await turns.cancelTurn({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId,
+      });
+    }
+  });
+
   it('runs the Worker relay and Queue entrypoints with Fake Model and B1 reads', async () => {
     const fixture = await createFixture();
     const persistedEvent = await outbox.getEvent(fixture.turnId);
@@ -291,7 +403,7 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
     await enqueueOutbox(fixture);
     const event = await outbox.getEvent(fixture.turnId);
     if (event === null) throw new Error('outbox event was not found');
-    const executor = createTurnExecutor({
+    const executor = await createTurnExecutor({
       pool: db.pool,
       model,
       event,
@@ -363,7 +475,7 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
         };
       },
     };
-    const executor = createTurnExecutor({
+    const executor = await createTurnExecutor({
       pool: db.pool,
       model,
       event,

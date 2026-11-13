@@ -10,6 +10,7 @@ import {
   preflightConversationTurn,
   type ModelBudgetCeilings,
   type ModelFailureCode,
+  type ModelGatewayFailureDiagnostic,
   type ModelGateway,
   type ModelRateRow,
   type ModelUsage,
@@ -170,6 +171,7 @@ interface GatewaySuccess {
 interface GatewayFailure {
   readonly kind: 'failure';
   readonly code: ModelFailureCode;
+  readonly diagnostic: ModelGatewayFailureDiagnostic | null;
 }
 
 /**
@@ -336,11 +338,11 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       };
     } catch (error) {
       if (isModelGatewayFailure(error)) {
-        return { kind: 'failure', code: error.code };
+        return { kind: 'failure', code: error.code, diagnostic: error.diagnostic };
       }
 
       // Anything else is our own defect, not a provider signal: it must not be retried with money.
-      return { kind: 'failure', code: 'model_invalid_output' };
+      return { kind: 'failure', code: 'model_invalid_output', diagnostic: null };
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
@@ -531,6 +533,14 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         state: 'unknown_billed',
         outcomeCode: shutdown ? 'client_cancelled' : result.code,
       });
+
+      if (result.code === 'model_unavailable' && result.diagnostic !== null) {
+        options.logger?.warn('model provider request unavailable', {
+          turnId: lease.turnId,
+          failureCode: result.code,
+          ...result.diagnostic,
+        });
+      }
 
       if (shutdown) {
         return 'skipped';

@@ -24,6 +24,7 @@ export {
   isModelGatewayFailure,
   isRetryableModelFailure,
   type ModelFailureCode,
+  type ModelGatewayFailureDiagnostic,
 } from './errors.js';
 export type {
   ConversationTurnInput,

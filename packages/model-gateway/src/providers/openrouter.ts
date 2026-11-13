@@ -194,11 +194,22 @@ export class OpenRouterModelGateway implements ModelGateway {
         throw error;
       }
 
-      throw new ModelGatewayFailure(signal.aborted ? 'model_timeout' : 'model_unavailable');
+      if (signal.aborted) {
+        throw new ModelGatewayFailure('model_timeout');
+      }
+
+      throw new ModelGatewayFailure(
+        'model_unavailable',
+        isNetworkFetchFailure(error) ? { kind: 'network_error' } : { kind: 'transport_exception' },
+      );
     }
 
     if (!response.ok) {
-      throw new ModelGatewayFailure(statusToFailureCode(response.status));
+      const code = statusToFailureCode(response.status);
+      throw new ModelGatewayFailure(
+        code,
+        code === 'model_unavailable' ? { kind: 'http_5xx', status: response.status } : null,
+      );
     }
 
     let payload: unknown;
@@ -241,4 +252,17 @@ export class OpenRouterModelGateway implements ModelGateway {
       usage,
     });
   }
+}
+
+/** Fetch network failures are TypeErrors in Workers and web-compatible Fetch implementations. */
+function isNetworkFetchFailure(error: unknown): boolean {
+  if (error instanceof TypeError) {
+    return true;
+  }
+
+  return (
+    typeof DOMException !== 'undefined' &&
+    error instanceof DOMException &&
+    error.name === 'NetworkError'
+  );
 }

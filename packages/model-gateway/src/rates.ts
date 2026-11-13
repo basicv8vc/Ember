@@ -93,10 +93,10 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
     maxPaidSmokeTurns: 1,
     stagingAlpha: Object.freeze({
       approval: Object.freeze({
-        approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12',
+        approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13',
         approvedBy: 'CTO',
-        approvedAt: '2026-11-12',
-        expiresAt: '2026-11-13',
+        approvedAt: '2026-11-13',
+        expiresAt: '2026-11-20',
       }),
       budgetCeilings: Object.freeze({
         perAttemptMicroUsd: 5_000,

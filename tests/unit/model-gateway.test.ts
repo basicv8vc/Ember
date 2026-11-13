@@ -410,7 +410,7 @@ describe('mode resolution and boot gates', () => {
   });
 
   it('resolves the separate one-turn Staging Alpha grant only for its trusted purpose', () => {
-    const now = new Date('2026-11-12T12:00:00.000Z');
+    const now = new Date('2026-11-13T12:00:00.000Z');
     const resolution = resolveModelExecution(
       {
         mode: 'real',
@@ -429,7 +429,7 @@ describe('mode resolution and boot gates', () => {
       mode: 'real',
       executionScope: 'staging_alpha',
       maxStagingAlphaTurns: 1,
-      approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12' },
+      approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13' },
       settings: {
         maxAttempts: 1,
         ceilings: {
@@ -442,13 +442,27 @@ describe('mode resolution and boot gates', () => {
       },
     });
     if (resolution.ok && resolution.mode === 'real') {
-      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-13T23:59:59.999Z'))).toBe(
+      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-20T23:59:59.999Z'))).toBe(
         true,
       );
-      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-14T00:00:00.000Z'))).toBe(
+      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-21T00:00:00.000Z'))).toBe(
         false,
       );
     }
+    expect(
+      resolveModelExecution(
+        {
+          mode: 'real',
+          providerId: 'openrouter',
+          modelId: 'nvidia/nemotron-3.5-lightning',
+          apiKey: VALID_KEY,
+          executionPurpose: 'paid_smoke',
+          maxAttempts: 1,
+        },
+        undefined,
+        now,
+      ),
+    ).toMatchObject({ ok: false, reason: 'approval_not_effective' });
     expect(
       resolveModelExecution(
         {

@@ -20,10 +20,10 @@
       "maxPaidSmokeTurns": 1,
       "stagingAlpha": {
         "approval": {
-          "approvalId": "L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12",
+          "approvalId": "L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13",
           "approvedBy": "CTO",
-          "approvedAt": "2026-11-12",
-          "expiresAt": "2026-11-13"
+          "approvedAt": "2026-11-13",
+          "expiresAt": "2026-11-20"
         },
         "budgetCeilings": {
           "perAttemptMicroUsd": 5000,

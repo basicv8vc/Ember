@@ -382,13 +382,17 @@ describe('mode resolution and boot gates', () => {
   });
 
   it('resolves only the approved OpenRouter model for trusted paid Smoke with its approved limits', () => {
-    const resolution = resolveModelExecution({
-      mode: 'real',
-      providerId: 'openrouter',
-      modelId: 'nvidia/nemotron-3.5-lightning',
-      apiKey: VALID_KEY,
-      executionPurpose: 'paid_smoke',
-    });
+    const resolution = resolveModelExecution(
+      {
+        mode: 'real',
+        providerId: 'openrouter',
+        modelId: 'nvidia/nemotron-3.5-lightning',
+        apiKey: VALID_KEY,
+        executionPurpose: 'paid_smoke',
+      },
+      undefined,
+      new Date('2026-11-12T12:00:00.000Z'),
+    );
 
     expect(resolution.ok).toBe(true);
     if (!resolution.ok || resolution.mode !== 'real') {
@@ -409,7 +413,7 @@ describe('mode resolution and boot gates', () => {
     });
   });
 
-  it('resolves the separate one-turn Staging Alpha grant only for its trusted purpose', () => {
+  it('resolves the standing internal Ember Cloud grant only for its trusted purpose', () => {
     const now = new Date('2026-11-13T12:00:00.000Z');
     const resolution = resolveModelExecution(
       {
@@ -428,25 +432,21 @@ describe('mode resolution and boot gates', () => {
       ok: true,
       mode: 'real',
       executionScope: 'staging_alpha',
-      maxStagingAlphaTurns: 1,
-      approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13' },
+      approval: { approvalId: 'EMBER-CLOUD-INTERNAL-MULTI-TURN' },
       settings: {
         maxAttempts: 1,
         ceilings: {
           perAttemptMicroUsd: 5_000,
-          principalDailyMicroUsd: 5_000,
-          tenantDailyMicroUsd: 5_000,
-          globalDailyMicroUsd: 5_000,
-          principalDailyTurns: 1,
+          principalDailyMicroUsd: 250_000,
+          tenantDailyMicroUsd: 1_000_000,
+          globalDailyMicroUsd: 1_000_000,
+          principalDailyTurns: 60,
         },
       },
     });
     if (resolution.ok && resolution.mode === 'real') {
-      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-20T23:59:59.999Z'))).toBe(
+      expect(isModelExecutionAuthorized(resolution, new Date('2030-11-21T00:00:00.000Z'))).toBe(
         true,
-      );
-      expect(isModelExecutionAuthorized(resolution, new Date('2026-11-21T00:00:00.000Z'))).toBe(
-        false,
       );
     }
     expect(
@@ -1253,6 +1253,11 @@ describe('approval record as a gate (L4-B)', () => {
     // `expiresAt` is inclusive: the last day the reviewer signed is still covered.
     expect(evaluateApproval(approval, new Date('2026-12-31T23:59:59Z'))).toBe('effective');
     expect(evaluateApproval(approval, new Date('2027-01-01T00:00:00Z'))).toBe('expired');
+  });
+
+  it('keeps a standing internal grant effective without an expiry date', () => {
+    const { expiresAt: _expiresAt, ...standingApproval } = TEST_APPROVAL;
+    expect(evaluateApproval(standingApproval, new Date('2030-11-21T00:00:00Z'))).toBe('effective');
   });
 
   it('treats a template id or an inverted window as malformed rather than valid', () => {

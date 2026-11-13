@@ -1,20 +1,19 @@
-# Ember Cloud Staging — Client Integration (iOS)
+# Ember Cloud — Client Integration (iOS)
 
-Audience: iOS Lead. This is the hand-off document for pointing the Ember client at the
-staging API. **This PR does not modify iOS code.**
+Audience: iOS Lead. This is the hand-off document for pointing the Ember client at the current
+shared Ember Cloud API. The endpoint and Apple audience are listed in [Ember Cloud](cloud-staging.md).
 
-Status: the base URL below becomes valid once the staging host exists and a certificate has
-been issued. Until then, the same contract is exercised against `http://127.0.0.1:8787` on a
-developer machine (§6).
+The Worker and Queue resource names still include `staging`; they identify the existing Ember Cloud
+resources and do not indicate a separate release environment.
 
 ---
 
 ## 1. Base URL
 
-| Environment | Base URL                           | Notes                                                                                                                                  |
-| ----------- | ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Staging     | `https://<EMBER_STAGING_HOSTNAME>` | Public TLS (Let's Encrypt), issued automatically on first boot. The hostname is chosen by the account owner; see the resource request. |
-| Local       | `http://127.0.0.1:8787`            | Loopback dev sign-in only. Never a staging substitute.                                                                                 |
+| Environment | Base URL                                               | Notes                                                             |
+| ----------- | ------------------------------------------------------ | ----------------------------------------------------------------- |
+| Ember Cloud | `https://ember-cloud-api-staging.10kpaper.workers.dev` | Existing Cloudflare HTTPS endpoint; keep this URL stable for iOS. |
+| Local       | `http://127.0.0.1:8787`                                | Loopback development only.                                        |
 
 Rules:
 
@@ -68,8 +67,8 @@ POST /v1/auth/session   { "provider": "apple", "identity_token": "<jwt>", "nonce
 - The response's `access_token` is the only credential the client stores. `expires_at` is an
   ISO-8601 timestamp; refresh before it passes.
 
-`POST /v1/auth/session` with `"provider": "dev"` returns **404** on staging by design. That is
-not a routing bug — treat it as "this build cannot talk to staging".
+`POST /v1/auth/session` with `"provider": "dev"` returns **404** on Ember Cloud by design. Use
+Apple Sign In for the shared cloud endpoint.
 
 ## 4. Response and error contract
 
@@ -92,18 +91,17 @@ everywhere:
 `request_id` is present on every response, including errors. Log it client-side; the API log
 line carries the same id and nothing else about the request.
 
-## 5. Staging-specific expectations
+## 5. Ember Cloud expectations
 
-1. **Turns will stay `running`.** There is no model provider on staging yet (paid calls are
-   disabled by design). A submitted Turn is durably stored and will complete once the Model
-   Gateway is wired. The client must handle a long-running Turn without treating it as an
-   error — poll, show a pending state, allow cancel.
-2. **No dev sign-in.** The client must not attempt the development provider against staging.
-3. **Expect restarts.** Deploys recreate containers; in-flight requests may see a connection
-   reset. Retry idempotent reads, and reconcile writes through
+1. **Internal real-model scope.** Real inference is enabled only for Tenant IDs on the server-side
+   internal allowlist. Authorized internal Conversations receive real replies (`simulated: false`);
+   other tenants are not granted provider access.
+2. **No dev sign-in.** The client must not attempt the development provider against Ember Cloud.
+3. **Recover writes by idempotency key.** A Worker version change or network interruption can make
+   a response ambiguous. Retry idempotent reads, and reconcile writes through
    `/v1/message-submissions/{client_submission_id}` before re-submitting.
-4. **Sessions survive restarts.** Session tokens are opaque, stored as digests in PostgreSQL,
-   so an API restart does not sign the user out.
+4. **Sessions survive deploys.** Session tokens are opaque, stored as digests in PostgreSQL, so an
+   API Worker update does not sign the user out.
 
 ## 6. Wiring it in a development build
 
@@ -111,7 +109,7 @@ The client currently reads its base URL from its own configuration; this documen
 the value, it does not change the code. For a local run:
 
 ```sh
-# terminal 1 — local stack (see docs/CLOUD-STAGING-DEPLOYMENT.md §11)
+# terminal 1 — optional local Docker Compose stack
 EMBER_STAGING_ENV_FILE=/tmp/ember-staging-verify.env \
   docker compose -f infra/staging/compose.yaml up -d --wait
 
@@ -119,8 +117,8 @@ EMBER_STAGING_ENV_FILE=/tmp/ember-staging-verify.env \
 curl -sS http://127.0.0.1:8787/readyz
 ```
 
-`http://127.0.0.1:8787` reaches the API container from the Mac host loopback only. A physical
-iPhone cannot reach it; use the staging hostname once it exists.
+`http://127.0.0.1:8787` reaches the local API from Mac loopback only. A physical iPhone cannot reach
+it; use the existing Ember Cloud HTTPS endpoint from the table above.
 
 ## 7. What the client must never do
 

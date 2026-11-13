@@ -4,19 +4,18 @@ import type { RealModelProviderId } from './types.js';
  * A pin, not a preference.
  *
  * `real` mode may only use a model id that appears in `APPROVED_REAL_MODELS`. The OpenRouter
- * approval below uses date-granularity UTC bounds with an inclusive `expiresAt`, for one exact
- * model and one reviewed upstream route.
- * It does not enable execution: runtime configuration still defaults to `disabled`, and smoke
- * execution has its own one-turn, one-attempt gate.
+ * approval below pins one exact model and one reviewed upstream route. Smoke grants may expire;
+ * the internal Ember Cloud grant is ongoing and remains bounded by its tenant allowlist and spend
+ * ceilings.
+ * The smoke grant remains time-limited and one-turn. Internal Ember Cloud execution has its own
+ * tenant allowlist, daily ledger ceilings, and one provider attempt per Turn.
  */
 
 /**
  * The recorded decision that allows one pinned model to be used.
  *
- * An approval without an expiry is a permanent permission granted by whoever happened to merge a
- * diff, so `expiresAt` is part of the record rather than a convention. The four fields are the
- * minimum an auditor needs to answer "who allowed this, on what date, until when, under which
- * ticket" without leaving the repository.
+ * `expiresAt` is optional for a standing internal grant. A grant still names who approved it and
+ * when; provider, model, route, tenant scope, and spend ceilings remain pinned in code/config.
  */
 export interface ModelApprovalRecord {
   /** Enablement review id, e.g. `L4B-A1`. Matches the approval table in the review document. */
@@ -25,8 +24,8 @@ export interface ModelApprovalRecord {
   readonly approvedBy: string;
   /** `YYYY-MM-DD`, UTC. The day the decision was recorded. */
   readonly approvedAt: string;
-  /** `YYYY-MM-DD`, UTC, inclusive. After this day the model must be re-approved. */
-  readonly expiresAt: string;
+  /** `YYYY-MM-DD`, UTC, inclusive. Omit only for a standing internal grant. */
+  readonly expiresAt?: string;
 }
 
 /** Runtime spend ceilings reviewed together with a model approval. */
@@ -38,13 +37,13 @@ export interface ModelApprovalBudgetCeilings {
   readonly principalDailyTurns: number;
 }
 
-/** Separate one-turn Cloud Staging Alpha grant for a model whose primary grant is Smoke-only. */
+/** Separate internal Ember Cloud grant for a model whose primary grant is Smoke-only. */
 export interface StagingAlphaModelAuthorization {
   readonly approval: ModelApprovalRecord;
   readonly budgetCeilings: ModelApprovalBudgetCeilings;
   /** Required provider-side lifetime key limit; it is an operator gate, not an app-side ledger. */
   readonly externalApiKeySpendLimitUsd: 1;
-  readonly maxTurns: 1;
+  /** Hard limit per Turn; Queue retries never open another provider attempt. */
   readonly maxProviderAttemptsPerTurn: 1;
 }
 
@@ -57,7 +56,7 @@ export interface ApprovedModel {
   readonly budgetCeilings: ModelApprovalBudgetCeilings;
   /** Turn count for `model:smoke`; independent of the principal's daily Turn budget. */
   readonly maxPaidSmokeTurns: number;
-  /** Explicit Cloud Staging Alpha scope; never inherited by the resident Worker or Smoke CLI. */
+  /** Explicit internal Ember Cloud scope; never inherited by the resident Worker or Smoke CLI. */
   readonly stagingAlpha?: StagingAlphaModelAuthorization;
   /** Required for OpenRouter models; this policy is part of the reviewed model decision. */
   readonly openRouterRouting?: OpenRouterRoutingPolicy;
@@ -71,7 +70,7 @@ export interface OpenRouterRoutingPolicy {
   readonly requireParameters: true;
 }
 
-/** One time-limited CTO-approved model route. Runtime execution remains disabled by default. */
+/** One pinned OpenRouter model route. Runtime execution still requires an internal tenant allowlist. */
 export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
   Object.freeze({
     providerId: 'openrouter' as const,
@@ -93,20 +92,18 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
     maxPaidSmokeTurns: 1,
     stagingAlpha: Object.freeze({
       approval: Object.freeze({
-        approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13',
+        approvalId: 'EMBER-CLOUD-INTERNAL-MULTI-TURN',
         approvedBy: 'CTO',
         approvedAt: '2026-11-13',
-        expiresAt: '2026-11-20',
       }),
       budgetCeilings: Object.freeze({
         perAttemptMicroUsd: 5_000,
-        principalDailyMicroUsd: 5_000,
-        tenantDailyMicroUsd: 5_000,
-        globalDailyMicroUsd: 5_000,
-        principalDailyTurns: 1,
+        principalDailyMicroUsd: 250_000,
+        tenantDailyMicroUsd: 1_000_000,
+        globalDailyMicroUsd: 1_000_000,
+        principalDailyTurns: 60,
       }),
       externalApiKeySpendLimitUsd: 1 as const,
-      maxTurns: 1 as const,
       maxProviderAttemptsPerTurn: 1 as const,
     }),
     openRouterRouting: Object.freeze({
@@ -339,9 +336,8 @@ export type ApprovalValidity = 'effective' | 'not_yet_valid' | 'expired' | 'malf
 /**
  * Whether an approval record authorises a call today.
  *
- * String comparison is sound because ISO-8601 calendar days sort lexicographically, and both sides
- * are validated against the same shape first. `expiresAt` is inclusive: an approval that expires
- * today is still valid today, which is the reading a reviewer signs.
+ * Calendar-day comparison is sound because ISO-8601 days sort lexicographically. When `expiresAt`
+ * is present it is inclusive; a standing internal approval omits the expiry.
  */
 export function evaluateApproval(
   approval: ModelApprovalRecord,
@@ -353,7 +349,7 @@ export function evaluateApproval(
     typeof approvalId !== 'string' ||
     typeof approvedBy !== 'string' ||
     !ISO_DAY.test(approvedAt) ||
-    !ISO_DAY.test(expiresAt) ||
+    (expiresAt !== undefined && !ISO_DAY.test(expiresAt)) ||
     approvalId.trim().length === 0 ||
     approvedBy.trim().length === 0 ||
     APPROVAL_PLACEHOLDER.test(approvalId)
@@ -361,7 +357,7 @@ export function evaluateApproval(
     return 'malformed';
   }
 
-  if (expiresAt < approvedAt) {
+  if (expiresAt !== undefined && expiresAt < approvedAt) {
     return 'malformed';
   }
 
@@ -371,7 +367,7 @@ export function evaluateApproval(
     return 'not_yet_valid';
   }
 
-  if (today > expiresAt) {
+  if (expiresAt !== undefined && today > expiresAt) {
     return 'expired';
   }
 
@@ -382,8 +378,8 @@ export function evaluateApproval(
  * Whether the provider has already reached the announced retirement day of this snapshot.
  *
  * A shutdown *date* in the future is not a refusal: pinning a model that retires in a year is a
- * normal, reviewable decision, and the approval's own `expiresAt` is what bounds it. A date that has
- * arrived is a hard stop, because the request would fail at the provider after a reservation.
+ * normal, reviewable decision. A date that has arrived is a hard stop, because the request would
+ * fail at the provider after a reservation.
  */
 export function isPastShutdown(rate: ModelRateRow, now: Date = new Date()): boolean {
   const day = rate.shutdownDate;

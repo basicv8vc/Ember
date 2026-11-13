@@ -16,11 +16,10 @@ import { publishDueTurnDispatches } from '../../apps/cloud-async-runtime/src/rel
 
 const TURN_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849302';
 const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849303';
+const SECOND_TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849305';
 const CONVERSATION_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849304';
 const TEST_MODEL_KEY = 'sk-test-cloud-staging-alpha-abcdefghijklmnopqrstuvwxyz';
 const ALPHA_NOW = new Date('2026-11-13T12:00:00.000Z');
-const TURN_CREATED_AFTER = '2026-11-12T11:00:00.000Z';
-
 function stagingAlphaEnv(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
     EMBER_ENV: 'staging',
@@ -28,9 +27,7 @@ function stagingAlphaEnv(overrides: Record<string, unknown> = {}): Record<string
     EMBER_MODEL_PROVIDER: 'openrouter',
     EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
     EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
-    EMBER_MODEL_ALPHA_TENANT_ID: TENANT_ID,
-    EMBER_MODEL_ALPHA_CONVERSATION_ID: CONVERSATION_ID,
-    EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: TURN_CREATED_AFTER,
+    EMBER_MODEL_ALPHA_TENANT_IDS: `${TENANT_ID},${SECOND_TENANT_ID}`,
     ...overrides,
   };
 }
@@ -187,44 +184,38 @@ describe('Cloud Async Runtime dispatch', () => {
     });
   });
 
-  it('allows only the code-selected staging Alpha purpose and first Turn in the approved Conversation', () => {
+  it('allows every Turn in every Conversation owned by an explicitly allowed internal tenant', () => {
     const model = resolveCloudRuntimeModelConfig(stagingAlphaEnv(), 'staging_alpha', ALPHA_NOW);
 
     expect(model).toMatchObject({
       kind: 'enabled',
       mode: 'real',
-      onlyConversation: {
-        tenantId: TENANT_ID,
-        conversationId: CONVERSATION_ID,
-        turnCreatedAfter: TURN_CREATED_AFTER,
-      },
+      onlyTenantIds: [TENANT_ID, SECOND_TENANT_ID],
       resolution: {
         executionScope: 'staging_alpha',
-        maxStagingAlphaTurns: 1,
-        approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13' },
+        approval: { approvalId: 'EMBER-CLOUD-INTERNAL-MULTI-TURN' },
         settings: { maxAttempts: 1 },
       },
     });
     if (model.kind !== 'enabled' || model.mode !== 'real') return;
 
-    expect(isAuthorizedCloudModelTurn(model, event(), TURN_ID)).toBe(true);
-    expect(isAuthorizedCloudModelTurn(model, event(), null)).toBe(false);
-    expect(isAuthorizedCloudModelTurn(model, event(), CONVERSATION_ID)).toBe(false);
-    for (const mismatch of [
-      { tenantId: CONVERSATION_ID },
-      { conversationId: TENANT_ID },
-      { turnId: CONVERSATION_ID, eventId: CONVERSATION_ID },
-    ]) {
-      expect(isAuthorizedCloudModelTurn(model, event(mismatch), TURN_ID)).toBe(false);
-    }
+    expect(isAuthorizedCloudModelTurn(model, event())).toBe(true);
+    expect(
+      isAuthorizedCloudModelTurn(
+        model,
+        event({ conversationId: CONVERSATION_ID, turnId: CONVERSATION_ID }),
+      ),
+    ).toBe(true);
+    expect(isAuthorizedCloudModelTurn(model, event({ tenantId: SECOND_TENANT_ID }))).toBe(true);
+    expect(isAuthorizedCloudModelTurn(model, event({ tenantId: CONVERSATION_ID }))).toBe(false);
   });
 
-  it('refuses a missing Conversation watermark, environment-selected purpose and production execution', () => {
+  it('requires an explicit internal tenant allowlist and refuses environment-selected purpose or production', () => {
     const scoped = stagingAlphaEnv();
-    delete scoped.EMBER_MODEL_ALPHA_TURN_CREATED_AFTER;
+    delete scoped.EMBER_MODEL_ALPHA_TENANT_IDS;
     expect(resolveCloudRuntimeModelConfig(scoped, 'staging_alpha', ALPHA_NOW)).toMatchObject({
       kind: 'refused',
-      reason: 'staging_alpha_turn_scope_required',
+      reason: 'staging_alpha_tenant_allowlist_required',
     });
 
     expect(
@@ -247,6 +238,18 @@ describe('Cloud Async Runtime dispatch', () => {
     ).toMatchObject({ kind: 'refused', reason: 'staging_alpha_environment_required' });
   });
 
+  it('fails closed for malformed Tenant allowlists', () => {
+    for (const allowlist of ['', '*', `${TENANT_ID},`, 'not-a-tenant-id']) {
+      expect(
+        resolveCloudRuntimeModelConfig(
+          stagingAlphaEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: allowlist }),
+          'staging_alpha',
+          ALPHA_NOW,
+        ),
+      ).toMatchObject({ kind: 'refused', reason: 'invalid_runtime_configuration' });
+    }
+  });
+
   it('uses approved defaults when Alpha budgets are absent and rejects higher values', () => {
     const missing = resolveCloudRuntimeModelConfig(stagingAlphaEnv(), 'staging_alpha', ALPHA_NOW);
     expect(missing).toMatchObject({
@@ -256,10 +259,10 @@ describe('Cloud Async Runtime dispatch', () => {
         settings: {
           ceilings: {
             perAttemptMicroUsd: 5_000,
-            principalDailyMicroUsd: 5_000,
-            tenantDailyMicroUsd: 5_000,
-            globalDailyMicroUsd: 5_000,
-            principalDailyTurns: 1,
+            principalDailyMicroUsd: 250_000,
+            tenantDailyMicroUsd: 1_000_000,
+            globalDailyMicroUsd: 1_000_000,
+            principalDailyTurns: 60,
           },
         },
       },
@@ -267,16 +270,16 @@ describe('Cloud Async Runtime dispatch', () => {
 
     for (const override of [
       {
-        EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: '5001',
-        EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '6000',
-        EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '7000',
+        EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: '250001',
+        EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '1000001',
+        EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '1000001',
       },
       {
-        EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '5001',
-        EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '6000',
+        EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '1000001',
+        EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '1000001',
       },
-      { EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '5001' },
-      { EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: '2' },
+      { EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '1000001' },
+      { EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: '61' },
       { EMBER_MODEL_MAX_ATTEMPTS: '2' },
     ]) {
       expect(
@@ -288,10 +291,10 @@ describe('Cloud Async Runtime dispatch', () => {
       resolveCloudRuntimeModelConfig(
         stagingAlphaEnv({
           EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD: '4000',
-          EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: '4000',
-          EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '4000',
-          EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '4000',
-          EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: '1',
+          EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: '200000',
+          EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: '800000',
+          EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '800000',
+          EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: '30',
         }),
         'staging_alpha',
         ALPHA_NOW,
@@ -299,14 +302,14 @@ describe('Cloud Async Runtime dispatch', () => {
     ).toMatchObject({ kind: 'enabled', mode: 'real' });
   });
 
-  it('expires the Staging Alpha grant without extending the existing Smoke approval', () => {
+  it('keeps the internal grant active without extending the independently expiring Smoke grant', () => {
     expect(
       resolveCloudRuntimeModelConfig(
         stagingAlphaEnv(),
         'staging_alpha',
-        new Date('2026-11-21T00:00:00.000Z'),
+        new Date('2028-11-21T00:00:00.000Z'),
       ),
-    ).toMatchObject({ kind: 'refused', reason: 'approval_not_effective' });
+    ).toMatchObject({ kind: 'enabled', mode: 'real' });
   });
 
   it('executes a running Turn once, marks the outbox complete, and deduplicates redelivery', async () => {

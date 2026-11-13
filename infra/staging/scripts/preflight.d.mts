@@ -51,7 +51,7 @@ export interface ModelAuthorizationEntry {
       readonly approvalId: string;
       readonly approvedBy: string;
       readonly approvedAt: string;
-      readonly expiresAt: string;
+      readonly expiresAt?: string;
     };
     readonly budgetCeilings: {
       readonly perAttemptMicroUsd: number;
@@ -61,7 +61,6 @@ export interface ModelAuthorizationEntry {
       readonly principalDailyTurns: number;
     };
     readonly externalApiKeySpendLimitUsd: 1;
-    readonly maxTurns: 1;
     readonly maxProviderAttemptsPerTurn: 1;
   };
 }

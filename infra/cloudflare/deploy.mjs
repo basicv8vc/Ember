@@ -77,10 +77,16 @@ async function activeVersion(worker) {
     { capture: true },
   );
   const deployments = JSON.parse(result.stdout);
-  const versions = deployments[0]?.versions ?? [];
+  const latestDeployment = deployments
+    .filter((deployment) => Number.isFinite(Date.parse(deployment.created_on)))
+    .sort((left, right) => Date.parse(right.created_on) - Date.parse(left.created_on))[0];
+  const versions = latestDeployment?.versions ?? [];
   if (versions.length !== 1 || versions[0].percentage !== 100) {
-    throw new Error(`refusing deployment: ${worker.name} has no single 100% active version`);
+    throw new Error(
+      `refusing deployment: ${worker.name} has no single 100% version in its latest deployment`,
+    );
   }
+  process.stdout.write(`Rollback target for ${worker.name}: ${versions[0].version_id}\n`);
   return versions[0].version_id;
 }
 

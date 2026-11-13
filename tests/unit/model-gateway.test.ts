@@ -1106,6 +1106,9 @@ describe('openrouter adapter', () => {
       expect(error.code).toBe(code);
       expect(error.retryable).toBe(retryable);
       expect(error.message).not.toContain(VALID_KEY);
+      expect(error.diagnostic).toEqual(
+        code === 'model_unavailable' ? { kind: 'http_5xx', status } : null,
+      );
     },
   );
 
@@ -1130,15 +1133,33 @@ describe('openrouter adapter', () => {
   });
 
   it('maps transport failures and aborts into the closed error taxonomy', async () => {
-    const reset = stubFetch(() => Promise.reject(new Error(`socket reset ${VALID_KEY}`)));
-    await expect(
-      openRouterGateway(reset.fetchImpl).generateConversationTurn(
-        input(),
-        new AbortController().signal,
-      ),
-    ).rejects.toSatisfy(
-      (error: unknown) => isModelGatewayFailure(error) && error.code === 'model_unavailable',
+    const networkFailure = stubFetch(() =>
+      Promise.reject(new TypeError(`fetch failed ${VALID_KEY}`)),
     );
+    const networkError = await openRouterGateway(networkFailure.fetchImpl)
+      .generateConversationTurn(input(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(isModelGatewayFailure(networkError)).toBe(true);
+    if (!isModelGatewayFailure(networkError)) {
+      throw new Error('expected a gateway failure');
+    }
+    expect(networkError.code).toBe('model_unavailable');
+    expect(networkError.diagnostic).toEqual({ kind: 'network_error' });
+    expect(JSON.stringify(networkError.diagnostic)).not.toContain(VALID_KEY);
+
+    const transportFailure = stubFetch(() =>
+      Promise.reject(new Error(`socket reset ${VALID_KEY}`)),
+    );
+    const transportError = await openRouterGateway(transportFailure.fetchImpl)
+      .generateConversationTurn(input(), new AbortController().signal)
+      .catch((caught: unknown) => caught);
+    expect(isModelGatewayFailure(transportError)).toBe(true);
+    if (!isModelGatewayFailure(transportError)) {
+      throw new Error('expected a gateway failure');
+    }
+    expect(transportError.code).toBe('model_unavailable');
+    expect(transportError.diagnostic).toEqual({ kind: 'transport_exception' });
+    expect(transportError.message).not.toContain(VALID_KEY);
 
     const abort = new AbortController();
     abort.abort();

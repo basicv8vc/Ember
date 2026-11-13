@@ -24,6 +24,12 @@ export const MODEL_FAILURE_CODES = Object.freeze([
 
 export type ModelFailureCode = (typeof MODEL_FAILURE_CODES)[number];
 
+/** Safe, closed transport diagnostics. Never carries provider text, URLs or exception messages. */
+export type ModelGatewayFailureDiagnostic =
+  | { readonly kind: 'http_5xx'; readonly status: number }
+  | { readonly kind: 'network_error' }
+  | { readonly kind: 'transport_exception' };
+
 /** Codes a second attempt may help with. Everything else is final on the first attempt. */
 const RETRYABLE: ReadonlySet<ModelFailureCode> = new Set<ModelFailureCode>([
   'model_timeout',
@@ -43,11 +49,13 @@ export class ModelGatewayFailure extends Error {
   override readonly name = 'ModelGatewayFailure';
   readonly code: ModelFailureCode;
   readonly retryable: boolean;
+  readonly diagnostic: ModelGatewayFailureDiagnostic | null;
 
-  constructor(code: ModelFailureCode) {
+  constructor(code: ModelFailureCode, diagnostic: ModelGatewayFailureDiagnostic | null = null) {
     super(`model gateway failure: ${code}`);
     this.code = code;
     this.retryable = RETRYABLE.has(code);
+    this.diagnostic = diagnostic;
   }
 }
 

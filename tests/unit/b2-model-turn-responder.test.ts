@@ -502,6 +502,45 @@ describe('B2 responder: concurrent workers', () => {
 });
 
 describe('B2 responder: provider failures', () => {
+  it('logs only the safe HTTP status for a provider 5xx', async () => {
+    const repository = new MemoryExecutionPort();
+    const warnings: Array<{ message: string; context?: Record<string, unknown> }> = [];
+    const gateway: ModelGateway = {
+      providerId: 'openrouter',
+      modelLabel: OPENROUTER_RATE.modelId,
+      simulated: false,
+      operations: ['conversation.turn'],
+      async generateConversationTurn() {
+        throw new ModelGatewayFailure('model_unavailable', { kind: 'http_5xx', status: 503 });
+      },
+    };
+
+    const summary = await realResponder(repository, gateway, {
+      maxAttempts: 1,
+      logger: {
+        warn(message, context) {
+          warnings.push({ message, context });
+        },
+      },
+    }).processOnce();
+
+    expect(summary.failed).toBe(1);
+    expect(warnings).toStrictEqual([
+      {
+        message: 'model provider request unavailable',
+        context: {
+          turnId,
+          failureCode: 'model_unavailable',
+          kind: 'http_5xx',
+          status: 503,
+        },
+      },
+    ]);
+    expect(repository.charges).toMatchObject([
+      { state: 'unknown_billed', outcomeCode: 'model_unavailable' },
+    ]);
+  });
+
   it('bills an unknown amount and fails the turn when the provider times out', async () => {
     const repository = new MemoryExecutionPort();
     const summary = await realResponder(

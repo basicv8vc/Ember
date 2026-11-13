@@ -1,7 +1,10 @@
-# Ember Cloud Staging — infrastructure
+# Legacy Compose infrastructure
 
-Everything needed to run the Ember Cloud API and Worker as a real HTTPS service, without
-touching the Shua estate.
+> This directory contains the earlier Docker Compose deployment path. It is retained for historical
+> compatibility and does not define the current Ember Cloud environment or release flow. Use
+> [Ember Cloud on Cloudflare](../../docs/cloud-staging.md) and `pnpm cloud:deploy` for current work.
+
+The files below support only that legacy host deployment and do not participate in `pnpm cloud:deploy`.
 
 | Path                            | What it is                                                                    |
 | ------------------------------- | ----------------------------------------------------------------------------- |

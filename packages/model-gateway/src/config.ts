@@ -109,7 +109,6 @@ export type ModelExecutionResolution =
       readonly approval: ModelApprovalRecord;
       readonly executionScope: ApprovedModel['executionScope'] | 'staging_alpha';
       readonly maxPaidSmokeTurns: number;
-      readonly maxStagingAlphaTurns: number;
       readonly openRouterRouting: OpenRouterRoutingPolicy | null;
       readonly credential: ModelCredential;
     }
@@ -207,13 +206,12 @@ function boundedInteger(
  * `real` requires five independent gates, and no configuration can substitute one for another:
  * 1. the provider is in the code-owned allowlist;
  * 2. the model id is in the code-owned allowlist as one exact approved entry;
- * 3. that entry carries an approval record that is effective **today** — dated, named, unexpired;
+ * 3. that entry carries an effective approval record — dated and named, with an optional expiry;
  * 4. a price row exists for that exact model id with official published pricing explicitly
  *    reviewed (or an invoice has been verified), and the snapshot's shutdown day has not arrived;
  * 5. a usable credential is bound.
  *
- * Gate 3 is what keeps "approved" from decaying into "approved once, forever": the record expires,
- * so a running Alpha re-proves its permission instead of inheriting it.
+ * Provider/model/routing pins, tenant allowlists, and ledger ceilings bound standing internal grants.
  *
  * There is deliberately no branch that turns `real` into `fake`: a process configured for real
  * inference that cannot deliver it must be dead and visible, never silently canned.
@@ -239,7 +237,6 @@ export function resolveModelExecution(
         ? {
             ...modelApproval,
             maxProviderAttemptsPerTurn: MODEL_LIMITS.maxAttemptsPerTurn,
-            maxStagingAlphaTurns: 0,
           }
         : {
             ...modelApproval,
@@ -247,7 +244,6 @@ export function resolveModelExecution(
             executionScope: 'staging_alpha' as const,
             budgetCeilings: stagingAlphaApproval.budgetCeilings,
             maxProviderAttemptsPerTurn: stagingAlphaApproval.maxProviderAttemptsPerTurn,
-            maxStagingAlphaTurns: stagingAlphaApproval.maxTurns,
           };
   const budgetDefaults =
     stagingAlphaApproval?.budgetCeilings ??
@@ -386,7 +382,6 @@ export function resolveModelExecution(
     approval: modelApproved.approval,
     executionScope: modelApproved.executionScope,
     maxPaidSmokeTurns: modelApproved.maxPaidSmokeTurns,
-    maxStagingAlphaTurns: modelApproved.maxStagingAlphaTurns,
     openRouterRouting: modelApproved.openRouterRouting ?? null,
     credential: credential.credential,
   };

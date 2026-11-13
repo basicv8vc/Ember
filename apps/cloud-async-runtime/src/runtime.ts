@@ -32,17 +32,7 @@ export async function createTurnExecutor(input: {
     return null;
   }
 
-  let firstTurnIdAfterWatermark: string | null | undefined;
-  if (input.model.mode === 'real') {
-    firstTurnIdAfterWatermark = await new PostgresB1TurnDispatchOutboxRepository(
-      input.pool,
-    ).getFirstTurnCreatedAfter({
-      tenantId: input.model.onlyConversation.tenantId,
-      conversationId: input.model.onlyConversation.conversationId,
-      createdAfter: input.model.onlyConversation.turnCreatedAfter,
-    });
-  }
-  if (!isAuthorizedCloudModelTurn(input.model, input.event, firstTurnIdAfterWatermark)) {
+  if (!isAuthorizedCloudModelTurn(input.model, input.event)) {
     return null;
   }
 

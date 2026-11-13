@@ -58,6 +58,7 @@ authenticated session. Sign in with Apple needs the `com.apple.developer.applesi
 team, and **neither is configured in `Ember.xcodeproj`**; the verified screens therefore stop at the Live entry and
 configuration-failure screens. Do not read the UI screenshot as staging chat evidence.
 
-For iPhone staging E2E, CTO must provide a deployed HTTPS origin, configured Apple Sign in
-entitlement/provisioning, valid session verification, the approved Fake Responder, and reachable B1 routes. The Apple
-account must be real, and `simulated: true` must stay visible.
+For Ember Cloud conversation verification, use the existing HTTPS endpoint and Apple audience in
+[`docs/cloud-staging.md`](../../cloud-staging.md). The current Alpha path uses a real responder for
+explicitly authorized internal Tenant IDs; verify real replies with `simulated: false`. No separate
+Production endpoint or release approval is part of the client flow.

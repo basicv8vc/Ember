@@ -1,4 +1,9 @@
-# Ember Cloud Staging — Deployment Runbook
+# Archived: Legacy Compose Deployment Runbook
+
+> This runbook describes the older Docker Compose/EC2 path. It is not the current Ember Cloud
+> release flow. Use [Ember Cloud](cloud-staging.md), which deploys the existing Cloudflare Workers,
+> Queues, Hyperdrive, and Neon database with `pnpm cloud:deploy`. No separate Production rollout is
+> required.
 
 Status: **reviewable configuration, not yet deployed.** No cloud resource has been created;
 see [CLOUD-STAGING-RESOURCE-REQUEST.md](./CLOUD-STAGING-RESOURCE-REQUEST.md) for what is

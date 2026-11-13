@@ -37,9 +37,14 @@ const runtimeEnvSchema = z.object({
     .max(5_000_000)
     .optional(),
   EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: z.coerce.number().int().min(0).max(60).optional(),
-  EMBER_MODEL_ALPHA_TENANT_ID: z.string().trim().uuid().optional(),
-  EMBER_MODEL_ALPHA_CONVERSATION_ID: z.string().trim().uuid().optional(),
-  EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: z.string().datetime({ offset: true }).optional(),
+  EMBER_MODEL_ALPHA_TENANT_IDS: z
+    .string()
+    .trim()
+    .min(1)
+    .max(4_096)
+    .transform((value) => value.split(',').map((tenantId) => tenantId.trim().toLowerCase()))
+    .pipe(z.array(z.string().uuid()).min(1).max(100))
+    .optional(),
 });
 
 export type CloudAsyncRuntimeEnv = z.input<typeof runtimeEnvSchema>;
@@ -62,18 +67,13 @@ export type CloudRuntimeModelConfig =
         ModelExecutionResolution,
         { readonly ok: true; readonly mode: 'real' }
       >;
-      readonly onlyConversation: {
-        readonly tenantId: string;
-        readonly conversationId: string;
-        /** PostgreSQL created_at watermark; only the first Turn after it is authorized. */
-        readonly turnCreatedAfter: string;
-      };
+      /** Internal account allowlist. Conversations and Turns remain tenant-isolated in B2. */
+      readonly onlyTenantIds: readonly string[];
     };
 
 export function isAuthorizedCloudModelTurn(
   model: CloudRuntimeModelConfig,
   event: { readonly tenantId: string; readonly conversationId: string; readonly turnId: string },
-  firstTurnIdAfterWatermark?: string | null,
 ): boolean {
   if (model.kind !== 'enabled') {
     return false;
@@ -81,11 +81,7 @@ export function isAuthorizedCloudModelTurn(
   if (model.mode === 'fake') {
     return true;
   }
-  return (
-    event.tenantId === model.onlyConversation.tenantId &&
-    event.conversationId === model.onlyConversation.conversationId &&
-    event.turnId === firstTurnIdAfterWatermark
-  );
+  return model.onlyTenantIds.includes(event.tenantId);
 }
 
 export function isCloudModelConversationAuthorized(
@@ -98,10 +94,7 @@ export function isCloudModelConversationAuthorized(
   if (model.mode === 'fake') {
     return true;
   }
-  return (
-    event.tenantId === model.onlyConversation.tenantId &&
-    event.conversationId === model.onlyConversation.conversationId
-  );
+  return model.onlyTenantIds.includes(event.tenantId);
 }
 
 /**
@@ -138,18 +131,9 @@ export function resolveCloudRuntimeModelConfig(
     return { kind: 'refused', reason: 'staging_alpha_environment_required' };
   }
 
-  const onlyConversation = {
-    tenantId: values.EMBER_MODEL_ALPHA_TENANT_ID,
-    conversationId: values.EMBER_MODEL_ALPHA_CONVERSATION_ID,
-    turnCreatedAfter: values.EMBER_MODEL_ALPHA_TURN_CREATED_AFTER,
-  };
-  if (
-    stagingAlphaReal &&
-    (onlyConversation.tenantId === undefined ||
-      onlyConversation.conversationId === undefined ||
-      onlyConversation.turnCreatedAfter === undefined)
-  ) {
-    return { kind: 'refused', reason: 'staging_alpha_turn_scope_required' };
+  const onlyTenantIds = values.EMBER_MODEL_ALPHA_TENANT_IDS;
+  if (stagingAlphaReal && onlyTenantIds === undefined) {
+    return { kind: 'refused', reason: 'staging_alpha_tenant_allowlist_required' };
   }
 
   const ceilings: Partial<ModelBudgetCeilings> = {
@@ -200,9 +184,7 @@ export function resolveCloudRuntimeModelConfig(
 
   if (
     stagingAlphaReal &&
-    (resolution.executionScope !== 'staging_alpha' ||
-      resolution.maxStagingAlphaTurns !== 1 ||
-      resolution.settings.maxAttempts !== 1)
+    (resolution.executionScope !== 'staging_alpha' || resolution.settings.maxAttempts !== 1)
   ) {
     return { kind: 'refused', reason: 'staging_alpha_authorization_invalid' };
   }
@@ -211,21 +193,15 @@ export function resolveCloudRuntimeModelConfig(
     if (
       values.EMBER_ENV !== 'staging' ||
       values.NODE_ENV?.trim().toLowerCase() === 'production' ||
-      onlyConversation.tenantId === undefined ||
-      onlyConversation.conversationId === undefined ||
-      onlyConversation.turnCreatedAfter === undefined
+      onlyTenantIds === undefined
     ) {
-      return { kind: 'refused', reason: 'staging_alpha_turn_scope_required' };
+      return { kind: 'refused', reason: 'staging_alpha_tenant_allowlist_required' };
     }
     return {
       kind: 'enabled',
       mode: 'real',
       resolution,
-      onlyConversation: {
-        tenantId: onlyConversation.tenantId,
-        conversationId: onlyConversation.conversationId,
-        turnCreatedAfter: onlyConversation.turnCreatedAfter,
-      },
+      onlyTenantIds,
     };
   }
 

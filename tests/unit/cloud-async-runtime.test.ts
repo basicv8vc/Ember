@@ -18,7 +18,7 @@ const TURN_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849302';
 const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849303';
 const CONVERSATION_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849304';
 const TEST_MODEL_KEY = 'sk-test-cloud-staging-alpha-abcdefghijklmnopqrstuvwxyz';
-const ALPHA_NOW = new Date('2026-11-12T12:00:00.000Z');
+const ALPHA_NOW = new Date('2026-11-13T12:00:00.000Z');
 const TURN_CREATED_AFTER = '2026-11-12T11:00:00.000Z';
 
 function stagingAlphaEnv(overrides: Record<string, unknown> = {}): Record<string, unknown> {
@@ -201,7 +201,7 @@ describe('Cloud Async Runtime dispatch', () => {
       resolution: {
         executionScope: 'staging_alpha',
         maxStagingAlphaTurns: 1,
-        approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-12' },
+        approval: { approvalId: 'L4C3-B2-CLOUD-STAGING-ALPHA-2026-11-13' },
         settings: { maxAttempts: 1 },
       },
     });
@@ -304,7 +304,7 @@ describe('Cloud Async Runtime dispatch', () => {
       resolveCloudRuntimeModelConfig(
         stagingAlphaEnv(),
         'staging_alpha',
-        new Date('2026-11-14T00:00:00.000Z'),
+        new Date('2026-11-21T00:00:00.000Z'),
       ),
     ).toMatchObject({ kind: 'refused', reason: 'approval_not_effective' });
   });

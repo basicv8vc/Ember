@@ -32,6 +32,7 @@ interface RuntimeEnv {
   readonly EMBER_MODEL_EXECUTION?: string;
   readonly EMBER_MODEL_PROVIDER?: string;
   readonly EMBER_MODEL_ID?: string;
+  readonly EMBER_MODEL_ALPHA_SCOPE?: string;
   readonly EMBER_MODEL_ALPHA_TENANT_IDS?: string;
   readonly EMBER_MODEL_API_KEY?: string;
   readonly EMBER_MODEL_TURN_LEASE_MS?: string;

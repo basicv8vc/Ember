@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { B1TurnDispatchEvent } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
 import {
   isAuthorizedCloudModelTurn,
+  isCloudModelConversationAuthorized,
   resolveCloudRuntimeModelConfig,
 } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
@@ -190,6 +191,7 @@ describe('Cloud Async Runtime dispatch', () => {
     expect(model).toMatchObject({
       kind: 'enabled',
       mode: 'real',
+      tenantScope: 'allowlist',
       onlyTenantIds: [TENANT_ID, SECOND_TENANT_ID],
       resolution: {
         executionScope: 'staging_alpha',
@@ -208,6 +210,61 @@ describe('Cloud Async Runtime dispatch', () => {
     ).toBe(true);
     expect(isAuthorizedCloudModelTurn(model, event({ tenantId: SECOND_TENANT_ID }))).toBe(true);
     expect(isAuthorizedCloudModelTurn(model, event({ tenantId: CONVERSATION_ID }))).toBe(false);
+  });
+
+  it('authorizes all authenticated tenants for Private Alpha without requiring an allowlist while keeping environment and purpose guards', () => {
+    const openEnv = stagingAlphaEnv({ EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' });
+    delete openEnv.EMBER_MODEL_ALPHA_TENANT_IDS;
+    const model = resolveCloudRuntimeModelConfig(openEnv, 'staging_alpha', ALPHA_NOW);
+
+    expect(model).toMatchObject({
+      kind: 'enabled',
+      mode: 'real',
+      tenantScope: 'authenticated_tenants',
+      onlyTenantIds: null,
+      resolution: {
+        executionScope: 'staging_alpha',
+        settings: { maxAttempts: 1 },
+      },
+    });
+    if (model.kind !== 'enabled' || model.mode !== 'real') return;
+
+    const newExternalTenantId = '018f5f2e-0e91-7a30-ae62-bcb97d849399';
+    expect(
+      isCloudModelConversationAuthorized(model, event({ tenantId: newExternalTenantId })),
+    ).toBe(true);
+    expect(isAuthorizedCloudModelTurn(model, event({ tenantId: newExternalTenantId }))).toBe(true);
+
+    // Tolerates legacy EMBER_MODEL_ALPHA_TENANT_IDS secret when authenticated_tenants is enabled.
+    const withLegacySecret = resolveCloudRuntimeModelConfig(
+      stagingAlphaEnv({ EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' }),
+      'staging_alpha',
+      ALPHA_NOW,
+    );
+    expect(withLegacySecret).toMatchObject({
+      kind: 'enabled',
+      mode: 'real',
+      tenantScope: 'authenticated_tenants',
+      onlyTenantIds: null,
+    });
+    if (withLegacySecret.kind === 'enabled' && withLegacySecret.mode === 'real') {
+      expect(
+        isAuthorizedCloudModelTurn(withLegacySecret, event({ tenantId: newExternalTenantId })),
+      ).toBe(true);
+    }
+
+    expect(
+      resolveCloudRuntimeModelConfig(
+        { ...openEnv, EMBER_ENV: 'production' },
+        'staging_alpha',
+        ALPHA_NOW,
+      ),
+    ).toMatchObject({ kind: 'refused', reason: 'staging_alpha_environment_required' });
+
+    expect(resolveCloudRuntimeModelConfig(openEnv, 'resident_worker', ALPHA_NOW)).toMatchObject({
+      kind: 'refused',
+      reason: 'execution_scope_refused',
+    });
   });
 
   it('requires an explicit internal tenant allowlist and refuses environment-selected purpose or production', () => {

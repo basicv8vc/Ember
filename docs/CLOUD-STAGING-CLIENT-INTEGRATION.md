@@ -93,9 +93,9 @@ line carries the same id and nothing else about the request.
 
 ## 5. Ember Cloud expectations
 
-1. **Internal real-model scope.** Real inference is enabled only for Tenant IDs on the server-side
-   internal allowlist. Authorized internal Conversations receive real replies (`simulated: false`);
-   other tenants are not granted provider access.
+1. **Private Alpha real-model scope.** Authenticated Apple Sign In users receive real model
+   replies (`simulated: false`) bounded by per-Turn, per-Principal, per-Tenant, and global daily
+   ledger budgets plus the server-side OpenRouter key cap. Anonymous requests remain rejected.
 2. **No dev sign-in.** The client must not attempt the development provider against Ember Cloud.
 3. **Recover writes by idempotency key.** A Worker version change or network interruption can make
    a response ambiguous. Retry idempotent reads, and reconcile writes through

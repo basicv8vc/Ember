@@ -38,13 +38,13 @@ pnpm --filter @ember/cloud-async-runtime exec wrangler rollback <previous-versio
 
 The Cloudflare OAuth login and Neon CLI profile must have write access to the existing Worker and Admin access to project `silent-boat-95177889`. Migration credentials are obtained transiently from Neon CLI and are not written to files or logs. Provider keys and Tenant allowlists are Worker secrets, not source-controlled variables.
 
-## Internal real-model testing
+## Private Alpha model execution
 
-The Async Runtime uses OpenRouter → DeepInfra → `nvidia/nemotron-3.5-lightning`, with provider fallback disabled. Real calls run only for Tenant IDs explicitly listed in the Worker secret `EMBER_MODEL_ALPHA_TENANT_IDS`; missing or malformed allowlists fail closed. A Tenant allowlist permits that account's Conversations to continue across Turns, while API authentication and database tenant predicates continue to isolate every user's data.
+The Async Runtime uses OpenRouter → DeepInfra → `nvidia/nemotron-3.5-lightning`, with provider fallback disabled. In Private Alpha (`EMBER_MODEL_ALPHA_SCOPE=authenticated_tenants`), any authenticated Apple Sign In account receives real model execution across Conversations and Turns, while API authentication and database tenant predicates continue to isolate every user's data. (If `EMBER_MODEL_ALPHA_SCOPE=allowlist` is restored, missing or malformed `EMBER_MODEL_ALPHA_TENANT_IDS` fail closed.)
 
 Each Turn has a `$0.005` reservation ceiling and exactly one provider attempt. Daily ledger limits are `$0.25` per principal, `$1` per Tenant, `$1` global, and at most 60 Turns per principal. Queue redelivery remains available for recovery; the database reservation, one-send fence, attempt record, and idempotent outbox prevent a second paid send for an already-started Turn. OpenRouter's existing dedicated key retains its `$1` lifetime spend cap as the final provider-side limit. A missing or exhausted provider allowance surfaces as a failed Turn; the Runtime does not switch providers or bypass the cap.
 
-Only the internal Tenant allowlist receives real model execution. Keep external Alpha users out of that allowlist. The API key is stored only as Cloudflare secret `EMBER_MODEL_API_KEY`; it must not appear in iOS configuration, source files, or logs.
+The API key is stored only as Cloudflare secret `EMBER_MODEL_API_KEY`; it must not appear in iOS configuration, source files, or logs.
 
 ## Private Alpha acceptance
 

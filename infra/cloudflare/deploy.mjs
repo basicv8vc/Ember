@@ -92,6 +92,13 @@ async function activeVersion(worker) {
 
 async function assertRuntimeSecrets() {
   const runtime = workers[1];
+  const runtimeConfig = await readFile(resolve(repoRoot, runtime.configPath), 'utf8');
+  const allowAllAuthenticatedTenants = runtimeConfig.includes(
+    '"EMBER_MODEL_ALPHA_SCOPE": "authenticated_tenants"',
+  );
+  const requiredSecrets = allowAllAuthenticatedTenants
+    ? ['EMBER_MODEL_API_KEY']
+    : ['EMBER_MODEL_API_KEY', 'EMBER_MODEL_ALPHA_TENANT_IDS'];
   const result = await command(
     'pnpm',
     wranglerArgs(runtime, ['secret', 'list', '--name', runtime.name]),
@@ -99,7 +106,7 @@ async function assertRuntimeSecrets() {
   );
   const secrets = JSON.parse(result.stdout);
   const names = new Set(secrets.map((secret) => secret.name));
-  for (const name of ['EMBER_MODEL_API_KEY', 'EMBER_MODEL_ALPHA_TENANT_IDS']) {
+  for (const name of requiredSecrets) {
     if (!names.has(name)) {
       throw new Error(`required Ember Cloud Runtime secret is missing: ${name}`);
     }

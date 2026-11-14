@@ -45,6 +45,7 @@
     "EMBER_TURN_DISPATCH_DLQ_NAME": "ember-staging-assistant-turns-dlq",
     "EMBER_MODEL_PROVIDER": "openrouter",
     "EMBER_MODEL_ID": "nvidia/nemotron-3.5-lightning",
+    "EMBER_MODEL_ALPHA_SCOPE": "authenticated_tenants",
     "EMBER_MODEL_TURN_LEASE_MS": "30000",
     "EMBER_MODEL_ATTEMPT_TIMEOUT_MS": "20000",
     "EMBER_MODEL_MAX_ATTEMPTS": "1",

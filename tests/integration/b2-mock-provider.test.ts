@@ -358,7 +358,7 @@ describe('B2 Mock Provider — production adapter, stubbed transport, real datab
     expect(body['stream']).toBe(false);
     expect(body['store']).toBe(false);
     expect(mock.calls[0]!.headers['authorization']).toBe(`Bearer ${API_KEY}`);
-    expect(mock.calls[0]!.redirect).toBe('error');
+    expect(mock.calls[0]!.redirect).toBe('manual');
 
     const turn = await readTurn(fixture);
     const transcript = await readTranscript(fixture);

@@ -8,13 +8,24 @@ private struct MockReceiptPresentation: Identifiable {
 
 @MainActor
 enum AppCompositionRoot {
-    /// Live must be explicitly selected by the Alpha launch configuration.
-    /// An absent/malformed endpoint fails closed; never fall back from Live to Mock.
+    static let defaultCloudBaseURL = "https://ember-cloud-api-staging.10kpaper.workers.dev"
+
+    private static let mockLaunchArguments: Set<String> = [
+        "--ember-mock-demo",
+        "--ember-show-onboarding",
+        "--ember-start-task-flow",
+        "--ember-start-conversation",
+    ]
+
+    /// Live Ember Cloud is the default entrypoint.
+    /// Mock flows remain explicitly selectable via launch arguments for UI tests.
+    /// An explicitly invalid or non-HTTPS EMBER_CLOUD_BASE_URL fails closed; never fall back to Mock.
     @ViewBuilder
     static func makeRootView() -> some View {
-        if ProcessInfo.processInfo.arguments.contains("--ember-live-cloud") {
-            if let origin = ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"],
-               let url = URL(string: origin),
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        if arguments.isDisjoint(with: mockLaunchArguments) || arguments.contains("--ember-live-cloud") {
+            let origin = ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"] ?? defaultCloudBaseURL
+            if let url = URL(string: origin),
                let model = try? LiveComposition.make(baseURL: url) {
                 LiveConversationHost(model: model)
             } else {

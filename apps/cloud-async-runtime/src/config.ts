@@ -37,6 +37,7 @@ const runtimeEnvSchema = z.object({
     .max(5_000_000)
     .optional(),
   EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: z.coerce.number().int().min(0).max(60).optional(),
+  EMBER_MODEL_ALPHA_SCOPE: z.enum(['allowlist', 'authenticated_tenants']).default('allowlist'),
   EMBER_MODEL_ALPHA_TENANT_IDS: z
     .string()
     .trim()
@@ -67,8 +68,9 @@ export type CloudRuntimeModelConfig =
         ModelExecutionResolution,
         { readonly ok: true; readonly mode: 'real' }
       >;
-      /** Internal account allowlist. Conversations and Turns remain tenant-isolated in B2. */
-      readonly onlyTenantIds: readonly string[];
+      readonly tenantScope: 'allowlist' | 'authenticated_tenants';
+      /** Internal account allowlist when tenantScope is 'allowlist'; null for all authenticated tenants. Conversations and Turns remain tenant-isolated in B2. */
+      readonly onlyTenantIds: readonly string[] | null;
     };
 
 export function isAuthorizedCloudModelTurn(
@@ -78,10 +80,10 @@ export function isAuthorizedCloudModelTurn(
   if (model.kind !== 'enabled') {
     return false;
   }
-  if (model.mode === 'fake') {
+  if (model.mode === 'fake' || model.tenantScope === 'authenticated_tenants') {
     return true;
   }
-  return model.onlyTenantIds.includes(event.tenantId);
+  return model.onlyTenantIds?.includes(event.tenantId) ?? false;
 }
 
 export function isCloudModelConversationAuthorized(
@@ -91,10 +93,10 @@ export function isCloudModelConversationAuthorized(
   if (model.kind !== 'enabled') {
     return false;
   }
-  if (model.mode === 'fake') {
+  if (model.mode === 'fake' || model.tenantScope === 'authenticated_tenants') {
     return true;
   }
-  return model.onlyTenantIds.includes(event.tenantId);
+  return model.onlyTenantIds?.includes(event.tenantId) ?? false;
 }
 
 /**
@@ -131,8 +133,9 @@ export function resolveCloudRuntimeModelConfig(
     return { kind: 'refused', reason: 'staging_alpha_environment_required' };
   }
 
+  const alphaScope = values.EMBER_MODEL_ALPHA_SCOPE;
   const onlyTenantIds = values.EMBER_MODEL_ALPHA_TENANT_IDS;
-  if (stagingAlphaReal && onlyTenantIds === undefined) {
+  if (stagingAlphaReal && alphaScope === 'allowlist' && onlyTenantIds === undefined) {
     return { kind: 'refused', reason: 'staging_alpha_tenant_allowlist_required' };
   }
 
@@ -190,18 +193,27 @@ export function resolveCloudRuntimeModelConfig(
   }
 
   if (executionPurpose === 'staging_alpha') {
-    if (
-      values.EMBER_ENV !== 'staging' ||
-      values.NODE_ENV?.trim().toLowerCase() === 'production' ||
-      onlyTenantIds === undefined
-    ) {
-      return { kind: 'refused', reason: 'staging_alpha_tenant_allowlist_required' };
+    if (values.EMBER_ENV !== 'staging' || values.NODE_ENV?.trim().toLowerCase() === 'production') {
+      return { kind: 'refused', reason: 'staging_alpha_environment_required' };
+    }
+    if (alphaScope === 'allowlist') {
+      if (onlyTenantIds === undefined) {
+        return { kind: 'refused', reason: 'staging_alpha_tenant_allowlist_required' };
+      }
+      return {
+        kind: 'enabled',
+        mode: 'real',
+        resolution,
+        tenantScope: 'allowlist',
+        onlyTenantIds,
+      };
     }
     return {
       kind: 'enabled',
       mode: 'real',
       resolution,
-      onlyTenantIds,
+      tenantScope: 'authenticated_tenants',
+      onlyTenantIds: null,
     };
   }
 

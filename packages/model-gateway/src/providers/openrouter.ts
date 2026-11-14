@@ -185,7 +185,7 @@ export class OpenRouterModelGateway implements ModelGateway {
           accept: 'application/json',
         },
         body,
-        redirect: 'error',
+        redirect: 'manual',
         credentials: 'omit',
         signal,
       });

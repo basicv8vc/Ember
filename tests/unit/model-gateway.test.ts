@@ -759,7 +759,7 @@ describe('openai adapter', () => {
     expect(stub.calls).toHaveLength(1);
     expect(call.url).toBe(OPENAI_CHAT_COMPLETIONS_URL);
     expect(call.url.startsWith(OPENAI_ORIGIN)).toBe(true);
-    expect(call.init.redirect).toBe('error');
+    expect(call.init.redirect).toBe('manual');
     expect(call.init.credentials).toBe('omit');
     expect(call.init.method).toBe('POST');
     expect(result.simulated).toBe(false);
@@ -822,6 +822,7 @@ describe('openai adapter', () => {
   });
 
   it.each([
+    [302, 'model_invalid_output', false],
     [401, 'model_auth_failed', false],
     [403, 'model_auth_failed', false],
     [429, 'model_rate_limited', true],
@@ -1003,7 +1004,7 @@ describe('openrouter adapter', () => {
     expect(stub.calls).toHaveLength(1);
     expect(url).toBe(OPENROUTER_CHAT_COMPLETIONS_URL);
     expect(url.startsWith(OPENROUTER_ORIGIN)).toBe(true);
-    expect(init.redirect).toBe('error');
+    expect(init.redirect).toBe('manual');
     expect(init.credentials).toBe('omit');
     expect(init.headers.authorization).toBe(`Bearer ${VALID_KEY}`);
     expect(init.body).not.toContain(VALID_KEY);
@@ -1098,6 +1099,7 @@ describe('openrouter adapter', () => {
   });
 
   it.each([
+    [302, 'model_invalid_output', false],
     [401, 'model_auth_failed', false],
     [403, 'model_auth_failed', false],
     [429, 'model_rate_limited', true],

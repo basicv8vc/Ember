@@ -33,8 +33,8 @@ export interface FetchRequestInitLike {
   readonly method: 'POST';
   readonly headers: Readonly<Record<string, string>>;
   readonly body: string;
-  /** Redirect following is disabled: a redirect would leave the pinned origin. */
-  readonly redirect: 'error';
+  /** Redirect following is disabled; Cloudflare Workers rejects `redirect: 'error'`, so use `manual` and reject non-2xx responses. */
+  readonly redirect: 'manual';
   readonly credentials: 'omit';
   readonly signal: AbortSignal;
 }
@@ -175,7 +175,7 @@ export class OpenAiModelGateway implements ModelGateway {
           accept: 'application/json',
         },
         body,
-        redirect: 'error',
+        redirect: 'manual',
         credentials: 'omit',
         signal,
       });

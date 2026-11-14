@@ -199,6 +199,9 @@ async function deploy() {
     previousVersions.set(worker.name, await activeVersion(worker));
   }
 
+  // Build workspace package exports before Wrangler bundles the Workers.
+  await command('pnpm', ['build']);
+
   for (const worker of workers) {
     await command('pnpm', wranglerArgs(worker, ['deploy', '--dry-run']));
   }

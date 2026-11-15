@@ -52,7 +52,7 @@ The app opens into one long-lived conversation with Ember. The user can:
 - leave and return without losing the conversation or work state;
 - understand when Ember needs input or when a result is actually ready.
 
-The existing **Notes → Action Items** path remains the first bounded delegated-work capability. It becomes an action Ember can perform from the conversation, not the app's primary home screen or a separate submission workflow.
+The existing **Notes → Action Items** path remains the first bounded delegated-work capability. It becomes an action Ember can perform from the conversation, not the app's primary home screen or a separate submission workflow. A bounded **Python Agent Task in a cloud sandbox** (Daytona) is the second required capability and shares the same Task system (see [B3](#b3--delegate-work-inside-conversation)).
 
 ### Conversation timeline
 
@@ -79,7 +79,8 @@ Do not flatten Tasks or Commitments into chat text. A message can reference a Ta
 - text-first multi-turn conversation;
 - consumer sign-in and authenticated cloud session;
 - durable conversation/message history;
-- one real, bounded delegated task capability;
+- two real, bounded delegated task capabilities sharing one Task system: Notes → Action Items, then a Python Agent Task in a Daytona cloud sandbox;
+- a Tasks Tab as a combined view over the same Tasks the conversation delegates;
 - structured, truthful Task activity and readable Outcome;
 - same-account, same-installation force-quit/relaunch recovery;
 - bounded, user-visible memory controls;
@@ -90,7 +91,7 @@ Do not flatten Tasks or Commitments into chat text. A message can reference a Ta
 
 - multiple Bots, personas or agent marketplace;
 - voice conversations and real-time audio;
-- arbitrary file/attachment ingestion beyond the selected first task;
+- file/attachment ingestion beyond small TXT/CSV/Markdown task inputs (≤256 KiB each);
 - general-purpose autonomous web browsing;
 - external write actions and broad third-party integrations;
 - production approvals before ActionIntent and Sentinel/security gates;
@@ -123,19 +124,19 @@ Use these labels in product specs, UI, PRs and API proposals:
 - **APPROVED** — explicitly approved by CTO for implementation within a defined scope.
 - **BLOCKED** — cannot proceed until a named dependency or approval is satisfied.
 
-| Capability                              | Baseline assessment                         | Important boundary                                                                           |
-| --------------------------------------- | ------------------------------------------- | -------------------------------------------------------------------------------------------- |
-| Task create/detail/events/SSE/cancel    | EXISTING API surface                        | Existing request kinds and current UX are not yet the complete real consumer task experience |
-| Task list / consumer inbox              | GAP / PROPOSED                              | Do not invent a production endpoint from the iOS UI                                          |
-| Commitment lifecycle and outcomes       | EXISTING API surface                        | Not equivalent to general conversation or assistant memory                                   |
-| Commitment scheduler/runtime            | Separate implementation/approval track      | A scheduler is not a general-purpose Agent runtime                                           |
-| Consumer identity and mobile session    | GAP / BLOCKED                               | Development bearer-token configuration is not production consumer authentication             |
-| Conversation/thread/message persistence | GAP / PROPOSED                              | No production conversation contract may be assumed                                           |
-| Model gateway and real assistant turn   | GAP / CTO GATE                              | No unapproved provider key, spend or model endpoint                                          |
-| Local conversation prototype            | MOCK                                        | Must remain visibly identified as demo/mock                                                  |
-| Task/Outcome inline cards               | MOCK until backed by real readable entities | UI must never imply fixture results came from a live model                                   |
-| Push notifications / APNs               | BLOCKED / later gate                        | No production notification claim or integration without approval                             |
-| User-controlled long-term memory        | PROPOSED                                    | Must have explicit controls, retention and deletion semantics                                |
+| Capability                              | Baseline assessment                         | Important boundary                                                                             |
+| --------------------------------------- | ------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| Task create/detail/events/SSE/cancel    | EXISTING API surface                        | Existing request kinds and current UX are not yet the complete real consumer task experience   |
+| Task list / consumer inbox              | GAP / APPROVED for B3 PR A2                 | Platform-owned endpoint with a locked DTO; do not invent a production endpoint from the iOS UI |
+| Commitment lifecycle and outcomes       | EXISTING API surface                        | Not equivalent to general conversation or assistant memory                                     |
+| Commitment scheduler/runtime            | Separate implementation/approval track      | A scheduler is not a general-purpose Agent runtime                                             |
+| Consumer identity and mobile session    | GAP / BLOCKED                               | Development bearer-token configuration is not production consumer authentication               |
+| Conversation/thread/message persistence | GAP / PROPOSED                              | No production conversation contract may be assumed                                             |
+| Model gateway and real assistant turn   | GAP / CTO GATE                              | No unapproved provider key, spend or model endpoint                                            |
+| Local conversation prototype            | MOCK                                        | Must remain visibly identified as demo/mock                                                    |
+| Task/Outcome inline cards               | MOCK until backed by real readable entities | UI must never imply fixture results came from a live model                                     |
+| Push notifications / APNs               | BLOCKED / later gate                        | No production notification claim or integration without approval                               |
+| User-controlled long-term memory        | PROPOSED                                    | Must have explicit controls, retention and deletion semantics                                  |
 
 The current Task API, Commitment API, development auth and Worker implementation must be re-audited against source before B1 contract approval. This table is a planning ledger, not a substitute for the CTO's technical review.
 
@@ -233,33 +234,68 @@ Do not add multi-Bot, voice, attachments, browsing or external actions to this s
 
 ### B3 — Delegate Work inside Conversation
 
-**Goal:** Make Ember perform one useful, bounded task from a natural-language conversation.
+**Goal:** Ember accepts delegated work in natural-language conversation and delivers a durable, readable result. Two real task capabilities share **one** Task system, and both are required before the Private Alpha release.
 
-First capability: **Notes → Action Items**.
+> **Scope update — 2026-11-15, CTO approved.** Bounded cloud code execution is now in Beta V1 scope (P0). This replaces the earlier exclusion of code execution from B3. Execution limits, the retry model and security rules are in [v1-execution-placement.md §11](../architecture/v1-execution-placement.md). These are implementation parameters: there is no separate approval step or design phase before coding.
+
+**Capabilities, in merge order:**
+
+1. **Notes → Action Items (PR A1, merges first).** The first real Task loop: conversation delegation → durable Task → real model execution → persisted result → iOS Task/Outcome card. No sandbox. A1 is the first PR to merge, not an extra approval step.
+2. **Python Agent Task on Daytona (PR B1, V1 P0).** Uses the same Task/Run path, plus controlled tool calling, a lazily provisioned Daytona sandbox, repairs driven by the model reading tracebacks, and artifact delivery. The Cloudflare + Daytona smoke test is done first and in parallel; it does not wait for A1.
+3. **Attachments and Tasks Tab (PR A2 / iOS).** Small TXT/CSV upload, bounded artifact byte storage, authenticated download, and a consumer task list endpoint. iOS builds against the locked DTOs in parallel.
+
+**Delegation model:**
+
+- **Chat delegates; the Tasks Tab is a combined management view** over the same Tasks, referenced by the same Task ID. Conversation remains the primary interface.
+- Whether a request becomes a Task depends on **which capability the model calls**. Quick tools answer inside the turn. Delegation tools ask for a Task, and the server checks the requested kind against an allowlist. No separate intent classifier.
+- Creating the Task, writing its `task_reference` message, sending Ember's single reply and completing the turn happen atomically under the existing lease/fencing rules. The turn is the idempotency key, so a retried turn never creates a second Task.
+- A Task's lifecycle is independent of the B1 assistant turn and its deadline.
+- Missing information is clarified **before** the Task is created. A Task's input cannot change after creation: a follow-up change creates a new Task, or cancels and replaces the old one. V1 adds no "needs input" state.
+- Completion is posted back to the conversation as an `outcome_reference`. A Task has at most one `task_reference`.
+
+**Reuse, do not duplicate:**
+
+- Reuse the existing Task/Run/Lease state machine, `task_results`, `artifacts` (linked via `artifacts.task_id`), `task_events`, `conversation_messages` `task_reference` / `outcome_reference`, and `commitments`.
+- Do not add a second AgentTask model or state machine. Do not copy conversation, artifact or commitment links onto `tasks`.
+- Schema changes are limited to: new task kinds (`TASK_KINDS`, the `tasks.kind` CHECK, `ember_task_event_payload_is_valid()`), a task title, a payload for user-readable progress, the bounded `bytea` byte store, and the API needed for these. They ship only as **new** migrations owned by Agent A. Historical migrations are not edited.
+- A table existing does not mean the feature exists: the `task_results` repository read/write path must actually be implemented.
+
+**Truthful progress and results:**
+
+- Displayed progress comes only from durable `task_events` recorded at real boundaries, such as sandbox ready, execution finished or artifact persisted.
+- **Plan ≠ Activity.** A plan the model wrote may be shown only when labelled as a plan, never as completed steps.
+- A result or artifact is shown only after authenticated retrieval succeeds.
+
+**Inputs:** text, plus TXT/CSV/Markdown attachments up to 256 KiB each, sent through a separate authenticated upload endpoint (chat messages keep their existing character limit). Uploads stay private staged uploads, not Artifacts, until a delegation binds them in the same transaction that creates the Task. Unbound uploads expire after 24 hours and are deleted. Images, PDFs and larger files are deferred. Product copy says "small datasets", not data-analysis platform.
+
+**App closed:** APNs is **not** implemented. Ember promises only that the Task keeps running in the cloud and that reopening the app recovers the true Task state and result. No UI or copy may claim the user will be notified while the app is closed.
 
 User journey:
 
-1. User asks Ember to organize notes.
+1. User asks Ember to do something, e.g. organize notes or analyze a small CSV.
 2. Ember asks for missing information when required.
 3. User confirms any required scope or data transfer.
-4. Server creates a durable Task linked to the originating message/turn.
-5. Ember returns a real receipt and a Task Activity card.
-6. A controlled Worker executes only the approved task kind through the approved model/runtime path.
-7. Durable server events update the inline Task card.
-8. A readable result is stored and rendered as an Outcome card.
+4. The model calls a delegation capability. The server validates it and atomically creates a durable Task linked to the originating message/turn.
+5. Ember returns a real receipt and a Task Activity card. The user can keep chatting or leave the app.
+6. A controlled runtime executes only the allowlisted task kind, within the approved model, sandbox and budget limits.
+7. Durable server events update the inline Task card and the Tasks Tab.
+8. A readable result/artifact is stored and shown as an Outcome card.
 9. User can follow up in the same conversation.
 
 **Exit criteria:**
 
 - accepted receipt ≠ execution started ≠ completed ≠ readable result available;
-- progress events are server facts, not client animations;
-- unknown-ack retries preserve the original key and payload;
-- stopping a response and cancelling a Task are distinct actions;
+- progress events are server facts, not client animations or model-written plans;
+- unknown-ack and turn retries keep the original key and payload, and never create duplicate Tasks;
+- stopping a response and cancelling a Task are separate actions;
 - Task state and result survive app relaunch;
-- result is shown only after authenticated result retrieval succeeds;
-- task failure, cancellation and missing result have truthful UI states.
+- a result is shown only after authenticated result retrieval succeeds;
+- task failure, cancellation and missing result have truthful UI states;
+- **Case 1 — Notes:** "Turn these meeting notes into action items" creates a Task automatically, runs it in the background and returns a real result;
+- **Case 2 — Daytona:** "Analyze this small CSV with Python, find outliers and write a report" runs end-to-end with real tool calling, sandbox execution, at least one failed execution repaired by the model, and an artifact download; the Task keeps running after the app is closed;
+- the final iPhone → Cloud → Daytona → Artifact → iPhone run verifies cross-tenant isolation, recovery after a restart, cancellation, timeout, budget rejection (including a per-Task budget that retries cannot reset), cleanup of orphaned sandboxes and expired uploads, and that artifacts are unreadable before completion.
 
-General-purpose browsing, arbitrary shell/code execution, external writes and multi-step third-party actions are out of scope for this first Beta V1 task.
+Out of scope for B3: general-purpose browsing; shell or code execution outside the allowlisted programs in the sandbox; network access from the sandbox; external writes and multi-step third-party actions; changing a Task while it runs; recurring Commitment execution (the existing Commitment model is kept and connected later).
 
 ### B4 — Continuity, Memory & Proactive Updates
 
@@ -388,7 +424,7 @@ Beta V1 is ready only when a new invited user can complete this journey on an iP
 1. Install and onboard without a Mac.
 2. Sign in and open one persistent Ember partner.
 3. Have a real multi-turn cloud conversation.
-4. Ask Ember to perform at least one bounded, useful task.
+4. Ask Ember to perform bounded, useful tasks: Notes → Action Items and a small-CSV Python analysis.
 5. See the task linked to the conversation with truthful server-backed progress.
 6. Receive and open a readable result in the same conversation.
 7. Leave the app, return later and recover the conversation and actual work state.
@@ -406,7 +442,7 @@ Beta V1 is ready only when a new invited user can complete this journey on an iP
 4. Send the consolidated B1 proposal to CTO as soon as #73 is ready. Request one coherent decision covering identity, conversation, model gateway/cost, task linkage and privacy.
 5. CTO/Platform begins B1 discovery in parallel with B0 implementation.
 6. Keep [#69](https://github.com/basicv8vc/Ember/issues/69) as a separate small M2 QA cleanup; it does not block M3.
-7. Defer APNs, external action approvals, voice, attachments, multi-Bot, Mac executor and complex memory until the core live conversation plus one real delegated task works end-to-end.
+7. Defer APNs, external action approvals, voice, attachments other than the B3 small TXT/CSV inputs, multi-Bot, Mac executor and complex memory. B3 delivery order: PR A1 (Notes) → PR B1 (Daytona Python Agent Task; Cloudflare + Daytona smoke runs in parallel) → PR A2 / iOS (attachments, Tasks Tab) → final integration.
 
 ## 9. Roadmap governance
 

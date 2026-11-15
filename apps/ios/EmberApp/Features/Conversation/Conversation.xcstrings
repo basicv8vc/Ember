@@ -379,6 +379,30 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新任务" } }
       }
     },
+    "tasks.action.load_more" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Load more tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载更多任务" } }
+      }
+    },
+    "tasks.pagination.more_available" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "More earlier tasks are stored in Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "云端还有更早的任务记录，点击可继续加载。" } }
+      }
+    },
+    "tasks.pagination.partial_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing recent tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前仅显示最近任务" } }
+      }
+    },
+    "tasks.pagination.partial_message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Additional earlier tasks exist on the server." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端存在更早的任务，当前列表仅展示了最新一页。" } }
+      }
+    },
     "tasks.row.result_ready" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Result ready" } },

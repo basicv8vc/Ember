@@ -189,7 +189,289 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertTrue(model.taskStore.orderedTasks.isEmpty)
     }
 
-    private func makeHostModel(directory: URL) throws -> LiveConversationHostModel {
+    func testBackgroundTaskCompletionUpdatesChatOutcomeOnForegroundAndTabReturnWithoutRestart() async throws {
+        let runningID = "00000000-0000-4000-8000-00000000b312"
+        let runningUUID = UUID(uuidString: runningID)!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let phaseBox = LockedInt(0)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            let phase = phaseBox.value
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                var messagesJSON = """
+                    {"message_id":"55555555-5555-4555-8555-555555555501",
+                     "sequence":1,"created_at":"2026-11-15T10:00:00Z",
+                     "kind":"user","text":"Summarize my meeting notes",
+                     "client_submission_id":"66666666-6666-4666-8666-666666666601"},
+                    {"message_id":"55555555-5555-4555-8555-555555555502",
+                     "sequence":2,"created_at":"2026-11-15T10:00:05Z",
+                     "kind":"task_reference","task_id":"\(runningID)"}
+                    """
+                if phase >= 1 {
+                    messagesJSON += """
+                    ,
+                    {"message_id":"55555555-5555-4555-8555-555555555503",
+                     "sequence":3,"created_at":"2026-11-15T10:01:00Z",
+                     "kind":"outcome_reference",
+                     "outcome":{"outcome_kind":"meaningful_change","task_id":"\(runningID)"}}
+                    """
+                }
+                if phase >= 2 {
+                    messagesJSON += """
+                    ,
+                    {"message_id":"55555555-5555-4555-8555-555555555504",
+                     "sequence":4,"created_at":"2026-11-15T10:02:00Z",
+                     "kind":"ember","text":"Action items are ready above.",
+                     "model_label":"ember-notes-v1","simulated":false}
+                    """
+                }
+                let nextAfter = phase >= 2 ? 4 : (phase >= 1 ? 3 : 2)
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[\(messagesJSON)],
+                  "next_after":\(nextAfter),"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/tasks" {
+                let status = phase >= 1 ? "completed" : "running"
+                let runIDJSON = phase >= 1 ? "null" : "\"00000000-0000-4000-8000-00000000b351\""
+                return .json(statusCode: 200, body: """
+                {
+                  "tasks":[
+                    {"task_id":"\(runningID)","agent_id":"\(agentID)","kind":"notes.action_items",
+                     "title":"Meeting Notes Summary","status":"\(status)","current_run_id":\(runIDJSON),
+                     "attempt_count":1,"cancel_requested":false,
+                     "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null}
+                  ],
+                  "next_after":null,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/tasks/\(runningID)/result" && phase >= 1 {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id":"\(runningID)",
+                  "task_status":"completed",
+                  "result_state":"available",
+                  "result":{
+                    "summary_text":"2 action items extracted",
+                    "detail_text":"1. Finalize release notes",
+                    "model_label":"ember-notes-v1",
+                    "simulated":false,
+                    "produced_at":"2026-11-15T10:01:00Z"
+                  }
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: makeTempDirectory(), taskPollInterval: .seconds(30))
+        model.handleViewAppeared()
+        await model.start()
+
+        // Initially Turn completed, Task is running, and Chat shows user message + TaskActivityCard only.
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertEqual(model.screen.timeline.count, 2)
+        XCTAssertEqual(model.taskStore.tasksByID[runningUUID]?.status, .running)
+
+        // Task completes while app is in background -> returning to active refreshes Conversation + Outcome card.
+        model.handleScenePhase(.background)
+        phaseBox.value = 1
+        model.handleScenePhase(.active)
+
+        for _ in 0..<60 {
+            if model.screen.timeline.count == 3,
+               model.taskStore.tasksByID[runningUUID]?.status == .completed,
+               model.taskStore.resultsByTaskID[runningUUID]?.resultState == .available {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        XCTAssertEqual(model.screen.timeline.count, 3)
+        guard case .inlineContent = model.screen.timeline[2] else {
+            return XCTFail("Expected newly emitted outcome_reference to render as OutcomeCard in Chat")
+        }
+        XCTAssertEqual(model.taskStore.tasksByID[runningUUID]?.status, .completed)
+        XCTAssertEqual(model.taskStore.resultsByTaskID[runningUUID]?.result?.summaryText, "2 action items extracted")
+
+        // Switching to Tasks tab and back to Chat also performs a controlled Conversation refresh.
+        model.selectedTab = .tasks
+        await model.handleTabSelection(.tasks)
+        phaseBox.value = 2
+        model.selectedTab = .chat
+        await model.handleTabSelection(.chat)
+
+        XCTAssertEqual(model.screen.timeline.count, 4)
+        XCTAssertEqual(model.command, .idle)
+    }
+
+    func testForegroundTaskObserverRefreshesConversationWhenRunningTaskCompletes() async throws {
+        let runningID = "00000000-0000-4000-8000-00000000b312"
+        let runningUUID = UUID(uuidString: runningID)!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let completedBox = LockedBool(false)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            let isCompleted = completedBox.value
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                var messagesJSON = """
+                    {"message_id":"55555555-5555-4555-8555-555555555501",
+                     "sequence":1,"created_at":"2026-11-15T10:00:00Z",
+                     "kind":"user","text":"Watch task completion",
+                     "client_submission_id":"66666666-6666-4666-8666-666666666601"},
+                    {"message_id":"55555555-5555-4555-8555-555555555502",
+                     "sequence":2,"created_at":"2026-11-15T10:00:05Z",
+                     "kind":"task_reference","task_id":"\(runningID)"}
+                    """
+                if isCompleted {
+                    messagesJSON += """
+                    ,
+                    {"message_id":"55555555-5555-4555-8555-555555555503",
+                     "sequence":3,"created_at":"2026-11-15T10:01:00Z",
+                     "kind":"outcome_reference",
+                     "outcome":{"outcome_kind":"meaningful_change","task_id":"\(runningID)"}}
+                    """
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[\(messagesJSON)],
+                  "next_after":\(isCompleted ? 3 : 2),"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/tasks" {
+                return .json(statusCode: 200, body: """
+                {
+                  "tasks":[
+                    {"task_id":"\(runningID)","agent_id":"\(agentID)","kind":"notes.action_items",
+                     "title":"Live Notes Task","status":"\(isCompleted ? "completed" : "running")",
+                     "current_run_id":null,"attempt_count":1,"cancel_requested":false,
+                     "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null}
+                  ],
+                  "next_after":null,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/tasks/\(runningID)/result" && isCompleted {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id":"\(runningID)",
+                  "task_status":"completed",
+                  "result_state":"available",
+                  "result":{
+                    "summary_text":"Foreground completion synced",
+                    "detail_text":null,
+                    "model_label":"ember-notes-v1",
+                    "simulated":false,
+                    "produced_at":"2026-11-15T10:01:00Z"
+                  }
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: makeTempDirectory(), taskPollInterval: .milliseconds(25))
+        model.handleViewAppeared()
+        await model.start()
+
+        XCTAssertEqual(model.screen.timeline.count, 2)
+        completedBox.value = true
+
+        for _ in 0..<60 {
+            if model.screen.timeline.count == 3,
+               model.taskStore.tasksByID[runningUUID]?.status == .completed,
+               model.taskStore.resultsByTaskID[runningUUID]?.resultState == .available {
+                break
+            }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        XCTAssertEqual(model.screen.timeline.count, 3)
+        XCTAssertEqual(model.taskStore.tasksByID[runningUUID]?.status, .completed)
+        XCTAssertEqual(model.taskStore.resultsByTaskID[runningUUID]?.result?.summaryText, "Foreground completion synced")
+    }
+
+    func testControlledRefreshPreservesUnknownAcknowledgementAndRejectedDraft() async throws {
+        let messageReloadCount = LockedInt(0)
+        let rejectNextSend = LockedBool(false)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST" && path.contains("/messages") {
+                if rejectNextSend.value {
+                    return .json(statusCode: 409, body: "{\"error\":\"stale_epoch\"}")
+                }
+                return .failure(URLError(.timedOut))
+            }
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                messageReloadCount.increment()
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[],\"next_after\":null,\"has_more\":false}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        // Case 1: unknownAcknowledgement must NOT be cleared or overwritten by foreground / tab refresh
+        let unknownModel = try makeHostModel(directory: makeTempDirectory())
+        unknownModel.handleViewAppeared()
+        await unknownModel.start()
+        let loadsBeforeUnknown = messageReloadCount.value
+
+        await unknownModel.send("Timed out message")
+        XCTAssertEqual(unknownModel.command, .unknownAcknowledgement)
+
+        unknownModel.handleScenePhase(.background)
+        unknownModel.handleScenePhase(.active)
+        await unknownModel.handleTabSelection(.chat)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(unknownModel.command, .unknownAcknowledgement)
+        XCTAssertEqual(messageReloadCount.value, loadsBeforeUnknown)
+
+        // Case 2: rejected draft must NOT be overwritten by foreground / tab refresh
+        rejectNextSend.value = true
+        let rejectedModel = try makeHostModel(directory: makeTempDirectory())
+        rejectedModel.handleViewAppeared()
+        await rejectedModel.start()
+        let loadsBeforeRejected = messageReloadCount.value
+
+        await rejectedModel.send("Draft awaiting review")
+        XCTAssertEqual(rejectedModel.command, .rejected)
+        XCTAssertEqual(rejectedModel.rejectedDraftText, "Draft awaiting review")
+
+        rejectedModel.handleScenePhase(.background)
+        rejectedModel.handleScenePhase(.active)
+        await rejectedModel.handleTabSelection(.chat)
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        XCTAssertEqual(rejectedModel.command, .rejected)
+        XCTAssertEqual(rejectedModel.rejectedDraftText, "Draft awaiting review")
+        XCTAssertEqual(messageReloadCount.value, loadsBeforeRejected)
+    }
+
+    private func makeHostModel(
+        directory: URL,
+        taskPollInterval: Duration = .seconds(2)
+    ) throws -> LiveConversationHostModel {
         let session = StubSession.make()
         sessions.append(session)
         let transport = try EmberAuthenticatedTransport(
@@ -212,7 +494,8 @@ final class LiveConversationHostTasksTests: XCTestCase {
         let model = LiveConversationHostModel(
             repository: repo,
             auth: auth,
-            taskRepository: taskRepo
+            taskRepository: taskRepo,
+            taskPollInterval: taskPollInterval
         )
         models.append(model)
         return model
@@ -228,5 +511,37 @@ final class LiveConversationHostTasksTests: XCTestCase {
 
     private func register(_ handler: @escaping StubURLProtocol.Handler) {
         registrations.append(StubURLProtocol.register(handler, forHost: AuthFixture.baseURL.host!))
+    }
+}
+
+private final class LockedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Bool
+
+    init(_ initial: Bool) {
+        self.storage = initial
+    }
+
+    var value: Bool {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
+    }
+}
+
+private final class LockedInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Int
+
+    init(_ initial: Int) {
+        self.storage = initial
+    }
+
+    var value: Int {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
+    }
+
+    func increment() {
+        lock.withLock { storage += 1 }
     }
 }

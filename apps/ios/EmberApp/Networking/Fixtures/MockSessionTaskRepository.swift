@@ -38,8 +38,37 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
         }
     }
 
-    func listTasks() async throws -> [SessionTaskDTO] {
-        state.tasks
+    func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO {
+        let ordered = state.tasks.sorted { lhs, rhs in
+            if lhs.updatedDate != rhs.updatedDate {
+                return lhs.updatedDate > rhs.updatedDate
+            }
+            if lhs.createdAt != rhs.createdAt {
+                return lhs.createdAt > rhs.createdAt
+            }
+            return lhs.taskID.uuidString < rhs.taskID.uuidString
+        }
+        let pageLimit = min(max(limit, 1), 100)
+        let startIndex: Int
+        if let cursor, !cursor.isEmpty {
+            guard let cursorIndex = ordered.firstIndex(where: {
+                $0.taskID.uuidString.caseInsensitiveCompare(cursor) == .orderedSame
+            }) else {
+                return SessionTaskListDTO(tasks: [], nextAfter: nil, hasMore: false)
+            }
+            startIndex = cursorIndex + 1
+        } else {
+            startIndex = 0
+        }
+
+        guard startIndex < ordered.count else {
+            return SessionTaskListDTO(tasks: [], nextAfter: nil, hasMore: false)
+        }
+        let endIndex = min(startIndex + pageLimit, ordered.count)
+        let slice = Array(ordered[startIndex..<endIndex])
+        let hasMore = endIndex < ordered.count
+        let nextAfter = hasMore ? slice.last?.taskID.uuidString.lowercased() : nil
+        return SessionTaskListDTO(tasks: slice, nextAfter: nextAfter, hasMore: hasMore)
     }
 
     func fetchTask(id: UUID) async throws -> SessionTaskDTO {

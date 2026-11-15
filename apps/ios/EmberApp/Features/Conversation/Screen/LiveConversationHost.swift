@@ -14,9 +14,13 @@ final class LiveConversationHostModel {
     private let repository: any LiveConversationServiceProtocol
     private let auth: any LiveAuthControlling
     private let pollingWindow: Duration
+    private let taskPollInterval: Duration
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     private var pollTask: Task<Void, Never>?
+    private var taskObserverTask: Task<Void, Never>?
+    private var conversationRefreshTask: Task<Void, Never>?
     private var currentPollSessionID = UUID()
+    private var sessionGeneration: UInt64 = 0
 
     let taskStore: SessionTaskStore
     let isMockMode: Bool
@@ -47,6 +51,7 @@ final class LiveConversationHostModel {
         taskRepository: (any SessionTaskRepositoryProtocol)? = nil,
         isMockMode: Bool = false,
         pollingWindow: Duration = .seconds(60),
+        taskPollInterval: Duration = .seconds(2),
         monotonicNow: @Sendable @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         self.repository = repository
@@ -54,6 +59,7 @@ final class LiveConversationHostModel {
         self.taskStore = SessionTaskStore(repository: taskRepository)
         self.isMockMode = isMockMode
         self.pollingWindow = pollingWindow
+        self.taskPollInterval = taskPollInterval
         self.monotonicNow = monotonicNow
     }
 
@@ -128,6 +134,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -147,6 +157,11 @@ final class LiveConversationHostModel {
     }
 
     private func clearLiveState() {
+        sessionGeneration &+= 1
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
         profile = nil
         snapshot = nil
         requiresSignIn = true
@@ -228,6 +243,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -257,6 +276,83 @@ final class LiveConversationHostModel {
         await taskStore.syncReferences(from: snapshot)
     }
 
+    func handleTabSelection(_ tab: RootTab) async {
+        switch tab {
+        case .chat:
+            if canPerformBackgroundRefresh {
+                await refreshConversationAndTasks()
+            } else {
+                await refreshTasks()
+            }
+        case .tasks:
+            await refreshTasks()
+        }
+    }
+
+    func refreshConversationAndTasks() async {
+        if let inFlight = conversationRefreshTask {
+            _ = await inFlight.value
+        }
+        guard canPerformBackgroundRefresh else {
+            await refreshTasks()
+            return
+        }
+        let expectedGeneration = sessionGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+        }
+        conversationRefreshTask = task
+        _ = await task.value
+        if sessionGeneration == expectedGeneration {
+            conversationRefreshTask = nil
+        }
+    }
+
+    private var canPerformBackgroundRefresh: Bool {
+        profile != nil
+            && !requiresSignIn
+            && !isLoading
+            && !isSubmitting
+            && !isSigningIn
+            && !isSigningOut
+            && pollTask == nil
+            && !isPollingPaused
+            && reply != .generating
+            && command != .unknownAcknowledgement
+            && rejectedDraftText == nil
+    }
+
+    private func scheduleForegroundRefresh() {
+        guard conversationRefreshTask == nil, canPerformBackgroundRefresh else { return }
+        let expectedGeneration = sessionGeneration
+        conversationRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            await performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+            if sessionGeneration == expectedGeneration {
+                conversationRefreshTask = nil
+            }
+        }
+    }
+
+    private func performControlledConversationRefresh(expectedGeneration: UInt64) async {
+        guard sessionGeneration == expectedGeneration, canPerformBackgroundRefresh else { return }
+        do {
+            let loaded = try await repository.load()
+            guard sessionGeneration == expectedGeneration,
+                  !Task.isCancelled,
+                  canPerformBackgroundRefresh
+            else { return }
+            snapshot = loaded
+            await syncTasksFromCloud(snapshot: loaded)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard sessionGeneration == expectedGeneration else { return }
+            await syncTasksFromCloud(snapshot: snapshot)
+        }
+    }
+
     func openTaskFromChat(_ taskID: UUID) {
         selectedTab = .chat
         if chatNavigationPath.last != taskID {
@@ -281,9 +377,12 @@ final class LiveConversationHostModel {
 
     func handleViewAppeared() {
         isViewVisible = true
-        if isSceneActive && !requiresSignIn && (reply == .generating || isPollingPaused) && pollTask == nil {
+        guard isSceneActive && !requiresSignIn else { return }
+        if (reply == .generating || isPollingPaused) && pollTask == nil {
             isPollingPaused = false
             beginPolling()
+        } else if canPerformBackgroundRefresh {
+            scheduleForegroundRefresh()
         }
     }
 
@@ -298,6 +397,8 @@ final class LiveConversationHostModel {
         if (reply == .generating || isPollingPaused) && pollTask == nil {
             isPollingPaused = false
             beginPolling()
+        } else if canPerformBackgroundRefresh {
+            scheduleForegroundRefresh()
         }
     }
 
@@ -321,6 +422,10 @@ final class LiveConversationHostModel {
         // Disappearance or inactive state stops only observation. It must not cancel the durable server Turn.
         pollTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
     }
 
     var screen: ConversationScreenState {
@@ -386,7 +491,9 @@ final class LiveConversationHostModel {
             return .inlineCard(id: stableID, accessibilityLabel: task.displayTitle) {
                 TaskActivityCard(
                     title: task.displayTitle,
-                    task: task.asTaskDTO(),
+                    taskID: task.taskID,
+                    status: task.status,
+                    updatedAt: task.updatedAt,
                     presentation: presentation,
                     cancelResponse: cancelResponse,
                     onOpenDetail: { [weak self] in
@@ -459,6 +566,80 @@ final class LiveConversationHostModel {
     private func syncTasksFromCloud(snapshot: ConversationSnapshot?) async {
         guard taskStore.hasRepository else { return }
         await taskStore.syncReferences(from: snapshot)
+        beginTaskObservationIfNeeded()
+    }
+
+    private func beginTaskObservationIfNeeded() {
+        guard !isMockMode,
+              isViewVisible,
+              isSceneActive,
+              !requiresSignIn,
+              pollTask == nil,
+              !isPollingPaused,
+              command != .unknownAcknowledgement,
+              rejectedDraftText == nil,
+              taskStore.hasObservableInProgressTask(in: snapshot)
+        else {
+            taskObserverTask?.cancel()
+            taskObserverTask = nil
+            return
+        }
+        guard taskObserverTask == nil else { return }
+
+        let expectedGeneration = sessionGeneration
+        let startTime = monotonicNow()
+        taskObserverTask = Task { [weak self] in
+            defer {
+                if let self, self.sessionGeneration == expectedGeneration {
+                    self.taskObserverTask = nil
+                }
+            }
+            while let self,
+                  !Task.isCancelled,
+                  self.sessionGeneration == expectedGeneration,
+                  self.isViewVisible,
+                  self.isSceneActive,
+                  !self.requiresSignIn,
+                  self.pollTask == nil,
+                  !self.isPollingPaused,
+                  self.monotonicNow() - startTime < self.pollingWindow,
+                  self.taskStore.hasObservableInProgressTask(in: self.snapshot) {
+                do {
+                    try await Task.sleep(for: self.taskPollInterval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      self.sessionGeneration == expectedGeneration,
+                      self.isViewVisible,
+                      self.isSceneActive,
+                      !self.requiresSignIn,
+                      self.pollTask == nil,
+                      !self.isPollingPaused
+                else { return }
+
+                let previouslyInProgress = Set(
+                    self.taskStore.tasksByID.values
+                        .filter { !$0.status.isTerminal && $0.status != .waitingApproval }
+                        .map(\.taskID)
+                )
+                let previouslyUnresolved = SessionTaskStore.referencedIDs(in: self.snapshot).taskIDs.filter {
+                    self.taskStore.tasksByID[$0] == nil
+                }
+                let trackedIDs = previouslyInProgress.union(previouslyUnresolved)
+
+                await self.taskStore.syncReferences(from: self.snapshot)
+                guard !Task.isCancelled, self.sessionGeneration == expectedGeneration else { return }
+
+                let shouldRefreshConversation = trackedIDs.contains { taskID in
+                    guard let updated = self.taskStore.tasksByID[taskID] else { return false }
+                    return updated.status.isTerminal || updated.status == .waitingApproval
+                }
+                if shouldRefreshConversation, self.canPerformBackgroundRefresh {
+                    await self.performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+                }
+            }
+        }
     }
 
     private func beginPolling() {
@@ -466,6 +647,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
 
         let sessionID = UUID()
@@ -678,15 +863,10 @@ struct LiveConversationHost: View {
             if let rejected, draft.isEmpty { draft = rejected }
         }
         .onChange(of: model.selectedTab) { _, newTab in
-            if newTab == .tasks {
-                Task { await model.refreshTasks() }
-            }
+            Task { await model.handleTabSelection(newTab) }
         }
         .onChange(of: scenePhase) { _, newPhase in
             model.handleScenePhase(newPhase)
-            if newPhase == .active && !model.requiresSignIn {
-                Task { await model.refreshTasks() }
-            }
         }
     }
 

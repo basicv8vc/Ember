@@ -47,8 +47,11 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
             """)
         }
 
-        let tasks = try await fixture.repository.listTasks()
+        let taskList = try await fixture.repository.listTasks()
+        let tasks = taskList.tasks
         XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(taskList.hasMore, false)
+        XCTAssertNil(taskList.nextAfter)
         XCTAssertEqual(tasks[0].kind, .notesActionItems)
         XCTAssertEqual(tasks[0].title, "Q4 Launch Action Items")
         XCTAssertEqual(tasks[0].status, .completed)
@@ -324,6 +327,166 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         }
     }
 
+    func testCursorPaginationAndRetryableFailedGroupingInSessionTaskStore() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let retryableID = UUID(uuidString: "00000000-0000-4000-8000-00000000b401")!
+        let approvalID = UUID(uuidString: "00000000-0000-4000-8000-00000000b402")!
+        let olderCompletedID = UUID(uuidString: "00000000-0000-4000-8000-00000000b403")!
+        let stallFlag = LockedBool(false)
+
+        register { request in
+            recorder.record(request)
+            let url = request.url!
+            let path = url.path
+            let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            let after = query.first(where: { $0.name == "after" })?.value
+
+            if path == "/v1/tasks" {
+                if after == "cursor-page-2" && stallFlag.value {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "tasks": [],
+                      "next_after": "cursor-page-2",
+                      "has_more": true
+                    }
+                    """)
+                }
+                if after == "cursor-page-2" {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "tasks": [
+                        {
+                          "task_id": "\(approvalID.uuidString.lowercased())",
+                          "agent_id": "\(agentID)",
+                          "kind": "sandbox.python",
+                          "title": "Approve CSV export",
+                          "status": "waiting_approval",
+                          "attempt_count": 1,
+                          "cancel_requested": false,
+                          "created_at": "2026-11-15T10:01:00Z",
+                          "updated_at": "2026-11-15T10:02:00Z"
+                        },
+                        {
+                          "task_id": "\(olderCompletedID.uuidString.lowercased())",
+                          "agent_id": "\(agentID)",
+                          "kind": "notes.action_items",
+                          "title": "Older meeting digest",
+                          "status": "completed",
+                          "attempt_count": 1,
+                          "cancel_requested": false,
+                          "created_at": "2026-11-15T09:00:00Z",
+                          "updated_at": "2026-11-15T09:05:00Z"
+                        }
+                      ],
+                      "next_after": null,
+                      "has_more": false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "tasks": [
+                    {
+                      "task_id": "\(retryableID.uuidString.lowercased())",
+                      "agent_id": "\(agentID)",
+                      "kind": "notes.action_items",
+                      "title": "Retryable notes extraction",
+                      "status": "retryable_failed",
+                      "attempt_count": 1,
+                      "cancel_requested": false,
+                      "created_at": "2026-11-15T10:03:00Z",
+                      "updated_at": "2026-11-15T10:04:00Z"
+                    },
+                    {
+                      "task_id": "\(approvalID.uuidString.lowercased())",
+                      "agent_id": "\(agentID)",
+                      "kind": "sandbox.python",
+                      "title": "Approve CSV export",
+                      "status": "waiting_approval",
+                      "attempt_count": 1,
+                      "cancel_requested": false,
+                      "created_at": "2026-11-15T10:01:00Z",
+                      "updated_at": "2026-11-15T10:02:00Z"
+                    }
+                  ],
+                  "next_after": "cursor-page-2",
+                  "has_more": true
+                }
+                """)
+            }
+
+            if path == "/v1/tasks/\(olderCompletedID.uuidString.lowercased())/result" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(olderCompletedID.uuidString.lowercased())",
+                  "task_status": "completed",
+                  "result_state": "available",
+                  "result": {
+                    "summary_text": "Older digest complete.",
+                    "detail_text": null,
+                    "model_label": "ember-notes-v1",
+                    "simulated": false,
+                    "produced_at": "2026-11-15T09:05:00Z"
+                  }
+                }
+                """)
+            }
+
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository, pageSize: 2)
+        await store.refreshAll()
+
+        XCTAssertTrue(store.hasMoreTasks)
+        XCTAssertEqual(store.nextTasksCursor, "cursor-page-2")
+        XCTAssertEqual(store.orderedTasks.map(\.taskID), [retryableID, approvalID])
+
+        // P2-1: retryable_failed belongs in .inProgress, not .needsIntervention badge count
+        XCTAssertEqual(TaskStatus.retryableFailed.sessionGroup, .inProgress)
+        XCTAssertEqual(store.tasks(in: .inProgress).map(\.taskID), [retryableID])
+        XCTAssertEqual(store.tasks(in: .needsIntervention).map(\.taskID), [approvalID])
+        XCTAssertEqual(store.inProgressCount, 1)
+        XCTAssertEqual(store.needsInterventionCount, 1)
+
+        // Load second page with overlapping approvalID and new olderCompletedID
+        await store.loadMoreTasks()
+
+        XCTAssertFalse(store.hasMoreTasks)
+        XCTAssertNil(store.nextTasksCursor)
+        XCTAssertEqual(store.orderedTasks.map(\.taskID), [retryableID, approvalID, olderCompletedID])
+        XCTAssertEqual(store.resultsByTaskID[olderCompletedID]?.result?.summaryText, "Older digest complete.")
+
+        let taskRequests = recorder.requests.filter { $0.url?.path == "/v1/tasks" }
+        XCTAssertEqual(taskRequests.count, 2)
+        let firstQuery = URLComponents(url: taskRequests[0].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        let secondQuery = URLComponents(url: taskRequests[1].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertNil(firstQuery.first(where: { $0.name == "after" }))
+        XCTAssertEqual(firstQuery.first(where: { $0.name == "limit" })?.value, "2")
+        XCTAssertEqual(secondQuery.first(where: { $0.name == "after" })?.value, "cursor-page-2")
+        XCTAssertEqual(secondQuery.first(where: { $0.name == "limit" })?.value, "2")
+
+        // Verify stalled cursor (empty page with identical cursor and has_more=true) stops pagination safely
+        stallFlag.value = true
+        await store.refreshAll()
+        XCTAssertTrue(store.hasMoreTasks)
+        await store.loadMoreTasks()
+        XCTAssertFalse(store.hasMoreTasks)
+        XCTAssertNil(store.nextTasksCursor)
+
+        let mockRepo = MockSessionTaskRepository()
+        let fullCount = try await mockRepo.listTasks(after: nil, limit: 10).tasks.count
+        XCTAssertEqual(fullCount, 4)
+        let firstMockPage = try await mockRepo.listTasks(after: nil, limit: 2)
+        XCTAssertEqual(firstMockPage.hasMore, true)
+        XCTAssertNotNil(firstMockPage.nextAfter)
+        let secondMockPage = try await mockRepo.listTasks(after: firstMockPage.nextAfter, limit: 2)
+        XCTAssertEqual(secondMockPage.hasMore, false)
+        XCTAssertEqual(Set(firstMockPage.tasks.map(\.taskID)).intersection(secondMockPage.tasks.map(\.taskID)).count, 0)
+    }
+
     private func makeRepository() throws -> (repository: LiveB1SessionTaskRepository, session: URLSession) {
         let session = StubSession.make()
         sessions.append(session)
@@ -344,5 +507,19 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
 
     private func register(_ handler: @escaping StubURLProtocol.Handler) {
         registrations.append(StubURLProtocol.register(handler, forHost: AuthFixture.baseURL.host!))
+    }
+}
+
+private final class LockedBool: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Bool
+
+    init(_ initial: Bool) {
+        self.storage = initial
+    }
+
+    var value: Bool {
+        get { lock.withLock { storage } }
+        set { lock.withLock { storage = newValue } }
     }
 }

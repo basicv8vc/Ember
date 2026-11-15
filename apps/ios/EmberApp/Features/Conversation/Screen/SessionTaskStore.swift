@@ -4,6 +4,7 @@ import Observation
 @MainActor @Observable
 final class SessionTaskStore {
     private let repository: (any SessionTaskRepositoryProtocol)?
+    private let pageSize: Int
     private var generation: UInt64 = 0
 
     private(set) var tasksByID: [UUID: SessionTaskDTO] = [:]
@@ -14,14 +15,19 @@ final class SessionTaskStore {
     private(set) var loadingDetailTaskIDs: Set<UUID> = []
     private(set) var cancellingTaskIDs: Set<UUID> = []
     private(set) var isLoadingList = false
+    private(set) var isLoadingMoreTasks = false
+    private(set) var hasMoreTasks = false
+    private(set) var nextTasksCursor: String?
     private(set) var listErrorMessage: String?
+    private(set) var loadMoreErrorMessage: String?
     private(set) var listEndpointUnavailable = false
     private(set) var detailErrorByTaskID: [UUID: String] = [:]
     private(set) var resultErrorByTaskID: [UUID: String] = [:]
     private(set) var cancelErrorByTaskID: [UUID: String] = [:]
 
-    init(repository: (any SessionTaskRepositoryProtocol)? = nil) {
+    init(repository: (any SessionTaskRepositoryProtocol)? = nil, pageSize: Int = 50) {
         self.repository = repository
+        self.pageSize = min(max(pageSize, 1), 100)
     }
 
     var hasRepository: Bool { repository != nil }
@@ -63,6 +69,7 @@ final class SessionTaskStore {
         let startGeneration = generation
         isLoadingList = true
         listErrorMessage = nil
+        loadMoreErrorMessage = nil
         listEndpointUnavailable = false
         defer {
             if generation == startGeneration {
@@ -71,22 +78,35 @@ final class SessionTaskStore {
         }
 
         var fetchedIDs = Set<UUID>()
+        var fetchedTasksByID: [UUID: SessionTaskDTO] = [:]
+        var listFetchSucceeded = false
         do {
-            let tasks = try await repository.listTasks()
+            let page = try await repository.listTasks(after: nil, limit: pageSize)
             guard generation == startGeneration else { return }
-            for task in tasks {
-                tasksByID[task.taskID] = task
+            listFetchSucceeded = true
+            for task in page.tasks {
+                fetchedTasksByID[task.taskID] = task
                 missingTaskIDs.remove(task.taskID)
                 fetchedIDs.insert(task.taskID)
             }
+            nextTasksCursor = (page.nextAfter?.isEmpty == false) ? page.nextAfter : nil
+            hasMoreTasks = page.hasMore ?? false
         } catch is CancellationError {
             return
         } catch let error as SessionTaskRepositoryError where error == .endpointNotReady {
             guard generation == startGeneration else { return }
             listEndpointUnavailable = true
+            nextTasksCursor = nil
+            hasMoreTasks = false
         } catch {
             guard generation == startGeneration else { return }
             listErrorMessage = String(localized: "tasks.error.list_load", table: "Conversation")
+        }
+
+        if listFetchSucceeded {
+            // Preserve chat-referenced tasks that will be refreshed individually below while replacing stale list pages.
+            let preservedReferenced = tasksByID.filter { referencedTaskIDs.contains($0.key) && fetchedTasksByID[$0.key] == nil }
+            tasksByID = preservedReferenced.merging(fetchedTasksByID) { _, latest in latest }
         }
 
         let remainingIDs = referencedTaskIDs.subtracting(fetchedIDs)
@@ -107,6 +127,65 @@ final class SessionTaskStore {
                 continue
             }
             await refreshResult(taskID, using: repository, generation: startGeneration)
+        }
+    }
+
+    func loadMoreTasks() async {
+        guard let repository,
+              !isLoadingList,
+              !isLoadingMoreTasks,
+              hasMoreTasks,
+              let cursor = nextTasksCursor,
+              !cursor.isEmpty
+        else { return }
+
+        let startGeneration = generation
+        isLoadingMoreTasks = true
+        loadMoreErrorMessage = nil
+        defer {
+            if generation == startGeneration {
+                isLoadingMoreTasks = false
+            }
+        }
+
+        do {
+            let page = try await repository.listTasks(after: cursor, limit: pageSize)
+            guard generation == startGeneration else { return }
+            for task in page.tasks {
+                tasksByID[task.taskID] = task
+                missingTaskIDs.remove(task.taskID)
+            }
+            let nextCursor = (page.nextAfter?.isEmpty == false) ? page.nextAfter : nil
+            if page.tasks.isEmpty || nextCursor == cursor {
+                nextTasksCursor = nil
+                hasMoreTasks = false
+            } else {
+                nextTasksCursor = nextCursor
+                hasMoreTasks = page.hasMore ?? false
+            }
+
+            let terminalIDs = page.tasks.filter { $0.status.isTerminal }.map(\.taskID)
+            for taskID in terminalIDs {
+                guard generation == startGeneration, !Task.isCancelled else { return }
+                if resultsByTaskID[taskID]?.resultState == .available { continue }
+                await refreshResult(taskID, using: repository, generation: startGeneration)
+            }
+        } catch is CancellationError {
+            return
+        } catch {
+            guard generation == startGeneration else { return }
+            loadMoreErrorMessage = String(localized: "tasks.error.list_load", table: "Conversation")
+        }
+    }
+
+    func hasObservableInProgressTask(in snapshot: ConversationSnapshot?) -> Bool {
+        let activeInStore = tasksByID.values.contains { task in
+            !task.status.isTerminal && task.status != .waitingApproval
+        }
+        if activeInStore { return true }
+        let referenced = Self.referencedIDs(in: snapshot).taskIDs
+        return referenced.contains { taskID in
+            !missingTaskIDs.contains(taskID) && tasksByID[taskID] == nil
         }
     }
 
@@ -190,7 +269,11 @@ final class SessionTaskStore {
         loadingDetailTaskIDs.removeAll()
         cancellingTaskIDs.removeAll()
         isLoadingList = false
+        isLoadingMoreTasks = false
+        hasMoreTasks = false
+        nextTasksCursor = nil
         listErrorMessage = nil
+        loadMoreErrorMessage = nil
         listEndpointUnavailable = false
         detailErrorByTaskID.removeAll()
         resultErrorByTaskID.removeAll()

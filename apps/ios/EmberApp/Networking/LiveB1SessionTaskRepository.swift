@@ -10,11 +10,17 @@ enum SessionTaskRepositoryError: Error, Equatable, Sendable {
 
 protocol SessionTaskRepositoryProtocol: Sendable {
     var isMockOnly: Bool { get }
-    func listTasks() async throws -> [SessionTaskDTO]
+    func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO
     func fetchTask(id: UUID) async throws -> SessionTaskDTO
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO
     func fetchResult(taskID: UUID) async throws -> SessionTaskResultDTO
     func cancelTask(id: UUID) async throws -> TaskCancelDTO
+}
+
+extension SessionTaskRepositoryProtocol {
+    func listTasks() async throws -> SessionTaskListDTO {
+        try await listTasks(after: nil, limit: 50)
+    }
 }
 
 /// Live B1 consumer-session client for Task list, detail, events, result, and cancellation.
@@ -22,14 +28,20 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
     let auth: LiveAuthSessionCoordinator
     let isMockOnly: Bool = false
 
-    func listTasks() async throws -> [SessionTaskDTO] {
+    func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO {
+        let boundedLimit = min(max(limit, 1), 100)
+        var queryItems = [URLQueryItem(name: "limit", value: String(boundedLimit))]
+        if let cursor, !cursor.isEmpty {
+            queryItems.append(URLQueryItem(name: "after", value: cursor))
+        }
+
         let response: EmberAPIResponse
         do {
             response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
                 method: "GET",
                 pathComponents: ["v1", "tasks"],
                 idempotency: .idempotentRead,
-                queryItems: [URLQueryItem(name: "limit", value: "50")]
+                queryItems: queryItems
             ))
         } catch let error as AuthError where error.requiresNewSignIn {
             throw SessionTaskRepositoryError.unauthenticated
@@ -43,8 +55,7 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         guard response.statusCode == 200 else {
             throw Self.mapStatusError(response.statusCode)
         }
-        let decoded = try decode(SessionTaskListDTO.self, from: response.data)
-        return decoded.tasks
+        return try decode(SessionTaskListDTO.self, from: response.data)
     }
 
     func fetchTask(id: UUID) async throws -> SessionTaskDTO {

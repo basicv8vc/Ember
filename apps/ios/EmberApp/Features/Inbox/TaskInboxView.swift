@@ -106,6 +106,50 @@ private struct SessionTaskInboxContent: View {
                                 sectionIdentifier: "tasks-section-completed"
                             )
                         }
+
+                        if let loadMoreError = store.loadMoreErrorMessage {
+                            InlineNotice(
+                                title: LocalizedStringKey("tasks.error.title"),
+                                message: LocalizedStringKey(loadMoreError),
+                                tone: .warning
+                            )
+                        }
+
+                        if store.hasMoreTasks {
+                            if let cursor = store.nextTasksCursor, !cursor.isEmpty {
+                                VStack(spacing: 8) {
+                                    Button {
+                                        Task { await store.loadMoreTasks() }
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            if store.isLoadingMoreTasks {
+                                                ProgressView()
+                                            }
+                                            Text("tasks.action.load_more", tableName: "Conversation")
+                                                .font(.subheadline.weight(.semibold))
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(store.isLoadingMoreTasks || store.isLoadingList)
+                                    .accessibilityIdentifier("tasks-load-more-button")
+
+                                    Text("tasks.pagination.more_available", tableName: "Conversation")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .padding(.top, 4)
+                            } else {
+                                InlineNotice(
+                                    title: LocalizedStringKey("tasks.pagination.partial_title"),
+                                    message: LocalizedStringKey("tasks.pagination.partial_message"),
+                                    tone: .neutral
+                                )
+                                .accessibilityIdentifier("tasks-partial-notice")
+                            }
+                        }
                     }
                 }
             }

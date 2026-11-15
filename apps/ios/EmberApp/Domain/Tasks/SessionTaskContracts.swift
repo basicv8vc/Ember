@@ -38,11 +38,6 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
         rawValue.hasPrefix("mock.")
     }
 
-    /// Maps into `TaskKind` solely so existing UI card components accepting `TaskDTO` can be reused.
-    public var legacyTaskKind: TaskKind {
-        TaskKind(rawValue: rawValue) ?? .mockChat
-    }
-
     public var localizedDisplayTitle: String {
         switch rawValue {
         case Self.notesActionItems.rawValue:
@@ -92,9 +87,9 @@ public extension TaskStatus {
 
     var sessionGroup: SessionTaskStatusGroup {
         switch self {
-        case .waitingApproval, .retryableFailed:
+        case .waitingApproval:
             .needsIntervention
-        case .queued, .running:
+        case .queued, .running, .retryableFailed:
             .inProgress
         case .completed, .failed, .cancelled:
             .completed
@@ -243,21 +238,6 @@ public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
         createdAt = try SessionWireDecode.isoString(container, "created_at", codingPath: decoder.codingPath)
         updatedAt = try SessionWireDecode.isoString(container, "updated_at", codingPath: decoder.codingPath)
         deadlineAt = try SessionWireDecode.optionalIsoString(container, "deadline_at", codingPath: decoder.codingPath)
-    }
-
-    /// Bridges to `TaskDTO` so the existing `TaskActivityCard` view renders server state directly.
-    public func asTaskDTO() -> TaskDTO {
-        TaskDTO(
-            taskID: taskID,
-            agentID: agentID,
-            kind: kind.legacyTaskKind,
-            status: status,
-            currentRunID: currentRunID,
-            attemptCount: attemptCount,
-            createdAt: createdAt,
-            updatedAt: updatedAt,
-            deadlineAt: deadlineAt
-        )
     }
 }
 

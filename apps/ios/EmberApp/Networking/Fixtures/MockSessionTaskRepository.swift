@@ -48,7 +48,7 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
             }
             return lhs.taskID.uuidString < rhs.taskID.uuidString
         }
-        let pageLimit = min(max(limit, 1), 100)
+        let pageLimit = min(max(limit, 1), 50)
         let startIndex: Int
         if let cursor, !cursor.isEmpty {
             guard let cursorIndex = ordered.firstIndex(where: {
@@ -71,11 +71,26 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
         return SessionTaskListDTO(tasks: slice, nextAfter: nextAfter, hasMore: hasMore)
     }
 
-    func fetchTask(id: UUID) async throws -> SessionTaskDTO {
+    func fetchTask(id: UUID) async throws -> SessionTaskDetailDTO {
         guard let task = state.tasks.first(where: { $0.taskID == id }) else {
             throw SessionTaskRepositoryError.notFound
         }
-        return task
+        let resultDTO = try await fetchResult(taskID: id)
+        let summary = SessionTaskDTO(
+            taskID: task.taskID,
+            agentID: task.agentID,
+            kind: task.kind,
+            title: task.title,
+            status: task.status,
+            currentRunID: task.currentRunID,
+            attemptCount: task.attemptCount,
+            cancelRequested: task.cancelRequested,
+            createdAt: task.createdAt,
+            updatedAt: task.updatedAt,
+            deadlineAt: task.deadlineAt,
+            resultState: resultDTO.resultState
+        )
+        return SessionTaskDetailDTO(summary: summary, result: resultDTO.result)
     }
 
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO {

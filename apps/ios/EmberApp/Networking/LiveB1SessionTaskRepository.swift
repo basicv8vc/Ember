@@ -11,7 +11,7 @@ enum SessionTaskRepositoryError: Error, Equatable, Sendable {
 protocol SessionTaskRepositoryProtocol: Sendable {
     var isMockOnly: Bool { get }
     func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO
-    func fetchTask(id: UUID) async throws -> SessionTaskDTO
+    func fetchTask(id: UUID) async throws -> SessionTaskDetailDTO
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO
     func fetchResult(taskID: UUID) async throws -> SessionTaskResultDTO
     func cancelTask(id: UUID) async throws -> TaskCancelDTO
@@ -24,30 +24,23 @@ extension SessionTaskRepositoryProtocol {
 }
 
 /// Live B1 consumer-session client for Task list, detail, events, result, and cancellation.
+/// Aligns with PR #160 B1 session routes (`GET /v1/me/tasks`, `GET /v1/me/tasks/:id`, `GET /v1/tasks/:id/result`)
+/// and keeps unimplemented consumer events/cancel under `/v1/me/tasks/:id/...` rather than legacy `tenantAuth` `/v1/tasks/*`.
 struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
     let auth: LiveAuthSessionCoordinator
     let isMockOnly: Bool = false
 
     func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO {
-        let boundedLimit = min(max(limit, 1), 100)
+        let boundedLimit = min(max(limit, 1), 50)
         var queryItems = [URLQueryItem(name: "limit", value: String(boundedLimit))]
         if let cursor, !cursor.isEmpty {
             queryItems.append(URLQueryItem(name: "after", value: cursor))
         }
 
-        let response: EmberAPIResponse
-        do {
-            response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
-                method: "GET",
-                pathComponents: ["v1", "tasks"],
-                idempotency: .idempotentRead,
-                queryItems: queryItems
-            ))
-        } catch let error as AuthError where error.requiresNewSignIn {
-            throw SessionTaskRepositoryError.unauthenticated
-        } catch {
-            throw SessionTaskRepositoryError.unavailable
-        }
+        let response = try await sendRead(
+            pathComponents: ["v1", "me", "tasks"],
+            queryItems: queryItems
+        )
 
         if response.statusCode == 404 || response.statusCode == 405 || response.statusCode == 501 {
             throw SessionTaskRepositoryError.endpointNotReady
@@ -58,16 +51,16 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         return try decode(SessionTaskListDTO.self, from: response.data)
     }
 
-    func fetchTask(id: UUID) async throws -> SessionTaskDTO {
+    func fetchTask(id: UUID) async throws -> SessionTaskDetailDTO {
         let response = try await sendRead(pathComponents: [
-            "v1", "tasks", id.uuidString.lowercased(),
+            "v1", "me", "tasks", id.uuidString.lowercased(),
         ])
         guard response.statusCode == 200 else {
             throw Self.mapStatusError(response.statusCode)
         }
-        let task = try decode(SessionTaskDTO.self, from: response.data)
-        guard task.taskID == id else { throw SessionTaskRepositoryError.invalidResponse }
-        return task
+        let detail = try decode(SessionTaskDetailDTO.self, from: response.data)
+        guard detail.taskID == id else { throw SessionTaskRepositoryError.invalidResponse }
+        return detail
     }
 
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO {
@@ -79,7 +72,7 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         }
 
         let response = try await sendRead(
-            pathComponents: ["v1", "tasks", taskID.uuidString.lowercased(), "events"],
+            pathComponents: ["v1", "me", "tasks", taskID.uuidString.lowercased(), "events"],
             queryItems: queryItems
         )
         guard response.statusCode == 200 else {
@@ -118,7 +111,7 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         do {
             response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
                 method: "POST",
-                pathComponents: ["v1", "tasks", id.uuidString.lowercased(), "cancel"],
+                pathComponents: ["v1", "me", "tasks", id.uuidString.lowercased(), "cancel"],
                 idempotency: .nonIdempotent(clientSubmissionID: nil)
             ))
         } catch let error as AuthError where error.requiresNewSignIn {
@@ -179,6 +172,8 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
             .unauthenticated
         case 404:
             .notFound
+        case 405, 501:
+            .endpointNotReady
         case 429, 500...599:
             .unavailable
         default:

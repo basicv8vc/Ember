@@ -57,24 +57,40 @@ final class LiveConversationHostTasksTests: XCTestCase {
                 }
                 """)
             }
-            if path == "/v1/tasks" {
+            if path == "/v1/me/tasks" {
                 return .json(statusCode: 200, body: """
                 {
                   "tasks":[
                     {"task_id":"\(taskID)","agent_id":"\(agentID)","kind":"notes.action_items",
-                     "title":"Q4 Launch Action Items","status":"completed","current_run_id":null,
-                     "attempt_count":1,"cancel_requested":false,
+                     "title":"Q4 Launch Action Items","status":"completed",
+                     "attempt_count":1,"result_state":"available",
                      "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null},
                     {"task_id":"\(runningID)","agent_id":"\(agentID)","kind":"notes.action_items",
-                     "title":"Interview Summary","status":"running","current_run_id":"00000000-0000-4000-8000-00000000b351",
-                     "attempt_count":1,"cancel_requested":false,
+                     "title":"Interview Summary","status":"running",
+                     "attempt_count":1,"result_state":"pending",
                      "created_at":"2026-11-15T10:02:00Z","updated_at":"2026-11-15T10:02:30Z","deadline_at":null},
                     {"task_id":"\(approvalID)","agent_id":"\(agentID)","kind":"sandbox.python",
-                     "title":"Export CSV","status":"waiting_approval","current_run_id":"00000000-0000-4000-8000-00000000b352",
-                     "attempt_count":1,"cancel_requested":false,
+                     "title":"Export CSV","status":"waiting_approval",
+                     "attempt_count":1,"result_state":"pending",
                      "created_at":"2026-11-15T09:50:00Z","updated_at":"2026-11-15T09:55:00Z","deadline_at":null}
-                  ],
-                  "next_after":null,"has_more":false
+                  ]
+                }
+                """)
+            }
+            if path == "/v1/me/tasks/\(taskID)" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id":"\(taskID)","agent_id":"\(agentID)","kind":"notes.action_items",
+                  "title":"Q4 Launch Action Items","status":"completed",
+                  "attempt_count":1,"result_state":"available",
+                  "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null,
+                  "result":{
+                    "summary_text":"Extracted 2 action items",
+                    "detail_text":"1. Ship beta\\n2. Review telemetry",
+                    "model_label":"ember-notes-v1",
+                    "simulated":false,
+                    "produced_at":"2026-11-15T10:01:00Z"
+                  }
                 }
                 """)
             }
@@ -94,7 +110,7 @@ final class LiveConversationHostTasksTests: XCTestCase {
                 }
                 """)
             }
-            if path == "/v1/tasks/\(taskID)/events" {
+            if path == "/v1/me/tasks/\(taskID)/events" {
                 return .json(statusCode: 200, body: """
                 {
                   "task_id":"\(taskID)",
@@ -236,18 +252,17 @@ final class LiveConversationHostTasksTests: XCTestCase {
                 }
                 """)
             }
-            if path == "/v1/tasks" {
+            if path == "/v1/me/tasks" {
                 let status = phase >= 1 ? "completed" : "running"
-                let runIDJSON = phase >= 1 ? "null" : "\"00000000-0000-4000-8000-00000000b351\""
+                let resultState = phase >= 1 ? "available" : "pending"
                 return .json(statusCode: 200, body: """
                 {
                   "tasks":[
                     {"task_id":"\(runningID)","agent_id":"\(agentID)","kind":"notes.action_items",
-                     "title":"Meeting Notes Summary","status":"\(status)","current_run_id":\(runIDJSON),
-                     "attempt_count":1,"cancel_requested":false,
+                     "title":"Meeting Notes Summary","status":"\(status)",
+                     "attempt_count":1,"result_state":"\(resultState)",
                      "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null}
-                  ],
-                  "next_after":null,"has_more":false
+                  ]
                 }
                 """)
             }
@@ -348,16 +363,15 @@ final class LiveConversationHostTasksTests: XCTestCase {
                 }
                 """)
             }
-            if path == "/v1/tasks" {
+            if path == "/v1/me/tasks" {
                 return .json(statusCode: 200, body: """
                 {
                   "tasks":[
                     {"task_id":"\(runningID)","agent_id":"\(agentID)","kind":"notes.action_items",
                      "title":"Live Notes Task","status":"\(isCompleted ? "completed" : "running")",
-                     "current_run_id":null,"attempt_count":1,"cancel_requested":false,
+                     "attempt_count":1,"result_state":"\(isCompleted ? "available" : "pending")",
                      "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null}
-                  ],
-                  "next_after":null,"has_more":false
+                  ]
                 }
                 """)
             }
@@ -424,8 +438,8 @@ final class LiveConversationHostTasksTests: XCTestCase {
                 }
                 """)
             }
-            if path == "/v1/tasks" {
-                return .json(statusCode: 200, body: "{\"tasks\":[],\"next_after\":null,\"has_more\":false}")
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[]}")
             }
             return .json(statusCode: 404, body: "{}")
         }

@@ -289,9 +289,14 @@ private struct SessionTaskDetailContent: View {
                 .font(.headline)
 
             if events.isEmpty {
-                Text("tasks.detail.activity_empty", tableName: "Conversation")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
+                Text(
+                    store.eventsUnavailableTaskIDs.contains(taskID)
+                        ? "tasks.detail.activity_unavailable"
+                        : "tasks.detail.activity_empty",
+                    tableName: "Conversation"
+                )
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
             } else {
                 ConversationCardRenderer.ActivityEvents(
                     events: events.map { $0.asTaskEventDTO() }

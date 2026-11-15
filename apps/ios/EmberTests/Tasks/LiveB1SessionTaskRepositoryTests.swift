@@ -38,7 +38,8 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
                   "cancel_requested": false,
                   "created_at": "2026-11-15T10:00:00Z",
                   "updated_at": "2026-11-15T10:01:00Z",
-                  "deadline_at": null
+                  "deadline_at": null,
+                  "result_state": "available"
                 }
               ],
               "next_after": null,
@@ -55,12 +56,40 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         XCTAssertEqual(tasks[0].kind, .notesActionItems)
         XCTAssertEqual(tasks[0].title, "Q4 Launch Action Items")
         XCTAssertEqual(tasks[0].status, .completed)
+        XCTAssertEqual(tasks[0].resultState, .available)
 
         let req = try XCTUnwrap(recorder.requests.first)
         XCTAssertEqual(req.httpMethod, "GET")
-        XCTAssertEqual(req.url?.path, "/v1/tasks")
+        XCTAssertEqual(req.url?.path, "/v1/me/tasks")
         let query = URLComponents(url: try XCTUnwrap(req.url), resolvingAgainstBaseURL: false)?.queryItems ?? []
         XCTAssertEqual(query.first(where: { $0.name == "limit" })?.value, "50")
+        XCTAssertNil(query.first(where: { $0.name == "after" }))
+
+        // Strict PR #160 B1TaskListDtoSchema payload (no current_run_id/cancel_requested/next_after/has_more)
+        let pr160Payload = Data("""
+            {
+              "tasks": [
+                {
+                  "task_id": "\(taskID)",
+                  "agent_id": "\(agentID)",
+                  "kind": "notes.action_items",
+                  "title": "PR160 Summary",
+                  "status": "running",
+                  "attempt_count": 1,
+                  "created_at": "2026-11-15T10:00:00Z",
+                  "updated_at": "2026-11-15T10:01:00Z",
+                  "deadline_at": null,
+                  "result_state": "pending"
+                }
+              ]
+            }
+            """.utf8)
+        let decodedPR160 = try JSONDecoder().decode(SessionTaskListDTO.self, from: pr160Payload)
+        XCTAssertEqual(decodedPR160.tasks.count, 1)
+        XCTAssertEqual(decodedPR160.tasks[0].status, .running)
+        XCTAssertEqual(decodedPR160.tasks[0].resultState, .pending)
+        XCTAssertNil(decodedPR160.hasMore)
+        XCTAssertNil(decodedPR160.nextAfter)
 
         let bareArray = Data("""
             [
@@ -168,11 +197,89 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         XCTAssertEqual(page.events[1].payload.taskKind, .notesActionItems)
         XCTAssertEqual(page.events[1].payload.route, .standard)
 
+        let eventRequest = try XCTUnwrap(recorder.requests.first)
+        XCTAssertEqual(eventRequest.url?.path, "/v1/me/tasks/\(taskID.uuidString.lowercased())/events")
         let query = URLComponents(
-            url: try XCTUnwrap(recorder.requests.first?.url),
+            url: try XCTUnwrap(eventRequest.url),
             resolvingAgainstBaseURL: false
         )?.queryItems ?? []
         XCTAssertEqual(query.first(where: { $0.name == "after" })?.value, "3")
+    }
+
+    func testFetchTaskDecodesB1DetailWithInlineResultAndEnforcesInvariants() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b311")!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 200, body: """
+            {
+              "task_id": "\(taskID.uuidString.lowercased())",
+              "agent_id": "\(agentID)",
+              "kind": "notes.action_items",
+              "title": "Q4 Launch Action Items",
+              "status": "completed",
+              "attempt_count": 1,
+              "created_at": "2026-11-15T10:00:00Z",
+              "updated_at": "2026-11-15T10:01:00Z",
+              "deadline_at": null,
+              "result_state": "available",
+              "result": {
+                "summary_text": "Inline B1 detail summary.",
+                "detail_text": "1. Ship B1 detail route",
+                "model_label": "ember-notes-v1",
+                "simulated": false,
+                "produced_at": "2026-11-15T10:01:00Z"
+              }
+            }
+            """)
+        }
+
+        let detail = try await fixture.repository.fetchTask(id: taskID)
+        XCTAssertEqual(detail.taskID, taskID)
+        XCTAssertEqual(detail.resultState, .available)
+        XCTAssertEqual(detail.result?.summaryText, "Inline B1 detail summary.")
+        XCTAssertEqual(detail.asResultDTO?.resultState, .available)
+        XCTAssertEqual(detail.asResultDTO?.result?.detailText, "1. Ship B1 detail route")
+        XCTAssertEqual(recorder.requests.first?.url?.path, "/v1/me/tasks/\(taskID.uuidString.lowercased())")
+
+        // Mismatched available state without result payload must fail decoding.
+        let missingResult = Data("""
+            {
+              "task_id": "\(taskID.uuidString.lowercased())",
+              "agent_id": "\(agentID)",
+              "kind": "notes.action_items",
+              "title": "Broken Detail",
+              "status": "completed",
+              "attempt_count": 1,
+              "created_at": "2026-11-15T10:00:00Z",
+              "updated_at": "2026-11-15T10:01:00Z",
+              "deadline_at": null,
+              "result_state": "available",
+              "result": null
+            }
+            """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionTaskDetailDTO.self, from: missingResult))
+
+        // Pending result_state on terminal task must fail decoding.
+        let pendingOnTerminal = Data("""
+            {
+              "task_id": "\(taskID.uuidString.lowercased())",
+              "agent_id": "\(agentID)",
+              "kind": "notes.action_items",
+              "title": "Broken Pending Terminal",
+              "status": "completed",
+              "attempt_count": 1,
+              "created_at": "2026-11-15T10:00:00Z",
+              "updated_at": "2026-11-15T10:01:00Z",
+              "deadline_at": null,
+              "result_state": "pending",
+              "result": null
+            }
+            """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(SessionTaskDetailDTO.self, from: pendingOnTerminal))
     }
 
     func testFetchEventsRejectsStaleOrNonMonotonicSequence() async throws {
@@ -213,9 +320,11 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
     func testFetchResultEnforcesB1ResultInvariantsAndDecodesAvailableResult() async throws {
         let fixture = try makeRepository()
         let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b311")!
+        let recorder = RequestRecorder()
 
-        register { _ in
-            .json(statusCode: 200, body: """
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 200, body: """
             {
               "task_id": "\(taskID.uuidString.lowercased())",
               "task_status": "completed",
@@ -232,6 +341,7 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         }
 
         let result = try await fixture.repository.fetchResult(taskID: taskID)
+        XCTAssertEqual(recorder.requests.first?.url?.path, "/v1/tasks/\(taskID.uuidString.lowercased())/result")
         XCTAssertEqual(result.resultState, .available)
         XCTAssertEqual(result.result?.summaryText, "Extracted 2 action items from meeting notes.")
         XCTAssertEqual(result.result?.simulated, false)
@@ -343,7 +453,7 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
             let query = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
             let after = query.first(where: { $0.name == "after" })?.value
 
-            if path == "/v1/tasks" {
+            if path == "/v1/me/tasks" {
                 if after == "cursor-page-2" && stallFlag.value {
                     return .json(statusCode: 200, body: """
                     {
@@ -459,7 +569,7 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         XCTAssertEqual(store.orderedTasks.map(\.taskID), [retryableID, approvalID, olderCompletedID])
         XCTAssertEqual(store.resultsByTaskID[olderCompletedID]?.result?.summaryText, "Older digest complete.")
 
-        let taskRequests = recorder.requests.filter { $0.url?.path == "/v1/tasks" }
+        let taskRequests = recorder.requests.filter { $0.url?.path == "/v1/me/tasks" }
         XCTAssertEqual(taskRequests.count, 2)
         let firstQuery = URLComponents(url: taskRequests[0].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
         let secondQuery = URLComponents(url: taskRequests[1].url!, resolvingAgainstBaseURL: false)?.queryItems ?? []
@@ -485,6 +595,61 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         let secondMockPage = try await mockRepo.listTasks(after: firstMockPage.nextAfter, limit: 2)
         XCTAssertEqual(secondMockPage.hasMore, false)
         XCTAssertEqual(Set(firstMockPage.tasks.map(\.taskID)).intersection(secondMockPage.tasks.map(\.taskID)).count, 0)
+    }
+
+    func testStoreDegradesGracefullyWhenEventsAndCancelEndpointsReturn404() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b499")!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+
+        register { request in
+            recorder.record(request)
+            let path = request.url?.path ?? ""
+            if path == "/v1/me/tasks/\(taskID.uuidString.lowercased())" && request.httpMethod == "GET" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "agent_id": "\(agentID)",
+                  "kind": "notes.action_items",
+                  "title": "Pending Consumer Cancel/Events",
+                  "status": "completed",
+                  "attempt_count": 1,
+                  "created_at": "2026-11-15T10:00:00Z",
+                  "updated_at": "2026-11-15T10:01:00Z",
+                  "deadline_at": null,
+                  "result_state": "available",
+                  "result": {
+                    "summary_text": "Loaded inline without /result roundtrip.",
+                    "detail_text": null,
+                    "model_label": "ember-notes-v1",
+                    "simulated": false,
+                    "produced_at": "2026-11-15T10:01:00Z"
+                  }
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        await store.loadDetail(taskID: taskID)
+
+        XCTAssertEqual(store.tasksByID[taskID]?.title, "Pending Consumer Cancel/Events")
+        XCTAssertFalse(store.missingTaskIDs.contains(taskID))
+        XCTAssertTrue(store.eventsUnavailableTaskIDs.contains(taskID))
+        XCTAssertNil(store.detailErrorByTaskID[taskID])
+        XCTAssertEqual(store.resultsByTaskID[taskID]?.result?.summaryText, "Loaded inline without /result roundtrip.")
+        XCTAssertFalse(recorder.requests.contains { $0.url?.path == "/v1/tasks/\(taskID.uuidString.lowercased())/result" })
+
+        await store.cancelTask(taskID: taskID)
+        XCTAssertEqual(
+            store.cancelErrorByTaskID[taskID],
+            String(localized: "tasks.error.cancel_unavailable", table: "Conversation")
+        )
+        XCTAssertTrue(recorder.requests.contains {
+            $0.httpMethod == "POST" && $0.url?.path == "/v1/me/tasks/\(taskID.uuidString.lowercased())/cancel"
+        })
     }
 
     private func makeRepository() throws -> (repository: LiveB1SessionTaskRepository, session: URLSession) {

@@ -373,6 +373,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法发送取消请求，请检查任务状态后重试。" } }
       }
     },
+    "tasks.error.cancel_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task cancellation is not yet enabled on Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember Cloud 暂未开放任务取消接口。" } }
+      }
+    },
     "tasks.action.refresh" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh tasks" } },
@@ -485,6 +491,12 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "No persisted execution events yet." } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无服务端持久执行记录。" } }
+      }
+    },
+    "tasks.detail.activity_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Execution activity timeline is not yet available from this server." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端暂未提供执行活动时间线。" } }
       }
     },
     "tasks.detail.result_section_title" : {

@@ -142,7 +142,7 @@ private enum SessionWireDecode {
     }
 }
 
-/// Authoritative server Task snapshot for Session Task endpoints (`GET /v1/tasks`, `GET /v1/tasks/:id`).
+/// Authoritative server Task snapshot for B1 Session Task endpoints (`GET /v1/me/tasks`, `GET /v1/me/tasks/:id`).
 public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
     public let taskID: UUID
     public let agentID: UUID
@@ -155,6 +155,7 @@ public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
     public let createdAt: String
     public let updatedAt: String
     public let deadlineAt: String?
+    public let resultState: SessionTaskResultState?
 
     public var id: UUID { taskID }
 
@@ -181,7 +182,8 @@ public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
         cancelRequested: Bool = false,
         createdAt: String,
         updatedAt: String,
-        deadlineAt: String? = nil
+        deadlineAt: String? = nil,
+        resultState: SessionTaskResultState? = nil
     ) {
         self.taskID = taskID
         self.agentID = agentID
@@ -194,12 +196,13 @@ public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
         self.createdAt = createdAt
         self.updatedAt = updatedAt
         self.deadlineAt = deadlineAt
+        self.resultState = resultState
     }
 
-    private static let allowedKeys: Set<String> = [
+    fileprivate static let allowedKeys: Set<String> = [
         "task_id", "agent_id", "kind", "title", "status",
         "current_run_id", "attempt_count", "cancel_requested",
-        "created_at", "updated_at", "deadline_at",
+        "created_at", "updated_at", "deadline_at", "result_state",
     ]
 
     enum CodingKeys: String, CodingKey {
@@ -214,34 +217,103 @@ public struct SessionTaskDTO: Identifiable, Equatable, Codable, Sendable {
         case createdAt = "created_at"
         case updatedAt = "updated_at"
         case deadlineAt = "deadline_at"
+        case resultState = "result_state"
     }
 
     public init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: SessionWireKey.self)
         try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+        try self.init(from: container, codingPath: decoder.codingPath)
+    }
 
+    fileprivate init(
+        from container: KeyedDecodingContainer<SessionWireKey>,
+        codingPath: [CodingKey]
+    ) throws {
         taskID = try container.decode(UUID.self, forKey: SessionWireDecode.key("task_id"))
         agentID = try container.decode(UUID.self, forKey: SessionWireDecode.key("agent_id"))
         kind = try container.decode(SessionTaskKind.self, forKey: SessionWireDecode.key("kind"))
         let decodedTitle = try container.decodeIfPresent(String.self, forKey: SessionWireDecode.key("title"))
         if let decodedTitle, decodedTitle.count > 240 {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Task title too long."))
+            throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Task title too long."))
         }
         title = decodedTitle
         status = try container.decode(TaskStatus.self, forKey: SessionWireDecode.key("status"))
         currentRunID = try container.decodeIfPresent(UUID.self, forKey: SessionWireDecode.key("current_run_id"))
         attemptCount = try container.decode(Int.self, forKey: SessionWireDecode.key("attempt_count"))
         guard attemptCount >= 0 else {
-            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Negative attempt count."))
+            throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Negative attempt count."))
         }
         cancelRequested = try container.decodeIfPresent(Bool.self, forKey: SessionWireDecode.key("cancel_requested")) ?? false
-        createdAt = try SessionWireDecode.isoString(container, "created_at", codingPath: decoder.codingPath)
-        updatedAt = try SessionWireDecode.isoString(container, "updated_at", codingPath: decoder.codingPath)
-        deadlineAt = try SessionWireDecode.optionalIsoString(container, "deadline_at", codingPath: decoder.codingPath)
+        createdAt = try SessionWireDecode.isoString(container, "created_at", codingPath: codingPath)
+        updatedAt = try SessionWireDecode.isoString(container, "updated_at", codingPath: codingPath)
+        deadlineAt = try SessionWireDecode.optionalIsoString(container, "deadline_at", codingPath: codingPath)
+        resultState = try container.decodeIfPresent(SessionTaskResultState.self, forKey: SessionWireDecode.key("result_state"))
+
+        if let resultState {
+            if resultState == .pending && status.isTerminal {
+                throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Terminal task cannot have pending result_state."))
+            }
+            if resultState != .pending && !status.isTerminal {
+                throw DecodingError.dataCorrupted(.init(codingPath: codingPath, debugDescription: "Non-terminal task cannot have available/unavailable result_state."))
+            }
+        }
     }
 }
 
-/// Wire page for `GET /v1/tasks`. Accepts either `{ "tasks": [...], ... }` or a JSON array `[...]`.
+/// Authoritative server Task detail snapshot for `GET /v1/me/tasks/{task_id}` (`B1TaskDetailDtoSchema`).
+public struct SessionTaskDetailDTO: Codable, Equatable, Sendable {
+    public let summary: SessionTaskDTO
+    public let result: SessionTaskTextResult?
+
+    public var taskID: UUID { summary.taskID }
+    public var status: TaskStatus { summary.status }
+    public var resultState: SessionTaskResultState? { summary.resultState }
+
+    public var asResultDTO: SessionTaskResultDTO? {
+        guard let resultState = summary.resultState else { return nil }
+        return SessionTaskResultDTO(
+            taskID: summary.taskID,
+            taskStatus: summary.status,
+            resultState: resultState,
+            result: result
+        )
+    }
+
+    private static let allowedKeys: Set<String> = SessionTaskDTO.allowedKeys.union(["result"])
+
+    public init(summary: SessionTaskDTO, result: SessionTaskTextResult? = nil) {
+        self.summary = summary
+        self.result = result
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+        summary = try SessionTaskDTO(from: container, codingPath: decoder.codingPath)
+        result = try container.decodeIfPresent(SessionTaskTextResult.self, forKey: SessionWireDecode.key("result"))
+
+        if let resultState = summary.resultState {
+            if (resultState == .available) != (result != nil) {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Detail result presence mismatch."))
+            }
+        } else if !summary.status.isTerminal && result != nil {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Non-terminal task cannot carry result."))
+        }
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        try summary.encode(to: encoder)
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encodeIfPresent(result, forKey: .result)
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case result
+    }
+}
+
+/// Wire page for `GET /v1/me/tasks`. Accepts either `{ "tasks": [...], ... }` or a JSON array `[...]`.
 public struct SessionTaskListDTO: Decodable, Equatable, Sendable {
     public let tasks: [SessionTaskDTO]
     public let nextAfter: String?

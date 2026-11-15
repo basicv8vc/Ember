@@ -202,7 +202,8 @@ private struct SessionTaskInboxContent: View {
             ForEach(tasks) { task in
                 SessionTaskInboxRow(
                     task: task,
-                    hasResult: store.resultsByTaskID[task.taskID]?.resultState == .available,
+                    hasResult: store.resultsByTaskID[task.taskID]?.resultState == .available
+                        || task.resultState == .available,
                     isMockOnly: store.isMock(task, result: store.resultsByTaskID[task.taskID]),
                     onTap: { onOpenTask(task.taskID) }
                 )

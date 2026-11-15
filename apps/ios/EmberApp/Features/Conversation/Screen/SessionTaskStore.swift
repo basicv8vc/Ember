@@ -12,6 +12,7 @@ final class SessionTaskStore {
     private(set) var resultsByTaskID: [UUID: SessionTaskResultDTO] = [:]
     private(set) var cancelResponseByTaskID: [UUID: TaskCancelDTO] = [:]
     private(set) var missingTaskIDs: Set<UUID> = []
+    private(set) var eventsUnavailableTaskIDs: Set<UUID> = []
     private(set) var loadingDetailTaskIDs: Set<UUID> = []
     private(set) var cancellingTaskIDs: Set<UUID> = []
     private(set) var isLoadingList = false
@@ -27,7 +28,7 @@ final class SessionTaskStore {
 
     init(repository: (any SessionTaskRepositoryProtocol)? = nil, pageSize: Int = 50) {
         self.repository = repository
-        self.pageSize = min(max(pageSize, 1), 100)
+        self.pageSize = min(max(pageSize, 1), 50)
     }
 
     var hasRepository: Bool { repository != nil }
@@ -87,6 +88,7 @@ final class SessionTaskStore {
             for task in page.tasks {
                 fetchedTasksByID[task.taskID] = task
                 missingTaskIDs.remove(task.taskID)
+                seedKnownUnavailableResult(for: task)
                 fetchedIDs.insert(task.taskID)
             }
             nextTasksCursor = (page.nextAfter?.isEmpty == false) ? page.nextAfter : nil
@@ -120,12 +122,7 @@ final class SessionTaskStore {
         )
         for taskID in candidateResultIDs {
             guard generation == startGeneration, !Task.isCancelled else { return }
-            if let task = tasksByID[taskID], !task.status.isTerminal, resultsByTaskID[taskID] == nil {
-                continue
-            }
-            if resultsByTaskID[taskID]?.resultState == .available {
-                continue
-            }
+            guard shouldFetchResult(for: taskID) else { continue }
             await refreshResult(taskID, using: repository, generation: startGeneration)
         }
     }
@@ -154,6 +151,7 @@ final class SessionTaskStore {
             for task in page.tasks {
                 tasksByID[task.taskID] = task
                 missingTaskIDs.remove(task.taskID)
+                seedKnownUnavailableResult(for: task)
             }
             let nextCursor = (page.nextAfter?.isEmpty == false) ? page.nextAfter : nil
             if page.tasks.isEmpty || nextCursor == cursor {
@@ -167,7 +165,7 @@ final class SessionTaskStore {
             let terminalIDs = page.tasks.filter { $0.status.isTerminal }.map(\.taskID)
             for taskID in terminalIDs {
                 guard generation == startGeneration, !Task.isCancelled else { return }
-                if resultsByTaskID[taskID]?.resultState == .available { continue }
+                guard shouldFetchResult(for: taskID) else { continue }
                 await refreshResult(taskID, using: repository, generation: startGeneration)
             }
         } catch is CancellationError {
@@ -211,26 +209,33 @@ final class SessionTaskStore {
         await refreshSingleTask(taskID, using: repository, generation: startGeneration)
         guard generation == startGeneration, !Task.isCancelled else { return }
 
-        let afterSequence = eventsByTaskID[taskID]?.last?.sequence
-        do {
-            let page = try await repository.fetchEvents(taskID: taskID, after: afterSequence)
-            guard generation == startGeneration else { return }
-            mergeEvents(page.events, for: taskID)
-        } catch is CancellationError {
-            return
-        } catch let error as SessionTaskRepositoryError where error == .notFound {
-            guard generation == startGeneration else { return }
-            if tasksByID[taskID] == nil {
-                missingTaskIDs.insert(taskID)
-            }
-        } catch {
-            guard generation == startGeneration else { return }
-            if detailErrorByTaskID[taskID] == nil {
-                detailErrorByTaskID[taskID] = String(localized: "tasks.error.detail_load", table: "Conversation")
+        if !missingTaskIDs.contains(taskID) {
+            let afterSequence = eventsByTaskID[taskID]?.last?.sequence
+            do {
+                let page = try await repository.fetchEvents(taskID: taskID, after: afterSequence)
+                guard generation == startGeneration else { return }
+                eventsUnavailableTaskIDs.remove(taskID)
+                mergeEvents(page.events, for: taskID)
+            } catch is CancellationError {
+                return
+            } catch SessionTaskRepositoryError.notFound, SessionTaskRepositoryError.endpointNotReady {
+                guard generation == startGeneration else { return }
+                if tasksByID[taskID] == nil {
+                    missingTaskIDs.insert(taskID)
+                } else {
+                    eventsUnavailableTaskIDs.insert(taskID)
+                }
+            } catch {
+                guard generation == startGeneration else { return }
+                if detailErrorByTaskID[taskID] == nil {
+                    detailErrorByTaskID[taskID] = String(localized: "tasks.error.detail_load", table: "Conversation")
+                }
             }
         }
 
-        if let task = tasksByID[taskID], task.status.isTerminal {
+        if let task = tasksByID[taskID],
+           task.status.isTerminal,
+           shouldFetchResult(for: taskID) {
             await refreshResult(taskID, using: repository, generation: startGeneration)
         }
     }
@@ -253,6 +258,17 @@ final class SessionTaskStore {
             await loadDetail(taskID: taskID)
         } catch is CancellationError {
             return
+        } catch SessionTaskRepositoryError.endpointNotReady {
+            guard generation == startGeneration else { return }
+            cancelErrorByTaskID[taskID] = String(localized: "tasks.error.cancel_unavailable", table: "Conversation")
+        } catch SessionTaskRepositoryError.notFound {
+            await refreshSingleTask(taskID, using: repository, generation: startGeneration)
+            guard generation == startGeneration else { return }
+            if tasksByID[taskID] != nil {
+                cancelErrorByTaskID[taskID] = String(localized: "tasks.error.cancel_unavailable", table: "Conversation")
+            } else {
+                cancelErrorByTaskID[taskID] = String(localized: "tasks.error.cancel_failed", table: "Conversation")
+            }
         } catch {
             guard generation == startGeneration else { return }
             cancelErrorByTaskID[taskID] = String(localized: "tasks.error.cancel_failed", table: "Conversation")
@@ -266,6 +282,7 @@ final class SessionTaskStore {
         resultsByTaskID.removeAll()
         cancelResponseByTaskID.removeAll()
         missingTaskIDs.removeAll()
+        eventsUnavailableTaskIDs.removeAll()
         loadingDetailTaskIDs.removeAll()
         cancellingTaskIDs.removeAll()
         isLoadingList = false
@@ -286,11 +303,15 @@ final class SessionTaskStore {
         generation startGeneration: UInt64
     ) async {
         do {
-            let task = try await repository.fetchTask(id: taskID)
+            let detail = try await repository.fetchTask(id: taskID)
             guard generation == startGeneration else { return }
-            tasksByID[taskID] = task
+            tasksByID[taskID] = detail.summary
             missingTaskIDs.remove(taskID)
             detailErrorByTaskID[taskID] = nil
+            if let embeddedResult = detail.asResultDTO {
+                resultsByTaskID[taskID] = embeddedResult
+                resultErrorByTaskID[taskID] = nil
+            }
         } catch is CancellationError {
             return
         } catch let error as SessionTaskRepositoryError where error == .notFound {
@@ -301,6 +322,35 @@ final class SessionTaskStore {
             guard generation == startGeneration else { return }
             detailErrorByTaskID[taskID] = String(localized: "tasks.error.detail_load", table: "Conversation")
         }
+    }
+
+    private func seedKnownUnavailableResult(for task: SessionTaskDTO) {
+        guard task.status.isTerminal,
+              task.resultState == .unavailable,
+              resultsByTaskID[task.taskID]?.resultState != .available
+        else { return }
+        resultsByTaskID[task.taskID] = SessionTaskResultDTO(
+            taskID: task.taskID,
+            taskStatus: task.status,
+            resultState: .unavailable,
+            result: nil
+        )
+        resultErrorByTaskID[task.taskID] = nil
+    }
+
+    private func shouldFetchResult(for taskID: UUID) -> Bool {
+        if resultsByTaskID[taskID]?.resultState == .available {
+            return false
+        }
+        if let task = tasksByID[taskID] {
+            if !task.status.isTerminal && resultsByTaskID[taskID] == nil {
+                return false
+            }
+            if task.resultState == .pending || task.resultState == .unavailable {
+                return false
+            }
+        }
+        return true
     }
 
     private func refreshResult(

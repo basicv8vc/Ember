@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
+  B1TaskCancelDtoSchema,
   B1TaskDetailDtoSchema,
+  B1TaskEventPageDtoSchema,
   B1TaskListDtoSchema,
   B1TaskResultDtoSchema,
   DelegateNotesActionItemsArgsSchema,
@@ -30,7 +32,9 @@ import {
 } from '@ember/model-gateway';
 import type {
   B1AssistantTurnDto,
+  B1TaskCancelDto,
   B1TaskDetailDto,
+  B1TaskEventPageDto,
   B1TaskListDto,
   B1TaskResultDto,
   RunExecutionContext,
@@ -493,6 +497,7 @@ describe('B3-A1 notes task handler orchestration and safety guards', () => {
       policy: POLICY,
       ceilings: {
         perAttemptMicroUsd: TEST_CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: TEST_CEILINGS.principalDailyMicroUsd,
         tenantDailyMicroUsd: TEST_CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: TEST_CEILINGS.globalDailyMicroUsd,
       },
@@ -557,15 +562,21 @@ describe('B3-A1 notes task handler orchestration and safety guards', () => {
     expect(repo.committed).toHaveLength(0);
   });
 
-  it('fails terminally before egress on budget refusal or malformed notes input', async () => {
-    const budgetRepo = new MemoryNotesRepo();
-    budgetRepo.reserveOutcome = { kind: 'task_budget_exhausted', reason: 'cost_exceeded' };
-    const budgetHandler = makeHandler(budgetRepo, ['ok']);
+  it('fails terminally before egress on budget refusal, principal unavailability, or malformed notes input', async () => {
+    for (const refusal of [
+      { kind: 'task_budget_exhausted' as const, reason: 'cost_exceeded' as const },
+      { kind: 'budget_exceeded' as const, scope: 'principal' as const },
+      { kind: 'principal_unavailable' as const },
+    ]) {
+      const budgetRepo = new MemoryNotesRepo();
+      budgetRepo.reserveOutcome = refusal;
+      const budgetHandler = makeHandler(budgetRepo, ['ok']);
 
-    await expect(
-      budgetHandler.handle(lease, new AbortController().signal, makeContext()),
-    ).resolves.toEqual({ type: 'finish', outcome: 'failed_terminal' });
-    expect(budgetRepo.committed).toHaveLength(0);
+      await expect(
+        budgetHandler.handle(lease, new AbortController().signal, makeContext()),
+      ).resolves.toEqual({ type: 'finish', outcome: 'failed_terminal' });
+      expect(budgetRepo.committed).toHaveLength(0);
+    }
 
     const invalidRepo = new MemoryNotesRepo();
     const invalidHandler = makeHandler(invalidRepo, ['ok']);
@@ -633,8 +644,9 @@ describe('B3-A1 HTTP task routes & auth split', () => {
     };
   }
 
-  function makeApp() {
+  function makeApp(cancelOutcome?: B1TaskCancelDto) {
     const queries: B1TaskListQuery[] = [];
+    const eventAfters: Array<number | undefined> = [];
     const sampleResult: B1TaskResultDto = {
       task_id: TASK_ID,
       task_status: 'completed',
@@ -653,28 +665,46 @@ describe('B3-A1 HTTP task routes & auth split', () => {
       kind: 'notes.action_items',
       title: 'Weekly Sync',
       status: 'completed',
+      current_run_id: RUN_ID,
       attempt_count: 1,
+      cancel_requested: false,
       created_at: '2026-11-15T00:00:00.000Z',
       updated_at: '2026-11-15T00:00:05.000Z',
       deadline_at: '2026-11-15T00:05:00.000Z',
-      result_state: 'available',
-      result: sampleResult.result,
     };
     const sampleList: B1TaskListDto = {
-      tasks: [
+      tasks: [sampleDetail],
+      next_after: null,
+      has_more: false,
+    };
+    const sampleEvents: B1TaskEventPageDto = {
+      task_id: TASK_ID,
+      events: [
         {
           task_id: TASK_ID,
-          agent_id: AGENT_ID,
-          kind: 'notes.action_items',
-          title: 'Weekly Sync',
-          status: 'completed',
-          attempt_count: 1,
-          created_at: '2026-11-15T00:00:00.000Z',
-          updated_at: '2026-11-15T00:00:05.000Z',
-          deadline_at: '2026-11-15T00:05:00.000Z',
-          result_state: 'available',
+          sequence: 1,
+          phase: 'accepted',
+          occurred_at: '2026-11-15T00:00:00.000Z',
+          trace_id: TURN_ID,
+          payload: {},
+        },
+        {
+          task_id: TASK_ID,
+          sequence: 2,
+          phase: 'completed',
+          occurred_at: '2026-11-15T00:00:05.000Z',
+          trace_id: TURN_ID,
+          payload: { runId: RUN_ID, attempt: 1 },
         },
       ],
+    };
+    const sampleCancel: B1TaskCancelDto = cancelOutcome ?? {
+      task_id: TASK_ID,
+      status: 'cancelled',
+      cancel_requested: true,
+      cancel_requested_at: '2026-11-15T00:00:06.000Z',
+      terminal: true,
+      updated_at: '2026-11-15T00:00:06.000Z',
     };
 
     const taskResults: B1TaskResultRepository = {
@@ -684,10 +714,22 @@ describe('B3-A1 HTTP task routes & auth split', () => {
     const taskReads: B1TaskReadRepository = {
       listTasks: (tenantId, query) => {
         queries.push(query ?? {});
-        return Promise.resolve(tenantId === TENANT_ID ? sampleList : { tasks: [] });
+        return Promise.resolve(
+          tenantId === TENANT_ID ? sampleList : { tasks: [], next_after: null, has_more: false },
+        );
       },
       getTaskDetail: (tenantId, taskId) =>
         Promise.resolve(tenantId === TENANT_ID && taskId === TASK_ID ? sampleDetail : null),
+      listTaskEvents: (tenantId, taskId, after) => {
+        eventAfters.push(after);
+        if (tenantId !== TENANT_ID || taskId !== TASK_ID) {
+          return Promise.resolve(null);
+        }
+        const events = sampleEvents.events.filter((e) => e.sequence > (after ?? 0));
+        return Promise.resolve({ task_id: TASK_ID, events });
+      },
+      cancelTask: (tenantId, taskId) =>
+        Promise.resolve(tenantId === TENANT_ID && taskId === TASK_ID ? sampleCancel : null),
     };
 
     const app = createApp({
@@ -695,48 +737,133 @@ describe('B3-A1 HTTP task routes & auth split', () => {
       b1TaskResultRepository: taskResults,
       b1TaskReadRepository: taskReads,
     });
-    return { app, queries, sampleList, sampleDetail, sampleResult };
+    return {
+      app,
+      queries,
+      eventAfters,
+      sampleList,
+      sampleDetail,
+      sampleResult,
+      sampleEvents,
+      sampleCancel,
+    };
   }
 
-  it('serves /v1/me/tasks, /v1/me/tasks/:taskId, and /v1/tasks/:taskId/result with ems_ session while keeping /v1/tasks/:taskId tenantAuth-gated', async () => {
-    const { app, queries, sampleList, sampleDetail, sampleResult } = makeApp();
+  it('serves B1/B3 session task routes (including /me/tasks/:id/events, /me/tasks/:id/result, /me/tasks/:id/cancel) while keeping M1 /v1/tasks* tenantAuth-gated', async () => {
+    const {
+      app,
+      queries,
+      eventAfters,
+      sampleList,
+      sampleDetail,
+      sampleResult,
+      sampleEvents,
+      sampleCancel,
+    } = makeApp();
     const auth = { authorization: `Bearer ${token}` };
 
     expect((await app.request('/v1/me/tasks')).status).toBe(401);
+    // M1 tenantAuth routes MUST continue rejecting ems_ consumer session tokens with 401.
+    expect((await app.request('/v1/tasks', { headers: auth })).status).toBe(401);
     expect((await app.request(`/v1/tasks/${TASK_ID}`, { headers: auth })).status).toBe(401);
+    expect((await app.request(`/v1/tasks/${TASK_ID}/events`, { headers: auth })).status).toBe(401);
+    expect(
+      (await app.request(`/v1/tasks/${TASK_ID}/cancel`, { method: 'POST', headers: auth })).status,
+    ).toBe(401);
 
-    const listRes = await app.request('/v1/me/tasks?status=completed&limit=10', { headers: auth });
+    const listRes = await app.request('/v1/me/tasks?status=completed&limit=10&after=cursor_abc', {
+      headers: auth,
+    });
     expect(listRes.status).toBe(200);
     expect(B1TaskListDtoSchema.parse(await listRes.json())).toEqual(sampleList);
-    expect(queries).toEqual([{ status: 'completed', limit: 10 }]);
+    expect(queries).toEqual([{ status: 'completed', limit: 10, after: 'cursor_abc' }]);
 
     const detailRes = await app.request(`/v1/me/tasks/${TASK_ID}`, { headers: auth });
     expect(detailRes.status).toBe(200);
     expect(B1TaskDetailDtoSchema.parse(await detailRes.json())).toEqual(sampleDetail);
 
-    const resultRes = await app.request(`/v1/tasks/${TASK_ID}/result`, { headers: auth });
-    expect(resultRes.status).toBe(200);
-    expect(B1TaskResultDtoSchema.parse(await resultRes.json())).toEqual(sampleResult);
+    const eventsRes = await app.request(`/v1/me/tasks/${TASK_ID}/events?after=1`, {
+      headers: auth,
+    });
+    expect(eventsRes.status).toBe(200);
+    expect(B1TaskEventPageDtoSchema.parse(await eventsRes.json())).toEqual({
+      task_id: TASK_ID,
+      events: [sampleEvents.events[1]],
+    });
+    expect(eventAfters).toEqual([1]);
 
-    const missing = await app.request(`/v1/me/tasks/${randomUUID()}`, { headers: auth });
-    expect(missing.status).toBe(404);
+    const meResultRes = await app.request(`/v1/me/tasks/${TASK_ID}/result`, { headers: auth });
+    expect(meResultRes.status).toBe(200);
+    expect(B1TaskResultDtoSchema.parse(await meResultRes.json())).toEqual(sampleResult);
+
+    const compatResultRes = await app.request(`/v1/tasks/${TASK_ID}/result`, { headers: auth });
+    expect(compatResultRes.status).toBe(200);
+    expect(B1TaskResultDtoSchema.parse(await compatResultRes.json())).toEqual(sampleResult);
+
+    const terminalCancelRes = await app.request(`/v1/me/tasks/${TASK_ID}/cancel`, {
+      method: 'POST',
+      headers: auth,
+    });
+    expect(terminalCancelRes.status).toBe(200);
+    expect(B1TaskCancelDtoSchema.parse(await terminalCancelRes.json())).toEqual(sampleCancel);
+
+    const runningCancelApp = makeApp({
+      task_id: TASK_ID,
+      status: 'running',
+      cancel_requested: true,
+      cancel_requested_at: '2026-11-15T00:00:06.000Z',
+      terminal: false,
+      updated_at: '2026-11-15T00:00:06.000Z',
+    });
+    const inProgressCancelRes = await runningCancelApp.app.request(
+      `/v1/me/tasks/${TASK_ID}/cancel`,
+      {
+        method: 'POST',
+        headers: auth,
+      },
+    );
+    expect(inProgressCancelRes.status).toBe(202);
+    expect(B1TaskCancelDtoSchema.parse(await inProgressCancelRes.json())).toMatchObject({
+      status: 'running',
+      cancel_requested: true,
+      terminal: false,
+    });
+
+    const missingId = randomUUID();
+    expect((await app.request(`/v1/me/tasks/${missingId}`, { headers: auth })).status).toBe(404);
+    expect((await app.request(`/v1/me/tasks/${missingId}/events`, { headers: auth })).status).toBe(
+      404,
+    );
+    expect(
+      (await app.request(`/v1/me/tasks/${missingId}/cancel`, { method: 'POST', headers: auth }))
+        .status,
+    ).toBe(404);
   });
 
-  it('rejects malformed UUIDs, client-supplied scope, and invalid list query parameters with 400', async () => {
+  it('rejects malformed UUIDs, client-supplied scope, and invalid query parameters with 400', async () => {
     const { app } = makeApp();
     const auth = { authorization: `Bearer ${token}` };
 
     const badStatuses = await Promise.all([
       app.request('/v1/me/tasks/not-a-uuid', { headers: auth }),
+      app.request('/v1/me/tasks/not-a-uuid/events', { headers: auth }),
+      app.request('/v1/me/tasks/not-a-uuid/result', { headers: auth }),
+      app.request('/v1/me/tasks/not-a-uuid/cancel', { method: 'POST', headers: auth }),
       app.request('/v1/tasks/not-a-uuid/result', { headers: auth }),
       app.request(`/v1/me/tasks?tenant_id=${TENANT_ID}`, { headers: auth }),
       app.request('/v1/me/tasks', { headers: { ...auth, 'x-tenant-id': TENANT_ID } }),
       app.request('/v1/me/tasks?status=unknown', { headers: auth }),
       app.request('/v1/me/tasks?limit=0', { headers: auth }),
       app.request('/v1/me/tasks?limit=51', { headers: auth }),
+      app.request('/v1/me/tasks?after=', { headers: auth }),
+      app.request(`/v1/me/tasks/${TASK_ID}/events?after=not-int`, { headers: auth }),
+      app.request(`/v1/me/tasks/${TASK_ID}/events?after=-1`, { headers: auth }),
+      app.request(`/v1/me/tasks/${TASK_ID}/events?extra=1`, { headers: auth }),
+      app.request(`/v1/me/tasks/${TASK_ID}/result?extra=1`, { headers: auth }),
+      app.request(`/v1/me/tasks/${TASK_ID}/cancel?extra=1`, { method: 'POST', headers: auth }),
       app.request(`/v1/tasks/${TASK_ID}/result?extra=1`, { headers: auth }),
     ]);
 
-    expect(badStatuses.map((res) => res.status)).toEqual([400, 400, 400, 400, 400, 400, 400, 400]);
+    expect(badStatuses.every((res) => res.status === 400)).toBe(true);
   });
 });

@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS task_model_attempts (
   lease_epoch             bigint      NOT NULL CHECK (lease_epoch >= 0),
   attempt_no              integer     NOT NULL,
   operation_id            uuid        NOT NULL,
+  principal_id            uuid        NOT NULL,
   utc_day                 date        NOT NULL,
   provider_id             text        NOT NULL,
   model_label             text        NOT NULL CHECK (char_length(model_label) BETWEEN 1 AND 128),
@@ -227,11 +228,16 @@ CREATE TABLE IF NOT EXISTS task_model_attempts (
   CONSTRAINT task_model_attempts_task_fk
     FOREIGN KEY (tenant_id, task_id) REFERENCES tasks (tenant_id, id) ON DELETE RESTRICT,
   CONSTRAINT task_model_attempts_run_fk
-    FOREIGN KEY (tenant_id, run_id) REFERENCES runs (tenant_id, id) ON DELETE RESTRICT
+    FOREIGN KEY (tenant_id, run_id) REFERENCES runs (tenant_id, id) ON DELETE RESTRICT,
+  CONSTRAINT task_model_attempts_principal_fk
+    FOREIGN KEY (tenant_id, principal_id) REFERENCES principals (tenant_id, id) ON DELETE RESTRICT
 );
 
 CREATE INDEX IF NOT EXISTS task_model_attempts_day_idx
   ON task_model_attempts (utc_day, tenant_id);
+
+CREATE INDEX IF NOT EXISTS task_model_attempts_principal_day_idx
+  ON task_model_attempts (tenant_id, principal_id, utc_day);
 
 CREATE INDEX IF NOT EXISTS task_model_attempts_open_idx
   ON task_model_attempts (utc_day, tenant_id)

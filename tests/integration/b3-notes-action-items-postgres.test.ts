@@ -1,7 +1,9 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
+  B1TaskCancelDtoSchema,
   B1TaskDetailDtoSchema,
+  B1TaskEventPageDtoSchema,
   B1TaskListDtoSchema,
   B1TaskResultDtoSchema,
 } from '@ember/contracts';
@@ -564,6 +566,7 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
       lease: staleLease,
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -576,26 +579,24 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     });
     expect(staleReserve.kind).toBe('lease_lost');
 
-    // Verify converged task, result, attempt, and outcome_reference.
+    // Verify converged task, result, attempt, events, principal spend attribution, and outcome_reference.
     const listDto = B1TaskListDtoSchema.parse(await taskReadRepo.listTasks(fixture.tenantId));
+    expect(listDto.next_after).toBeNull();
+    expect(listDto.has_more).toBe(false);
     expect(listDto.tasks).toHaveLength(1);
     expect(listDto.tasks[0]).toMatchObject({
       task_id: taskId,
       kind: 'notes.action_items',
       title: '周会行动项',
       status: 'completed',
-      result_state: 'available',
+      current_run_id: lease.runId,
+      cancel_requested: false,
     });
 
     const detailDto = B1TaskDetailDtoSchema.parse(
       await taskReadRepo.getTaskDetail(fixture.tenantId, taskId),
     );
-    expect(detailDto.result).toMatchObject({
-      summary_text: '共整理出 3 条周会 Action Items。',
-      model_label: MODEL_LABEL,
-      simulated: false,
-    });
-    expect(detailDto.result?.detail_text).toContain('Alice');
+    expect(detailDto).toEqual(listDto.tasks[0]);
 
     const resultDto = B1TaskResultDtoSchema.parse(
       await taskReadRepo.getTaskResult(fixture.tenantId, taskId),
@@ -604,7 +605,49 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
       task_id: taskId,
       task_status: 'completed',
       result_state: 'available',
+      result: {
+        summary_text: '共整理出 3 条周会 Action Items。',
+        model_label: MODEL_LABEL,
+        simulated: false,
+      },
     });
+    expect(resultDto.result?.detail_text).toContain('Alice');
+
+    const eventsPage = B1TaskEventPageDtoSchema.parse(
+      await taskReadRepo.listTaskEvents(fixture.tenantId, taskId),
+    );
+    expect(eventsPage.task_id).toBe(taskId);
+    expect(eventsPage.events.length).toBeGreaterThanOrEqual(2);
+    const tailEvents = B1TaskEventPageDtoSchema.parse(
+      await taskReadRepo.listTaskEvents(fixture.tenantId, taskId, eventsPage.events[0]!.sequence),
+    );
+    expect(tailEvents.events).toEqual(eventsPage.events.slice(1));
+
+    // Verify Notes task spend was attributed to tenant AND principal daily buckets.
+    const spendRows = await db.observerPool.query<{
+      readonly scope_kind: string;
+      readonly scope_id: string;
+      readonly consumed_micro_usd: string;
+    }>(
+      `SELECT scope_kind, scope_id::text, consumed_micro_usd::text
+         FROM model_spend_days
+        WHERE tenant_id = $1`,
+      [fixture.tenantId],
+    );
+    expect(spendRows.rows).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scope_kind: 'tenant',
+          scope_id: fixture.tenantId,
+          consumed_micro_usd: '19',
+        }),
+        expect.objectContaining({
+          scope_kind: 'principal',
+          scope_id: fixture.principalId,
+          consumed_micro_usd: '19',
+        }),
+      ]),
+    );
 
     const page = await reader.readMessages({
       tenantId: fixture.tenantId,
@@ -631,6 +674,8 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     const foreignTenantId = randomUUID();
     expect((await taskReadRepo.listTasks(foreignTenantId)).tasks).toEqual([]);
     expect(await taskReadRepo.getTaskDetail(foreignTenantId, taskId)).toBeNull();
+    expect(await taskReadRepo.listTaskEvents(foreignTenantId, taskId)).toBeNull();
+    expect(await taskReadRepo.cancelTask(foreignTenantId, taskId)).toBeNull();
     expect(await taskReadRepo.getTaskResult(foreignTenantId, taskId)).toBeNull();
 
     // Q-3: clearing transcript increments transcript_epoch and deletes messages/turns without touching tasks/results.
@@ -657,7 +702,7 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     expect((await taskReadRepo.listTasks(fixture.tenantId)).tasks).toHaveLength(1);
     expect(await taskReadRepo.getTaskDetail(fixture.tenantId, taskId)).toMatchObject({
       task_id: taskId,
-      result_state: 'available',
+      status: 'completed',
     });
     expect(await taskReadRepo.getTaskResult(fixture.tenantId, taskId)).toMatchObject({
       task_id: taskId,
@@ -746,7 +791,7 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
       [fixture.tenantId],
     );
 
-    // Cooperative cancel test on a second task.
+    // Cooperative cancel test on a second task using B1 session cancelTask (running -> 202 semantics).
     const cancelTask = await taskRepo.create(authCtx, {
       agentId: fixture.agentId,
       kind: 'notes.action_items',
@@ -757,7 +802,15 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     expect(cancelLease?.taskId).toBe(cancelTask.taskId);
     if (cancelLease === null) return;
 
-    await taskRepo.cancel(authCtx, cancelTask.taskId);
+    const cancelAccepted = B1TaskCancelDtoSchema.parse(
+      await taskReadRepo.cancelTask(fixture.tenantId, cancelTask.taskId),
+    );
+    expect(cancelAccepted).toMatchObject({
+      task_id: cancelTask.taskId,
+      status: 'running',
+      cancel_requested: true,
+      terminal: false,
+    });
     const neverCalledGateway = makeOpenRouterGateway(() =>
       Promise.reject(new Error('should not call provider when cancelled')),
     );
@@ -768,15 +821,22 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     expect(cancelCompletion).toEqual({ type: 'finish', outcome: 'cancelled' });
     expect(await leaseQueue.finish(cancelLease, 'cancelled')).toBe(true);
 
-    const cancelledDetail = await taskReadRepo.getTaskDetail(fixture.tenantId, cancelTask.taskId);
+    const cancelledDetail = B1TaskDetailDtoSchema.parse(
+      await taskReadRepo.getTaskDetail(fixture.tenantId, cancelTask.taskId),
+    );
     expect(cancelledDetail).toMatchObject({
       task_id: cancelTask.taskId,
       status: 'cancelled',
+      cancel_requested: true,
+    });
+    expect(await taskReadRepo.getTaskResult(fixture.tenantId, cancelTask.taskId)).toMatchObject({
+      task_id: cancelTask.taskId,
+      task_status: 'cancelled',
       result_state: 'unavailable',
       result: null,
     });
 
-    // Also test maxTaskCostMicroUsd enforcement and STALE_LEASE while a run is actively running.
+    // Also test maxTaskCostMicroUsd, principalDailyMicroUsd, and STALE_LEASE while a run is actively running.
     const costCappedTask = await taskRepo.create(authCtx, {
       agentId: fixture.agentId,
       kind: 'notes.action_items',
@@ -798,12 +858,74 @@ describe('B3-A1 PostgreSQL 17 integration: migration 0020, atomic delegation, du
     }
     expect(staleThrew).toBe(true);
 
+    // Enforces shared principal daily budget ceiling before egress.
+    const principalBlocked = await notesRepo.reserveAttempt({
+      lease: capLease,
+      ceilings: {
+        perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: 1,
+        tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
+        globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
+      },
+      maxAttemptsPerTask: MODEL_LIMITS.maxModelAttemptsPerTask,
+      maxTaskCostMicroUsd: MODEL_LIMITS.maxModelCostPerTaskMicroUsd,
+      reservedMicroUsd: 100,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(principalBlocked).toEqual({ kind: 'budget_exceeded', scope: 'principal' });
+
     const capOutcome = await makeNotesHandler(neverCalledGateway, 1).handle(
       capLease,
       new AbortController().signal,
     );
     expect(capOutcome).toEqual({ type: 'finish', outcome: 'failed_terminal' });
     expect(await leaseQueue.finish(capLease, 'failed_terminal')).toBe(true);
+
+    // Verify B1 queued cancellation + keyset cursor pagination + invalid cursor rejection.
+    const queuedTask = await taskRepo.create(authCtx, {
+      agentId: fixture.agentId,
+      kind: 'notes.action_items',
+      title: 'Queued Cancel & Page 4',
+      input: { notes: SAMPLE_NOTES },
+      idempotencyKey: `queued-cancel-${randomUUID()}`,
+    });
+    const queuedCancel = B1TaskCancelDtoSchema.parse(
+      await taskReadRepo.cancelTask(fixture.tenantId, queuedTask.taskId),
+    );
+    expect(queuedCancel).toMatchObject({
+      task_id: queuedTask.taskId,
+      status: 'cancelled',
+      cancel_requested: true,
+      terminal: true,
+    });
+
+    const page1 = B1TaskListDtoSchema.parse(
+      await taskReadRepo.listTasks(fixture.tenantId, { limit: 2 }),
+    );
+    expect(page1.tasks).toHaveLength(2);
+    expect(page1.has_more).toBe(true);
+    expect(page1.next_after).not.toBeNull();
+
+    const page2 = B1TaskListDtoSchema.parse(
+      await taskReadRepo.listTasks(fixture.tenantId, { limit: 2, after: page1.next_after! }),
+    );
+    expect(page2.tasks).toHaveLength(2);
+    expect(page2.has_more).toBe(false);
+    expect(page2.next_after).toBeNull();
+    const allIds = [...page1.tasks, ...page2.tasks].map((t) => t.task_id);
+    expect(new Set(allIds).size).toBe(4);
+
+    let invalidCursorCode: string | null = null;
+    try {
+      await taskReadRepo.listTasks(fixture.tenantId, { after: 'not_valid_base64_cursor' });
+    } catch (error) {
+      if (isDomainError(error)) {
+        invalidCursorCode = error.code;
+      }
+    }
+    expect(invalidCursorCode).toBe('INVALID_ARGUMENT');
 
     // Check connection pool pid sanity helper imported cleanly.
     const client = await db.pool.connect();

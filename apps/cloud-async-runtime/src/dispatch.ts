@@ -1,5 +1,15 @@
-import type { B1TurnDispatchEnvelope, B1TurnDispatchEvent } from '@ember/postgres/b2-worker';
-import { parseB1TurnDispatchEnvelope } from '@ember/postgres/b2-worker';
+import { isDomainError, type LeasedRun, type RunTerminalStatus } from '@ember/domain';
+import type {
+  B1TaskDispatchEnvelope,
+  B1TaskDispatchTarget,
+  B1TurnDispatchEnvelope,
+  B1TurnDispatchEvent,
+  TaskClaimOutcome,
+} from '@ember/postgres/b2-worker';
+import {
+  parseB1TaskDispatchEnvelope,
+  parseB1TurnDispatchEnvelope,
+} from '@ember/postgres/b2-worker';
 
 export const TURN_DISPATCH_QUEUE_NAME = 'ember-assistant-turns';
 export const TURN_DISPATCH_DLQ_NAME = 'ember-assistant-turns-dlq';
@@ -7,8 +17,13 @@ export const TURN_OUTBOX_REENQUEUE_MS = 60_000;
 export const TURN_OUTBOX_PUBLISH_LEASE_MS = 30_000;
 export const TURN_OUTBOX_BATCH_SIZE = 10;
 
-export { parseB1TurnDispatchEnvelope };
-export type { B1TurnDispatchEnvelope, B1TurnDispatchEvent };
+export { parseB1TaskDispatchEnvelope, parseB1TurnDispatchEnvelope };
+export type {
+  B1TaskDispatchEnvelope,
+  B1TaskDispatchTarget,
+  B1TurnDispatchEnvelope,
+  B1TurnDispatchEvent,
+};
 
 export function turnDispatchEnvelope(event: B1TurnDispatchEvent): B1TurnDispatchEnvelope {
   return Object.freeze({
@@ -16,6 +31,15 @@ export function turnDispatchEnvelope(event: B1TurnDispatchEvent): B1TurnDispatch
     eventId: event.eventId,
     tenantId: event.tenantId,
     turnId: event.turnId,
+  });
+}
+
+export function taskDispatchEnvelope(target: B1TaskDispatchTarget): B1TaskDispatchEnvelope {
+  return Object.freeze({
+    schemaVersion: 1,
+    kind: 'task',
+    tenantId: target.tenantId,
+    taskId: target.taskId,
   });
 }
 
@@ -68,6 +92,31 @@ export interface TurnDispatchConsumerOptions {
   /** Null means model execution is deliberately disabled or refused; it never means Fake Model. */
   readonly executor: TurnExecutionPort | null;
   readonly logger?: TurnDispatchLogger;
+}
+
+export interface TaskDispatchQueuePort {
+  reapExpired(now: Date): Promise<number>;
+  claimTask(workerId: string, now: Date, identity: B1TaskDispatchTarget): Promise<TaskClaimOutcome>;
+  finish(run: LeasedRun, outcome: RunTerminalStatus, now: Date): Promise<boolean>;
+}
+
+export interface TaskDispatchHandlerPort {
+  handle(
+    run: LeasedRun,
+    signal: AbortSignal,
+  ): Promise<
+    | { readonly type: 'finish'; readonly outcome: RunTerminalStatus }
+    | { readonly type: 'committed' }
+  >;
+}
+
+export interface TaskDispatchConsumerOptions {
+  readonly leaseQueue: TaskDispatchQueuePort;
+  readonly workerId: string;
+  /** Null means model execution is disabled/refused or tenant is outside the Staging Alpha allowlist. */
+  readonly handler: TaskDispatchHandlerPort | null;
+  readonly logger?: TurnDispatchLogger;
+  readonly now?: () => Date;
 }
 
 function retry(message: TurnDispatchQueueMessage, delaySeconds?: number): void {
@@ -167,6 +216,90 @@ export async function consumeTurnDispatchMessage(
   retry(message, queueRetryDelaySeconds(Math.max(1, message.attempts)));
 }
 
+/**
+ * Consume one Notes Task Queue wakeup using `PostgresLeaseQueue` as the single lease/fencing
+ * authority and `createNotesTaskHandler` as the durable executor.
+ */
+export async function consumeTaskDispatchMessage(
+  message: TurnDispatchQueueMessage,
+  options: TaskDispatchConsumerOptions,
+): Promise<void> {
+  const envelope = parseB1TaskDispatchEnvelope(message.body);
+  if (envelope === null) {
+    options.logger?.warn('discarded malformed Notes Task dispatch envelope', {
+      category: 'invalid_envelope',
+    });
+    message.ack();
+    return;
+  }
+
+  if (options.handler === null) {
+    message.ack();
+    return;
+  }
+
+  const now = options.now ?? (() => new Date());
+  const target: B1TaskDispatchTarget = {
+    tenantId: envelope.tenantId,
+    taskId: envelope.taskId,
+  };
+
+  let claim = await options.leaseQueue.claimTask(options.workerId, now(), target);
+  if (claim.kind === 'deferred') {
+    await options.leaseQueue.reapExpired(now());
+    claim = await options.leaseQueue.claimTask(options.workerId, now(), target);
+  }
+
+  if (claim.kind === 'not_found' || claim.kind === 'terminal') {
+    message.ack();
+    return;
+  }
+
+  if (claim.kind === 'lease_active') {
+    retry(message, leaseRetryDelaySeconds(Math.ceil(claim.leaseRemainingMs)));
+    return;
+  }
+
+  if (claim.kind === 'deferred') {
+    retry(message, leaseRetryDelaySeconds(Math.ceil(claim.delayMs)));
+    return;
+  }
+
+  const lease = claim.lease;
+  const remainingLeaseMs = Math.max(1, Date.parse(lease.leaseExpiresAt) - now().getTime());
+  const execution = new AbortController();
+  const leaseTimer = setTimeout(() => execution.abort(), remainingLeaseMs);
+
+  let completion:
+    | { readonly type: 'finish'; readonly outcome: RunTerminalStatus }
+    | { readonly type: 'committed' };
+  try {
+    completion = await options.handler.handle(lease, execution.signal);
+  } catch (error) {
+    if (isDomainError(error) && (error.code === 'STALE_LEASE' || error.code === 'NOT_FOUND')) {
+      // Another worker took ownership or the task converged; never call finish() on a lost lease.
+      retry(message, queueRetryDelaySeconds(Math.max(1, message.attempts)));
+      return;
+    }
+    throw error;
+  } finally {
+    clearTimeout(leaseTimer);
+  }
+
+  if (completion.type === 'committed') {
+    message.ack();
+    return;
+  }
+
+  const accepted = await options.leaseQueue.finish(lease, completion.outcome, now());
+  if (accepted && completion.outcome === 'failed_retryable') {
+    retry(message, queueRetryDelaySeconds(Math.max(1, message.attempts)));
+    return;
+  }
+
+  message.ack();
+}
+
 export async function recoverDeadLetter(
   message: TurnDispatchQueueMessage,
   outbox: TurnDispatchOutboxPort,
@@ -206,5 +339,31 @@ export async function recoverDeadLetter(
   }
 
   // The outbox will publish again after the delay. DLQ state is transport metadata only.
+  message.ack();
+}
+
+export async function recoverTaskDeadLetter(
+  message: TurnDispatchQueueMessage,
+  getTaskStatus: (tenantId: string, taskId: string) => Promise<'open' | 'terminal' | 'missing'>,
+  logger?: TurnDispatchLogger,
+): Promise<void> {
+  const envelope = parseB1TaskDispatchEnvelope(message.body);
+  if (envelope === null) {
+    logger?.warn('discarded malformed Notes Task DLQ envelope', {
+      category: 'invalid_envelope',
+    });
+    message.ack();
+    return;
+  }
+
+  const status = await getTaskStatus(envelope.tenantId, envelope.taskId);
+  if (status === 'open') {
+    logger?.warn('returned Notes Task DLQ delivery to PostgreSQL cron reconciliation', {
+      taskId: envelope.taskId,
+      category: 'queue_dlq',
+    });
+  }
+
+  // Cron reconciliation lists open due `notes.action_items` rows on the next tick.
   message.ack();
 }

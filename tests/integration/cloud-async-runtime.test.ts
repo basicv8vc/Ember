@@ -1,12 +1,18 @@
 import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
-import { FAKE_MODEL_LABEL, FAKE_REPLY_PREFIX, type ModelGateway } from '@ember/model-gateway';
+import {
+  DELEGATE_NOTES_TOOL_NAME,
+  FAKE_MODEL_LABEL,
+  FAKE_REPLY_PREFIX,
+  type ModelGateway,
+} from '@ember/model-gateway';
 import {
   B1_ASSISTANT_TURN_MODEL_LABEL,
   PostgresB1AssistantTurnRepository,
 } from '../../packages/postgres/src/repositories/b1-assistant-turn-repository.js';
 import { PostgresB1ConversationReadRepository } from '../../packages/postgres/src/repositories/b1-conversation-read.js';
 import { PostgresB1ConversationWriteRepository } from '../../packages/postgres/src/repositories/b1-conversation-write.js';
+import { PostgresB1TaskReadRepository } from '../../packages/postgres/src/repositories/b1-task-read-repository.js';
 import {
   insertB1TurnDispatchOutbox,
   PostgresB1TurnDispatchOutboxRepository,
@@ -17,11 +23,17 @@ import {
   consumeTurnDispatchMessage,
   type TurnDispatchQueueMessage,
 } from '../../apps/cloud-async-runtime/src/dispatch.js';
-import { createTurnExecutor } from '../../apps/cloud-async-runtime/src/runtime.js';
+import {
+  createNotesTaskExecutor,
+  createNotesTaskLeaseQueue,
+  createTurnExecutor,
+} from '../../apps/cloud-async-runtime/src/runtime.js';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
 
 interface Fixture {
   readonly tenantId: string;
+  readonly principalId: string;
+  readonly agentId: string;
   readonly conversationId: string;
   readonly turnId: string;
 }
@@ -48,6 +60,7 @@ let db: TestDatabase;
 let outbox: PostgresB1TurnDispatchOutboxRepository;
 let turns: PostgresB1AssistantTurnRepository;
 let conversations: PostgresB1ConversationReadRepository;
+let taskReads: PostgresB1TaskReadRepository;
 let writer: PostgresB1ConversationWriteRepository;
 const model = resolveCloudRuntimeModelConfig({
   EMBER_ENV: 'test',
@@ -58,9 +71,19 @@ const TEST_MODEL_KEY = 'sk-test-cloud-staging-alpha-abcdefghijklmnopqrstuvwxyz';
 
 async function createFixture(): Promise<Fixture> {
   const tenantId = randomUUID();
+  const principalId = randomUUID();
   const agentId = randomUUID();
   const conversationId = randomUUID();
   await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [tenantId, 'runtime E2E']);
+  await db.pool.query("INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')", [
+    principalId,
+    tenantId,
+  ]);
+  await db.pool.query('INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)', [
+    randomUUID(),
+    tenantId,
+    principalId,
+  ]);
   await db.pool.query(
     'INSERT INTO agents (id, tenant_id, name, policy_version) VALUES ($1, $2, $3, 1)',
     [agentId, tenantId, 'runtime E2E agent'],
@@ -81,6 +104,8 @@ async function createFixture(): Promise<Fixture> {
 
   return {
     tenantId,
+    principalId,
+    agentId,
     conversationId,
     turnId: submitted.receipt.turn.turn_id,
   };
@@ -166,6 +191,7 @@ beforeAll(async () => {
   outbox = new PostgresB1TurnDispatchOutboxRepository(db.pool);
   turns = new PostgresB1AssistantTurnRepository(db.pool);
   conversations = new PostgresB1ConversationReadRepository(db.pool);
+  taskReads = new PostgresB1TaskReadRepository(db.pool);
   writer = new PostgresB1ConversationWriteRepository(db.pool, {
     writeTurnDispatchOutbox: true,
   });
@@ -176,114 +202,123 @@ afterAll(async () => {
 });
 
 describe('Cloud Async Runtime on PostgreSQL', () => {
-  it('authorizes only the first post-watermark Turn in one approved Conversation', async () => {
-    const fixture = await createFixture();
-    await db.pool.query(
-      `UPDATE assistant_turns
-          SET created_at = clock_timestamp() - interval '1 minute'
-        WHERE tenant_id = $1 AND conversation_id = $2 AND id = $3`,
-      [fixture.tenantId, fixture.conversationId, fixture.turnId],
-    );
-    const watermarkResult = await db.pool.query<{ readonly created_after: Date }>(
-      `SELECT clock_timestamp() - interval '1 second' AS created_after`,
-    );
-    const createdAfter = watermarkResult.rows[0]?.created_after.toISOString();
-    if (createdAfter === undefined) throw new Error('database watermark was not returned');
+  it('authorizes configured Staging Alpha allowlist tenants for Turns and Notes Tasks and refuses non-allowlisted tenants', async () => {
+    const allowed = await createFixture();
+    const foreign = await createFixture();
+    const createdTurnIds = [
+      {
+        tenantId: allowed.tenantId,
+        conversationId: allowed.conversationId,
+        turnId: allowed.turnId,
+      },
+      {
+        tenantId: foreign.tenantId,
+        conversationId: foreign.conversationId,
+        turnId: foreign.turnId,
+      },
+    ];
 
-    const submitAfterWatermark = async (text: string): Promise<string> => {
-      const submitted = await writer.submitUserMessage({
-        tenantId: fixture.tenantId,
-        conversationId: fixture.conversationId,
+    try {
+      const submittedLater = await writer.submitUserMessage({
+        tenantId: allowed.tenantId,
+        conversationId: allowed.conversationId,
         request: {
           client_submission_id: randomUUID(),
-          text,
+          text: 'Second synthetic Alpha Turn.',
           transcript_epoch: 0,
         },
       });
-      return submitted.receipt.turn.turn_id;
-    };
-    const firstApprovedTurnId = await submitAfterWatermark('First synthetic Alpha Turn.');
-    const laterTurnId = await submitAfterWatermark('Later synthetic Alpha Turn.');
-
-    const alphaModel = resolveCloudRuntimeModelConfig(
-      {
-        EMBER_ENV: 'staging',
-        NODE_ENV: 'staging',
-        EMBER_MODEL_EXECUTION: 'real',
-        EMBER_MODEL_PROVIDER: 'openrouter',
-        EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
-        EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
-        EMBER_MODEL_ALPHA_TENANT_ID: fixture.tenantId,
-        EMBER_MODEL_ALPHA_CONVERSATION_ID: fixture.conversationId,
-        EMBER_MODEL_ALPHA_TURN_CREATED_AFTER: createdAfter,
-      },
-      'staging_alpha',
-      new Date('2026-11-12T12:00:00.000Z'),
-    );
-    expect(alphaModel.kind).toBe('enabled');
-    if (alphaModel.kind !== 'enabled' || alphaModel.mode !== 'real') return;
-
-    const neverCalledGateway: ModelGateway = {
-      providerId: 'openrouter',
-      modelLabel: 'nvidia/nemotron-3.5-lightning',
-      simulated: false,
-      operations: ['conversation.turn', 'task.notes_action_items'],
-      generateConversationTurn() {
-        throw new Error('the integration test must not call a Provider');
-      },
-      extractNotesActionItems() {
-        throw new Error('the integration test must not call a Provider');
-      },
-    };
-    const makeExecutor = async (turnId: string) => {
-      const persistedEvent = await outbox.getEvent(turnId);
-      if (persistedEvent === null) throw new Error('outbox event was not found');
-      return createTurnExecutor({
-        pool: db.pool,
-        model: alphaModel,
-        event: persistedEvent,
-        workerId: 'cloud-runtime-alpha-authorization',
-        gateway: neverCalledGateway,
+      const secondAllowedTurnId = submittedLater.receipt.turn.turn_id;
+      createdTurnIds.push({
+        tenantId: allowed.tenantId,
+        conversationId: allowed.conversationId,
+        turnId: secondAllowedTurnId,
       });
-    };
 
-    expect(
-      await outbox.getFirstTurnCreatedAfter({
-        tenantId: fixture.tenantId,
-        conversationId: fixture.conversationId,
-        createdAfter,
-      }),
-    ).toBe(firstApprovedTurnId);
-    expect(await makeExecutor(fixture.turnId)).toBeNull();
-    expect(await makeExecutor(firstApprovedTurnId)).not.toBeNull();
-    expect(await makeExecutor(laterTurnId)).toBeNull();
+      const alphaModel = resolveCloudRuntimeModelConfig(
+        {
+          EMBER_ENV: 'staging',
+          NODE_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'real',
+          EMBER_MODEL_PROVIDER: 'openrouter',
+          EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
+          EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
+          EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+          EMBER_MODEL_ALPHA_TENANT_IDS: allowed.tenantId,
+        },
+        'staging_alpha',
+        new Date('2026-11-13T12:00:00.000Z'),
+      );
+      expect(alphaModel.kind).toBe('enabled');
+      if (alphaModel.kind !== 'enabled' || alphaModel.mode !== 'real') {
+        throw new Error(`expected enabled staging_alpha model config, got ${alphaModel.kind}`);
+      }
 
-    await turns.finishTurn({
-      tenantId: fixture.tenantId,
-      conversationId: fixture.conversationId,
-      turnId: firstApprovedTurnId,
-      result: {
-        status: 'completed',
-        text: 'Local integration fixture only.',
-        modelLabel: B1_ASSISTANT_TURN_MODEL_LABEL,
-        simulated: true,
-      },
-    });
-    expect(
-      await outbox.getFirstTurnCreatedAfter({
-        tenantId: fixture.tenantId,
-        conversationId: fixture.conversationId,
-        createdAfter,
-      }),
-    ).toBe(firstApprovedTurnId);
-    expect(await makeExecutor(laterTurnId)).toBeNull();
+      const neverCalledGateway: ModelGateway = {
+        providerId: 'openrouter',
+        modelLabel: 'nvidia/nemotron-3.5-lightning',
+        simulated: false,
+        operations: ['conversation.turn', 'task.notes_action_items'],
+        generateConversationTurn() {
+          throw new Error('the integration test must not call a Provider');
+        },
+        extractNotesActionItems() {
+          throw new Error('the integration test must not call a Provider');
+        },
+      };
+      const makeTurnExecutor = async (turnId: string) => {
+        const persistedEvent = await outbox.getEvent(turnId);
+        if (persistedEvent === null) throw new Error('outbox event was not found');
+        return createTurnExecutor({
+          pool: db.pool,
+          model: alphaModel,
+          event: persistedEvent,
+          workerId: 'cloud-runtime-alpha-authorization',
+          gateway: neverCalledGateway,
+        });
+      };
 
-    for (const turnId of [fixture.turnId, laterTurnId]) {
-      await turns.cancelTurn({
-        tenantId: fixture.tenantId,
-        conversationId: fixture.conversationId,
-        turnId,
+      const leaseQueue = createNotesTaskLeaseQueue(db.pool, alphaModel);
+
+      expect(await makeTurnExecutor(allowed.turnId)).not.toBeNull();
+      expect(await makeTurnExecutor(secondAllowedTurnId)).not.toBeNull();
+      expect(await makeTurnExecutor(foreign.turnId)).toBeNull();
+      expect(
+        await createNotesTaskExecutor({
+          pool: db.pool,
+          model: alphaModel,
+          tenantId: allowed.tenantId,
+          leaseQueue,
+          gateway: neverCalledGateway,
+        }),
+      ).not.toBeNull();
+      expect(
+        await createNotesTaskExecutor({
+          pool: db.pool,
+          model: alphaModel,
+          tenantId: foreign.tenantId,
+          leaseQueue,
+          gateway: neverCalledGateway,
+        }),
+      ).toBeNull();
+
+      await turns.finishTurn({
+        tenantId: allowed.tenantId,
+        conversationId: allowed.conversationId,
+        turnId: allowed.turnId,
+        result: {
+          status: 'completed',
+          text: 'Local integration fixture only.',
+          modelLabel: B1_ASSISTANT_TURN_MODEL_LABEL,
+          simulated: true,
+        },
       });
+      await outbox.markCompleted(allowed.turnId);
+    } finally {
+      for (const item of createdTurnIds) {
+        await turns.cancelTurn(item).catch(() => undefined);
+        await outbox.markCompleted(item.turnId).catch(() => undefined);
+      }
     }
   });
 
@@ -514,5 +549,189 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
     expect(cancelled.status).toBe('cancelled');
     expect(await readAssistantMessages(fixture)).toHaveLength(0);
     expect(delivery.ackCount).toBe(1);
+  });
+
+  it('dispatches delegated Notes Task immediately on Turn completion, executes via Cloud Queue to task_results + outcome_reference, and reconciles via Cron', async () => {
+    const fixture = await createFixture();
+    const sent: unknown[] = [];
+    const env = cloudRuntimeEnv(sent);
+
+    try {
+      const event = await outbox.getEvent(fixture.turnId);
+      if (event === null) throw new Error('outbox event was not found');
+
+      const delegatingGateway: ModelGateway = {
+        providerId: 'fake',
+        modelLabel: FAKE_MODEL_LABEL,
+        simulated: true,
+        operations: ['conversation.turn', 'task.notes_action_items'],
+        generateConversationTurn() {
+          return Promise.resolve({
+            output: {
+              kind: 'delegate' as const,
+              toolName: DELEGATE_NOTES_TOOL_NAME,
+              text: '好的，我已在云端开始整理会议 Action Items。',
+              finishReason: 'stop' as const,
+              delegation: {
+                toolName: DELEGATE_NOTES_TOOL_NAME,
+                arguments: {
+                  title: 'Cloud Notes Task',
+                  notes: '- Alice: deploy staging check\n- Bob: verify cloud queue',
+                },
+              },
+            },
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            usage: {
+              inputTokens: 12,
+              outputTokens: 18,
+              costMicroUsd: 0,
+              rateVersion: 'fake-zero-cost',
+            },
+          });
+        },
+        extractNotesActionItems() {
+          return Promise.reject(new Error('not used during turn delegation'));
+        },
+      };
+
+      const turnExecutor = await createTurnExecutor({
+        pool: db.pool,
+        model,
+        event,
+        workerId: 'cloud-runtime-notes-delegation',
+        queue: env.TURN_DISPATCH_QUEUE,
+        gateway: delegatingGateway,
+      });
+      expect(turnExecutor).not.toBeNull();
+
+      await turnExecutor!.processTurn(event);
+      await outbox.markCompleted(fixture.turnId);
+
+      // Immediate Queue send was emitted right after Turn+Task transaction commit.
+      expect(sent).toHaveLength(1);
+      const taskEnvelope = sent[0] as {
+        readonly schemaVersion: number;
+        readonly kind: string;
+        readonly tenantId: string;
+        readonly taskId: string;
+      };
+      expect(taskEnvelope).toMatchObject({
+        schemaVersion: 1,
+        kind: 'task',
+        tenantId: fixture.tenantId,
+      });
+      const taskId = taskEnvelope.taskId;
+
+      // Consume Notes Task via Worker Queue entrypoint in Fake Model mode.
+      const taskDelivery = new QueueDelivery(taskEnvelope);
+      await cloudAsyncRuntime.queue(
+        { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [taskDelivery] },
+        env,
+      );
+      expect(taskDelivery.ackCount).toBe(1);
+
+      const detail = await taskReads.getTaskDetail(fixture.tenantId, taskId);
+      expect(detail).toMatchObject({
+        task_id: taskId,
+        kind: 'notes.action_items',
+        title: 'Cloud Notes Task',
+        status: 'completed',
+      });
+
+      const result = await taskReads.getTaskResult(fixture.tenantId, taskId);
+      expect(result).toMatchObject({
+        task_id: taskId,
+        task_status: 'completed',
+        result_state: 'available',
+        result: {
+          simulated: true,
+        },
+      });
+      expect(result?.result?.detail_text).toContain('Alice');
+
+      const page = await conversations.readMessages({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        after: 0,
+        limit: 20,
+      });
+      expect(page.messages.map((m) => m.kind)).toEqual([
+        'user',
+        'ember',
+        'task_reference',
+        'outcome_reference',
+      ]);
+
+      // Duplicate Queue delivery for the completed Task is safely ACKed without duplicate outcomes.
+      const duplicateDelivery = new QueueDelivery(taskEnvelope);
+      await cloudAsyncRuntime.queue(
+        { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [duplicateDelivery] },
+        env,
+      );
+      expect(duplicateDelivery.ackCount).toBe(1);
+
+      // Cron reconciliation picks up a due open Notes Task if immediate Queue send was dropped.
+      const relayFixture = await createFixture();
+      try {
+        const relayTurn = await outbox.getEvent(relayFixture.turnId);
+        if (relayTurn === null) throw new Error('relay outbox event was not found');
+        // Mark turn outbox complete and cancel its turn? No, complete turn with delegation WITHOUT queue passed.
+        const noQueueExecutor = await createTurnExecutor({
+          pool: db.pool,
+          model,
+          event: relayTurn,
+          workerId: 'cloud-runtime-notes-cron-relay',
+          gateway: delegatingGateway,
+        });
+        await noQueueExecutor!.processTurn(relayTurn);
+        await outbox.markCompleted(relayFixture.turnId);
+
+        sent.length = 0;
+        await runScheduledRelay(env);
+        expect(sent).toHaveLength(1);
+        const cronEnvelope = sent[0] as {
+          readonly schemaVersion: number;
+          readonly kind: string;
+          readonly tenantId: string;
+          readonly taskId: string;
+        };
+        expect(cronEnvelope).toMatchObject({
+          schemaVersion: 1,
+          kind: 'task',
+          tenantId: relayFixture.tenantId,
+        });
+
+        const cronDelivery = new QueueDelivery(cronEnvelope);
+        await cloudAsyncRuntime.queue(
+          { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [cronDelivery] },
+          env,
+        );
+        expect(cronDelivery.ackCount).toBe(1);
+        expect(
+          await taskReads.getTaskDetail(relayFixture.tenantId, cronEnvelope.taskId),
+        ).toMatchObject({
+          status: 'completed',
+        });
+      } finally {
+        await turns
+          .cancelTurn({
+            tenantId: relayFixture.tenantId,
+            conversationId: relayFixture.conversationId,
+            turnId: relayFixture.turnId,
+          })
+          .catch(() => undefined);
+        await outbox.markCompleted(relayFixture.turnId).catch(() => undefined);
+      }
+    } finally {
+      await turns
+        .cancelTurn({
+          tenantId: fixture.tenantId,
+          conversationId: fixture.conversationId,
+          turnId: fixture.turnId,
+        })
+        .catch(() => undefined);
+      await outbox.markCompleted(fixture.turnId).catch(() => undefined);
+    }
   });
 });

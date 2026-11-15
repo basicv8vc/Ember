@@ -66,6 +66,7 @@ export interface NotesTaskHandlerDependencies {
   readonly policy: RetryPolicyConfig;
   readonly ceilings: {
     readonly perAttemptMicroUsd: number;
+    readonly principalDailyMicroUsd: number;
     readonly tenantDailyMicroUsd: number;
     readonly globalDailyMicroUsd: number;
   };
@@ -459,6 +460,7 @@ export function createNotesTaskHandler(deps: NotesTaskHandlerDependencies): RunH
             lease: run,
             ceilings: {
               perAttemptMicroUsd: deps.ceilings.perAttemptMicroUsd,
+              principalDailyMicroUsd: deps.ceilings.principalDailyMicroUsd,
               tenantDailyMicroUsd: deps.ceilings.tenantDailyMicroUsd,
               globalDailyMicroUsd: deps.ceilings.globalDailyMicroUsd,
             },
@@ -488,7 +490,8 @@ export function createNotesTaskHandler(deps: NotesTaskHandlerDependencies): RunH
           if (
             reservation.kind === 'task_budget_exhausted' ||
             reservation.kind === 'budget_exceeded' ||
-            reservation.kind === 'budget_halted'
+            reservation.kind === 'budget_halted' ||
+            reservation.kind === 'principal_unavailable'
           ) {
             deps.logger.warn('notes model execution stopped by budget/attempt cap', {
               ...base,

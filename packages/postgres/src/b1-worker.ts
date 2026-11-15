@@ -29,6 +29,7 @@ export {
 export { PostgresB1ConsumerProvisioningRepository } from './repositories/b1-session-provisioning-repository.js';
 export { PostgresB1ConsumerSessionRepository } from './repositories/b1-session-repository.js';
 export {
+  B1_TASK_EVENTS_PAGE_LIMIT,
   B1_TASK_LIST_DEFAULT_LIMIT,
   B1_TASK_LIST_MAX_LIMIT,
   PostgresB1TaskReadRepository,

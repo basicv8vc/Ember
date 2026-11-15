@@ -36,6 +36,12 @@ export default defineConfig({
       '@ember/telemetry': fileURLToPath(
         new URL('./packages/telemetry/src/index.ts', import.meta.url),
       ),
+      '@ember/worker/b1/model-turn-responder': fileURLToPath(
+        new URL('./apps/worker/src/b1/model-turn-responder.ts', import.meta.url),
+      ),
+      '@ember/worker/notes-task-handler': fileURLToPath(
+        new URL('./apps/worker/src/notes-task-handler.ts', import.meta.url),
+      ),
     },
   },
   test: {

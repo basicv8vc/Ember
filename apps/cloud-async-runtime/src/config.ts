@@ -73,9 +73,12 @@ export type CloudRuntimeModelConfig =
       readonly onlyTenantIds: readonly string[] | null;
     };
 
-export function isAuthorizedCloudModelTurn(
+/**
+ * Shared tenant authorization predicate for both Assistant Turns and Notes Tasks in Staging Alpha.
+ */
+export function isCloudModelTenantAuthorized(
   model: CloudRuntimeModelConfig,
-  event: { readonly tenantId: string; readonly conversationId: string; readonly turnId: string },
+  tenantId: string,
 ): boolean {
   if (model.kind !== 'enabled') {
     return false;
@@ -83,20 +86,21 @@ export function isAuthorizedCloudModelTurn(
   if (model.mode === 'fake' || model.tenantScope === 'authenticated_tenants') {
     return true;
   }
-  return model.onlyTenantIds?.includes(event.tenantId) ?? false;
+  return model.onlyTenantIds?.includes(tenantId) ?? false;
+}
+
+export function isAuthorizedCloudModelTurn(
+  model: CloudRuntimeModelConfig,
+  event: { readonly tenantId: string; readonly conversationId: string; readonly turnId: string },
+): boolean {
+  return isCloudModelTenantAuthorized(model, event.tenantId);
 }
 
 export function isCloudModelConversationAuthorized(
   model: CloudRuntimeModelConfig,
   event: { readonly tenantId: string; readonly conversationId: string },
 ): boolean {
-  if (model.kind !== 'enabled') {
-    return false;
-  }
-  if (model.mode === 'fake' || model.tenantScope === 'authenticated_tenants') {
-    return true;
-  }
-  return model.onlyTenantIds?.includes(event.tenantId) ?? false;
+  return isCloudModelTenantAuthorized(model, event.tenantId);
 }
 
 /**

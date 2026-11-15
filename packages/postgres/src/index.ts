@@ -17,6 +17,7 @@ export {
 export {
   PostgresLeaseQueue,
   type PostgresLeaseQueueOptions,
+  type TaskClaimOutcome,
 } from './lease-queue/postgres-lease-queue.js';
 export { planRetry, retryDelayMs, type RetryPlan } from './lease-queue/retry-policy.js';
 export {
@@ -62,9 +63,14 @@ export type {
 } from './repositories/b1-interfaces.js';
 export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
 export {
+  getOpenNotesTaskStatus,
   insertB1TurnDispatchOutbox,
+  listDueNotesTaskDispatches,
+  parseB1TaskDispatchEnvelope,
   parseB1TurnDispatchEnvelope,
   PostgresB1TurnDispatchOutboxRepository,
+  type B1TaskDispatchEnvelope,
+  type B1TaskDispatchTarget,
   type B1TurnDispatchEnvelope,
   type B1TurnDispatchEvent,
   type B1TurnDispatchStatus,
@@ -99,6 +105,7 @@ export {
   type NotesReserveOutcome,
 } from './repositories/notes-task-execution-repository.js';
 export {
+  B1_TASK_EVENTS_PAGE_LIMIT,
   B1_TASK_LIST_DEFAULT_LIMIT,
   B1_TASK_LIST_MAX_LIMIT,
   PostgresB1TaskReadRepository,

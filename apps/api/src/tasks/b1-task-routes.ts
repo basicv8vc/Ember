@@ -1,5 +1,7 @@
 import {
+  B1TaskCancelDtoSchema,
   B1TaskDetailDtoSchema,
+  B1TaskEventPageDtoSchema,
   B1TaskListDtoSchema,
   B1TaskResultDtoSchema,
   IdSchema,
@@ -25,11 +27,13 @@ import {
   unexpectedErrorCategory,
 } from '../http/error-mapping.js';
 import type { Logger } from '../logger.js';
+import { parseAfterCursor } from './routes.js';
 
 export const B1_TASK_LIST_MIN_LIMIT = 1;
 export const B1_TASK_LIST_MAX_LIMIT = 50;
 
 const STRICT_POSITIVE_INTEGER = /^[1-9][0-9]*$/;
+const MAX_TASK_LIST_CURSOR_LENGTH = 256;
 const FORBIDDEN_SCOPE_QUERY_KEYS = [
   'tenant_id',
   'principal_id',
@@ -95,8 +99,11 @@ function readValidatedTaskId(c: AppContext, queryDiagnostic: string): Id | Respo
 
 function parseTaskListQuery(searchParams: URLSearchParams): ParsedTaskListQuery {
   for (const key of searchParams.keys()) {
-    if (key !== 'status' && key !== 'limit') {
-      return { ok: false, diagnostic: 'only status and limit query parameters are allowed' };
+    if (key !== 'status' && key !== 'limit' && key !== 'after') {
+      return {
+        ok: false,
+        diagnostic: 'only status, limit and after query parameters are allowed',
+      };
     }
   }
 
@@ -142,26 +149,68 @@ function parseTaskListQuery(searchParams: URLSearchParams): ParsedTaskListQuery 
     limit = parsedLimit;
   }
 
+  const afterValues = searchParams.getAll('after');
+  if (afterValues.length > 1) {
+    return { ok: false, diagnostic: 'after must appear at most once' };
+  }
+
+  let after: string | undefined;
+  if (afterValues.length === 1) {
+    const rawAfter = afterValues[0]!;
+    if (rawAfter.length === 0 || rawAfter.length > MAX_TASK_LIST_CURSOR_LENGTH) {
+      return { ok: false, diagnostic: 'after cursor is malformed' };
+    }
+    after = rawAfter;
+  }
+
   return {
     ok: true,
     query: {
       ...(status === undefined ? {} : { status }),
       ...(limit === undefined ? {} : { limit }),
+      ...(after === undefined ? {} : { after }),
     },
   };
 }
 
+function parseTaskEventAfterQuery(
+  searchParams: URLSearchParams,
+):
+  | { readonly ok: true; readonly after: number }
+  | { readonly ok: false; readonly diagnostic: string } {
+  for (const key of searchParams.keys()) {
+    if (key !== 'after') {
+      return { ok: false, diagnostic: 'only after query parameter is allowed' };
+    }
+  }
+
+  const afterValues = searchParams.getAll('after');
+  if (afterValues.length > 1) {
+    return { ok: false, diagnostic: 'after must appear at most once' };
+  }
+
+  const cursor = parseAfterCursor(afterValues[0]);
+  if (!cursor.ok) {
+    return { ok: false, diagnostic: 'after must be a non-negative integer cursor' };
+  }
+
+  return { ok: true, after: cursor.after };
+}
+
 /**
- * B1 Session-authenticated Task & Task Result read endpoints:
+ * B1 Session-authenticated Task, Event, Cancellation & Task Result endpoints:
  * - `GET /v1/tasks/:taskId/result`
  * - `GET /v1/me/tasks`
  * - `GET /v1/me/tasks/:taskId`
+ * - `GET /v1/me/tasks/:taskId/events`
+ * - `GET /v1/me/tasks/:taskId/result`
+ * - `POST /v1/me/tasks/:taskId/cancel`
  */
 export function createB1TaskRoutes(deps: B1TaskRouteDependencies): Hono<AppBindings> {
   const routes = new Hono<AppBindings>();
   const sessionAuth = requireSessionAuth({ service: deps.session, logger: deps.logger });
 
-  routes.get('/tasks/:taskId/result', sessionAuth, async (c) => {
+  async function handleTaskResult(c: AppContext): Promise<Response> {
     try {
       const taskId = readValidatedTaskId(c, 'task result lookup takes no query parameters');
       if (taskId instanceof Response) {
@@ -177,7 +226,10 @@ export function createB1TaskRoutes(deps: B1TaskRouteDependencies): Hono<AppBindi
     } catch (error) {
       throw error instanceof Error ? error : new UnexpectedNonErrorFault();
     }
-  });
+  }
+
+  routes.get('/tasks/:taskId/result', sessionAuth, handleTaskResult);
+  routes.get('/me/tasks/:taskId/result', sessionAuth, handleTaskResult);
 
   routes.get('/me/tasks', sessionAuth, async (c) => {
     try {
@@ -211,6 +263,56 @@ export function createB1TaskRoutes(deps: B1TaskRouteDependencies): Hono<AppBindi
       }
 
       return c.json(B1TaskDetailDtoSchema.parse(detail), 200);
+    } catch (error) {
+      throw error instanceof Error ? error : new UnexpectedNonErrorFault();
+    }
+  });
+
+  routes.get('/me/tasks/:taskId/events', sessionAuth, async (c) => {
+    try {
+      const rejected = rejectClientScope(c);
+      if (rejected !== undefined) {
+        return rejected;
+      }
+
+      const parsedQuery = parseTaskEventAfterQuery(new URL(c.req.url).searchParams);
+      if (!parsedQuery.ok) {
+        return respondInvalidArgument(c, parsedQuery.diagnostic);
+      }
+
+      const taskId = parseTaskIdParam(c);
+      if (taskId instanceof Response) {
+        return taskId;
+      }
+
+      const page = await deps.taskReads.listTaskEvents(
+        c.get('auth').tenantId,
+        taskId,
+        parsedQuery.after,
+      );
+      if (page === null) {
+        return respondNotFound(c, 'task is not visible in this tenant');
+      }
+
+      return c.json(B1TaskEventPageDtoSchema.parse(page), 200);
+    } catch (error) {
+      throw error instanceof Error ? error : new UnexpectedNonErrorFault();
+    }
+  });
+
+  routes.post('/me/tasks/:taskId/cancel', sessionAuth, async (c) => {
+    try {
+      const taskId = readValidatedTaskId(c, 'task cancellation takes no query parameters');
+      if (taskId instanceof Response) {
+        return taskId;
+      }
+
+      const outcome = await deps.taskReads.cancelTask(c.get('auth').tenantId, taskId);
+      if (outcome === null) {
+        return respondNotFound(c, 'task is not visible in this tenant');
+      }
+
+      return c.json(B1TaskCancelDtoSchema.parse(outcome), outcome.terminal ? 200 : 202);
     } catch (error) {
       throw error instanceof Error ? error : new UnexpectedNonErrorFault();
     }

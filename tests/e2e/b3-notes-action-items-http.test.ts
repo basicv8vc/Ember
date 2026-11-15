@@ -9,7 +9,9 @@ import {
   B1MeResponseSchema,
   B1SendMessageReceiptSchema,
   B1SessionResponseSchema,
+  B1TaskCancelDtoSchema,
   B1TaskDetailDtoSchema,
+  B1TaskEventPageDtoSchema,
   B1TaskListDtoSchema,
   B1TaskResultDtoSchema,
 } from '@ember/contracts';
@@ -204,21 +206,34 @@ async function waitForCompletedTask(
   baseUrl: string,
   token: string,
   taskId: string,
-): Promise<ReturnType<typeof B1TaskDetailDtoSchema.parse>> {
+): Promise<{
+  readonly detail: ReturnType<typeof B1TaskDetailDtoSchema.parse>;
+  readonly result: ReturnType<typeof B1TaskResultDtoSchema.parse>;
+}> {
   const deadline = Date.now() + 10_000;
-  let latest: ReturnType<typeof B1TaskDetailDtoSchema.parse> | undefined;
+  let latestDetail: ReturnType<typeof B1TaskDetailDtoSchema.parse> | undefined;
+  let latestResult: ReturnType<typeof B1TaskResultDtoSchema.parse> | undefined;
   while (Date.now() < deadline) {
-    const response = await fetch(`${baseUrl}/v1/me/tasks/${taskId}`, {
+    const detailResponse = await fetch(`${baseUrl}/v1/me/tasks/${taskId}`, {
       headers: auth(token),
     });
-    expect(response.status).toBe(200);
-    latest = B1TaskDetailDtoSchema.parse(await response.json());
-    if (latest.status === 'completed' && latest.result_state === 'available') {
-      return latest;
+    expect(detailResponse.status).toBe(200);
+    latestDetail = B1TaskDetailDtoSchema.parse(await detailResponse.json());
+    if (latestDetail.status === 'completed') {
+      const resultResponse = await fetch(`${baseUrl}/v1/me/tasks/${taskId}/result`, {
+        headers: auth(token),
+      });
+      expect(resultResponse.status).toBe(200);
+      latestResult = B1TaskResultDtoSchema.parse(await resultResponse.json());
+      if (latestResult.result_state === 'available') {
+        return { detail: latestDetail, result: latestResult };
+      }
     }
     await new Promise((resolve) => setTimeout(resolve, 40));
   }
-  throw new Error(`task ${taskId} did not complete within 10s (status=${latest?.status})`);
+  throw new Error(
+    `task ${taskId} did not complete within 10s (status=${latestDetail?.status}, result_state=${latestResult?.result_state})`,
+  );
 }
 
 function jsonFetchResponse(body: unknown): FetchResponseLike {
@@ -528,34 +543,70 @@ describe('B3-A1 E2E: Real HTTP API + PostgreSQL 17 + Worker LLM delegation & dur
     });
 
     // 3. Wait for Worker lease queue execution -> task completes & writes Action Items + outcome_reference.
-    const completedDetail = await waitForCompletedTask(baseUrl, sessionA.access_token, taskId);
-    expect(completedDetail.result).toMatchObject({
-      summary_text: '已从会议笔记中整理出 2 项 Action Items。',
-      model_label: MODEL_LABEL,
-      simulated: false,
+    const completed = await waitForCompletedTask(baseUrl, sessionA.access_token, taskId);
+    expect(completed.detail).toMatchObject({
+      task_id: taskId,
+      kind: 'notes.action_items',
+      status: 'completed',
+      cancel_requested: false,
     });
-    expect(completedDetail.result?.detail_text).toContain('Alice');
-    expect(completedDetail.result?.detail_text).toContain('Bob');
-
-    const resultResp = await fetch(`${baseUrl}/v1/tasks/${taskId}/result`, {
-      headers: auth(sessionA.access_token),
-    });
-    expect(resultResp.status).toBe(200);
-    expect(B1TaskResultDtoSchema.parse(await resultResp.json())).toMatchObject({
+    expect(completed.detail.current_run_id).not.toBeNull();
+    expect(completed.result).toMatchObject({
       task_id: taskId,
       task_status: 'completed',
       result_state: 'available',
       result: {
         summary_text: '已从会议笔记中整理出 2 项 Action Items。',
+        model_label: MODEL_LABEL,
         simulated: false,
       },
+    });
+    expect(completed.result.result?.detail_text).toContain('Alice');
+    expect(completed.result.result?.detail_text).toContain('Bob');
+
+    const resultResp = await fetch(`${baseUrl}/v1/tasks/${taskId}/result`, {
+      headers: auth(sessionA.access_token),
+    });
+    expect(resultResp.status).toBe(200);
+    expect(B1TaskResultDtoSchema.parse(await resultResp.json())).toEqual(completed.result);
+
+    const eventsResp = await fetch(`${baseUrl}/v1/me/tasks/${taskId}/events`, {
+      headers: auth(sessionA.access_token),
+    });
+    expect(eventsResp.status).toBe(200);
+    const eventsPage = B1TaskEventPageDtoSchema.parse(await eventsResp.json());
+    expect(eventsPage.task_id).toBe(taskId);
+    expect(eventsPage.events.map((event) => event.phase)).toEqual(
+      expect.arrayContaining(['accepted', 'leased', 'started', 'completed']),
+    );
+    const incrementalEventsResp = await fetch(
+      `${baseUrl}/v1/me/tasks/${taskId}/events?after=${eventsPage.events[0]!.sequence}`,
+      { headers: auth(sessionA.access_token) },
+    );
+    expect(incrementalEventsResp.status).toBe(200);
+    expect(B1TaskEventPageDtoSchema.parse(await incrementalEventsResp.json()).events).toEqual(
+      eventsPage.events.slice(1),
+    );
+
+    const terminalCancelResp = await fetch(`${baseUrl}/v1/me/tasks/${taskId}/cancel`, {
+      method: 'POST',
+      headers: auth(sessionA.access_token),
+    });
+    expect(terminalCancelResp.status).toBe(200);
+    expect(B1TaskCancelDtoSchema.parse(await terminalCancelResp.json())).toMatchObject({
+      task_id: taskId,
+      status: 'completed',
+      terminal: true,
     });
 
     // Filtered list endpoints & M1 route boundary check
     const filteredCompleted = await fetch(`${baseUrl}/v1/me/tasks?status=completed&limit=10`, {
       headers: auth(sessionA.access_token),
     });
-    expect(B1TaskListDtoSchema.parse(await filteredCompleted.json()).tasks).toHaveLength(1);
+    const completedList = B1TaskListDtoSchema.parse(await filteredCompleted.json());
+    expect(completedList.tasks).toHaveLength(1);
+    expect(completedList.has_more).toBe(false);
+    expect(completedList.next_after).toBeNull();
 
     const filteredQueued = await fetch(`${baseUrl}/v1/me/tasks?status=queued`, {
       headers: auth(sessionA.access_token),
@@ -567,11 +618,29 @@ describe('B3-A1 E2E: Real HTTP API + PostgreSQL 17 + Worker LLM delegation & dur
     });
     expect(badTaskResp.status).toBe(400);
 
-    // M1 tenant-scoped /v1/tasks/:id MUST continue rejecting ems_ consumer sessions with 401.
+    // M1 tenant-scoped /v1/tasks* routes MUST continue rejecting ems_ consumer sessions with 401.
+    expect(
+      (await fetch(`${baseUrl}/v1/tasks`, { headers: auth(sessionA.access_token) })).status,
+    ).toBe(401);
     const m1TaskResp = await fetch(`${baseUrl}/v1/tasks/${taskId}`, {
       headers: auth(sessionA.access_token),
     });
     expect(m1TaskResp.status).toBe(401);
+    expect(
+      (
+        await fetch(`${baseUrl}/v1/tasks/${taskId}/events`, {
+          headers: auth(sessionA.access_token),
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await fetch(`${baseUrl}/v1/tasks/${taskId}/cancel`, {
+          method: 'POST',
+          headers: auth(sessionA.access_token),
+        })
+      ).status,
+    ).toBe(401);
 
     // Verify full Conversation timeline includes user -> ember -> task_reference -> outcome_reference.
     const pageResp = await fetch(`${baseUrl}/v1/conversations/${conversationId}/messages`, {
@@ -640,9 +709,18 @@ describe('B3-A1 E2E: Real HTTP API + PostgreSQL 17 + Worker LLM delegation & dur
       headers: auth(reopenedSession.access_token),
     });
     expect(reopenedDetail.status).toBe(200);
-    expect(B1TaskDetailDtoSchema.parse(await reopenedDetail.json()).result?.detail_text).toContain(
-      'Alice',
-    );
+    expect(B1TaskDetailDtoSchema.parse(await reopenedDetail.json())).toMatchObject({
+      task_id: taskId,
+      status: 'completed',
+    });
+
+    const reopenedMeResult = await fetch(`${baseUrl}/v1/me/tasks/${taskId}/result`, {
+      headers: auth(reopenedSession.access_token),
+    });
+    expect(reopenedMeResult.status).toBe(200);
+    expect(
+      B1TaskResultDtoSchema.parse(await reopenedMeResult.json()).result?.detail_text,
+    ).toContain('Alice');
 
     const reopenedResult = await fetch(`${baseUrl}/v1/tasks/${taskId}/result`, {
       headers: auth(reopenedSession.access_token),
@@ -653,16 +731,43 @@ describe('B3-A1 E2E: Real HTTP API + PostgreSQL 17 + Worker LLM delegation & dur
       result_state: 'available',
     });
 
-    // 5. Cross-tenant isolation: User B receives [] on list and 404 on User A's Task & Result.
+    // 5. Cross-tenant isolation: User B receives [] on list and 404 on User A's Task, Events, Cancel & Result.
     const sessionB = await signInDev(baseUrl, `dev-user-b-${randomUUID()}`);
     const listB = await fetch(`${baseUrl}/v1/me/tasks`, { headers: auth(sessionB.access_token) });
     expect(listB.status).toBe(200);
-    expect(B1TaskListDtoSchema.parse(await listB.json()).tasks).toEqual([]);
+    expect(B1TaskListDtoSchema.parse(await listB.json())).toEqual({
+      tasks: [],
+      next_after: null,
+      has_more: false,
+    });
 
     const foreignDetail = await fetch(`${baseUrl}/v1/me/tasks/${taskId}`, {
       headers: auth(sessionB.access_token),
     });
     expect(foreignDetail.status).toBe(404);
+
+    expect(
+      (
+        await fetch(`${baseUrl}/v1/me/tasks/${taskId}/events`, {
+          headers: auth(sessionB.access_token),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await fetch(`${baseUrl}/v1/me/tasks/${taskId}/result`, {
+          headers: auth(sessionB.access_token),
+        })
+      ).status,
+    ).toBe(404);
+    expect(
+      (
+        await fetch(`${baseUrl}/v1/me/tasks/${taskId}/cancel`, {
+          method: 'POST',
+          headers: auth(sessionB.access_token),
+        })
+      ).status,
+    ).toBe(404);
 
     const foreignResult = await fetch(`${baseUrl}/v1/tasks/${taskId}/result`, {
       headers: auth(sessionB.access_token),

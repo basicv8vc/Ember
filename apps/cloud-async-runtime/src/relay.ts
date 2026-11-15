@@ -1,8 +1,9 @@
-import type { B1TurnDispatchEvent } from '@ember/postgres/b2-worker';
+import type { B1TaskDispatchTarget, B1TurnDispatchEvent } from '@ember/postgres/b2-worker';
 import {
   TURN_OUTBOX_BATCH_SIZE,
   TURN_OUTBOX_PUBLISH_LEASE_MS,
   TURN_OUTBOX_REENQUEUE_MS,
+  taskDispatchEnvelope,
   turnDispatchEnvelope,
   type TurnDispatchLogger,
 } from './dispatch.js';
@@ -32,6 +33,18 @@ export interface TurnDispatchRelayOutboxPort {
 
 export interface TurnDispatchRelayResult {
   readonly claimed: number;
+  readonly enqueued: number;
+  readonly failed: number;
+}
+
+export interface NotesTaskDispatchRelayPort {
+  reapExpired(now: Date): Promise<number>;
+  listDueNotesTasks(limit: number): Promise<readonly B1TaskDispatchTarget[]>;
+}
+
+export interface NotesTaskRelayResult {
+  readonly reaped: number;
+  readonly examined: number;
   readonly enqueued: number;
   readonly failed: number;
 }
@@ -88,4 +101,48 @@ export async function publishDueTurnDispatches(input: {
   }
 
   return Object.freeze({ claimed: events.length, enqueued, failed });
+}
+
+/**
+ * Reap expired Task leases/deadlines and enqueue any due open `notes.action_items` Tasks as
+ * idempotent Queue wakeups (reconciliation safety net alongside immediate delegation send).
+ */
+export async function publishDueNotesTaskDispatches(input: {
+  readonly relay: NotesTaskDispatchRelayPort;
+  readonly queue: TurnDispatchQueuePort;
+  readonly isAuthorizedTenant?: (tenantId: string) => boolean;
+  readonly logger?: TurnDispatchLogger;
+  readonly limit?: number;
+  readonly now?: () => Date;
+}): Promise<NotesTaskRelayResult> {
+  const now = input.now ?? (() => new Date());
+  const reaped = await input.relay.reapExpired(now());
+  const due = await input.relay.listDueNotesTasks(input.limit ?? TURN_OUTBOX_BATCH_SIZE);
+  const targets =
+    input.isAuthorizedTenant === undefined
+      ? due
+      : due.filter((target) => input.isAuthorizedTenant!(target.tenantId));
+
+  let enqueued = 0;
+  let failed = 0;
+
+  for (const target of targets) {
+    try {
+      await input.queue.send(taskDispatchEnvelope(target));
+      enqueued += 1;
+    } catch {
+      failed += 1;
+      input.logger?.warn('Notes Task reconciliation enqueue failed', {
+        category: 'queue_unavailable',
+        taskId: target.taskId,
+      });
+    }
+  }
+
+  return Object.freeze({
+    reaped,
+    examined: targets.length,
+    enqueued,
+    failed,
+  });
 }

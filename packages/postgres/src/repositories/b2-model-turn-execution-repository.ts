@@ -1,12 +1,23 @@
 import { randomUUID } from 'node:crypto';
-import { IdSchema, toInvalidArgumentError, type B1AssistantTurnDto } from '@ember/contracts';
+import {
+  DelegationToolNameSchema,
+  IdSchema,
+  NotesActionItemsInputSchema,
+  TaskEventSchema,
+  TaskTitleSchema,
+  toInvalidArgumentError,
+  type B1AssistantTurnDto,
+} from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { z } from 'zod';
+import { prepareTaskCommand } from '../task-digest.js';
 import {
   B1_ASSISTANT_TURN_FAILURE_MESSAGE,
   SIMULATED_MODEL_IDENTITY,
+  allocateSequence,
   insertTurnResponse,
+  isExpired,
   lockTurn,
   markTurnCompleted,
   markTurnFailed,
@@ -745,12 +756,67 @@ UPDATE model_turn_attempts
         label: result.modelLabel,
         simulated: result.simulated,
       };
+
+      if (result.delegation === undefined) {
+        const messageId = await insertTurnResponse(client, identity, result.text, model);
+        const completed = await markTurnCompleted(client, identity, messageId);
+
+        return completed === null
+          ? { outcome: 'fenced' as const, turn: null }
+          : { outcome: 'published' as const, turn: toTurnDto(completed), delegatedTaskId: null };
+      }
+
+      // Expired turns never create Tasks or task_reference rows.
+      if (await isExpired(client, locked)) {
+        const timeoutMessageId = await insertTurnResponse(
+          client,
+          identity,
+          B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+          SIMULATED_MODEL_IDENTITY,
+        );
+        const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
+
+        return timedOut === null
+          ? { outcome: 'fenced' as const, turn: null }
+          : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
+      }
+
+      // Guard against the sub-millisecond edge where `deadline_at` crosses right as
+      // `markTurnCompleted` runs: rolling back the savepoint discards Task + task_reference cleanly.
+      await client.query('SAVEPOINT b3_delegation_attempt');
+      const taskId = await createOrReuseTurnDelegatedTask(client, identity, result.delegation);
       const messageId = await insertTurnResponse(client, identity, result.text, model);
+      await ensureTurnTaskReference(client, identity, taskId);
       const completed = await markTurnCompleted(client, identity, messageId);
 
-      return completed === null
-        ? { outcome: 'fenced' as const, turn: null }
-        : { outcome: 'published' as const, turn: toTurnDto(completed) };
+      if (completed === null) {
+        await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
+        await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
+        return { outcome: 'fenced' as const, turn: null };
+      }
+
+      if (completed.status === 'failed' && completed.failure_reason === 'timeout') {
+        await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
+        await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
+        const timeoutMessageId = await insertTurnResponse(
+          client,
+          identity,
+          B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+          SIMULATED_MODEL_IDENTITY,
+        );
+        const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
+
+        return timedOut === null
+          ? { outcome: 'fenced' as const, turn: null }
+          : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
+      }
+
+      await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
+      return {
+        outcome: 'published' as const,
+        turn: toTurnDto(completed),
+        delegatedTaskId: taskId,
+      };
     });
   }
 
@@ -1380,6 +1446,12 @@ const resolveIncidentSchema = z.strictObject({
   note: z.string().min(1).max(1_000),
 });
 
+const delegationSchema = z.strictObject({
+  toolName: DelegationToolNameSchema,
+  title: TaskTitleSchema.optional(),
+  input: NotesActionItemsInputSchema,
+});
+
 const publishSchema = z.strictObject({
   lease: leaseSchema,
   result: z.discriminatedUnion('status', [
@@ -1389,6 +1461,7 @@ const publishSchema = z.strictObject({
         text: z.string().min(1).max(8192),
         modelLabel: z.string().min(1).max(120),
         simulated: z.boolean(),
+        delegation: delegationSchema.optional(),
       })
       // Anti-misrepresentation rule at the persistence boundary: a real label can never carry
       // `simulated: true`, and a `-fake-`/`-echo-` label can never claim to be real.
@@ -1402,3 +1475,140 @@ const publishSchema = z.strictObject({
     }),
   ]),
 });
+
+async function createOrReuseTurnDelegatedTask(
+  client: pg.PoolClient,
+  identity: PendingAssistantTurn,
+  delegation: z.infer<typeof delegationSchema>,
+): Promise<Id> {
+  const agentLookup = await client.query<{
+    readonly agent_id: string;
+    readonly policy_version: number;
+  }>(
+    `SELECT c.agent_id, a.policy_version
+       FROM conversations c
+       JOIN agents a
+         ON a.tenant_id = c.tenant_id AND a.id = c.agent_id
+      WHERE c.tenant_id = $1 AND c.id = $2`,
+    [identity.tenantId, identity.conversationId],
+  );
+  const meta = agentLookup.rows[0];
+
+  if (meta === undefined) {
+    throw new DomainError('NOT_FOUND', 'conversation agent is not visible in this tenant');
+  }
+
+  const prepared = prepareTaskCommand({
+    agentId: meta.agent_id,
+    idempotencyKey: `turn:${identity.turnId}`,
+    kind: 'notes.action_items',
+    ...(delegation.title === undefined ? {} : { title: delegation.title }),
+    input: delegation.input,
+  });
+
+  const inserted = await client.query<{
+    readonly id: string;
+    readonly accepted_at: Date | string;
+  }>(
+    `INSERT INTO tasks (
+       id, tenant_id, agent_id, kind, title, input, digest, idempotency_key, deadline_at
+     )
+     VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+     ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+     RETURNING id, accepted_at`,
+    [
+      randomUUID(),
+      identity.tenantId,
+      prepared.command.agentId,
+      prepared.command.kind,
+      prepared.command.title ?? null,
+      JSON.stringify(prepared.command.input),
+      prepared.digest,
+      prepared.command.idempotencyKey,
+      prepared.deadlineAt,
+    ],
+  );
+  const insertedRow = inserted.rows[0];
+
+  if (insertedRow !== undefined) {
+    const parsedEvent = TaskEventSchema.safeParse({
+      taskId: insertedRow.id,
+      sequence: 1,
+      phase: 'accepted',
+      occurredAt: toIso(insertedRow.accepted_at),
+      traceId: randomUUID(),
+      payload: {
+        taskKind: prepared.command.kind,
+        policyVersion: meta.policy_version,
+        replayed: false,
+      },
+    });
+
+    if (!parsedEvent.success) {
+      throw new DomainError('INVALID_ARGUMENT', 'accepted event failed its redaction contract');
+    }
+
+    await client.query(
+      `INSERT INTO task_events (id, tenant_id, task_id, sequence, phase, payload, trace_id, occurred_at)
+       VALUES ($1, $2, $3, 1, 'accepted', $4::jsonb, $5, $6)`,
+      [
+        randomUUID(),
+        identity.tenantId,
+        parsedEvent.data.taskId,
+        JSON.stringify(parsedEvent.data.payload),
+        parsedEvent.data.traceId,
+        insertedRow.accepted_at,
+      ],
+    );
+
+    return insertedRow.id;
+  }
+
+  const existing = await client.query<{ readonly id: string; readonly digest: string }>(
+    `SELECT id, digest
+       FROM tasks
+      WHERE tenant_id = $1 AND idempotency_key = $2`,
+    [identity.tenantId, prepared.command.idempotencyKey],
+  );
+  const existingRow = existing.rows[0];
+
+  if (existingRow === undefined) {
+    throw new DomainError('DB_UNAVAILABLE', 'delegated task idempotency lookup did not resolve');
+  }
+
+  if (existingRow.digest !== prepared.digest) {
+    throw new DomainError(
+      'IDEMPOTENCY_CONFLICT',
+      'idempotency key already belongs to a different canonical command',
+    );
+  }
+
+  return existingRow.id;
+}
+
+async function ensureTurnTaskReference(
+  client: pg.PoolClient,
+  identity: PendingAssistantTurn,
+  taskId: Id,
+): Promise<void> {
+  const existing = await client.query(
+    `SELECT 1
+       FROM conversation_messages
+      WHERE tenant_id = $1 AND task_id = $2 AND kind = 'task_reference'
+      LIMIT 1`,
+    [identity.tenantId, taskId],
+  );
+
+  if ((existing.rowCount ?? 0) > 0) {
+    return;
+  }
+
+  const sequence = await allocateSequence(client, identity);
+  await client.query(
+    `INSERT INTO conversation_messages
+       (id, tenant_id, conversation_id, sequence, kind, task_id)
+     VALUES ($1, $2, $3, $4::bigint, 'task_reference', $5)
+     ON CONFLICT (tenant_id, task_id) WHERE task_id IS NOT NULL DO NOTHING`,
+    [randomUUID(), identity.tenantId, identity.conversationId, sequence, taskId],
+  );
+}

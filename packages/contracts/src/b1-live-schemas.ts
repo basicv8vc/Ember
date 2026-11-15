@@ -271,3 +271,58 @@ export type B1MessageSubmissionReconciliationDto = z.infer<
 export type B1ConversationPage = z.infer<typeof B1ConversationPageSchema>;
 export type B1AssistantTurnDto = z.infer<typeof B1AssistantTurnDtoSchema>;
 export type B1TaskResultDto = z.infer<typeof B1TaskResultDtoSchema>;
+
+export const B1TaskSummaryDtoSchema = z.strictObject({
+  task_id: IdSchema,
+  agent_id: IdSchema,
+  kind: z.string().min(1),
+  title: z.string().min(1).max(128).nullable(),
+  status: TaskStatusSchema,
+  attempt_count: z.number().int().nonnegative(),
+  created_at: IsoDateTimeSchema,
+  updated_at: IsoDateTimeSchema,
+  deadline_at: IsoDateTimeSchema.nullable(),
+  result_state: z.enum(['pending', 'available', 'unavailable']),
+});
+
+export const B1TaskListDtoSchema = z.strictObject({
+  tasks: z.array(B1TaskSummaryDtoSchema).max(50),
+});
+
+export const B1TaskDetailDtoSchema = B1TaskSummaryDtoSchema.extend({
+  result: b1TextResultSchema.nullable(),
+}).superRefine((dto, context) => {
+  const isTerminal = (TASK_TERMINAL_STATUSES as readonly string[]).includes(dto.status);
+  if (dto.result_state === 'pending' && isTerminal) {
+    context.addIssue({
+      code: 'custom',
+      message: 'terminal tasks cannot have pending results',
+      path: ['result_state'],
+    });
+  }
+  if (dto.result_state !== 'pending' && !isTerminal) {
+    context.addIssue({
+      code: 'custom',
+      message: 'available or unavailable results require a terminal task',
+      path: ['result_state'],
+    });
+  }
+  if (dto.result_state === 'available' && dto.result === null) {
+    context.addIssue({
+      code: 'custom',
+      message: 'available result requires a result payload',
+      path: ['result'],
+    });
+  }
+  if (dto.result_state !== 'available' && dto.result !== null) {
+    context.addIssue({
+      code: 'custom',
+      message: 'pending or unavailable result must have null payload',
+      path: ['result'],
+    });
+  }
+});
+
+export type B1TaskSummaryDto = z.infer<typeof B1TaskSummaryDtoSchema>;
+export type B1TaskListDto = z.infer<typeof B1TaskListDtoSchema>;
+export type B1TaskDetailDto = z.infer<typeof B1TaskDetailDtoSchema>;

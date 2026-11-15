@@ -4,6 +4,7 @@ import {
   PostgresB1ConsumerSessionRepository,
   PostgresB1ConversationReadRepository,
   PostgresB1ConversationWriteRepository,
+  PostgresB1TaskReadRepository,
   createPool,
 } from '@ember/postgres/b1-worker';
 import type { B1SessionPorts } from './auth/session-service.js';
@@ -161,6 +162,8 @@ function createWorkerApp(
     }
   };
 
+  const b1TaskReadRepository = new PostgresB1TaskReadRepository(pool);
+
   // The API exposes the same B1 HTTP routes and SQL repositories as Node. Turn reads must remain
   // read-only in this shared cloud environment; Agent B's executor owns timeout and publication.
   return createApp({
@@ -177,6 +180,8 @@ function createWorkerApp(
     b1AssistantTurnRepository: new PostgresB1AssistantTurnRepository(pool, {
       expireOnRead: false,
     }),
+    b1TaskResultRepository: b1TaskReadRepository,
+    b1TaskReadRepository,
   });
 }
 

@@ -1,12 +1,15 @@
 import { createHash } from 'node:crypto';
 import { ModelGatewayFailure } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative } from './limits.js';
+import { clampText } from './providers/shared.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
   ModelCallResult,
   ModelGateway,
   ModelUsage,
+  NotesActionItemsInput,
+  NotesActionItemsOutput,
 } from './types.js';
 
 /** Contains `-fake-`, so no heuristic is needed to recognise simulated text. */
@@ -33,6 +36,10 @@ export interface FakeModelGatewayOptions {
   readonly delayMs?: number;
   /** Deterministic failure injection: no provider, no network, same closed taxonomy. */
   readonly failure?: 'model_timeout' | 'model_unavailable' | 'model_rate_limited';
+  /** Test-only callback to script a reply or controlled delegation output without keywords. */
+  readonly onConversationTurn?: (input: ConversationTurnInput) => ConversationTurnOutput;
+  /** Test-only callback to script deterministic notes extraction output. */
+  readonly onExtractNotesActionItems?: (input: NotesActionItemsInput) => NotesActionItemsOutput;
 }
 
 /**
@@ -46,34 +53,42 @@ export class FakeModelGateway implements ModelGateway {
   readonly providerId = 'fake' as const;
   readonly modelLabel = FAKE_MODEL_LABEL;
   readonly simulated = true;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   readonly #delayMs: number;
   readonly #failure: FakeModelGatewayOptions['failure'];
+  readonly #onConversationTurn: FakeModelGatewayOptions['onConversationTurn'];
+  readonly #onExtractNotesActionItems: FakeModelGatewayOptions['onExtractNotesActionItems'];
 
   constructor(options: FakeModelGatewayOptions = {}) {
     this.#delayMs = Math.max(0, Math.trunc(options.delayMs ?? 0));
     this.#failure = options.failure;
+    this.#onConversationTurn = options.onConversationTurn;
+    this.#onExtractNotesActionItems = options.onExtractNotesActionItems;
   }
 
   async generateConversationTurn(
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
-    if (signal.aborted) {
-      throw new ModelGatewayFailure('client_cancelled');
-    }
+    await this.#beforeExecute(signal);
 
-    if (this.#delayMs > 0) {
-      await delay(this.#delayMs, signal);
-    }
-
-    if (signal.aborted) {
-      throw new ModelGatewayFailure('client_cancelled');
-    }
-
-    if (this.#failure !== undefined) {
-      throw new ModelGatewayFailure(this.#failure);
+    if (this.#onConversationTurn !== undefined) {
+      const output = this.#onConversationTurn(input);
+      return Object.freeze({
+        output,
+        modelLabel: FAKE_MODEL_LABEL,
+        simulated: true as const,
+        usage: Object.freeze({
+          inputTokens: input.context.reduce(
+            (total, message) => total + estimateTokensConservative(message.text),
+            0,
+          ),
+          outputTokens: Math.max(1, estimateTokensConservative(output.text)),
+          costMicroUsd: 0,
+          rateVersion: 'fake-zero-cost',
+        }),
+      });
     }
 
     const maxOutputTokens = Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens);
@@ -101,6 +116,7 @@ export class FakeModelGateway implements ModelGateway {
 
     return Object.freeze({
       output: Object.freeze({
+        kind: 'reply' as const,
         text: `${FAKE_REPLY_PREFIX}${words.join(' ')}`,
         finishReason: 'stop' as const,
       }),
@@ -108,6 +124,68 @@ export class FakeModelGateway implements ModelGateway {
       simulated: true as const,
       usage,
     });
+  }
+
+  async extractNotesActionItems(
+    input: NotesActionItemsInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<NotesActionItemsOutput>> {
+    await this.#beforeExecute(signal);
+
+    const output: NotesActionItemsOutput =
+      this.#onExtractNotesActionItems !== undefined
+        ? this.#onExtractNotesActionItems(input)
+        : (() => {
+            const firstLine =
+              input.notes
+                .split(/\r?\n/)
+                .map((line) => line.trim())
+                .find((line) => line.length > 0) ?? 'Notes';
+            const summary = clampText(
+              `${FAKE_REPLY_PREFIX}Action items for: ${firstLine}`,
+              MODEL_LIMITS.resultSummaryMaxChars,
+            );
+            const detail = clampText(
+              `${FAKE_REPLY_PREFIX}\n\n- [ ] Review notes: ${input.notes}`,
+              MODEL_LIMITS.resultDetailMaxChars,
+            );
+            return Object.freeze({
+              summaryText: summary.text,
+              detailText: detail.text,
+              truncated: summary.truncated || detail.truncated,
+              finishReason: 'stop' as const,
+            });
+          })();
+
+    return Object.freeze({
+      output,
+      modelLabel: FAKE_MODEL_LABEL,
+      simulated: true as const,
+      usage: Object.freeze({
+        inputTokens: estimateTokensConservative(input.notes),
+        outputTokens: Math.max(1, estimateTokensConservative(output.detailText)),
+        costMicroUsd: 0,
+        rateVersion: 'fake-zero-cost',
+      }),
+    });
+  }
+
+  async #beforeExecute(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) {
+      throw new ModelGatewayFailure('client_cancelled');
+    }
+
+    if (this.#delayMs > 0) {
+      await delay(this.#delayMs, signal);
+    }
+
+    if (signal.aborted) {
+      throw new ModelGatewayFailure('client_cancelled');
+    }
+
+    if (this.#failure !== undefined) {
+      throw new ModelGatewayFailure(this.#failure);
+    }
   }
 }
 

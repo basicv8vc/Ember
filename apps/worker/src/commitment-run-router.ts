@@ -10,6 +10,8 @@ export interface CommitmentRouteAwareRunHandlerDependencies {
   readonly clock: ExecutionClock;
   /** Handler for Tasks dispatched by the Commitment Scheduler. */
   readonly commitmentHandler: RunHandler;
+  /** Handler for `notes.action_items` Tasks when model execution is enabled. */
+  readonly notesHandler?: RunHandler;
   /** Handler for every other Task kind (P0B-05 simulation / P0B-06 durable path). */
   readonly defaultHandler: RunHandler;
   readonly logger: WorkerLogger;
@@ -43,6 +45,10 @@ export function createCommitmentRouteAwareRunHandler(
 
       if (readCommitmentTaskMarker(context.input) !== null) {
         return deps.commitmentHandler.handle(run, signal, context);
+      }
+
+      if (context.kind === 'notes.action_items' && deps.notesHandler !== undefined) {
+        return deps.notesHandler.handle(run, signal, context);
       }
 
       return deps.defaultHandler.handle(run, signal, context);

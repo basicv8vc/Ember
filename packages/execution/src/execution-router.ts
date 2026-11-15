@@ -49,6 +49,7 @@ export const ROUTE_REASONS = [
   'file_small_content_standard',
   'file_large_content_heavy',
   'approval_policy_standard',
+  'notes_action_items_standard',
 ] as const;
 
 export type RouteReason = (typeof ROUTE_REASONS)[number];
@@ -97,6 +98,10 @@ function metricsOf(kind: TaskKind, input: MockTaskInput): RouteMetrics {
       const approval = input as Extract<MockTaskInput, { action: string }>;
       return { size: approval.action.length, maxOutputTokens: 0 };
     }
+    case 'notes.action_items': {
+      const notes = input as Extract<MockTaskInput, { notes: string }>;
+      return { size: notes.notes.length, maxOutputTokens: 0 };
+    }
   }
 }
 
@@ -143,6 +148,9 @@ function routeFor(input: TrustedRouteContext): RouteDecision {
     // Recognised by policy only; the approval workflow is P0B-08.
     case 'mock.approval':
       return decision('standard', 'approval_policy_standard', policyVersion);
+
+    case 'notes.action_items':
+      return decision('standard', 'notes_action_items_standard', policyVersion);
   }
 }
 

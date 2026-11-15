@@ -1,6 +1,5 @@
 import { z } from 'zod';
-import { CONVERSATION_SYSTEM_PROMPT } from '../context.js';
-import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
+import { ModelGatewayFailure } from '../errors.js';
 import { MODEL_LIMITS } from '../limits.js';
 import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
 import type {
@@ -9,7 +8,19 @@ import type {
   ModelCallResult,
   ModelGateway,
   ModelUsage,
+  NotesActionItemsInput,
+  NotesActionItemsOutput,
 } from '../types.js';
+import {
+  DELEGATION_TOOLS,
+  assertAuthorizedBeforeFetch,
+  buildConversationTurnMessages,
+  buildNotesExtractionMessages,
+  completionMessageSchema,
+  parseConversationTurnChoice,
+  parseNotesActionItemsChoice,
+  rateRequestModifiers,
+} from './shared.js';
 
 /**
  * The only origin this process may ever contact for inference.
@@ -48,7 +59,7 @@ const completionSchema = z.object({
   choices: z
     .array(
       z.object({
-        message: z.object({ content: z.string().nullable().optional() }),
+        message: completionMessageSchema,
         finish_reason: z.string().nullable().optional(),
       }),
     )
@@ -107,7 +118,7 @@ export interface OpenAiGatewayOptions {
 }
 
 /**
- * One pinned model, one origin, one call, no retries, no streaming, no tools.
+ * One pinned model, one origin, reviewed operations only, no internal retries or streaming.
  *
  * The credential lives in this closure only: it is not a field, is never returned, and cannot be
  * reached through the `ModelGateway` interface a caller holds.
@@ -115,7 +126,7 @@ export interface OpenAiGatewayOptions {
 export class OpenAiModelGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
   readonly modelLabel: string;
 
   readonly #apiKey: string;
@@ -137,32 +148,45 @@ export class OpenAiModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
-    // `reasoning_effort` is not a caller input: it comes from the pinned rate row, so the only way
-    // to change it is to edit reviewed code. It exists because the reasoning tokens of a reasoning
-    // model are charged against `max_completion_tokens` *and* billed as output — a 512-token cap
-    // with the provider's default effort produces an empty reply that the caller would still pay
-    // for. Absent for a non-reasoning model, in which case the field is not sent at all.
-    const reasoningEffort = this.#rate.reasoningEffort;
-
     const body = JSON.stringify({
       model: this.#modelId,
-      messages: [
-        { role: 'system', content: CONVERSATION_SYSTEM_PROMPT },
-        ...input.context.map((message) => ({ role: message.role, content: message.text })),
-      ],
+      messages: buildConversationTurnMessages(input),
       max_completion_tokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
       n: 1,
       stream: false,
-      // Keeps the provider from storing the conversation when the account allows it.
       store: false,
-      ...(reasoningEffort === undefined ? {} : { reasoning_effort: reasoningEffort }),
+      tools: DELEGATION_TOOLS,
+      tool_choice: 'auto',
+      ...rateRequestModifiers(this.#rate, 'openai'),
     });
 
-    // The approval is dated and can expire while this process stays up. This synchronous check is
-    // deliberately adjacent to fetch so no retry or later Turn can use the boot-time decision.
-    if (!this.#isAuthorized()) {
-      throw new ModelAuthorizationRefused();
-    }
+    return await this.#sendChatCompletion(body, signal, parseConversationTurnChoice);
+  }
+
+  async extractNotesActionItems(
+    input: NotesActionItemsInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<NotesActionItemsOutput>> {
+    const body = JSON.stringify({
+      model: this.#modelId,
+      messages: buildNotesExtractionMessages(input),
+      max_completion_tokens: MODEL_LIMITS.notesMaxOutputTokens,
+      n: 1,
+      stream: false,
+      store: false,
+      ...rateRequestModifiers(this.#rate, 'openai'),
+    });
+
+    return await this.#sendChatCompletion(body, signal, parseNotesActionItemsChoice);
+  }
+
+  async #sendChatCompletion<T>(
+    body: string,
+    signal: AbortSignal,
+    parseChoice: (choice: z.infer<typeof completionSchema>['choices'][number]) => T,
+  ): Promise<ModelCallResult<T>> {
+    // Re-evaluated immediately before egress so expired approvals cannot run.
+    assertAuthorizedBeforeFetch(this.#isAuthorized);
 
     let response: FetchResponseLike;
 
@@ -184,7 +208,6 @@ export class OpenAiModelGateway implements ModelGateway {
         throw error;
       }
 
-      // A request that was aborted may already have been billed: never report it as free.
       throw new ModelGatewayFailure(signal.aborted ? 'model_timeout' : 'model_unavailable');
     }
 
@@ -206,17 +229,9 @@ export class OpenAiModelGateway implements ModelGateway {
       throw new ModelGatewayFailure('model_invalid_output');
     }
 
-    const choice = parsed.data.choices[0]!;
-    const text = choice.message.content;
-
-    if (typeof text !== 'string' || text.trim().length === 0) {
-      throw new ModelGatewayFailure('model_invalid_output');
-    }
-
+    const output = parseChoice(parsed.data.choices[0]!);
     const priced = toUsage(parsed.data.usage, this.#rate);
 
-    // A 2xx without usage is *not* a free call. The charge is unknown, which the caller must handle
-    // by booking the full reservation; `null` carries that meaning explicitly.
     const usage: ModelUsage | null =
       priced === null
         ? null
@@ -228,10 +243,7 @@ export class OpenAiModelGateway implements ModelGateway {
           });
 
     return Object.freeze({
-      output: Object.freeze({
-        text,
-        finishReason: choice.finish_reason === 'length' ? ('length' as const) : ('stop' as const),
-      }),
+      output,
       modelLabel: this.#modelId,
       simulated: false as const,
       usage,

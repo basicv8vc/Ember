@@ -8,6 +8,7 @@ import type {
   MockComputeInput,
   MockFileInput,
   MockTaskInput,
+  NotesActionItemsInput,
   RunStatus,
   TaskCommand,
   TaskInputByKind,
@@ -37,9 +38,41 @@ export const TASK_INPUT_LIMITS = Object.freeze({
   mediaTypeMaxChars: 128,
   approvalActionMaxChars: 128,
   approvalReasonMaxChars: 1_000,
+  notesMaxChars: 8_000,
+  notesInstructionsMaxChars: 500,
+  taskTitleMaxChars: 128,
   idempotencyKeyMinChars: 8,
   idempotencyKeyMaxChars: 128,
 });
+
+/** Closed allowlist of Chat tool names that can delegate work into durable Tasks. */
+export const DELEGATION_TOOL_NAMES = Object.freeze(['delegate_notes_action_items'] as const);
+export type DelegationToolName = (typeof DELEGATION_TOOL_NAMES)[number];
+export const DelegationToolNameSchema = z.enum(DELEGATION_TOOL_NAMES);
+
+export const TaskTitleSchema = z.string().trim().min(1).max(TASK_INPUT_LIMITS.taskTitleMaxChars);
+
+export const NotesActionItemsInputSchema: z.ZodType<NotesActionItemsInput> = z.strictObject({
+  notes: z.string().trim().min(1).max(TASK_INPUT_LIMITS.notesMaxChars),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(TASK_INPUT_LIMITS.notesInstructionsMaxChars)
+    .optional(),
+});
+
+export const DelegateNotesActionItemsArgsSchema = z.strictObject({
+  title: TaskTitleSchema.optional(),
+  notes: z.string().trim().min(1).max(TASK_INPUT_LIMITS.notesMaxChars),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(TASK_INPUT_LIMITS.notesInstructionsMaxChars)
+    .optional(),
+});
+export type DelegateNotesActionItemsArgs = z.infer<typeof DelegateNotesActionItemsArgsSchema>;
 
 /**
  * Workspace-relative logical file key:
@@ -130,6 +163,7 @@ export const TASK_INPUT_SCHEMAS = Object.freeze({
   'mock.compute': MockComputeInputSchema,
   'mock.file': MockFileInputSchema,
   'mock.approval': MockApprovalInputSchema,
+  'notes.action_items': NotesActionItemsInputSchema,
 }) satisfies Readonly<Record<TaskKind, z.ZodType<MockTaskInput>>>;
 
 /** Narrowing helper for callers that already know a validated `TaskKind`. */
@@ -154,6 +188,7 @@ export type CreateTaskRequest = {
     readonly kind: K;
     readonly input: TaskInputByKind[K];
     readonly deadline_at?: string;
+    readonly title?: string;
   };
 }[TaskKind];
 
@@ -163,24 +198,35 @@ const createTaskBodyVariants = [
     kind: z.literal('mock.chat'),
     input: MockChatInputSchema,
     deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agentId: IdSchema,
     kind: z.literal('mock.compute'),
     input: MockComputeInputSchema,
     deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agentId: IdSchema,
     kind: z.literal('mock.file'),
     input: MockFileInputSchema,
     deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agentId: IdSchema,
     kind: z.literal('mock.approval'),
     input: MockApprovalInputSchema,
     deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
+  }),
+  z.strictObject({
+    agentId: IdSchema,
+    kind: z.literal('notes.action_items'),
+    input: NotesActionItemsInputSchema,
+    deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
 ] as const;
 
@@ -198,6 +244,7 @@ const taskCommandVariants = [
   createTaskBodyVariants[1].extend({ idempotencyKey: IdempotencyKeySchema }),
   createTaskBodyVariants[2].extend({ idempotencyKey: IdempotencyKeySchema }),
   createTaskBodyVariants[3].extend({ idempotencyKey: IdempotencyKeySchema }),
+  createTaskBodyVariants[4].extend({ idempotencyKey: IdempotencyKeySchema }),
 ] as const;
 
 /**
@@ -216,24 +263,35 @@ const createTaskRequestVariants = [
     kind: z.literal('mock.chat'),
     input: MockChatInputSchema,
     deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agent_id: IdSchema,
     kind: z.literal('mock.compute'),
     input: MockComputeInputSchema,
     deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agent_id: IdSchema,
     kind: z.literal('mock.file'),
     input: MockFileInputSchema,
     deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
   z.strictObject({
     agent_id: IdSchema,
     kind: z.literal('mock.approval'),
     input: MockApprovalInputSchema,
     deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
+  }),
+  z.strictObject({
+    agent_id: IdSchema,
+    kind: z.literal('notes.action_items'),
+    input: NotesActionItemsInputSchema,
+    deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
   }),
 ] as const;
 
@@ -243,53 +301,17 @@ export const CreateTaskRequestSchema: z.ZodType<CreateTaskRequest> = z.discrimin
   createTaskRequestVariants,
 );
 
-function withDeadline<T extends object>(
-  value: T,
-  deadlineAt: string | undefined,
-): T | (T & { readonly deadlineAt: string }) {
-  return deadlineAt === undefined ? value : { ...value, deadlineAt };
-}
-
 /** Explicit snake_case → camelCase conversion; there is only one canonical internal shape. */
 export function toCreateTaskBody(request: CreateTaskRequest): CreateTaskBody {
-  switch (request.kind) {
-    case 'mock.chat':
-      return withDeadline(
-        {
-          agentId: request.agent_id,
-          kind: request.kind,
-          input: request.input,
-        },
-        request.deadline_at,
-      );
-    case 'mock.compute':
-      return withDeadline(
-        {
-          agentId: request.agent_id,
-          kind: request.kind,
-          input: request.input,
-        },
-        request.deadline_at,
-      );
-    case 'mock.file':
-      return withDeadline(
-        {
-          agentId: request.agent_id,
-          kind: request.kind,
-          input: request.input,
-        },
-        request.deadline_at,
-      );
-    case 'mock.approval':
-      return withDeadline(
-        {
-          agentId: request.agent_id,
-          kind: request.kind,
-          input: request.input,
-        },
-        request.deadline_at,
-      );
-  }
+  const base = {
+    agentId: request.agent_id,
+    kind: request.kind,
+    input: request.input,
+    ...(request.deadline_at === undefined ? {} : { deadlineAt: request.deadline_at }),
+    ...(request.title === undefined ? {} : { title: request.title }),
+  };
+
+  return base as CreateTaskBody;
 }
 
 /**

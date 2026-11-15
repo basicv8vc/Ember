@@ -227,8 +227,11 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       providerId: 'openrouter',
       modelLabel: 'nvidia/nemotron-3.5-lightning',
       simulated: false,
-      operations: ['conversation.turn'],
+      operations: ['conversation.turn', 'task.notes_action_items'],
       generateConversationTurn() {
+        throw new Error('the integration test must not call a Provider');
+      },
+      extractNotesActionItems() {
         throw new Error('the integration test must not call a Provider');
       },
     };
@@ -458,12 +461,16 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       providerId: 'fake',
       modelLabel: FAKE_MODEL_LABEL,
       simulated: true,
-      operations: ['conversation.turn'],
+      operations: ['conversation.turn', 'task.notes_action_items'],
       async generateConversationTurn() {
         entered();
         await heldResult;
         return {
-          output: { text: `${FAKE_REPLY_PREFIX}late test response`, finishReason: 'stop' },
+          output: {
+            kind: 'reply',
+            text: `${FAKE_REPLY_PREFIX}late test response`,
+            finishReason: 'stop',
+          },
           modelLabel: FAKE_MODEL_LABEL,
           simulated: true,
           usage: {
@@ -473,6 +480,11 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
             rateVersion: 'fake-zero-cost',
           },
         };
+      },
+      extractNotesActionItems() {
+        return Promise.reject(
+          new Error('extractNotesActionItems unused in cloud-async-runtime test'),
+        );
       },
     };
     const executor = await createTurnExecutor({

@@ -1,5 +1,5 @@
-import type { B1AssistantTurnDto } from '@ember/contracts';
-import type { Id } from '@ember/domain';
+import type { B1AssistantTurnDto, DelegationToolName } from '@ember/contracts';
+import type { Id, NotesActionItemsInput } from '@ember/domain';
 import type { PendingAssistantTurn } from './b1-turn-publication.js';
 
 /**
@@ -107,8 +107,18 @@ export interface B2BudgetIncident {
   readonly resolutionNote: string | null;
 }
 
+export interface B2TaskDelegationCommand {
+  readonly toolName: DelegationToolName;
+  readonly title?: string;
+  readonly input: NotesActionItemsInput;
+}
+
 export type B2PublicationResult =
-  | { readonly outcome: 'published'; readonly turn: B1AssistantTurnDto }
+  | {
+      readonly outcome: 'published';
+      readonly turn: B1AssistantTurnDto;
+      readonly delegatedTaskId?: Id | null;
+    }
   | { readonly outcome: 'fenced'; readonly turn: B1AssistantTurnDto | null };
 
 export interface B2TurnContextRow {
@@ -136,6 +146,7 @@ export interface B2PublishCommand {
         readonly text: string;
         readonly modelLabel: string;
         readonly simulated: boolean;
+        readonly delegation?: B2TaskDelegationCommand;
       }
     | {
         readonly status: 'failed';

@@ -4,9 +4,11 @@ import type {
   B1MessageSubmissionReconciliationDto,
   B1SendMessageRequest,
   B1SendMessageReceipt,
+  B1TaskDetailDto,
+  B1TaskListDto,
   B1TaskResultDto,
 } from '@ember/contracts';
-import type { Id } from '@ember/domain';
+import type { Id, TaskStatus } from '@ember/domain';
 
 /**
  * B1-1 persistence boundaries. No implementation uses network auth or model egress.
@@ -184,4 +186,16 @@ export interface B1AssistantTurnRepository {
 export interface B1TaskResultRepository {
   /** Read joins authoritative Task status; terminal tasks must never appear pending. */
   getTaskResult(tenantId: Id, taskId: Id): Promise<B1TaskResultDto | null>;
+}
+
+export interface B1TaskListQuery {
+  readonly status?: TaskStatus;
+  readonly limit?: number;
+}
+
+export interface B1TaskReadRepository {
+  /** Tenant-scoped list of Tasks sorted newest-first, joining live `task_results` state. */
+  listTasks(tenantId: Id, query?: B1TaskListQuery): Promise<B1TaskListDto>;
+  /** Tenant-scoped detail read joining Task metadata + live `task_results` state. */
+  getTaskDetail(tenantId: Id, taskId: Id): Promise<B1TaskDetailDto | null>;
 }

@@ -3,6 +3,7 @@ import type { LeaseQueue } from '@ember/contracts';
 import {
   DomainError,
   InvalidArgumentError,
+  isTerminalTaskStatus,
   transitionRun,
   transitionTask,
   type LeasedRun,
@@ -10,10 +11,12 @@ import {
   type RunTerminalStatus,
   type TaskKind,
   type TaskStatus,
+  type TaskTerminalStatus,
 } from '@ember/domain';
 import type pg from 'pg';
 import { appendTaskEvent } from '../repositories/event-store.js';
 import { asDomainError, withTransaction } from '../repositories/support.js';
+import { finalizeTaskTerminalEffects } from '../repositories/task-terminal-effects.js';
 import { systemClock, parseNow, type Clock } from './clock.js';
 import {
   applyFinishConvergence,
@@ -802,6 +805,13 @@ export class PostgresLeaseQueue implements LeaseQueue {
           : {}),
       },
     });
+
+    await finalizeTaskTerminalEffects(client, {
+      tenantId: task.tenant_id,
+      taskId: task.id,
+      status: nextStatus as TaskTerminalStatus,
+      occurredAt: at,
+    });
   }
 
   private async reapRunningTask(
@@ -938,6 +948,15 @@ export class PostgresLeaseQueue implements LeaseQueue {
           : { cancelRequested: convergence.cancelRequested }),
       },
     });
+
+    if (isTerminalTaskStatus(nextTaskStatus)) {
+      await finalizeTaskTerminalEffects(client, {
+        tenantId: task.tenant_id,
+        taskId: task.id,
+        status: nextTaskStatus,
+        occurredAt: reapedAt,
+      });
+    }
   }
 
   private async reapWaitingApprovalTask(
@@ -993,6 +1012,13 @@ export class PostgresLeaseQueue implements LeaseQueue {
                 : ('EXECUTION_TIMEOUT' as const),
             }),
       },
+    });
+
+    await finalizeTaskTerminalEffects(client, {
+      tenantId: task.tenant_id,
+      taskId: task.id,
+      status: nextStatus as TaskTerminalStatus,
+      occurredAt: reapedAt,
     });
   }
 }

@@ -27,6 +27,7 @@ export {
   type ModelGatewayFailureDiagnostic,
 } from './errors.js';
 export type {
+  ConversationDelegationCall,
   ConversationTurnInput,
   ConversationTurnOutput,
   ModelCallResult,
@@ -35,16 +36,28 @@ export type {
   ModelMessage,
   ModelOperation,
   ModelProviderId,
+  NotesActionItemsInput,
+  NotesActionItemsOutput,
   RealModelProviderId,
   ModelUsage,
 } from './types.js';
 export {
   CONVERSATION_SYSTEM_PROMPT,
+  NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   buildBoundedContext,
   type BoundedContext,
   type ContextRow,
 } from './context.js';
-export { preflightConversationTurn, type TokenPreflight } from './preflight.js';
+export {
+  preflightConversationTurn,
+  preflightNotesActionItems,
+  type TokenPreflight,
+} from './preflight.js';
+export {
+  DELEGATE_NOTES_TOOL_NAME,
+  DELEGATION_TOOLS,
+  DEFAULT_DELEGATION_ACK_TEXT,
+} from './providers/shared.js';
 export {
   APPROVED_MODEL_PROVIDERS,
   APPROVED_REAL_MODELS,

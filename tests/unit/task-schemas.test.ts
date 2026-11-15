@@ -81,7 +81,13 @@ describe('identifier, status and deadline schemas', () => {
   });
 
   it('accepts exactly the defined task kinds', () => {
-    expect(TASK_KINDS).toEqual(['mock.chat', 'mock.compute', 'mock.file', 'mock.approval']);
+    expect(TASK_KINDS).toEqual([
+      'mock.chat',
+      'mock.compute',
+      'mock.file',
+      'mock.approval',
+      'notes.action_items',
+    ]);
 
     for (const kind of TASK_KINDS) {
       expect(TaskKindSchema.safeParse(kind).success).toBe(true);

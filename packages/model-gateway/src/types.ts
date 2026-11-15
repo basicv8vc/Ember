@@ -1,12 +1,13 @@
 /**
- * The gateway is deliberately smaller than a "provider abstraction": it is the shape of the one
- * thing B2 does. No input carries a model, a temperature, a system prompt, a tool list, a stop
- * sequence or a provider, so a later feature cannot smuggle capability in through a parameter.
+ * The gateway is deliberately smaller than a "provider abstraction": it is the closed set of
+ * reviewed model operations Ember performs. No input carries a model, a temperature, a system
+ * prompt, a caller-defined tool list, a stop sequence or a provider, so a later feature cannot
+ * smuggle capability in through a parameter.
  */
 export type ModelProviderId = 'fake' | 'openai' | 'openrouter';
 export type RealModelProviderId = Exclude<ModelProviderId, 'fake'>;
 
-export type ModelOperation = 'conversation.turn';
+export type ModelOperation = 'conversation.turn' | 'task.notes_action_items';
 
 export type ModelExecutionMode = 'disabled' | 'fake' | 'real';
 
@@ -36,8 +37,40 @@ export interface ConversationTurnInput {
   readonly maxOutputTokens: number;
 }
 
-export interface ConversationTurnOutput {
-  readonly text: string;
+export interface ConversationDelegationCall {
+  readonly toolName: 'delegate_notes_action_items';
+  readonly arguments: {
+    readonly title?: string;
+    readonly notes: string;
+    readonly instructions?: string;
+  };
+}
+
+export type ConversationTurnOutput =
+  | {
+      readonly kind: 'reply';
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+    }
+  | {
+      readonly kind: 'delegate';
+      readonly toolName: 'delegate_notes_action_items';
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+      readonly delegation: ConversationDelegationCall;
+    };
+
+export interface NotesActionItemsInput {
+  readonly taskId: string;
+  readonly notes: string;
+  readonly instructions?: string;
+  readonly title?: string;
+}
+
+export interface NotesActionItemsOutput {
+  readonly summaryText: string;
+  readonly detailText: string;
+  readonly truncated: boolean;
   readonly finishReason: 'stop' | 'length';
 }
 
@@ -70,4 +103,8 @@ export interface ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>>;
+  extractNotesActionItems(
+    input: NotesActionItemsInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<NotesActionItemsOutput>>;
 }

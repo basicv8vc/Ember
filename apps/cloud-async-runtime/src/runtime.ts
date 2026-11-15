@@ -17,7 +17,7 @@ export function createTurnDispatchOutbox(pool: pg.Pool): PostgresB1TurnDispatchO
   return new PostgresB1TurnDispatchOutboxRepository(pool);
 }
 
-export async function createTurnExecutor(input: {
+export function createTurnExecutor(input: {
   readonly pool: pg.Pool;
   readonly model: CloudRuntimeModelConfig;
   readonly event: B1TurnDispatchEvent;
@@ -29,11 +29,11 @@ export async function createTurnExecutor(input: {
     input.model.kind !== 'enabled' ||
     !isCloudModelConversationAuthorized(input.model, input.event)
   ) {
-    return null;
+    return Promise.resolve(null);
   }
 
   if (!isAuthorizedCloudModelTurn(input.model, input.event)) {
-    return null;
+    return Promise.resolve(null);
   }
 
   const { mode, resolution } = input.model;
@@ -61,8 +61,8 @@ export async function createTurnExecutor(input: {
     },
   });
 
-  return {
+  return Promise.resolve({
     expireTurnIfDue: (turn) => repository.expireTurnIfDue(turn),
     processTurn: () => responder.processOnce(),
-  };
+  });
 }

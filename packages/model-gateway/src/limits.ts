@@ -17,6 +17,11 @@ export const MODEL_LIMITS = Object.freeze({
   maxContextChars: 12_000,
   /** Provider-side output cap passed as `max_completion_tokens`. */
   maxOutputTokens: 512,
+  /** Output cap for structured Notes -> Action Items extraction. */
+  notesMaxOutputTokens: 1_024,
+  /** Bounded result text fields matching 0013_task_results.sql. */
+  resultSummaryMaxChars: 2_048,
+  resultDetailMaxChars: 16_384,
   /** Fixed system prompt, versioned in code with the operation it belongs to. */
   systemPromptChars: 900,
   /** JSON envelope, role labels and schema overhead added to the character estimate. */
@@ -27,6 +32,10 @@ export const MODEL_LIMITS = Object.freeze({
   turnDeadlineMs: 60_000,
   /** Sentinels that make an unbounded call impossible even if a caller misbehaves. */
   maxInputTokens: 8_000,
+  /** Per-Task ceiling on cumulative model attempts across Runs/retries (<= placement §11.3 cap of 6). */
+  maxModelAttemptsPerTask: 4,
+  /** Per-Task cumulative reserved/applied model spend ceiling in micro-USD ($0.02). */
+  maxModelCostPerTaskMicroUsd: 20_000,
   /**
    * ASCII characters per token, as used to *price* a request. Real tokenizers are near 4 for English
    * prose; this figure is a planning ratio and proves nothing about any actual request.

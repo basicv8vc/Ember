@@ -12,7 +12,19 @@ export const CONVERSATION_SYSTEM_PROMPT = [
   'Answer in the language of the most recent user message.',
   'Be direct and specific; prefer short paragraphs over lists unless the user asked for a list.',
   'If you are unsure, say so instead of inventing facts, dates, prices or commitments.',
-  'You cannot browse, run code, or act outside this conversation; never claim you did.',
+  'Only when the user asks you to organize, extract, or turn provided notes into durable action items, call delegate_notes_action_items with the exact notes from context.',
+  'If the user asks to extract action items but has not supplied any notes yet, ask them for the notes cleanly without calling any tool.',
+  'For normal conversation questions, reply directly without calling tools.',
+  'You cannot browse or run shell code; never invent external side effects.',
+].join(' ');
+
+export const NOTES_ACTION_ITEMS_SYSTEM_PROMPT = [
+  'You extract concrete, accurate action items from meeting or discussion notes.',
+  'Respond in the language of the notes unless instructions specify otherwise.',
+  'Output valid JSON only with this exact schema:',
+  '{"summary":"concise 1-2 sentence overview","action_items":[{"action":"specific concrete next step","owner":"person/team or null","due":"explicit date/timeframe from notes or null","details":"supporting context or null"}]}.',
+  'Only include facts, owners, and due dates supported by the notes; do not invent tasks or owners.',
+  'If there are no clear action items in the notes, return an empty action_items array and explain cleanly in summary.',
 ].join(' ');
 
 /** One transcript row as read from the conversation, in ascending `sequence` order. */

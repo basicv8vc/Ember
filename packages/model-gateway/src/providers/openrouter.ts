@@ -1,6 +1,5 @@
 import { z } from 'zod';
-import { CONVERSATION_SYSTEM_PROMPT } from '../context.js';
-import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
+import { ModelGatewayFailure } from '../errors.js';
 import { MODEL_LIMITS } from '../limits.js';
 import { estimateCostMicroUsd, type ModelRateRow, type OpenRouterRoutingPolicy } from '../rates.js';
 import type {
@@ -9,8 +8,20 @@ import type {
   ModelCallResult,
   ModelGateway,
   ModelUsage,
+  NotesActionItemsInput,
+  NotesActionItemsOutput,
 } from '../types.js';
 import { statusToFailureCode, type FetchLike, type FetchResponseLike } from './openai.js';
+import {
+  DELEGATION_TOOLS,
+  assertAuthorizedBeforeFetch,
+  buildConversationTurnMessages,
+  buildNotesExtractionMessages,
+  completionMessageSchema,
+  parseConversationTurnChoice,
+  parseNotesActionItemsChoice,
+  rateRequestModifiers,
+} from './shared.js';
 
 export const OPENROUTER_ORIGIN = 'https://openrouter.ai';
 export const OPENROUTER_CHAT_COMPLETIONS_PATH = '/api/v1/chat/completions';
@@ -21,7 +32,7 @@ const completionSchema = z.object({
   choices: z
     .array(
       z.object({
-        message: z.object({ content: z.string().nullable().optional() }),
+        message: completionMessageSchema,
         finish_reason: z.string().nullable().optional(),
       }),
     )
@@ -104,14 +115,12 @@ const defaultFetch: FetchLike = (url, init) =>
   (globalThis.fetch as unknown as FetchLike)(url, init);
 
 /**
- * One exact model ID, one reviewed provider policy, no model fallbacks, no tools, no streaming.
- * OpenRouter's implicit provider failover is disabled unless the model's reviewed policy says
- * otherwise; model fallback is never sent in the request.
+ * One exact model ID, one reviewed provider policy, no model fallbacks, closed reviewed operations.
  */
 export class OpenRouterModelGateway implements ModelGateway {
   readonly providerId = 'openrouter' as const;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
   readonly modelLabel: string;
 
   readonly #apiKey: string;
@@ -138,24 +147,45 @@ export class OpenRouterModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
-    const body = JSON.stringify({
+    const body = this.#serializePayload({
+      messages: buildConversationTurnMessages(input),
+      maxCompletionTokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
+      includeDelegationTools: true,
+    });
+
+    return await this.#sendChatCompletion(body, signal, parseConversationTurnChoice);
+  }
+
+  async extractNotesActionItems(
+    input: NotesActionItemsInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<NotesActionItemsOutput>> {
+    const body = this.#serializePayload({
+      messages: buildNotesExtractionMessages(input),
+      maxCompletionTokens: MODEL_LIMITS.notesMaxOutputTokens,
+      includeDelegationTools: false,
+    });
+
+    return await this.#sendChatCompletion(body, signal, parseNotesActionItemsChoice);
+  }
+
+  #serializePayload(params: {
+    readonly messages: readonly {
+      readonly role: 'system' | 'user' | 'assistant';
+      readonly content: string;
+    }[];
+    readonly maxCompletionTokens: number;
+    readonly includeDelegationTools: boolean;
+  }): string {
+    return JSON.stringify({
       model: this.#modelId,
-      messages: [
-        { role: 'system', content: CONVERSATION_SYSTEM_PROMPT },
-        ...input.context.map((message) => ({ role: message.role, content: message.text })),
-      ],
-      max_completion_tokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
+      messages: params.messages,
+      max_completion_tokens: params.maxCompletionTokens,
       n: 1,
       stream: false,
       store: false,
-      ...(this.#rate.promptCacheMode === undefined
-        ? {}
-        : { prompt_cache_options: { mode: this.#rate.promptCacheMode } }),
-      ...(this.#rate.reasoningEffort === undefined
-        ? {}
-        : this.#rate.reasoningEffort === 'none'
-          ? { reasoning: { enabled: false } }
-          : { reasoning: { effort: this.#rate.reasoningEffort } }),
+      ...(params.includeDelegationTools ? { tools: DELEGATION_TOOLS, tool_choice: 'auto' } : {}),
+      ...rateRequestModifiers(this.#rate, 'openrouter'),
       provider: {
         only: [...this.#routing.only],
         allow_fallbacks: this.#routing.allowFallbacks,
@@ -168,11 +198,15 @@ export class OpenRouterModelGateway implements ModelGateway {
         },
       },
     });
+  }
 
+  async #sendChatCompletion<T>(
+    body: string,
+    signal: AbortSignal,
+    parseChoice: (choice: z.infer<typeof completionSchema>['choices'][number]) => T,
+  ): Promise<ModelCallResult<T>> {
     // No await occurs between the live authorization check and the provider request.
-    if (!this.#isAuthorized()) {
-      throw new ModelAuthorizationRefused();
-    }
+    assertAuthorizedBeforeFetch(this.#isAuthorized);
 
     let response: FetchResponseLike;
 
@@ -226,13 +260,7 @@ export class OpenRouterModelGateway implements ModelGateway {
       throw new ModelGatewayFailure('model_invalid_output');
     }
 
-    const choice = parsed.data.choices[0]!;
-    const text = choice.message.content;
-
-    if (typeof text !== 'string' || text.trim().length === 0) {
-      throw new ModelGatewayFailure('model_invalid_output');
-    }
-
+    const output = parseChoice(parsed.data.choices[0]!);
     const priced = toUsage(parsed.data.usage, this.#rate);
     const usage: ModelUsage | null =
       priced === null
@@ -243,10 +271,7 @@ export class OpenRouterModelGateway implements ModelGateway {
           });
 
     return Object.freeze({
-      output: Object.freeze({
-        text,
-        finishReason: choice.finish_reason === 'length' ? ('length' as const) : ('stop' as const),
-      }),
+      output,
       modelLabel: this.#modelId,
       simulated: false as const,
       usage,

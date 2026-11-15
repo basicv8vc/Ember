@@ -15,6 +15,7 @@ import {
   PostgresB1AssistantTurnRepository,
   PostgresB1ConversationReadRepository,
   PostgresB1ConversationWriteRepository,
+  PostgresB1TaskReadRepository,
   PostgresCommitmentRepository,
   PostgresConsentRepository,
   PostgresTaskRepository,
@@ -157,6 +158,7 @@ export function createApiApplication(options: ApiApplicationOptions) {
   const b1AssistantTurnRepository = new PostgresB1AssistantTurnRepository(pool, {
     expireOnRead: apiConfig.expireTurnsOnRead,
   });
+  const b1TaskReadRepository = new PostgresB1TaskReadRepository(pool);
 
   return createApp({
     readiness: createDatabaseReadiness(pool),
@@ -175,6 +177,8 @@ export function createApiApplication(options: ApiApplicationOptions) {
     b1ConversationWriteRepository,
     b1ConversationReadRepository,
     b1AssistantTurnRepository,
+    b1TaskResultRepository: b1TaskReadRepository,
+    b1TaskReadRepository,
     ...(apiConfig.blobRoot === null
       ? {}
       : {

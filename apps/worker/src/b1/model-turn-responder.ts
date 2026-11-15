@@ -8,6 +8,7 @@ import {
   isModelGatewayFailure,
   isRetryableModelFailure,
   preflightConversationTurn,
+  type ConversationTurnOutput,
   type ModelBudgetCeilings,
   type ModelFailureCode,
   type ModelGatewayFailureDiagnostic,
@@ -21,6 +22,7 @@ import type {
   B2PublicationResult,
   B2ReserveOutcome,
   B2SettlementOutcome,
+  B2TaskDelegationCommand,
   B2TurnContextRow,
   B2TurnLease,
 } from '@ember/postgres';
@@ -78,6 +80,7 @@ export interface ModelTurnExecutionPort {
           readonly text: string;
           readonly modelLabel: string;
           readonly simulated: boolean;
+          readonly delegation?: B2TaskDelegationCommand;
         }
       | {
           readonly status: 'failed';
@@ -152,6 +155,13 @@ export interface ModelTurnResponderOptions {
   readonly errorBackoffMs?: number;
   readonly sleep?: Sleeper;
   readonly logger?: Pick<WorkerLogger, 'warn'>;
+  /** Invoked when a completed Turn atomically delegates to a persistent Task. */
+  readonly onTaskDelegated?: (event: {
+    readonly tenantId: string;
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly taskId: string;
+  }) => void;
 }
 
 export interface ModelTurnResponderRunner {
@@ -161,7 +171,7 @@ export interface ModelTurnResponderRunner {
 
 interface GatewaySuccess {
   readonly kind: 'success';
-  readonly text: string;
+  readonly output: ConversationTurnOutput;
   readonly modelLabel: string;
   readonly simulated: boolean;
   /** `null` when the provider answered without reporting usage: an unknown charge, never a free one. */
@@ -331,7 +341,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
 
       return {
         kind: 'success',
-        text: result.output.text,
+        output: result.output,
         modelLabel: result.modelLabel,
         simulated: result.simulated,
         usage: result.usage,
@@ -347,6 +357,56 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       clearTimeout(timer);
       signal?.removeEventListener('abort', onAbort);
     }
+  };
+
+  const toDelegationCommand = (
+    output: ConversationTurnOutput,
+  ): B2TaskDelegationCommand | undefined => {
+    if (output.kind !== 'delegate') {
+      return undefined;
+    }
+
+    const args = output.delegation.arguments;
+    return {
+      toolName: output.delegation.toolName,
+      ...(args.title === undefined ? {} : { title: args.title }),
+      input: {
+        notes: args.notes,
+        ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+      },
+    };
+  };
+
+  const publishGatewaySuccess = async (
+    lease: B2TurnLease,
+    result: GatewaySuccess,
+  ): Promise<ModelTurnOutcome> => {
+    const delegation = toDelegationCommand(result.output);
+    const published = await options.repository.publishCompletion({
+      lease,
+      result: {
+        status: 'completed',
+        text: result.output.text,
+        modelLabel: result.modelLabel,
+        simulated: result.simulated,
+        ...(delegation === undefined ? {} : { delegation }),
+      },
+    });
+
+    if (published.outcome === 'fenced') {
+      return 'fenced';
+    }
+
+    if (published.delegatedTaskId !== null && published.delegatedTaskId !== undefined) {
+      options.onTaskDelegated?.({
+        tenantId: lease.tenantId,
+        conversationId: lease.conversationId,
+        turnId: lease.turnId,
+        taskId: published.delegatedTaskId,
+      });
+    }
+
+    return 'completed';
   };
 
   const settle = async (
@@ -403,17 +463,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         return terminalFailure(lease, 'internal_error');
       }
 
-      const published = await options.repository.publishCompletion({
-        lease,
-        result: {
-          status: 'completed',
-          text: result.text,
-          modelLabel: result.modelLabel,
-          simulated: result.simulated,
-        },
-      });
-
-      return published.outcome === 'published' ? 'completed' : 'fenced';
+      return await publishGatewaySuccess(lease, result);
     }
 
     const rate = options.rate;
@@ -502,17 +552,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
           });
         }
 
-        const published = await options.repository.publishCompletion({
-          lease,
-          result: {
-            status: 'completed',
-            text: result.text,
-            modelLabel: result.modelLabel,
-            simulated: result.simulated,
-          },
-        });
-
-        return published.outcome === 'published' ? 'completed' : 'fenced';
+        return await publishGatewaySuccess(lease, result);
       }
 
       const shutdown = signal?.aborted === true;

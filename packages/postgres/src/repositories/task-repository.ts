@@ -22,6 +22,7 @@ import type pg from 'pg';
 import { prepareTaskCommand, type PreparedTaskCommand } from '../task-digest.js';
 import { appendTaskEvent } from './event-store.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
+import { finalizeTaskTerminalEffects } from './task-terminal-effects.js';
 
 interface TaskRow {
   id: string;
@@ -55,9 +56,9 @@ const TASK_COLUMNS = `
 
 const INSERT_TASK_SQL = `
 INSERT INTO tasks (
-  id, tenant_id, agent_id, kind, input, digest, idempotency_key, deadline_at
+  id, tenant_id, agent_id, kind, title, input, digest, idempotency_key, deadline_at
 )
-VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 RETURNING ${TASK_COLUMNS}
 `;
@@ -464,6 +465,13 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
           },
         });
 
+        await finalizeTaskTerminalEffects(client, {
+          tenantId: validatedContext.tenantId,
+          taskId: validatedTaskId,
+          status: 'cancelled',
+          occurredAt: now,
+        });
+
         return toTaskCancelOutcome(cancelledRow);
       });
     } catch (error) {
@@ -488,6 +496,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
         ctx.tenantId,
         prepared.command.agentId,
         prepared.command.kind,
+        prepared.command.title ?? null,
         JSON.stringify(prepared.command.input),
         prepared.digest,
         prepared.command.idempotencyKey,

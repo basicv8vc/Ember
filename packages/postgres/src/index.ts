@@ -55,6 +55,8 @@ export type {
   B1ProvisionedSession,
   B1SessionRotationResult,
   B1SessionRecord,
+  B1TaskListQuery,
+  B1TaskReadRepository,
   B1TaskResultRepository,
   B1TranscriptClearResult,
 } from './repositories/b1-interfaces.js';
@@ -82,10 +84,25 @@ export type {
   B2ReserveAttemptCommand,
   B2ReserveOutcome,
   B2SettlementOutcome,
+  B2TaskDelegationCommand,
   B2TurnContextRow,
   B2TurnLease,
 } from './repositories/b2-interfaces.js';
 export { B2_ABSOLUTE_DAY_CEILINGS } from './repositories/b2-ledger-limits.js';
+export {
+  PostgresNotesTaskExecutionRepository,
+  type NotesAttemptCharge,
+  type NotesAttemptReservation,
+  type NotesCommitCompletionCommand,
+  type NotesCommitResult,
+  type NotesReserveAttemptCommand,
+  type NotesReserveOutcome,
+} from './repositories/notes-task-execution-repository.js';
+export {
+  B1_TASK_LIST_DEFAULT_LIMIT,
+  B1_TASK_LIST_MAX_LIMIT,
+  PostgresB1TaskReadRepository,
+} from './repositories/b1-task-read-repository.js';
 export {
   B1_ASSISTANT_TURN_FAILURE_MESSAGE as B1_TURN_FAILURE_MESSAGE,
   B1_ASSISTANT_TURN_MODEL_LABEL,

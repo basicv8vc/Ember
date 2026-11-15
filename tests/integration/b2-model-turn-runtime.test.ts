@@ -79,7 +79,7 @@ class ScriptedGateway implements ModelGateway {
   readonly providerId: 'openai' | 'openrouter';
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   readonly inputs: ConversationTurnInput[] = [];
   #script: Array<ModelFailureCode | 'ok'>;
@@ -110,7 +110,7 @@ class ScriptedGateway implements ModelGateway {
     }
 
     return Promise.resolve({
-      output: { text: this.text, finishReason: 'stop' as const },
+      output: { kind: 'reply', text: this.text, finishReason: 'stop' as const },
       modelLabel: REAL_MODEL_LABEL,
       simulated: false as const,
       usage: {
@@ -121,6 +121,12 @@ class ScriptedGateway implements ModelGateway {
       },
     });
   }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(
+      new Error('extractNotesActionItems unused in b2-model-turn-runtime test'),
+    );
+  }
 }
 
 /** A gateway whose call is held open until the test releases or fails it. */
@@ -128,7 +134,7 @@ class DeferredGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   calls = 0;
   #release: (() => void) | null = null;
@@ -149,7 +155,7 @@ class DeferredGateway implements ModelGateway {
     return new Promise((resolve, reject) => {
       this.#release = () => {
         resolve({
-          output: { text: this.text, finishReason: 'stop' as const },
+          output: { kind: 'reply', text: this.text, finishReason: 'stop' as const },
           modelLabel: REAL_MODEL_LABEL,
           simulated: false as const,
           usage: {
@@ -165,6 +171,12 @@ class DeferredGateway implements ModelGateway {
         once: true,
       });
     });
+  }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(
+      new Error('extractNotesActionItems unused in b2-model-turn-runtime test'),
+    );
   }
 
   release(): void {
@@ -1035,14 +1047,14 @@ describe('B2 real model Turn runtime on PostgreSQL 17', () => {
       providerId: 'openai',
       modelLabel: REAL_MODEL_LABEL,
       simulated: false,
-      operations: ['conversation.turn'] as const,
+      operations: ['conversation.turn', 'task.notes_action_items'] as const,
       generateConversationTurn() {
         // Sampled at the exact moment the paid request would be on the wire.
         checkedOut = db.pool.totalCount - db.pool.idleCount;
         waiting = db.pool.waitingCount;
 
         return Promise.resolve({
-          output: { text: 'no transaction was held', finishReason: 'stop' as const },
+          output: { kind: 'reply', text: 'no transaction was held', finishReason: 'stop' as const },
           modelLabel: REAL_MODEL_LABEL,
           simulated: false as const,
           usage: {
@@ -1052,6 +1064,9 @@ describe('B2 real model Turn runtime on PostgreSQL 17', () => {
             rateVersion: RATE.rateVersion,
           },
         });
+      },
+      extractNotesActionItems() {
+        return Promise.reject(new Error('extractNotesActionItems unused'));
       },
     };
 

@@ -185,7 +185,20 @@ V1 采用 **简单、规则驱动、可解释的 Placement**：交互设备和�
 | 并发                | Agent Task Queue 初始 `max_concurrency: 2`、`max_batch_size: 1`。Adapter 的 `maxConcurrentSandboxes: 2` 只约束单个 Provider 实例，不能当作全局保证 |
 | 孤儿回收            | 依赖 Adapter 的 vendor idle-stop + 停止即删除，Reaper 负责回收超时 Run                                                                             |
 
-- 重试产生的新 Run 同样受上述上限约束；每个 Task 的 Run 总数受现有重试策略限制。
+上表是**每个 Run** 的上限。`tasks.max_attempts` 默认为 3，如果只有 per-Run 上限，重试会重新获得额度，单个 Task 理论上可达 9 次 Python 执行和 12 次模型调用。因此另设**跨 Run 累计的 per-Task 预算**，重试不会重置：
+
+| 每个 Task（所有 Run 合计） | V1 上限                                               |
+| -------------------------- | ----------------------------------------------------- |
+| Sandbox 创建               | ≤ 2 次                                                |
+| Python 执行                | ≤ 4 次                                                |
+| 执行阶段 LLM 调用          | ≤ 6 次                                                |
+| 模型 Token / 费用          | 固定代码常量，PR B1 给出数值和依据（基于 Smoke 实测） |
+
+- 这些数值让一次基础设施故障后的重试仍能走完最短路径（1 次执行 + 总结），但不会再给一整份新额度。实现可以更严格。
+- 计量**复用现有 `budget_operations`**（已有 `task_id`、`run_id`、`lease_epoch`）：每次创建 Sandbox、执行 Python、调用模型前，先在现有租户 Advisory Lock 下按 `task_id` 汇总所有 Run 的 `reserved` / `settled` / `expired` 记录，再预留本次额度。类别可用 `operation_id` 前缀区分（如 `sandbox:`、`py:`、`llm:`），或在新增 Migration 中加类别列。
+- 结果不确定的调用（发出后崩溃、ACK 丢失）按已消耗计，与现有 “expired 全额计费” 约束一致。累计额度只存在数据库中，不放在 Run 内存或 Queue 消息里。
+- per-Task 预算耗尽时，Task 以不可重试的 `failed` 结束，并给出用户可读的原因；剩余额度不足一次 LLM 调用时，Lease 恢复不得再创建新 Run。
+- PR B1 必须包含测试：连续重试后累计次数不超过 per-Task 上限。
 - Task 的 LLM 调用与普通聊天的 `model_turn_attempts` **分开计量**，但共享全局费用上限。外部测试前必须核实当前 OpenRouter Key 的累计额度限制。
 
 ### 11.4 重试与恢复：Queue 只负责投递，Run/Lease 负责执行重试
@@ -194,7 +207,8 @@ V1 采用 **简单、规则驱动、可解释的 Placement**：交互设备和�
 - 是否重试只由 Run/Lease 决定（`retryable_failed` → 新 Run），避免 Queue 重试和 Lease 恢复同时重跑同一个 Task。
 - **Lease Heartbeat** 在等待模型和 Daytona 期间也要持续发送，不能只在步骤之间发送；Lease TTL 必须大于单次最长等待。
 - **Fencing**：旧 epoch 的 Run 写入的事件、结果和 Artifact 一律拒绝。
-- **Checkpoint 恢复**：LLM 循环不可重复，因此 Checkpoint 定义为“已完成的工具调用及其持久化结果”。新 Run 使用新的 Sandbox，从已持久化的输入 Artifact 重新上传，并带着已保存的历史重新提示模型；不假设模型会生成相同的计划。有副作用的操作通过现有 `operation_receipts` / `external_effects` 保证最多执行一次（V1 Python Task 本身在 `deny-all` 下没有外部副作用）。
+- **Checkpoint 恢复**：LLM 循环不可重复，因此 Checkpoint 定义为“已完成的工具调用及其持久化结果”。新 Run 使用新的 Sandbox，从已持久化的输入 Artifact 重新上传，并带着已保存的历史重新提示模型；不假设模型会生成相同的计划。
+- **V1 禁止外部写操作**：V1 Agent Task 不提供任何对第三方系统的写工具，Python Task 在 `deny-all` 下也没有外部副作用。现有 `operation_receipts` / `external_effects` 只记录 Ember 自身操作的幂等与审计信息，**不能**单独保证 ACK 不确定或崩溃后第三方写操作不会重复执行，本文不作 exactly-once 承诺。将来任何外部写工具都必须具备 Provider 侧幂等键或对账（reconciliation）机制，并经过 ActionIntent / Sentinel 审批边界，另行批准后才能启用。
 
 ### 11.5 不可信输入
 
@@ -209,10 +223,12 @@ V1 采用 **简单、规则驱动、可解释的 Placement**：交互设备和�
 - 单文件 ≤ 256 KiB，在上传接口和数据库约束两层都要校验。
 - 文件在发布为 Artifact 之前不可下载；每次读取都校验租户。
 - 最终 Artifact 与 Task 完成状态、`task_results` 在同一个事务中提交，不会出现“显示已完成但文件不可读”。
-- 未关联到任何委托的上传文件由现有 GC 隔离机制回收。
+- **上传文件在委托前不发布**：上传接口只创建租户私有的**暂存上传**（不是 `artifacts` 行），有效期 24 小时。只有在 Task 创建的同一事务中，暂存上传才发布为该 Task 的输入 Artifact（绑定 `task_id`，`retention = 'task'`，不使用 `retention = 'user'`）。
+- 超过有效期仍未绑定委托的暂存上传，由新 `bytea` 存储自己的过期清理任务删除，并须有测试覆盖。现有 GC 隔离只回收未发布的暂存字节，已发布且 `retention = 'user'` 的 Artifact 会被明确保留，因此**不假设**现有 GC 会自动覆盖新存储。
+- 每个用户的未绑定暂存上传设数量上限（初始 ≤ 10 个），超过后拒绝新上传。
 - 本方案**不**决定 D-01。
 
 ### 11.7 输入与体验边界
 
-- 初始输入：普通文本，以及 ≤ 256 KiB 的 TXT/CSV/Markdown 附件，通过独立的认证上传接口提交（聊天消息保持现有字符上限）。上传后的 Artifact ID 必须校验所有权，并与该次委托绑定。
+- 初始输入：普通文本，以及 ≤ 256 KiB 的 TXT/CSV/Markdown 附件，通过独立的认证上传接口提交（聊天消息保持现有字符上限）。委托时引用的暂存上传 ID 必须校验所有权和有效期，并在 Task 创建事务中绑定（见 §11.6）。
 - **APNs 未实现**：关闭 App 后，只承诺任务在云端继续执行、重新打开 App 后恢复真实状态和结果；不承诺任何推送通知。

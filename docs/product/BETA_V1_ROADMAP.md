@@ -266,7 +266,7 @@ Do not add multi-Bot, voice, attachments, browsing or external actions to this s
 - **Plan ≠ Activity.** A plan the model wrote may be shown only when labelled as a plan, never as completed steps.
 - A result or artifact is shown only after authenticated retrieval succeeds.
 
-**Inputs:** text, plus TXT/CSV/Markdown attachments up to 256 KiB each, sent through a separate authenticated upload endpoint (chat messages keep their existing character limit). Uploaded artifact IDs are checked for ownership and bound to the delegation. Images, PDFs and larger files are deferred. Product copy says "small datasets", not data-analysis platform.
+**Inputs:** text, plus TXT/CSV/Markdown attachments up to 256 KiB each, sent through a separate authenticated upload endpoint (chat messages keep their existing character limit). Uploads stay private staged uploads, not Artifacts, until a delegation binds them in the same transaction that creates the Task. Unbound uploads expire after 24 hours and are deleted. Images, PDFs and larger files are deferred. Product copy says "small datasets", not data-analysis platform.
 
 **App closed:** APNs is **not** implemented. Ember promises only that the Task keeps running in the cloud and that reopening the app recovers the true Task state and result. No UI or copy may claim the user will be notified while the app is closed.
 
@@ -293,7 +293,7 @@ User journey:
 - task failure, cancellation and missing result have truthful UI states;
 - **Case 1 — Notes:** "Turn these meeting notes into action items" creates a Task automatically, runs it in the background and returns a real result;
 - **Case 2 — Daytona:** "Analyze this small CSV with Python, find outliers and write a report" runs end-to-end with real tool calling, sandbox execution, at least one failed execution repaired by the model, and an artifact download; the Task keeps running after the app is closed;
-- the final iPhone → Cloud → Daytona → Artifact → iPhone run verifies cross-tenant isolation, recovery after a restart, cancellation, timeout, budget rejection, cleanup of orphaned sandboxes, and that artifacts are unreadable before completion.
+- the final iPhone → Cloud → Daytona → Artifact → iPhone run verifies cross-tenant isolation, recovery after a restart, cancellation, timeout, budget rejection (including a per-Task budget that retries cannot reset), cleanup of orphaned sandboxes and expired uploads, and that artifacts are unreadable before completion.
 
 Out of scope for B3: general-purpose browsing; shell or code execution outside the allowlisted programs in the sandbox; network access from the sandbox; external writes and multi-step third-party actions; changing a Task while it runs; recurring Commitment execution (the existing Commitment model is kept and connected later).
 

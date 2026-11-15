@@ -93,6 +93,7 @@ public struct OutcomeCard: View {
                 }
             }
         }
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("outcome-card")
     }
 

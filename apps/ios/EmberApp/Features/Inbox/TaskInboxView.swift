@@ -1,6 +1,291 @@
 import SwiftUI
 
 struct TaskInboxView: View {
+    private enum Mode {
+        case legacyDemo(TaskJourneySession, () -> Void)
+        case sessionTasks(SessionTaskStore, (UUID) -> Void)
+    }
+
+    private let mode: Mode
+
+    init(session: TaskJourneySession, onSelectTask: @escaping () -> Void) {
+        self.mode = .legacyDemo(session, onSelectTask)
+    }
+
+    init(store: SessionTaskStore, onOpenTask: @escaping (UUID) -> Void) {
+        self.mode = .sessionTasks(store, onOpenTask)
+    }
+
+    var body: some View {
+        switch mode {
+        case .legacyDemo(let session, let onSelectTask):
+            LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
+        case .sessionTasks(let store, let onOpenTask):
+            SessionTaskInboxContent(store: store, onOpenTask: onOpenTask)
+        }
+    }
+}
+
+private struct SessionTaskInboxContent: View {
+    @Bindable var store: SessionTaskStore
+    let onOpenTask: (UUID) -> Void
+
+    private var needsIntervention: [SessionTaskDTO] {
+        store.tasks(in: .needsIntervention)
+    }
+
+    private var inProgress: [SessionTaskDTO] {
+        store.tasks(in: .inProgress)
+    }
+
+    private var completed: [SessionTaskDTO] {
+        store.tasks(in: .completed)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                if store.isMockOnly {
+                    MockOnlyBanner()
+                }
+
+                if store.isLoadingList && store.orderedTasks.isEmpty {
+                    LoadingPlaceholder(title: "placeholder.loading")
+                        .accessibilityIdentifier("tasks-loading")
+                } else if let error = store.listErrorMessage, store.orderedTasks.isEmpty {
+                    ErrorPlaceholder(
+                        title: LocalizedStringKey("tasks.error.title"),
+                        message: LocalizedStringKey(error),
+                        retryTitle: LocalizedStringKey("placeholder.retry")
+                    ) {
+                        Task { await store.refreshAll() }
+                    }
+                    .accessibilityIdentifier("tasks-error-state")
+                } else {
+                    if let error = store.listErrorMessage {
+                        InlineNotice(
+                            title: LocalizedStringKey("tasks.error.title"),
+                            message: LocalizedStringKey(error),
+                            tone: .warning
+                        )
+                    } else if store.listEndpointUnavailable {
+                        InlineNotice(
+                            title: LocalizedStringKey("tasks.endpoint_unavailable.title"),
+                            message: LocalizedStringKey("tasks.endpoint_unavailable.message"),
+                            tone: .neutral
+                        )
+                        .accessibilityIdentifier("tasks-endpoint-unavailable")
+                    }
+
+                    if store.orderedTasks.isEmpty && !store.isLoadingList {
+                        EmptyPlaceholder(
+                            title: LocalizedStringKey("tasks.empty.title"),
+                            message: LocalizedStringKey("tasks.empty.message"),
+                            systemImage: "checklist"
+                        )
+                        .accessibilityIdentifier("tasks-empty-state")
+                    } else {
+                        if !needsIntervention.isEmpty {
+                            taskSection(
+                                title: SessionTaskStatusGroup.needsIntervention.localizedSectionTitle,
+                                tasks: needsIntervention,
+                                sectionIdentifier: "tasks-section-needs-intervention"
+                            )
+                        }
+                        if !inProgress.isEmpty {
+                            taskSection(
+                                title: SessionTaskStatusGroup.inProgress.localizedSectionTitle,
+                                tasks: inProgress,
+                                sectionIdentifier: "tasks-section-in-progress"
+                            )
+                        }
+                        if !completed.isEmpty {
+                            taskSection(
+                                title: SessionTaskStatusGroup.completed.localizedSectionTitle,
+                                tasks: completed,
+                                sectionIdentifier: "tasks-section-completed"
+                            )
+                        }
+
+                        if let loadMoreError = store.loadMoreErrorMessage {
+                            InlineNotice(
+                                title: LocalizedStringKey("tasks.error.title"),
+                                message: LocalizedStringKey(loadMoreError),
+                                tone: .warning
+                            )
+                        }
+
+                        if store.hasMoreTasks {
+                            if let cursor = store.nextTasksCursor, !cursor.isEmpty {
+                                VStack(spacing: 8) {
+                                    Button {
+                                        Task { await store.loadMoreTasks() }
+                                    } label: {
+                                        HStack(spacing: 8) {
+                                            if store.isLoadingMoreTasks {
+                                                ProgressView()
+                                            }
+                                            Text("tasks.action.load_more", tableName: "Conversation")
+                                                .font(.subheadline.weight(.semibold))
+                                        }
+                                        .frame(maxWidth: .infinity)
+                                        .padding(.vertical, 10)
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .disabled(store.isLoadingMoreTasks || store.isLoadingList)
+                                    .accessibilityIdentifier("tasks-load-more-button")
+
+                                    Text("tasks.pagination.more_available", tableName: "Conversation")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .multilineTextAlignment(.center)
+                                }
+                                .padding(.top, 4)
+                            } else {
+                                InlineNotice(
+                                    title: LocalizedStringKey("tasks.pagination.partial_title"),
+                                    message: LocalizedStringKey("tasks.pagination.partial_message"),
+                                    tone: .neutral
+                                )
+                                .accessibilityIdentifier("tasks-partial-notice")
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+        }
+        .background(EmberDesignTokens.groupedBackground)
+        .navigationTitle(Text("tab.tasks", tableName: "Conversation"))
+        .navigationBarTitleDisplayMode(.large)
+        .accessibilityIdentifier("tasks-inbox-screen")
+        .refreshable {
+            await store.refreshAll()
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await store.refreshAll() }
+                } label: {
+                    if store.isLoadingList {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .accessibilityLabel(Text("tasks.action.refresh", tableName: "Conversation"))
+                    }
+                }
+                .disabled(store.isLoadingList)
+                .accessibilityIdentifier("tasks-refresh-button")
+            }
+        }
+    }
+
+    private func taskSection(
+        title: String,
+        tasks: [SessionTaskDTO],
+        sectionIdentifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: EmberDesignTokens.compactSpacing + 2) {
+            HStack {
+                Text(title)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                Spacer()
+                Text(tasks.count, format: .number)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 4)
+
+            ForEach(tasks) { task in
+                SessionTaskInboxRow(
+                    task: task,
+                    hasResult: store.resultsByTaskID[task.taskID]?.resultState == .available
+                        || task.resultState == .available,
+                    isMockOnly: store.isMock(task, result: store.resultsByTaskID[task.taskID]),
+                    onTap: { onOpenTask(task.taskID) }
+                )
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(sectionIdentifier)
+    }
+}
+
+private struct SessionTaskInboxRow: View {
+    let task: SessionTaskDTO
+    let hasResult: Bool
+    let isMockOnly: Bool
+    let onTap: () -> Void
+
+    var body: some View {
+        Button(action: onTap) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(alignment: .top, spacing: 10) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(task.kind.localizedDisplayTitle)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            if isMockOnly {
+                                ConversationMockTag()
+                            }
+                        }
+
+                        Text(task.displayTitle)
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
+                        .accessibilityHidden(true)
+                }
+
+                HStack(spacing: 8) {
+                    TaskStatusBadge(status: task.status)
+                    Spacer(minLength: 0)
+                    if hasResult {
+                        Label {
+                            Text("tasks.row.result_ready", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "doc.text")
+                        }
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(Color(uiColor: .systemGreen))
+                    } else if task.cancelRequested && !task.status.isTerminal {
+                        Text("card.cancel_pending", tableName: "ConversationCards")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else if let updatedAt = ConversationCardFormatting.date(from: task.updatedAt) {
+                        Text(updatedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                EmberDesignTokens.cardBackground,
+                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("tasks-row-\(task.taskID.uuidString.lowercased())")
+    }
+}
+
+private struct LegacyDemoTaskInboxView: View {
     @Bindable var session: TaskJourneySession
     let onSelectTask: () -> Void
 
@@ -107,15 +392,15 @@ struct TaskInboxView: View {
             .accessibilityIdentifier("inbox-401-state")
         case .notFound:
             contentNotice(
-                title: "任务当前不可见",
-                message: "本机演示没有查询其他用户的任务，也没有发出查询请求。",
+                title: "任务不可见或不存在",
+                message: "没有权限查看或无此任务时，只会说明不可见，不提供可猜测的信息。",
                 symbol: "questionmark.folder"
             )
             .accessibilityIdentifier("inbox-404-state")
         case .offline:
             contentNotice(
-                title: "连接中断",
-                message: "连接状态与任务状态分开显示。任务可能仍在进行；此处只演示文案，没有连接真实服务端。",
+                title: "网络不可用",
+                message: "演示的离线提示，没有发起真实网络请求。当前只能查看内存里的固定样例。",
                 symbol: "wifi.slash"
             )
             .accessibilityIdentifier("inbox-offline-state")
@@ -124,13 +409,10 @@ struct TaskInboxView: View {
 
     private var fixtureSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("独立演示样例")
+            Text("固定演示样例")
                 .font(.headline)
-            Text("每一项都是单独的固定情景，不代表你提交的任务会自动进入这些状态。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             ForEach(fixtureRecords) { record in
-                taskRow(record, sourceLabel: "固定演示样例")
+                taskRow(record, sourceLabel: "固定样例 · 不代表真实处理结果")
             }
         }
     }

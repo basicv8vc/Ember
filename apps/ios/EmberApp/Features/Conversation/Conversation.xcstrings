@@ -253,6 +253,12 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以从这里开始" } }
       }
     },
+    "conversation.task.loading" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading linked task…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在加载关联任务…" } }
+      }
+    },
     "conversation.task.unavailable" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Task unavailable" } },
@@ -275,6 +281,228 @@
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Still waiting for Ember Cloud." } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仍在等待 Ember Cloud…" } }
+      }
+    },
+    "tab.chat" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Chat" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对话" } }
+      }
+    },
+    "tab.tasks" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务" } }
+      }
+    },
+    "tasks.kind.notes_action_items" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Notes · Action Items" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "笔记 · 待办整理" } }
+      }
+    },
+    "tasks.kind.python_sandbox" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sandbox · Python" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "沙盒 · Python" } }
+      }
+    },
+    "tasks.kind.mock_chat" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Chat" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 对话" } }
+      }
+    },
+    "tasks.kind.mock_compute" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Compute" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 计算" } }
+      }
+    },
+    "tasks.kind.mock_file" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · File" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 文件" } }
+      }
+    },
+    "tasks.kind.mock_approval" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Approval" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 审批" } }
+      }
+    },
+    "tasks.group.needs_intervention" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs Attention" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要介入" } }
+      }
+    },
+    "tasks.group.in_progress" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "In Progress" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进行中" } }
+      }
+    },
+    "tasks.group.completed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Completed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已完成" } }
+      }
+    },
+    "tasks.error.list_load" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load tasks from Ember Cloud. Pull to try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务列表，请下拉重试。" } }
+      }
+    },
+    "tasks.error.detail_load" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task details from Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务详情。" } }
+      }
+    },
+    "tasks.error.result_load" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task result from Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务结果。" } }
+      }
+    },
+    "tasks.error.cancel_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not request task cancellation. Check task status before retrying." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法发送取消请求，请检查任务状态后重试。" } }
+      }
+    },
+    "tasks.error.cancel_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task cancellation is not yet enabled on Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember Cloud 暂未开放任务取消接口。" } }
+      }
+    },
+    "tasks.action.refresh" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新任务" } }
+      }
+    },
+    "tasks.action.load_more" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Load more tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载更多任务" } }
+      }
+    },
+    "tasks.pagination.more_available" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "More earlier tasks are stored in Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "云端还有更早的任务记录，点击可继续加载。" } }
+      }
+    },
+    "tasks.pagination.partial_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing recent tasks" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前仅显示最近任务" } }
+      }
+    },
+    "tasks.pagination.partial_message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Additional earlier tasks exist on the server." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端存在更早的任务，当前列表仅展示了最新一页。" } }
+      }
+    },
+    "tasks.row.result_ready" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result ready" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果已就绪" } }
+      }
+    },
+    "tasks.detail.nav_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task Detail" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务详情" } }
+      }
+    },
+    "tasks.detail.copied_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result copied" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果已复制" } }
+      }
+    },
+    "tasks.detail.ok" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "OK" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "好" } }
+      }
+    },
+    "tasks.detail.server_truth_note" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Progress and lifecycle reflect persisted server state only." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进度与状态仅来自服务端持久记录，不做客户端估算。" } }
+      }
+    },
+    "tasks.detail.updated_at" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Updated" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更新于" } }
+      }
+    },
+    "tasks.detail.created_at" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Created" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "创建于" } }
+      }
+    },
+    "tasks.detail.attempts" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Attempts" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "执行次数" } }
+      }
+    },
+    "tasks.detail.task_id" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task ID" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务编号" } }
+      }
+    },
+    "tasks.detail.cancel_section_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task Actions" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务控制" } }
+      }
+    },
+    "tasks.detail.cancel_honest_note" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Requesting cancellation notifies the server; status updates only after persisted confirmation." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求取消后会等待服务端持久确认，确认前会继续显示当前状态。" } }
+      }
+    },
+    "tasks.detail.cancel_button" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel Task" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消任务" } }
+      }
+    },
+    "tasks.detail.activity_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Execution Activity" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "真实执行活动" } }
+      }
+    },
+    "tasks.detail.activity_empty" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No persisted execution events yet." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无服务端持久执行记录。" } }
+      }
+    },
+    "tasks.detail.activity_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Execution activity timeline is not yet available from this server." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端暂未提供执行活动时间线。" } }
+      }
+    },
+    "tasks.detail.result_section_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务结果" } }
       }
     }
   },

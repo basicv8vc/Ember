@@ -2,6 +2,384 @@ import SwiftUI
 import UIKit
 
 struct TaskDetailView: View {
+    private enum Mode {
+        case legacyDemo(TaskJourneySession)
+        case sessionTask(UUID, SessionTaskStore)
+    }
+
+    private let mode: Mode
+
+    init(session: TaskJourneySession) {
+        self.mode = .legacyDemo(session)
+    }
+
+    init(taskID: UUID, store: SessionTaskStore) {
+        self.mode = .sessionTask(taskID, store)
+    }
+
+    var body: some View {
+        switch mode {
+        case .legacyDemo(let session):
+            LegacyDemoTaskDetailView(session: session)
+        case .sessionTask(let taskID, let store):
+            SessionTaskDetailContent(taskID: taskID, store: store)
+        }
+    }
+}
+
+private struct SessionTaskDetailContent: View {
+    let taskID: UUID
+    @Bindable var store: SessionTaskStore
+
+    @State private var copiedResultAlert = false
+
+    private var task: SessionTaskDTO? {
+        store.tasksByID[taskID]
+    }
+
+    private var events: [SessionTaskEventDTO] {
+        store.eventsByTaskID[taskID] ?? []
+    }
+
+    private var result: SessionTaskResultDTO? {
+        store.resultsByTaskID[taskID]
+    }
+
+    private var cancelResponse: TaskCancelDTO? {
+        store.cancelResponseByTaskID[taskID]
+    }
+
+    private var isLoading: Bool {
+        store.loadingDetailTaskIDs.contains(taskID)
+    }
+
+    private var isCancelling: Bool {
+        store.cancellingTaskIDs.contains(taskID)
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                if store.isMock(task, result: result) {
+                    MockOnlyBanner()
+                }
+
+                if let task {
+                    summaryCard(task)
+                    interventionCardIfNeeded(task)
+                    cancelSectionIfNeeded(task)
+                    activitySection
+                    resultSection(for: task)
+                } else if isLoading {
+                    LoadingPlaceholder(title: "placeholder.loading")
+                } else if store.missingTaskIDs.contains(taskID) {
+                    EmptyPlaceholder(
+                        title: LocalizedStringKey("tasks.detail.not_found_title"),
+                        message: LocalizedStringKey("tasks.detail.not_found_message"),
+                        systemImage: "questionmark.folder"
+                    )
+                    .accessibilityIdentifier("task-detail-not-found")
+                } else {
+                    ErrorPlaceholder(
+                        title: LocalizedStringKey("tasks.error.title"),
+                        message: LocalizedStringKey(
+                            store.detailErrorByTaskID[taskID] ?? String(localized: "tasks.error.detail_load", table: "Conversation")
+                        ),
+                        retryTitle: LocalizedStringKey("placeholder.retry")
+                    ) {
+                        Task { await store.loadDetail(taskID: taskID) }
+                    }
+                    .accessibilityIdentifier("task-detail-error")
+                }
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .frame(maxWidth: 760)
+            .frame(maxWidth: .infinity)
+        }
+        .background(EmberDesignTokens.groupedBackground)
+        .navigationTitle(Text("tasks.detail.nav_title", tableName: "Conversation"))
+        .navigationBarTitleDisplayMode(.inline)
+        .refreshable {
+            await store.loadDetail(taskID: taskID)
+        }
+        .task(id: taskID) {
+            await store.loadDetail(taskID: taskID)
+        }
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button {
+                    Task { await store.loadDetail(taskID: taskID) }
+                } label: {
+                    if isLoading {
+                        ProgressView()
+                    } else {
+                        Image(systemName: "arrow.clockwise")
+                            .accessibilityLabel(Text("tasks.action.refresh", tableName: "Conversation"))
+                    }
+                }
+                .disabled(isLoading)
+                .accessibilityIdentifier("task-detail-refresh")
+            }
+        }
+        .alert(
+            Text("tasks.detail.copied_title", tableName: "Conversation"),
+            isPresented: $copiedResultAlert
+        ) {
+            Button(role: .cancel) {} label: {
+                Text("tasks.detail.ok", tableName: "Conversation")
+            }
+        }
+    }
+
+    private func summaryCard(_ task: SessionTaskDTO) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(task.kind.localizedDisplayTitle)
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Text(task.displayTitle)
+                        .font(.title3.weight(.semibold))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 8)
+                TaskStatusBadge(status: task.status)
+            }
+
+            Text("tasks.detail.server_truth_note", tableName: "Conversation")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let detailError = store.detailErrorByTaskID[taskID] {
+                InlineNotice(
+                    title: LocalizedStringKey("tasks.error.title"),
+                    message: LocalizedStringKey(detailError),
+                    tone: .warning
+                )
+            }
+
+            Divider()
+
+            VStack(alignment: .leading, spacing: 6) {
+                if let updatedAt = ConversationCardFormatting.date(from: task.updatedAt) {
+                    LabeledContent {
+                        Text(updatedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    } label: {
+                        Text("tasks.detail.updated_at", tableName: "Conversation")
+                    }
+                    .font(.footnote)
+                }
+                if let createdAt = ConversationCardFormatting.date(from: task.createdAt) {
+                    LabeledContent {
+                        Text(createdAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    } label: {
+                        Text("tasks.detail.created_at", tableName: "Conversation")
+                    }
+                    .font(.footnote)
+                }
+                LabeledContent {
+                    Text(task.attemptCount, format: .number)
+                } label: {
+                    Text("tasks.detail.attempts", tableName: "Conversation")
+                }
+                .font(.footnote)
+
+                LabeledContent {
+                    Text(task.taskID.uuidString.lowercased())
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                } label: {
+                    Text("tasks.detail.task_id", tableName: "Conversation")
+                }
+                .font(.footnote)
+            }
+        }
+        .padding(EmberDesignTokens.standardSpacing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            EmberDesignTokens.cardBackground,
+            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-detail-summary")
+    }
+
+    @ViewBuilder
+    private func interventionCardIfNeeded(_ task: SessionTaskDTO) -> some View {
+        if task.status == .waitingApproval {
+            InlineNotice(
+                title: LocalizedStringKey("tasks.detail.waiting_approval_title"),
+                message: LocalizedStringKey("tasks.detail.waiting_approval_message"),
+                tone: .warning
+            )
+            .accessibilityIdentifier("task-detail-waiting-approval")
+        } else if task.status == .retryableFailed {
+            InlineNotice(
+                title: LocalizedStringKey("tasks.detail.retry_scheduled_title"),
+                message: LocalizedStringKey("tasks.detail.retry_scheduled_message"),
+                tone: .warning
+            )
+            .accessibilityIdentifier("task-detail-retry-scheduled")
+        }
+    }
+
+    @ViewBuilder
+    private func cancelSectionIfNeeded(_ task: SessionTaskDTO) -> some View {
+        if !task.status.isTerminal {
+            VStack(alignment: .leading, spacing: 10) {
+                Label {
+                    Text("tasks.detail.cancel_section_title", tableName: "Conversation")
+                } icon: {
+                    Image(systemName: "arrow.uturn.backward.circle")
+                }
+                .font(.headline)
+
+                if let cancelError = store.cancelErrorByTaskID[taskID] {
+                    Text(cancelError)
+                        .font(.subheadline)
+                        .foregroundStyle(Color(uiColor: .systemRed))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("task-cancel-status")
+                } else if (cancelResponse?.cancelRequested == true && cancelResponse?.terminal == false) || task.cancelRequested {
+                    Text("card.cancel_pending", tableName: "ConversationCards")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("task-cancel-status")
+                } else {
+                    Text("tasks.detail.cancel_honest_note", tableName: "Conversation")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Button(role: .destructive) {
+                    Task { await store.cancelTask(taskID: taskID) }
+                } label: {
+                    if isCancelling {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label {
+                            Text("tasks.detail.cancel_button", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "stop.circle")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 44)
+                .disabled(isCancelling || task.cancelRequested)
+                .accessibilityIdentifier("task-cancel")
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                EmberDesignTokens.cardBackground,
+                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+            )
+        }
+    }
+
+    private var activitySection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("tasks.detail.activity_title", tableName: "Conversation")
+                .font(.headline)
+
+            if events.isEmpty {
+                Text(
+                    store.eventsUnavailableTaskIDs.contains(taskID)
+                        ? "tasks.detail.activity_unavailable"
+                        : "tasks.detail.activity_empty",
+                    tableName: "Conversation"
+                )
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            } else {
+                ConversationCardRenderer.ActivityEvents(
+                    events: events.map { $0.asTaskEventDTO() }
+                )
+            }
+        }
+        .padding(EmberDesignTokens.standardSpacing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            EmberDesignTokens.cardBackground,
+            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-detail-timeline")
+    }
+
+    private func resultSection(for task: SessionTaskDTO) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("tasks.detail.result_section_title", tableName: "Conversation")
+                .font(.headline)
+
+            if !task.status.isTerminal {
+                InlineNotice(
+                    title: LocalizedStringKey("tasks.detail.result_pending_title"),
+                    message: LocalizedStringKey("tasks.detail.result_pending_message"),
+                    tone: .neutral
+                )
+                .accessibilityIdentifier("task-outcome-pending")
+            } else if let resultError = store.resultErrorByTaskID[taskID], result == nil {
+                ErrorPlaceholder(
+                    title: LocalizedStringKey("tasks.error.title"),
+                    message: LocalizedStringKey(resultError),
+                    retryTitle: LocalizedStringKey("placeholder.retry")
+                ) {
+                    Task { await store.loadDetail(taskID: taskID) }
+                }
+            } else {
+                let payload = result?.resultState == .available ? result?.result : nil
+                let summary: String? = payload.flatMap { textResult in
+                    if let detail = textResult.detailText, OutcomeCard.hasReadableContent(detail) {
+                        return textResult.summaryText
+                    }
+                    return nil
+                }
+                let readable: String? = payload.map { textResult in
+                    if let detail = textResult.detailText, OutcomeCard.hasReadableContent(detail) {
+                        return detail
+                    }
+                    return textResult.summaryText
+                }
+
+                OutcomeCard(
+                    title: task.displayTitle,
+                    summary: summary,
+                    readableContent: readable,
+                    isMockOnly: store.isMock(task, result: result),
+                    onCopy: readable.map { content in
+                        {
+                            UIPasteboard.general.string = content
+                            copiedResultAlert = true
+                        }
+                    }
+                )
+
+                if let payload {
+                    HStack(spacing: 12) {
+                        Label(payload.modelLabel, systemImage: "cpu")
+                        if let producedAt = ConversationCardFormatting.date(from: payload.producedAt) {
+                            Text(producedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 4)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-detail-outcome")
+    }
+}
+
+private struct LegacyDemoTaskDetailView: View {
     @Bindable var session: TaskJourneySession
     @State private var copiedOutcome = false
 

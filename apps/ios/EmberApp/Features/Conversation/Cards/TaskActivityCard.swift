@@ -3,13 +3,21 @@ import SwiftUI
 /// A compact, navigable summary of an existing Task snapshot.
 public struct TaskActivityCard: View {
     private let title: String
-    private let task: TaskDTO
+    private let taskID: UUID
+    private let taskStatus: TaskStatus
+    private let updatedAt: String
     private let presentation: TaskPresentationState
     private let cancelResponse: TaskCancelDTO?
     private let onOpenDetail: () -> Void
 
     private var facts: TaskActivityFacts {
-        Self.facts(for: task, presentation: presentation, cancelResponse: cancelResponse)
+        Self.facts(
+            taskID: taskID,
+            status: taskStatus,
+            updatedAt: updatedAt,
+            presentation: presentation,
+            cancelResponse: cancelResponse
+        )
     }
 
     public init(
@@ -19,8 +27,30 @@ public struct TaskActivityCard: View {
         cancelResponse: TaskCancelDTO? = nil,
         onOpenDetail: @escaping () -> Void
     ) {
+        self.init(
+            title: title,
+            taskID: task.taskID,
+            status: task.status,
+            updatedAt: task.updatedAt,
+            presentation: presentation,
+            cancelResponse: cancelResponse,
+            onOpenDetail: onOpenDetail
+        )
+    }
+
+    public init(
+        title: String,
+        taskID: UUID,
+        status: TaskStatus,
+        updatedAt: String,
+        presentation: TaskPresentationState,
+        cancelResponse: TaskCancelDTO? = nil,
+        onOpenDetail: @escaping () -> Void
+    ) {
         self.title = title
-        self.task = task
+        self.taskID = taskID
+        self.taskStatus = status
+        self.updatedAt = updatedAt
         self.presentation = presentation
         self.cancelResponse = cancelResponse
         self.onOpenDetail = onOpenDetail
@@ -96,7 +126,7 @@ public struct TaskActivityCard: View {
         .frame(minHeight: 44)
         .accessibilityElement(children: .combine)
         .accessibilityHint(Text("card.task_open_hint", tableName: "ConversationCards"))
-        .accessibilityIdentifier("task-activity-card-\(task.taskID.uuidString.lowercased())")
+        .accessibilityIdentifier("task-activity-card-\(taskID.uuidString.lowercased())")
     }
 
     static func facts(
@@ -104,25 +134,41 @@ public struct TaskActivityCard: View {
         presentation: TaskPresentationState,
         cancelResponse: TaskCancelDTO?
     ) -> TaskActivityFacts {
-        TaskActivityFacts(
+        facts(
+            taskID: task.taskID,
             status: task.status,
-            updatedAt: ConversationCardFormatting.date(from: task.updatedAt),
-            capability: presentation.capability,
-            connectionPhase: presentation.connectionPhase,
-            commandInFlight: presentation.commandInFlight,
-            cancellationPending: isCancellationPending(for: task, response: cancelResponse)
+            updatedAt: task.updatedAt,
+            presentation: presentation,
+            cancelResponse: cancelResponse
         )
     }
 
-    private static func isCancellationPending(for task: TaskDTO, response: TaskCancelDTO?) -> Bool {
-        switch task.status {
+    static func facts(
+        taskID: UUID,
+        status: TaskStatus,
+        updatedAt: String,
+        presentation: TaskPresentationState,
+        cancelResponse: TaskCancelDTO?
+    ) -> TaskActivityFacts {
+        TaskActivityFacts(
+            status: status,
+            updatedAt: ConversationCardFormatting.date(from: updatedAt),
+            capability: presentation.capability,
+            connectionPhase: presentation.connectionPhase,
+            commandInFlight: presentation.commandInFlight,
+            cancellationPending: isCancellationPending(taskID: taskID, status: status, response: cancelResponse)
+        )
+    }
+
+    private static func isCancellationPending(taskID: UUID, status: TaskStatus, response: TaskCancelDTO?) -> Bool {
+        switch status {
         case .completed, .failed, .cancelled:
             return false
         case .queued, .running, .waitingApproval, .retryableFailed:
             break
         }
 
-        guard let response, response.taskID == task.taskID else { return false }
+        guard let response, response.taskID == taskID else { return false }
         return response.cancelRequested && !response.terminal
     }
 }

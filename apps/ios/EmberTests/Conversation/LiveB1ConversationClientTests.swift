@@ -154,6 +154,61 @@ final class LiveB1ConversationClientTests: XCTestCase {
         XCTAssertEqual(counter.value, 1)
     }
 
+    func testMessagePageDecodesTaskAndOutcomeReferencesWithOutcomeKinds() async throws {
+        let fixture = try makeClient()
+        let taskID = "00000000-0000-4000-8000-00000000b311"
+        let commitmentID = "00000000-0000-4000-8000-00000000b399"
+        register { _ in
+            .json(statusCode: 200, body: """
+            {
+              "conversation_id":"44444444-4444-4444-8444-444444444444",
+              "transcript_epoch":0,
+              "messages":[
+                {"message_id":"55555555-5555-4555-8555-555555555551",
+                 "sequence":1,"created_at":"2026-11-15T00:00:00Z",
+                 "kind":"task_reference","task_id":"\(taskID)"},
+                {"message_id":"55555555-5555-4555-8555-555555555552",
+                 "sequence":2,"created_at":"2026-11-15T00:00:01Z",
+                 "kind":"outcome_reference",
+                 "outcome":{"outcome_kind":"meaningful_change","task_id":"\(taskID)","commitment_id":"\(commitmentID)"}}
+              ],
+              "next_after":2,"has_more":false
+            }
+            """)
+        }
+        let page = try await fixture.client.page(conversationID: AuthFixture.conversationID, after: 0, limit: 50)
+        XCTAssertEqual(page.messages.count, 2)
+        let convID = ConversationID(rawValue: AuthFixture.conversationID)
+        XCTAssertEqual(page.messages[0].domainMessage(conversationID: convID).kind,
+                       .taskReference(TaskReference(taskID: UUID(uuidString: taskID)!)))
+        XCTAssertEqual(page.messages[1].domainMessage(conversationID: convID).kind,
+                       .outcomeReference(.taskResult(taskID: UUID(uuidString: taskID)!)))
+        if case .outcome(let decodedTaskID, let outcomeKind, let decodedCommitmentID) = page.messages[1].payload {
+            XCTAssertEqual(decodedTaskID.uuidString.lowercased(), taskID)
+            XCTAssertEqual(outcomeKind, LiveB1OutcomeKind.meaningfulChange)
+            XCTAssertEqual(decodedCommitmentID?.uuidString.lowercased(), commitmentID)
+        } else {
+            XCTFail("Expected outcome payload")
+        }
+    }
+
+    func testOutcomeReferenceRejectsUnknownOutcomeKind() throws {
+        let data = Data("""
+            {
+              "conversation_id":"44444444-4444-4444-8444-444444444444",
+              "transcript_epoch":0,
+              "messages":[
+                {"message_id":"55555555-5555-4555-8555-555555555552",
+                 "sequence":1,"created_at":"2026-11-15T00:00:01Z",
+                 "kind":"outcome_reference",
+                 "outcome":{"outcome_kind":"invented_kind","task_id":"00000000-0000-4000-8000-00000000b311"}}
+              ],
+              "next_after":1,"has_more":false
+            }
+            """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(LiveB1Page.self, from: data))
+    }
+
     private func makeClient() throws -> (client: LiveB1ConversationClient, session: URLSession) {
         let session = StubSession.make()
         sessions.append(session)

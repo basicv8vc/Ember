@@ -1,16 +1,34 @@
 import Foundation
 import Observation
 import SwiftUI
+import UIKit
 
-/// The Live host observes real Cloud state; it never runs the local Mock reply generator.
+/// The Live host observes real Cloud state; it never runs the local Mock reply generator unless explicitly configured for B3 Mock UI tests.
 @MainActor @Observable
 final class LiveConversationHostModel {
-    private let repository: LiveConversationRepository
-    private let auth: LiveAuthSessionCoordinator
+    enum RootTab: Hashable, Sendable {
+        case chat
+        case tasks
+    }
+
+    private let repository: any LiveConversationServiceProtocol
+    private let auth: any LiveAuthControlling
     private let pollingWindow: Duration
+    private let taskPollInterval: Duration
     private let monotonicNow: @Sendable () -> ContinuousClock.Instant
     private var pollTask: Task<Void, Never>?
+    private var taskObserverTask: Task<Void, Never>?
+    private var conversationRefreshTask: Task<Void, Never>?
     private var currentPollSessionID = UUID()
+    private var sessionGeneration: UInt64 = 0
+
+    let taskStore: SessionTaskStore
+    let isMockMode: Bool
+
+    var selectedTab: RootTab = .chat
+    var chatNavigationPath: [UUID] = []
+    var tasksNavigationPath: [UUID] = []
+    var copiedOutcomeAlert = false
 
     private(set) var profile: EmberMeDTO?
     private(set) var snapshot: ConversationSnapshot?
@@ -28,14 +46,20 @@ final class LiveConversationHostModel {
     private(set) var rejectedDraftText: String?
 
     init(
-        repository: LiveConversationRepository,
-        auth: LiveAuthSessionCoordinator,
+        repository: any LiveConversationServiceProtocol,
+        auth: any LiveAuthControlling,
+        taskRepository: (any SessionTaskRepositoryProtocol)? = nil,
+        isMockMode: Bool = false,
         pollingWindow: Duration = .seconds(60),
+        taskPollInterval: Duration = .seconds(2),
         monotonicNow: @Sendable @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }
     ) {
         self.repository = repository
         self.auth = auth
+        self.taskStore = SessionTaskStore(repository: taskRepository)
+        self.isMockMode = isMockMode
         self.pollingWindow = pollingWindow
+        self.taskPollInterval = taskPollInterval
         self.monotonicNow = monotonicNow
     }
 
@@ -49,7 +73,8 @@ final class LiveConversationHostModel {
             profile = try await repository.bootstrap()
             requiresSignIn = false
             do {
-                snapshot = try await repository.recoverAfterRelaunch()
+                let recovered = try await repository.recoverAfterRelaunch()
+                snapshot = recovered
                 status = nil
                 reply = .idle
                 if let rejected = try await repository.rejectedDraft() {
@@ -64,6 +89,7 @@ final class LiveConversationHostModel {
                         beginPolling()
                     }
                 }
+                await syncTasksFromCloud(snapshot: recovered)
             } catch {
                 command = .unknownAcknowledgement
                 reply = .failed(
@@ -88,9 +114,11 @@ final class LiveConversationHostModel {
         do {
             try await auth.signInWithApple()
             profile = try await repository.bootstrap()
-            snapshot = try await repository.load()
+            let loaded = try await repository.load()
+            snapshot = loaded
             requiresSignIn = false
             status = nil
+            await syncTasksFromCloud(snapshot: loaded)
         } catch let error as AuthError where error == .appleCancelled {
             status = "Sign-in cancelled."
         } catch {
@@ -106,6 +134,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -125,6 +157,11 @@ final class LiveConversationHostModel {
     }
 
     private func clearLiveState() {
+        sessionGeneration &+= 1
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
         profile = nil
         snapshot = nil
         requiresSignIn = true
@@ -132,6 +169,10 @@ final class LiveConversationHostModel {
         command = .idle
         reply = .idle
         isPollingPaused = false
+        selectedTab = .chat
+        chatNavigationPath.removeAll()
+        tasksNavigationPath.removeAll()
+        taskStore.clear()
     }
 
     func send(_ text: String) async {
@@ -144,9 +185,11 @@ final class LiveConversationHostModel {
             _ = try await repository.send(text: text)
             command = .acknowledged
             reply = .generating
-            snapshot = try await repository.load()
-            status = "Message saved to Ember Cloud."
+            let loaded = try await repository.load()
+            snapshot = loaded
+            status = isMockMode ? nil : "Message saved to Ember Cloud."
             beginPolling()
+            await syncTasksFromCloud(snapshot: loaded)
         } catch let error as LiveB1Failure where error == .unknownAcknowledgement {
             command = .unknownAcknowledgement
             reply = .failed(message: "Send result is unknown. Check receipt before retrying.", retryable: true)
@@ -172,18 +215,22 @@ final class LiveConversationHostModel {
                 if try await repository.reconcilePending() != nil {
                     command = .acknowledged
                     reply = .generating
-                    snapshot = try await repository.load()
+                    let loaded = try await repository.load()
+                    snapshot = loaded
                     status = nil
                     beginPolling()
+                    await syncTasksFromCloud(snapshot: loaded)
                 }
             } else {
-                snapshot = try await repository.load()
+                let loaded = try await repository.load()
+                snapshot = loaded
                 if try await repository.activeTurn() != nil {
                     reply = .generating
                     if isViewVisible && isSceneActive {
                         beginPolling()
                     }
                 }
+                await syncTasksFromCloud(snapshot: loaded)
             }
         } catch {
             reply = .failed(message: "Could not confirm the previous send. Try again later.", retryable: true)
@@ -196,6 +243,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -211,10 +262,108 @@ final class LiveConversationHostModel {
                 status = "Cancellation requested; checking server state."
                 beginPolling()
             }
-            snapshot = try await repository.load()
+            let loaded = try await repository.load()
+            snapshot = loaded
+            await syncTasksFromCloud(snapshot: loaded)
         } catch {
             status = "Cancellation unconfirmed; server state will be checked."
             beginPolling()
+        }
+    }
+
+    func refreshTasks() async {
+        guard !requiresSignIn, taskStore.hasRepository else { return }
+        await taskStore.syncReferences(from: snapshot)
+    }
+
+    func handleTabSelection(_ tab: RootTab) async {
+        switch tab {
+        case .chat:
+            if canPerformBackgroundRefresh {
+                await refreshConversationAndTasks()
+            } else {
+                await refreshTasks()
+            }
+        case .tasks:
+            await refreshTasks()
+        }
+    }
+
+    func refreshConversationAndTasks() async {
+        if let inFlight = conversationRefreshTask {
+            _ = await inFlight.value
+        }
+        guard canPerformBackgroundRefresh else {
+            await refreshTasks()
+            return
+        }
+        let expectedGeneration = sessionGeneration
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+        }
+        conversationRefreshTask = task
+        _ = await task.value
+        if sessionGeneration == expectedGeneration {
+            conversationRefreshTask = nil
+        }
+    }
+
+    private var canPerformBackgroundRefresh: Bool {
+        profile != nil
+            && !requiresSignIn
+            && !isLoading
+            && !isSubmitting
+            && !isSigningIn
+            && !isSigningOut
+            && pollTask == nil
+            && !isPollingPaused
+            && reply != .generating
+            && command != .unknownAcknowledgement
+            && rejectedDraftText == nil
+    }
+
+    private func scheduleForegroundRefresh() {
+        guard conversationRefreshTask == nil, canPerformBackgroundRefresh else { return }
+        let expectedGeneration = sessionGeneration
+        conversationRefreshTask = Task { [weak self] in
+            guard let self else { return }
+            await performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+            if sessionGeneration == expectedGeneration {
+                conversationRefreshTask = nil
+            }
+        }
+    }
+
+    private func performControlledConversationRefresh(expectedGeneration: UInt64) async {
+        guard sessionGeneration == expectedGeneration, canPerformBackgroundRefresh else { return }
+        do {
+            let loaded = try await repository.load()
+            guard sessionGeneration == expectedGeneration,
+                  !Task.isCancelled,
+                  canPerformBackgroundRefresh
+            else { return }
+            snapshot = loaded
+            await syncTasksFromCloud(snapshot: loaded)
+        } catch is CancellationError {
+            return
+        } catch {
+            guard sessionGeneration == expectedGeneration else { return }
+            await syncTasksFromCloud(snapshot: snapshot)
+        }
+    }
+
+    func openTaskFromChat(_ taskID: UUID) {
+        selectedTab = .chat
+        if chatNavigationPath.last != taskID {
+            chatNavigationPath.append(taskID)
+        }
+    }
+
+    func openTaskFromInbox(_ taskID: UUID) {
+        selectedTab = .tasks
+        if tasksNavigationPath.last != taskID {
+            tasksNavigationPath.append(taskID)
         }
     }
 
@@ -228,9 +377,12 @@ final class LiveConversationHostModel {
 
     func handleViewAppeared() {
         isViewVisible = true
-        if isSceneActive && !requiresSignIn && (reply == .generating || isPollingPaused) && pollTask == nil {
+        guard isSceneActive && !requiresSignIn else { return }
+        if (reply == .generating || isPollingPaused) && pollTask == nil {
             isPollingPaused = false
             beginPolling()
+        } else if canPerformBackgroundRefresh {
+            scheduleForegroundRefresh()
         }
     }
 
@@ -242,10 +394,12 @@ final class LiveConversationHostModel {
     func handleSceneActive() {
         isSceneActive = true
         guard isViewVisible && !requiresSignIn else { return }
-        guard reply == .generating || isPollingPaused else { return }
-        guard pollTask == nil else { return }
-        isPollingPaused = false
-        beginPolling()
+        if (reply == .generating || isPollingPaused) && pollTask == nil {
+            isPollingPaused = false
+            beginPolling()
+        } else if canPerformBackgroundRefresh {
+            scheduleForegroundRefresh()
+        }
     }
 
     func handleSceneInactive() {
@@ -268,6 +422,10 @@ final class LiveConversationHostModel {
         // Disappearance or inactive state stops only observation. It must not cancel the durable server Turn.
         pollTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
     }
 
     var screen: ConversationScreenState {
@@ -276,23 +434,37 @@ final class LiveConversationHostModel {
             let stableID = "conversation-message-\(message.id.rawValue.uuidString.lowercased())"
             switch message.kind {
             case .user(let text):
-                return .message(ConversationMessagePresentation(id: stableID,
-                    author: .user, text: text, timestamp: message.createdAt))
+                return .message(ConversationMessagePresentation(
+                    id: stableID,
+                    author: .user,
+                    text: text,
+                    timestamp: message.createdAt
+                ))
             case .ember(let text):
-                return .message(ConversationMessagePresentation(id: stableID,
-                    author: .ember, text: text, timestamp: message.createdAt))
+                return .message(ConversationMessagePresentation(
+                    id: stableID,
+                    author: .ember,
+                    text: text,
+                    timestamp: message.createdAt
+                ))
             case .activity(let activity):
-                return .activity(ConversationActivityPresentation(id: stableID,
-                    title: "Cloud activity", detail: activity.text, timestamp: message.createdAt))
+                return .activity(ConversationActivityPresentation(
+                    id: stableID,
+                    title: "Cloud activity",
+                    detail: activity.text,
+                    timestamp: message.createdAt
+                ))
             case .taskReference(let ref):
-                return .activity(ConversationActivityPresentation(id: stableID,
-                    title: "Task reference", detail: ref.taskID.uuidString, timestamp: message.createdAt))
+                return makeTaskReferenceEntry(stableID: stableID, taskID: ref.taskID)
             case .commitmentReference(let ref):
-                return .activity(ConversationActivityPresentation(id: stableID,
-                    title: "Commitment reference", detail: ref.commitmentID.uuidString, timestamp: message.createdAt))
-            case .outcomeReference:
-                return .activity(ConversationActivityPresentation(id: stableID,
-                    title: "Linked result", detail: "Available from Ember Cloud", timestamp: message.createdAt))
+                return .activity(ConversationActivityPresentation(
+                    id: stableID,
+                    title: "Commitment reference",
+                    detail: ref.commitmentID.uuidString,
+                    timestamp: message.createdAt
+                ))
+            case .outcomeReference(let outcome):
+                return makeOutcomeReferenceEntry(stableID: stableID, outcome: outcome)
             }
         }
         return ConversationScreenState(
@@ -303,7 +475,171 @@ final class LiveConversationHostModel {
             showsEmptyState: timeline.isEmpty && id != nil,
             isLoading: isLoading,
             isSubmitting: isSubmitting,
-            commandStatus: command)
+            commandStatus: command
+        )
+    }
+
+    private func makeTaskReferenceEntry(stableID: String, taskID: UUID) -> ConversationTimelineEntry {
+        if let task = taskStore.tasksByID[taskID] {
+            let presentation = TaskPresentationState(
+                taskStatus: task.status,
+                connectionPhase: taskStore.detailErrorByTaskID[taskID] != nil ? .disconnected : .connected,
+                commandInFlight: taskStore.cancellingTaskIDs.contains(taskID) ? .cancellingTask : nil,
+                capability: taskStore.isMock(task) ? .mockOnly : .real
+            )
+            let cancelResponse = taskStore.cancelResponseByTaskID[taskID]
+            return .inlineCard(id: stableID, accessibilityLabel: task.displayTitle) {
+                TaskActivityCard(
+                    title: task.displayTitle,
+                    taskID: task.taskID,
+                    status: task.status,
+                    updatedAt: task.updatedAt,
+                    presentation: presentation,
+                    cancelResponse: cancelResponse,
+                    onOpenDetail: { [weak self] in
+                        self?.openTaskFromChat(taskID)
+                    }
+                )
+            }
+        }
+
+        let title = String(localized: "conversation.task.unavailable", table: "Conversation")
+        let isLoadingTask = taskStore.isLoadingList || taskStore.loadingDetailTaskIDs.contains(taskID)
+        let isMissing = taskStore.missingTaskIDs.contains(taskID)
+        let isMock = isMockMode || taskStore.isMockOnly
+        return .inlineCard(id: stableID, accessibilityLabel: title) {
+            SessionTaskPendingReferenceCard(
+                taskID: taskID,
+                isLoading: isLoadingTask,
+                isMissing: isMissing,
+                isMockOnly: isMock,
+                onOpenDetail: { [weak self] in
+                    self?.openTaskFromChat(taskID)
+                }
+            )
+        }
+    }
+
+    private func makeOutcomeReferenceEntry(stableID: String, outcome: OutcomeReference) -> ConversationTimelineEntry {
+        let taskID: UUID? = switch outcome {
+        case .taskResult(let id): id
+        case .artifact(_, let taskID): taskID
+        case .commitmentOutcome: nil
+        }
+
+        let task = taskID.flatMap { taskStore.tasksByID[$0] }
+        let result = taskID.flatMap { taskStore.resultsByTaskID[$0] }
+        let title = task?.displayTitle ?? String(localized: "card.result", table: "ConversationCards")
+
+        let summaryText: String?
+        let readableContent: String?
+        if let result, result.resultState == .available, let payload = result.result {
+            if let detail = payload.detailText, OutcomeCard.hasReadableContent(detail) {
+                summaryText = payload.summaryText
+                readableContent = detail
+            } else {
+                summaryText = nil
+                readableContent = payload.summaryText
+            }
+        } else {
+            summaryText = nil
+            readableContent = nil
+        }
+
+        let isSimulated = taskStore.isMock(task, result: result) || isMockMode
+        return .inlineCard(id: stableID, accessibilityLabel: title) {
+            OutcomeCard(
+                title: title,
+                summary: summaryText,
+                readableContent: readableContent,
+                isMockOnly: isSimulated,
+                onCopy: readableContent.map { content in
+                    { [weak self] in
+                        UIPasteboard.general.string = content
+                        self?.copiedOutcomeAlert = true
+                    }
+                }
+            )
+        }
+    }
+
+    private func syncTasksFromCloud(snapshot: ConversationSnapshot?) async {
+        guard taskStore.hasRepository else { return }
+        await taskStore.syncReferences(from: snapshot)
+        beginTaskObservationIfNeeded()
+    }
+
+    private func beginTaskObservationIfNeeded() {
+        guard !isMockMode,
+              isViewVisible,
+              isSceneActive,
+              !requiresSignIn,
+              pollTask == nil,
+              !isPollingPaused,
+              command != .unknownAcknowledgement,
+              rejectedDraftText == nil,
+              taskStore.hasObservableInProgressTask(in: snapshot)
+        else {
+            taskObserverTask?.cancel()
+            taskObserverTask = nil
+            return
+        }
+        guard taskObserverTask == nil else { return }
+
+        let expectedGeneration = sessionGeneration
+        let startTime = monotonicNow()
+        taskObserverTask = Task { [weak self] in
+            defer {
+                if let self, self.sessionGeneration == expectedGeneration {
+                    self.taskObserverTask = nil
+                }
+            }
+            while let self,
+                  !Task.isCancelled,
+                  self.sessionGeneration == expectedGeneration,
+                  self.isViewVisible,
+                  self.isSceneActive,
+                  !self.requiresSignIn,
+                  self.pollTask == nil,
+                  !self.isPollingPaused,
+                  self.monotonicNow() - startTime < self.pollingWindow,
+                  self.taskStore.hasObservableInProgressTask(in: self.snapshot) {
+                do {
+                    try await Task.sleep(for: self.taskPollInterval)
+                } catch {
+                    return
+                }
+                guard !Task.isCancelled,
+                      self.sessionGeneration == expectedGeneration,
+                      self.isViewVisible,
+                      self.isSceneActive,
+                      !self.requiresSignIn,
+                      self.pollTask == nil,
+                      !self.isPollingPaused
+                else { return }
+
+                let previouslyInProgress = Set(
+                    self.taskStore.tasksByID.values
+                        .filter { !$0.status.isTerminal && $0.status != .waitingApproval }
+                        .map(\.taskID)
+                )
+                let previouslyUnresolved = SessionTaskStore.referencedIDs(in: self.snapshot).taskIDs.filter {
+                    self.taskStore.tasksByID[$0] == nil
+                }
+                let trackedIDs = previouslyInProgress.union(previouslyUnresolved)
+
+                await self.taskStore.syncReferences(from: self.snapshot)
+                guard !Task.isCancelled, self.sessionGeneration == expectedGeneration else { return }
+
+                let shouldRefreshConversation = trackedIDs.contains { taskID in
+                    guard let updated = self.taskStore.tasksByID[taskID] else { return false }
+                    return updated.status.isTerminal || updated.status == .waitingApproval
+                }
+                if shouldRefreshConversation, self.canPerformBackgroundRefresh {
+                    await self.performControlledConversationRefresh(expectedGeneration: expectedGeneration)
+                }
+            }
+        }
     }
 
     private func beginPolling() {
@@ -311,6 +647,10 @@ final class LiveConversationHostModel {
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
+        taskObserverTask?.cancel()
+        taskObserverTask = nil
+        conversationRefreshTask?.cancel()
+        conversationRefreshTask = nil
         isPollingPaused = false
 
         let sessionID = UUID()
@@ -354,9 +694,10 @@ final class LiveConversationHostModel {
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         snapshot = loaded
                         reply = .idle
-                        status = "Completed by Ember Cloud."
+                        status = isMockMode ? nil : "Completed by Ember Cloud."
                         pollTask = nil
                         isPollingPaused = false
+                        await syncTasksFromCloud(snapshot: loaded)
                         return
                     case .failed:
                         let loaded = try await repository.load()
@@ -365,6 +706,7 @@ final class LiveConversationHostModel {
                         reply = .failed(message: "Cloud turn failed.", retryable: false)
                         pollTask = nil
                         isPollingPaused = false
+                        await syncTasksFromCloud(snapshot: loaded)
                         return
                     case .cancelled:
                         let loaded = try await repository.load()
@@ -374,6 +716,7 @@ final class LiveConversationHostModel {
                         status = "Turn cancelled."
                         pollTask = nil
                         isPollingPaused = false
+                        await syncTasksFromCloud(snapshot: loaded)
                         return
                     }
                 } catch is CancellationError {
@@ -390,7 +733,61 @@ final class LiveConversationHostModel {
     }
 }
 
-/// Reuses the existing ConversationScreen. The default App Root never instantiates this view.
+private struct SessionTaskPendingReferenceCard: View {
+    let taskID: UUID
+    let isLoading: Bool
+    let isMissing: Bool
+    let isMockOnly: Bool
+    let onOpenDetail: () -> Void
+
+    var body: some View {
+        Button(action: onOpenDetail) {
+            ConversationCardSurface {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: isMissing ? "questionmark.circle" : "clock.arrow.circlepath")
+                        .font(.title3)
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack(spacing: 7) {
+                            Text(
+                                isLoading
+                                    ? String(localized: "conversation.task.loading", table: "Conversation")
+                                    : String(localized: "conversation.task.unavailable", table: "Conversation")
+                            )
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(.primary)
+
+                            if isMockOnly {
+                                ConversationMockTag()
+                            }
+                        }
+
+                        Text(taskID.uuidString.lowercased())
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+
+                    Spacer(minLength: 0)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .padding(.top, 4)
+                        .accessibilityHidden(true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .contentShape(RoundedRectangle(cornerRadius: 16))
+        }
+        .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("task-reference-unavailable-\(taskID.uuidString.lowercased())")
+    }
+}
+
+/// Reuses ConversationScreen, TaskInboxView, TaskActivityCard, OutcomeCard, and DesignSystem
+/// in a Chat + Tasks dual-tab shell behind Live authentication (and in `--ember-mock-chat-tasks`).
 struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
@@ -404,72 +801,27 @@ struct LiveConversationHost: View {
     var body: some View {
         Group {
             if model.requiresSignIn {
-                VStack(spacing: 16) {
-                    Text("Ember Cloud").font(.title2.bold())
-                    Text("Sign in to sync your conversation securely.")
-                        .foregroundStyle(.secondary)
-                    AppleSignInControl(isEnabled: !model.isSigningIn) {
-                        Task { await model.signIn() }
-                    }
-                    .frame(height: 50)
-                    .frame(maxWidth: 360)
-                    .accessibilityIdentifier("live-conversation-sign-in")
-                    if let status = model.status {
-                        Text(status).font(.footnote).foregroundStyle(.secondary)
-                    }
-                }
-                .padding()
+                signInView
             } else {
-                VStack(spacing: 0) {
-                    HStack {
-                        Text("LIVE CLOUD")
-                            .font(.caption.weight(.semibold))
-                            .accessibilityIdentifier("live-cloud-mode")
-                        Spacer()
-                        Button {
-                            isConfirmingSignOut = true
-                        } label: {
-                            Text("conversation.live.sign_out", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
-                        .accessibilityIdentifier("live-conversation-sign-out")
-                    }
-                    if let status = model.status {
-                        Text(status)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .accessibilityIdentifier("live-conversation-status")
-                    }
-                    if model.isPollingPaused {
-                        Button {
-                            model.resumePolling()
-                        } label: {
+                TabView(selection: $model.selectedTab) {
+                    chatTab
+                        .tabItem {
                             Label(
-                                String(localized: "conversation.live.check_again", table: "Conversation"),
-                                systemImage: "arrow.clockwise"
+                                String(localized: "tab.chat", table: "Conversation"),
+                                systemImage: "bubble.left.and.bubble.right"
                             )
-                            .font(.caption.weight(.semibold))
                         }
-                        .accessibilityIdentifier("live-conversation-resume-polling")
-                        .padding(.vertical, 4)
-                    }
-                    ConversationScreen(
-                        state: model.screen,
-                        draft: $draft,
-                        actions: ConversationScreenActions(
-                            send: { text in
-                                draft = ""
-                                Task { await model.send(text) }
-                            },
-                            retry: { Task { await model.retry() } },
-                            stopGenerating: { Task { await model.stop() } },
-                            selectPrompt: { draft = $0 }),
-                        composerNote: "conversation.composer.cloud_note",
-                        showsSubmissionAcknowledgement: false,
-                        replyPreparingText: "conversation.reply.waiting_for_cloud",
-                        replyStopText: "conversation.reply.cancel_cloud_turn",
-                        emberMessageAuthorText: "conversation.message.ember_cloud")
+                        .tag(LiveConversationHostModel.RootTab.chat)
+
+                    tasksTab
+                        .tabItem {
+                            Label(
+                                String(localized: "tab.tasks", table: "Conversation"),
+                                systemImage: "checklist"
+                            )
+                        }
+                        .badge(model.taskStore.needsInterventionCount)
+                        .tag(LiveConversationHostModel.RootTab.tasks)
                 }
             }
         }
@@ -492,6 +844,14 @@ struct LiveConversationHost: View {
         } message: {
             Text("conversation.live.sign_out_confirm_message", tableName: "Conversation")
         }
+        .alert(
+            Text("tasks.detail.copied_title", tableName: "Conversation"),
+            isPresented: $model.copiedOutcomeAlert
+        ) {
+            Button(role: .cancel) {} label: {
+                Text("tasks.detail.ok", tableName: "Conversation")
+            }
+        }
         .task { await model.start() }
         .onAppear {
             model.handleScenePhase(scenePhase)
@@ -502,8 +862,127 @@ struct LiveConversationHost: View {
             // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
             if let rejected, draft.isEmpty { draft = rejected }
         }
+        .onChange(of: model.selectedTab) { _, newTab in
+            Task { await model.handleTabSelection(newTab) }
+        }
         .onChange(of: scenePhase) { _, newPhase in
             model.handleScenePhase(newPhase)
+        }
+    }
+
+    private var signInView: some View {
+        VStack(spacing: 16) {
+            Text("Ember Cloud").font(.title2.bold())
+            Text("Sign in to sync your conversation securely.")
+                .foregroundStyle(.secondary)
+            AppleSignInControl(isEnabled: !model.isSigningIn) {
+                Task { await model.signIn() }
+            }
+            .frame(height: 50)
+            .frame(maxWidth: 360)
+            .accessibilityIdentifier("live-conversation-sign-in")
+            if let status = model.status {
+                Text(status).font(.footnote).foregroundStyle(.secondary)
+            }
+        }
+        .padding()
+    }
+
+    private var chatTab: some View {
+        NavigationStack(path: $model.chatNavigationPath) {
+            VStack(spacing: 0) {
+                if model.isMockMode {
+                    MockOnlyBanner()
+                        .padding(.horizontal, 16)
+                        .padding(.top, 8)
+                        .padding(.bottom, 4)
+                        .background(EmberDesignTokens.groupedBackground)
+                } else {
+                    HStack {
+                        Text("LIVE CLOUD")
+                            .font(.caption.weight(.semibold))
+                            .accessibilityIdentifier("live-cloud-mode")
+                        Spacer()
+                        Button {
+                            isConfirmingSignOut = true
+                        } label: {
+                            Text("conversation.live.sign_out", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
+                        .accessibilityIdentifier("live-conversation-sign-out")
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 6)
+                }
+
+                if let status = model.status {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 2)
+                        .accessibilityIdentifier("live-conversation-status")
+                }
+
+                if model.isPollingPaused {
+                    Button {
+                        model.resumePolling()
+                    } label: {
+                        Label(
+                            String(localized: "conversation.live.check_again", table: "Conversation"),
+                            systemImage: "arrow.clockwise"
+                        )
+                        .font(.caption.weight(.semibold))
+                    }
+                    .accessibilityIdentifier("live-conversation-resume-polling")
+                    .padding(.vertical, 4)
+                }
+
+                ConversationScreen(
+                    state: model.screen,
+                    draft: $draft,
+                    actions: ConversationScreenActions(
+                        send: { text in
+                            draft = ""
+                            Task { await model.send(text) }
+                        },
+                        retry: { Task { await model.retry() } },
+                        stopGenerating: { Task { await model.stop() } },
+                        selectPrompt: { draft = $0 }
+                    ),
+                    composerNote: model.isMockMode
+                        ? "conversation.composer.local_note"
+                        : "conversation.composer.cloud_note",
+                    showsSubmissionAcknowledgement: model.isMockMode,
+                    replyPreparingText: model.isMockMode
+                        ? "conversation.reply.preparing"
+                        : "conversation.reply.waiting_for_cloud",
+                    replyStopText: model.isMockMode
+                        ? "conversation.reply.stop"
+                        : "conversation.reply.cancel_cloud_turn",
+                    emberMessageAuthorText: model.isMockMode
+                        ? "conversation.message.ember_mock"
+                        : "conversation.message.ember_cloud"
+                )
+            }
+            .toolbar(.hidden, for: .navigationBar)
+            .navigationDestination(for: UUID.self) { taskID in
+                TaskDetailView(taskID: taskID, store: model.taskStore)
+                    .toolbar(.hidden, for: .tabBar)
+            }
+        }
+    }
+
+    private var tasksTab: some View {
+        NavigationStack(path: $model.tasksNavigationPath) {
+            TaskInboxView(store: model.taskStore) { taskID in
+                model.openTaskFromInbox(taskID)
+            }
+            .navigationDestination(for: UUID.self) { taskID in
+                TaskDetailView(taskID: taskID, store: model.taskStore)
+                    .toolbar(.hidden, for: .tabBar)
+            }
         }
     }
 }

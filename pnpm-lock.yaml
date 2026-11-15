@@ -293,12 +293,24 @@ importers:
 
   apps/cloud-async-runtime:
     dependencies:
+      '@ember/contracts':
+        specifier: workspace:*
+        version: link:../../packages/contracts
+      '@ember/domain':
+        specifier: workspace:*
+        version: link:../../packages/domain
+      '@ember/execution':
+        specifier: workspace:*
+        version: link:../../packages/execution
       '@ember/model-gateway':
         specifier: workspace:*
         version: link:../../packages/model-gateway
       '@ember/postgres':
         specifier: workspace:*
         version: link:../../packages/postgres
+      '@ember/sandbox-daytona':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-daytona
       '@ember/worker':
         specifier: workspace:*
         version: link:../worker

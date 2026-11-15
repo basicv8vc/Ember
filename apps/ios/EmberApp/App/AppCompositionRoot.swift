@@ -15,6 +15,7 @@ enum AppCompositionRoot {
         "--ember-show-onboarding",
         "--ember-start-task-flow",
         "--ember-start-conversation",
+        "--ember-mock-chat-tasks",
     ]
 
     /// Live Ember Cloud is the default entrypoint.
@@ -35,6 +36,12 @@ enum AppCompositionRoot {
                     description: Text("Set a secure EMBER_CLOUD_BASE_URL for the Live Alpha build.")
                 )
             }
+        } else if arguments.contains("--ember-mock-chat-tasks") {
+            LiveConversationHost(
+                model: MockB3Composition.make(
+                    resetStorage: arguments.contains("--ember-mock-chat-tasks-reset")
+                )
+            )
         } else {
             IntegratedAppRootView()
         }
@@ -61,10 +68,40 @@ private enum LiveComposition {
         let repository = LiveConversationRepository(
             client: LiveB1ConversationClient(auth: auth), journal: journal
         )
+        let taskRepository = LiveB1SessionTaskRepository(auth: auth)
         // Process-local caches only: identity is re-established by `bootstrap()` on every entry, so
         // this is not the security boundary and may settle asynchronously.
         Task { await auth.registerSignOutCleanup { await repository.clearOnLogout() } }
-        return LiveConversationHostModel(repository: repository, auth: auth)
+        return LiveConversationHostModel(
+            repository: repository,
+            auth: auth,
+            taskRepository: taskRepository
+        )
+    }
+}
+
+@MainActor
+private enum MockB3Composition {
+    static func make(resetStorage: Bool) -> LiveConversationHostModel {
+        let storageURL = MockSessionTaskRepository.defaultStorageURL()
+        let taskRepository = MockSessionTaskRepository(
+            storageURL: storageURL,
+            resetStorage: resetStorage
+        )
+        let initialMessages = resetStorage
+            ? []
+            : MockSessionTaskRepository.loadPersistedUserMessages(from: storageURL)
+        let repository = MockB3ConversationRepository(
+            taskRepository: taskRepository,
+            initialUserMessages: initialMessages
+        )
+        let auth = MockAuthController()
+        return LiveConversationHostModel(
+            repository: repository,
+            auth: auth,
+            taskRepository: taskRepository,
+            isMockMode: true
+        )
     }
 }
 

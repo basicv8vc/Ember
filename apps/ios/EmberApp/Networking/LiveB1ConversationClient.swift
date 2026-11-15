@@ -47,6 +47,13 @@ private enum LiveWire {
     }
 }
 
+enum LiveB1OutcomeKind: String, Codable, Equatable, Sendable {
+    case meaningfulChange = "meaningful_change"
+    case noChange = "no_change"
+    case failed
+    case denied
+}
+
 /// A B1 history row, including the explicitly simulated Ember response marker.
 struct LiveB1Message: Decodable, Sendable {
     enum Payload: Sendable {
@@ -55,7 +62,7 @@ struct LiveB1Message: Decodable, Sendable {
         case activity(String, source: String)
         case task(UUID)
         case commitment(UUID)
-        case outcome(taskID: UUID)
+        case outcome(taskID: UUID, outcomeKind: LiveB1OutcomeKind, commitmentID: UUID?)
     }
 
     let id: UUID
@@ -108,9 +115,21 @@ struct LiveB1Message: Decodable, Sendable {
         case "outcome_reference":
             let outcome = try c.nestedContainer(keyedBy: LiveWireKey.self, forKey: LiveWire.key("outcome"))
             try LiveWire.check(outcome, allowed: ["outcome_kind", "task_id", "commitment_id"])
-            _ = try outcome.decode(String.self, forKey: LiveWire.key("outcome_kind"))
-            _ = try outcome.decodeIfPresent(String.self, forKey: LiveWire.key("commitment_id"))
-            payload = .outcome(taskID: try LiveWire.uuid(outcome, "task_id"))
+            let outcomeKind = try outcome.decode(LiveB1OutcomeKind.self, forKey: LiveWire.key("outcome_kind"))
+            let commitmentID: UUID?
+            if let rawCommitment = try outcome.decodeIfPresent(String.self, forKey: LiveWire.key("commitment_id")) {
+                guard let parsed = UUID(uuidString: rawCommitment) else {
+                    throw LiveB1Failure.invalidResponse
+                }
+                commitmentID = parsed
+            } else {
+                commitmentID = nil
+            }
+            payload = .outcome(
+                taskID: try LiveWire.uuid(outcome, "task_id"),
+                outcomeKind: outcomeKind,
+                commitmentID: commitmentID
+            )
         default: throw LiveB1Failure.invalidResponse
         }
     }
@@ -126,7 +145,7 @@ struct LiveB1Message: Decodable, Sendable {
         case .task(let id): kind = .taskReference(TaskReference(taskID: id))
         case .commitment(let id):
             kind = .commitmentReference(CommitmentReference(commitmentID: id))
-        case .outcome(let id): kind = .outcomeReference(.taskResult(taskID: id))
+        case .outcome(let id, _, _): kind = .outcomeReference(.taskResult(taskID: id))
         }
         return ConversationMessage(
             id: MessageID(rawValue: id),
@@ -172,6 +191,24 @@ struct LiveB1Receipt: Decodable, Sendable {
     let turnID: UUID
     let transcriptEpoch: Int
 
+    init(
+        clientSubmissionID: UUID,
+        conversationID: UUID,
+        messageID: UUID,
+        sequence: Int,
+        text: String,
+        turnID: UUID,
+        transcriptEpoch: Int
+    ) {
+        self.clientSubmissionID = clientSubmissionID
+        self.conversationID = conversationID
+        self.messageID = messageID
+        self.sequence = sequence
+        self.text = text
+        self.turnID = turnID
+        self.transcriptEpoch = transcriptEpoch
+    }
+
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: LiveWireKey.self)
         try LiveWire.check(c, allowed: ["message", "turn", "transcript_epoch"])
@@ -204,6 +241,12 @@ struct LiveB1Turn: Decodable, Sendable {
     let id: UUID
     let conversationID: UUID
     let status: Status
+
+    init(id: UUID, conversationID: UUID, status: Status) {
+        self.id = id
+        self.conversationID = conversationID
+        self.status = status
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: LiveWireKey.self)

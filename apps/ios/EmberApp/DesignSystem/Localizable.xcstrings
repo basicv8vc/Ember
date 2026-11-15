@@ -880,6 +880,84 @@
           }
         }
       }
+    },
+    "tasks.error.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Task sync unavailable" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务同步暂不可用" } }
+      }
+    },
+    "tasks.endpoint_unavailable.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Task inbox endpoint not active" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务列表接口尚未开放" } }
+      }
+    },
+    "tasks.endpoint_unavailable.message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Referenced tasks from Chat can still be viewed here when available." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "对话中关联的任务在可用时仍可在此查看。" } }
+      }
+    },
+    "tasks.empty.title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No tasks yet" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "暂无任务" } }
+      }
+    },
+    "tasks.empty.message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cloud tasks started from Chat will appear here." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "在对话中发起的云端任务会显示在这里。" } }
+      }
+    },
+    "tasks.detail.not_found_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Task not found" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "未找到此任务" } }
+      }
+    },
+    "tasks.detail.not_found_message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "This task is not available on Ember Cloud." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "此任务在 Ember Cloud 上不可用。" } }
+      }
+    },
+    "tasks.detail.waiting_approval_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Needs confirmation" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "需要介入确认" } }
+      }
+    },
+    "tasks.detail.waiting_approval_message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The server paused this task awaiting user decision." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "服务端已暂停此任务，等待你的进一步确认。" } }
+      }
+    },
+    "tasks.detail.retry_scheduled_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Retry scheduled" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已安排重试" } }
+      }
+    },
+    "tasks.detail.retry_scheduled_message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "A previous run encountered a retryable error; the server will retry." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "上一次执行遇到可重试错误，服务端将自动安排重试。" } }
+      }
+    },
+    "tasks.detail.result_pending_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Result pending" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "结果尚未生成" } }
+      }
+    },
+    "tasks.detail.result_pending_message": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "The task is still active. Results appear after the server completes execution." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务仍在执行中，完成后会在此展示服务端返回的结果。" } }
+      }
     }
   },
   "version": "1.0"

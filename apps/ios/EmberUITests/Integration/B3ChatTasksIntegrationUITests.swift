@@ -1,0 +1,143 @@
+import XCTest
+
+/// Verifies B3 Chat + Tasks dual-tab UI integration using `--ember-mock-chat-tasks`:
+/// 1. Default landing on Chat tab with no normal chat regression.
+/// 2. `task_reference` and `outcome_reference` render as real `TaskActivityCard` & `OutcomeCard` views.
+/// 3. Navigation from Chat card and Tasks tab to Task Detail (timeline, cancel, result).
+/// 4. Persisted state & chat messages reload cleanly across process relaunch.
+@MainActor
+final class B3ChatTasksIntegrationUITests: XCTestCase {
+    func testChatCardsTasksTabCancelAndRelaunchPersistence() {
+        let app = XCUIApplication()
+        launch(app, reset: true)
+
+        // 1. Default entrypoint is Chat tab
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        XCTAssertFalse(app.staticTexts["task-flow-mock-only-label"].exists)
+
+        // 2. Real TaskActivityCard and OutcomeCard render inline in Chat timeline
+        let notesCard = app.buttons["task-activity-card-00000000-0000-4000-8000-00000000b311"]
+        for _ in 0..<6 {
+            if notesCard.exists && notesCard.isHittable { break }
+            app.swipeDown()
+        }
+        XCTAssertTrue(notesCard.waitForExistence(timeout: 10))
+
+        let outcomeCard = app.descendants(matching: .any)["outcome-card"].firstMatch
+        XCTAssertTrue(outcomeCard.waitForExistence(timeout: 10))
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(format: "label CONTAINS %@", "Confirm App Store review checklist"))
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+        attachScreenshot(app: app, name: "b3-01-chat-tab-cards")
+
+        // 3. Open Task Detail from Chat's TaskActivityCard and verify activity + outcome
+        XCTAssertTrue(notesCard.isHittable)
+        notesCard.tap()
+        XCTAssertTrue(app.descendants(matching: .any)["task-detail-summary"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["task-detail-timeline"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["task-detail-outcome"].waitForExistence(timeout: 10))
+        attachScreenshot(app: app, name: "b3-02-task-detail-notes-outcome")
+
+        let backToChat = app.navigationBars.buttons.firstMatch
+        XCTAssertTrue(backToChat.waitForExistence(timeout: 10))
+        backToChat.tap()
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 10))
+
+        // 4. Normal Chat still works without regression
+        let composer = app.textFields["conversation-composer-input"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap()
+        let uniqueMessage = "B3 chat regression check"
+        composer.typeText(uniqueMessage)
+        let sendButton = app.buttons["conversation-send"]
+        XCTAssertTrue(sendButton.isEnabled)
+        sendButton.tap()
+
+        let timeline = app.scrollViews["conversation-timeline"]
+        let sentBubble = timeline.staticTexts
+            .matching(identifier: "conversation-message-user")
+            .matching(NSPredicate(format: "label CONTAINS %@", uniqueMessage))
+            .firstMatch
+        XCTAssertTrue(sentBubble.waitForExistence(timeout: 10))
+
+        // 5. Switch to Tasks tab and verify status groups
+        let tasksTabButton = app.tabBars.buttons["Tasks"]
+        XCTAssertTrue(tasksTabButton.waitForExistence(timeout: 10))
+        tasksTabButton.tap()
+
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-section-needs-intervention"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-section-in-progress"].waitForExistence(timeout: 10))
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-section-completed"].waitForExistence(timeout: 10))
+        attachScreenshot(app: app, name: "b3-03-tasks-tab-inbox")
+
+        // 6. Open running task in Tasks tab and cancel it
+        let runningRow = app.buttons["tasks-row-00000000-0000-4000-8000-00000000b312"]
+        XCTAssertTrue(runningRow.waitForExistence(timeout: 10))
+        runningRow.tap()
+
+        let cancelButton = app.buttons["task-cancel"]
+        for _ in 0..<4 {
+            if cancelButton.exists && cancelButton.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(cancelButton.waitForExistence(timeout: 10))
+        cancelButton.tap()
+
+        // Wait until terminal state removes cancel button and cancelled badge appears
+        let cancelRemoved = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: cancelButton
+        )
+        wait(for: [cancelRemoved], timeout: 10)
+        let unavailableOutcome = app.descendants(matching: .any)["outcome-result-unavailable"]
+        for _ in 0..<3 {
+            if unavailableOutcome.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(unavailableOutcome.waitForExistence(timeout: 10))
+
+        // 7. Terminate and relaunch WITHOUT reset to confirm persistence across relaunch
+        app.terminate()
+        launch(app, reset: false)
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        let reloadedTimeline = app.scrollViews["conversation-timeline"]
+        let persistedBubble = reloadedTimeline.staticTexts
+            .matching(identifier: "conversation-message-user")
+            .matching(NSPredicate(format: "label CONTAINS %@", uniqueMessage))
+            .firstMatch
+        for _ in 0..<6 {
+            if persistedBubble.exists { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(persistedBubble.waitForExistence(timeout: 10))
+
+        // Running task should remain cancelled after relaunch (not in In Progress)
+        app.tabBars.buttons["Tasks"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
+        XCTAssertFalse(app.descendants(matching: .any)["tasks-section-in-progress"].exists)
+        let cancelledRow = app.buttons["tasks-row-00000000-0000-4000-8000-00000000b312"]
+        XCTAssertTrue(cancelledRow.waitForExistence(timeout: 10))
+    }
+
+    private func launch(_ app: XCUIApplication, reset: Bool) {
+        var args = ["--ember-mock-chat-tasks"]
+        if reset {
+            args.append("--ember-mock-chat-tasks-reset")
+        }
+        args.append(contentsOf: ["-AppleLanguages", "(en)", "-AppleLocale", "en_US"])
+        app.launchArguments = args
+        app.launch()
+    }
+
+    private func attachScreenshot(app: XCUIApplication, name: String) {
+        let attachment = XCTAttachment(screenshot: app.screenshot())
+        attachment.name = name
+        attachment.lifetime = .keepAlways
+        add(attachment)
+    }
+}

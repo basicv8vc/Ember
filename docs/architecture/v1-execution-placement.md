@@ -1,6 +1,6 @@
 # Ember V1 — 执行调度设计（Execution Placement）
 
-> 状态：**Proposed / 待 CTO 与产品负责人确认（专项决策 D-01～D-07 未批准）**  
+> 状态：**Proposed / 待 CTO 与产品负责人确认（专项决策 D-01～D-07 未批准；D-04 仅就 V1 云端 Daytona Sandbox 部分批准，见 §11）**  
 > 版本：v0.2 · 2026-10-29（与已接受（Accepted，PR #8）的 V1 Architecture Baseline 对齐；本文自身仍为 Proposed）  
 > 适用范围：Ember V1（iOS + macOS 同期发布）  
 > 仓库路径：`docs/architecture/v1-execution-placement.md`  
@@ -139,6 +139,7 @@ V1 不以智能模型推断执行位置。所有拒绝都要有固定规则码�
 - **D-02（多 Mac）**：V1 仅支持一台已选定执行 Mac，还是允许多台已注册 Mac 但必须显式选定其中一台？不在 V1 自动负载均衡。
 - **D-03（体验）**：Mac 离线任务的排队时限、用户通知与主动重新指定执行位置的流程。
 - **D-04（收费）**：启用真实付费云端 Executor 前的额度、预算、并发和成本保护门槛。
+  - **部分决定（2026-11-15，CTO 批准）**：仅针对 Beta V1 / Private Alpha 的 Daytona Python Agent Task，采用 §11 的有界执行参数。其他执行环境（Mac/本地 Harness、E2B、VM 类 Sandbox 等）、商业收费方案、用户配额定价与正式发布后的成本策略**仍未批准**。
 - **D-05（协议）**：Mac 与 Executor Gateway 之间使用轮询、持续连接还是混合机制；实现需结合断线恢复与移动/桌面运行特性确定。
 - **D-06（Harness）**：本地可执行程序发现/版本/能力探测、用户授权、ACP/原生适配、会话管理、审批与隔离策略；先独立验收，再宣称支持特定 Provider。
 - **D-07（跨 Run 恢复）**：何时允许改变目标 Executor、Checkpoints/输入数据条件、用户偏好约束和失败时显示的原因；不属于 P0B-06 的自动调度行为。
@@ -148,3 +149,70 @@ V1 不以智能模型推断执行位置。所有拒绝都要有固定规则码�
 V1 采用 **简单、规则驱动、可解释的 Placement**：交互设备和执行位置解耦；`auto` 默认云端执行云端可用任务；涉及未经同步的本机资源必须使用获授权 Mac；用户可显式选择云端或 Mac，但不能突破能力和隐私边界。单次 Run 不热迁移，重试默认保持目标；未来在单独批准的策略和已提交逻辑 Checkpoint 上允许新的 Run 条件性跨设备恢复。永久在线来自云端控制面，而不是每个 Agent 或每台 Mac 永久运行。
 
 下一步单独讨论：**长期记忆、Workspace、文件与 Checkpoint 在云端、Mac、iPhone 之间的持久化、所有权和同步模型。**
+
+## 11. V1 云端 Agent Task 执行边界（D-04 部分决定）
+
+> 状态：**APPROVED（CTO，2026-11-15）**，仅适用于 Beta V1 / Private Alpha 中的 **Daytona Python Agent Task**（产品范围见 [BETA_V1_ROADMAP.md B3](../product/BETA_V1_ROADMAP.md#b3--delegate-work-inside-conversation)）。  
+> 本节**不**批准：其他执行环境（Mac/本地 Harness、E2B、VM 类 Sandbox）、商业收费与用户配额定价、D-01 的长期存储方案，或正式发布后的成本策略。  
+> 下列数值均为上限，实现可以更严格；放宽需 CTO 批准。本节是直接用于实施的参数，不引入新的审批流程或设计阶段。
+
+### 11.1 数据模型：复用，不新建
+
+- 复用现有 Task / Run / Lease 状态机、`task_results`、`artifacts`（`artifacts.task_id`）、`task_events`、Conversation `task_reference` / `outcome_reference` 与 `commitments`。
+- 不引入第二套 AgentTask 模型或状态机；不在 `tasks` 上复制 Conversation、Artifact、Commitment 关联。
+- Schema 变更只能以**新增** Migration 提交（由 Agent A 统一负责），不修改历史 Migration。
+
+### 11.2 Runtime 位置与 Smoke 优先
+
+- 复用 `apps/cloud-async-runtime` 的 Cloudflare Queue Consumer，新增独立的 Agent Task Queue；不预先部署常驻 Node 服务。
+- 依据：Queue Consumer 单次调用的 Wall Time 上限远大于 Sandbox 生命周期；现有 `limits.cpu_ms: 30000` 是 CPU 预算，等待模型与 Daytona 的网络时间基本不计入。
+- **Cloudflare + Daytona Smoke 优先**：Agent B 首先验证 Daytona SDK 能在 Workers Runtime 中完成打包、Node 兼容 API 调用以及 `container-small` 的创建/执行/销毁。Smoke 不等待 PR A1。只有出现无法低成本解决的阻塞时，才改为独立 Node Task Worker，并在 PR 中附上证据。
+
+### 11.3 Sandbox 与预算上限
+
+| 项                  | V1 决定                                                                                                                                            |
+| ------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sandbox 类型        | Daytona `container-small`（snapshot `daytona-small`）                                                                                              |
+| 创建方式            | **Lazy Sandbox Provisioning**：首次 Python 工具调用时才创建，之前的模型调用不占用 Sandbox 生命周期                                                 |
+| 每个 Run 的 Sandbox | 最多 1 个；Run 结束（成功、失败、取消、超时）后立即销毁；不跨 Run 复用                                                                             |
+| Sandbox 生命周期    | 120 秒（`DAYTONA_SANDBOX_LIMITS.maxSandboxLifetimeSec`）                                                                                           |
+| 单条命令            | ≤ 60 秒（`maxExecTimeoutMs`）                                                                                                                      |
+| Python 执行次数     | 每个 Run 最多 **3 次**（含首次执行和基于 traceback 的修复）                                                                                        |
+| 执行阶段 LLM 调用   | 每个 Run 最多 **4 次**（≤ 3 次生成或修复代码 + 1 次结果总结）                                                                                      |
+| 文件大小            | 输入、输出单文件 ≤ 256 KiB                                                                                                                         |
+| 网络                | 默认 `deny-all`                                                                                                                                    |
+| 凭据                | 不向 Sandbox 注入任何 Ember Secret（数据库凭据、模型 Provider Key、会话 Token、Daytona Key 等）                                                    |
+| 并发                | Agent Task Queue 初始 `max_concurrency: 2`、`max_batch_size: 1`。Adapter 的 `maxConcurrentSandboxes: 2` 只约束单个 Provider 实例，不能当作全局保证 |
+| 孤儿回收            | 依赖 Adapter 的 vendor idle-stop + 停止即删除，Reaper 负责回收超时 Run                                                                             |
+
+- 重试产生的新 Run 同样受上述上限约束；每个 Task 的 Run 总数受现有重试策略限制。
+- Task 的 LLM 调用与普通聊天的 `model_turn_attempts` **分开计量**，但共享全局费用上限。外部测试前必须核实当前 OpenRouter Key 的累计额度限制。
+
+### 11.4 重试与恢复：Queue 只负责投递，Run/Lease 负责执行重试
+
+- Agent Task Queue 只负责**投递**：重试次数设为低值并配置 DLQ。每次投递都必须先通过 Lease/Fencing 领取一个 Run，才能调用模型或接触 Sandbox；没有可领取 Run 时直接确认消息并退出。
+- 是否重试只由 Run/Lease 决定（`retryable_failed` → 新 Run），避免 Queue 重试和 Lease 恢复同时重跑同一个 Task。
+- **Lease Heartbeat** 在等待模型和 Daytona 期间也要持续发送，不能只在步骤之间发送；Lease TTL 必须大于单次最长等待。
+- **Fencing**：旧 epoch 的 Run 写入的事件、结果和 Artifact 一律拒绝。
+- **Checkpoint 恢复**：LLM 循环不可重复，因此 Checkpoint 定义为“已完成的工具调用及其持久化结果”。新 Run 使用新的 Sandbox，从已持久化的输入 Artifact 重新上传，并带着已保存的历史重新提示模型；不假设模型会生成相同的计划。有副作用的操作通过现有 `operation_receipts` / `external_effects` 保证最多执行一次（V1 Python Task 本身在 `deny-all` 下没有外部副作用）。
+
+### 11.5 不可信输入
+
+- **模型生成的代码和用户文件都视为不可信输入**；文件内容可能包含提示注入，借此诱导模型生成恶意代码。
+- Sandbox 只运行程序允许列表中的程序（`python3` 已在列表中），不开放 Shell、包管理器或网络客户端。
+- stdout/stderr 按 Adapter 上限截断；回传给模型和在 iOS 渲染时都作为不可信数据处理（转义后以文本或 Markdown 展示，不执行脚本或 HTML）。
+- PR B1 必须包含以下安全测试：网络隔离、路径限制、资源耗尽（CPU、内存、磁盘、进程数、时间）、Sandbox 环境中不存在 Secret、跨租户数据隔离。
+
+### 11.6 Artifact 存储（V1 临时方案）
+
+- 文件字节暂存在 **Neon PostgreSQL**：新增一个受大小约束的 `bytea` 实现，实现现有 `BlobStore` 接口，沿用 `blobs` / `artifacts` 的现有语义，不引入 R2。现有 `PostgresBlobStore` 通过 `LocalBlobStore` 存储字节，不能在 Cloudflare 与各 Worker 之间共享。
+- 单文件 ≤ 256 KiB，在上传接口和数据库约束两层都要校验。
+- 文件在发布为 Artifact 之前不可下载；每次读取都校验租户。
+- 最终 Artifact 与 Task 完成状态、`task_results` 在同一个事务中提交，不会出现“显示已完成但文件不可读”。
+- 未关联到任何委托的上传文件由现有 GC 隔离机制回收。
+- 本方案**不**决定 D-01。
+
+### 11.7 输入与体验边界
+
+- 初始输入：普通文本，以及 ≤ 256 KiB 的 TXT/CSV/Markdown 附件，通过独立的认证上传接口提交（聊天消息保持现有字符上限）。上传后的 Artifact ID 必须校验所有权，并与该次委托绑定。
+- **APNs 未实现**：关闭 App 后，只承诺任务在云端继续执行、重新打开 App 后恢复真实状态和结果；不承诺任何推送通知。

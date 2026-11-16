@@ -8,11 +8,47 @@ actor LiveConversationJournal {
         let conversationID: UUID
         let transcriptEpoch: Int64
         let text: String
+        let attachmentIDs: [UUID]
+
+        init(
+            clientSubmissionID: UUID,
+            conversationID: UUID,
+            transcriptEpoch: Int64,
+            text: String,
+            attachmentIDs: [UUID] = []
+        ) {
+            self.clientSubmissionID = clientSubmissionID
+            self.conversationID = conversationID
+            self.transcriptEpoch = transcriptEpoch
+            self.text = text
+            self.attachmentIDs = attachmentIDs
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case clientSubmissionID
+            case conversationID
+            case transcriptEpoch
+            case text
+            case attachmentIDs
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            clientSubmissionID = try container.decode(UUID.self, forKey: .clientSubmissionID)
+            conversationID = try container.decode(UUID.self, forKey: .conversationID)
+            transcriptEpoch = try container.decode(Int64.self, forKey: .transcriptEpoch)
+            text = try container.decode(String.self, forKey: .text)
+            attachmentIDs = try container.decodeIfPresent([UUID].self, forKey: .attachmentIDs) ?? []
+        }
 
         var submission: ConversationSubmission {
-            ConversationSubmission(clientSubmissionID: clientSubmissionID,
-                                   conversationID: ConversationID(rawValue: conversationID),
-                                   transcriptEpoch: transcriptEpoch, text: text)
+            ConversationSubmission(
+                clientSubmissionID: clientSubmissionID,
+                conversationID: ConversationID(rawValue: conversationID),
+                transcriptEpoch: transcriptEpoch,
+                text: text,
+                attachmentIDs: attachmentIDs
+            )
         }
     }
 

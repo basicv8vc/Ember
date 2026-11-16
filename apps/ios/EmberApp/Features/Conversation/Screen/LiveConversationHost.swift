@@ -2,6 +2,7 @@ import Foundation
 import Observation
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 /// The Live host observes real Cloud state; it never runs the local Mock reply generator unless explicitly configured for B3 Mock UI tests.
 @MainActor @Observable
@@ -44,6 +45,9 @@ final class LiveConversationHostModel {
     private(set) var status: String?
     private(set) var requiresSignIn = false
     private(set) var rejectedDraftText: String?
+    private(set) var stagedAttachments: [ComposerAttachment] = []
+    private(set) var isUploadingAttachment = false
+    private(set) var attachmentError: String?
 
     init(
         repository: any LiveConversationServiceProtocol,
@@ -166,6 +170,9 @@ final class LiveConversationHostModel {
         snapshot = nil
         requiresSignIn = true
         rejectedDraftText = nil
+        stagedAttachments.removeAll()
+        isUploadingAttachment = false
+        attachmentError = nil
         command = .idle
         reply = .idle
         isPollingPaused = false
@@ -175,14 +182,105 @@ final class LiveConversationHostModel {
         taskStore.clear()
     }
 
+    func removeAttachment(_ attachmentID: UUID) {
+        stagedAttachments.removeAll { $0.id == attachmentID }
+        attachmentError = nil
+    }
+
+    func reportAttachmentPickerFailure() {
+        attachmentError = String(localized: "conversation.composer.attachment_read_failed", table: "Conversation")
+    }
+
+    func attachFile(from url: URL) async {
+        guard !isUploadingAttachment, !isSubmitting else { return }
+        guard stagedAttachments.count < B3AttachmentLimits.maxAttachmentsPerMessage else {
+            attachmentError = String(localized: "conversation.composer.attachment_limit", table: "Conversation")
+            return
+        }
+
+        let startGeneration = sessionGeneration
+        isUploadingAttachment = true
+        attachmentError = nil
+        defer {
+            if sessionGeneration == startGeneration {
+                isUploadingAttachment = false
+            }
+        }
+
+        let didStartScope = url.startAccessingSecurityScopedResource()
+        defer {
+            if didStartScope {
+                url.stopAccessingSecurityScopedResource()
+            }
+        }
+
+        let resolvedMediaType: String?
+        if let byExtension = B3AttachmentLimits.mediaType(forFileExtension: url.pathExtension) {
+            resolvedMediaType = byExtension
+        } else if let contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+            if contentType.conforms(to: .commaSeparatedText) {
+                resolvedMediaType = "text/csv"
+            } else if contentType.conforms(to: .plainText) {
+                resolvedMediaType = "text/plain"
+            } else {
+                resolvedMediaType = nil
+            }
+        } else {
+            resolvedMediaType = nil
+        }
+
+        guard let mediaType = resolvedMediaType else {
+            attachmentError = String(localized: "conversation.composer.attachment_unsupported", table: "Conversation")
+            return
+        }
+
+        do {
+            if let fileSize = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+               fileSize > B3AttachmentLimits.maxFileBytes {
+                attachmentError = String(localized: "conversation.composer.attachment_too_large", table: "Conversation")
+                return
+            }
+
+            let data = try Data(contentsOf: url)
+            guard data.count <= B3AttachmentLimits.maxFileBytes else {
+                attachmentError = String(localized: "conversation.composer.attachment_too_large", table: "Conversation")
+                return
+            }
+
+            let filename = B3AttachmentLimits.safeUploadFilename(url.lastPathComponent, mediaType: mediaType)
+            let receipt = try await repository.uploadAttachment(
+                filename: filename,
+                mediaType: mediaType,
+                data: data
+            )
+            guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
+            if !stagedAttachments.contains(where: { $0.id == receipt.uploadID }) {
+                stagedAttachments.append(
+                    ComposerAttachment(
+                        id: receipt.uploadID,
+                        filename: receipt.filename,
+                        mediaType: receipt.mediaType,
+                        sizeBytes: receipt.size
+                    )
+                )
+            }
+        } catch {
+            guard sessionGeneration == startGeneration else { return }
+            attachmentError = String(localized: "conversation.composer.attachment_upload_failed", table: "Conversation")
+        }
+    }
+
     func send(_ text: String) async {
-        guard !isSubmitting else { return }
+        guard !isSubmitting, !isUploadingAttachment else { return }
+        let attachmentIDs = stagedAttachments.map(\.id)
         isSubmitting = true
         command = .submitting
         rejectedDraftText = nil
+        attachmentError = nil
         defer { isSubmitting = false }
         do {
-            _ = try await repository.send(text: text)
+            _ = try await repository.send(text: text, attachmentIDs: attachmentIDs)
+            stagedAttachments.removeAll()
             command = .acknowledged
             reply = .generating
             let loaded = try await repository.load()
@@ -475,7 +573,10 @@ final class LiveConversationHostModel {
             showsEmptyState: timeline.isEmpty && id != nil,
             isLoading: isLoading,
             isSubmitting: isSubmitting,
-            commandStatus: command
+            commandStatus: command,
+            attachments: stagedAttachments,
+            isUploadingAttachment: isUploadingAttachment,
+            attachmentError: attachmentError
         )
     }
 
@@ -547,19 +648,38 @@ final class LiveConversationHostModel {
         }
 
         let isSimulated = taskStore.isMock(task, result: result) || isMockMode
+        let generatedArtifacts = taskID.flatMap { taskStore.artifactsByTaskID[$0] }?.filter { $0.createdBy == .run } ?? []
         return .inlineCard(id: stableID, accessibilityLabel: title) {
-            OutcomeCard(
-                title: title,
-                summary: summaryText,
-                readableContent: readableContent,
-                isMockOnly: isSimulated,
-                onCopy: readableContent.map { content in
-                    { [weak self] in
-                        UIPasteboard.general.string = content
-                        self?.copiedOutcomeAlert = true
+            VStack(alignment: .leading, spacing: 8) {
+                OutcomeCard(
+                    title: title,
+                    summary: summaryText,
+                    readableContent: readableContent,
+                    isMockOnly: isSimulated,
+                    onCopy: readableContent.map { content in
+                        { [weak self] in
+                            UIPasteboard.general.string = content
+                            self?.copiedOutcomeAlert = true
+                        }
                     }
+                )
+
+                if let taskID, !generatedArtifacts.isEmpty {
+                    Button { [weak self] in
+                        self?.openTaskFromChat(taskID)
+                    } label: {
+                        Label {
+                            Text("tasks.artifacts.open_files_count \(generatedArtifacts.count)", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "doc.badge.arrow.up")
+                        }
+                        .font(.footnote.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("outcome-open-artifacts-\(taskID.uuidString.lowercased())")
                 }
-            )
+            }
         }
     }
 
@@ -793,6 +913,18 @@ struct LiveConversationHost: View {
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
     @State private var isConfirmingSignOut = false
+    @State private var isShowingFileImporter = false
+
+    private static var allowedAttachmentTypes: [UTType] {
+        var types: [UTType] = [.commaSeparatedText, .plainText, .tabSeparatedText]
+        if let md = UTType(filenameExtension: "md") {
+            types.append(md)
+        }
+        if let markdown = UTType(filenameExtension: "markdown") {
+            types.append(markdown)
+        }
+        return types
+    }
 
     init(model: LiveConversationHostModel) {
         _model = State(initialValue: model)
@@ -949,7 +1081,9 @@ struct LiveConversationHost: View {
                         },
                         retry: { Task { await model.retry() } },
                         stopGenerating: { Task { await model.stop() } },
-                        selectPrompt: { draft = $0 }
+                        selectPrompt: { draft = $0 },
+                        onPickAttachment: { isShowingFileImporter = true },
+                        onRemoveAttachment: { model.removeAttachment($0) }
                     ),
                     composerNote: model.isMockMode
                         ? "conversation.composer.local_note"
@@ -965,6 +1099,20 @@ struct LiveConversationHost: View {
                         ? "conversation.message.ember_mock"
                         : "conversation.message.ember_cloud"
                 )
+            }
+            .fileImporter(
+                isPresented: $isShowingFileImporter,
+                allowedContentTypes: Self.allowedAttachmentTypes,
+                allowsMultipleSelection: false
+            ) { result in
+                switch result {
+                case .success(let urls):
+                    if let url = urls.first {
+                        Task { await model.attachFile(from: url) }
+                    }
+                case .failure:
+                    model.reportAttachmentPickerFailure()
+                }
             }
             .toolbar(.hidden, for: .navigationBar)
             .navigationDestination(for: UUID.self) { taskID in

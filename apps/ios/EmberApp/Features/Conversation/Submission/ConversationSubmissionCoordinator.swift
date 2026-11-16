@@ -7,6 +7,7 @@ public struct ConversationSubmission: Equatable, Sendable, Identifiable, CustomS
     public let conversationID: ConversationID
     public let transcriptEpoch: Int64
     public let text: String
+    public let attachmentIDs: [UUID]
 
     public var id: UUID { clientSubmissionID }
 
@@ -14,16 +15,18 @@ public struct ConversationSubmission: Equatable, Sendable, Identifiable, CustomS
         clientSubmissionID: UUID = UUID(),
         conversationID: ConversationID,
         transcriptEpoch: Int64,
-        text: String
+        text: String,
+        attachmentIDs: [UUID] = []
     ) {
         self.clientSubmissionID = clientSubmissionID
         self.conversationID = conversationID
         self.transcriptEpoch = transcriptEpoch
         self.text = text
+        self.attachmentIDs = attachmentIDs
     }
 
     public var description: String {
-        "ConversationSubmission(clientSubmissionID: \(clientSubmissionID), conversationID: \(conversationID.rawValue), transcriptEpoch: \(transcriptEpoch), text: <redacted>)"
+        "ConversationSubmission(clientSubmissionID: \(clientSubmissionID), conversationID: \(conversationID.rawValue), transcriptEpoch: \(transcriptEpoch), attachmentCount: \(attachmentIDs.count), text: <redacted>)"
     }
 
     public var debugDescription: String {

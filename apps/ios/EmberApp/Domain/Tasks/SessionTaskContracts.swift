@@ -4,6 +4,7 @@ import Foundation
 /// Preserves existing M2 mock kinds while supporting real V1 task kinds such as `notes.action_items`.
 public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
     public static let notesActionItems = SessionTaskKind(rawValue: "notes.action_items")!
+    public static let pythonAgent = SessionTaskKind(rawValue: "python.agent")!
     public static let pythonSandbox = SessionTaskKind(rawValue: "sandbox.python")!
     public static let mockChat = SessionTaskKind(rawValue: "mock.chat")!
     public static let mockCompute = SessionTaskKind(rawValue: "mock.compute")!
@@ -42,7 +43,7 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
         switch rawValue {
         case Self.notesActionItems.rawValue:
             String(localized: "tasks.kind.notes_action_items", table: "Conversation")
-        case Self.pythonSandbox.rawValue:
+        case Self.pythonAgent.rawValue, Self.pythonSandbox.rawValue:
             String(localized: "tasks.kind.python_sandbox", table: "Conversation")
         case Self.mockChat.rawValue:
             String(localized: "tasks.kind.mock_chat", table: "Conversation")
@@ -669,5 +670,316 @@ public struct SessionTaskResultDTO: Codable, Equatable, Sendable {
         if (resultState == .available) != (result != nil) {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Result presence mismatch."))
         }
+    }
+}
+
+public enum B3AttachmentLimits {
+    public static let maxFileBytes = 262_144
+    public static let maxAttachmentsPerMessage = 5
+    public static let allowedMediaTypes: Set<String> = [
+        "text/plain",
+        "text/csv",
+        "text/markdown",
+    ]
+
+    public static func mediaType(forFileExtension rawExtension: String) -> String? {
+        switch rawExtension.lowercased() {
+        case "csv":
+            "text/csv"
+        case "md", "markdown":
+            "text/markdown"
+        case "txt", "text", "log", "tsv":
+            "text/plain"
+        default:
+            nil
+        }
+    }
+
+    public static func defaultExtension(forMediaType mediaType: String) -> String {
+        switch mediaType {
+        case "text/csv":
+            "csv"
+        case "text/markdown":
+            "md"
+        default:
+            "txt"
+        }
+    }
+
+    public static func isSafeArtifactFilename(_ value: String) -> Bool {
+        guard !value.isEmpty, value.count <= 128, !value.contains("..") else { return false }
+        let scalars = Array(value.unicodeScalars)
+        guard let first = scalars.first, isAsciiAlnum(first) else { return false }
+        return scalars.allSatisfy { scalar in
+            isAsciiAlnum(scalar) || scalar == "." || scalar == "_" || scalar == "-"
+        }
+    }
+
+    /// Normalizes arbitrary user-picked file names (including spaces or Unicode characters) into an ASCII
+    /// filename accepted by `ArtifactFilenameSchema` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`, without `..`).
+    public static func safeUploadFilename(_ rawName: String, mediaType: String) -> String {
+        let base = URL(fileURLWithPath: rawName).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        var sanitized = String(base.unicodeScalars.map { scalar -> Character in
+            if isAsciiAlnum(scalar) || scalar == "." || scalar == "_" || scalar == "-" {
+                return Character(scalar)
+            }
+            return "_"
+        })
+        while sanitized.contains("..") {
+            sanitized = sanitized.replacingOccurrences(of: "..", with: "_")
+        }
+        while sanitized.hasPrefix(".") || sanitized.hasPrefix("_") || sanitized.hasPrefix("-") {
+            sanitized.removeFirst()
+        }
+
+        let ext = defaultExtension(forMediaType: mediaType)
+        if sanitized.isEmpty {
+            sanitized = "upload.\(ext)"
+        } else if URL(fileURLWithPath: sanitized).pathExtension.isEmpty {
+            sanitized += ".\(ext)"
+        }
+
+        if let first = sanitized.unicodeScalars.first, !isAsciiAlnum(first) {
+            sanitized = "file_" + sanitized
+        }
+
+        if sanitized.count > 128 {
+            let dotExt = ".\(ext)"
+            let maxStem = max(1, 128 - dotExt.count)
+            let rawStem = (sanitized as NSString).deletingPathExtension
+            let clippedStem = String(rawStem.prefix(maxStem))
+            sanitized = clippedStem + dotExt
+        }
+
+        if !isSafeArtifactFilename(sanitized) {
+            return "upload.\(ext)"
+        }
+        return sanitized
+    }
+
+    fileprivate static func isValidSha256(_ value: String) -> Bool {
+        value.count == 64 && value.unicodeScalars.allSatisfy { scalar in
+            (scalar >= "0" && scalar <= "9") || (scalar >= "a" && scalar <= "f")
+        }
+    }
+
+    private static func isAsciiAlnum(_ scalar: UnicodeScalar) -> Bool {
+        (scalar >= "A" && scalar <= "Z")
+            || (scalar >= "a" && scalar <= "z")
+            || (scalar >= "0" && scalar <= "9")
+    }
+}
+
+/// Server receipt returned by `POST /v1/me/uploads` (`B3StagedUploadReceiptDtoSchema`).
+public struct StagedUploadReceiptDTO: Identifiable, Codable, Equatable, Sendable {
+    public let uploadID: UUID
+    public let filename: String
+    public let mediaType: String
+    public let size: Int
+    public let sha256: String
+    public let expiresAt: String
+    public let createdAt: String
+
+    public var id: UUID { uploadID }
+
+    private static let allowedKeys: Set<String> = [
+        "upload_id", "filename", "media_type", "size", "sha256", "expires_at", "created_at",
+    ]
+
+    public init(
+        uploadID: UUID,
+        filename: String,
+        mediaType: String,
+        size: Int,
+        sha256: String,
+        expiresAt: String,
+        createdAt: String
+    ) {
+        self.uploadID = uploadID
+        self.filename = filename
+        self.mediaType = mediaType
+        self.size = size
+        self.sha256 = sha256
+        self.expiresAt = expiresAt
+        self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case uploadID = "upload_id"
+        case filename
+        case mediaType = "media_type"
+        case size
+        case sha256
+        case expiresAt = "expires_at"
+        case createdAt = "created_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+
+        uploadID = try container.decode(UUID.self, forKey: SessionWireDecode.key("upload_id"))
+        let decodedFilename = try container.decode(String.self, forKey: SessionWireDecode.key("filename"))
+        guard B3AttachmentLimits.isSafeArtifactFilename(decodedFilename) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid upload filename."))
+        }
+        filename = decodedFilename
+
+        let decodedMediaType = try container.decode(String.self, forKey: SessionWireDecode.key("media_type"))
+        guard B3AttachmentLimits.allowedMediaTypes.contains(decodedMediaType) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unsupported upload media_type."))
+        }
+        mediaType = decodedMediaType
+
+        let decodedSize = try container.decode(Int.self, forKey: SessionWireDecode.key("size"))
+        guard decodedSize >= 0 && decodedSize <= B3AttachmentLimits.maxFileBytes else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Upload size out of range."))
+        }
+        size = decodedSize
+
+        let decodedSha = try container.decode(String.self, forKey: SessionWireDecode.key("sha256"))
+        guard B3AttachmentLimits.isValidSha256(decodedSha) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid sha256 digest."))
+        }
+        sha256 = decodedSha
+
+        expiresAt = try SessionWireDecode.isoString(container, "expires_at", codingPath: decoder.codingPath)
+        createdAt = try SessionWireDecode.isoString(container, "created_at", codingPath: decoder.codingPath)
+    }
+}
+
+public enum TaskArtifactCreator: String, Codable, Equatable, Sendable {
+    case user
+    case run
+}
+
+/// Artifact metadata item from `GET /v1/me/tasks/{task_id}/artifacts` (`B3TaskArtifactItemDtoSchema`).
+public struct TaskArtifactItemDTO: Identifiable, Codable, Equatable, Sendable {
+    public let artifactID: UUID
+    public let filename: String?
+    public let mediaType: String
+    public let size: Int
+    public let sha256: String
+    public let createdBy: TaskArtifactCreator
+    public let createdAt: String
+
+    public var id: UUID { artifactID }
+
+    public var displayFilename: String {
+        if let filename, !filename.isEmpty {
+            return filename
+        }
+        let ext = B3AttachmentLimits.defaultExtension(forMediaType: mediaType)
+        return "artifact-\(artifactID.uuidString.lowercased().prefix(8)).\(ext)"
+    }
+
+    private static let allowedKeys: Set<String> = [
+        "artifact_id", "filename", "media_type", "size", "sha256", "created_by", "created_at",
+    ]
+
+    public init(
+        artifactID: UUID,
+        filename: String?,
+        mediaType: String,
+        size: Int,
+        sha256: String,
+        createdBy: TaskArtifactCreator,
+        createdAt: String
+    ) {
+        self.artifactID = artifactID
+        self.filename = filename
+        self.mediaType = mediaType
+        self.size = size
+        self.sha256 = sha256
+        self.createdBy = createdBy
+        self.createdAt = createdAt
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case artifactID = "artifact_id"
+        case filename
+        case mediaType = "media_type"
+        case size
+        case sha256
+        case createdBy = "created_by"
+        case createdAt = "created_at"
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+
+        artifactID = try container.decode(UUID.self, forKey: SessionWireDecode.key("artifact_id"))
+        let decodedFilename = try container.decodeIfPresent(String.self, forKey: SessionWireDecode.key("filename"))
+        if let decodedFilename, !B3AttachmentLimits.isSafeArtifactFilename(decodedFilename) {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact filename."))
+        }
+        filename = decodedFilename
+
+        let decodedMediaType = try container.decode(String.self, forKey: SessionWireDecode.key("media_type"))
+        guard !decodedMediaType.isEmpty && decodedMediaType.count <= 128 else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact media_type."))
+        }
+        mediaType = decodedMediaType
+
+        let decodedSize = try container.decode(Int.self, forKey: SessionWireDecode.key("size"))
+        guard decodedSize >= 0 else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Negative artifact size."))
+        }
+        size = decodedSize
+
+        let decodedSha = try container.decode(String.self, forKey: SessionWireDecode.key("sha256"))
+        guard B3AttachmentLimits.isValidSha256(decodedSha) else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact sha256."))
+        }
+        sha256 = decodedSha
+
+        createdBy = try container.decode(TaskArtifactCreator.self, forKey: SessionWireDecode.key("created_by"))
+        createdAt = try SessionWireDecode.isoString(container, "created_at", codingPath: decoder.codingPath)
+    }
+}
+
+/// Response wrapper for `GET /v1/me/tasks/{task_id}/artifacts` (`B3TaskArtifactsListDtoSchema`).
+public struct TaskArtifactsListDTO: Codable, Equatable, Sendable {
+    public let taskID: UUID
+    public let artifacts: [TaskArtifactItemDTO]
+
+    private static let allowedKeys: Set<String> = ["task_id", "artifacts"]
+
+    public init(taskID: UUID, artifacts: [TaskArtifactItemDTO]) {
+        self.taskID = taskID
+        self.artifacts = artifacts
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case taskID = "task_id"
+        case artifacts
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+
+        taskID = try container.decode(UUID.self, forKey: SessionWireDecode.key("task_id"))
+        let decoded = try container.decode([TaskArtifactItemDTO].self, forKey: SessionWireDecode.key("artifacts"))
+        guard decoded.count <= 50 else {
+            throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Artifact list exceeds 50 items."))
+        }
+        artifacts = decoded
+    }
+}
+
+public struct DownloadedTaskArtifact: Equatable, Sendable {
+    public let artifactID: UUID
+    public let filename: String
+    public let mediaType: String
+    public let data: Data
+
+    public init(artifactID: UUID, filename: String, mediaType: String, data: Data) {
+        self.artifactID = artifactID
+        self.filename = filename
+        self.mediaType = mediaType
+        self.data = data
     }
 }

@@ -48,6 +48,11 @@ struct ConversationScreen: View {
                 focused: $composerIsFocused,
                 isGenerating: isGenerating,
                 note: composerNote,
+                attachments: state.attachments,
+                isUploadingAttachment: state.isUploadingAttachment,
+                attachmentError: state.attachmentError,
+                onPickAttachment: actions.onPickAttachment,
+                onRemoveAttachment: actions.onRemoveAttachment,
                 onSend: actions.send
             )
         }

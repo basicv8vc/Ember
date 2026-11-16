@@ -652,6 +652,113 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         })
     }
 
+    func testPythonAgentKindAndTaskArtifactsListAndDownload() async throws {
+        XCTAssertEqual(
+            SessionTaskKind.pythonAgent.localizedDisplayTitle,
+            SessionTaskKind.pythonSandbox.localizedDisplayTitle
+        )
+        XCTAssertEqual(
+            B3AttachmentLimits.safeUploadFilename("../Sales Q4 (final).csv", mediaType: "text/csv"),
+            "Sales_Q4__final_.csv"
+        )
+
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b555")!
+        let artifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000a555")!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let csvContent = "item,total\nAlpha,42\n"
+        let sha = String(repeating: "b", count: 64)
+
+        register { request in
+            recorder.record(request)
+            let path = request.url?.path ?? ""
+            if path == "/v1/me/tasks/\(taskID.uuidString.lowercased())" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "agent_id": "\(agentID)",
+                  "kind": "python.agent",
+                  "title": "CSV Summary",
+                  "status": "completed",
+                  "attempt_count": 2,
+                  "created_at": "2026-11-16T10:00:00Z",
+                  "updated_at": "2026-11-16T10:01:00Z",
+                  "deadline_at": null,
+                  "result_state": "available",
+                  "result": {
+                    "summary_text": "Generated summary.csv with Alpha total 42.",
+                    "detail_text": "CSV processed successfully.",
+                    "model_label": "python-agent-v1",
+                    "simulated": false,
+                    "produced_at": "2026-11-16T10:01:00Z"
+                  }
+                }
+                """)
+            }
+            if path == "/v1/tasks/\(taskID.uuidString.lowercased())/result" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "task_status": "completed",
+                  "result_state": "available",
+                  "result": {
+                    "summary_text": "Generated summary.csv with Alpha total 42.",
+                    "detail_text": "CSV processed successfully.",
+                    "model_label": "python-agent-v1",
+                    "simulated": false,
+                    "produced_at": "2026-11-16T10:01:00Z"
+                  }
+                }
+                """)
+            }
+            if path == "/v1/me/tasks/\(taskID.uuidString.lowercased())/artifacts" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "artifacts": [
+                    {
+                      "artifact_id": "\(artifactID.uuidString.lowercased())",
+                      "filename": "summary.csv",
+                      "media_type": "text/csv",
+                      "size": \(csvContent.utf8.count),
+                      "sha256": "\(sha)",
+                      "created_by": "run",
+                      "created_at": "2026-11-16T10:01:00Z"
+                    }
+                  ]
+                }
+                """)
+            }
+            if path == "/v1/me/artifacts/\(artifactID.uuidString.lowercased())" {
+                return URLProtocolStubResponse(
+                    statusCode: 200,
+                    headers: ["Content-Type": "text/csv; charset=utf-8"],
+                    body: Data(csvContent.utf8)
+                )
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        await store.loadDetail(taskID: taskID)
+
+        XCTAssertEqual(store.tasksByID[taskID]?.kind, .pythonAgent)
+        let artifacts = try XCTUnwrap(store.artifactsByTaskID[taskID])
+        XCTAssertEqual(artifacts.count, 1)
+        XCTAssertEqual(artifacts[0].displayFilename, "summary.csv")
+        XCTAssertEqual(artifacts[0].createdBy, .run)
+
+        await store.downloadArtifact(artifacts[0])
+        let fileURL = try XCTUnwrap(store.downloadedArtifactFileByID[artifactID])
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fileURL.path))
+        XCTAssertEqual(try String(contentsOf: fileURL, encoding: .utf8), csvContent)
+        XCTAssertEqual(store.downloadedArtifactPreviewByID[artifactID], csvContent)
+
+        store.clear()
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
     private func makeRepository() throws -> (repository: LiveB1SessionTaskRepository, session: URLSession) {
         let session = StubSession.make()
         sessions.append(session)

@@ -57,7 +57,8 @@ function toEvent(row: B3TaskDispatchOutboxRow): B3TaskDispatchEvent {
     taskId: row.task_id,
     kind: 'python.agent',
     status: row.status,
-    leaseRemainingMs: Number.isFinite(leaseRemaining) && leaseRemaining > 0 ? Math.trunc(leaseRemaining) : 0,
+    leaseRemainingMs:
+      Number.isFinite(leaseRemaining) && leaseRemaining > 0 ? Math.trunc(leaseRemaining) : 0,
     deadlineAt: row.deadline_at === null ? null : toIso(row.deadline_at),
     nextRunAt: row.next_run_at === null ? null : toIso(row.next_run_at),
   });

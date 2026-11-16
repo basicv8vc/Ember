@@ -64,10 +64,7 @@ export interface PythonAgentSandboxPort {
   putBytesFile(sandboxId: Id, relativePath: string, bytes: Uint8Array): Promise<void>;
   getBytesFile(sandboxId: Id, relativePath: string): Promise<Uint8Array>;
   putTextFile(sandboxId: Id, relativePath: string, text: string): Promise<void>;
-  listDirectory(
-    sandboxId: Id,
-    relativeDir: string,
-  ): Promise<readonly PythonAgentDirectoryEntry[]>;
+  listDirectory(sandboxId: Id, relativeDir: string): Promise<readonly PythonAgentDirectoryEntry[]>;
   destroy(sandboxId: Id): Promise<void>;
 }
 
@@ -137,7 +134,10 @@ type StepGatewayResult =
       readonly diagnostic: ModelGatewayFailureDiagnostic | null;
     };
 
-function clampText(text: string, maxChars: number): { readonly text: string; readonly truncated: boolean } {
+function clampText(
+  text: string,
+  maxChars: number,
+): { readonly text: string; readonly truncated: boolean } {
   if (text.length <= maxChars) {
     return { text, truncated: false };
   }
@@ -589,10 +589,7 @@ export async function executePythonAgentRun(
 
       const remainingTaskLlm = PYTHON_AGENT_LIMITS.maxLlmCallsPerTask - taskLlmUsed;
       const remainingRunLlm = PYTHON_AGENT_LIMITS.maxLlmCallsPerRun - runLlmUsed;
-      if (
-        remainingTaskLlm <= 0 ||
-        taskCostMicroUsd >= PYTHON_AGENT_LIMITS.maxTaskCostMicroUsd
-      ) {
+      if (remainingTaskLlm <= 0 || taskCostMicroUsd >= PYTHON_AGENT_LIMITS.maxTaskCostMicroUsd) {
         return await failRun('failed_terminal', 'BUDGET_EXCEEDED', 'task_llm_budget_exhausted');
       }
       if (remainingRunLlm <= 0) {
@@ -639,7 +636,8 @@ export async function executePythonAgentRun(
         maxAttemptsPerRun: PYTHON_AGENT_LIMITS.maxLlmCallsPerRun,
         maxTaskCostMicroUsd: PYTHON_AGENT_LIMITS.maxTaskCostMicroUsd,
         reservedMicroUsd,
-        rateVersion: deps.mode === 'fake' || deps.rate === null ? 'fake-zero-cost' : deps.rate.rateVersion,
+        rateVersion:
+          deps.mode === 'fake' || deps.rate === null ? 'fake-zero-cost' : deps.rate.rateVersion,
         providerId,
         modelLabel: deps.gateway.modelLabel,
       });
@@ -657,10 +655,18 @@ export async function executePythonAgentRun(
         return await failRun('failed_terminal', 'DEADLINE_EXCEEDED', 'deadline_exceeded');
       }
       if (reservation.kind === 'budget_halted') {
-        return await failRun('failed_terminal', 'BUDGET_EXCEEDED', `budget_halted:${reservation.reason}`);
+        return await failRun(
+          'failed_terminal',
+          'BUDGET_EXCEEDED',
+          `budget_halted:${reservation.reason}`,
+        );
       }
       if (reservation.kind === 'budget_exceeded') {
-        return await failRun('failed_terminal', 'BUDGET_EXCEEDED', `budget_exceeded:${reservation.scope}`);
+        return await failRun(
+          'failed_terminal',
+          'BUDGET_EXCEEDED',
+          `budget_exceeded:${reservation.scope}`,
+        );
       }
       if (reservation.kind === 'task_budget_exhausted') {
         return await failRun('failed_terminal', 'BUDGET_EXCEEDED', reservation.reason);

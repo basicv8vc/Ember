@@ -80,7 +80,9 @@ function buildTestApp(uploads: B3StagedUploadRepository): Hono<AppBindings> {
   return app;
 }
 
-function makeFakeUploadsRepo(recorded: Array<{ ctx: AuthContext; input: StageUploadInput }>): B3StagedUploadRepository {
+function makeFakeUploadsRepo(
+  recorded: Array<{ ctx: AuthContext; input: StageUploadInput }>,
+): B3StagedUploadRepository {
   return {
     stageUpload(ctx, input) {
       recorded.push({ ctx, input });

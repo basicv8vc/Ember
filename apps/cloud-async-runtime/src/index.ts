@@ -190,7 +190,11 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
         try {
           const envelope = parseB3TaskDispatchEnvelope(message.body);
           if (envelope === null) {
-            await consumeAgentDispatchMessage(message, { outbox: agentOutbox, executor: null, logger });
+            await consumeAgentDispatchMessage(message, {
+              outbox: agentOutbox,
+              executor: null,
+              logger,
+            });
             continue;
           }
 
@@ -363,11 +367,9 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
       }
     }
 
-    await new PostgresB3StagedUploadRepository(pool)
-      .sweepExpiredUnboundUploads()
-      .catch(() => {
-        logger.warn('expired upload GC sweep failed', { category: 'database_unavailable' });
-      });
+    await new PostgresB3StagedUploadRepository(pool).sweepExpiredUnboundUploads().catch(() => {
+      logger.warn('expired upload GC sweep failed', { category: 'database_unavailable' });
+    });
 
     await new PostgresByteaBlobStore(pool)
       .sweepOrphans(new Date(), { retentionMs: BLOB_GC_MAX_AGE_MS })

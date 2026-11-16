@@ -118,9 +118,7 @@ function normalizeMediaType(raw: string): string {
   return base;
 }
 
-async function parseUploadPayload(
-  c: AppContext,
-): Promise<
+async function parseUploadPayload(c: AppContext): Promise<
   | {
       readonly ok: true;
       readonly filename: string;
@@ -140,7 +138,10 @@ async function parseUploadPayload(
   if (JSON_CONTENT_TYPE.test(contentType)) {
     const body = await readJsonBody(c.req.raw, MAX_UPLOAD_REQUEST_BYTES);
     if (!body.ok) {
-      return { ok: false, response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES[body.reason]) };
+      return {
+        ok: false,
+        response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES[body.reason]),
+      };
     }
 
     const parsed = jsonUploadSchema.safeParse(body.value);
@@ -286,7 +287,9 @@ async function parseUploadPayload(
     }
 
     const rawMediaType = explicitMediaType !== undefined ? explicitMediaType : fileEntry.type;
-    const mediaTypeParsed = B3StagedUploadMediaTypeSchema.safeParse(normalizeMediaType(rawMediaType));
+    const mediaTypeParsed = B3StagedUploadMediaTypeSchema.safeParse(
+      normalizeMediaType(rawMediaType),
+    );
     if (!mediaTypeParsed.success) {
       return {
         ok: false,

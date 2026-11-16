@@ -2,11 +2,13 @@ import { randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   DELEGATE_NOTES_TOOL_NAME,
+  DELEGATE_PYTHON_TOOL_NAME,
   FAKE_MODEL_LABEL,
   FAKE_REPLY_PREFIX,
   ModelGatewayFailure,
   type ModelGateway,
 } from '@ember/model-gateway';
+import { PostgresB3StagedUploadRepository } from '@ember/postgres/b3-worker';
 import {
   B1_ASSISTANT_TURN_MODEL_LABEL,
   PostgresB1AssistantTurnRepository,
@@ -20,14 +22,17 @@ import {
 } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
 import { resolveCloudRuntimeModelConfig } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
+import { consumeAgentDispatchMessage } from '../../apps/cloud-async-runtime/src/agent-dispatch.js';
 import {
   consumeTaskDispatchMessage,
   consumeTurnDispatchMessage,
   type TurnDispatchQueueMessage,
 } from '../../apps/cloud-async-runtime/src/dispatch.js';
 import {
+  createAgentDispatchOutbox,
   createNotesTaskExecutor,
   createNotesTaskLeaseQueue,
+  createPythonAgentExecutor,
   createTurnExecutor,
 } from '../../apps/cloud-async-runtime/src/runtime.js';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
@@ -265,6 +270,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
           throw new Error('the integration test must not call a Provider');
         },
         extractNotesActionItems() {
+          throw new Error('the integration test must not call a Provider');
+        },
+        stepPythonAgent() {
           throw new Error('the integration test must not call a Provider');
         },
       };
@@ -598,6 +606,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
         extractNotesActionItems() {
           return Promise.reject(new Error('not used during turn delegation'));
         },
+        stepPythonAgent() {
+          return Promise.reject(new Error('not used during notes delegation'));
+        },
       };
 
       const turnExecutor = await createTurnExecutor({
@@ -778,6 +789,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       extractNotesActionItems() {
         return Promise.reject(new Error('not used during turn delegation'));
       },
+      stepPythonAgent() {
+        return Promise.reject(new Error('not used during notes delegation'));
+      },
     };
 
     try {
@@ -916,6 +930,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
             },
           };
         },
+        stepPythonAgent() {
+          return Promise.reject(new Error('not used by notes task handler'));
+        },
       };
 
       const handler = await createNotesTaskExecutor({
@@ -1052,6 +1069,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       extractNotesActionItems() {
         return Promise.reject(new Error('not used during turn delegation'));
       },
+      stepPythonAgent() {
+        return Promise.reject(new Error('not used during notes delegation'));
+      },
     };
 
     try {
@@ -1124,6 +1144,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
             );
           });
         },
+        stepPythonAgent() {
+          return Promise.reject(new Error('not used by notes task handler'));
+        },
       };
 
       const handler = await createNotesTaskExecutor({
@@ -1184,6 +1207,331 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
         })
         .catch(() => undefined);
       await outbox.markCompleted(fixture.turnId).catch(() => undefined);
+    }
+  });
+
+  it('routes Notes and Python Agent delegations through merged Cloud Runtime queues to completion with principal tracking', async () => {
+    const fixture = await createFixture();
+    const notesSent: unknown[] = [];
+    const agentSent: unknown[] = [];
+    const env = {
+      ...cloudRuntimeEnv(notesSent),
+      AGENT_TASK_QUEUE: {
+        send: (message: unknown) => {
+          agentSent.push(message);
+          return Promise.resolve();
+        },
+      },
+      EMBER_AGENT_TASK_QUEUE_NAME: 'ember-test-agent-tasks',
+      EMBER_AGENT_TASK_DLQ_NAME: 'ember-test-agent-tasks-dlq',
+      DAYTONA_API_KEY: 'daytona-test-cloud-runtime-key-123456',
+      EMBER_SANDBOX_OWNER: 'cloud-runtime-test',
+    };
+
+    const uploadRepo = new PostgresB3StagedUploadRepository(db.pool);
+    const agentOutbox = createAgentDispatchOutbox(db.pool);
+    const secondTurnIds: Array<{ tenantId: string; conversationId: string; turnId: string }> = [
+      {
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: fixture.turnId,
+      },
+    ];
+
+    try {
+      const staged = await uploadRepo.stageUpload(
+        { tenantId: fixture.tenantId, principalId: fixture.principalId, policyVersion: 1 },
+        {
+          filename: 'sales.csv',
+          mediaType: 'text/csv',
+          bytes: new TextEncoder().encode('region,amount\napac,200\n'),
+        },
+      );
+
+      // Turn 1 delegates notes.action_items -> dispatched to TURN_DISPATCH_QUEUE and consumed by Worker queue().
+      const event1 = await outbox.getEvent(fixture.turnId);
+      if (event1 === null) throw new Error('turn 1 outbox event was not found');
+      const notesGateway: ModelGateway = {
+        providerId: 'fake',
+        modelLabel: FAKE_MODEL_LABEL,
+        simulated: true,
+        operations: ['conversation.turn', 'task.notes_action_items'],
+        generateConversationTurn() {
+          return Promise.resolve({
+            output: {
+              kind: 'delegate' as const,
+              toolName: DELEGATE_NOTES_TOOL_NAME,
+              text: 'Delegating Notes extraction.',
+              finishReason: 'stop' as const,
+              delegation: {
+                toolName: DELEGATE_NOTES_TOOL_NAME,
+                arguments: {
+                  title: 'Merged Cloud Notes',
+                  notes: '- Alice: verify merged runtime',
+                },
+              },
+            },
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            usage: {
+              inputTokens: 10,
+              outputTokens: 12,
+              costMicroUsd: 0,
+              rateVersion: 'fake-zero-cost',
+            },
+          });
+        },
+        extractNotesActionItems() {
+          return Promise.reject(new Error('not used during turn delegation'));
+        },
+        stepPythonAgent() {
+          return Promise.reject(new Error('not used during notes delegation'));
+        },
+      };
+
+      const turn1Executor = await createTurnExecutor({
+        pool: db.pool,
+        model,
+        event: event1,
+        workerId: 'cloud-merged-notes-turn',
+        queue: env.TURN_DISPATCH_QUEUE,
+        agentQueue: env.AGENT_TASK_QUEUE,
+        gateway: notesGateway,
+      });
+      await turn1Executor!.processTurn(event1);
+      await outbox.markCompleted(fixture.turnId);
+
+      expect(notesSent).toHaveLength(1);
+      expect(agentSent).toHaveLength(0);
+      const notesEnvelope = notesSent[0] as { readonly kind: string; readonly taskId: string };
+      expect(notesEnvelope.kind).toBe('task');
+
+      const notesDelivery = new QueueDelivery(notesEnvelope);
+      await cloudAsyncRuntime.queue(
+        { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [notesDelivery] },
+        env,
+      );
+      expect(notesDelivery.ackCount).toBe(1);
+      expect(await taskReads.getTaskDetail(fixture.tenantId, notesEnvelope.taskId)).toMatchObject({
+        kind: 'notes.action_items',
+        status: 'completed',
+      });
+
+      // Turn 2 delegates python.agent with staged upload -> routed to AGENT_TASK_QUEUE.
+      const sub2 = await writer.submitUserMessage({
+        tenantId: fixture.tenantId,
+        principalId: fixture.principalId,
+        conversationId: fixture.conversationId,
+        request: {
+          client_submission_id: randomUUID(),
+          text: 'Summarize sales.csv into outputs/summary.csv',
+          transcript_epoch: 0,
+          attachment_ids: [staged.upload_id],
+        },
+      });
+      const turn2Id = sub2.receipt.turn.turn_id;
+      secondTurnIds.push({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: turn2Id,
+      });
+
+      const event2 = await outbox.getEvent(turn2Id);
+      if (event2 === null) throw new Error('turn 2 outbox event was not found');
+
+      let pyStepCalls = 0;
+      const pythonGateway: ModelGateway = {
+        providerId: 'fake',
+        modelLabel: FAKE_MODEL_LABEL,
+        simulated: true,
+        operations: ['conversation.turn', 'task.python_agent'],
+        generateConversationTurn() {
+          return Promise.resolve({
+            output: {
+              kind: 'delegate' as const,
+              toolName: DELEGATE_PYTHON_TOOL_NAME,
+              text: 'Delegating Python aggregation.',
+              finishReason: 'stop' as const,
+              delegation: {
+                toolName: DELEGATE_PYTHON_TOOL_NAME,
+                arguments: {
+                  title: 'Merged Cloud Python',
+                  prompt: 'Aggregate sales.csv into outputs/summary.csv',
+                  attachment_ids: [staged.upload_id],
+                },
+              },
+            },
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            usage: {
+              inputTokens: 12,
+              outputTokens: 14,
+              costMicroUsd: 0,
+              rateVersion: 'fake-zero-cost',
+            },
+          });
+        },
+        extractNotesActionItems() {
+          return Promise.reject(new Error('not used during python delegation'));
+        },
+        stepPythonAgent() {
+          pyStepCalls += 1;
+          if (pyStepCalls === 1) {
+            const code = "open('outputs/summary.csv', 'w').write('region,amount\\napac,200\\n')";
+            const purpose = 'Aggregate sales CSV';
+            return Promise.resolve({
+              output: {
+                kind: 'tool_call' as const,
+                toolCallId: 'py_call_1',
+                code,
+                purpose,
+                rawArgumentsJson: JSON.stringify({ code, purpose }),
+              },
+              modelLabel: FAKE_MODEL_LABEL,
+              simulated: true,
+              usage: {
+                inputTokens: 20,
+                outputTokens: 25,
+                costMicroUsd: 0,
+                rateVersion: 'fake-zero-cost',
+              },
+            });
+          }
+          return Promise.resolve({
+            output: {
+              kind: 'final' as const,
+              summaryText: 'Aggregated sales.csv -> outputs/summary.csv',
+              detailText: 'apac: 200',
+              truncated: false,
+              finishReason: 'stop' as const,
+            },
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            usage: {
+              inputTokens: 30,
+              outputTokens: 15,
+              costMicroUsd: 0,
+              rateVersion: 'fake-zero-cost',
+            },
+          });
+        },
+      };
+
+      const turn2Executor = await createTurnExecutor({
+        pool: db.pool,
+        model,
+        event: event2,
+        workerId: 'cloud-merged-python-turn',
+        queue: env.TURN_DISPATCH_QUEUE,
+        agentQueue: env.AGENT_TASK_QUEUE,
+        gateway: pythonGateway,
+      });
+      await turn2Executor!.processTurn(event2);
+      await outbox.markCompleted(turn2Id);
+
+      expect(notesSent).toHaveLength(1);
+      expect(agentSent).toHaveLength(1);
+      const agentEnvelope = agentSent[0] as { readonly taskId: string; readonly tenantId: string };
+      expect(agentEnvelope.tenantId).toBe(fixture.tenantId);
+
+      // Scheduled Cron relay also reconciles un-completed Python Agent outbox rows onto AGENT_TASK_QUEUE.
+      await runScheduledRelay(env);
+      expect(agentSent).toHaveLength(2);
+
+      const agentEvent = await agentOutbox.getEvent(agentEnvelope.taskId);
+      if (agentEvent === null) throw new Error('python agent outbox event not found');
+
+      const sandboxFiles = new Map<string, Uint8Array>();
+      const summaryBytes = new TextEncoder().encode('region,amount\napac,200\n');
+      let sandboxClosed = false;
+
+      const pyExecutor = await createPythonAgentExecutor({
+        pool: db.pool,
+        model,
+        daytona: { kind: 'enabled', apiKey: env.DAYTONA_API_KEY, owner: env.EMBER_SANDBOX_OWNER },
+        event: agentEvent,
+        workerId: 'cloud-merged-python-worker',
+        gateway: pythonGateway,
+        sandboxFactory: () => ({
+          provider: {
+            create: () => Promise.resolve({ sandboxId: `sbx-${randomUUID()}` }),
+            waitReady: () => Promise.resolve(),
+            putTextFile: (_id, rel, text) => {
+              sandboxFiles.set(rel, new TextEncoder().encode(text));
+              return Promise.resolve();
+            },
+            putBytesFile: (_id, rel, bytes) => {
+              sandboxFiles.set(rel, bytes);
+              return Promise.resolve();
+            },
+            getBytesFile: (_id, rel) => Promise.resolve(sandboxFiles.get(rel) ?? summaryBytes),
+            listDirectory: (_id, rel) =>
+              Promise.resolve(
+                rel === 'outputs'
+                  ? [
+                      {
+                        name: 'summary.csv',
+                        isDir: false,
+                        isSymlink: false,
+                        sizeBytes: summaryBytes.byteLength,
+                      },
+                    ]
+                  : [],
+              ),
+            exec: () => {
+              sandboxFiles.set('outputs/summary.csv', summaryBytes);
+              return Promise.resolve({
+                exitCode: 0,
+                stdoutRef: 'out:ok',
+                stderrRef: 'err:',
+                artifactRefs: [],
+              });
+            },
+            readOutput: (_id, ref) => Promise.resolve(ref.startsWith('out:') ? 'ok' : ''),
+            destroy: () => Promise.resolve(),
+          },
+          close: () => {
+            sandboxClosed = true;
+            return Promise.resolve();
+          },
+        }),
+      });
+
+      const agentDelivery = new QueueDelivery(agentEnvelope);
+      await consumeAgentDispatchMessage(agentDelivery, {
+        outbox: agentOutbox,
+        executor: pyExecutor,
+      });
+
+      expect(agentDelivery.ackCount).toBe(1);
+      expect(sandboxClosed).toBe(true);
+      expect(await taskReads.getTaskDetail(fixture.tenantId, agentEnvelope.taskId)).toMatchObject({
+        kind: 'python.agent',
+        status: 'completed',
+      });
+
+      const listedArtifacts = await uploadRepo.listTaskArtifacts(
+        { tenantId: fixture.tenantId, principalId: fixture.principalId, policyVersion: 1 },
+        agentEnvelope.taskId,
+      );
+      expect(listedArtifacts?.artifacts.map((a) => a.filename)).toEqual([
+        'sales.csv',
+        'summary.csv',
+      ]);
+
+      const pyAttempts = await db.pool.query<{ readonly principal_id: string }>(
+        `SELECT principal_id
+           FROM task_model_attempts
+          WHERE tenant_id = $1 AND task_id = $2`,
+        [fixture.tenantId, agentEnvelope.taskId],
+      );
+      expect(pyAttempts.rows).toHaveLength(2);
+      expect(pyAttempts.rows.every((r) => r.principal_id === fixture.principalId)).toBe(true);
+    } finally {
+      for (const item of secondTurnIds) {
+        await turns.cancelTurn(item).catch(() => undefined);
+        await outbox.markCompleted(item.turnId).catch(() => undefined);
+      }
     }
   });
 });

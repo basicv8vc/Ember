@@ -97,7 +97,9 @@ function openRouter(fetchImpl: FetchLike): OpenRouterModelGateway {
   });
 }
 
-function turnInput(text = 'Analyze the uploaded sales CSV and output regional totals'): ConversationTurnInput {
+function turnInput(
+  text = 'Analyze the uploaded sales CSV and output regional totals',
+): ConversationTurnInput {
   return {
     conversationId: '33333333-3333-4333-8333-333333333333',
     turnId: '44444444-4444-4444-8444-444444444444',
@@ -381,9 +383,9 @@ describe('B3-B1 controlled Python delegation and agent step gateway', () => {
 
   it('preflightPythonAgentStep enforces pythonAgentMaxContextChars and FakeModelGateway simulates tool -> final', async () => {
     const huge = 'x'.repeat(MODEL_LIMITS.pythonAgentMaxContextChars + 500);
-    expect(() =>
-      preflightPythonAgentStep(stepInput({ prompt: huge })),
-    ).toThrowError(ModelInputRefused);
+    expect(() => preflightPythonAgentStep(stepInput({ prompt: huge }))).toThrowError(
+      ModelInputRefused,
+    );
 
     const fake = new FakeModelGateway();
     const first = await fake.stepPythonAgent(stepInput(), new AbortController().signal);

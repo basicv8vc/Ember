@@ -11,7 +11,13 @@ import { DomainError, InvalidArgumentError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, withTransaction } from '../repositories/support.js';
 import { BLOB_LOCK_NAMESPACE, DEFAULT_BLOB_GC_QUARANTINE_MS } from './blob-store.js';
-import { blobKeyFor, parseDigest, parseMediaType, parseTenantId, stagingKeyFor } from './validation.js';
+import {
+  blobKeyFor,
+  parseDigest,
+  parseMediaType,
+  parseTenantId,
+  stagingKeyFor,
+} from './validation.js';
 
 export const MAX_BYTEA_BLOB_BYTES = PYTHON_AGENT_LIMITS.maxFileBytes;
 
@@ -205,7 +211,11 @@ export class PostgresByteaBlobStore implements BlobStore {
     this.maxBytes = options.maxBytes ?? MAX_BYTEA_BLOB_BYTES;
     this.gcQuarantineMs = options.gcQuarantineMs ?? DEFAULT_BLOB_GC_QUARANTINE_MS;
 
-    if (!Number.isSafeInteger(this.maxBytes) || this.maxBytes <= 0 || this.maxBytes > MAX_BYTEA_BLOB_BYTES) {
+    if (
+      !Number.isSafeInteger(this.maxBytes) ||
+      this.maxBytes <= 0 ||
+      this.maxBytes > MAX_BYTEA_BLOB_BYTES
+    ) {
       throw new InvalidArgumentError([{ path: 'maxBytes', code: 'invalid_limit' }]);
     }
     if (!Number.isSafeInteger(this.gcQuarantineMs) || this.gcQuarantineMs <= 0) {
@@ -450,10 +460,7 @@ export class PostgresByteaBlobStore implements BlobStore {
       await withTransaction(this.pool, async (client) => {
         await client.query(ADVISORY_LOCK_SQL, [`${BLOB_LOCK_NAMESPACE}:${tenant}:${digest}`]);
         await client.query(MARK_STAGED_SETTLED_SQL, [tenant, staged.stagedId, 'abandoned']);
-        const pending = await client.query(HAS_PENDING_STAGED_KEY_SQL, [
-          tenant,
-          staged.storageKey,
-        ]);
+        const pending = await client.query(HAS_PENDING_STAGED_KEY_SQL, [tenant, staged.storageKey]);
         if ((pending.rowCount ?? 0) === 0) {
           await client.query(DELETE_BYTEA_STAGED_KEY_SQL, [tenant, staged.storageKey]);
         }

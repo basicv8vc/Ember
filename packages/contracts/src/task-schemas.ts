@@ -203,12 +203,7 @@ export const MockApprovalInputSchema: z.ZodType<MockApprovalInput> = z.strictObj
 
 export const PythonAgentInputSchema: z.ZodType<PythonAgentInput> = z.strictObject({
   prompt: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.promptMaxChars),
-  instructions: z
-    .string()
-    .trim()
-    .min(1)
-    .max(PYTHON_AGENT_LIMITS.instructionsMaxChars)
-    .optional(),
+  instructions: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.instructionsMaxChars).optional(),
   inputArtifactIds: z
     .array(IdSchema)
     .max(PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage)
@@ -219,12 +214,7 @@ export const PythonAgentInputSchema: z.ZodType<PythonAgentInput> = z.strictObjec
 export const DelegatePythonAgentArgsSchema = z.strictObject({
   title: TaskTitleSchema.optional(),
   prompt: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.promptMaxChars),
-  instructions: z
-    .string()
-    .trim()
-    .min(1)
-    .max(PYTHON_AGENT_LIMITS.instructionsMaxChars)
-    .optional(),
+  instructions: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.instructionsMaxChars).optional(),
   attachment_ids: z
     .array(IdSchema)
     .min(1)

@@ -198,7 +198,10 @@ export class FakeModelGateway implements ModelGateway {
                 toolCallId: `fake_call_${input.messages.length + 1}`,
                 code,
                 purpose: 'run deterministic fake script',
-                rawArgumentsJson: JSON.stringify({ code, purpose: 'run deterministic fake script' }),
+                rawArgumentsJson: JSON.stringify({
+                  code,
+                  purpose: 'run deterministic fake script',
+                }),
               });
             }
 

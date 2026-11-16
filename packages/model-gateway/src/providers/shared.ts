@@ -170,14 +170,15 @@ const delegatePythonToolArgsSchema = z.strictObject({
   title: optionalBoundedText(128),
   prompt: z.string().trim().min(1).max(8_000),
   instructions: optionalBoundedText(500),
-  attachment_ids: z
-    .array(z.string().trim().regex(UUID_REGEX, 'must be a UUID'))
-    .max(5)
-    .optional(),
+  attachment_ids: z.array(z.string().trim().regex(UUID_REGEX, 'must be a UUID')).max(5).optional(),
 });
 
 const runPythonToolArgsSchema = z.strictObject({
-  code: z.string().min(1).max(16_384).refine((v) => v.trim().length > 0, 'code must be non-empty'),
+  code: z
+    .string()
+    .min(1)
+    .max(16_384)
+    .refine((v) => v.trim().length > 0, 'code must be non-empty'),
   purpose: optionalBoundedText(200),
 });
 
@@ -476,7 +477,8 @@ export function parsePythonAgentStepChoice(
 
     return Object.freeze({
       kind: 'tool_call' as const,
-      toolCallId: call.id ?? `call_${globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`,
+      toolCallId:
+        call.id ?? `call_${globalThis.crypto.randomUUID().replace(/-/g, '').slice(0, 16)}`,
       code: parsedArgs.data.code,
       ...(parsedArgs.data.purpose === undefined ? {} : { purpose: parsedArgs.data.purpose }),
       rawArgumentsJson: call.function.arguments,

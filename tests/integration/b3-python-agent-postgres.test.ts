@@ -119,7 +119,10 @@ async function createTenantFixture() {
   const agentId = randomUUID();
   const conversationId = randomUUID();
 
-  await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [tenantId, 'b3 py it tenant']);
+  await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [
+    tenantId,
+    'b3 py it tenant',
+  ]);
   await db.pool.query("INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')", [
     principalId,
     tenantId,
@@ -193,7 +196,10 @@ class FakePostgresSandbox implements PythonAgentSandboxPort {
     return Promise.resolve(bytes);
   }
 
-  listDirectory(_sandboxId: string, relativeDir: string): Promise<readonly PythonAgentDirectoryEntry[]> {
+  listDirectory(
+    _sandboxId: string,
+    relativeDir: string,
+  ): Promise<readonly PythonAgentDirectoryEntry[]> {
     return Promise.resolve(relativeDir === 'outputs' ? [...this.outputs] : []);
   }
 
@@ -334,7 +340,8 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
                       name: DELEGATE_PYTHON_TOOL_NAME,
                       arguments: JSON.stringify({
                         title: 'Revenue Rollup',
-                        prompt: 'Sum gross_amount_usd_v2 grouped by txn_region_code and write outputs/summary.csv',
+                        prompt:
+                          'Sum gross_amount_usd_v2 grouped by txn_region_code and write outputs/summary.csv',
                         attachment_ids: [stagedUpload.upload_id],
                       }),
                     },
@@ -385,7 +392,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
     expect(wrongQueueClaim).toBeNull();
 
     // Claim python.agent run and execute self-healing 2-step Python loop.
-    const lease = await pythonLeaseQueue.claimTask(
+    const lease = await pythonLeaseQueue.claimTaskForRun(
       tenantA.tenantId,
       delegatedTaskId,
       'py-worker-1',
@@ -555,7 +562,9 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       outArtifact!.artifact_id,
     );
     expect(downloaded).not.toBeNull();
-    expect(new TextDecoder().decode(downloaded!.bytes)).toBe('txn_region_code,total\nNA,150\nEU,75\n');
+    expect(new TextDecoder().decode(downloaded!.bytes)).toBe(
+      'txn_region_code,total\nNA,150\nEU,75\n',
+    );
     expect(downloaded!.sha256).toBe(createHash('sha256').update(outputCsvBytes).digest('hex'));
 
     // Cross-tenant download must return null.
@@ -572,9 +581,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       after: 0,
       limit: 20,
     });
-    expect(
-      messages.messages.some((m) => m.kind === 'outcome_reference'),
-    ).toBe(true);
+    expect(messages.messages.some((m) => m.kind === 'outcome_reference')).toBe(true);
   });
 
   it('persists checkpoints across retryable failure and restores staged outputs on Run 2', async () => {
@@ -644,7 +651,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
     }).processOnce();
 
     // Run 1 executes step 1 (stages intermediate.csv) and then fails retryably on LLM call 2 (HTTP 503).
-    const lease1 = await pythonLeaseQueue.claimTask(
+    const lease1 = await pythonLeaseQueue.claimTaskForRun(
       tenant.tenantId,
       taskId,
       'py-worker-retry-1',
@@ -735,7 +742,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       [taskId],
     );
 
-    const lease2 = await pythonLeaseQueue.claimTask(
+    const lease2 = await pythonLeaseQueue.claimTaskForRun(
       tenant.tenantId,
       taskId,
       'py-worker-retry-2',
@@ -979,7 +986,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       }).processOnce();
       expect(taskId).not.toBe('');
 
-      const lease = await rtLeaseQueue.claimTask(
+      const lease = await rtLeaseQueue.claimTaskForRun(
         tenant.tenantId,
         taskId,
         'rt-worker-priv',
@@ -1116,7 +1123,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
         idempotencyKey: `orphan-${randomUUID()}`,
       },
     );
-    const orphanLease = await pythonLeaseQueue.claimTask(
+    const orphanLease = await pythonLeaseQueue.claimTaskForRun(
       orphanTenantId,
       orphanTask.taskId,
       'py-orphan-worker',
@@ -1153,7 +1160,11 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       tenantId: fixture.tenantId,
       principalId: fixture.principalId,
       conversationId: fixture.conversationId,
-      request: { client_submission_id: randomUUID(), text: 'Summarize sprint', transcript_epoch: 0 },
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Summarize sprint',
+        transcript_epoch: 0,
+      },
     });
     const turnClaim = await turnRepo.claimTurn({
       turn: {
@@ -1207,7 +1218,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       input: { notes: '- Alice: ship release' },
       idempotencyKey: `notes-shared-${randomUUID()}`,
     });
-    const notesLease = await notesLeaseQueue.claimTask(
+    const notesLease = await notesLeaseQueue.claimTaskForRun(
       fixture.tenantId,
       notesTask.taskId,
       'notes-budget-worker',
@@ -1266,7 +1277,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       input: { prompt: 'Compute metrics' },
       idempotencyKey: `py-shared-${randomUUID()}`,
     });
-    const pyLease = await pythonLeaseQueue.claimTask(
+    const pyLease = await pythonLeaseQueue.claimTaskForRun(
       fixture.tenantId,
       pyTask.taskId,
       'py-budget-worker',
@@ -1274,11 +1285,12 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
     );
     expect(pyLease).not.toBeNull();
 
+    // Principal spend already includes Turn (120) + Notes (80) = 200; reserving 330 requires >= 530 ceiling.
     const pyRes1 = await pythonRepo.reserveLlmAttempt({
       lease: pyLease!,
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
-        principalDailyMicroUsd: 450,
+        principalDailyMicroUsd: 530,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -1303,8 +1315,22 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       outputTokens: 50,
     });
 
-    // Principal spend ledger holds Turn (120) + Python (300) = 420 micro-USD (Notes principal
-    // tracking lands in PR #160 rebase); tenant ledger holds all three: Turn (120) + Notes (80) + Python (300) = 500.
+    // Both principal and tenant ledgers hold Turn (120) + Notes (80) + Python (300) = 500 micro-USD,
+    // and both Notes & Python task_model_attempts persist principal_id.
+    const persistedPrincipals = await db.pool.query<{
+      readonly task_id: string;
+      readonly principal_id: string;
+    }>(
+      `SELECT task_id, principal_id
+         FROM task_model_attempts
+        WHERE tenant_id = $1 AND task_id = ANY($2::uuid[])`,
+      [fixture.tenantId, [notesTask.taskId, pyTask.taskId]],
+    );
+    expect(persistedPrincipals.rows).toHaveLength(2);
+    expect(persistedPrincipals.rows.every((r) => r.principal_id === fixture.principalId)).toBe(
+      true,
+    );
+
     const principalSpendAfter1 = await db.pool.query<{
       readonly reserved_micro_usd: string;
       readonly consumed_micro_usd: string;
@@ -1315,7 +1341,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       [fixture.tenantId, fixture.principalId],
     );
     expect(Number(principalSpendAfter1.rows[0]?.reserved_micro_usd)).toBe(0);
-    expect(Number(principalSpendAfter1.rows[0]?.consumed_micro_usd)).toBe(420);
+    expect(Number(principalSpendAfter1.rows[0]?.consumed_micro_usd)).toBe(500);
 
     const tenantSpendAfter1 = await db.pool.query<{
       readonly reserved_micro_usd: string;
@@ -1329,12 +1355,12 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
     expect(Number(tenantSpendAfter1.rows[0]?.reserved_micro_usd)).toBe(0);
     expect(Number(tenantSpendAfter1.rows[0]?.consumed_micro_usd)).toBe(500);
 
-    // 3. Python attempt 2 requesting 50 against principalDailyMicroUsd=450 must refuse AND rollback global/tenant holds.
+    // 3. Python attempt 2 requesting 50 against principalDailyMicroUsd=530 must refuse AND rollback global/tenant holds.
     const pyRefused = await pythonRepo.reserveLlmAttempt({
       lease: pyLease!,
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
-        principalDailyMicroUsd: 450,
+        principalDailyMicroUsd: 530,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -1380,7 +1406,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
 
     const turn2Refused = await turnRepo.reserveAttempt({
       lease: turn2Claim.lease,
-      ceilings: { ...CEILINGS, principalDailyMicroUsd: 450 },
+      ceilings: { ...CEILINGS, principalDailyMicroUsd: 530 },
       maxAttempts: 2,
       reservedMicroUsd: 50,
       rateVersion: OPENROUTER_RATE.rateVersion,

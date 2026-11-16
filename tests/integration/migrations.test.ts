@@ -9,6 +9,9 @@ import {
   loadDatabaseConfig,
   loadMigrations,
   MigrationError,
+  PostgresLeaseQueue,
+  PostgresPythonAgentExecutionRepository,
+  PostgresTaskRepository,
   runMigrations,
 } from '@ember/postgres';
 import { createDatabaseReadiness } from '../../apps/api/src/readiness.js';
@@ -505,23 +508,28 @@ describe('PostgreSQL migrations (real database)', () => {
     expect(outcomes.filter((accepted) => !accepted)).toHaveLength(31);
   });
 
-  it('preserves deployed 0020 checksum and backfills principal_id via forward migration 0022', async () => {
+  it('preserves deployed 0020/0021 checksums and backfills principal_id via forward migration 0022', async () => {
     await withFreshSchema(async (isolatedPool) => {
       const prePrincipalNames = (await readdir(migrationsDir))
         .filter((name) => name.endsWith('.sql') && !name.startsWith('0022_'))
         .sort();
-      const stage0020Dir = await stageMigrations(prePrincipalNames);
+      const stage0020Plus0021Dir = await stageMigrations(prePrincipalNames);
 
       const tenantId = randomUUID();
       const principalId = randomUUID();
       const consumerId = randomUUID();
       const agentId = randomUUID();
-      const taskId = randomUUID();
-      const runId = randomUUID();
-      const operationId = randomUUID();
+      const notesTaskId = randomUUID();
+      const notesRunId = randomUUID();
+      const notesOperationId = randomUUID();
+      const pythonTaskId = randomUUID();
+      const pythonRunId = randomUUID();
+      const pythonOperationId = randomUUID();
 
       try {
-        await runMigrations(isolatedPool, stage0020Dir);
+        const appliedPre = await runMigrations(isolatedPool, stage0020Plus0021Dir);
+        expect(appliedPre.applied.some((m) => m.id === '0020')).toBe(true);
+        expect(appliedPre.applied.some((m) => m.id === '0021')).toBe(true);
 
         const checksum0020 = await isolatedPool.query<{ readonly checksum: string }>(
           "SELECT checksum FROM schema_migrations WHERE id = '0020'",
@@ -557,13 +565,26 @@ describe('PostgreSQL migrations (real database)', () => {
         );
         await isolatedPool.query(
           `INSERT INTO tasks (id, tenant_id, agent_id, kind, input, digest, idempotency_key, status)
-           VALUES ($1, $2, $3, 'notes.action_items', '{"notes":"- Alice: ship"}'::jsonb, $4, $5, 'completed')`,
-          [taskId, tenantId, agentId, 'a'.repeat(64), `compat-${taskId}`],
+           VALUES
+             ($1, $3, $4, 'notes.action_items', '{"notes":"- Alice: ship"}'::jsonb, $5, $6, 'completed'),
+             ($2, $3, $4, 'python.agent', '{"prompt":"print(1)"}'::jsonb, $7, $8, 'completed')`,
+          [
+            notesTaskId,
+            pythonTaskId,
+            tenantId,
+            agentId,
+            'a'.repeat(64),
+            `compat-notes-${notesTaskId}`,
+            'b'.repeat(64),
+            `compat-py-${pythonTaskId}`,
+          ],
         );
         await isolatedPool.query(
           `INSERT INTO runs (id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, started_at, finished_at)
-           VALUES ($1, $2, $3, 1, 1, 'succeeded', 'w-1', now(), now())`,
-          [runId, tenantId, taskId],
+           VALUES
+             ($1, $3, $2, 1, 1, 'succeeded', 'w-1', now(), now()),
+             ($4, $3, $5, 1, 1, 'succeeded', 'w-2', now(), now())`,
+          [notesRunId, notesTaskId, tenantId, pythonRunId, pythonTaskId],
         );
         await isolatedPool.query(
           `INSERT INTO task_model_attempts (
@@ -572,27 +593,45 @@ describe('PostgreSQL migrations (real database)', () => {
              reserved_micro_usd, applied_cost_micro_usd, observed_cost_micro_usd,
              input_tokens, output_tokens, billing_basis, overage_micro_usd,
              send_started_at, settled_at
-           ) VALUES (
-             $1, $2, $3, 1, 1, $4,
-             '2026-11-16', 'openrouter', 'nvidia/nemotron-3.5-lightning', 'v1', 'settled', 'ok',
-             50, 20, 20,
-             10, 10, 'provider_usage', 0,
-             now(), now()
-           )`,
-          [tenantId, taskId, runId, operationId],
+           ) VALUES
+             (
+               $1, $2, $3, 1, 1, $4,
+               '2026-11-16', 'openrouter', 'nvidia/nemotron-3.5-lightning', 'v1', 'settled', 'ok',
+               50, 20, 20, 10, 10, 'provider_usage', 0, now(), now()
+             ),
+             (
+               $1, $5, $6, 1, 6, $7,
+               '2026-11-16', 'openrouter', 'nvidia/nemotron-3.5-lightning', 'v1', 'settled', 'ok',
+               50, 30, 30, 15, 10, 'provider_usage', 0, now(), now()
+             )`,
+          [
+            tenantId,
+            notesTaskId,
+            notesRunId,
+            notesOperationId,
+            pythonTaskId,
+            pythonRunId,
+            pythonOperationId,
+          ],
         );
       } finally {
-        await rm(stage0020Dir, { recursive: true, force: true });
+        await rm(stage0020Plus0021Dir, { recursive: true, force: true });
       }
 
       const upgrade = await runMigrations(isolatedPool, migrationsDir);
       expect(upgrade.applied.map((m) => m.id)).toEqual(['0022']);
 
-      const backfilled = await isolatedPool.query<{ readonly principal_id: string }>(
-        'SELECT principal_id FROM task_model_attempts WHERE tenant_id = $1 AND task_id = $2',
-        [tenantId, taskId],
+      const backfilled = await isolatedPool.query<{
+        readonly task_id: string;
+        readonly principal_id: string;
+      }>(
+        `SELECT task_id, principal_id
+           FROM task_model_attempts
+          WHERE tenant_id = $1 AND task_id = ANY($2::uuid[])`,
+        [tenantId, [notesTaskId, pythonTaskId]],
       );
-      expect(backfilled.rows[0]?.principal_id).toBe(principalId);
+      expect(backfilled.rows).toHaveLength(2);
+      expect(backfilled.rows.every((row) => row.principal_id === principalId)).toBe(true);
 
       const colAfter = await isolatedPool.query<{ readonly is_nullable: string }>(
         `SELECT is_nullable
@@ -610,6 +649,67 @@ describe('PostgreSQL migrations (real database)', () => {
             AND conname = 'task_model_attempts_principal_fk'`,
       );
       expect(constraint.rows).toHaveLength(1);
+
+      // Post-0022 python.agent LLM reserve + settle must persist and consume principal_id without NOT NULL error.
+      const taskRepo = new PostgresTaskRepository(isolatedPool);
+      const leaseQueue = new PostgresLeaseQueue(isolatedPool, {
+        claimableKinds: ['python.agent'],
+        leaseDurationMs: 30_000,
+        heartbeatIntervalMs: 5_000,
+      });
+      const pythonRepo = new PostgresPythonAgentExecutionRepository(isolatedPool);
+      const created = await taskRepo.create(
+        { tenantId, principalId, policyVersion: 1 },
+        {
+          agentId,
+          kind: 'python.agent',
+          title: 'Post-0022 upgrade python check',
+          input: { prompt: 'print(42)' },
+          idempotencyKey: `post-0022-${randomUUID()}`,
+        },
+      );
+      const lease = await leaseQueue.claimTaskForRun(
+        tenantId,
+        created.taskId,
+        'post-0022-worker',
+        new Date(),
+      );
+      expect(lease).not.toBeNull();
+      const reserved = await pythonRepo.reserveLlmAttempt({
+        lease: lease!,
+        ceilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 250_000,
+          tenantDailyMicroUsd: 1_000_000,
+          globalDailyMicroUsd: 5_000_000,
+        },
+        maxAttemptsPerTask: 6,
+        maxAttemptsPerRun: 4,
+        maxTaskCostMicroUsd: 20_000,
+        reservedMicroUsd: 100,
+        rateVersion: 'v1',
+        providerId: 'openrouter',
+        modelLabel: 'nvidia/nemotron-3.5-lightning',
+      });
+      expect(reserved.kind).toBe('reserved');
+      await pythonRepo.markLlmAttemptSent({ lease: lease!, attemptNo: 1 });
+      const settled = await pythonRepo.settleLlmAttempt({
+        tenantId,
+        taskId: created.taskId,
+        attemptNo: 1,
+        state: 'settled',
+        outcomeCode: 'ok',
+        observedCostMicroUsd: 40,
+        inputTokens: 20,
+        outputTokens: 10,
+      });
+      expect(settled).toMatchObject({ kind: 'applied', state: 'settled', appliedMicroUsd: 40 });
+
+      const insertedAttempt = await isolatedPool.query<{ readonly principal_id: string }>(
+        'SELECT principal_id FROM task_model_attempts WHERE tenant_id = $1 AND task_id = $2 AND attempt_no = 1',
+        [tenantId, created.taskId],
+      );
+      expect(insertedAttempt.rows[0]?.principal_id).toBe(principalId);
     });
   });
 });

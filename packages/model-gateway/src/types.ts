@@ -7,10 +7,7 @@
 export type ModelProviderId = 'fake' | 'openai' | 'openrouter';
 export type RealModelProviderId = Exclude<ModelProviderId, 'fake'>;
 
-export type ModelOperation =
-  | 'conversation.turn'
-  | 'task.notes_action_items'
-  | 'task.python_agent';
+export type ModelOperation = 'conversation.turn' | 'task.notes_action_items' | 'task.python_agent';
 
 export type ModelExecutionMode = 'disabled' | 'fake' | 'real';
 

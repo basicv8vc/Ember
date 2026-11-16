@@ -29,12 +29,18 @@ import { lockBlobDigests } from '../storage/blob-store.js';
 import { PostgresByteaBlobStore, decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
 import type { B2ModelProviderId, B2SettlementOutcome } from './b2-interfaces.js';
 import { B2_ABSOLUTE_DAY_CEILINGS } from './b2-ledger-limits.js';
+import {
+  applySpendCharge,
+  findOutstandingHalt,
+  insertBudgetIncident,
+  lockBudgetHalt,
+  tryReserveGlobalSpend,
+  tryReserveScopeSpend,
+} from './b2-spend-ledger.js';
 import { appendTaskEvent } from './event-store.js';
 import { asDomainError } from './support.js';
 
 const SIMULATED_LABEL_PATTERN = /-(fake|echo)-/;
-const BUDGET_HALT_LOCK_CLASS = 782;
-const BUDGET_HALT_LOCK_ID = 0;
 
 export interface PythonAgentAttemptReservation {
   readonly attemptNo: number;
@@ -480,23 +486,6 @@ async function lockTaskAndRun(
   return { task, run, now, utcDay, leaseLive };
 }
 
-function splitCharge(
-  reserved: number,
-  consumed: number,
-  release: number,
-  charge: number,
-  ceiling: number,
-): {
-  readonly remainingReserved: number;
-  readonly appliedMicroUsd: number;
-  readonly overageMicroUsd: number;
-} {
-  const remainingReserved = reserved - release;
-  const room = Math.max(0, ceiling - (remainingReserved + consumed));
-  const appliedMicroUsd = Math.min(charge, room);
-  return { remainingReserved, appliedMicroUsd, overageMicroUsd: charge - appliedMicroUsd };
-}
-
 /** Resolve the server-owned principal mapped to `tenantId` (`consumers` 1:1 invariant). */
 async function resolveTenantPrincipalId(
   client: pg.PoolClient,
@@ -507,100 +496,6 @@ async function resolveTenantPrincipalId(
     [tenantId],
   );
   return principal.rows[0]?.principal_id ?? null;
-}
-
-/** Reserve spend against one `model_spend_days` bucket (`tenant` or `principal`). */
-async function tryReserveScopeSpend(
-  client: pg.PoolClient,
-  tenantId: string,
-  scopeKind: 'tenant' | 'principal',
-  scopeId: string,
-  utcDay: string,
-  reservedMicroUsd: number,
-  ceiling: number,
-): Promise<boolean> {
-  const result = await client.query(
-    `INSERT INTO model_spend_days
-        (tenant_id, scope_kind, scope_id, utc_day, reserved_micro_usd, turns_started)
-     SELECT $1::uuid, $2, $3::uuid, $4::date, $5::bigint, 0
-      WHERE $5::bigint <= $6::bigint
-     ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO UPDATE
-        SET reserved_micro_usd = model_spend_days.reserved_micro_usd + EXCLUDED.reserved_micro_usd,
-            updated_at = clock_timestamp()
-      WHERE model_spend_days.reserved_micro_usd
-          + model_spend_days.consumed_micro_usd
-          + EXCLUDED.reserved_micro_usd <= $6::bigint`,
-    [tenantId, scopeKind, scopeId, utcDay, reservedMicroUsd, ceiling],
-  );
-  return (result.rowCount ?? 0) === 1;
-}
-
-/** Release reserved hold and book actual charge for one `model_spend_days` bucket. */
-async function chargeScopeSpend(
-  client: pg.PoolClient,
-  tenantId: string,
-  scopeKind: 'tenant' | 'principal',
-  scopeId: string,
-  utcDay: string,
-  releaseMicroUsd: number,
-  chargeMicroUsd: number,
-): Promise<{
-  readonly scope: 'tenant' | 'principal';
-  readonly scopeId: string;
-  readonly appliedMicroUsd: number;
-  readonly overageMicroUsd: number;
-}> {
-  await client.query(
-    `INSERT INTO model_spend_days (tenant_id, scope_kind, scope_id, utc_day)
-     VALUES ($1::uuid, $2, $3::uuid, $4::date)
-     ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO NOTHING`,
-    [tenantId, scopeKind, scopeId, utcDay],
-  );
-  const locked = await client.query<{
-    readonly reserved_micro_usd: string | number;
-    readonly consumed_micro_usd: string | number;
-  }>(
-    `SELECT reserved_micro_usd, consumed_micro_usd
-       FROM model_spend_days
-      WHERE tenant_id = $1::uuid AND scope_kind = $2 AND scope_id = $3::uuid AND utc_day = $4::date
-      FOR UPDATE`,
-    [tenantId, scopeKind, scopeId, utcDay],
-  );
-  const consumed = Number(locked.rows[0]!.consumed_micro_usd);
-  const ceiling =
-    scopeKind === 'tenant'
-      ? B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd
-      : B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd;
-  const split = splitCharge(
-    Number(locked.rows[0]!.reserved_micro_usd),
-    consumed,
-    releaseMicroUsd,
-    chargeMicroUsd,
-    ceiling,
-  );
-  await client.query(
-    `UPDATE model_spend_days
-        SET reserved_micro_usd = $5,
-            consumed_micro_usd = $6,
-            overage_micro_usd = overage_micro_usd + $7,
-            updated_at = clock_timestamp()
-      WHERE tenant_id = $1::uuid AND scope_kind = $2 AND scope_id = $3::uuid AND utc_day = $4::date`,
-    [
-      tenantId,
-      scopeKind,
-      scopeId,
-      utcDay,
-      split.remainingReserved,
-      consumed + split.appliedMicroUsd,
-      split.overageMicroUsd,
-    ],
-  );
-  return {
-    scope: scopeKind,
-    scopeId,
-    appliedMicroUsd: split.appliedMicroUsd,
-    overageMicroUsd: split.overageMicroUsd,
-  };
 }
 
 /**
@@ -848,38 +743,20 @@ export class PostgresPythonAgentExecutionRepository {
 
     try {
       return await runTx(this.pool, async (client) => {
-        await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
-          BUDGET_HALT_LOCK_CLASS,
-          BUDGET_HALT_LOCK_ID,
-        ]);
+        await lockBudgetHalt(client);
 
         const principalId = await resolveTenantPrincipalId(client, input.lease.tenantId);
         if (principalId === null) {
           return { kind: 'principal_unavailable' as const };
         }
 
-        const halt = await client.query<{
-          readonly scope_kind: 'global' | 'tenant' | 'principal';
-          readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
-        }>(
-          `SELECT scope_kind, reason
-             FROM model_budget_incidents
-            WHERE resolved_at IS NULL
-              AND (
-                scope_kind = 'global'
-                OR (tenant_id = $1 AND scope_kind = 'tenant')
-                OR (tenant_id = $1 AND scope_kind = 'principal' AND scope_id = $2)
-              )
-            ORDER BY CASE scope_kind WHEN 'global' THEN 0 WHEN 'tenant' THEN 1 ELSE 2 END
-            LIMIT 1`,
-          [input.lease.tenantId, principalId],
-        );
+        const halt = await findOutstandingHalt(client, input.lease.tenantId, principalId);
 
-        if (halt.rows[0] !== undefined) {
+        if (halt !== null) {
           return {
             kind: 'budget_halted' as const,
-            scope: halt.rows[0].scope_kind,
-            reason: halt.rows[0].reason,
+            scope: halt.scope,
+            reason: halt.reason,
           };
         }
 
@@ -920,7 +797,10 @@ export class PostgresPythonAgentExecutionRepository {
         const cumulativeMicroUsd = Number(prior.rows[0]?.cumulative_micro_usd ?? 0);
 
         if (runAttempts >= input.maxAttemptsPerRun) {
-          return { kind: 'run_budget_exhausted' as const, reason: 'run_attempts_exhausted' as const };
+          return {
+            kind: 'run_budget_exhausted' as const,
+            reason: 'run_attempts_exhausted' as const,
+          };
         }
         if (maxAttempt >= input.maxAttemptsPerTask) {
           return { kind: 'task_budget_exhausted' as const, reason: 'attempts_exhausted' as const };
@@ -930,19 +810,7 @@ export class PostgresPythonAgentExecutionRepository {
         }
 
         // Strict 3-scope lock order matching B2 Turns and B3 Notes: global -> tenant -> principal.
-        const globalRes = await client.query(
-          `INSERT INTO model_global_spend_days (utc_day, reserved_micro_usd)
-           SELECT $1::date, $2::bigint
-            WHERE $2::bigint <= $3::bigint
-           ON CONFLICT (utc_day) DO UPDATE
-              SET reserved_micro_usd = model_global_spend_days.reserved_micro_usd + EXCLUDED.reserved_micro_usd,
-                  updated_at = clock_timestamp()
-            WHERE model_global_spend_days.reserved_micro_usd
-                + model_global_spend_days.consumed_micro_usd
-                + EXCLUDED.reserved_micro_usd <= $3`,
-          [utcDay, input.reservedMicroUsd, globalCeiling],
-        );
-        if ((globalRes.rowCount ?? 0) !== 1) {
+        if (!(await tryReserveGlobalSpend(client, utcDay, input.reservedMicroUsd, globalCeiling))) {
           throw new Refusal({ kind: 'budget_exceeded', scope: 'global' });
         }
 
@@ -955,6 +823,8 @@ export class PostgresPythonAgentExecutionRepository {
             utcDay,
             input.reservedMicroUsd,
             tenantCeiling,
+            0,
+            60,
           ))
         ) {
           throw new Refusal({ kind: 'budget_exceeded', scope: 'tenant' });
@@ -969,6 +839,8 @@ export class PostgresPythonAgentExecutionRepository {
             utcDay,
             input.reservedMicroUsd,
             principalCeiling,
+            0,
+            60,
           ))
         ) {
           throw new Refusal({ kind: 'budget_exceeded', scope: 'principal' });
@@ -980,9 +852,9 @@ export class PostgresPythonAgentExecutionRepository {
         await client.query(
           `INSERT INTO task_model_attempts (
              tenant_id, task_id, run_id, lease_epoch, attempt_no, operation_id,
-             utc_day, provider_id, model_label, rate_version, state, reserved_micro_usd
+             principal_id, utc_day, provider_id, model_label, rate_version, state, reserved_micro_usd
            )
-           VALUES ($1, $2, $3, $4, $5, $6, $7::date, $8, $9, $10, 'reserved', $11)`,
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8::date, $9, $10, $11, 'reserved', $12)`,
           [
             input.lease.tenantId,
             input.lease.taskId,
@@ -990,6 +862,7 @@ export class PostgresPythonAgentExecutionRepository {
             input.lease.leaseEpoch,
             attemptNo,
             operationId,
+            principalId,
             utcDay,
             input.providerId,
             input.modelLabel,
@@ -1061,17 +934,15 @@ export class PostgresPythonAgentExecutionRepository {
     const input = parsed.data;
 
     return runTx(this.pool, async (client) => {
-      await client.query('SELECT pg_advisory_xact_lock($1, $2)', [
-        BUDGET_HALT_LOCK_CLASS,
-        BUDGET_HALT_LOCK_ID,
-      ]);
+      await lockBudgetHalt(client);
 
       const attempt = await client.query<{
         readonly state: string;
         readonly reserved_micro_usd: string | number;
         readonly utc_day: string;
+        readonly principal_id: string;
       }>(
-        `SELECT state, reserved_micro_usd, utc_day::text AS utc_day
+        `SELECT state, reserved_micro_usd, utc_day::text AS utc_day, principal_id
            FROM task_model_attempts
           WHERE tenant_id = $1 AND task_id = $2 AND attempt_no = $3
           FOR UPDATE`,
@@ -1114,93 +985,29 @@ export class PostgresPythonAgentExecutionRepository {
       let bucketOverage = 0;
 
       if (releaseMicroUsd > 0 || chargeMicroUsd > 0) {
-        const principalId = await resolveTenantPrincipalId(client, input.tenantId);
-        if (principalId === null) {
-          throw new DomainError('POLICY_DENIED', 'principal mapping unavailable for tenant');
-        }
-
-        await client.query(
-          `INSERT INTO model_global_spend_days (utc_day) VALUES ($1::date) ON CONFLICT (utc_day) DO NOTHING`,
-          [row.utc_day],
-        );
-        const gLocked = await client.query<{
-          readonly reserved_micro_usd: string | number;
-          readonly consumed_micro_usd: string | number;
-        }>(
-          `SELECT reserved_micro_usd, consumed_micro_usd
-             FROM model_global_spend_days
-            WHERE utc_day = $1::date
-            FOR UPDATE`,
-          [row.utc_day],
-        );
-        const gSplit = splitCharge(
-          Number(gLocked.rows[0]!.reserved_micro_usd),
-          Number(gLocked.rows[0]!.consumed_micro_usd),
+        const charged = await applySpendCharge(client, {
+          utcDay: row.utc_day,
+          tenantId: input.tenantId,
+          principalId: row.principal_id,
           releaseMicroUsd,
           chargeMicroUsd,
-          B2_ABSOLUTE_DAY_CEILINGS.globalMicroUsd,
-        );
-        await client.query(
-          `UPDATE model_global_spend_days
-              SET reserved_micro_usd = $2,
-                  consumed_micro_usd = $3,
-                  overage_micro_usd = overage_micro_usd + $4,
-                  updated_at = clock_timestamp()
-            WHERE utc_day = $1::date`,
-          [
-            row.utc_day,
-            gSplit.remainingReserved,
-            Number(gLocked.rows[0]!.consumed_micro_usd) + gSplit.appliedMicroUsd,
-            gSplit.overageMicroUsd,
-          ],
-        );
+        });
 
-        const tenantCharge = await chargeScopeSpend(
-          client,
-          input.tenantId,
-          'tenant',
-          input.tenantId,
-          row.utc_day,
-          releaseMicroUsd,
-          chargeMicroUsd,
-        );
-        const principalCharge = await chargeScopeSpend(
-          client,
-          input.tenantId,
-          'principal',
-          principalId,
-          row.utc_day,
-          releaseMicroUsd,
-          chargeMicroUsd,
-        );
-
-        const buckets = [
-          { scope: 'global' as const, scopeId: 'platform', ...gSplit },
-          tenantCharge,
-          principalCharge,
-        ];
-
-        for (const bucket of buckets) {
+        for (const bucket of charged) {
           if (bucket.overageMicroUsd > 0) {
-            await client.query(
-              `INSERT INTO model_budget_incidents
-                 (id, tenant_id, scope_kind, scope_id, utc_day, reason, task_id, attempt_no,
-                  observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
-               VALUES ($1, $2, $3, $4, $5::date, 'day_ceiling_exceeded', $6, $7, $8, $9, $10, $11)`,
-              [
-                globalThis.crypto.randomUUID(),
-                input.tenantId,
-                bucket.scope,
-                bucket.scopeId,
-                row.utc_day,
-                input.taskId,
-                input.attemptNo,
-                chargeMicroUsd,
-                bucket.appliedMicroUsd,
-                bucket.overageMicroUsd,
-                reserved,
-              ],
-            );
+            await insertBudgetIncident(client, {
+              tenantId: input.tenantId,
+              scope: bucket.scope,
+              scopeId: bucket.scopeId,
+              utcDay: row.utc_day,
+              reason: 'day_ceiling_exceeded',
+              taskId: input.taskId,
+              attemptNo: input.attemptNo,
+              observedMicroUsd: chargeMicroUsd,
+              appliedMicroUsd: bucket.appliedMicroUsd,
+              overageMicroUsd: bucket.overageMicroUsd,
+              reservationMicroUsd: reserved,
+            });
             incidentsOpened += 1;
             bucketOverage += bucket.overageMicroUsd;
           }
@@ -1208,41 +1015,36 @@ export class PostgresPythonAgentExecutionRepository {
       }
 
       if (incidentsOpened === 0 && observed !== null && observed > reserved) {
-        await client.query(
-          `INSERT INTO model_budget_incidents
-             (id, tenant_id, scope_kind, scope_id, utc_day, reason, task_id, attempt_no,
-              observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
-           VALUES ($1, $2::uuid, 'tenant', $3::text, $4::date, 'reservation_exceeded', $5, $6, $7, $7, 0, $8)`,
-          [
-            globalThis.crypto.randomUUID(),
-            input.tenantId,
-            input.tenantId,
-            row.utc_day,
-            input.taskId,
-            input.attemptNo,
-            observed,
-            reserved,
-          ],
-        );
+        await insertBudgetIncident(client, {
+          tenantId: input.tenantId,
+          scope: 'tenant',
+          scopeId: input.tenantId,
+          utcDay: row.utc_day,
+          reason: 'reservation_exceeded',
+          taskId: input.taskId,
+          attemptNo: input.attemptNo,
+          observedMicroUsd: observed,
+          appliedMicroUsd: observed,
+          overageMicroUsd: 0,
+          reservationMicroUsd: reserved,
+        });
         incidentsOpened = 1;
       }
 
       if (input.state === 'conservative_billed') {
-        await client.query(
-          `INSERT INTO model_budget_incidents
-             (id, tenant_id, scope_kind, scope_id, utc_day, reason, task_id, attempt_no,
-              observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd)
-           VALUES ($1, $2::uuid, 'tenant', $3::text, $4::date, 'usage_missing', $5, $6, $7, $7, 0, $7)`,
-          [
-            globalThis.crypto.randomUUID(),
-            input.tenantId,
-            input.tenantId,
-            row.utc_day,
-            input.taskId,
-            input.attemptNo,
-            reserved,
-          ],
-        );
+        await insertBudgetIncident(client, {
+          tenantId: input.tenantId,
+          scope: 'tenant',
+          scopeId: input.tenantId,
+          utcDay: row.utc_day,
+          reason: 'usage_missing',
+          taskId: input.taskId,
+          attemptNo: input.attemptNo,
+          observedMicroUsd: reserved,
+          appliedMicroUsd: reserved,
+          overageMicroUsd: 0,
+          reservationMicroUsd: reserved,
+        });
         incidentsOpened += 1;
       }
 
@@ -1732,9 +1534,7 @@ export class PostgresPythonAgentExecutionRepository {
     });
   }
 
-  async commitFailure(
-    command: PythonAgentCommitFailureCommand,
-  ): Promise<PythonAgentFailureResult> {
+  async commitFailure(command: PythonAgentCommitFailureCommand): Promise<PythonAgentFailureResult> {
     const parsedLease = leasedRunSchema.safeParse(command.lease);
     if (!parsedLease.success) {
       throw toInvalidArgumentError(parsedLease.error);

@@ -164,11 +164,10 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
           );
         const expiresAt = new Date(createdAt.getTime() + PYTHON_AGENT_LIMITS.maxUploadTtlMs);
 
-        const countResult = await client.query<{ active_count: number }>(COUNT_UNBOUND_UPLOADS_SQL, [
-          auth.tenantId,
-          auth.principalId,
-          createdAt,
-        ]);
+        const countResult = await client.query<{ active_count: number }>(
+          COUNT_UNBOUND_UPLOADS_SQL,
+          [auth.tenantId, auth.principalId, createdAt],
+        );
 
         const activeCount = Number(countResult.rows[0]?.active_count ?? 0);
         if (activeCount >= PYTHON_AGENT_LIMITS.maxUnboundUploadsPerUser) {

@@ -204,9 +204,7 @@ export class OpenAiModelGateway implements ModelGateway {
       n: 1,
       stream: false,
       store: false,
-      ...(input.remainingPythonCalls > 0
-        ? { tools: PYTHON_AGENT_TOOLS, tool_choice: 'auto' }
-        : {}),
+      ...(input.remainingPythonCalls > 0 ? { tools: PYTHON_AGENT_TOOLS, tool_choice: 'auto' } : {}),
       ...rateRequestModifiers(this.#rate, 'openai'),
     });
 

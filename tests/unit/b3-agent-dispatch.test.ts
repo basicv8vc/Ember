@@ -37,7 +37,9 @@ class QueueMsg implements TurnDispatchQueueMessage {
   readonly attempts = 1;
   ack = vi.fn();
   retry = vi.fn();
-  constructor(readonly body: unknown = agentTaskEnvelope({ tenantId: TENANT_ID, taskId: TASK_ID })) {}
+  constructor(
+    readonly body: unknown = agentTaskEnvelope({ tenantId: TENANT_ID, taskId: TASK_ID }),
+  ) {}
 }
 
 class MemoryAgentOutbox implements AgentTaskOutboxPort {

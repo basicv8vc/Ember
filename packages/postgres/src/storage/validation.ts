@@ -2,7 +2,8 @@ import { InvalidArgumentError, type Id } from '@ember/domain';
 
 export const SHA256_PATTERN = /^[0-9a-f]{64}$/;
 export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-export const MEDIA_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/;
+export const MEDIA_TYPE_PATTERN =
+  /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/;
 export const STAGING_KEY_PATTERN = /^staging\/[0-9a-f-]{36}\/[0-9a-f]{64}$/;
 export const BLOB_KEY_PATTERN = /^blobs\/[0-9a-f-]{36}\/[0-9a-f]{64}$/;
 

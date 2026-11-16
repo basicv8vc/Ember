@@ -73,7 +73,10 @@ class MemoryBlobStore implements BlobStore {
     source: Uint8Array | ReadableStream<Uint8Array>,
     mediaType: string,
   ): Promise<StagedBlobRef> {
-    const bytes = source instanceof Uint8Array ? source : new Uint8Array(await new Response(source).arrayBuffer());
+    const bytes =
+      source instanceof Uint8Array
+        ? source
+        : new Uint8Array(await new Response(source).arrayBuffer());
     const sha256 = createHash('sha256').update(bytes).digest('hex');
     const stagedId = randomUUID();
     const storageKey = `staged/${tenantId}/${sha256}`;
@@ -182,7 +185,10 @@ class MemorySandbox implements PythonAgentSandboxPort {
     return Promise.resolve(bytes);
   }
 
-  listDirectory(_sandboxId: Id, relativeDir: string): Promise<readonly PythonAgentDirectoryEntry[]> {
+  listDirectory(
+    _sandboxId: Id,
+    relativeDir: string,
+  ): Promise<readonly PythonAgentDirectoryEntry[]> {
     if (relativeDir === 'outputs') {
       return Promise.resolve([...this.outputsEntries]);
     }
@@ -208,7 +214,9 @@ class MemorySandbox implements PythonAgentSandboxPort {
   }
 
   readOutput(_sandboxId: Id, ref: Id, stream: 'stdout' | 'stderr'): Promise<string> {
-    return Promise.resolve((stream === 'stdout' ? this.stdoutByRef.get(ref) : this.stderrByRef.get(ref)) ?? '');
+    return Promise.resolve(
+      (stream === 'stdout' ? this.stdoutByRef.get(ref) : this.stderrByRef.get(ref)) ?? '',
+    );
   }
 
   destroy(sandboxId: Id): Promise<void> {
@@ -220,14 +228,20 @@ class MemorySandbox implements PythonAgentSandboxPort {
 class MemoryPythonAgentRepository {
   context: PythonAgentLoadedContext;
   readonly settlements: PythonAgentLlmCharge[] = [];
-  readonly opEvents: Array<{ kind: 'reserve' | 'settle'; opKind?: PythonAgentOpKind; operationId: string; state?: string }> = [];
+  readonly opEvents: Array<{
+    kind: 'reserve' | 'settle';
+    opKind?: PythonAgentOpKind;
+    operationId: string;
+    state?: string;
+  }> = [];
   readonly committedSteps: PythonAgentCommitStepCommand[] = [];
   readonly completions: PythonAgentCommitCompletionCommand[] = [];
   readonly failures: PythonAgentCommitFailureCommand[] = [];
   staleOnCommitStep = false;
   staleOnComplete = false;
   nextAttemptNo = 1;
-  overrideReserveLlm: ((cmd: PythonAgentReserveLlmCommand) => PythonAgentReserveLlmOutcome) | null = null;
+  overrideReserveLlm: ((cmd: PythonAgentReserveLlmCommand) => PythonAgentReserveLlmOutcome) | null =
+    null;
   overrideReserveOp: ((opKind: PythonAgentOpKind) => PythonAgentReserveOpOutcome) | null = null;
 
   constructor(overrides: Partial<PythonAgentLoadedContext> = {}) {
@@ -300,14 +314,21 @@ class MemoryPythonAgentRepository {
     readonly opKind: PythonAgentOpKind;
     readonly operationId: string;
   }): Promise<PythonAgentReserveOpOutcome> {
-    this.opEvents.push({ kind: 'reserve', opKind: command.opKind, operationId: command.operationId });
+    this.opEvents.push({
+      kind: 'reserve',
+      opKind: command.opKind,
+      operationId: command.operationId,
+    });
     if (this.overrideReserveOp !== null) {
       return Promise.resolve(this.overrideReserveOp(command.opKind));
     }
     return Promise.resolve({ kind: 'reserved', operationId: command.operationId });
   }
 
-  settleAgentOperation(command: { readonly operationId: string; readonly state: string }): Promise<void> {
+  settleAgentOperation(command: {
+    readonly operationId: string;
+    readonly state: string;
+  }): Promise<void> {
     this.opEvents.push({ kind: 'settle', operationId: command.operationId, state: command.state });
     return Promise.resolve();
   }
@@ -339,7 +360,12 @@ class MemoryPythonAgentRepository {
     this.failures.push(command);
     return Promise.resolve({
       outcome: 'committed',
-      taskStatus: command.outcome === 'cancelled' ? 'cancelled' : command.outcome === 'failed_retryable' ? 'retryable_failed' : 'failed',
+      taskStatus:
+        command.outcome === 'cancelled'
+          ? 'cancelled'
+          : command.outcome === 'failed_retryable'
+            ? 'retryable_failed'
+            : 'failed',
       runStatus:
         command.outcome === 'cancelled'
           ? 'cancelled'
@@ -655,7 +681,9 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
 
   it('aborts and returns lease_lost when heartbeat fails during a slow step, while destroying sandbox', async () => {
     const repo = new MemoryPythonAgentRepository();
-    const sandbox = new MemorySandbox(() => Promise.resolve({ exitCode: 0, stdout: 'ok', stderr: '' }));
+    const sandbox = new MemorySandbox(() =>
+      Promise.resolve({ exitCode: 0, stdout: 'ok', stderr: '' }),
+    );
     let heartbeatCalls = 0;
 
     const gateway: ModelGateway = {

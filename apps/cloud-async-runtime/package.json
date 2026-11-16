@@ -9,8 +9,12 @@
     "typecheck": "tsc --noEmit -p tsconfig.json"
   },
   "dependencies": {
+    "@ember/contracts": "workspace:*",
+    "@ember/domain": "workspace:*",
+    "@ember/execution": "workspace:*",
     "@ember/model-gateway": "workspace:*",
     "@ember/postgres": "workspace:*",
+    "@ember/sandbox-daytona": "workspace:*",
     "@ember/worker": "workspace:*",
     "pg": "8.23.1",
     "zod": "4.6.7"

@@ -74,6 +74,7 @@ export interface DaytonaSdkClientOptions {
   readonly apiUrl?: string;
   readonly target?: string;
   readonly requestTimeoutMs?: number;
+  readonly useDeprecatedPolling?: boolean;
 }
 
 function toState(value: unknown): DaytonaSandboxState {
@@ -125,8 +126,23 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
       apiKey: options.apiKey,
       ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
       ...(options.target === undefined ? {} : { target: options.target }),
+      ...(options.useDeprecatedPolling === undefined
+        ? {}
+        : { useDeprecatedPolling: options.useDeprecatedPolling }),
       requestTimeoutMs: options.requestTimeoutMs ?? 120_000,
     });
+  }
+
+  /**
+   * Disconnects the SDK's background EventDispatcher WebSocket and subscription timers so
+   * serverless isolates (Cloudflare Workers/Queues) can exit immediately when work finishes.
+   */
+  public async close(): Promise<void> {
+    await this.daytona[Symbol.asyncDispose]();
+  }
+
+  public async [Symbol.asyncDispose](): Promise<void> {
+    await this.close();
   }
 
   public async create(request: DaytonaCreateRequest): Promise<{ sandboxId: string }> {

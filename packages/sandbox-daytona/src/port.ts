@@ -151,4 +151,6 @@ export interface DaytonaSandboxClient {
   download(sandboxId: string, absolutePath: string): Promise<Buffer>;
   exists(sandboxId: string, absolutePath: string): Promise<boolean>;
   latestMetrics(sandboxId: string): Promise<DaytonaMetricsSample | null>;
+  /** Releases SDK background connections and timers (e.g. Socket.IO EventDispatcher). */
+  close?(): Promise<void>;
 }

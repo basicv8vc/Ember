@@ -13,6 +13,7 @@
     { "path": "../../packages/execution/tsconfig.build.json" },
     { "path": "../../packages/model-gateway/tsconfig.build.json" },
     { "path": "../../packages/postgres/tsconfig.build.json" },
+    { "path": "../../packages/sandbox-daytona/tsconfig.build.json" },
     { "path": "../worker/tsconfig.build.json" }
   ],
   "include": ["src/**/*.ts"]

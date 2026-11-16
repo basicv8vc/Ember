@@ -5,6 +5,12 @@
   "compatibility_date": "2026-11-10",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "routes": [
+    {
+      "pattern": "ember-api.slowfast.dev",
+      "custom_domain": true,
+    },
+  ],
   "observability": { "enabled": true },
   "vars": {
     "EMBER_ENV": "staging",

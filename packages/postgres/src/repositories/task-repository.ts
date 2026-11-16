@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   AuthContextSchema,
   IdSchema,
@@ -18,6 +17,7 @@ import {
 } from '@ember/domain';
 import type pg from 'pg';
 import { prepareTaskCommand, type PreparedTaskCommand } from '../task-digest.js';
+import { insertB3TaskDispatchOutbox } from './b3-task-dispatch-outbox.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 import { cancelTaskInTransaction, type TaskCancelOutcome } from './task-cancellation.js';
 import {
@@ -135,8 +135,19 @@ function toTaskView(row: TaskRow): TaskView {
  * by `UNIQUE (tenant_id, idempotency_key)`, not by an in-process Map or a
  * SELECT-then-INSERT check.
  */
+export interface PostgresTaskRepositoryOptions {
+  readonly onTaskCreated?: (event: {
+    readonly tenantId: Id;
+    readonly taskId: Id;
+    readonly kind: TaskCommand['kind'];
+  }) => void;
+}
+
 export class PostgresTaskRepository implements TaskRepositoryContract {
-  constructor(private readonly pool: pg.Pool) {}
+  constructor(
+    private readonly pool: pg.Pool,
+    private readonly options: PostgresTaskRepositoryOptions = {},
+  ) {}
 
   async create(ctx: AuthContext, command: TaskCommand): Promise<TaskReceipt> {
     const validatedContext = parseContext(ctx);
@@ -145,7 +156,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
     const prepared = prepareTaskCommand(command);
 
     try {
-      return await withTransaction(this.pool, async (client) => {
+      const receipt = await withTransaction(this.pool, async (client) => {
         const agent = await client.query(AGENT_EXISTS_SQL, [
           validatedContext.tenantId,
           prepared.command.agentId,
@@ -158,6 +169,20 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
 
         return await this.insertOrReplay(client, validatedContext, prepared);
       });
+
+      if (!receipt.replayed && this.options.onTaskCreated !== undefined) {
+        try {
+          this.options.onTaskCreated({
+            tenantId: validatedContext.tenantId,
+            taskId: receipt.taskId,
+            kind: prepared.command.kind,
+          });
+        } catch {
+          // The committed outbox row guarantees recovery if Queue dispatch fails.
+        }
+      }
+
+      return receipt;
     } catch (error) {
       throw asDomainError(error);
     }
@@ -252,7 +277,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
     prepared: PreparedTaskCommand,
   ): Promise<TaskReceipt> {
     for (let attempt = 0; attempt < MAX_IDEMPOTENT_INSERT_ATTEMPTS; attempt += 1) {
-      const taskId = randomUUID();
+      const taskId = globalThis.crypto.randomUUID();
       const inserted = await client.query<TaskRow>(INSERT_TASK_SQL, [
         taskId,
         ctx.tenantId,
@@ -267,6 +292,12 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
       const insertedRow = inserted.rows[0];
 
       if (insertedRow !== undefined) {
+        if (prepared.command.kind === 'python.agent') {
+          await insertB3TaskDispatchOutbox(client, {
+            tenantId: ctx.tenantId,
+            taskId: insertedRow.id,
+          });
+        }
         await this.appendAcceptedEvent(client, ctx, prepared, insertedRow);
         return toTaskReceipt(insertedRow, false);
       }
@@ -313,7 +344,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
       sequence: 1,
       phase: 'accepted' as const,
       occurredAt: toIsoTimestamp(taskRow.accepted_at),
-      traceId: randomUUID(),
+      traceId: globalThis.crypto.randomUUID(),
       payload: {
         taskKind: prepared.command.kind,
         policyVersion: ctx.policyVersion,
@@ -329,7 +360,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
     }
 
     await client.query(INSERT_ACCEPTED_EVENT_SQL, [
-      randomUUID(),
+      globalThis.crypto.randomUUID(),
       ctx.tenantId,
       parsed.data.taskId,
       JSON.stringify(parsed.data.payload),

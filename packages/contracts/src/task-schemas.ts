@@ -9,6 +9,7 @@ import type {
   MockFileInput,
   MockTaskInput,
   NotesActionItemsInput,
+  PythonAgentInput,
   RunStatus,
   TaskCommand,
   TaskInputByKind,
@@ -45,8 +46,51 @@ export const TASK_INPUT_LIMITS = Object.freeze({
   idempotencyKeyMaxChars: 128,
 });
 
+export const PYTHON_AGENT_LIMITS = Object.freeze({
+  promptMaxChars: 8_000,
+  instructionsMaxChars: 500,
+  maxFileBytes: 262_144,
+  maxUploadTtlMs: 86_400_000,
+  maxUnboundUploadsPerUser: 10,
+  maxAttachmentsPerMessage: 5,
+  allowedMediaTypes: Object.freeze(['text/plain', 'text/csv', 'text/markdown'] as const),
+  maxSandboxesPerRun: 1,
+  maxPythonExecsPerRun: 3,
+  maxLlmCallsPerRun: 4,
+  maxSandboxesPerTask: 2,
+  maxPythonExecsPerTask: 4,
+  maxLlmCallsPerTask: 6,
+  maxTaskCostMicroUsd: 30_000,
+  maxOutputArtifactsPerTask: 5,
+  maxFilenameChars: 128,
+  maxPythonCodeChars: 16_384,
+  maxStepOutputPreviewChars: 2_048,
+});
+
+export const ARTIFACT_FILENAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+
+export function isSafeArtifactFilename(value: string): boolean {
+  return (
+    value.length >= 1 &&
+    value.length <= PYTHON_AGENT_LIMITS.maxFilenameChars &&
+    ARTIFACT_FILENAME_PATTERN.test(value) &&
+    !value.includes('..')
+  );
+}
+
+export const ArtifactFilenameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(PYTHON_AGENT_LIMITS.maxFilenameChars)
+  .regex(ARTIFACT_FILENAME_PATTERN, 'must be a safe ASCII filename without slashes')
+  .refine((value) => !value.includes('..'), 'filename must not contain ..');
+
 /** Closed allowlist of Chat tool names that can delegate work into durable Tasks. */
-export const DELEGATION_TOOL_NAMES = Object.freeze(['delegate_notes_action_items'] as const);
+export const DELEGATION_TOOL_NAMES = Object.freeze([
+  'delegate_notes_action_items',
+  'delegate_python_agent',
+] as const);
 export type DelegationToolName = (typeof DELEGATION_TOOL_NAMES)[number];
 export const DelegationToolNameSchema = z.enum(DELEGATION_TOOL_NAMES);
 
@@ -157,6 +201,39 @@ export const MockApprovalInputSchema: z.ZodType<MockApprovalInput> = z.strictObj
   reason: z.string().max(TASK_INPUT_LIMITS.approvalReasonMaxChars).optional(),
 });
 
+export const PythonAgentInputSchema: z.ZodType<PythonAgentInput> = z.strictObject({
+  prompt: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.promptMaxChars),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(PYTHON_AGENT_LIMITS.instructionsMaxChars)
+    .optional(),
+  inputArtifactIds: z
+    .array(IdSchema)
+    .max(PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage)
+    .refine((ids) => new Set(ids).size === ids.length, 'inputArtifactIds must be unique')
+    .optional(),
+});
+
+export const DelegatePythonAgentArgsSchema = z.strictObject({
+  title: TaskTitleSchema.optional(),
+  prompt: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.promptMaxChars),
+  instructions: z
+    .string()
+    .trim()
+    .min(1)
+    .max(PYTHON_AGENT_LIMITS.instructionsMaxChars)
+    .optional(),
+  attachment_ids: z
+    .array(IdSchema)
+    .min(1)
+    .max(PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage)
+    .refine((ids) => new Set(ids).size === ids.length, 'attachment_ids must be unique')
+    .optional(),
+});
+export type DelegatePythonAgentArgs = z.infer<typeof DelegatePythonAgentArgsSchema>;
+
 /** Input schemas keyed by kind. Unknown kinds are rejected before this map is consulted. */
 export const TASK_INPUT_SCHEMAS = Object.freeze({
   'mock.chat': MockChatInputSchema,
@@ -164,6 +241,7 @@ export const TASK_INPUT_SCHEMAS = Object.freeze({
   'mock.file': MockFileInputSchema,
   'mock.approval': MockApprovalInputSchema,
   'notes.action_items': NotesActionItemsInputSchema,
+  'python.agent': PythonAgentInputSchema,
 }) satisfies Readonly<Record<TaskKind, z.ZodType<MockTaskInput>>>;
 
 /** Narrowing helper for callers that already know a validated `TaskKind`. */
@@ -228,6 +306,13 @@ const createTaskBodyVariants = [
     deadlineAt: DeadlineSchema.optional(),
     title: TaskTitleSchema.optional(),
   }),
+  z.strictObject({
+    agentId: IdSchema,
+    kind: z.literal('python.agent'),
+    input: PythonAgentInputSchema,
+    deadlineAt: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
+  }),
 ] as const;
 
 /**
@@ -245,6 +330,7 @@ const taskCommandVariants = [
   createTaskBodyVariants[2].extend({ idempotencyKey: IdempotencyKeySchema }),
   createTaskBodyVariants[3].extend({ idempotencyKey: IdempotencyKeySchema }),
   createTaskBodyVariants[4].extend({ idempotencyKey: IdempotencyKeySchema }),
+  createTaskBodyVariants[5].extend({ idempotencyKey: IdempotencyKeySchema }),
 ] as const;
 
 /**
@@ -290,6 +376,13 @@ const createTaskRequestVariants = [
     agent_id: IdSchema,
     kind: z.literal('notes.action_items'),
     input: NotesActionItemsInputSchema,
+    deadline_at: DeadlineSchema.optional(),
+    title: TaskTitleSchema.optional(),
+  }),
+  z.strictObject({
+    agent_id: IdSchema,
+    kind: z.literal('python.agent'),
+    input: PythonAgentInputSchema,
     deadline_at: DeadlineSchema.optional(),
     title: TaskTitleSchema.optional(),
   }),

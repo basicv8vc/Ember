@@ -4,6 +4,7 @@ import type {
   B1ConversationRepository,
   B1TaskReadRepository,
   B1TaskResultRepository,
+  B3StagedUploadRepository,
 } from '@ember/postgres';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { unconfiguredAgentStore, type AgentStore } from './agents/agent-store.js';
@@ -51,6 +52,7 @@ import { createB1TaskRoutes } from './tasks/b1-task-routes.js';
 import { createTaskRoutes } from './tasks/routes.js';
 import { unconfiguredTaskStore, type TaskStore } from './tasks/task-store.js';
 import { createB1TurnRoutes } from './turns/turn-routes.js';
+import { createB3UploadArtifactRoutes } from './uploads/b3-upload-artifact-routes.js';
 
 export const SERVICE_NAME = 'ember-api';
 
@@ -103,6 +105,8 @@ export interface AppDependencies {
   readonly b1TaskResultRepository?: B1TaskResultRepository;
   /** B1 session-authenticated Task list/detail reader (`GET /v1/me/tasks*`). */
   readonly b1TaskReadRepository?: B1TaskReadRepository;
+  /** B3 session-authenticated upload staging and Task artifact download repository. */
+  readonly b3UploadRepository?: B3StagedUploadRepository;
 }
 
 /**
@@ -269,6 +273,17 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
 
   if (b1TaskDeps !== null) {
     app.route('/v1', createB1TaskRoutes(b1TaskDeps));
+  }
+
+  if (deps.b1Session !== undefined && deps.b3UploadRepository !== undefined) {
+    app.route(
+      '/v1',
+      createB3UploadArtifactRoutes({
+        session: deps.b1Session.service,
+        uploads: deps.b3UploadRepository,
+        logger,
+      }),
+    );
   }
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a

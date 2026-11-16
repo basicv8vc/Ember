@@ -1,4 +1,9 @@
-import { IdSchema, toInvalidArgumentError, type LeaseQueue } from '@ember/contracts';
+import {
+  IdSchema,
+  PYTHON_AGENT_LIMITS,
+  toInvalidArgumentError,
+  type LeaseQueue,
+} from '@ember/contracts';
 import {
   DomainError,
   InvalidArgumentError,
@@ -52,8 +57,23 @@ interface TargetedTaskRow extends TaskRow {
 }
 
 const TASK_COLUMNS = `
-  id, tenant_id, status, attempt_count, max_attempts, lease_epoch::text AS lease_epoch,
+  id, tenant_id, kind, status, attempt_count, max_attempts, lease_epoch::text AS lease_epoch,
   current_run_id, next_run_at, lease_expires_at, deadline_at, cancel_requested_at
+`;
+
+const PYTHON_AGENT_PRECLAIM_BUDGET_SQL = `
+SELECT COALESCE(MAX(attempt_no), 0)::int AS max_attempt,
+       COALESCE(
+         SUM(
+           CASE
+             WHEN state = 'reserved' THEN reserved_micro_usd
+             ELSE COALESCE(applied_cost_micro_usd, reserved_micro_usd)
+           END
+         ),
+         0
+       )::bigint AS cumulative_micro_usd
+  FROM task_model_attempts
+ WHERE tenant_id = $1 AND task_id = $2
 `;
 
 const RUN_COLUMNS = `
@@ -402,6 +422,71 @@ export class PostgresLeaseQueue implements LeaseQueue {
     }
   }
 
+  /**
+   * Claim a specific Task by identity (`tenantId`, `taskId`) under full Lease fencing, reaping
+   * an already-expired running Run inline before checking eligibility.
+   */
+  async claimTaskForRun(
+    tenantId: Id,
+    taskId: Id,
+    workerId: string,
+    now: Date,
+  ): Promise<LeasedRun | null> {
+    const parsedTenantId = IdSchema.safeParse(tenantId);
+    if (!parsedTenantId.success) {
+      throw toInvalidArgumentError(parsedTenantId.error);
+    }
+    const parsedTaskId = IdSchema.safeParse(taskId);
+    if (!parsedTaskId.success) {
+      throw toInvalidArgumentError(parsedTaskId.error);
+    }
+    const validatedWorkerId = parseWorkerId(workerId);
+    const claimedAt = parseNow(now);
+
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        const lockedResult = await client.query<TaskRow>(LOCK_TASK_SQL, [
+          parsedTenantId.data,
+          parsedTaskId.data,
+        ]);
+        let task = lockedResult.rows[0];
+
+        if (task === undefined) {
+          return null;
+        }
+
+        if (task.kind === undefined || !this.claimableKinds.includes(task.kind as TaskKind)) {
+          return null;
+        }
+
+        if (task.status === 'running') {
+          const leaseExpiry = parsePersistedTimestamp(task.lease_expires_at);
+          if (leaseExpiry === null || leaseExpiry.getTime() > claimedAt.getTime()) {
+            return null;
+          }
+          await this.reapRunningTask(client, task, claimedAt);
+          const refreshed = await client.query<TaskRow>(LOCK_TASK_SQL, [
+            parsedTenantId.data,
+            parsedTaskId.data,
+          ]);
+          task = refreshed.rows[0];
+          if (task === undefined) {
+            return null;
+          }
+        }
+
+        if (task.status !== 'queued' && task.status !== 'retryable_failed') {
+          return null;
+        }
+
+        const claim = await this.tryClaimLockedTask(client, task, validatedWorkerId, claimedAt);
+        return claim.kind === 'done' ? claim.lease : null;
+      });
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
   private async tryClaimLockedTask(
     client: pg.PoolClient,
     task: TaskRow,
@@ -415,11 +500,14 @@ export class PostgresLeaseQueue implements LeaseQueue {
     const cancelRequested = task.cancel_requested_at !== null;
     const deadlineReached = deadlineAt !== null && deadlineAt.getTime() <= claimedAt.getTime();
     const attemptsExhausted = task.attempt_count >= task.max_attempts;
+    const budgetExhausted =
+      task.kind === 'python.agent' ? await this.isPythonAgentBudgetExhausted(client, task) : false;
 
-    if (cancelRequested || deadlineReached || attemptsExhausted) {
+    if (cancelRequested || deadlineReached || attemptsExhausted || budgetExhausted) {
       await this.convergeBeforeClaim(client, task, status, claimedAt, {
         cancelRequested,
         deadlineReached,
+        budgetExhausted,
       });
       return { kind: 'converged' };
     }
@@ -443,7 +531,6 @@ export class PostgresLeaseQueue implements LeaseQueue {
       lease: await this.createLease(client, task, status, workerId, claimedAt),
     };
   }
-
   async heartbeat(run: LeasedRun, now: Date): Promise<boolean> {
     const leased = parseLeasedRun(run);
     const requestedAt = parseNow(now);
@@ -864,12 +951,36 @@ export class PostgresLeaseQueue implements LeaseQueue {
     });
   }
 
+  private async isPythonAgentBudgetExhausted(
+    client: pg.PoolClient,
+    task: TaskRow,
+  ): Promise<boolean> {
+    const result = await client.query<{
+      readonly max_attempt: number;
+      readonly cumulative_micro_usd: string | number;
+    }>(PYTHON_AGENT_PRECLAIM_BUDGET_SQL, [task.tenant_id, task.id]);
+    const row = result.rows[0];
+    if (row === undefined) {
+      return false;
+    }
+    const usedAttempts = Number(row.max_attempt);
+    const cumulativeCost = Number(row.cumulative_micro_usd);
+    return (
+      usedAttempts >= PYTHON_AGENT_LIMITS.maxLlmCallsPerTask ||
+      cumulativeCost >= PYTHON_AGENT_LIMITS.maxTaskCostMicroUsd
+    );
+  }
+
   private async convergeBeforeClaim(
     client: pg.PoolClient,
     task: TaskRow,
     status: TaskStatus,
     at: Date,
-    reason: { readonly cancelRequested: boolean; readonly deadlineReached: boolean },
+    reason: {
+      readonly cancelRequested: boolean;
+      readonly deadlineReached: boolean;
+      readonly budgetExhausted?: boolean;
+    },
   ): Promise<void> {
     // ADR-0002 mandatory precondition: a pre-claim convergence is only legal when the
     // Task has no `created` or `running` Run. If such a Run exists the database is in an
@@ -908,9 +1019,13 @@ export class PostgresLeaseQueue implements LeaseQueue {
         fromStatus: status,
         toStatus: nextStatus,
         ...(reason.cancelRequested ? { cancelRequested: true } : {}),
-        ...(reason.deadlineReached && !reason.cancelRequested
-          ? { errorCode: 'DEADLINE_EXCEEDED' as const }
-          : {}),
+        ...(reason.cancelRequested
+          ? {}
+          : reason.deadlineReached
+            ? { errorCode: 'DEADLINE_EXCEEDED' as const }
+            : reason.budgetExhausted
+              ? { errorCode: 'BUDGET_EXCEEDED' as const }
+              : {}),
       },
     });
 

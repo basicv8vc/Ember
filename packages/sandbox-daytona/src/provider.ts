@@ -29,6 +29,7 @@ import {
 import {
   DAYTONA_LIVE_STATES,
   DaytonaExecCancelledError,
+  type DaytonaDirectoryEntry,
   type DaytonaExecResult,
   type DaytonaMetricsSample,
   type DaytonaSandboxClient,
@@ -460,6 +461,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   public async putTextFile(sandboxId: Id, relativePath: string, text: string): Promise<void> {
     const record = this.requireRecord(sandboxId);
     this.requireReady(record);
+    this.throwIfAborted('putTextFile');
 
     const absolutePath = resolveConfinedPath(this.workspaceRoot, relativePath);
     const bytes = Buffer.from(text, 'utf8');
@@ -468,22 +470,69 @@ export class DaytonaSandboxProvider implements SandboxProvider {
       throw new DomainError('POLICY_DENIED', 'file exceeds the per-transfer ceiling');
     }
 
-    await this.client.upload(record.sandboxId, absolutePath, bytes);
+    await this.raceSignal(this.client.upload(record.sandboxId, absolutePath, bytes), 'putTextFile');
   }
 
-  /** PoC-only extension: reads UTF-8 text from a path confined under the workspace root. */
+  /** Reads UTF-8 text from a path confined under the workspace root. */
   public async getTextFile(sandboxId: Id, relativePath: string): Promise<string> {
+    const bytes = await this.getBytesFile(sandboxId, relativePath);
+    return Buffer.from(bytes).toString('utf8');
+  }
+
+  /** Writes raw bytes (<= 256 KiB) to a path confined under the workspace root. */
+  public async putBytesFile(sandboxId: Id, relativePath: string, bytes: Uint8Array): Promise<void> {
     const record = this.requireRecord(sandboxId);
     this.requireReady(record);
-
-    const absolutePath = resolveConfinedPath(this.workspaceRoot, relativePath);
-    const bytes = await this.client.download(record.sandboxId, absolutePath);
+    this.throwIfAborted('putBytesFile');
 
     if (bytes.byteLength > DAYTONA_SANDBOX_LIMITS.maxFileBytes) {
       throw new DomainError('POLICY_DENIED', 'file exceeds the per-transfer ceiling');
     }
 
-    return bytes.toString('utf8');
+    const absolutePath = resolveConfinedPath(this.workspaceRoot, relativePath);
+    await this.raceSignal(
+      this.client.upload(record.sandboxId, absolutePath, Buffer.from(bytes)),
+      'putBytesFile',
+    );
+  }
+
+  /** Reads raw bytes (<= 256 KiB) from a path confined under the workspace root. */
+  public async getBytesFile(sandboxId: Id, relativePath: string): Promise<Uint8Array> {
+    const record = this.requireRecord(sandboxId);
+    this.requireReady(record);
+    this.throwIfAborted('getBytesFile');
+
+    const absolutePath = resolveConfinedPath(this.workspaceRoot, relativePath);
+    const bytes = await this.raceSignal(
+      this.client.download(record.sandboxId, absolutePath),
+      'getBytesFile',
+    );
+
+    if (bytes.byteLength > DAYTONA_SANDBOX_LIMITS.maxFileBytes) {
+      throw new DomainError('POLICY_DENIED', 'file exceeds the per-transfer ceiling');
+    }
+
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+
+  /** Lists non-escaped files inside a confined subdirectory under the workspace root. */
+  public async listDirectory(
+    sandboxId: Id,
+    relativeDir: string,
+  ): Promise<readonly DaytonaDirectoryEntry[]> {
+    const record = this.requireRecord(sandboxId);
+    this.requireReady(record);
+    this.throwIfAborted('listDirectory');
+
+    const absoluteDir = resolveConfinedPath(this.workspaceRoot, relativeDir);
+    if (this.client.listDirectory === undefined) {
+      return [];
+    }
+
+    return this.raceSignal(
+      this.client.listDirectory(record.sandboxId, absoluteDir),
+      'listDirectory',
+    );
   }
 
   /** PoC-only extension: existence check used to prove a path is *not* readable cross-tenant. */
@@ -770,6 +819,36 @@ export class DaytonaSandboxProvider implements SandboxProvider {
   private throwIfAborted(operation: string): void {
     if (this.signal?.aborted === true) {
       throw new DomainError('CANCELLED', `sandbox ${operation} aborted by caller`);
+    }
+  }
+
+  private async raceSignal<T>(operation: Promise<T>, label: string): Promise<T> {
+    const signal = this.signal;
+    if (signal === undefined) {
+      return operation;
+    }
+
+    if (signal.aborted) {
+      operation.catch(() => undefined);
+      throw new DomainError('CANCELLED', `sandbox ${label} aborted by caller`);
+    }
+
+    operation.catch(() => undefined);
+
+    let onAbort: (() => void) | undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      onAbort = () => {
+        reject(new DomainError('CANCELLED', `sandbox ${label} aborted by caller`));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+
+    try {
+      return await Promise.race([operation, aborted]);
+    } finally {
+      if (onAbort !== undefined) {
+        signal.removeEventListener('abort', onAbort);
+      }
     }
   }
 

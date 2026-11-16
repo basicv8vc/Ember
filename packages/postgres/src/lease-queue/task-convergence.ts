@@ -33,6 +33,7 @@ import { planRetry } from './retry-policy.js';
 export interface TaskRow {
   id: string;
   tenant_id: string;
+  kind?: string;
   status: string;
   attempt_count: number;
   max_attempts: number;

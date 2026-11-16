@@ -17,6 +17,10 @@
     "./b2-worker": {
       "types": "./dist/b2-worker.d.ts",
       "default": "./dist/b2-worker.js"
+    },
+    "./b3-worker": {
+      "types": "./dist/b3-worker.d.ts",
+      "default": "./dist/b3-worker.js"
     }
   },
   "files": [

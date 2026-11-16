@@ -10,17 +10,23 @@ import type {
   ModelUsage,
   NotesActionItemsInput,
   NotesActionItemsOutput,
+  PythonAgentStepInput,
+  PythonAgentStepOutput,
 } from '../types.js';
 import { statusToFailureCode, type FetchLike, type FetchResponseLike } from './openai.js';
 import {
   DELEGATION_TOOLS,
+  PYTHON_AGENT_TOOLS,
   assertAuthorizedBeforeFetch,
   buildConversationTurnMessages,
   buildNotesExtractionMessages,
+  buildPythonAgentMessages,
   completionMessageSchema,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
+  parsePythonAgentStepChoice,
   rateRequestModifiers,
+  type ProviderChatMessage,
 } from './shared.js';
 
 export const OPENROUTER_ORIGIN = 'https://openrouter.ai';
@@ -120,7 +126,11 @@ const defaultFetch: FetchLike = (url, init) =>
 export class OpenRouterModelGateway implements ModelGateway {
   readonly providerId = 'openrouter' as const;
   readonly simulated = false;
-  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
+  readonly operations = [
+    'conversation.turn',
+    'task.notes_action_items',
+    'task.python_agent',
+  ] as const;
   readonly modelLabel: string;
 
   readonly #apiKey: string;
@@ -150,7 +160,7 @@ export class OpenRouterModelGateway implements ModelGateway {
     const body = this.#serializePayload({
       messages: buildConversationTurnMessages(input),
       maxCompletionTokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
-      includeDelegationTools: true,
+      tools: DELEGATION_TOOLS,
     });
 
     return await this.#sendChatCompletion(body, signal, parseConversationTurnChoice);
@@ -163,19 +173,34 @@ export class OpenRouterModelGateway implements ModelGateway {
     const body = this.#serializePayload({
       messages: buildNotesExtractionMessages(input),
       maxCompletionTokens: MODEL_LIMITS.notesMaxOutputTokens,
-      includeDelegationTools: false,
     });
 
     return await this.#sendChatCompletion(body, signal, parseNotesActionItemsChoice);
   }
 
+  async stepPythonAgent(
+    input: PythonAgentStepInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<PythonAgentStepOutput>> {
+    const maxTokens = Math.min(
+      input.maxOutputTokens ?? MODEL_LIMITS.pythonAgentMaxOutputTokens,
+      MODEL_LIMITS.pythonAgentMaxOutputTokens,
+    );
+    const body = this.#serializePayload({
+      messages: buildPythonAgentMessages(input),
+      maxCompletionTokens: maxTokens,
+      tools: input.remainingPythonCalls > 0 ? PYTHON_AGENT_TOOLS : undefined,
+    });
+
+    return await this.#sendChatCompletion(body, signal, (choice) =>
+      parsePythonAgentStepChoice(choice, input.remainingPythonCalls),
+    );
+  }
+
   #serializePayload(params: {
-    readonly messages: readonly {
-      readonly role: 'system' | 'user' | 'assistant';
-      readonly content: string;
-    }[];
+    readonly messages: readonly ProviderChatMessage[];
     readonly maxCompletionTokens: number;
-    readonly includeDelegationTools: boolean;
+    readonly tools?: readonly unknown[];
   }): string {
     return JSON.stringify({
       model: this.#modelId,
@@ -184,7 +209,7 @@ export class OpenRouterModelGateway implements ModelGateway {
       n: 1,
       stream: false,
       store: false,
-      ...(params.includeDelegationTools ? { tools: DELEGATION_TOOLS, tool_choice: 'auto' } : {}),
+      ...(params.tools !== undefined ? { tools: params.tools, tool_choice: 'auto' } : {}),
       ...rateRequestModifiers(this.#rate, 'openrouter'),
       provider: {
         only: [...this.#routing.only],

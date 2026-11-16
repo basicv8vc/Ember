@@ -176,6 +176,7 @@ export function createConversationMessageWriteRoutes(
         const auth = c.get('auth');
         const outcome = await deps.conversations.submitUserMessage({
           tenantId: auth.tenantId,
+          principalId: auth.principalId,
           conversationId: parsedConversationId.data,
           request: request.data,
         });

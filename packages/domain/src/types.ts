@@ -39,6 +39,7 @@ export const TASK_KINDS = [
   'mock.file',
   'mock.approval',
   'notes.action_items',
+  'python.agent',
 ] as const;
 
 export type TaskKind = (typeof TASK_KINDS)[number];
@@ -83,6 +84,15 @@ export interface NotesActionItemsInput {
   readonly instructions?: string;
 }
 
+export interface PythonAgentInput {
+  /** User objective / task prompt passed to the Python execution agent. */
+  readonly prompt: string;
+  /** Optional short formatting/execution instruction supplied by delegation tool call. */
+  readonly instructions?: string;
+  /** Optional published user input artifact IDs bound atomically at Task creation. */
+  readonly inputArtifactIds?: readonly Id[];
+}
+
 /** Correlates each supported task kind with exactly one input shape. */
 export interface TaskInputByKind {
   readonly 'mock.chat': MockChatInput;
@@ -90,6 +100,7 @@ export interface TaskInputByKind {
   readonly 'mock.file': MockFileInput;
   readonly 'mock.approval': MockApprovalInput;
   readonly 'notes.action_items': NotesActionItemsInput;
+  readonly 'python.agent': PythonAgentInput;
 }
 
 export type MockTaskInput = TaskInputByKind[TaskKind];

@@ -10,7 +10,7 @@ import { DomainError, isDomainError, type AuthContext, type Id } from '@ember/do
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from '../repositories/support.js';
 import { lockBlobDigests } from './blob-store.js';
-import { parseMediaType, parseTenantId } from './local-blob-store.js';
+import { parseMediaType, parseTenantId } from './validation.js';
 
 /**
  * Tenant-scoped artifact API (user path) and internal lookup (Run path).

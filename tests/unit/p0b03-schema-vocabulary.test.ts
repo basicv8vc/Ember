@@ -16,11 +16,20 @@ const notesMigrationSql = await readFile(
   new URL('../../migrations/0020_b3_notes_action_items.sql', import.meta.url),
   'utf8',
 );
+const pythonMigrationSql = await readFile(
+  new URL('../../migrations/0021_b3_python_agent.sql', import.meta.url),
+  'utf8',
+);
 
 describe('P0B-03 schema vocabulary', () => {
   it('keeps SQL value checks aligned with the domain vocabulary', () => {
     for (const value of [...TASK_KINDS, ...TASK_STATUSES, ...RUN_STATUSES, ...TASK_EVENT_PHASES]) {
-      const targetSql = value === 'notes.action_items' ? notesMigrationSql : migrationSql;
+      const targetSql =
+        value === 'notes.action_items'
+          ? notesMigrationSql
+          : value === 'python.agent'
+            ? pythonMigrationSql
+            : migrationSql;
       expect(targetSql).toContain(`'${value}'`);
     }
 

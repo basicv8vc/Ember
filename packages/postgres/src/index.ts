@@ -85,6 +85,7 @@ export type {
   B2BudgetCeilings,
   B2BudgetIncident,
   B2ClaimOutcome,
+  B2MessageAttachmentMeta,
   B2PublicationResult,
   B2PublishCommand,
   B2ReserveAttemptCommand,
@@ -95,6 +96,47 @@ export type {
   B2TurnLease,
 } from './repositories/b2-interfaces.js';
 export { B2_ABSOLUTE_DAY_CEILINGS } from './repositories/b2-ledger-limits.js';
+export {
+  insertB3TaskDispatchOutbox,
+  parseB3TaskDispatchEnvelope,
+  PostgresB3TaskDispatchOutboxRepository,
+  type B3TaskDispatchEnvelope,
+  type B3TaskDispatchEvent,
+} from './repositories/b3-task-dispatch-outbox.js';
+export {
+  PostgresB3StagedUploadRepository,
+  type B3ArtifactDownload,
+  type B3StagedUploadRepository,
+  type StageUploadInput,
+} from './repositories/b3-staged-upload-repository.js';
+export {
+  PostgresPythonAgentExecutionRepository,
+  type PythonAgentAttemptReservation,
+  type PythonAgentCommitCompletionCommand,
+  type PythonAgentCommitFailureCommand,
+  type PythonAgentCommitResult,
+  type PythonAgentCommitStepCommand,
+  type PythonAgentFailureResult,
+  type PythonAgentInputFile,
+  type PythonAgentLlmCharge,
+  type PythonAgentLoadContextResult,
+  type PythonAgentLoadedContext,
+  type PythonAgentOpKind,
+  type PythonAgentReserveLlmCommand,
+  type PythonAgentReserveLlmOutcome,
+  type PythonAgentReserveOpOutcome,
+  type PythonAgentRestoredOutput,
+  type PythonAgentStepCursor,
+  type PythonStepStagedOutput,
+} from './repositories/python-agent-execution-repository.js';
+export {
+  MAX_BYTEA_BLOB_BYTES,
+  PostgresByteaBlobStore,
+  decodePgBytea,
+  readBoundedBlobSource,
+  sha256Hex,
+  type PostgresByteaBlobStoreOptions,
+} from './storage/bytea-blob-store.js';
 export {
   PostgresNotesTaskExecutionRepository,
   type NotesAttemptCharge,

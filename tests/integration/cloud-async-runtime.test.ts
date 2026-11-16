@@ -523,6 +523,9 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
           new Error('extractNotesActionItems unused in cloud-async-runtime test'),
         );
       },
+      stepPythonAgent() {
+        return Promise.reject(new Error('stepPythonAgent unused in cloud-async-runtime test'));
+      },
     };
     const executor = await createTurnExecutor({
       pool: db.pool,

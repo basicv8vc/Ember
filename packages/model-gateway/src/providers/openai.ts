@@ -10,15 +10,20 @@ import type {
   ModelUsage,
   NotesActionItemsInput,
   NotesActionItemsOutput,
+  PythonAgentStepInput,
+  PythonAgentStepOutput,
 } from '../types.js';
 import {
   DELEGATION_TOOLS,
+  PYTHON_AGENT_TOOLS,
   assertAuthorizedBeforeFetch,
   buildConversationTurnMessages,
   buildNotesExtractionMessages,
+  buildPythonAgentMessages,
   completionMessageSchema,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
+  parsePythonAgentStepChoice,
   rateRequestModifiers,
 } from './shared.js';
 
@@ -126,7 +131,11 @@ export interface OpenAiGatewayOptions {
 export class OpenAiModelGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly simulated = false;
-  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
+  readonly operations = [
+    'conversation.turn',
+    'task.notes_action_items',
+    'task.python_agent',
+  ] as const;
   readonly modelLabel: string;
 
   readonly #apiKey: string;
@@ -178,6 +187,32 @@ export class OpenAiModelGateway implements ModelGateway {
     });
 
     return await this.#sendChatCompletion(body, signal, parseNotesActionItemsChoice);
+  }
+
+  async stepPythonAgent(
+    input: PythonAgentStepInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<PythonAgentStepOutput>> {
+    const maxTokens = Math.min(
+      input.maxOutputTokens ?? MODEL_LIMITS.pythonAgentMaxOutputTokens,
+      MODEL_LIMITS.pythonAgentMaxOutputTokens,
+    );
+    const body = JSON.stringify({
+      model: this.#modelId,
+      messages: buildPythonAgentMessages(input),
+      max_completion_tokens: maxTokens,
+      n: 1,
+      stream: false,
+      store: false,
+      ...(input.remainingPythonCalls > 0
+        ? { tools: PYTHON_AGENT_TOOLS, tool_choice: 'auto' }
+        : {}),
+      ...rateRequestModifiers(this.#rate, 'openai'),
+    });
+
+    return await this.#sendChatCompletion(body, signal, (choice) =>
+      parsePythonAgentStepChoice(choice, input.remainingPythonCalls),
+    );
   }
 
   async #sendChatCompletion<T>(

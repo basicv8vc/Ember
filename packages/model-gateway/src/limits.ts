@@ -19,6 +19,10 @@ export const MODEL_LIMITS = Object.freeze({
   maxOutputTokens: 512,
   /** Output cap for structured Notes -> Action Items extraction. */
   notesMaxOutputTokens: 1_024,
+  /** Output cap for each Python agent step (code generation or final summary). */
+  pythonAgentMaxOutputTokens: 1_536,
+  /** Hard character ceiling for Python agent step prompt + history. */
+  pythonAgentMaxContextChars: 24_000,
   /** Bounded result text fields matching 0013_task_results.sql. */
   resultSummaryMaxChars: 2_048,
   resultDetailMaxChars: 16_384,

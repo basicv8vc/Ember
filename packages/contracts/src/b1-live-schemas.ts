@@ -2,7 +2,13 @@ import { z } from 'zod';
 import { TASK_TERMINAL_STATUSES } from '@ember/domain';
 import { OUTCOME_RESULT_STATUSES } from './commitment-schemas.js';
 import { TaskEventDtoSchema } from './event-schemas.js';
-import { IdSchema, IsoDateTimeSchema, TaskStatusSchema } from './task-schemas.js';
+import {
+  ArtifactFilenameSchema,
+  IdSchema,
+  IsoDateTimeSchema,
+  PYTHON_AGENT_LIMITS,
+  TaskStatusSchema,
+} from './task-schemas.js';
 
 /**
  * B1-1 contract-only schemas. Approved wire authority:
@@ -116,6 +122,12 @@ export const B1SendMessageRequestSchema = z.strictObject({
     .refine((value) => value.trim().length > 0),
   transcript_epoch: B1TranscriptEpochSchema,
   client_created_at: IsoDateTimeSchema.optional(),
+  attachment_ids: z
+    .array(IdSchema)
+    .min(1)
+    .max(PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage)
+    .refine((ids) => new Set(ids).size === ids.length, 'attachment_ids must be unique')
+    .optional(),
 });
 
 export const B1SendMessageReceiptSchema = z.strictObject({
@@ -314,3 +326,34 @@ export type B1TaskListDto = z.infer<typeof B1TaskListDtoSchema>;
 export type B1TaskDetailDto = z.infer<typeof B1TaskDetailDtoSchema>;
 export type B1TaskEventPageDto = z.infer<typeof B1TaskEventPageDtoSchema>;
 export type B1TaskCancelDto = z.infer<typeof B1TaskCancelDtoSchema>;
+
+export const B3StagedUploadMediaTypeSchema = z.enum(PYTHON_AGENT_LIMITS.allowedMediaTypes);
+export type B3StagedUploadMediaType = z.infer<typeof B3StagedUploadMediaTypeSchema>;
+
+export const B3StagedUploadReceiptDtoSchema = z.strictObject({
+  upload_id: IdSchema,
+  filename: ArtifactFilenameSchema,
+  media_type: B3StagedUploadMediaTypeSchema,
+  size: z.number().int().min(0).max(PYTHON_AGENT_LIMITS.maxFileBytes),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  expires_at: IsoDateTimeSchema,
+  created_at: IsoDateTimeSchema,
+});
+export type B3StagedUploadReceiptDto = z.infer<typeof B3StagedUploadReceiptDtoSchema>;
+
+export const B3TaskArtifactItemDtoSchema = z.strictObject({
+  artifact_id: IdSchema,
+  filename: ArtifactFilenameSchema.nullable(),
+  media_type: z.string().min(1).max(128),
+  size: z.number().int().nonnegative(),
+  sha256: z.string().regex(/^[0-9a-f]{64}$/),
+  created_by: z.enum(['user', 'run']),
+  created_at: IsoDateTimeSchema,
+});
+export type B3TaskArtifactItemDto = z.infer<typeof B3TaskArtifactItemDtoSchema>;
+
+export const B3TaskArtifactsListDtoSchema = z.strictObject({
+  task_id: IdSchema,
+  artifacts: z.array(B3TaskArtifactItemDtoSchema).max(50),
+});
+export type B3TaskArtifactsListDto = z.infer<typeof B3TaskArtifactsListDtoSchema>;

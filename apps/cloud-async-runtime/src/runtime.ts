@@ -16,13 +16,27 @@ import {
   type B1TaskDispatchTarget,
   type B1TurnDispatchEvent,
 } from '@ember/postgres/b2-worker';
+import {
+  LEASE_QUEUE_DEFAULTS,
+  PostgresB3TaskDispatchOutboxRepository,
+  PostgresByteaBlobStore,
+  PostgresPythonAgentExecutionRepository,
+  type B3TaskDispatchEvent,
+} from '@ember/postgres/b3-worker';
+import { DaytonaSandboxProvider, DaytonaSdkSandboxClient } from '@ember/sandbox-daytona';
 import { createModelTurnResponder } from '@ember/worker/b1/model-turn-responder';
 import { createNotesTaskHandler } from '@ember/worker/notes-task-handler';
+import {
+  executePythonAgentRun,
+  type PythonAgentSandboxFactory,
+} from '@ember/worker/b3/python-agent-executor';
 import type pg from 'pg';
+import { agentTaskEnvelope, type AgentTaskExecutionPort } from './agent-dispatch.js';
 import {
   isAuthorizedCloudModelTurn,
   isCloudModelConversationAuthorized,
   isCloudModelTenantAuthorized,
+  type CloudDaytonaConfig,
   type CloudRuntimeModelConfig,
 } from './config.js';
 import {
@@ -31,6 +45,15 @@ import {
   type TurnExecutionPort,
 } from './dispatch.js';
 import type { TurnDispatchQueuePort } from './relay.js';
+
+const runtimeLogger = {
+  info(message: string, context?: Record<string, unknown>) {
+    console.log(message, context ?? {});
+  },
+  warn(message: string, context?: Record<string, unknown>) {
+    console.warn(message, context ?? {});
+  },
+};
 
 export function createTurnDispatchOutbox(pool: pg.Pool): PostgresB1TurnDispatchOutboxRepository {
   return new PostgresB1TurnDispatchOutboxRepository(pool);
@@ -58,12 +81,24 @@ export function createNotesTaskLeaseQueue(
   });
 }
 
+export function createAgentDispatchOutbox(pool: pg.Pool): PostgresB3TaskDispatchOutboxRepository {
+  return new PostgresB3TaskDispatchOutboxRepository(pool);
+}
+
 export function createTurnExecutor(input: {
   readonly pool: pg.Pool;
   readonly model: CloudRuntimeModelConfig;
   readonly event: B1TurnDispatchEvent;
   readonly workerId: string;
   readonly queue?: TurnDispatchQueuePort;
+  readonly agentQueue?: TurnDispatchQueuePort;
+  readonly onTaskDelegated?: (delegated: {
+    readonly tenantId: string;
+    readonly conversationId: string;
+    readonly turnId: string;
+    readonly taskId: string;
+    readonly toolName?: 'delegate_notes_action_items' | 'delegate_python_agent';
+  }) => void;
   /** Test seam; production callers always construct the approved gateway from its resolution. */
   readonly gateway?: ModelGateway;
 }): Promise<TurnExecutionPort | null> {
@@ -80,7 +115,10 @@ export function createTurnExecutor(input: {
 
   const { mode, resolution } = input.model;
   const repository = new PostgresModelTurnExecutionRepository(input.pool);
-  const delegatedTasks: B1TaskDispatchTarget[] = [];
+  const delegatedTasks: Array<{
+    readonly target: B1TaskDispatchTarget;
+    readonly toolName: 'delegate_notes_action_items' | 'delegate_python_agent';
+  }> = [];
   const responder = createModelTurnResponder({
     mode,
     repository,
@@ -98,20 +136,34 @@ export function createTurnExecutor(input: {
     },
     batchSize: 1,
     onTaskDelegated: (delegation) => {
-      delegatedTasks.push({ tenantId: delegation.tenantId, taskId: delegation.taskId });
+      delegatedTasks.push({
+        target: { tenantId: delegation.tenantId, taskId: delegation.taskId },
+        toolName: delegation.toolName ?? 'delegate_notes_action_items',
+      });
+      input.onTaskDelegated?.(delegation);
     },
-    logger: {
-      warn(message, context) {
-        console.warn(message, context ?? {});
-      },
-    },
+    logger: runtimeLogger,
   });
 
   return Promise.resolve({
     expireTurnIfDue: (turn) => repository.expireTurnIfDue(turn),
     processTurn: async () => {
       const summary = await responder.processOnce();
-      for (const target of delegatedTasks) {
+      for (const { target, toolName } of delegatedTasks) {
+        if (toolName === 'delegate_python_agent') {
+          if (input.agentQueue === undefined) {
+            continue;
+          }
+          try {
+            await input.agentQueue.send(agentTaskEnvelope(target));
+          } catch {
+            console.warn('Agent Task immediate queue dispatch failed; cron relay will recover', {
+              category: 'queue_unavailable',
+              taskId: target.taskId,
+            });
+          }
+          continue;
+        }
         if (input.queue === undefined) {
           continue;
         }
@@ -188,5 +240,102 @@ export function createNotesTaskExecutor(input: {
 
   return Promise.resolve({
     handle: (run, signal) => handler.handle(run, signal),
+  });
+}
+
+export function createPythonAgentExecutor(input: {
+  readonly pool: pg.Pool;
+  readonly model: CloudRuntimeModelConfig;
+  readonly daytona: CloudDaytonaConfig;
+  readonly event: B3TaskDispatchEvent;
+  readonly workerId: string;
+  readonly gateway?: ModelGateway;
+  readonly sandboxFactory?: PythonAgentSandboxFactory;
+}): Promise<AgentTaskExecutionPort | null> {
+  if (input.model.kind !== 'enabled' || input.daytona.kind !== 'enabled') {
+    return Promise.resolve(null);
+  }
+
+  if (!isCloudModelTenantAuthorized(input.model, input.event.tenantId)) {
+    return Promise.resolve(null);
+  }
+
+  const { mode, resolution } = input.model;
+  const daytona = input.daytona;
+  const leaseQueue = new PostgresLeaseQueue(input.pool, {
+    leaseDurationMs: LEASE_QUEUE_DEFAULTS.leaseDurationMs,
+    heartbeatIntervalMs: LEASE_QUEUE_DEFAULTS.heartbeatIntervalMs,
+    claimableKinds: ['python.agent'],
+  });
+  const repository = new PostgresPythonAgentExecutionRepository(input.pool);
+  const gateway = input.gateway ?? createModelGateway(resolution);
+
+  const createSandbox: PythonAgentSandboxFactory =
+    input.sandboxFactory ??
+    (({ tenantId, runId, owner, signal }) => {
+      const client = new DaytonaSdkSandboxClient({
+        apiKey: daytona.apiKey,
+        ...(daytona.apiUrl === undefined ? {} : { apiUrl: daytona.apiUrl }),
+        ...(daytona.target === undefined ? {} : { target: daytona.target }),
+      });
+      const provider = new DaytonaSandboxProvider({
+        tenantId,
+        runId,
+        client,
+        snapshot: 'daytona-small',
+        sandboxClass: 'container',
+        owner,
+        signal,
+      });
+      return {
+        provider,
+        close: () => client.close(),
+      };
+    });
+
+  return Promise.resolve({
+    async processTask(event: B3TaskDispatchEvent) {
+      const claimed = await leaseQueue.claimTaskForRun(
+        event.tenantId,
+        event.taskId,
+        input.workerId,
+        new Date(),
+      );
+      if (claimed === null) {
+        return { outcome: 'not_claimed' as const };
+      }
+
+      const blobStore = new PostgresByteaBlobStore(input.pool, {
+        ownership: {
+          taskId: claimed.taskId,
+          runId: claimed.runId,
+          leaseEpoch: claimed.leaseEpoch,
+        },
+      });
+      const result = await executePythonAgentRun(claimed, {
+        mode,
+        leaseQueue,
+        repository,
+        blobStore,
+        gateway,
+        createSandbox,
+        sandboxOwner: daytona.owner,
+        policy: {
+          baseDelayMs: LEASE_QUEUE_DEFAULTS.baseDelayMs,
+          capDelayMs: LEASE_QUEUE_DEFAULTS.capDelayMs,
+        },
+        ceilings: {
+          perAttemptMicroUsd: resolution.settings.ceilings.perAttemptMicroUsd,
+          tenantDailyMicroUsd: resolution.settings.ceilings.tenantDailyMicroUsd,
+          globalDailyMicroUsd: resolution.settings.ceilings.globalDailyMicroUsd,
+        },
+        rate: mode === 'real' ? resolution.rate : null,
+        leaseDurationMs: leaseQueue.configuration.leaseDurationMs,
+        attemptTimeoutMs: resolution.settings.attemptTimeoutMs,
+        logger: runtimeLogger,
+      });
+
+      return { outcome: result.outcome };
+    },
   });
 }

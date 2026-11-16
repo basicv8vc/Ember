@@ -13,6 +13,7 @@ import {
   type ModelFailureCode,
   type ModelGatewayFailureDiagnostic,
   type ModelGateway,
+  type ModelMessage,
   type ModelRateRow,
   type ModelUsage,
 } from '@ember/model-gateway';
@@ -161,6 +162,7 @@ export interface ModelTurnResponderOptions {
     readonly conversationId: string;
     readonly turnId: string;
     readonly taskId: string;
+    readonly toolName?: 'delegate_notes_action_items' | 'delegate_python_agent';
   }) => void;
 }
 
@@ -309,7 +311,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
    */
   const callGateway = async (
     lease: B2TurnLease,
-    context: readonly { readonly role: 'user' | 'assistant'; readonly text: string }[],
+    context: readonly ModelMessage[],
     signal: AbortSignal | undefined,
   ): Promise<GatewaySuccess | GatewayFailure> => {
     const remainingMs = Math.max(1, Date.parse(lease.deadlineAt) - Date.now());
@@ -366,6 +368,21 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       return undefined;
     }
 
+    if (output.delegation.toolName === 'delegate_python_agent') {
+      const args = output.delegation.arguments;
+      return {
+        toolName: 'delegate_python_agent',
+        ...(args.title === undefined ? {} : { title: args.title }),
+        input: {
+          prompt: args.prompt,
+          ...(args.instructions === undefined ? {} : { instructions: args.instructions }),
+          ...(args.attachmentIds === undefined || args.attachmentIds.length === 0
+            ? {}
+            : { attachmentIds: args.attachmentIds }),
+        },
+      };
+    }
+
     const args = output.delegation.arguments;
     return {
       toolName: output.delegation.toolName,
@@ -403,6 +420,7 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         conversationId: lease.conversationId,
         turnId: lease.turnId,
         taskId: published.delegatedTaskId,
+        ...(delegation === undefined ? {} : { toolName: delegation.toolName }),
       });
     }
 

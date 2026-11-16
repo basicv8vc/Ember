@@ -110,6 +110,10 @@ class UsageGateway implements ModelGateway {
   extractNotesActionItems(): Promise<never> {
     return Promise.reject(new Error('extractNotesActionItems unused in b2-budget-safety test'));
   }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused in b2-budget-safety test'));
+  }
 }
 
 function makeResponder(

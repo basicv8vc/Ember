@@ -1,4 +1,8 @@
-import type { B1AssistantTurnDto, DelegationToolName } from '@ember/contracts';
+import type {
+  B1AssistantTurnDto,
+  B3StagedUploadMediaType,
+  DelegationToolName,
+} from '@ember/contracts';
 import type { Id, NotesActionItemsInput } from '@ember/domain';
 import type { PendingAssistantTurn } from './b1-turn-publication.js';
 
@@ -107,11 +111,21 @@ export interface B2BudgetIncident {
   readonly resolutionNote: string | null;
 }
 
-export interface B2TaskDelegationCommand {
-  readonly toolName: DelegationToolName;
-  readonly title?: string;
-  readonly input: NotesActionItemsInput;
-}
+export type B2TaskDelegationCommand =
+  | {
+      readonly toolName: Extract<DelegationToolName, 'delegate_notes_action_items'>;
+      readonly title?: string;
+      readonly input: NotesActionItemsInput;
+    }
+  | {
+      readonly toolName: Extract<DelegationToolName, 'delegate_python_agent'>;
+      readonly title?: string;
+      readonly input: {
+        readonly prompt: string;
+        readonly instructions?: string;
+        readonly attachmentIds?: readonly Id[];
+      };
+    };
 
 export type B2PublicationResult =
   | {
@@ -121,10 +135,18 @@ export type B2PublicationResult =
     }
   | { readonly outcome: 'fenced'; readonly turn: B1AssistantTurnDto | null };
 
+export interface B2MessageAttachmentMeta {
+  readonly uploadId: Id;
+  readonly filename: string;
+  readonly mediaType: B3StagedUploadMediaType;
+  readonly sizeBytes: number;
+}
+
 export interface B2TurnContextRow {
   readonly sequence: number;
   readonly kind: 'user' | 'ember';
   readonly text: string;
+  readonly attachments?: readonly B2MessageAttachmentMeta[];
 }
 
 export interface B2ReserveAttemptCommand {

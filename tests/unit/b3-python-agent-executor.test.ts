@@ -460,6 +460,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -524,6 +525,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -630,6 +632,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -691,6 +694,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -744,6 +748,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -786,6 +791,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -826,6 +832,7 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       policy: TEST_POLICY,
       ceilings: {
         perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
         tenantDailyMicroUsd: 100_000,
         globalDailyMicroUsd: 500_000,
       },
@@ -837,5 +844,81 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
 
     expect(staleOutcome).toEqual({ outcome: 'lease_lost' });
     expect(staleRepo.failures).toHaveLength(0);
+  });
+
+  it('fails closed without model egress or sandbox when principal mapping, principal budget, or principal halt refuses', async () => {
+    const cases: readonly {
+      readonly reserveOutcome: PythonAgentReserveLlmOutcome;
+      readonly expectedReason: string;
+      readonly expectedErrorCode: 'POLICY_DENIED' | 'BUDGET_EXCEEDED';
+    }[] = [
+      {
+        reserveOutcome: { kind: 'principal_unavailable' },
+        expectedReason: 'principal_unavailable',
+        expectedErrorCode: 'POLICY_DENIED',
+      },
+      {
+        reserveOutcome: { kind: 'budget_exceeded', scope: 'principal' },
+        expectedReason: 'budget_exceeded:principal',
+        expectedErrorCode: 'BUDGET_EXCEEDED',
+      },
+      {
+        reserveOutcome: {
+          kind: 'budget_halted',
+          scope: 'principal',
+          reason: 'day_ceiling_exceeded',
+        },
+        expectedReason: 'budget_halted:day_ceiling_exceeded',
+        expectedErrorCode: 'BUDGET_EXCEEDED',
+      },
+    ];
+
+    for (const testCase of cases) {
+      const repo = new MemoryPythonAgentRepository();
+      repo.overrideReserveLlm = (command) => {
+        expect(command.ceilings.principalDailyMicroUsd).toBe(50_000);
+        return testCase.reserveOutcome;
+      };
+      let gatewayCalled = 0;
+      const gateway: ModelGateway = {
+        providerId: 'openrouter',
+        modelLabel: 'nvidia/nemotron-3.5-lightning',
+        simulated: false,
+        operations: ['conversation.turn', 'task.notes_action_items', 'task.python_agent'],
+        generateConversationTurn: () => Promise.reject(new Error('unused')),
+        extractNotesActionItems: () => Promise.reject(new Error('unused')),
+        stepPythonAgent: () => {
+          gatewayCalled += 1;
+          return Promise.reject(new Error('must not call gateway'));
+        },
+      };
+
+      const outcome = await executePythonAgentRun(makeLease(), {
+        mode: 'real',
+        leaseQueue: { heartbeat: () => Promise.resolve(true) },
+        repository: repo as unknown as PostgresPythonAgentExecutionRepository,
+        blobStore: new MemoryBlobStore(),
+        gateway,
+        createSandbox: () => {
+          throw new Error('must not create sandbox');
+        },
+        sandboxOwner: 'test-owner',
+        policy: TEST_POLICY,
+        ceilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 50_000,
+          tenantDailyMicroUsd: 100_000,
+          globalDailyMicroUsd: 500_000,
+        },
+        rate: TEST_RATE,
+        leaseDurationMs: 15_000,
+        attemptTimeoutMs: 5_000,
+        logger: { info: () => {}, warn: () => {} },
+      });
+
+      expect(outcome).toEqual({ outcome: 'failed_terminal', reason: testCase.expectedReason });
+      expect(gatewayCalled).toBe(0);
+      expect(repo.failures[0]!.errorCode).toBe(testCase.expectedErrorCode);
+    }
   });
 });

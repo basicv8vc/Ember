@@ -326,6 +326,7 @@ export function createPythonAgentExecutor(input: {
         },
         ceilings: {
           perAttemptMicroUsd: resolution.settings.ceilings.perAttemptMicroUsd,
+          principalDailyMicroUsd: resolution.settings.ceilings.principalDailyMicroUsd,
           tenantDailyMicroUsd: resolution.settings.ceilings.tenantDailyMicroUsd,
           globalDailyMicroUsd: resolution.settings.ceilings.globalDailyMicroUsd,
         },

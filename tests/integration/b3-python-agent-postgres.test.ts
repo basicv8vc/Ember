@@ -4,6 +4,7 @@ import { B1TaskDetailDtoSchema, B1TaskResultDtoSchema } from '@ember/contracts';
 import { isDomainError } from '@ember/domain';
 import {
   DELEGATE_PYTHON_TOOL_NAME,
+  MODEL_LIMITS,
   OpenRouterModelGateway,
   RUN_PYTHON_TOOL_NAME,
   type FetchLike,
@@ -12,6 +13,7 @@ import {
   type OpenRouterRoutingPolicy,
 } from '@ember/model-gateway';
 import {
+  B2_ABSOLUTE_DAY_CEILINGS,
   PostgresB1ConversationReadRepository,
   PostgresB1ConversationWriteRepository,
   PostgresB1TaskReadRepository,
@@ -20,12 +22,23 @@ import {
   PostgresByteaBlobStore,
   PostgresLeaseQueue,
   PostgresModelTurnExecutionRepository,
+  PostgresNotesTaskExecutionRepository,
   PostgresPythonAgentExecutionRepository,
+  PostgresRunExecutionContextReader,
+  PostgresTaskRepository,
   createPool,
   loadDatabaseConfig,
   resolveLeaseQueueConfig,
+  systemClock,
 } from '@ember/postgres';
+import {
+  DeterministicExecutionRouter,
+  createDefaultSentinelPolicy,
+  SAFE_MOCK_ACTION_CATEGORIES,
+  SENTINEL_POLICY_VERSION,
+} from '@ember/execution';
 import { createModelTurnResponder } from '../../apps/worker/src/b1/model-turn-responder.js';
+import { createNotesTaskHandler } from '../../apps/worker/src/notes-task-handler.js';
 import {
   executePythonAgentRun,
   type PythonAgentDirectoryEntry,
@@ -75,6 +88,9 @@ let taskReadRepo: PostgresB1TaskReadRepository;
 let uploadRepo: PostgresB3StagedUploadRepository;
 let outboxRepo: PostgresB3TaskDispatchOutboxRepository;
 let pythonRepo: PostgresPythonAgentExecutionRepository;
+let notesRepo: PostgresNotesTaskExecutionRepository;
+let taskRepo: PostgresTaskRepository;
+let contextReader: PostgresRunExecutionContextReader;
 let pythonLeaseQueue: PostgresLeaseQueue;
 let notesLeaseQueue: PostgresLeaseQueue;
 
@@ -212,6 +228,9 @@ beforeAll(async () => {
   uploadRepo = new PostgresB3StagedUploadRepository(db.pool);
   outboxRepo = new PostgresB3TaskDispatchOutboxRepository(db.pool);
   pythonRepo = new PostgresPythonAgentExecutionRepository(db.pool);
+  notesRepo = new PostgresNotesTaskExecutionRepository(db.pool);
+  taskRepo = new PostgresTaskRepository(db.pool);
+  contextReader = new PostgresRunExecutionContextReader(db.pool, systemClock);
   pythonLeaseQueue = new PostgresLeaseQueue(db.pool, {
     claimableKinds: ['python.agent'],
     leaseDurationMs: 30_000,
@@ -490,6 +509,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       policy: resolveLeaseQueueConfig({ leaseDurationMs: 30_000, heartbeatIntervalMs: 5_000 }),
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -696,6 +716,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       policy: resolveLeaseQueueConfig({ leaseDurationMs: 30_000, heartbeatIntervalMs: 5_000 }),
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -802,6 +823,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
       policy: resolveLeaseQueueConfig({ leaseDurationMs: 30_000, heartbeatIntervalMs: 5_000 }),
       ceilings: {
         perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
         tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
         globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
       },
@@ -1038,6 +1060,7 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
         policy: resolveLeaseQueueConfig({ leaseDurationMs: 30_000, heartbeatIntervalMs: 5_000 }),
         ceilings: {
           perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+          principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
           tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
           globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
         },
@@ -1067,5 +1090,355 @@ describe('B3-B1 PostgreSQL integration: migration 0021, staged uploads, python.a
         .catch(() => undefined);
       await db.roleAdminPool.query(`DROP ROLE IF EXISTS ${quotedRole}`).catch(() => undefined);
     }
+  });
+
+  it('enforces shared principal daily budget, incident halts, and consumers fail-closed across Turn, Notes, and Python Agent', async () => {
+    await clearGlobalSpend();
+
+    // 1. Fail closed (`principal_unavailable`) when a tenant has no `consumers` row.
+    const orphanTenantId = randomUUID();
+    const orphanAgentId = randomUUID();
+    await db.pool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [
+      orphanTenantId,
+      'orphan py tenant',
+    ]);
+    await db.pool.query(
+      'INSERT INTO agents (id, tenant_id, name, policy_version) VALUES ($1, $2, $3, 1)',
+      [orphanAgentId, orphanTenantId, 'Ember'],
+    );
+    const orphanTask = await taskRepo.create(
+      { tenantId: orphanTenantId, principalId: randomUUID(), policyVersion: 1 },
+      {
+        agentId: orphanAgentId,
+        kind: 'python.agent',
+        title: 'No consumer task',
+        input: { prompt: 'print(1)' },
+        idempotencyKey: `orphan-${randomUUID()}`,
+      },
+    );
+    const orphanLease = await pythonLeaseQueue.claimTask(
+      orphanTenantId,
+      orphanTask.taskId,
+      'py-orphan-worker',
+      new Date(),
+    );
+    expect(orphanLease).not.toBeNull();
+    const orphanRes = await pythonRepo.reserveLlmAttempt({
+      lease: orphanLease!,
+      ceilings: {
+        perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
+        tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
+        globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
+      },
+      maxAttemptsPerTask: 6,
+      maxAttemptsPerRun: 4,
+      maxTaskCostMicroUsd: 20_000,
+      reservedMicroUsd: 100,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(orphanRes).toEqual({ kind: 'principal_unavailable' });
+
+    // 2. Same-principal spend sharing across Assistant Turn + Notes Task + Python Agent.
+    const fixture = await createTenantFixture();
+    const authCtx = {
+      tenantId: fixture.tenantId,
+      principalId: fixture.principalId,
+      policyVersion: 1,
+    };
+
+    const turnSub = await writer.submitUserMessage({
+      tenantId: fixture.tenantId,
+      principalId: fixture.principalId,
+      conversationId: fixture.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'Summarize sprint', transcript_epoch: 0 },
+    });
+    const turnClaim = await turnRepo.claimTurn({
+      turn: {
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: turnSub.receipt.turn.turn_id,
+      },
+      workerId: 'turn-budget-worker',
+      leaseMs: 30_000,
+    });
+    expect(turnClaim.kind).toBe('claimed');
+    if (turnClaim.kind !== 'claimed') return;
+
+    const turnRes = await turnRepo.reserveAttempt({
+      lease: turnClaim.lease,
+      ceilings: CEILINGS,
+      maxAttempts: 2,
+      reservedMicroUsd: 200,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(turnRes.kind).toBe('reserved');
+    await turnRepo.markAttemptSent({ lease: turnClaim.lease, attemptNo: 1 });
+    await turnRepo.settleAttempt({
+      tenantId: fixture.tenantId,
+      turnId: turnSub.receipt.turn.turn_id,
+      attemptNo: 1,
+      state: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: 120,
+      inputTokens: 40,
+      outputTokens: 10,
+    });
+    const turnPub1 = await turnRepo.publishCompletion({
+      lease: turnClaim.lease,
+      result: {
+        status: 'completed',
+        text: 'Turn 1 complete',
+        modelLabel: MODEL_LABEL,
+        simulated: false,
+      },
+    });
+    expect(turnPub1.outcome).toBe('published');
+
+    // Run a Notes task on the same tenant/principal via `createNotesTaskHandler`.
+    const notesTask = await taskRepo.create(authCtx, {
+      agentId: fixture.agentId,
+      kind: 'notes.action_items',
+      title: 'Shared principal notes',
+      input: { notes: '- Alice: ship release' },
+      idempotencyKey: `notes-shared-${randomUUID()}`,
+    });
+    const notesLease = await notesLeaseQueue.claimTask(
+      fixture.tenantId,
+      notesTask.taskId,
+      'notes-budget-worker',
+      new Date(),
+    );
+    expect(notesLease).not.toBeNull();
+    const notesGateway = makeOpenRouterGateway(() =>
+      Promise.resolve(
+        jsonResponse({
+          model: MODEL_LABEL,
+          choices: [
+            {
+              finish_reason: 'stop',
+              message: {
+                role: 'assistant',
+                content: JSON.stringify({
+                  summary: '1 action item',
+                  action_items: [{ action: 'Ship release', owner: 'Alice' }],
+                }),
+              },
+            },
+          ],
+          usage: { prompt_tokens: 50, completion_tokens: 20, cost: 0.00008 },
+        }),
+      ),
+    );
+    const notesOutcome = await createNotesTaskHandler({
+      mode: 'real',
+      contextReader,
+      router: new DeterministicExecutionRouter(),
+      repository: notesRepo,
+      gateway: notesGateway,
+      policy: resolveLeaseQueueConfig({ leaseDurationMs: 30_000, heartbeatIntervalMs: 5_000 }),
+      ceilings: CEILINGS,
+      maxAttemptsPerTask: MODEL_LIMITS.maxModelAttemptsPerTask,
+      maxTaskCostMicroUsd: MODEL_LIMITS.maxModelCostPerTaskMicroUsd,
+      attemptTimeoutMs: MODEL_LIMITS.attemptTimeoutMs,
+      rate: OPENROUTER_RATE,
+      clock: systemClock,
+      sentinelPolicy: () =>
+        createDefaultSentinelPolicy({
+          policyId: 'test-sentinel',
+          policyVersion: SENTINEL_POLICY_VERSION,
+          tenantId: fixture.tenantId,
+          allowedActions: SAFE_MOCK_ACTION_CATEGORIES,
+        }),
+      logger: SILENT_LOGGER,
+    }).handle(notesLease!, new AbortController().signal);
+    expect(notesOutcome.type).toBe('committed');
+
+    // Run a Python task attempt on the same tenant/principal and settle 300 micro-USD.
+    const pyTask = await taskRepo.create(authCtx, {
+      agentId: fixture.agentId,
+      kind: 'python.agent',
+      title: 'Shared principal python',
+      input: { prompt: 'Compute metrics' },
+      idempotencyKey: `py-shared-${randomUUID()}`,
+    });
+    const pyLease = await pythonLeaseQueue.claimTask(
+      fixture.tenantId,
+      pyTask.taskId,
+      'py-budget-worker',
+      new Date(),
+    );
+    expect(pyLease).not.toBeNull();
+
+    const pyRes1 = await pythonRepo.reserveLlmAttempt({
+      lease: pyLease!,
+      ceilings: {
+        perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: 450,
+        tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
+        globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
+      },
+      maxAttemptsPerTask: 6,
+      maxAttemptsPerRun: 4,
+      maxTaskCostMicroUsd: 20_000,
+      reservedMicroUsd: 330,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(pyRes1.kind).toBe('reserved');
+    await pythonRepo.markLlmAttemptSent({ lease: pyLease!, attemptNo: 1 });
+    await pythonRepo.settleLlmAttempt({
+      tenantId: fixture.tenantId,
+      taskId: pyTask.taskId,
+      attemptNo: 1,
+      state: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: 300,
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+
+    // Principal spend ledger holds Turn (120) + Python (300) = 420 micro-USD (Notes principal
+    // tracking lands in PR #160 rebase); tenant ledger holds all three: Turn (120) + Notes (80) + Python (300) = 500.
+    const principalSpendAfter1 = await db.pool.query<{
+      readonly reserved_micro_usd: string;
+      readonly consumed_micro_usd: string;
+    }>(
+      `SELECT reserved_micro_usd, consumed_micro_usd
+         FROM model_spend_days
+        WHERE tenant_id = $1 AND scope_kind = 'principal' AND scope_id = $2`,
+      [fixture.tenantId, fixture.principalId],
+    );
+    expect(Number(principalSpendAfter1.rows[0]?.reserved_micro_usd)).toBe(0);
+    expect(Number(principalSpendAfter1.rows[0]?.consumed_micro_usd)).toBe(420);
+
+    const tenantSpendAfter1 = await db.pool.query<{
+      readonly reserved_micro_usd: string;
+      readonly consumed_micro_usd: string;
+    }>(
+      `SELECT reserved_micro_usd, consumed_micro_usd
+         FROM model_spend_days
+        WHERE tenant_id = $1 AND scope_kind = 'tenant' AND scope_id = $1`,
+      [fixture.tenantId],
+    );
+    expect(Number(tenantSpendAfter1.rows[0]?.reserved_micro_usd)).toBe(0);
+    expect(Number(tenantSpendAfter1.rows[0]?.consumed_micro_usd)).toBe(500);
+
+    // 3. Python attempt 2 requesting 50 against principalDailyMicroUsd=450 must refuse AND rollback global/tenant holds.
+    const pyRefused = await pythonRepo.reserveLlmAttempt({
+      lease: pyLease!,
+      ceilings: {
+        perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+        principalDailyMicroUsd: 450,
+        tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
+        globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
+      },
+      maxAttemptsPerTask: 6,
+      maxAttemptsPerRun: 4,
+      maxTaskCostMicroUsd: 20_000,
+      reservedMicroUsd: 50,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(pyRefused).toEqual({ kind: 'budget_exceeded', scope: 'principal' });
+
+    const leakedHolds = await db.pool.query<{
+      readonly scope_kind: string;
+      readonly reserved_micro_usd: string;
+    }>(
+      `SELECT scope_kind, reserved_micro_usd
+         FROM model_spend_days
+        WHERE tenant_id = $1`,
+      [fixture.tenantId],
+    );
+    expect(leakedHolds.rows.every((r) => Number(r.reserved_micro_usd) === 0)).toBe(true);
+
+    // 4. Conversely, Python spend counts against a subsequent Assistant Turn's principalDailyMicroUsd cap.
+    const turn2Sub = await writer.submitUserMessage({
+      tenantId: fixture.tenantId,
+      principalId: fixture.principalId,
+      conversationId: fixture.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'Followup', transcript_epoch: 0 },
+    });
+    const turn2Claim = await turnRepo.claimTurn({
+      turn: {
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: turn2Sub.receipt.turn.turn_id,
+      },
+      workerId: 'turn-budget-worker-2',
+      leaseMs: 30_000,
+    });
+    expect(turn2Claim.kind).toBe('claimed');
+    if (turn2Claim.kind !== 'claimed') return;
+
+    const turn2Refused = await turnRepo.reserveAttempt({
+      lease: turn2Claim.lease,
+      ceilings: { ...CEILINGS, principalDailyMicroUsd: 450 },
+      maxAttempts: 2,
+      reservedMicroUsd: 50,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(turn2Refused).toEqual({ kind: 'budget_exceeded', scope: 'principal' });
+
+    // 5. Principal day_ceiling_exceeded incident opened by Python settlement halts subsequent Python calls.
+    const pyCeilings = {
+      perAttemptMicroUsd: CEILINGS.perAttemptMicroUsd,
+      principalDailyMicroUsd: CEILINGS.principalDailyMicroUsd,
+      tenantDailyMicroUsd: CEILINGS.tenantDailyMicroUsd,
+      globalDailyMicroUsd: CEILINGS.globalDailyMicroUsd,
+    };
+    const pyRes2 = await pythonRepo.reserveLlmAttempt({
+      lease: pyLease!,
+      ceilings: pyCeilings,
+      maxAttemptsPerTask: 6,
+      maxAttemptsPerRun: 4,
+      maxTaskCostMicroUsd: 20_000,
+      reservedMicroUsd: 100,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(pyRes2.kind).toBe('reserved');
+    await pythonRepo.markLlmAttemptSent({ lease: pyLease!, attemptNo: 2 });
+    const overageSettle = await pythonRepo.settleLlmAttempt({
+      tenantId: fixture.tenantId,
+      taskId: pyTask.taskId,
+      attemptNo: 2,
+      state: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd,
+      inputTokens: 100,
+      outputTokens: 50,
+    });
+    expect(overageSettle.kind).toBe('applied');
+    if (overageSettle.kind === 'applied') {
+      expect(overageSettle.incidentsOpened).toBeGreaterThanOrEqual(1);
+    }
+
+    const haltedPy = await pythonRepo.reserveLlmAttempt({
+      lease: pyLease!,
+      ceilings: pyCeilings,
+      maxAttemptsPerTask: 6,
+      maxAttemptsPerRun: 4,
+      maxTaskCostMicroUsd: 20_000,
+      reservedMicroUsd: 10,
+      rateVersion: OPENROUTER_RATE.rateVersion,
+      providerId: 'openrouter',
+      modelLabel: MODEL_LABEL,
+    });
+    expect(haltedPy).toEqual({
+      kind: 'budget_halted',
+      scope: 'principal',
+      reason: 'day_ceiling_exceeded',
+    });
   });
 });

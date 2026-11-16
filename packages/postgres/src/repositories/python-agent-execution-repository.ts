@@ -50,7 +50,8 @@ export type PythonAgentReserveLlmOutcome =
       readonly reason: 'attempts_exhausted' | 'cost_exceeded';
     }
   | { readonly kind: 'run_budget_exhausted'; readonly reason: 'run_attempts_exhausted' }
-  | { readonly kind: 'budget_exceeded'; readonly scope: 'global' | 'tenant' }
+  | { readonly kind: 'budget_exceeded'; readonly scope: 'global' | 'tenant' | 'principal' }
+  | { readonly kind: 'principal_unavailable' }
   | { readonly kind: 'lease_lost' }
   | { readonly kind: 'cancelled' }
   | { readonly kind: 'deadline_exceeded' }
@@ -144,6 +145,7 @@ export interface PythonAgentReserveLlmCommand {
   readonly lease: LeasedRun;
   readonly ceilings: {
     readonly perAttemptMicroUsd: number;
+    readonly principalDailyMicroUsd: number;
     readonly tenantDailyMicroUsd: number;
     readonly globalDailyMicroUsd: number;
   };
@@ -298,6 +300,7 @@ const reserveLlmSchema = z.strictObject({
   maxTaskCostMicroUsd: z.number().int().min(1).max(PYTHON_AGENT_LIMITS.maxTaskCostMicroUsd),
   ceilings: z.strictObject({
     perAttemptMicroUsd: z.number().int().min(1).max(5_000),
+    principalDailyMicroUsd: z.number().int().min(0).max(B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd),
     tenantDailyMicroUsd: z.number().int().min(0).max(B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd),
     globalDailyMicroUsd: z.number().int().min(0).max(B2_ABSOLUTE_DAY_CEILINGS.globalMicroUsd),
   }),
@@ -492,6 +495,112 @@ function splitCharge(
   const room = Math.max(0, ceiling - (remainingReserved + consumed));
   const appliedMicroUsd = Math.min(charge, room);
   return { remainingReserved, appliedMicroUsd, overageMicroUsd: charge - appliedMicroUsd };
+}
+
+/** Resolve the server-owned principal mapped to `tenantId` (`consumers` 1:1 invariant). */
+async function resolveTenantPrincipalId(
+  client: pg.PoolClient,
+  tenantId: string,
+): Promise<string | null> {
+  const principal = await client.query<{ readonly principal_id: string }>(
+    'SELECT principal_id FROM consumers WHERE tenant_id = $1',
+    [tenantId],
+  );
+  return principal.rows[0]?.principal_id ?? null;
+}
+
+/** Reserve spend against one `model_spend_days` bucket (`tenant` or `principal`). */
+async function tryReserveScopeSpend(
+  client: pg.PoolClient,
+  tenantId: string,
+  scopeKind: 'tenant' | 'principal',
+  scopeId: string,
+  utcDay: string,
+  reservedMicroUsd: number,
+  ceiling: number,
+): Promise<boolean> {
+  const result = await client.query(
+    `INSERT INTO model_spend_days
+        (tenant_id, scope_kind, scope_id, utc_day, reserved_micro_usd, turns_started)
+     SELECT $1::uuid, $2, $3::uuid, $4::date, $5::bigint, 0
+      WHERE $5::bigint <= $6::bigint
+     ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO UPDATE
+        SET reserved_micro_usd = model_spend_days.reserved_micro_usd + EXCLUDED.reserved_micro_usd,
+            updated_at = clock_timestamp()
+      WHERE model_spend_days.reserved_micro_usd
+          + model_spend_days.consumed_micro_usd
+          + EXCLUDED.reserved_micro_usd <= $6::bigint`,
+    [tenantId, scopeKind, scopeId, utcDay, reservedMicroUsd, ceiling],
+  );
+  return (result.rowCount ?? 0) === 1;
+}
+
+/** Release reserved hold and book actual charge for one `model_spend_days` bucket. */
+async function chargeScopeSpend(
+  client: pg.PoolClient,
+  tenantId: string,
+  scopeKind: 'tenant' | 'principal',
+  scopeId: string,
+  utcDay: string,
+  releaseMicroUsd: number,
+  chargeMicroUsd: number,
+): Promise<{
+  readonly scope: 'tenant' | 'principal';
+  readonly scopeId: string;
+  readonly appliedMicroUsd: number;
+  readonly overageMicroUsd: number;
+}> {
+  await client.query(
+    `INSERT INTO model_spend_days (tenant_id, scope_kind, scope_id, utc_day)
+     VALUES ($1::uuid, $2, $3::uuid, $4::date)
+     ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO NOTHING`,
+    [tenantId, scopeKind, scopeId, utcDay],
+  );
+  const locked = await client.query<{
+    readonly reserved_micro_usd: string | number;
+    readonly consumed_micro_usd: string | number;
+  }>(
+    `SELECT reserved_micro_usd, consumed_micro_usd
+       FROM model_spend_days
+      WHERE tenant_id = $1::uuid AND scope_kind = $2 AND scope_id = $3::uuid AND utc_day = $4::date
+      FOR UPDATE`,
+    [tenantId, scopeKind, scopeId, utcDay],
+  );
+  const consumed = Number(locked.rows[0]!.consumed_micro_usd);
+  const ceiling =
+    scopeKind === 'tenant'
+      ? B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd
+      : B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd;
+  const split = splitCharge(
+    Number(locked.rows[0]!.reserved_micro_usd),
+    consumed,
+    releaseMicroUsd,
+    chargeMicroUsd,
+    ceiling,
+  );
+  await client.query(
+    `UPDATE model_spend_days
+        SET reserved_micro_usd = $5,
+            consumed_micro_usd = $6,
+            overage_micro_usd = overage_micro_usd + $7,
+            updated_at = clock_timestamp()
+      WHERE tenant_id = $1::uuid AND scope_kind = $2 AND scope_id = $3::uuid AND utc_day = $4::date`,
+    [
+      tenantId,
+      scopeKind,
+      scopeId,
+      utcDay,
+      split.remainingReserved,
+      consumed + split.appliedMicroUsd,
+      split.overageMicroUsd,
+    ],
+  );
+  return {
+    scope: scopeKind,
+    scopeId,
+    appliedMicroUsd: split.appliedMicroUsd,
+    overageMicroUsd: split.overageMicroUsd,
+  };
 }
 
 /**
@@ -724,6 +833,10 @@ export class PostgresPythonAgentExecutionRepository {
     }
 
     const input = parsed.data;
+    const principalCeiling = Math.min(
+      input.ceilings.principalDailyMicroUsd,
+      B2_ABSOLUTE_DAY_CEILINGS.principalMicroUsd,
+    );
     const tenantCeiling = Math.min(
       input.ceilings.tenantDailyMicroUsd,
       B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd,
@@ -740,6 +853,11 @@ export class PostgresPythonAgentExecutionRepository {
           BUDGET_HALT_LOCK_ID,
         ]);
 
+        const principalId = await resolveTenantPrincipalId(client, input.lease.tenantId);
+        if (principalId === null) {
+          return { kind: 'principal_unavailable' as const };
+        }
+
         const halt = await client.query<{
           readonly scope_kind: 'global' | 'tenant' | 'principal';
           readonly reason: 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
@@ -747,10 +865,14 @@ export class PostgresPythonAgentExecutionRepository {
           `SELECT scope_kind, reason
              FROM model_budget_incidents
             WHERE resolved_at IS NULL
-              AND (scope_kind = 'global' OR (tenant_id = $1 AND scope_kind = 'tenant'))
-            ORDER BY CASE scope_kind WHEN 'global' THEN 0 ELSE 1 END
+              AND (
+                scope_kind = 'global'
+                OR (tenant_id = $1 AND scope_kind = 'tenant')
+                OR (tenant_id = $1 AND scope_kind = 'principal' AND scope_id = $2)
+              )
+            ORDER BY CASE scope_kind WHEN 'global' THEN 0 WHEN 'tenant' THEN 1 ELSE 2 END
             LIMIT 1`,
-          [input.lease.tenantId],
+          [input.lease.tenantId, principalId],
         );
 
         if (halt.rows[0] !== undefined) {
@@ -807,6 +929,7 @@ export class PostgresPythonAgentExecutionRepository {
           return { kind: 'task_budget_exhausted' as const, reason: 'cost_exceeded' as const };
         }
 
+        // Strict 3-scope lock order matching B2 Turns and B3 Notes: global -> tenant -> principal.
         const globalRes = await client.query(
           `INSERT INTO model_global_spend_days (utc_day, reserved_micro_usd)
            SELECT $1::date, $2::bigint
@@ -823,21 +946,32 @@ export class PostgresPythonAgentExecutionRepository {
           throw new Refusal({ kind: 'budget_exceeded', scope: 'global' });
         }
 
-        const tenantRes = await client.query(
-          `INSERT INTO model_spend_days
-              (tenant_id, scope_kind, scope_id, utc_day, reserved_micro_usd, turns_started)
-           SELECT $1::uuid, 'tenant', $1::uuid, $2::date, $3::bigint, 0
-            WHERE $3::bigint <= $4::bigint
-           ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO UPDATE
-              SET reserved_micro_usd = model_spend_days.reserved_micro_usd + EXCLUDED.reserved_micro_usd,
-                  updated_at = clock_timestamp()
-            WHERE model_spend_days.reserved_micro_usd
-                + model_spend_days.consumed_micro_usd
-                + EXCLUDED.reserved_micro_usd <= $4`,
-          [input.lease.tenantId, utcDay, input.reservedMicroUsd, tenantCeiling],
-        );
-        if ((tenantRes.rowCount ?? 0) !== 1) {
+        if (
+          !(await tryReserveScopeSpend(
+            client,
+            input.lease.tenantId,
+            'tenant',
+            input.lease.tenantId,
+            utcDay,
+            input.reservedMicroUsd,
+            tenantCeiling,
+          ))
+        ) {
           throw new Refusal({ kind: 'budget_exceeded', scope: 'tenant' });
+        }
+
+        if (
+          !(await tryReserveScopeSpend(
+            client,
+            input.lease.tenantId,
+            'principal',
+            principalId,
+            utcDay,
+            input.reservedMicroUsd,
+            principalCeiling,
+          ))
+        ) {
+          throw new Refusal({ kind: 'budget_exceeded', scope: 'principal' });
         }
 
         const attemptNo = maxAttempt + 1;
@@ -980,6 +1114,11 @@ export class PostgresPythonAgentExecutionRepository {
       let bucketOverage = 0;
 
       if (releaseMicroUsd > 0 || chargeMicroUsd > 0) {
+        const principalId = await resolveTenantPrincipalId(client, input.tenantId);
+        if (principalId === null) {
+          throw new DomainError('POLICY_DENIED', 'principal mapping unavailable for tenant');
+        }
+
         await client.query(
           `INSERT INTO model_global_spend_days (utc_day) VALUES ($1::date) ON CONFLICT (utc_day) DO NOTHING`,
           [row.utc_day],
@@ -1016,48 +1155,29 @@ export class PostgresPythonAgentExecutionRepository {
           ],
         );
 
-        await client.query(
-          `INSERT INTO model_spend_days (tenant_id, scope_kind, scope_id, utc_day)
-           VALUES ($1::uuid, 'tenant', $1::uuid, $2::date)
-           ON CONFLICT (tenant_id, scope_kind, scope_id, utc_day) DO NOTHING`,
-          [input.tenantId, row.utc_day],
-        );
-        const tLocked = await client.query<{
-          readonly reserved_micro_usd: string | number;
-          readonly consumed_micro_usd: string | number;
-        }>(
-          `SELECT reserved_micro_usd, consumed_micro_usd
-             FROM model_spend_days
-            WHERE tenant_id = $1::uuid AND scope_kind = 'tenant' AND scope_id = $1::uuid AND utc_day = $2::date
-            FOR UPDATE`,
-          [input.tenantId, row.utc_day],
-        );
-        const tSplit = splitCharge(
-          Number(tLocked.rows[0]!.reserved_micro_usd),
-          Number(tLocked.rows[0]!.consumed_micro_usd),
+        const tenantCharge = await chargeScopeSpend(
+          client,
+          input.tenantId,
+          'tenant',
+          input.tenantId,
+          row.utc_day,
           releaseMicroUsd,
           chargeMicroUsd,
-          B2_ABSOLUTE_DAY_CEILINGS.tenantMicroUsd,
         );
-        await client.query(
-          `UPDATE model_spend_days
-              SET reserved_micro_usd = $3,
-                  consumed_micro_usd = $4,
-                  overage_micro_usd = overage_micro_usd + $5,
-                  updated_at = clock_timestamp()
-            WHERE tenant_id = $1::uuid AND scope_kind = 'tenant' AND scope_id = $1::uuid AND utc_day = $2::date`,
-          [
-            input.tenantId,
-            row.utc_day,
-            tSplit.remainingReserved,
-            Number(tLocked.rows[0]!.consumed_micro_usd) + tSplit.appliedMicroUsd,
-            tSplit.overageMicroUsd,
-          ],
+        const principalCharge = await chargeScopeSpend(
+          client,
+          input.tenantId,
+          'principal',
+          principalId,
+          row.utc_day,
+          releaseMicroUsd,
+          chargeMicroUsd,
         );
 
         const buckets = [
           { scope: 'global' as const, scopeId: 'platform', ...gSplit },
-          { scope: 'tenant' as const, scopeId: input.tenantId, ...tSplit },
+          tenantCharge,
+          principalCharge,
         ];
 
         for (const bucket of buckets) {

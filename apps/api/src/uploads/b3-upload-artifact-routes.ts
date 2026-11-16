@@ -14,7 +14,11 @@ import { z } from 'zod';
 import { requireSessionAuth } from '../auth/session-authenticator.js';
 import type { SessionService } from '../auth/session-service.js';
 import { requestIdOf, type AppBindings, type AppContext } from '../http/app-context.js';
-import { readJsonBody, type BodyRejectionReason } from '../http/bounded-body.js';
+import {
+  readBoundedBodyBytes,
+  readJsonBody,
+  type BodyRejectionReason,
+} from '../http/bounded-body.js';
 import {
   INTERNAL_ERROR_CODE,
   UnexpectedNonErrorFault,
@@ -27,6 +31,7 @@ import {
 import type { Logger } from '../logger.js';
 
 const MAX_UPLOAD_REQUEST_BYTES = 524_288;
+const ALLOWED_MULTIPART_FIELDS = new Set(['file', 'filename', 'media_type']);
 const MULTIPART_CONTENT_TYPE = /^multipart\/form-data(?:\s*;.*)?$/i;
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;.*)?$/i;
 const MEDIA_TYPE_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/;
@@ -179,20 +184,22 @@ async function parseUploadPayload(
   }
 
   if (MULTIPART_CONTENT_TYPE.test(contentType)) {
-    const declaredLength = c.req.header('content-length');
-    if (declaredLength !== undefined) {
-      const len = Number(declaredLength);
-      if (Number.isFinite(len) && len > MAX_UPLOAD_REQUEST_BYTES) {
-        return {
-          ok: false,
-          response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES.too_large),
-        };
-      }
+    const bounded = await readBoundedBodyBytes(c.req.raw, MAX_UPLOAD_REQUEST_BYTES);
+    if (!bounded.ok) {
+      return {
+        ok: false,
+        response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES[bounded.reason]),
+      };
     }
 
     let form: FormData;
     try {
-      form = await c.req.raw.formData();
+      const boundedRequest = new Request(c.req.url, {
+        method: 'POST',
+        headers: { 'content-type': contentType },
+        body: bounded.bytes,
+      });
+      form = await boundedRequest.formData();
     } catch {
       return {
         ok: false,
@@ -200,8 +207,54 @@ async function parseUploadPayload(
       };
     }
 
-    const fileEntry = form.get('file');
-    if (!(fileEntry instanceof Blob)) {
+    const seenFields = new Set<string>();
+    let fileEntry: Blob | null = null;
+    let explicitFilename: string | undefined;
+    let explicitMediaType: string | undefined;
+
+    for (const [key, value] of form.entries()) {
+      if (!ALLOWED_MULTIPART_FIELDS.has(key)) {
+        return {
+          ok: false,
+          response: respondInvalidArgument(c, 'multipart form contains unexpected fields'),
+        };
+      }
+      if (seenFields.has(key)) {
+        return {
+          ok: false,
+          response: respondInvalidArgument(c, 'multipart form contains duplicate fields'),
+        };
+      }
+      seenFields.add(key);
+
+      if (key === 'file') {
+        if (!(value instanceof Blob)) {
+          return {
+            ok: false,
+            response: respondInvalidArgument(c, 'multipart form must include a file field'),
+          };
+        }
+        fileEntry = value;
+      } else if (key === 'filename') {
+        if (typeof value !== 'string') {
+          return {
+            ok: false,
+            response: respondInvalidArgument(c, 'filename field must be text'),
+          };
+        }
+        explicitFilename = value;
+      } else if (key === 'media_type') {
+        if (typeof value !== 'string') {
+          return {
+            ok: false,
+            response: respondInvalidArgument(c, 'media_type field must be text'),
+          };
+        }
+        explicitMediaType = value;
+      }
+    }
+
+    if (fileEntry === null) {
       return {
         ok: false,
         response: respondInvalidArgument(c, 'multipart form must include a file field'),
@@ -219,8 +272,8 @@ async function parseUploadPayload(
     }
 
     const rawFilename =
-      typeof form.get('filename') === 'string'
-        ? (form.get('filename') as string)
+      explicitFilename !== undefined
+        ? explicitFilename
         : 'name' in fileEntry && typeof fileEntry.name === 'string'
           ? fileEntry.name
           : '';
@@ -232,10 +285,7 @@ async function parseUploadPayload(
       };
     }
 
-    const rawMediaType =
-      typeof form.get('media_type') === 'string'
-        ? (form.get('media_type') as string)
-        : fileEntry.type;
+    const rawMediaType = explicitMediaType !== undefined ? explicitMediaType : fileEntry.type;
     const mediaTypeParsed = B3StagedUploadMediaTypeSchema.safeParse(normalizeMediaType(rawMediaType));
     if (!mediaTypeParsed.success) {
       return {

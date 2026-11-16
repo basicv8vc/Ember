@@ -94,6 +94,7 @@ export interface PythonAgentExecutorDependencies {
   readonly policy: RetryPolicyConfig;
   readonly ceilings: {
     readonly perAttemptMicroUsd: number;
+    readonly principalDailyMicroUsd: number;
     readonly tenantDailyMicroUsd: number;
     readonly globalDailyMicroUsd: number;
   };
@@ -630,6 +631,7 @@ export async function executePythonAgentRun(
         lease: run,
         ceilings: {
           perAttemptMicroUsd: deps.ceilings.perAttemptMicroUsd,
+          principalDailyMicroUsd: deps.ceilings.principalDailyMicroUsd,
           tenantDailyMicroUsd: deps.ceilings.tenantDailyMicroUsd,
           globalDailyMicroUsd: deps.ceilings.globalDailyMicroUsd,
         },
@@ -644,6 +646,9 @@ export async function executePythonAgentRun(
 
       if (reservation.kind === 'lease_lost') {
         return { outcome: 'lease_lost' };
+      }
+      if (reservation.kind === 'principal_unavailable') {
+        return await failRun('failed_terminal', 'POLICY_DENIED', 'principal_unavailable');
       }
       if (reservation.kind === 'cancelled') {
         return await failRun('cancelled', 'CANCELLED', 'cancelled');

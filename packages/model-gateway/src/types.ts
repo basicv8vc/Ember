@@ -7,7 +7,7 @@
 export type ModelProviderId = 'fake' | 'openai' | 'openrouter';
 export type RealModelProviderId = Exclude<ModelProviderId, 'fake'>;
 
-export type ModelOperation = 'conversation.turn' | 'task.notes_action_items';
+export type ModelOperation = 'conversation.turn' | 'task.notes_action_items' | 'task.python_agent';
 
 export type ModelExecutionMode = 'disabled' | 'fake' | 'real';
 
@@ -24,9 +24,17 @@ export interface ModelUsage {
   readonly rateVersion: string;
 }
 
+export interface ConversationAttachmentMetadata {
+  readonly uploadId: string;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+}
+
 export interface ModelMessage {
   readonly role: 'user' | 'assistant';
   readonly text: string;
+  readonly attachments?: readonly ConversationAttachmentMetadata[];
 }
 
 export interface ConversationTurnInput {
@@ -37,14 +45,24 @@ export interface ConversationTurnInput {
   readonly maxOutputTokens: number;
 }
 
-export interface ConversationDelegationCall {
-  readonly toolName: 'delegate_notes_action_items';
-  readonly arguments: {
-    readonly title?: string;
-    readonly notes: string;
-    readonly instructions?: string;
-  };
-}
+export type ConversationDelegationCall =
+  | {
+      readonly toolName: 'delegate_notes_action_items';
+      readonly arguments: {
+        readonly title?: string;
+        readonly notes: string;
+        readonly instructions?: string;
+      };
+    }
+  | {
+      readonly toolName: 'delegate_python_agent';
+      readonly arguments: {
+        readonly title?: string;
+        readonly prompt: string;
+        readonly instructions?: string;
+        readonly attachmentIds?: readonly string[];
+      };
+    };
 
 export type ConversationTurnOutput =
   | {
@@ -54,7 +72,7 @@ export type ConversationTurnOutput =
     }
   | {
       readonly kind: 'delegate';
-      readonly toolName: 'delegate_notes_action_items';
+      readonly toolName: ConversationDelegationCall['toolName'];
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly delegation: ConversationDelegationCall;
@@ -73,6 +91,54 @@ export interface NotesActionItemsOutput {
   readonly truncated: boolean;
   readonly finishReason: 'stop' | 'length';
 }
+
+export interface PythonAgentInputFile {
+  readonly artifactId: string;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly sizeBytes: number;
+  readonly previewText?: string;
+}
+
+export interface PythonAgentStepMessage {
+  readonly role: 'user' | 'assistant' | 'tool';
+  readonly text: string;
+  readonly toolCallId?: string;
+  readonly toolCalls?: readonly {
+    readonly id: string;
+    readonly name: 'run_python_script';
+    readonly argumentsJson: string;
+  }[];
+}
+
+export interface PythonAgentStepInput {
+  readonly taskId: string;
+  readonly prompt: string;
+  readonly instructions?: string;
+  readonly title?: string;
+  readonly inputFiles: readonly PythonAgentInputFile[];
+  readonly messages: readonly PythonAgentStepMessage[];
+  readonly maxOutputTokens?: number;
+  /** Remaining run_python_script calls allowed; 0 forces a final answer without tools. */
+  readonly remainingPythonCalls: number;
+}
+
+export type PythonAgentStepOutput =
+  | {
+      readonly kind: 'tool_call';
+      readonly toolCallId: string;
+      readonly code: string;
+      readonly purpose?: string;
+      readonly rawArgumentsJson: string;
+      readonly assistantText?: string;
+    }
+  | {
+      readonly kind: 'final';
+      readonly summaryText: string;
+      readonly detailText: string;
+      readonly truncated: boolean;
+      readonly finishReason: 'stop' | 'length';
+    };
 
 export interface ModelCallResult<T> {
   readonly output: T;
@@ -107,4 +173,8 @@ export interface ModelGateway {
     input: NotesActionItemsInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<NotesActionItemsOutput>>;
+  stepPythonAgent(
+    input: PythonAgentStepInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<PythonAgentStepOutput>>;
 }

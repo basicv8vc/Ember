@@ -87,7 +87,12 @@ export function resolveSentinelCategory(
   kind: string,
   phase: 'produce' | 'publish' = 'produce',
 ): SentinelActionCategory | 'unknown' {
-  if (kind === 'mock.chat' || kind === 'mock.compute' || kind === 'notes.action_items') {
+  if (
+    kind === 'mock.chat' ||
+    kind === 'mock.compute' ||
+    kind === 'notes.action_items' ||
+    kind === 'python.agent'
+  ) {
     return 'mock.compute';
   }
 

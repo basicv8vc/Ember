@@ -16,6 +16,7 @@ import {
   DAYTONA_LIVE_STATES,
   DaytonaExecCancelledError,
   type DaytonaCreateRequest,
+  type DaytonaDirectoryEntry,
   type DaytonaExecRequest,
   type DaytonaExecResult,
   type DaytonaListFilter,
@@ -299,6 +300,35 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
     } catch (error) {
       if (error instanceof DaytonaFileNotFoundError) {
         return false;
+      }
+
+      throw error;
+    }
+  }
+
+  public async listDirectory(
+    sandboxId: string,
+    absolutePath: string,
+  ): Promise<readonly DaytonaDirectoryEntry[]> {
+    const sandbox = await this.requireSandbox(sandboxId);
+
+    try {
+      const entries = await sandbox.fs.listFiles(absolutePath);
+
+      return entries.map((entry) => ({
+        name: entry.name,
+        isDir: entry.isDir === true,
+        isSymlink:
+          (typeof entry.permissions === 'string' && entry.permissions.startsWith('l')) ||
+          (typeof entry.mode === 'string' && entry.mode.startsWith('l')),
+        sizeBytes: typeof entry.size === 'number' ? entry.size : 0,
+      }));
+    } catch (error) {
+      if (
+        error instanceof DaytonaFileNotFoundError ||
+        (error instanceof Error && /not found|no such file/i.test(error.message))
+      ) {
+        return [];
       }
 
       throw error;

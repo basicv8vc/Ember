@@ -113,6 +113,7 @@ export interface B1ConversationRepository {
    */
   submitUserMessage(command: {
     readonly tenantId: Id;
+    readonly principalId?: Id;
     readonly conversationId: Id;
     readonly request: B1SendMessageRequest;
   }): Promise<{ readonly replayed: boolean; readonly receipt: B1SendMessageReceipt }>;

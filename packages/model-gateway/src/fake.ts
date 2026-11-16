@@ -10,6 +10,8 @@ import type {
   ModelUsage,
   NotesActionItemsInput,
   NotesActionItemsOutput,
+  PythonAgentStepInput,
+  PythonAgentStepOutput,
 } from './types.js';
 
 /** Contains `-fake-`, so no heuristic is needed to recognise simulated text. */
@@ -40,6 +42,8 @@ export interface FakeModelGatewayOptions {
   readonly onConversationTurn?: (input: ConversationTurnInput) => ConversationTurnOutput;
   /** Test-only callback to script deterministic notes extraction output. */
   readonly onExtractNotesActionItems?: (input: NotesActionItemsInput) => NotesActionItemsOutput;
+  /** Test-only callback to script deterministic Python agent steps. */
+  readonly onStepPythonAgent?: (input: PythonAgentStepInput) => PythonAgentStepOutput;
 }
 
 /**
@@ -53,18 +57,24 @@ export class FakeModelGateway implements ModelGateway {
   readonly providerId = 'fake' as const;
   readonly modelLabel = FAKE_MODEL_LABEL;
   readonly simulated = true;
-  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
+  readonly operations = [
+    'conversation.turn',
+    'task.notes_action_items',
+    'task.python_agent',
+  ] as const;
 
   readonly #delayMs: number;
   readonly #failure: FakeModelGatewayOptions['failure'];
   readonly #onConversationTurn: FakeModelGatewayOptions['onConversationTurn'];
   readonly #onExtractNotesActionItems: FakeModelGatewayOptions['onExtractNotesActionItems'];
+  readonly #onStepPythonAgent: FakeModelGatewayOptions['onStepPythonAgent'];
 
   constructor(options: FakeModelGatewayOptions = {}) {
     this.#delayMs = Math.max(0, Math.trunc(options.delayMs ?? 0));
     this.#failure = options.failure;
     this.#onConversationTurn = options.onConversationTurn;
     this.#onExtractNotesActionItems = options.onExtractNotesActionItems;
+    this.#onStepPythonAgent = options.onStepPythonAgent;
   }
 
   async generateConversationTurn(
@@ -164,6 +174,62 @@ export class FakeModelGateway implements ModelGateway {
       usage: Object.freeze({
         inputTokens: estimateTokensConservative(input.notes),
         outputTokens: Math.max(1, estimateTokensConservative(output.detailText)),
+        costMicroUsd: 0,
+        rateVersion: 'fake-zero-cost',
+      }),
+    });
+  }
+
+  async stepPythonAgent(
+    input: PythonAgentStepInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<PythonAgentStepOutput>> {
+    await this.#beforeExecute(signal);
+
+    const output: PythonAgentStepOutput =
+      this.#onStepPythonAgent !== undefined
+        ? this.#onStepPythonAgent(input)
+        : (() => {
+            const hasPriorToolResult = input.messages.some((message) => message.role === 'tool');
+            if (!hasPriorToolResult && input.remainingPythonCalls > 0) {
+              const code = `print("ember-fake-python-ok")`;
+              return Object.freeze({
+                kind: 'tool_call' as const,
+                toolCallId: `fake_call_${input.messages.length + 1}`,
+                code,
+                purpose: 'run deterministic fake script',
+                rawArgumentsJson: JSON.stringify({
+                  code,
+                  purpose: 'run deterministic fake script',
+                }),
+              });
+            }
+
+            const summary = clampText(
+              `${FAKE_REPLY_PREFIX}Completed Python task: ${input.prompt}`,
+              MODEL_LIMITS.resultSummaryMaxChars,
+            );
+            const detail = clampText(
+              `${FAKE_REPLY_PREFIX}\n\nExecuted deterministic fake Python agent loop.`,
+              MODEL_LIMITS.resultDetailMaxChars,
+            );
+            return Object.freeze({
+              kind: 'final' as const,
+              summaryText: summary.text,
+              detailText: detail.text,
+              truncated: summary.truncated || detail.truncated,
+              finishReason: 'stop' as const,
+            });
+          })();
+
+    const outputChars = output.kind === 'tool_call' ? output.rawArgumentsJson : output.detailText;
+    return Object.freeze({
+      output,
+      modelLabel: FAKE_MODEL_LABEL,
+      simulated: true as const,
+      usage: Object.freeze({
+        inputTokens: Math.max(1, estimateTokensConservative(input.prompt)),
+        outputTokens: Math.max(1, estimateTokensConservative(outputChars)),
         costMicroUsd: 0,
         rateVersion: 'fake-zero-cost',
       }),

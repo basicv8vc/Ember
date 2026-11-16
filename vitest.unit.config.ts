@@ -27,17 +27,23 @@ export default defineConfig({
       '@ember/postgres/b2-worker': fileURLToPath(
         new URL('./packages/postgres/src/b2-worker.ts', import.meta.url),
       ),
+      '@ember/postgres/b3-worker': fileURLToPath(
+        new URL('./packages/postgres/src/b3-worker.ts', import.meta.url),
+      ),
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
+      ),
+      '@ember/worker/b1/model-turn-responder': fileURLToPath(
+        new URL('./apps/worker/src/b1/model-turn-responder.ts', import.meta.url),
+      ),
+      '@ember/worker/b3/python-agent-executor': fileURLToPath(
+        new URL('./apps/worker/src/b3/python-agent-executor.ts', import.meta.url),
       ),
       '@ember/sandbox-daytona': fileURLToPath(
         new URL('./packages/sandbox-daytona/src/index.ts', import.meta.url),
       ),
       '@ember/telemetry': fileURLToPath(
         new URL('./packages/telemetry/src/index.ts', import.meta.url),
-      ),
-      '@ember/worker/b1/model-turn-responder': fileURLToPath(
-        new URL('./apps/worker/src/b1/model-turn-responder.ts', import.meta.url),
       ),
       '@ember/worker/notes-task-handler': fileURLToPath(
         new URL('./apps/worker/src/notes-task-handler.ts', import.meta.url),

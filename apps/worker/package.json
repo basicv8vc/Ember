@@ -11,6 +11,10 @@
     "./notes-task-handler": {
       "types": "./dist/notes-task-handler.d.ts",
       "default": "./dist/notes-task-handler.js"
+    },
+    "./b3/python-agent-executor": {
+      "types": "./dist/b3/python-agent-executor.d.ts",
+      "default": "./dist/b3/python-agent-executor.js"
     }
   },
   "scripts": {

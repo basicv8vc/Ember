@@ -127,6 +127,10 @@ class ScriptedGateway implements ModelGateway {
       new Error('extractNotesActionItems unused in b2-model-turn-runtime test'),
     );
   }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused in b2-model-turn-runtime test'));
+  }
 }
 
 /** A gateway whose call is held open until the test releases or fails it. */
@@ -177,6 +181,10 @@ class DeferredGateway implements ModelGateway {
     return Promise.reject(
       new Error('extractNotesActionItems unused in b2-model-turn-runtime test'),
     );
+  }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused in b2-model-turn-runtime test'));
   }
 
   release(): void {
@@ -1067,6 +1075,9 @@ describe('B2 real model Turn runtime on PostgreSQL 17', () => {
       },
       extractNotesActionItems() {
         return Promise.reject(new Error('extractNotesActionItems unused'));
+      },
+      stepPythonAgent() {
+        return Promise.reject(new Error('stepPythonAgent unused'));
       },
     };
 

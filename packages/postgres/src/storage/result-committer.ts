@@ -34,7 +34,7 @@ import {
 } from '../lease-queue/task-convergence.js';
 import type { LeaseQueueConfig } from '../lease-queue/config.js';
 import { lockBlobDigests } from './blob-store.js';
-import { parseMediaType } from './local-blob-store.js';
+import { parseMediaType } from './validation.js';
 import { lockArtifactRows, lockCheckpointArtifacts } from './artifact-references.js';
 import {
   commitWorkspaceInTransaction,

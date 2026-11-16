@@ -1,16 +1,21 @@
 import {
-  DelegationToolNameSchema,
   IdSchema,
   NotesActionItemsInputSchema,
+  PYTHON_AGENT_LIMITS,
   TaskEventSchema,
   TaskTitleSchema,
   toInvalidArgumentError,
   type B1AssistantTurnDto,
+  type B3StagedUploadMediaType,
 } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { z } from 'zod';
 import { prepareTaskCommand } from '../task-digest.js';
+import { BLOB_LOCK_NAMESPACE } from '../storage/blob-store.js';
+import { decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
+import { blobKeyFor } from '../storage/validation.js';
+import { insertB3TaskDispatchOutbox } from './b3-task-dispatch-outbox.js';
 import {
   B1_ASSISTANT_TURN_FAILURE_MESSAGE,
   SIMULATED_MODEL_IDENTITY,
@@ -29,6 +34,7 @@ import type {
   B2AttemptCharge,
   B2BudgetIncident,
   B2ClaimOutcome,
+  B2MessageAttachmentMeta,
   B2PublicationResult,
   B2PublishCommand,
   B2ReserveAttemptCommand,
@@ -299,12 +305,13 @@ RETURNING t.status, t.lease_epoch, t.lease_owner, t.deadline_at, t.lease_expires
 
     try {
       const result = await this.pool.query<{
+        readonly id: string;
         readonly sequence: string | number;
         readonly kind: 'user' | 'ember';
         readonly text: string;
       }>(
         `
-SELECT m.sequence, m.kind, m.text
+SELECT m.id, m.sequence, m.kind, m.text
   FROM conversation_messages m
  WHERE m.tenant_id = $1
    AND m.conversation_id = $2
@@ -323,12 +330,54 @@ SELECT m.sequence, m.kind, m.text
         [turn.tenantId, turn.conversationId, turn.turnId, parsed.data.maxMessages],
       );
 
+      const userMessageIds = result.rows.filter((r) => r.kind === 'user').map((r) => r.id);
+      const attachmentsByMessage = new Map<string, B2MessageAttachmentMeta[]>();
+      if (userMessageIds.length > 0) {
+        const attachmentsResult = await this.pool.query<{
+          readonly message_id: string;
+          readonly upload_id: string;
+          readonly filename: string;
+          readonly media_type: B3StagedUploadMediaType;
+          readonly size: string | number;
+        }>(
+          `SELECT cma.message_id, u.id AS upload_id, u.filename, u.media_type, u.size
+             FROM conversation_message_attachments cma
+             JOIN user_staged_uploads u
+               ON u.tenant_id = cma.tenant_id AND u.id = cma.upload_id
+            WHERE cma.tenant_id = $1::uuid
+              AND cma.message_id = ANY($2::uuid[])
+            ORDER BY cma.message_id, cma.position ASC`,
+          [turn.tenantId, userMessageIds],
+        );
+
+        for (const row of attachmentsResult.rows) {
+          const list = attachmentsByMessage.get(row.message_id) ?? [];
+          list.push({
+            uploadId: row.upload_id,
+            filename: row.filename,
+            mediaType: row.media_type,
+            sizeBytes: Number(row.size),
+          });
+          attachmentsByMessage.set(row.message_id, list);
+        }
+      }
+
       return result.rows
-        .map((row) => ({
-          sequence: Number(row.sequence),
-          kind: row.kind,
-          text: row.text,
-        }))
+        .map((row): B2TurnContextRow => {
+          const attachments = attachmentsByMessage.get(row.id);
+          return attachments === undefined || attachments.length === 0
+            ? {
+                sequence: Number(row.sequence),
+                kind: row.kind,
+                text: row.text,
+              }
+            : {
+                sequence: Number(row.sequence),
+                kind: row.kind,
+                text: row.text,
+                attachments: Object.freeze(attachments),
+              };
+        })
         .reverse();
     } catch (error) {
       throw asDomainError(error);
@@ -1123,11 +1172,40 @@ const resolveIncidentSchema = z.strictObject({
   note: z.string().min(1).max(1_000),
 });
 
-const delegationSchema = z.strictObject({
-  toolName: DelegationToolNameSchema,
-  title: TaskTitleSchema.optional(),
-  input: NotesActionItemsInputSchema,
-});
+const delegationSchema = z.discriminatedUnion('toolName', [
+  z.strictObject({
+    toolName: z.literal('delegate_notes_action_items'),
+    title: TaskTitleSchema.optional(),
+    input: NotesActionItemsInputSchema,
+  }),
+  z.strictObject({
+    toolName: z.literal('delegate_python_agent'),
+    title: TaskTitleSchema.optional(),
+    input: z.strictObject({
+      prompt: z.string().trim().min(1).max(PYTHON_AGENT_LIMITS.promptMaxChars),
+      instructions: z
+        .string()
+        .trim()
+        .min(1)
+        .max(PYTHON_AGENT_LIMITS.instructionsMaxChars)
+        .optional(),
+      attachmentIds: z
+        .array(IdSchema)
+        .max(PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage)
+        .refine((ids) => new Set(ids).size === ids.length, 'attachmentIds must be unique')
+        .optional(),
+    }),
+  }),
+]);
+
+async function deterministicArtifactUuid(turnId: string, uploadId: string): Promise<string> {
+  const digest = await sha256Hex(
+    new TextEncoder().encode(`ember.turn-artifact.v1:${turnId}:${uploadId}`),
+  );
+  const hex = digest.slice(0, 32);
+  const variantNibble = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-4${hex.slice(13, 16)}-${variantNibble}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
 
 const publishSchema = z.strictObject({
   lease: leaseSchema,
@@ -1175,26 +1253,190 @@ async function createOrReuseTurnDelegatedTask(
     throw new DomainError('NOT_FOUND', 'conversation agent is not visible in this tenant');
   }
 
+  const idempotencyKey = `turn:${identity.turnId}`;
+
+  if (delegation.toolName === 'delegate_notes_action_items') {
+    const prepared = prepareTaskCommand({
+      agentId: meta.agent_id,
+      idempotencyKey,
+      kind: 'notes.action_items',
+      ...(delegation.title === undefined ? {} : { title: delegation.title }),
+      input: delegation.input,
+    });
+
+    const inserted = await client.query<{
+      readonly id: string;
+      readonly accepted_at: Date | string;
+    }>(
+      `INSERT INTO tasks (
+         id, tenant_id, agent_id, kind, title, input, digest, idempotency_key, deadline_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
+       ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
+       RETURNING id, accepted_at`,
+      [
+        globalThis.crypto.randomUUID(),
+        identity.tenantId,
+        prepared.command.agentId,
+        prepared.command.kind,
+        prepared.command.title ?? null,
+        JSON.stringify(prepared.command.input),
+        prepared.digest,
+        prepared.command.idempotencyKey,
+        prepared.deadlineAt,
+      ],
+    );
+    const insertedRow = inserted.rows[0];
+
+    if (insertedRow !== undefined) {
+      const parsedEvent = TaskEventSchema.safeParse({
+        taskId: insertedRow.id,
+        sequence: 1,
+        phase: 'accepted',
+        occurredAt: toIso(insertedRow.accepted_at),
+        traceId: globalThis.crypto.randomUUID(),
+        payload: {
+          taskKind: prepared.command.kind,
+          policyVersion: meta.policy_version,
+          replayed: false,
+        },
+      });
+
+      if (!parsedEvent.success) {
+        throw new DomainError('INVALID_ARGUMENT', 'accepted event failed its redaction contract');
+      }
+
+      await client.query(
+        `INSERT INTO task_events (id, tenant_id, task_id, sequence, phase, payload, trace_id, occurred_at)
+         VALUES ($1, $2, $3, 1, 'accepted', $4::jsonb, $5, $6)`,
+        [
+          globalThis.crypto.randomUUID(),
+          identity.tenantId,
+          parsedEvent.data.taskId,
+          JSON.stringify(parsedEvent.data.payload),
+          parsedEvent.data.traceId,
+          insertedRow.accepted_at,
+        ],
+      );
+
+      return insertedRow.id;
+    }
+
+    const existing = await client.query<{ readonly id: string; readonly digest: string }>(
+      `SELECT id, digest
+         FROM tasks
+        WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [identity.tenantId, prepared.command.idempotencyKey],
+    );
+    const existingRow = existing.rows[0];
+
+    if (existingRow === undefined) {
+      throw new DomainError('DB_UNAVAILABLE', 'delegated task idempotency lookup did not resolve');
+    }
+
+    if (existingRow.digest !== prepared.digest) {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        'idempotency key already belongs to a different canonical command',
+      );
+    }
+
+    return existingRow.id;
+  }
+
+  let uploadIds = delegation.input.attachmentIds ?? [];
+  if (uploadIds.length === 0) {
+    const attached = await client.query<{ readonly upload_id: string }>(
+      `SELECT cma.upload_id
+         FROM assistant_turns t
+         JOIN conversation_message_attachments cma
+           ON cma.tenant_id = t.tenant_id AND cma.message_id = t.source_message_id
+        WHERE t.tenant_id = $1::uuid AND t.id = $2::uuid
+        ORDER BY cma.position ASC`,
+      [identity.tenantId, identity.turnId],
+    );
+    uploadIds = attached.rows.map((row) => row.upload_id);
+  }
+
+  const inputArtifactIds = await Promise.all(
+    uploadIds.map((uploadId) => deterministicArtifactUuid(identity.turnId, uploadId)),
+  );
   const prepared = prepareTaskCommand({
     agentId: meta.agent_id,
-    idempotencyKey: `turn:${identity.turnId}`,
-    kind: 'notes.action_items',
+    idempotencyKey,
+    kind: 'python.agent',
     ...(delegation.title === undefined ? {} : { title: delegation.title }),
-    input: delegation.input,
+    input: {
+      prompt: delegation.input.prompt,
+      ...(delegation.input.instructions === undefined
+        ? {}
+        : { instructions: delegation.input.instructions }),
+      ...(inputArtifactIds.length > 0 ? { inputArtifactIds } : {}),
+    },
   });
 
-  const inserted = await client.query<{
+  const existingTask = await client.query<{ readonly id: string; readonly digest: string }>(
+    `SELECT id, digest
+       FROM tasks
+      WHERE tenant_id = $1 AND idempotency_key = $2`,
+    [identity.tenantId, idempotencyKey],
+  );
+  const existingTaskRow = existingTask.rows[0];
+  if (existingTaskRow !== undefined) {
+    if (existingTaskRow.digest !== prepared.digest) {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        'idempotency key already belongs to a different canonical command',
+      );
+    }
+    return existingTaskRow.id;
+  }
+
+  interface LockedUploadRow {
     readonly id: string;
-    readonly accepted_at: Date | string;
-  }>(
+    readonly filename: string;
+    readonly media_type: string;
+    readonly sha256: string;
+    readonly size: string | number;
+    readonly bytes: unknown;
+    readonly status: string;
+    readonly not_expired: boolean;
+  }
+
+  const lockedUploadsById = new Map<string, LockedUploadRow>();
+  if (uploadIds.length > 0) {
+    const locked = await client.query<LockedUploadRow>(
+      `SELECT id, filename, media_type, sha256, size, bytes, status,
+              (expires_at > clock_timestamp()) AS not_expired
+         FROM user_staged_uploads
+        WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])
+        ORDER BY id ASC
+        FOR UPDATE`,
+      [identity.tenantId, uploadIds],
+    );
+    for (const row of locked.rows) {
+      lockedUploadsById.set(row.id, row);
+    }
+    for (const uploadId of uploadIds) {
+      const row = lockedUploadsById.get(uploadId);
+      if (row === undefined || row.status !== 'unbound' || !row.not_expired) {
+        throw new DomainError(
+          'INVALID_ARGUMENT',
+          'referenced attachment upload is missing, expired, or already bound',
+        );
+      }
+    }
+  }
+
+  const taskId = globalThis.crypto.randomUUID();
+  const inserted = await client.query<{ readonly id: string; readonly accepted_at: Date | string }>(
     `INSERT INTO tasks (
        id, tenant_id, agent_id, kind, title, input, digest, idempotency_key, deadline_at
      )
      VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
-     ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
      RETURNING id, accepted_at`,
     [
-      globalThis.crypto.randomUUID(),
+      taskId,
       identity.tenantId,
       prepared.command.agentId,
       prepared.command.kind,
@@ -1205,62 +1447,101 @@ async function createOrReuseTurnDelegatedTask(
       prepared.deadlineAt,
     ],
   );
-  const insertedRow = inserted.rows[0];
+  const insertedRow = inserted.rows[0]!;
 
-  if (insertedRow !== undefined) {
-    const parsedEvent = TaskEventSchema.safeParse({
-      taskId: insertedRow.id,
-      sequence: 1,
-      phase: 'accepted',
-      occurredAt: toIso(insertedRow.accepted_at),
-      traceId: globalThis.crypto.randomUUID(),
-      payload: {
-        taskKind: prepared.command.kind,
-        policyVersion: meta.policy_version,
-        replayed: false,
-      },
-    });
-
-    if (!parsedEvent.success) {
-      throw new DomainError('INVALID_ARGUMENT', 'accepted event failed its redaction contract');
+  if (uploadIds.length > 0) {
+    const uniqueDigests = [
+      ...new Set(uploadIds.map((uploadId) => lockedUploadsById.get(uploadId)!.sha256)),
+    ].sort();
+    for (const sha256 of uniqueDigests) {
+      await client.query(`SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, [
+        `${BLOB_LOCK_NAMESPACE}:${identity.tenantId}:${sha256}`,
+      ]);
     }
 
-    await client.query(
-      `INSERT INTO task_events (id, tenant_id, task_id, sequence, phase, payload, trace_id, occurred_at)
-       VALUES ($1, $2, $3, 1, 'accepted', $4::jsonb, $5, $6)`,
-      [
-        globalThis.crypto.randomUUID(),
-        identity.tenantId,
-        parsedEvent.data.taskId,
-        JSON.stringify(parsedEvent.data.payload),
-        parsedEvent.data.traceId,
-        insertedRow.accepted_at,
-      ],
-    );
+    for (let index = 0; index < uploadIds.length; index += 1) {
+      const uploadId = uploadIds[index]!;
+      const upload = lockedUploadsById.get(uploadId)!;
+      const artifactId = inputArtifactIds[index]!;
+      const bytes = decodePgBytea(upload.bytes);
+      const size = Number(upload.size);
+      const storageKey = blobKeyFor(identity.tenantId, upload.sha256);
 
-    return insertedRow.id;
+      await client.query(
+        `INSERT INTO bytea_blobs (tenant_id, storage_key, sha256, size, media_type, bytes)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         ON CONFLICT (tenant_id, storage_key) DO NOTHING`,
+        [identity.tenantId, storageKey, upload.sha256, size, upload.media_type, bytes],
+      );
+      await client.query(
+        `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)
+         VALUES ($1, $2, $3, $4, $5)
+         ON CONFLICT (tenant_id, sha256) DO NOTHING`,
+        [identity.tenantId, upload.sha256, size, upload.media_type, storageKey],
+      );
+      await client.query(
+        `INSERT INTO artifacts (
+           id, tenant_id, task_id, run_id, created_by, sha256, size, media_type, retention, filename
+         )
+         VALUES ($1, $2, $3, NULL, 'user', $4, $5, $6, 'task', $7)`,
+        [
+          artifactId,
+          identity.tenantId,
+          insertedRow.id,
+          upload.sha256,
+          size,
+          upload.media_type,
+          upload.filename,
+        ],
+      );
+      await client.query(
+        `UPDATE user_staged_uploads
+            SET status = 'bound',
+                bound_task_id = $3,
+                artifact_id = $4,
+                bound_at = clock_timestamp()
+          WHERE tenant_id = $1 AND id = $2 AND status = 'unbound'`,
+        [identity.tenantId, uploadId, insertedRow.id, artifactId],
+      );
+    }
   }
 
-  const existing = await client.query<{ readonly id: string; readonly digest: string }>(
-    `SELECT id, digest
-       FROM tasks
-      WHERE tenant_id = $1 AND idempotency_key = $2`,
-    [identity.tenantId, prepared.command.idempotencyKey],
+  await insertB3TaskDispatchOutbox(client, {
+    tenantId: identity.tenantId,
+    taskId: insertedRow.id,
+  });
+
+  const parsedEvent = TaskEventSchema.safeParse({
+    taskId: insertedRow.id,
+    sequence: 1,
+    phase: 'accepted',
+    occurredAt: toIso(insertedRow.accepted_at),
+    traceId: globalThis.crypto.randomUUID(),
+    payload: {
+      taskKind: prepared.command.kind,
+      policyVersion: meta.policy_version,
+      replayed: false,
+    },
+  });
+
+  if (!parsedEvent.success) {
+    throw new DomainError('INVALID_ARGUMENT', 'accepted event failed its redaction contract');
+  }
+
+  await client.query(
+    `INSERT INTO task_events (id, tenant_id, task_id, sequence, phase, payload, trace_id, occurred_at)
+     VALUES ($1, $2, $3, 1, 'accepted', $4::jsonb, $5, $6)`,
+    [
+      globalThis.crypto.randomUUID(),
+      identity.tenantId,
+      parsedEvent.data.taskId,
+      JSON.stringify(parsedEvent.data.payload),
+      parsedEvent.data.traceId,
+      insertedRow.accepted_at,
+    ],
   );
-  const existingRow = existing.rows[0];
 
-  if (existingRow === undefined) {
-    throw new DomainError('DB_UNAVAILABLE', 'delegated task idempotency lookup did not resolve');
-  }
-
-  if (existingRow.digest !== prepared.digest) {
-    throw new DomainError(
-      'IDEMPOTENCY_CONFLICT',
-      'idempotency key already belongs to a different canonical command',
-    );
-  }
-
-  return existingRow.id;
+  return insertedRow.id;
 }
 
 async function ensureTurnTaskReference(

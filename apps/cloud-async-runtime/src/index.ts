@@ -1,6 +1,19 @@
 import { randomUUID } from 'node:crypto';
 import { getOpenNotesTaskStatus, listDueNotesTaskDispatches } from '@ember/postgres/b2-worker';
+import {
+  PostgresB3StagedUploadRepository,
+  PostgresByteaBlobStore,
+} from '@ember/postgres/b3-worker';
 import { Pool } from 'pg';
+import {
+  AGENT_OUTBOX_BATCH_SIZE,
+  AGENT_OUTBOX_PUBLISH_LEASE_MS,
+  AGENT_TASK_DLQ_NAME,
+  AGENT_TASK_QUEUE_NAME,
+  consumeAgentDispatchMessage,
+  parseB3TaskDispatchEnvelope,
+  recoverAgentDeadLetter,
+} from './agent-dispatch.js';
 import {
   TURN_DISPATCH_DLQ_NAME,
   TURN_DISPATCH_QUEUE_NAME,
@@ -15,18 +28,27 @@ import {
   type TurnDispatchLogger,
   type TurnDispatchQueueMessage,
 } from './dispatch.js';
-import { isCloudModelTenantAuthorized, resolveCloudRuntimeModelConfig } from './config.js';
 import {
+  isCloudModelTenantAuthorized,
+  resolveCloudDaytonaConfig,
+  resolveCloudRuntimeModelConfig,
+} from './config.js';
+import {
+  publishDueAgentDispatches,
   publishDueNotesTaskDispatches,
   publishDueTurnDispatches,
   type TurnDispatchQueuePort,
 } from './relay.js';
 import {
+  createAgentDispatchOutbox,
   createNotesTaskExecutor,
   createNotesTaskLeaseQueue,
+  createPythonAgentExecutor,
   createTurnDispatchOutbox,
   createTurnExecutor,
 } from './runtime.js';
+
+const BLOB_GC_MAX_AGE_MS = 60 * 60 * 1_000;
 
 interface HyperdriveBinding {
   readonly connectionString: string;
@@ -37,9 +59,12 @@ type QueueBinding = TurnDispatchQueuePort;
 interface RuntimeEnv {
   readonly HYPERDRIVE: HyperdriveBinding;
   readonly TURN_DISPATCH_QUEUE: QueueBinding;
+  readonly AGENT_TASK_QUEUE?: QueueBinding;
   /** Optional names for isolated environments that bind a dedicated Queue/DLQ pair. */
   readonly EMBER_TURN_DISPATCH_QUEUE_NAME?: string;
   readonly EMBER_TURN_DISPATCH_DLQ_NAME?: string;
+  readonly EMBER_AGENT_TASK_QUEUE_NAME?: string;
+  readonly EMBER_AGENT_TASK_DLQ_NAME?: string;
   readonly EMBER_ENV?: string;
   readonly NODE_ENV?: string;
   readonly EMBER_MODEL_EXECUTION?: string;
@@ -56,6 +81,10 @@ interface RuntimeEnv {
   readonly EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD?: string;
   readonly EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD?: string;
   readonly EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS?: string;
+  readonly DAYTONA_API_KEY?: string;
+  readonly DAYTONA_API_URL?: string;
+  readonly DAYTONA_TARGET?: string;
+  readonly EMBER_SANDBOX_OWNER?: string;
 }
 
 type QueueMessage = TurnDispatchQueueMessage;
@@ -98,12 +127,14 @@ function runtimeWorkerId(): string {
 
 async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> {
   const pool = createPool(env);
-  const outbox = createTurnDispatchOutbox(pool);
   const dispatchQueueName = env.EMBER_TURN_DISPATCH_QUEUE_NAME?.trim() || TURN_DISPATCH_QUEUE_NAME;
   const dispatchDlqName = env.EMBER_TURN_DISPATCH_DLQ_NAME?.trim() || TURN_DISPATCH_DLQ_NAME;
+  const agentQueueName = env.EMBER_AGENT_TASK_QUEUE_NAME?.trim() || AGENT_TASK_QUEUE_NAME;
+  const agentDlqName = env.EMBER_AGENT_TASK_DLQ_NAME?.trim() || AGENT_TASK_DLQ_NAME;
 
   try {
     if (batch.queue === dispatchDlqName) {
+      const outbox = createTurnDispatchOutbox(pool);
       for (const message of batch.messages) {
         try {
           if (parseB1TaskDispatchEnvelope(message.body) !== null) {
@@ -120,6 +151,73 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
             category: 'database_unavailable',
           });
           message.retry({ delaySeconds: 30 });
+        }
+      }
+      return;
+    }
+
+    if (batch.queue === agentDlqName) {
+      const agentOutbox = createAgentDispatchOutbox(pool);
+      for (const message of batch.messages) {
+        try {
+          await recoverAgentDeadLetter(message, agentOutbox, logger);
+        } catch {
+          logger.warn('Agent Task DLQ reconciliation failed', {
+            category: 'database_unavailable',
+          });
+          message.retry({ delaySeconds: 30 });
+        }
+      }
+      return;
+    }
+
+    if (batch.queue === agentQueueName) {
+      const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
+      if (model.kind === 'refused') {
+        logger.warn('Agent Task model execution refused by runtime configuration', {
+          category: model.reason,
+        });
+      }
+      const daytona = resolveCloudDaytonaConfig(env);
+      if (daytona.kind === 'disabled') {
+        logger.warn('Agent Task sandbox execution is disabled (DAYTONA_API_KEY missing)', {
+          category: 'daytona_disabled',
+        });
+      }
+      const agentOutbox = createAgentDispatchOutbox(pool);
+
+      for (const message of batch.messages) {
+        try {
+          const envelope = parseB3TaskDispatchEnvelope(message.body);
+          if (envelope === null) {
+            await consumeAgentDispatchMessage(message, {
+              outbox: agentOutbox,
+              executor: null,
+              logger,
+            });
+            continue;
+          }
+
+          const event = await agentOutbox.getEvent(envelope.eventId);
+          const executor =
+            event === null ||
+            (event.status !== 'queued' &&
+              event.status !== 'retryable_failed' &&
+              event.status !== 'running')
+              ? null
+              : await createPythonAgentExecutor({
+                  pool,
+                  model,
+                  daytona,
+                  event,
+                  workerId: runtimeWorkerId(),
+                });
+          await consumeAgentDispatchMessage(message, { outbox: agentOutbox, executor, logger });
+        } catch {
+          logger.warn('Agent Task Queue delivery failed', {
+            category: 'runtime_failure',
+          });
+          message.retry({ delaySeconds: Math.min(300, 2 ** Math.min(message.attempts, 8)) });
         }
       }
       return;
@@ -142,7 +240,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
         category: model.reason,
       });
     }
-
+    const outbox = createTurnDispatchOutbox(pool);
     const leaseQueue = createNotesTaskLeaseQueue(pool, model);
 
     for (const message of batch.messages) {
@@ -161,6 +259,9 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
                   event,
                   workerId: runtimeWorkerId(),
                   queue: env.TURN_DISPATCH_QUEUE,
+                  ...(env.AGENT_TASK_QUEUE === undefined
+                    ? {}
+                    : { agentQueue: env.AGENT_TASK_QUEUE }),
                 });
           await consumeTurnDispatchMessage(message, { outbox, executor, logger });
           continue;
@@ -202,53 +303,79 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
 async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
   // The Cron relay shares the same code-owned Alpha authorization and remains off by default.
   const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
-  if (model.kind !== 'enabled') {
-    if (model.kind === 'refused') {
-      logger.warn('Cloud runtime relay is paused by runtime configuration', {
-        category: model.reason,
-      });
-    }
-    // Do not turn a deliberate model-off state into minute-by-minute Queue churn. Outbox rows stay
-    // due in PostgreSQL and the next Cron run publishes them after execution is enabled.
-    return;
+  if (model.kind === 'refused') {
+    logger.warn('Cloud runtime relay is paused by runtime configuration', {
+      category: model.reason,
+    });
   }
-
+  const daytona = resolveCloudDaytonaConfig(env);
   const pool = createPool(env);
-  const outbox = createTurnDispatchOutbox(pool);
-  const leaseQueue = createNotesTaskLeaseQueue(pool, model);
+  const workerId = runtimeWorkerId();
 
   try {
-    const turnResult = await publishDueTurnDispatches({
-      outbox,
-      queue: env.TURN_DISPATCH_QUEUE,
-      workerId: runtimeWorkerId(),
-      logger,
-      limit: TURN_OUTBOX_BATCH_SIZE,
-      leaseMs: TURN_OUTBOX_PUBLISH_LEASE_MS,
-    });
-    if (turnResult.failed > 0) {
-      console.warn('Assistant Turn outbox relay had publication failures', {
-        claimed: turnResult.claimed,
-        failed: turnResult.failed,
+    if (model.kind === 'enabled') {
+      const turnOutbox = createTurnDispatchOutbox(pool);
+      const turnResult = await publishDueTurnDispatches({
+        outbox: turnOutbox,
+        queue: env.TURN_DISPATCH_QUEUE,
+        workerId,
+        logger,
+        limit: TURN_OUTBOX_BATCH_SIZE,
+        leaseMs: TURN_OUTBOX_PUBLISH_LEASE_MS,
       });
+      if (turnResult.failed > 0) {
+        console.warn('Assistant Turn outbox relay had publication failures', {
+          claimed: turnResult.claimed,
+          failed: turnResult.failed,
+        });
+      }
+
+      const leaseQueue = createNotesTaskLeaseQueue(pool, model);
+      const notesResult = await publishDueNotesTaskDispatches({
+        relay: {
+          reapExpired: (now) => leaseQueue.reapExpired(now),
+          listDueNotesTasks: (limit) => listDueNotesTaskDispatches(pool, limit),
+        },
+        queue: env.TURN_DISPATCH_QUEUE,
+        isAuthorizedTenant: (tenantId) => isCloudModelTenantAuthorized(model, tenantId),
+        logger,
+        limit: TURN_OUTBOX_BATCH_SIZE,
+      });
+      if (notesResult.failed > 0) {
+        console.warn('Notes Task reconciliation relay had publication failures', {
+          examined: notesResult.examined,
+          failed: notesResult.failed,
+        });
+      }
+
+      if (daytona.kind === 'enabled' && env.AGENT_TASK_QUEUE !== undefined) {
+        const agentOutbox = createAgentDispatchOutbox(pool);
+        const agentResult = await publishDueAgentDispatches({
+          outbox: agentOutbox,
+          queue: env.AGENT_TASK_QUEUE,
+          workerId,
+          logger,
+          limit: AGENT_OUTBOX_BATCH_SIZE,
+          leaseMs: AGENT_OUTBOX_PUBLISH_LEASE_MS,
+        });
+        if (agentResult.failed > 0) {
+          console.warn('Agent Task outbox relay had publication failures', {
+            claimed: agentResult.claimed,
+            failed: agentResult.failed,
+          });
+        }
+      }
     }
 
-    const notesResult = await publishDueNotesTaskDispatches({
-      relay: {
-        reapExpired: (now) => leaseQueue.reapExpired(now),
-        listDueNotesTasks: (limit) => listDueNotesTaskDispatches(pool, limit),
-      },
-      queue: env.TURN_DISPATCH_QUEUE,
-      isAuthorizedTenant: (tenantId) => isCloudModelTenantAuthorized(model, tenantId),
-      logger,
-      limit: TURN_OUTBOX_BATCH_SIZE,
+    await new PostgresB3StagedUploadRepository(pool).sweepExpiredUnboundUploads().catch(() => {
+      logger.warn('expired upload GC sweep failed', { category: 'database_unavailable' });
     });
-    if (notesResult.failed > 0) {
-      console.warn('Notes Task reconciliation relay had publication failures', {
-        examined: notesResult.examined,
-        failed: notesResult.failed,
+
+    await new PostgresByteaBlobStore(pool)
+      .sweepOrphans(new Date(), { retentionMs: BLOB_GC_MAX_AGE_MS })
+      .catch(() => {
+        logger.warn('bytea blob GC sweep failed', { category: 'database_unavailable' });
       });
-    }
   } finally {
     await pool.end().catch(() => undefined);
   }

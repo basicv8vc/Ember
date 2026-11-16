@@ -9,7 +9,7 @@ import type {
 import { DomainError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, withTransaction } from '../repositories/support.js';
-import { parseTenantId } from './local-blob-store.js';
+import { parseTenantId } from './validation.js';
 import type { LocalBlobStore } from './local-blob-store.js';
 
 /**

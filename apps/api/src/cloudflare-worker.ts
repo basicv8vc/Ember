@@ -7,6 +7,7 @@ import {
   PostgresB1TaskReadRepository,
   createPool,
 } from '@ember/postgres/b1-worker';
+import { PostgresB3StagedUploadRepository } from '@ember/postgres/b3-worker';
 import type { B1SessionPorts } from './auth/session-service.js';
 import { createB1SessionRuntime } from './auth/b1-auth-runtime.js';
 import {
@@ -182,6 +183,7 @@ function createWorkerApp(
     }),
     b1TaskResultRepository: b1TaskReadRepository,
     b1TaskReadRepository,
+    b3UploadRepository: new PostgresB3StagedUploadRepository(pool),
   });
 }
 

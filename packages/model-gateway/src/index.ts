@@ -27,6 +27,7 @@ export {
   type ModelGatewayFailureDiagnostic,
 } from './errors.js';
 export type {
+  ConversationAttachmentMetadata,
   ConversationDelegationCall,
   ConversationTurnInput,
   ConversationTurnOutput,
@@ -38,12 +39,17 @@ export type {
   ModelProviderId,
   NotesActionItemsInput,
   NotesActionItemsOutput,
+  PythonAgentInputFile,
+  PythonAgentStepInput,
+  PythonAgentStepMessage,
+  PythonAgentStepOutput,
   RealModelProviderId,
   ModelUsage,
 } from './types.js';
 export {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
+  PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedContext,
   type BoundedContext,
   type ContextRow,
@@ -51,12 +57,18 @@ export {
 export {
   preflightConversationTurn,
   preflightNotesActionItems,
+  preflightPythonAgentStep,
   type TokenPreflight,
 } from './preflight.js';
 export {
   DELEGATE_NOTES_TOOL_NAME,
+  DELEGATE_PYTHON_TOOL_NAME,
   DELEGATION_TOOLS,
   DEFAULT_DELEGATION_ACK_TEXT,
+  DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
+  PYTHON_AGENT_TOOLS,
+  RUN_PYTHON_TOOL_NAME,
+  formatConversationMessageText,
 } from './providers/shared.js';
 export {
   APPROVED_MODEL_PROVIDERS,

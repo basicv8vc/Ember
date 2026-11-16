@@ -1,6 +1,17 @@
-import { CONVERSATION_SYSTEM_PROMPT, NOTES_ACTION_ITEMS_SYSTEM_PROMPT } from './context.js';
+import {
+  CONVERSATION_SYSTEM_PROMPT,
+  NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
+  PYTHON_AGENT_SYSTEM_PROMPT,
+} from './context.js';
 import { ModelInputRefused } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative, serializationOverheadTokens } from './limits.js';
+import {
+  DELEGATION_TOOLS_TOKEN_ESTIMATE,
+  PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE,
+  buildPythonAgentInitialUserText,
+  formatConversationMessageText,
+} from './providers/shared.js';
+import type { ConversationAttachmentMetadata, PythonAgentStepInput } from './types.js';
 
 export interface TokenPreflight {
   /** Characters that will be sent, including the fixed prompt and the JSON envelope. */
@@ -13,11 +24,10 @@ export interface TokenPreflight {
   readonly maxOutputTokens: number;
 }
 
-import { DELEGATION_TOOLS_TOKEN_ESTIMATE } from './providers/shared.js';
-
 /** Fixed prompt and tool schema token estimates, computed once: compile-time constants. */
 const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROMPT);
 const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
+const PYTHON_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(PYTHON_AGENT_SYSTEM_PROMPT);
 const OVERHEAD_TOKENS = serializationOverheadTokens();
 
 /**
@@ -38,7 +48,11 @@ const OVERHEAD_TOKENS = serializationOverheadTokens();
  * Chinese is roughly twelve times the token count that formula implies.
  */
 export function preflightConversationTurn(input: {
-  readonly messages: readonly { readonly text: string }[];
+  readonly messages: readonly {
+    readonly role?: 'user' | 'assistant';
+    readonly text: string;
+    readonly attachments?: readonly ConversationAttachmentMetadata[];
+  }[];
   readonly maxOutputTokens: number;
 }): TokenPreflight {
   if (
@@ -61,8 +75,15 @@ export function preflightConversationTurn(input: {
       throw new ModelInputRefused('context_invalid');
     }
 
-    messageChars += message.text.length;
-    messageTokens += estimateTokensConservative(message.text);
+    const formatted =
+      message.attachments !== undefined && message.attachments.length > 0
+        ? formatConversationMessageText({
+            text: message.text,
+            attachments: message.attachments,
+          })
+        : message.text;
+    messageChars += formatted.length;
+    messageTokens += estimateTokensConservative(formatted);
   }
 
   if (!Number.isInteger(messageChars) || messageChars < 1) {
@@ -122,6 +143,56 @@ export function preflightNotesActionItems(input: {
   const inputChars =
     userPayloadChars + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars;
   const inputTokens = userTokens + NOTES_SYSTEM_PROMPT_TOKENS + OVERHEAD_TOKENS;
+
+  if (inputTokens > MODEL_LIMITS.maxInputTokens) {
+    throw new ModelInputRefused('input_tokens_over_cap');
+  }
+
+  return Object.freeze({
+    inputChars,
+    inputTokens,
+    maxOutputTokens,
+  });
+}
+
+export function preflightPythonAgentStep(input: PythonAgentStepInput): TokenPreflight {
+  const maxOutputTokens = input.maxOutputTokens ?? MODEL_LIMITS.pythonAgentMaxOutputTokens;
+  if (
+    !Number.isInteger(maxOutputTokens) ||
+    maxOutputTokens < 1 ||
+    maxOutputTokens > MODEL_LIMITS.pythonAgentMaxOutputTokens
+  ) {
+    throw new ModelInputRefused('max_output_invalid');
+  }
+
+  if (typeof input.prompt !== 'string' || input.prompt.trim().length === 0) {
+    throw new ModelInputRefused('context_invalid');
+  }
+
+  const initialUserText = buildPythonAgentInitialUserText(input);
+  let contextChars = initialUserText.length;
+  let contextTokens = estimateTokensConservative(initialUserText);
+
+  for (const message of input.messages) {
+    contextChars += message.text.length;
+    contextTokens += estimateTokensConservative(message.text);
+    if (message.toolCalls !== undefined) {
+      for (const call of message.toolCalls) {
+        const callText = `${call.name}:${call.argumentsJson}`;
+        contextChars += callText.length;
+        contextTokens += estimateTokensConservative(callText);
+      }
+    }
+  }
+
+  if (contextChars > MODEL_LIMITS.pythonAgentMaxContextChars) {
+    throw new ModelInputRefused('context_too_large');
+  }
+
+  const toolTokens = input.remainingPythonCalls > 0 ? PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE : 0;
+  const inputChars =
+    contextChars + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars;
+  const inputTokens = contextTokens + PYTHON_SYSTEM_PROMPT_TOKENS + toolTokens + OVERHEAD_TOKENS;
 
   if (inputTokens > MODEL_LIMITS.maxInputTokens) {
     throw new ModelInputRefused('input_tokens_over_cap');

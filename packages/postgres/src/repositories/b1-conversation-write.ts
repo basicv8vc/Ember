@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import {
   B1SendMessageReceiptSchema,
   B1SendMessageRequestSchema,
@@ -154,6 +153,30 @@ VALUES ($1, $2, $3, $4, 'running', now() + ($5::int * interval '1 second'))
 RETURNING id, created_at
 `;
 
+const SELECT_MESSAGE_ATTACHMENTS_SQL = `
+SELECT upload_id
+  FROM conversation_message_attachments
+ WHERE tenant_id = $1::uuid AND message_id = $2::uuid
+ ORDER BY position ASC
+`;
+
+const LOCK_VALID_UNBOUND_UPLOADS_SQL = `
+SELECT id
+  FROM user_staged_uploads
+ WHERE tenant_id = $1::uuid
+   AND id = ANY($2::uuid[])
+   AND status = 'unbound'
+   AND expires_at > clock_timestamp()
+   AND ($3::uuid IS NULL OR principal_id = $3::uuid)
+ FOR UPDATE
+`;
+
+const INSERT_MESSAGE_ATTACHMENT_SQL = `
+INSERT INTO conversation_message_attachments
+       (tenant_id, conversation_id, message_id, upload_id, position)
+VALUES ($1::uuid, $2::uuid, $3::uuid, $4::uuid, $5::int)
+`;
+
 /**
  * bigint columns arrive as strings through the driver, and the wire DTO is an integer, so the
  * conversion is explicit and refuses anything a JSON client could not represent exactly.
@@ -238,6 +261,7 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
 
   async submitUserMessage(command: {
     readonly tenantId: Id;
+    readonly principalId?: Id;
     readonly conversationId: Id;
     readonly request: B1SendMessageRequest;
   }): Promise<{ readonly replayed: boolean; readonly receipt: B1SendMessageReceipt }> {
@@ -247,7 +271,7 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
 
     try {
       const outcome = await withTransaction(this.pool, (client) =>
-        this.submit(client, command.tenantId, command.conversationId, request),
+        this.submit(client, command.tenantId, command.principalId, command.conversationId, request),
       );
 
       if (!outcome.replayed && this.options.onTurnCommitted !== undefined) {
@@ -287,6 +311,7 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
   private async submit(
     client: pg.PoolClient,
     tenantId: Id,
+    principalId: Id | undefined,
     conversationId: Id,
     request: B1SendMessageRequest,
   ): Promise<{ readonly replayed: boolean; readonly receipt: B1SendMessageReceipt }> {
@@ -323,6 +348,20 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
       return replay;
     }
 
+    const attachmentIds = request.attachment_ids ?? [];
+    if (attachmentIds.length > 0) {
+      const lockedUploads = await client.query<{ readonly id: string }>(
+        LOCK_VALID_UNBOUND_UPLOADS_SQL,
+        [tenantId, attachmentIds, principalId ?? null],
+      );
+      if (lockedUploads.rows.length !== attachmentIds.length) {
+        throw new DomainError(
+          'INVALID_ARGUMENT',
+          'one or more staged upload attachments are missing, expired, or unavailable',
+        );
+      }
+    }
+
     await this.assertWithinQuota(client, tenantId, conversationId);
 
     const bumped = await client.query<{ readonly last_sequence: string | number }>(
@@ -344,6 +383,15 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
       sequence,
       request,
     );
+    for (let position = 0; position < attachmentIds.length; position += 1) {
+      await client.query(INSERT_MESSAGE_ATTACHMENT_SQL, [
+        tenantId,
+        conversationId,
+        messageRow.id,
+        attachmentIds[position]!,
+        position,
+      ]);
+    }
     const turnRow = await this.insertAssistantTurn(client, tenantId, conversationId, messageRow.id);
 
     if (this.options.writeTurnDispatchOutbox === true) {
@@ -403,6 +451,22 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
       );
     }
 
+    const existingAttachments = await client.query<{ readonly upload_id: string }>(
+      SELECT_MESSAGE_ATTACHMENTS_SQL,
+      [tenantId, submission.message_id],
+    );
+    const storedAttachmentIds = existingAttachments.rows.map((row) => row.upload_id);
+    const requestedAttachmentIds = request.attachment_ids ?? [];
+    if (
+      storedAttachmentIds.length !== requestedAttachmentIds.length ||
+      storedAttachmentIds.some((id, index) => id !== requestedAttachmentIds[index])
+    ) {
+      throw new DomainError(
+        'IDEMPOTENCY_CONFLICT',
+        'client submission id already belongs to different attachments',
+      );
+    }
+
     return { replayed: true, receipt: buildReceipt(submission, transcriptEpoch) };
   }
 
@@ -440,7 +504,7 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
 
     try {
       inserted = await client.query<MessageInsertRow>(INSERT_USER_MESSAGE_SQL, [
-        randomUUID(),
+        globalThis.crypto.randomUUID(),
         tenantId,
         conversationId,
         sequence,
@@ -478,7 +542,7 @@ export class PostgresB1ConversationWriteRepository implements B1ConversationWrit
     sourceMessageId: string,
   ): Promise<TurnInsertRow> {
     const inserted = await client.query<TurnInsertRow>(INSERT_ASSISTANT_TURN_SQL, [
-      randomUUID(),
+      globalThis.crypto.randomUUID(),
       tenantId,
       conversationId,
       sourceMessageId,

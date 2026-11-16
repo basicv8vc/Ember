@@ -285,6 +285,9 @@ describe('B3-A1 model-turn-responder delegation forwarding', () => {
       extractNotesActionItems() {
         return Promise.reject(new Error('unused'));
       },
+      stepPythonAgent() {
+        return Promise.reject(new Error('unused'));
+      },
     };
 
     const summary = await createModelTurnResponder({
@@ -344,6 +347,9 @@ describe('B3-A1 model-turn-responder delegation forwarding', () => {
         });
       },
       extractNotesActionItems() {
+        return Promise.reject(new Error('unused'));
+      },
+      stepPythonAgent() {
         return Promise.reject(new Error('unused'));
       },
     };
@@ -485,6 +491,9 @@ describe('B3-A1 notes task handler orchestration and safety guards', () => {
                   rateVersion: TEST_RATE.rateVersion,
                 },
         });
+      },
+      stepPythonAgent() {
+        return Promise.reject(new Error('unused'));
       },
     };
 

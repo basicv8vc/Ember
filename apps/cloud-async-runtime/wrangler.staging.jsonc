@@ -19,6 +19,10 @@
         "binding": "TURN_DISPATCH_QUEUE",
         "queue": "ember-staging-assistant-turns",
       },
+      {
+        "binding": "AGENT_TASK_QUEUE",
+        "queue": "ember-staging-agent-tasks",
+      },
     ],
     "consumers": [
       {
@@ -33,6 +37,18 @@
         "max_batch_size": 10,
         "max_retries": 1,
       },
+      {
+        "queue": "ember-staging-agent-tasks",
+        "max_batch_size": 1,
+        "max_retries": 2,
+        "max_concurrency": 2,
+        "dead_letter_queue": "ember-staging-agent-tasks-dlq",
+      },
+      {
+        "queue": "ember-staging-agent-tasks-dlq",
+        "max_batch_size": 10,
+        "max_retries": 1,
+      },
     ],
   },
   "triggers": {
@@ -43,6 +59,8 @@
     "EMBER_MODEL_EXECUTION": "real",
     "EMBER_TURN_DISPATCH_QUEUE_NAME": "ember-staging-assistant-turns",
     "EMBER_TURN_DISPATCH_DLQ_NAME": "ember-staging-assistant-turns-dlq",
+    "EMBER_AGENT_TASK_QUEUE_NAME": "ember-staging-agent-tasks",
+    "EMBER_AGENT_TASK_DLQ_NAME": "ember-staging-agent-tasks-dlq",
     "EMBER_MODEL_PROVIDER": "openrouter",
     "EMBER_MODEL_ID": "nvidia/nemotron-3.5-lightning",
     "EMBER_MODEL_ALPHA_SCOPE": "authenticated_tenants",

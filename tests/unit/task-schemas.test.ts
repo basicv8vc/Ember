@@ -87,6 +87,7 @@ describe('identifier, status and deadline schemas', () => {
       'mock.file',
       'mock.approval',
       'notes.action_items',
+      'python.agent',
     ]);
 
     for (const kind of TASK_KINDS) {

@@ -123,6 +123,13 @@ export interface DaytonaListFilter {
   readonly states?: readonly DaytonaSandboxState[];
 }
 
+export interface DaytonaDirectoryEntry {
+  readonly name: string;
+  readonly isDir: boolean;
+  readonly isSymlink: boolean;
+  readonly sizeBytes: number;
+}
+
 /** Raised when the caller's trusted cancellation signal aborts an in-flight exec. */
 export class DaytonaExecCancelledError extends Error {
   public constructor() {
@@ -150,6 +157,10 @@ export interface DaytonaSandboxClient {
   upload(sandboxId: string, absolutePath: string, data: Buffer): Promise<void>;
   download(sandboxId: string, absolutePath: string): Promise<Buffer>;
   exists(sandboxId: string, absolutePath: string): Promise<boolean>;
+  listDirectory?(
+    sandboxId: string,
+    absolutePath: string,
+  ): Promise<readonly DaytonaDirectoryEntry[]>;
   latestMetrics(sandboxId: string): Promise<DaytonaMetricsSample | null>;
   /** Releases SDK background connections and timers (e.g. Socket.IO EventDispatcher). */
   close?(): Promise<void>;

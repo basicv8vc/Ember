@@ -5,7 +5,7 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
-const cloudApiBaseUrl = 'https://ember-cloud-api-staging.10kpaper.workers.dev';
+const cloudApiBaseUrl = 'https://ember-api.slowfast.dev';
 const neonProjectId = 'silent-boat-95177889';
 const neonBranch = 'staging';
 const neonDatabase = 'ember_staging';
@@ -35,7 +35,7 @@ function command(commandName, args, options = {}) {
     const child = spawn(commandName, args, {
       cwd: repoRoot,
       env,
-      stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
+      stdio: capture ? ['ignore', 'pipe', 'pipe'] : ['ignore', 'inherit', 'inherit'],
     });
     let stdout = '';
     let stderr = '';

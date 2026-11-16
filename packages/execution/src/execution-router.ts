@@ -4,6 +4,7 @@ import type {
   ExecutionPath,
   MockTaskInput,
   TaskCommand,
+  TaskInputByKind,
   TaskKind,
 } from '@ember/domain';
 import { parsePolicyVersion, parseTaskInput, parseTaskKind } from './validation.js';
@@ -50,6 +51,7 @@ export const ROUTE_REASONS = [
   'file_large_content_heavy',
   'approval_policy_standard',
   'notes_action_items_standard',
+  'python_agent_heavy',
 ] as const;
 
 export type RouteReason = (typeof ROUTE_REASONS)[number];
@@ -83,24 +85,28 @@ interface RouteMetrics {
 function metricsOf(kind: TaskKind, input: MockTaskInput): RouteMetrics {
   switch (kind) {
     case 'mock.chat': {
-      const chat = input as Extract<MockTaskInput, { prompt: string }>;
+      const chat = input as TaskInputByKind['mock.chat'];
       return { size: chat.prompt.length, maxOutputTokens: chat.maxOutputTokens ?? 0 };
     }
     case 'mock.compute': {
-      const compute = input as Extract<MockTaskInput, { text: string }>;
+      const compute = input as TaskInputByKind['mock.compute'];
       return { size: compute.text.length, maxOutputTokens: 0 };
     }
     case 'mock.file': {
-      const file = input as Extract<MockTaskInput, { fileKey: string }>;
+      const file = input as TaskInputByKind['mock.file'];
       return { size: file.content.length, maxOutputTokens: 0 };
     }
     case 'mock.approval': {
-      const approval = input as Extract<MockTaskInput, { action: string }>;
+      const approval = input as TaskInputByKind['mock.approval'];
       return { size: approval.action.length, maxOutputTokens: 0 };
     }
     case 'notes.action_items': {
-      const notes = input as Extract<MockTaskInput, { notes: string }>;
+      const notes = input as TaskInputByKind['notes.action_items'];
       return { size: notes.notes.length, maxOutputTokens: 0 };
+    }
+    case 'python.agent': {
+      const py = input as TaskInputByKind['python.agent'];
+      return { size: py.prompt.length, maxOutputTokens: 0 };
     }
   }
 }
@@ -151,6 +157,9 @@ function routeFor(input: TrustedRouteContext): RouteDecision {
 
     case 'notes.action_items':
       return decision('standard', 'notes_action_items_standard', policyVersion);
+
+    case 'python.agent':
+      return decision('heavy', 'python_agent_heavy', policyVersion);
   }
 }
 

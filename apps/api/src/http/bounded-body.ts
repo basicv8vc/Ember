@@ -20,6 +20,10 @@ export const BODY_REJECTION_REASONS = [
 
 export type BodyRejectionReason = (typeof BODY_REJECTION_REASONS)[number];
 
+export type BoundedBodyBytesResult =
+  | { readonly ok: true; readonly bytes: Uint8Array<ArrayBuffer> }
+  | { readonly ok: false; readonly reason: 'empty_body' | 'too_large' };
+
 export type JsonBodyResult =
   | { readonly ok: true; readonly value: unknown }
   | { readonly ok: false; readonly reason: BodyRejectionReason };
@@ -36,23 +40,16 @@ const JSON_CONTENT_TYPE = /^application\/json(?:\s*;.*)?$/i;
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
 
 /**
- * Read at most `maxBytes` and parse the result as JSON.
+ * Read at most `maxBytes` from `request.body` into a bounded buffer.
  *
- * The returned object is untrusted: every caller must still validate it against a strict
- * schema. Nothing here is logged or echoed back, so an oversized or malformed body cannot
- * leak through an error message.
+ * `Content-Length` is checked early when present, and the stream itself is aborted the moment
+ * cumulative chunk bytes exceed `maxBytes`, so absent or spoofed `Content-Length` headers cannot
+ * trigger unbounded buffering.
  */
-export async function readJsonBody(request: Request, maxBytes: number): Promise<JsonBodyResult> {
-  const contentType = request.headers.get('content-type');
-
-  if (contentType === null || contentType.trim() === '') {
-    return { ok: false, reason: 'missing_content_type' };
-  }
-
-  if (!JSON_CONTENT_TYPE.test(contentType.trim())) {
-    return { ok: false, reason: 'unsupported_content_type' };
-  }
-
+export async function readBoundedBodyBytes(
+  request: Request,
+  maxBytes: number,
+): Promise<BoundedBodyBytesResult> {
   const declaredLength = request.headers.get('content-length');
 
   if (declaredLength !== null) {
@@ -106,7 +103,7 @@ export async function readJsonBody(request: Request, maxBytes: number): Promise<
     return { ok: false, reason: 'empty_body' };
   }
 
-  const bytes = new Uint8Array(total);
+  const bytes = new Uint8Array(new ArrayBuffer(total));
   let offset = 0;
 
   for (const chunk of chunks) {
@@ -114,10 +111,36 @@ export async function readJsonBody(request: Request, maxBytes: number): Promise<
     offset += chunk.byteLength;
   }
 
+  return { ok: true, bytes };
+}
+
+/**
+ * Read at most `maxBytes` and parse the result as JSON.
+ *
+ * The returned object is untrusted: every caller must still validate it against a strict
+ * schema. Nothing here is logged or echoed back, so an oversized or malformed body cannot
+ * leak through an error message.
+ */
+export async function readJsonBody(request: Request, maxBytes: number): Promise<JsonBodyResult> {
+  const contentType = request.headers.get('content-type');
+
+  if (contentType === null || contentType.trim() === '') {
+    return { ok: false, reason: 'missing_content_type' };
+  }
+
+  if (!JSON_CONTENT_TYPE.test(contentType.trim())) {
+    return { ok: false, reason: 'unsupported_content_type' };
+  }
+
+  const bounded = await readBoundedBodyBytes(request, maxBytes);
+  if (!bounded.ok) {
+    return bounded;
+  }
+
   let text: string;
 
   try {
-    text = utf8Decoder.decode(bytes);
+    text = utf8Decoder.decode(bounded.bytes);
   } catch {
     return { ok: false, reason: 'invalid_encoding' };
   }

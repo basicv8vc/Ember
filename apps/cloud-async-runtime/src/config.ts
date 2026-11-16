@@ -46,6 +46,10 @@ const runtimeEnvSchema = z.object({
     .transform((value) => value.split(',').map((tenantId) => tenantId.trim().toLowerCase()))
     .pipe(z.array(z.string().uuid()).min(1).max(100))
     .optional(),
+  DAYTONA_API_KEY: z.string().max(512).optional(),
+  DAYTONA_API_URL: z.string().max(512).optional(),
+  DAYTONA_TARGET: z.string().max(128).optional(),
+  EMBER_SANDBOX_OWNER: z.string().trim().min(1).max(128).optional(),
 });
 
 export type CloudAsyncRuntimeEnv = z.input<typeof runtimeEnvSchema>;
@@ -222,4 +226,43 @@ export function resolveCloudRuntimeModelConfig(
   }
 
   return { kind: 'refused', reason: 'execution_scope_refused' };
+}
+
+export type CloudDaytonaConfig =
+  | { readonly kind: 'disabled' }
+  | {
+      readonly kind: 'enabled';
+      readonly apiKey: string;
+      readonly apiUrl?: string;
+      readonly target?: string;
+      readonly owner: string;
+    };
+
+/**
+ * Resolve Daytona sandbox credentials and deployment ownership label from Worker env.
+ * Absence of `DAYTONA_API_KEY` disables Python agent execution gracefully without breaking turns.
+ */
+export function resolveCloudDaytonaConfig(input: unknown): CloudDaytonaConfig {
+  const parsed = runtimeEnvSchema.safeParse(input);
+  if (!parsed.success) {
+    return { kind: 'disabled' };
+  }
+
+  const apiKey = parsed.data.DAYTONA_API_KEY?.trim();
+  if (!apiKey) {
+    return { kind: 'disabled' };
+  }
+
+  const apiUrl = parsed.data.DAYTONA_API_URL?.trim();
+  const target = parsed.data.DAYTONA_TARGET?.trim();
+  const owner =
+    parsed.data.EMBER_SANDBOX_OWNER?.trim() || `ember-${parsed.data.EMBER_ENV}:cloud-async-runtime`;
+
+  return Object.freeze({
+    kind: 'enabled' as const,
+    apiKey,
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(target ? { target } : {}),
+    owner,
+  });
 }

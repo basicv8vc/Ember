@@ -303,6 +303,10 @@ class ScriptedGateway implements ModelGateway {
   extractNotesActionItems(): Promise<never> {
     return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
   }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused in responder unit test'));
+  }
 }
 
 /** Never settles on its own: it only rejects when the shared signal aborts. */
@@ -332,6 +336,10 @@ class HangingGateway implements ModelGateway {
 
   extractNotesActionItems(): Promise<never> {
     return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
+  }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused in responder unit test'));
   }
 }
 
@@ -525,6 +533,9 @@ describe('B2 responder: provider failures', () => {
       },
       extractNotesActionItems() {
         return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
+      },
+      stepPythonAgent() {
+        return Promise.reject(new Error('stepPythonAgent unused in responder unit test'));
       },
     };
 
@@ -898,6 +909,10 @@ class NullUsageGateway implements ModelGateway {
 
   extractNotesActionItems(): Promise<never> {
     return Promise.reject(new Error('extractNotesActionItems unused'));
+  }
+
+  stepPythonAgent(): Promise<never> {
+    return Promise.reject(new Error('stepPythonAgent unused'));
   }
 }
 

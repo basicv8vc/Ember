@@ -16,6 +16,7 @@ import {
   PostgresB1ConversationReadRepository,
   PostgresB1ConversationWriteRepository,
   PostgresB1TaskReadRepository,
+  PostgresB3StagedUploadRepository,
   PostgresCommitmentRepository,
   PostgresConsentRepository,
   PostgresTaskRepository,
@@ -179,6 +180,7 @@ export function createApiApplication(options: ApiApplicationOptions) {
     b1AssistantTurnRepository,
     b1TaskResultRepository: b1TaskReadRepository,
     b1TaskReadRepository,
+    b3UploadRepository: new PostgresB3StagedUploadRepository(pool),
     ...(apiConfig.blobRoot === null
       ? {}
       : {

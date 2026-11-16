@@ -26,6 +26,7 @@ export {
   DAYTONA_LIVE_STATES,
   DaytonaExecCancelledError,
   type DaytonaCreateRequest,
+  type DaytonaDirectoryEntry,
   type DaytonaExecRequest,
   type DaytonaExecResult,
   type DaytonaListFilter,

@@ -230,7 +230,7 @@ export class DeterministicExecutor implements SimulatedExecutor {
     try {
       switch (kind) {
         case 'mock.chat': {
-          const chat = input as Extract<typeof input, { prompt: string }>;
+          const chat = input as { readonly prompt: string; readonly maxOutputTokens?: number };
           const response = await this.llm.generate(
             { prompt: chat.prompt, maxOutputTokens: chat.maxOutputTokens },
             signal,

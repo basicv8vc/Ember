@@ -13,6 +13,18 @@ export interface B1TurnDispatchEnvelope {
   readonly turnId: string;
 }
 
+export interface B1TaskDispatchEnvelope {
+  readonly schemaVersion: 1;
+  readonly kind: 'task';
+  readonly tenantId: string;
+  readonly taskId: string;
+}
+
+export interface B1TaskDispatchTarget {
+  readonly tenantId: string;
+  readonly taskId: string;
+}
+
 export type B1TurnDispatchStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
 export interface B1TurnDispatchEvent extends B1TurnDispatchEnvelope {
@@ -90,6 +102,103 @@ export function parseB1TurnDispatchEnvelope(value: unknown): B1TurnDispatchEnvel
   }
 
   return Object.freeze({ schemaVersion: 1, ...parsed.data });
+}
+
+const taskDispatchIdentitySchema = z.object({
+  kind: z.literal('task'),
+  tenantId: z.string().regex(UUID_PATTERN),
+  taskId: z.string().regex(UUID_PATTERN),
+});
+
+/**
+ * Parse a closed, input-free Notes Task Queue dispatch wakeup. PostgreSQL remains authoritative
+ * for task existence, kind, lease, deadline, cancellation and execution context.
+ */
+export function parseB1TaskDispatchEnvelope(value: unknown): B1TaskDispatchEnvelope | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (Object.keys(candidate).sort().join(',') !== 'kind,schemaVersion,taskId,tenantId') {
+    return null;
+  }
+
+  const parsed = taskDispatchIdentitySchema.safeParse(candidate);
+  if (!parsed.success || candidate.schemaVersion !== 1) {
+    return null;
+  }
+
+  return Object.freeze({ schemaVersion: 1, ...parsed.data });
+}
+
+/**
+ * Query open, due `notes.action_items` Tasks for cron safety-net Queue publication.
+ */
+export async function listDueNotesTaskDispatches(
+  pool: pg.Pool,
+  limit: number,
+): Promise<readonly B1TaskDispatchTarget[]> {
+  const parsedLimit = z.number().int().min(1).max(100).safeParse(limit);
+  if (!parsedLimit.success) {
+    throw new DomainError('INVALID_ARGUMENT', 'invalid notes dispatch limit');
+  }
+
+  try {
+    const result = await pool.query<{ readonly tenant_id: string; readonly task_id: string }>(
+      `SELECT tenant_id, id AS task_id
+         FROM tasks
+        WHERE kind = 'notes.action_items'
+          AND status IN ('queued', 'retryable_failed')
+          AND next_run_at <= clock_timestamp()
+        ORDER BY next_run_at ASC, created_at ASC, id ASC
+        LIMIT $1::int`,
+      [parsedLimit.data],
+    );
+
+    return Object.freeze(
+      result.rows.map((row) => Object.freeze({ tenantId: row.tenant_id, taskId: row.task_id })),
+    );
+  } catch (error) {
+    throw asDomainError(error);
+  }
+}
+
+/**
+ * Check whether `(tenantId, taskId)` is an open, terminal, or missing `notes.action_items` Task.
+ */
+export async function getOpenNotesTaskStatus(
+  pool: pg.Pool,
+  tenantId: string,
+  taskId: string,
+): Promise<'open' | 'terminal' | 'missing'> {
+  const parsed = z
+    .object({ tenantId: z.string().regex(UUID_PATTERN), taskId: z.string().regex(UUID_PATTERN) })
+    .safeParse({ tenantId, taskId });
+  if (!parsed.success) {
+    throw new DomainError('INVALID_ARGUMENT', 'invalid notes task identity');
+  }
+
+  try {
+    const result = await pool.query<{ readonly status: string }>(
+      `SELECT status
+         FROM tasks
+        WHERE tenant_id = $1::uuid
+          AND id = $2::uuid
+          AND kind = 'notes.action_items'`,
+      [parsed.data.tenantId, parsed.data.taskId],
+    );
+    const status = result.rows[0]?.status;
+    if (status === undefined) {
+      return 'missing';
+    }
+    if (status === 'completed' || status === 'failed' || status === 'cancelled') {
+      return 'terminal';
+    }
+    return 'open';
+  } catch (error) {
+    throw asDomainError(error);
+  }
 }
 
 /**

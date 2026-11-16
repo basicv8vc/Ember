@@ -811,14 +811,23 @@ describe('openai adapter', () => {
       'n',
       'store',
       'stream',
+      'tool_choice',
+      'tools',
     ]);
     expect(messages[0]).toEqual({ role: 'system', content: CONVERSATION_SYSTEM_PROMPT });
     expect(body['store']).toBe(false);
     expect(body['stream']).toBe(false);
     expect(body['max_completion_tokens']).toBe(256);
-    // No caller-controlled model, temperature, tools or stop sequence can appear.
+    expect(body['tool_choice']).toBe('auto');
+    const tools = body['tools'] as Array<{
+      readonly type: string;
+      readonly function: { readonly name: string };
+    }>;
+    expect(tools).toHaveLength(1);
+    expect(tools[0]?.type).toBe('function');
+    expect(tools[0]?.function.name).toBe('delegate_notes_action_items');
+    // No caller-controlled model, temperature or stop sequence can appear.
     expect(body['temperature']).toBeUndefined();
-    expect(body['tools']).toBeUndefined();
   });
 
   it.each([
@@ -1474,6 +1483,8 @@ describe('pinned reasoning effort', () => {
       'reasoning_effort',
       'store',
       'stream',
+      'tool_choice',
+      'tools',
     ]);
   });
 });

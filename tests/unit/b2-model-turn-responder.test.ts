@@ -263,7 +263,7 @@ class ScriptedGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   readonly inputs: ConversationTurnInput[] = [];
   readonly signals: AbortSignal[] = [];
@@ -288,7 +288,7 @@ class ScriptedGateway implements ModelGateway {
     }
 
     return Promise.resolve({
-      output: { text: 'a real reply', finishReason: 'stop' as const },
+      output: { kind: 'reply', text: 'a real reply', finishReason: 'stop' as const },
       modelLabel: REAL_MODEL_LABEL,
       simulated: false as const,
       usage: {
@@ -299,6 +299,10 @@ class ScriptedGateway implements ModelGateway {
       },
     });
   }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
+  }
 }
 
 /** Never settles on its own: it only rejects when the shared signal aborts. */
@@ -306,7 +310,7 @@ class HangingGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   #entered: () => void = () => {};
   readonly entered = new Promise<void>((resolve) => {
@@ -324,6 +328,10 @@ class HangingGateway implements ModelGateway {
         once: true,
       });
     });
+  }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
   }
 }
 
@@ -509,9 +517,14 @@ describe('B2 responder: provider failures', () => {
       providerId: 'openrouter',
       modelLabel: OPENROUTER_RATE.modelId,
       simulated: false,
-      operations: ['conversation.turn'],
-      async generateConversationTurn() {
-        throw new ModelGatewayFailure('model_unavailable', { kind: 'http_5xx', status: 503 });
+      operations: ['conversation.turn', 'task.notes_action_items'],
+      generateConversationTurn() {
+        return Promise.reject(
+          new ModelGatewayFailure('model_unavailable', { kind: 'http_5xx', status: 503 }),
+        );
+      },
+      extractNotesActionItems() {
+        return Promise.reject(new Error('extractNotesActionItems unused in responder unit test'));
       },
     };
 
@@ -862,7 +875,7 @@ class NullUsageGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly modelLabel = REAL_MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   readonly inputs: ConversationTurnInput[] = [];
 
@@ -872,11 +885,19 @@ class NullUsageGateway implements ModelGateway {
     this.inputs.push(input);
 
     return Promise.resolve({
-      output: { text: 'a reply with an unknown bill', finishReason: 'stop' as const },
+      output: {
+        kind: 'reply',
+        text: 'a reply with an unknown bill',
+        finishReason: 'stop' as const,
+      },
       modelLabel: REAL_MODEL_LABEL,
       simulated: false as const,
       usage: null,
     });
+  }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(new Error('extractNotesActionItems unused'));
   }
 }
 

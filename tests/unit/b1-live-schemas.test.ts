@@ -9,7 +9,12 @@ import {
   B1SendMessageRequestSchema,
   B1SessionRequestSchema,
   B1SessionResponseSchema,
+  B1TaskCancelDtoSchema,
+  B1TaskDetailDtoSchema,
+  B1TaskEventPageDtoSchema,
+  B1TaskListDtoSchema,
   B1TaskResultDtoSchema,
+  B1TaskSummaryDtoSchema,
 } from '@ember/contracts';
 
 const id = '123e4567-e89b-42d3-a456-426614174000';
@@ -495,6 +500,121 @@ describe('B1-1 frozen live wire schemas', () => {
           task_status: 'completed',
           result_state: 'available',
           result: { ...result, principal_id: id },
+        }).success,
+      ).toBe(false);
+    });
+  });
+
+  describe('B3/iOS-aligned task list, detail, events and cancel DTOs', () => {
+    const taskSummary = {
+      task_id: taskId,
+      agent_id: submissionId,
+      kind: 'notes.action_items',
+      title: 'Meeting Notes',
+      status: 'running',
+      current_run_id: commitmentId,
+      attempt_count: 1,
+      cancel_requested: false,
+      created_at: createdAt,
+      updated_at: createdAt,
+      deadline_at: createdAt,
+    };
+
+    it('validates B1TaskSummaryDtoSchema and B1TaskDetailDtoSchema without embedded result fields', () => {
+      expect(B1TaskSummaryDtoSchema.safeParse(taskSummary).success).toBe(true);
+      expect(B1TaskDetailDtoSchema.safeParse(taskSummary).success).toBe(true);
+      expect(
+        B1TaskDetailDtoSchema.safeParse({
+          ...taskSummary,
+          title: null,
+          current_run_id: null,
+          deadline_at: null,
+        }).success,
+      ).toBe(true);
+
+      // Detail/Summary must not embed result/result_state or leak tenant_id.
+      expect(
+        B1TaskDetailDtoSchema.safeParse({ ...taskSummary, result_state: 'pending' }).success,
+      ).toBe(false);
+      expect(B1TaskDetailDtoSchema.safeParse({ ...taskSummary, tenant_id: id }).success).toBe(
+        false,
+      );
+    });
+
+    it('validates B1TaskListDtoSchema pagination cursor fields and rejects missing cursor metadata', () => {
+      expect(
+        B1TaskListDtoSchema.safeParse({
+          tasks: [taskSummary],
+          next_after: 'MjAyNi0xMS0xNVQwMDowMDowMC4wMDAwMDBafDEyMw',
+          has_more: true,
+        }).success,
+      ).toBe(true);
+      expect(
+        B1TaskListDtoSchema.safeParse({
+          tasks: [],
+          next_after: null,
+          has_more: false,
+        }).success,
+      ).toBe(true);
+      expect(B1TaskListDtoSchema.safeParse({ tasks: [taskSummary] }).success).toBe(false);
+      expect(
+        B1TaskListDtoSchema.safeParse({ tasks: [], next_after: '', has_more: false }).success,
+      ).toBe(false);
+    });
+
+    it('validates B1TaskEventPageDtoSchema and B1TaskCancelDtoSchema', () => {
+      expect(
+        B1TaskEventPageDtoSchema.safeParse({
+          task_id: taskId,
+          events: [
+            {
+              task_id: taskId,
+              sequence: 1,
+              phase: 'accepted',
+              occurred_at: createdAt,
+              trace_id: submissionId,
+              payload: {},
+            },
+          ],
+        }).success,
+      ).toBe(true);
+      expect(
+        B1TaskEventPageDtoSchema.safeParse({
+          task_id: taskId,
+          events: [],
+          extra: true,
+        }).success,
+      ).toBe(false);
+
+      expect(
+        B1TaskCancelDtoSchema.safeParse({
+          task_id: taskId,
+          status: 'running',
+          cancel_requested: true,
+          cancel_requested_at: createdAt,
+          terminal: false,
+          updated_at: createdAt,
+        }).success,
+      ).toBe(true);
+      expect(
+        B1TaskCancelDtoSchema.safeParse({
+          task_id: taskId,
+          status: 'cancelled',
+          cancel_requested: true,
+          cancel_requested_at: null,
+          terminal: true,
+          updated_at: createdAt,
+        }).success,
+      ).toBe(true);
+      expect(
+        B1TaskCancelDtoSchema.safeParse({
+          task_id: taskId,
+          status: 'cancelled',
+          cancel_requested: true,
+          cancel_requested_at: createdAt,
+          terminal: true,
+          updated_at: createdAt,
+          tenant_id: id,
         }).success,
       ).toBe(false);
     });

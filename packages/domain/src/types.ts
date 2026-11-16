@@ -32,8 +32,14 @@ export const EXECUTION_PATHS = ['fast', 'standard', 'heavy'] as const;
 /** Coarse execution tier selected by the execution router. */
 export type ExecutionPath = (typeof EXECUTION_PATHS)[number];
 
-/** Mock task kinds implemented in P0-B. No real LLM or sandbox kind exists yet. */
-export const TASK_KINDS = ['mock.chat', 'mock.compute', 'mock.file', 'mock.approval'] as const;
+/** Task kinds supported across durable execution. */
+export const TASK_KINDS = [
+  'mock.chat',
+  'mock.compute',
+  'mock.file',
+  'mock.approval',
+  'notes.action_items',
+] as const;
 
 export type TaskKind = (typeof TASK_KINDS)[number];
 
@@ -70,12 +76,20 @@ export interface MockApprovalInput {
   readonly reason?: string;
 }
 
+export interface NotesActionItemsInput {
+  /** Bounded meeting/discussion notes to convert into durable action items. */
+  readonly notes: string;
+  /** Optional short formatting/focus instruction supplied by delegation tool call. */
+  readonly instructions?: string;
+}
+
 /** Correlates each supported task kind with exactly one input shape. */
 export interface TaskInputByKind {
   readonly 'mock.chat': MockChatInput;
   readonly 'mock.compute': MockComputeInput;
   readonly 'mock.file': MockFileInput;
   readonly 'mock.approval': MockApprovalInput;
+  readonly 'notes.action_items': NotesActionItemsInput;
 }
 
 export type MockTaskInput = TaskInputByKind[TaskKind];
@@ -83,12 +97,14 @@ export type MockTaskInput = TaskInputByKind[TaskKind];
 export interface TaskCommandBase {
   readonly agentId: Id;
   /**
-   * Idempotency key taken from the HTTP header by the gateway. It is deliberately not
-   * part of the client-supplied body.
+   * Idempotency key taken from the HTTP header by the gateway (or server-derived turn key).
+   * It is deliberately not part of the client-supplied body.
    */
   readonly idempotencyKey: string;
   /** Optional RFC 3339 / ISO 8601 deadline with an explicit timezone. */
   readonly deadlineAt?: string;
+  /** Optional concise human-readable Task title. */
+  readonly title?: string;
 }
 
 /**

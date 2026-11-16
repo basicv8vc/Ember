@@ -7,6 +7,10 @@
     "./b1/model-turn-responder": {
       "types": "./dist/b1/model-turn-responder.d.ts",
       "default": "./dist/b1/model-turn-responder.js"
+    },
+    "./notes-task-handler": {
+      "types": "./dist/notes-task-handler.d.ts",
+      "default": "./dist/notes-task-handler.js"
     }
   },
   "scripts": {

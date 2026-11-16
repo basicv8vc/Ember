@@ -1,19 +1,31 @@
 import { describe, expect, it, vi } from 'vitest';
+import { DomainError, type LeasedRun } from '@ember/domain';
 import type { B1TurnDispatchEvent } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
 import {
   isAuthorizedCloudModelTurn,
   isCloudModelConversationAuthorized,
+  isCloudModelTenantAuthorized,
   resolveCloudRuntimeModelConfig,
 } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
+import { createNotesTaskLeaseQueue } from '../../apps/cloud-async-runtime/src/runtime.js';
 import {
+  consumeTaskDispatchMessage,
   consumeTurnDispatchMessage,
+  parseB1TaskDispatchEnvelope,
   parseB1TurnDispatchEnvelope,
   recoverDeadLetter,
+  recoverTaskDeadLetter,
+  taskDispatchEnvelope,
+  type TaskDispatchHandlerPort,
+  type TaskDispatchQueuePort,
   type TurnDispatchOutboxPort,
   type TurnDispatchQueueMessage,
 } from '../../apps/cloud-async-runtime/src/dispatch.js';
-import { publishDueTurnDispatches } from '../../apps/cloud-async-runtime/src/relay.js';
+import {
+  publishDueNotesTaskDispatches,
+  publishDueTurnDispatches,
+} from '../../apps/cloud-async-runtime/src/relay.js';
 
 const TURN_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849302';
 const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849303';
@@ -148,7 +160,7 @@ describe('Cloud Async Runtime dispatch', () => {
 
       expect(unexpectedMessage.ack).toHaveBeenCalledTimes(1);
       expect(warn).toHaveBeenCalledWith(
-        'discarded Assistant Turn message from an unexpected Queue',
+        'discarded dispatch message from an unexpected Queue',
         expect.objectContaining({ category: 'unexpected_queue' }),
       );
     } finally {
@@ -511,5 +523,388 @@ describe('Cloud Async Runtime dispatch', () => {
     expect(sent.enqueued).toBe(1);
     expect(workingQueue.send).toHaveBeenCalledWith(envelope());
     expect(outbox.markEnqueued).toHaveBeenCalledTimes(1);
+  });
+
+  describe('Notes Task dispatch, DLQ recovery, and reconciliation relay', () => {
+    const TASK_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849306';
+    const RUN_ID = '018f5f2e-0e91-7a30-ae62-bcb97d849307';
+
+    function sampleTaskEnvelope() {
+      return taskDispatchEnvelope({ tenantId: TENANT_ID, taskId: TASK_ID });
+    }
+
+    function sampleLease(): LeasedRun {
+      return {
+        tenantId: TENANT_ID,
+        taskId: TASK_ID,
+        runId: RUN_ID,
+        attempt: 1,
+        leaseEpoch: 1,
+        leaseExpiresAt: '2026-11-15T12:00:30.000Z',
+      };
+    }
+
+    function createMockTaskQueue(overrides?: {
+      reapExpired?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['reapExpired']>>;
+      claimTask?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['claimTask']>>;
+      heartbeat?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['heartbeat']>>;
+      finish?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['finish']>>;
+    }) {
+      const reapExpired =
+        overrides?.reapExpired ??
+        vi.fn<TaskDispatchQueuePort['reapExpired']>(() => Promise.resolve(0));
+      const claimTask =
+        overrides?.claimTask ??
+        vi.fn<TaskDispatchQueuePort['claimTask']>(() => Promise.resolve({ kind: 'not_found' }));
+      const heartbeat =
+        overrides?.heartbeat ??
+        vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(true));
+      const finish =
+        overrides?.finish ?? vi.fn<TaskDispatchQueuePort['finish']>(() => Promise.resolve(true));
+      return {
+        port: { reapExpired, claimTask, heartbeat, finish } satisfies TaskDispatchQueuePort,
+        reapExpired,
+        claimTask,
+        heartbeat,
+        finish,
+      };
+    }
+
+    it('parses only prompt-free closed Notes Task envelopes and checks tenant authorization', () => {
+      const valid = sampleTaskEnvelope();
+      expect(valid).toEqual({
+        schemaVersion: 1,
+        kind: 'task',
+        tenantId: TENANT_ID,
+        taskId: TASK_ID,
+      });
+      expect(parseB1TaskDispatchEnvelope(valid)).toEqual(valid);
+      expect(parseB1TaskDispatchEnvelope({ ...valid, notes: 'secret' })).toBeNull();
+      expect(parseB1TaskDispatchEnvelope({ ...valid, kind: 'turn' })).toBeNull();
+      expect(parseB1TaskDispatchEnvelope({ ...valid, taskId: 'not-uuid' })).toBeNull();
+
+      const model = resolveCloudRuntimeModelConfig(stagingAlphaEnv(), 'staging_alpha', ALPHA_NOW);
+      expect(model.kind).toBe('enabled');
+      if (model.kind !== 'enabled') return;
+      expect(isCloudModelTenantAuthorized(model, TENANT_ID)).toBe(true);
+      expect(isCloudModelTenantAuthorized(model, SECOND_TENANT_ID)).toBe(true);
+      expect(isCloudModelTenantAuthorized(model, CONVERSATION_ID)).toBe(false);
+    });
+
+    it('claims, executes, finishes, and handles retries/fencing on Notes Task messages', async () => {
+      const fixedNow = () => new Date('2026-11-15T12:00:00.000Z');
+      const warn = vi.fn();
+
+      // Malformed envelope -> ACK + discard.
+      const badMsg = new Message({ kind: 'task', tenantId: TENANT_ID });
+      const unusedQueue = createMockTaskQueue();
+      await consumeTaskDispatchMessage(badMsg, {
+        leaseQueue: unusedQueue.port,
+        workerId: 'w-1',
+        handler: { handle: vi.fn() },
+        logger: { warn },
+        now: fixedNow,
+      });
+      expect(badMsg.ack).toHaveBeenCalledTimes(1);
+      expect(unusedQueue.claimTask).not.toHaveBeenCalled();
+
+      // Handler null (disabled/unauthorized) -> ACK without touching DB.
+      const disabledMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(disabledMsg, {
+        leaseQueue: unusedQueue.port,
+        workerId: 'w-1',
+        handler: null,
+        now: fixedNow,
+      });
+      expect(disabledMsg.ack).toHaveBeenCalledTimes(1);
+      expect(unusedQueue.claimTask).not.toHaveBeenCalled();
+
+      // Active lease -> retry with lease delay.
+      const leaseActiveQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'lease_active', leaseRemainingMs: 2_300 }),
+        ),
+      });
+      const leaseActiveMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(leaseActiveMsg, {
+        leaseQueue: leaseActiveQueue.port,
+        workerId: 'w-1',
+        handler: { handle: vi.fn() },
+        now: fixedNow,
+      });
+      expect(leaseActiveMsg.retry).toHaveBeenCalledWith({ delaySeconds: 3 });
+
+      // Deferred -> reaps expired, then claims on retry and commits -> ACK without calling finish.
+      const claimTaskDeferred = vi
+        .fn<TaskDispatchQueuePort['claimTask']>()
+        .mockResolvedValueOnce({ kind: 'deferred', delayMs: 2_000 })
+        .mockResolvedValueOnce({ kind: 'claimed', lease: sampleLease() });
+      const committedQueue = createMockTaskQueue({
+        reapExpired: vi.fn<TaskDispatchQueuePort['reapExpired']>(() => Promise.resolve(1)),
+        claimTask: claimTaskDeferred,
+      });
+      const handleCommitted = vi.fn<TaskDispatchHandlerPort['handle']>(() =>
+        Promise.resolve({ type: 'committed' }),
+      );
+      const committedMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(committedMsg, {
+        leaseQueue: committedQueue.port,
+        workerId: 'w-1',
+        handler: { handle: handleCommitted },
+        now: fixedNow,
+      });
+      expect(committedQueue.reapExpired).toHaveBeenCalledTimes(1);
+      expect(handleCommitted).toHaveBeenCalledTimes(1);
+      expect(committedQueue.finish).not.toHaveBeenCalled();
+      expect(committedMsg.ack).toHaveBeenCalledTimes(1);
+
+      // Failed retryable -> calls finish(failed_retryable) and retries message.
+      const retryQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+      });
+      const retryMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(retryMsg, {
+        leaseQueue: retryQueue.port,
+        workerId: 'w-1',
+        handler: {
+          handle: vi.fn<TaskDispatchHandlerPort['handle']>(() =>
+            Promise.resolve({ type: 'finish', outcome: 'failed_retryable' }),
+          ),
+        },
+        now: fixedNow,
+      });
+      expect(retryQueue.finish).toHaveBeenCalledWith(sampleLease(), 'failed_retryable', fixedNow());
+      expect(retryMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+
+      // STALE_LEASE -> retries without calling finish().
+      const staleQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+      });
+      const staleMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(staleMsg, {
+        leaseQueue: staleQueue.port,
+        workerId: 'w-1',
+        handler: {
+          handle: vi.fn(() => Promise.reject(new DomainError('STALE_LEASE', 'epoch lost'))),
+        },
+        now: fixedNow,
+      });
+      expect(staleQueue.finish).not.toHaveBeenCalled();
+      expect(staleMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+    });
+
+    it('recovers Notes DLQ envelopes and filters due Notes relay targets by tenant allowlist', async () => {
+      const warn = vi.fn();
+      const openMsg = new Message(sampleTaskEnvelope());
+      await recoverTaskDeadLetter(
+        openMsg,
+        vi.fn<() => Promise<'open' | 'terminal' | 'missing'>>(() => Promise.resolve('open')),
+        { warn },
+      );
+      expect(openMsg.ack).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith(
+        'returned Notes Task DLQ delivery to PostgreSQL cron reconciliation',
+        expect.objectContaining({ taskId: TASK_ID }),
+      );
+
+      const relay = {
+        reapExpired: vi.fn(() => Promise.resolve(2)),
+        listDueNotesTasks: vi.fn(() =>
+          Promise.resolve([
+            { tenantId: TENANT_ID, taskId: TASK_ID },
+            { tenantId: CONVERSATION_ID, taskId: TURN_ID },
+          ]),
+        ),
+      };
+      const queue = { send: vi.fn(() => Promise.resolve()) };
+      const result = await publishDueNotesTaskDispatches({
+        relay,
+        queue,
+        isAuthorizedTenant: (tenantId) => tenantId === TENANT_ID,
+      });
+      expect(result).toEqual({ reaped: 2, examined: 1, enqueued: 1, failed: 0 });
+      expect(queue.send).toHaveBeenCalledTimes(1);
+      expect(queue.send).toHaveBeenCalledWith(sampleTaskEnvelope());
+    });
+
+    it('renews lease heartbeats past the original lease TTL and cleans up timers on exit', async () => {
+      vi.useFakeTimers();
+      try {
+        const start = new Date('2026-11-15T12:00:00.000Z');
+        vi.setSystemTime(start);
+        const lease: LeasedRun = {
+          ...sampleLease(),
+          leaseExpiresAt: new Date(start.getTime() + 100).toISOString(),
+        };
+        const queue = createMockTaskQueue({
+          claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+            Promise.resolve({ kind: 'claimed', lease }),
+          ),
+        });
+
+        let abortedDuringExecution = false;
+        let finishExecution!: () => void;
+        const executionDone = new Promise<void>((resolve) => {
+          finishExecution = resolve;
+        });
+
+        const msg = new Message(sampleTaskEnvelope());
+        const consumePromise = consumeTaskDispatchMessage(msg, {
+          leaseQueue: queue.port,
+          workerId: 'w-hb-1',
+          heartbeatIntervalMs: 30,
+          handler: {
+            handle: async (_run, signal) => {
+              signal.addEventListener('abort', () => {
+                abortedDuringExecution = true;
+              });
+              await executionDone;
+              return { type: 'committed' };
+            },
+          },
+        });
+
+        // Advance well past the 100ms initial lease TTL; heartbeats every 30ms keep extending watchdog.
+        await vi.advanceTimersByTimeAsync(150);
+        expect(queue.heartbeat.mock.calls.length).toBeGreaterThanOrEqual(4);
+        expect(abortedDuringExecution).toBe(false);
+
+        finishExecution();
+        await consumePromise;
+
+        expect(msg.ack).toHaveBeenCalledTimes(1);
+        expect(queue.finish).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('aborts execution and handles fencing/cancellation/errors cleanly when heartbeat fails', async () => {
+      const fixedNow = () => new Date('2026-11-15T12:00:00.000Z');
+      const warn = vi.fn();
+
+      // 1) heartbeat() returns false -> aborts handler, skips non-cancelled finish(), retries message.
+      const lostQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(false)),
+      });
+      const lostMsg = new Message(sampleTaskEnvelope());
+      let signalAbortedOnLost = false;
+      await consumeTaskDispatchMessage(lostMsg, {
+        leaseQueue: lostQueue.port,
+        workerId: 'w-hb-lost',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        logger: { warn },
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  signalAbortedOnLost = true;
+                  resolve({ type: 'finish', outcome: 'failed_retryable' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(signalAbortedOnLost).toBe(true);
+      expect(lostQueue.finish).not.toHaveBeenCalled();
+      expect(lostMsg.ack).not.toHaveBeenCalled();
+      expect(lostMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+      expect(warn).toHaveBeenCalledWith(
+        'Notes Task lease heartbeat rejected',
+        expect.objectContaining({ category: 'lease_lost' }),
+      );
+
+      // 2) heartbeat() returns false due to cooperative cancellation -> converges via finish('cancelled').
+      const cancelQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(false)),
+      });
+      const cancelMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(cancelMsg, {
+        leaseQueue: cancelQueue.port,
+        workerId: 'w-hb-cancel',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  resolve({ type: 'finish', outcome: 'cancelled' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(cancelQueue.finish).toHaveBeenCalledWith(sampleLease(), 'cancelled', fixedNow());
+      expect(cancelMsg.ack).toHaveBeenCalledTimes(1);
+      expect(cancelMsg.retry).not.toHaveBeenCalled();
+
+      // 3) heartbeat() throws -> aborts handler, skips finish() even if outcome looks terminal, retries.
+      const errorQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() =>
+          Promise.reject(new DomainError('DB_UNAVAILABLE', 'pool timeout')),
+        ),
+      });
+      const errMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(errMsg, {
+        leaseQueue: errorQueue.port,
+        workerId: 'w-hb-err',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        logger: { warn },
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  resolve({ type: 'finish', outcome: 'cancelled' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(errorQueue.finish).not.toHaveBeenCalled();
+      expect(errMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+      expect(warn).toHaveBeenCalledWith(
+        'Notes Task lease heartbeat failed',
+        expect.objectContaining({ category: 'DB_UNAVAILABLE' }),
+      );
+
+      // 4) createNotesTaskLeaseQueue configures heartbeat strictly shorter than short 1s leases.
+      const shortModel = resolveCloudRuntimeModelConfig(
+        stagingAlphaEnv({ EMBER_MODEL_TURN_LEASE_MS: '1000' }),
+        'staging_alpha',
+        ALPHA_NOW,
+      );
+      expect(shortModel.kind).toBe('enabled');
+      const shortLeaseQueue = createNotesTaskLeaseQueue({} as never, shortModel);
+      expect(shortLeaseQueue.configuration.leaseDurationMs).toBe(1_000);
+      expect(shortLeaseQueue.configuration.heartbeatIntervalMs).toBe(333);
+    });
   });
 });

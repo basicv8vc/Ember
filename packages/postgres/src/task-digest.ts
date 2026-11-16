@@ -82,6 +82,7 @@ export function prepareTaskCommand(command: unknown): PreparedTaskCommand {
   const canonical = canonicalJson({
     agentId: validated.agentId,
     kind: validated.kind,
+    ...(validated.title === undefined ? {} : { title: validated.title }),
     input: validated.input,
     deadlineAt,
   });

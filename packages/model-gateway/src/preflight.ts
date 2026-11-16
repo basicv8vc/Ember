@@ -1,4 +1,4 @@
-import { CONVERSATION_SYSTEM_PROMPT } from './context.js';
+import { CONVERSATION_SYSTEM_PROMPT, NOTES_ACTION_ITEMS_SYSTEM_PROMPT } from './context.js';
 import { ModelInputRefused } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative, serializationOverheadTokens } from './limits.js';
 
@@ -13,8 +13,11 @@ export interface TokenPreflight {
   readonly maxOutputTokens: number;
 }
 
-/** The fixed prompt's token estimate, computed once: it is a compile-time constant. */
+import { DELEGATION_TOOLS_TOKEN_ESTIMATE } from './providers/shared.js';
+
+/** Fixed prompt and tool schema token estimates, computed once: compile-time constants. */
 const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROMPT);
+const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
 const OVERHEAD_TOKENS = serializationOverheadTokens();
 
 /**
@@ -72,7 +75,8 @@ export function preflightConversationTurn(input: {
 
   const inputChars =
     messageChars + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars;
-  const inputTokens = messageTokens + SYSTEM_PROMPT_TOKENS + OVERHEAD_TOKENS;
+  const inputTokens =
+    messageTokens + SYSTEM_PROMPT_TOKENS + DELEGATION_TOOLS_TOKEN_ESTIMATE + OVERHEAD_TOKENS;
 
   if (inputTokens > MODEL_LIMITS.maxInputTokens) {
     throw new ModelInputRefused('input_tokens_over_cap');
@@ -82,5 +86,50 @@ export function preflightConversationTurn(input: {
     inputChars,
     inputTokens,
     maxOutputTokens: input.maxOutputTokens,
+  });
+}
+
+export function preflightNotesActionItems(input: {
+  readonly notes: string;
+  readonly instructions?: string;
+  readonly title?: string;
+  readonly maxOutputTokens?: number;
+}): TokenPreflight {
+  const maxOutputTokens = input.maxOutputTokens ?? MODEL_LIMITS.notesMaxOutputTokens;
+  if (
+    !Number.isInteger(maxOutputTokens) ||
+    maxOutputTokens < 1 ||
+    maxOutputTokens > MODEL_LIMITS.notesMaxOutputTokens
+  ) {
+    throw new ModelInputRefused('max_output_invalid');
+  }
+
+  if (typeof input.notes !== 'string' || input.notes.trim().length === 0) {
+    throw new ModelInputRefused('context_invalid');
+  }
+
+  const userPayloadChars =
+    input.notes.length + (input.instructions?.length ?? 0) + (input.title?.length ?? 0);
+  if (userPayloadChars > MODEL_LIMITS.maxContextChars) {
+    throw new ModelInputRefused('context_too_large');
+  }
+
+  const userTokens =
+    estimateTokensConservative(input.notes) +
+    (input.instructions === undefined ? 0 : estimateTokensConservative(input.instructions)) +
+    (input.title === undefined ? 0 : estimateTokensConservative(input.title));
+
+  const inputChars =
+    userPayloadChars + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars;
+  const inputTokens = userTokens + NOTES_SYSTEM_PROMPT_TOKENS + OVERHEAD_TOKENS;
+
+  if (inputTokens > MODEL_LIMITS.maxInputTokens) {
+    throw new ModelInputRefused('input_tokens_over_cap');
+  }
+
+  return Object.freeze({
+    inputChars,
+    inputTokens,
+    maxOutputTokens,
   });
 }

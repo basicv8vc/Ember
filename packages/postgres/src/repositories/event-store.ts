@@ -1,4 +1,3 @@
-import { randomUUID } from 'node:crypto';
 import { TaskEventSchema } from '@ember/contracts';
 import { DomainError, type Id, type TaskEventPayload, type TaskEventPhase } from '@ember/domain';
 import type pg from 'pg';
@@ -53,7 +52,7 @@ export async function appendTaskEvent(
     sequence,
     phase: input.phase,
     occurredAt: input.occurredAt.toISOString(),
-    traceId: randomUUID(),
+    traceId: globalThis.crypto.randomUUID(),
     payload: input.payload,
   };
   const parsed = TaskEventSchema.safeParse(candidate);
@@ -65,7 +64,7 @@ export async function appendTaskEvent(
   }
 
   await client.query(INSERT_EVENT_SQL, [
-    randomUUID(),
+    globalThis.crypto.randomUUID(),
     input.tenantId,
     parsed.data.taskId,
     parsed.data.sequence,

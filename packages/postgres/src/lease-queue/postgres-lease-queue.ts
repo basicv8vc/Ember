@@ -1,19 +1,22 @@
-import { randomUUID } from 'node:crypto';
-import type { LeaseQueue } from '@ember/contracts';
+import { IdSchema, toInvalidArgumentError, type LeaseQueue } from '@ember/contracts';
 import {
   DomainError,
   InvalidArgumentError,
+  isTerminalTaskStatus,
   transitionRun,
   transitionTask,
+  type Id,
   type LeasedRun,
   type RunStatus,
   type RunTerminalStatus,
   type TaskKind,
   type TaskStatus,
+  type TaskTerminalStatus,
 } from '@ember/domain';
 import type pg from 'pg';
 import { appendTaskEvent } from '../repositories/event-store.js';
 import { asDomainError, withTransaction } from '../repositories/support.js';
+import { finalizeTaskTerminalEffects } from '../repositories/task-terminal-effects.js';
 import { systemClock, parseNow, type Clock } from './clock.js';
 import {
   applyFinishConvergence,
@@ -44,6 +47,10 @@ interface IdRow {
   id: string;
 }
 
+interface TargetedTaskRow extends TaskRow {
+  kind: string;
+}
+
 const TASK_COLUMNS = `
   id, tenant_id, status, attempt_count, max_attempts, lease_epoch::text AS lease_epoch,
   current_run_id, next_run_at, lease_expires_at, deadline_at, cancel_requested_at
@@ -63,6 +70,13 @@ SELECT ${TASK_COLUMNS}
  ORDER BY next_run_at ASC, created_at ASC, id ASC
  LIMIT 1
  FOR UPDATE SKIP LOCKED
+`;
+
+const LOCK_TARGETED_TASK_SQL = `
+SELECT ${TASK_COLUMNS}, kind
+  FROM tasks
+ WHERE tenant_id = $1 AND id = $2
+ FOR UPDATE
 `;
 
 const LOCK_TASK_SQL = `
@@ -217,6 +231,14 @@ UPDATE budget_operations
 /** Bound a single claim transaction's attempt to skip expired candidates. */
 const MAX_CLAIM_SKIPS = 16;
 
+/** Outcome of claiming one explicit `(tenantId, taskId)` from the durable queue. */
+export type TaskClaimOutcome =
+  | { readonly kind: 'claimed'; readonly lease: LeasedRun }
+  | { readonly kind: 'not_found' }
+  | { readonly kind: 'terminal' }
+  | { readonly kind: 'lease_active'; readonly leaseRemainingMs: number }
+  | { readonly kind: 'deferred'; readonly delayMs: number };
+
 export interface PostgresLeaseQueueOptions extends LeaseQueueConfigOverrides {
   /** Single clock seam. Defaults to the real UTC system clock. */
   readonly clock?: Clock;
@@ -293,37 +315,12 @@ export class PostgresLeaseQueue implements LeaseQueue {
             return null;
           }
 
-          const status = toTaskStatus(task.status);
-          const deadlineAt = parsePersistedTimestamp(task.deadline_at);
-          const cancelRequested = task.cancel_requested_at !== null;
-          const deadlineReached =
-            deadlineAt !== null && deadlineAt.getTime() <= claimedAt.getTime();
-          const attemptsExhausted = task.attempt_count >= task.max_attempts;
-
-          if (cancelRequested || deadlineReached || attemptsExhausted) {
-            await this.convergeBeforeClaim(client, task, status, claimedAt, {
-              cancelRequested,
-              deadlineReached,
-            });
+          const claim = await this.tryClaimLockedTask(client, task, validatedWorkerId, claimedAt);
+          if (claim.kind === 'converged') {
             continue;
           }
 
-          if (toDate(task.next_run_at).getTime() > claimedAt.getTime()) {
-            // Defensive: the locked row changed in a way the SQL predicate should prevent.
-            return null;
-          }
-
-          const activeRun = await client.query<IdRow>(ACTIVE_RUN_SQL, [task.tenant_id, task.id]);
-
-          if ((activeRun.rowCount ?? 0) > 0) {
-            // Invariant violation: never create a second active Run.
-            throw new DomainError(
-              'DB_UNAVAILABLE',
-              'task has an active run while it is not in running status',
-            );
-          }
-
-          return await this.createLease(client, task, status, validatedWorkerId, claimedAt);
+          return claim.lease;
         }
 
         return null;
@@ -331,6 +328,120 @@ export class PostgresLeaseQueue implements LeaseQueue {
     } catch (error) {
       throw asDomainError(error);
     }
+  }
+
+  /**
+   * Claim a specific `(tenantId, taskId)` for event-driven Queue delivery without scanning unrelated
+   * tenants or tasks. Converges overdue/cancelled open tasks fail-closed under the same lock rules.
+   */
+  async claimTask(
+    workerId: string,
+    now: Date,
+    identity: { readonly tenantId: Id; readonly taskId: Id },
+  ): Promise<TaskClaimOutcome> {
+    const validatedWorkerId = parseWorkerId(workerId);
+    const claimedAt = parseNow(now);
+    const tenantId = IdSchema.safeParse(identity.tenantId);
+    if (!tenantId.success) {
+      throw toInvalidArgumentError(tenantId.error);
+    }
+    const taskId = IdSchema.safeParse(identity.taskId);
+    if (!taskId.success) {
+      throw toInvalidArgumentError(taskId.error);
+    }
+
+    try {
+      return await withTransaction(this.pool, async (client) => {
+        const result = await client.query<TargetedTaskRow>(LOCK_TARGETED_TASK_SQL, [
+          tenantId.data,
+          taskId.data,
+        ]);
+        const task = result.rows[0];
+
+        if (task === undefined || !(this.claimableKinds as readonly string[]).includes(task.kind)) {
+          return { kind: 'not_found' };
+        }
+
+        const status = toTaskStatus(task.status);
+        if (isTerminalTaskStatus(status)) {
+          return { kind: 'terminal' };
+        }
+
+        if (status === 'running') {
+          const leaseExpiresAt = parsePersistedTimestamp(task.lease_expires_at);
+          if (leaseExpiresAt !== null && leaseExpiresAt.getTime() > claimedAt.getTime()) {
+            return {
+              kind: 'lease_active',
+              leaseRemainingMs: Math.max(1, leaseExpiresAt.getTime() - claimedAt.getTime()),
+            };
+          }
+          // Stale running lease awaits reaper convergence before re-dispatch.
+          return { kind: 'deferred', delayMs: 1_000 };
+        }
+
+        if (status === 'waiting_approval') {
+          return { kind: 'deferred', delayMs: 10_000 };
+        }
+
+        const claim = await this.tryClaimLockedTask(client, task, validatedWorkerId, claimedAt);
+        if (claim.kind === 'converged') {
+          return { kind: 'terminal' };
+        }
+        if (claim.lease === null) {
+          const nextRunAt = toDate(task.next_run_at).getTime();
+          return {
+            kind: 'deferred',
+            delayMs: Math.max(1_000, nextRunAt - claimedAt.getTime()),
+          };
+        }
+
+        return { kind: 'claimed', lease: claim.lease };
+      });
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
+
+  private async tryClaimLockedTask(
+    client: pg.PoolClient,
+    task: TaskRow,
+    workerId: string,
+    claimedAt: Date,
+  ): Promise<
+    { readonly kind: 'converged' } | { readonly kind: 'done'; readonly lease: LeasedRun | null }
+  > {
+    const status = toTaskStatus(task.status);
+    const deadlineAt = parsePersistedTimestamp(task.deadline_at);
+    const cancelRequested = task.cancel_requested_at !== null;
+    const deadlineReached = deadlineAt !== null && deadlineAt.getTime() <= claimedAt.getTime();
+    const attemptsExhausted = task.attempt_count >= task.max_attempts;
+
+    if (cancelRequested || deadlineReached || attemptsExhausted) {
+      await this.convergeBeforeClaim(client, task, status, claimedAt, {
+        cancelRequested,
+        deadlineReached,
+      });
+      return { kind: 'converged' };
+    }
+
+    if (toDate(task.next_run_at).getTime() > claimedAt.getTime()) {
+      return { kind: 'done', lease: null };
+    }
+
+    const activeRun = await client.query<IdRow>(ACTIVE_RUN_SQL, [task.tenant_id, task.id]);
+
+    if ((activeRun.rowCount ?? 0) > 0) {
+      // Invariant violation: never create a second active Run.
+      throw new DomainError(
+        'DB_UNAVAILABLE',
+        'task has an active run while it is not in running status',
+      );
+    }
+
+    return {
+      kind: 'done',
+      lease: await this.createLease(client, task, status, workerId, claimedAt),
+    };
   }
 
   async heartbeat(run: LeasedRun, now: Date): Promise<boolean> {
@@ -636,7 +747,7 @@ export class PostgresLeaseQueue implements LeaseQueue {
     workerId: string,
     claimedAt: Date,
   ): Promise<LeasedRun> {
-    const runId = randomUUID();
+    const runId = globalThis.crypto.randomUUID();
     const attempt = task.attempt_count + 1;
     const epoch = nextLeaseEpoch(parseLeaseEpoch(task.lease_epoch));
 
@@ -802,6 +913,13 @@ export class PostgresLeaseQueue implements LeaseQueue {
           : {}),
       },
     });
+
+    await finalizeTaskTerminalEffects(client, {
+      tenantId: task.tenant_id,
+      taskId: task.id,
+      status: nextStatus as TaskTerminalStatus,
+      occurredAt: at,
+    });
   }
 
   private async reapRunningTask(
@@ -938,6 +1056,15 @@ export class PostgresLeaseQueue implements LeaseQueue {
           : { cancelRequested: convergence.cancelRequested }),
       },
     });
+
+    if (isTerminalTaskStatus(nextTaskStatus)) {
+      await finalizeTaskTerminalEffects(client, {
+        tenantId: task.tenant_id,
+        taskId: task.id,
+        status: nextTaskStatus,
+        occurredAt: reapedAt,
+      });
+    }
   }
 
   private async reapWaitingApprovalTask(
@@ -993,6 +1120,13 @@ export class PostgresLeaseQueue implements LeaseQueue {
                 : ('EXECUTION_TIMEOUT' as const),
             }),
       },
+    });
+
+    await finalizeTaskTerminalEffects(client, {
+      tenantId: task.tenant_id,
+      taskId: task.id,
+      status: nextStatus as TaskTerminalStatus,
+      occurredAt: reapedAt,
     });
   }
 }

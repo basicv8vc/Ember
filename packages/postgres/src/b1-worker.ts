@@ -15,6 +15,9 @@ export type {
   B1ConversationRepository,
   B1SessionRecord,
   B1SessionRotationResult,
+  B1TaskListQuery,
+  B1TaskReadRepository,
+  B1TaskResultRepository,
 } from './repositories/b1-interfaces.js';
 export { PostgresB1AssistantTurnRepository } from './repositories/b1-assistant-turn-repository.js';
 export { insertB1TurnDispatchOutbox } from './repositories/b1-turn-dispatch-outbox.js';
@@ -25,3 +28,9 @@ export {
 } from './repositories/b1-conversation-write.js';
 export { PostgresB1ConsumerProvisioningRepository } from './repositories/b1-session-provisioning-repository.js';
 export { PostgresB1ConsumerSessionRepository } from './repositories/b1-session-repository.js';
+export {
+  B1_TASK_EVENTS_PAGE_LIMIT,
+  B1_TASK_LIST_DEFAULT_LIMIT,
+  B1_TASK_LIST_MAX_LIMIT,
+  PostgresB1TaskReadRepository,
+} from './repositories/b1-task-read-repository.js';

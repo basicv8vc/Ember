@@ -1,5 +1,11 @@
 import type pg from 'pg';
-import { DomainError, InvalidArgumentError, transitionRun, transitionTask } from '@ember/domain';
+import {
+  DomainError,
+  InvalidArgumentError,
+  isTerminalTaskStatus,
+  transitionRun,
+  transitionTask,
+} from '@ember/domain';
 import type {
   RunTerminalStatus,
   TaskEventPayload,
@@ -7,6 +13,7 @@ import type {
   TaskStatus,
 } from '@ember/domain';
 import { appendTaskEvent } from '../repositories/event-store.js';
+import { finalizeTaskTerminalEffects } from '../repositories/task-terminal-effects.js';
 import type { RetryPolicyConfig } from './config.js';
 import { planRetry } from './retry-policy.js';
 
@@ -208,6 +215,15 @@ export async function applyFinishConvergence(
       ...(input.payloadExtra ?? {}),
     },
   });
+
+  if (isTerminalTaskStatus(nextTaskStatus)) {
+    await finalizeTaskTerminalEffects(client, {
+      tenantId: input.task.tenant_id,
+      taskId: input.task.id,
+      status: nextTaskStatus,
+      occurredAt: input.finishedAt,
+    });
+  }
 
   return Object.freeze({ taskStatus: nextTaskStatus, runStatus: input.convergence.runStatus });
 }

@@ -1,6 +1,11 @@
 import { isDomainError } from '@ember/domain';
-import type { B1AssistantTurnRepository, B1ConversationRepository } from '@ember/postgres';
-import { Hono } from 'hono';
+import type {
+  B1AssistantTurnRepository,
+  B1ConversationRepository,
+  B1TaskReadRepository,
+  B1TaskResultRepository,
+} from '@ember/postgres';
+import { Hono, type MiddlewareHandler } from 'hono';
 import { unconfiguredAgentStore, type AgentStore } from './agents/agent-store.js';
 import { AGENTS_PATH } from './agents/constants.js';
 import { createAgentRoutes } from './agents/routes.js';
@@ -42,6 +47,7 @@ import {
 import type { Logger } from './logger.js';
 import { notConfiguredReadiness, type ReadinessCheck } from './readiness.js';
 import { TASKS_PATH } from './tasks/constants.js';
+import { createB1TaskRoutes } from './tasks/b1-task-routes.js';
 import { createTaskRoutes } from './tasks/routes.js';
 import { unconfiguredTaskStore, type TaskStore } from './tasks/task-store.js';
 import { createB1TurnRoutes } from './turns/turn-routes.js';
@@ -93,6 +99,10 @@ export interface AppDependencies {
   >;
   /** Turn read/cancel runtime for the session-authenticated B1 Turn routes. */
   readonly b1AssistantTurnRepository?: Pick<B1AssistantTurnRepository, 'getTurn' | 'cancelTurn'>;
+  /** B1 session-authenticated Task result reader (`GET /v1/tasks/:taskId/result`). */
+  readonly b1TaskResultRepository?: B1TaskResultRepository;
+  /** B1 session-authenticated Task list/detail reader (`GET /v1/me/tasks*`). */
+  readonly b1TaskReadRepository?: B1TaskReadRepository;
 }
 
 /**
@@ -172,10 +182,34 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
   // endpoint exactly, while `use(path + '/*')` matches parameterised routes below it.
   // Registering only the wildcard would leave `POST /v1/agents` and `POST /v1/tasks`
   // unauthenticated.
+  const b1TaskDeps =
+    deps.b1Session !== undefined &&
+    deps.b1TaskResultRepository !== undefined &&
+    deps.b1TaskReadRepository !== undefined
+      ? {
+          session: deps.b1Session.service,
+          taskResults: deps.b1TaskResultRepository,
+          taskReads: deps.b1TaskReadRepository,
+          logger,
+        }
+      : null;
+
   app.use(AGENTS_PATH, tenantAuth);
   app.use(`${AGENTS_PATH}/*`, tenantAuth);
   app.use(TASKS_PATH, tenantAuth);
-  app.use(`${TASKS_PATH}/*`, tenantAuth);
+  const tasksWildcardAuth: MiddlewareHandler<AppBindings> = async (c, next) => {
+    if (
+      b1TaskDeps !== null &&
+      c.req.method === 'GET' &&
+      /^\/v1\/tasks\/[^/]+\/result$/.test(c.req.path)
+    ) {
+      await next();
+      return;
+    }
+
+    return tenantAuth(c, next);
+  };
+  app.use(`${TASKS_PATH}/*`, tasksWildcardAuth);
   app.use('/v1/artifacts', tenantAuth);
   app.use('/v1/artifacts/*', tenantAuth);
   app.use(APPROVALS_PATH, tenantAuth);
@@ -231,6 +265,10 @@ export function createApp(deps: AppDependencies = {}): Hono<AppBindings> {
         logger,
       }),
     );
+  }
+
+  if (b1TaskDeps !== null) {
+    app.route('/v1', createB1TaskRoutes(b1TaskDeps));
   }
 
   // Unknown routes use the same `ErrorResponse` vocabulary as every other failure, so a

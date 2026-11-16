@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -503,5 +503,113 @@ describe('PostgreSQL migrations (real database)', () => {
 
     expect(outcomes.filter(Boolean)).toHaveLength(1);
     expect(outcomes.filter((accepted) => !accepted)).toHaveLength(31);
+  });
+
+  it('preserves deployed 0020 checksum and backfills principal_id via forward migration 0022', async () => {
+    await withFreshSchema(async (isolatedPool) => {
+      const prePrincipalNames = (await readdir(migrationsDir))
+        .filter((name) => name.endsWith('.sql') && !name.startsWith('0022_'))
+        .sort();
+      const stage0020Dir = await stageMigrations(prePrincipalNames);
+
+      const tenantId = randomUUID();
+      const principalId = randomUUID();
+      const consumerId = randomUUID();
+      const agentId = randomUUID();
+      const taskId = randomUUID();
+      const runId = randomUUID();
+      const operationId = randomUUID();
+
+      try {
+        await runMigrations(isolatedPool, stage0020Dir);
+
+        const checksum0020 = await isolatedPool.query<{ readonly checksum: string }>(
+          "SELECT checksum FROM schema_migrations WHERE id = '0020'",
+        );
+        expect(checksum0020.rows[0]?.checksum).toBe(
+          '9a319ab1225d8bd827b1d56e6a2529912e8eeec41ec884f1dd40bc7a9328ce4d',
+        );
+
+        const colBefore = await isolatedPool.query<{ readonly count: string }>(
+          `SELECT count(*)::text AS count
+             FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = 'task_model_attempts'
+              AND column_name = 'principal_id'`,
+        );
+        expect(colBefore.rows[0]?.count).toBe('0');
+
+        await isolatedPool.query('INSERT INTO tenants (id, name) VALUES ($1, $2)', [
+          tenantId,
+          'staging compat tenant',
+        ]);
+        await isolatedPool.query(
+          "INSERT INTO principals (id, tenant_id, role) VALUES ($1, $2, 'owner')",
+          [principalId, tenantId],
+        );
+        await isolatedPool.query(
+          'INSERT INTO consumers (id, tenant_id, principal_id) VALUES ($1, $2, $3)',
+          [consumerId, tenantId, principalId],
+        );
+        await isolatedPool.query(
+          'INSERT INTO agents (id, tenant_id, name, policy_version) VALUES ($1, $2, $3, 1)',
+          [agentId, tenantId, 'staging compat agent'],
+        );
+        await isolatedPool.query(
+          `INSERT INTO tasks (id, tenant_id, agent_id, kind, input, digest, idempotency_key, status)
+           VALUES ($1, $2, $3, 'notes.action_items', '{"notes":"- Alice: ship"}'::jsonb, $4, $5, 'completed')`,
+          [taskId, tenantId, agentId, 'a'.repeat(64), `compat-${taskId}`],
+        );
+        await isolatedPool.query(
+          `INSERT INTO runs (id, tenant_id, task_id, attempt, lease_epoch, status, worker_id, started_at, finished_at)
+           VALUES ($1, $2, $3, 1, 1, 'succeeded', 'w-1', now(), now())`,
+          [runId, tenantId, taskId],
+        );
+        await isolatedPool.query(
+          `INSERT INTO task_model_attempts (
+             tenant_id, task_id, run_id, lease_epoch, attempt_no, operation_id,
+             utc_day, provider_id, model_label, rate_version, state, outcome_code,
+             reserved_micro_usd, applied_cost_micro_usd, observed_cost_micro_usd,
+             input_tokens, output_tokens, billing_basis, overage_micro_usd,
+             send_started_at, settled_at
+           ) VALUES (
+             $1, $2, $3, 1, 1, $4,
+             '2026-11-16', 'openrouter', 'nvidia/nemotron-3.5-lightning', 'v1', 'settled', 'ok',
+             50, 20, 20,
+             10, 10, 'provider_usage', 0,
+             now(), now()
+           )`,
+          [tenantId, taskId, runId, operationId],
+        );
+      } finally {
+        await rm(stage0020Dir, { recursive: true, force: true });
+      }
+
+      const upgrade = await runMigrations(isolatedPool, migrationsDir);
+      expect(upgrade.applied.map((m) => m.id)).toEqual(['0022']);
+
+      const backfilled = await isolatedPool.query<{ readonly principal_id: string }>(
+        'SELECT principal_id FROM task_model_attempts WHERE tenant_id = $1 AND task_id = $2',
+        [tenantId, taskId],
+      );
+      expect(backfilled.rows[0]?.principal_id).toBe(principalId);
+
+      const colAfter = await isolatedPool.query<{ readonly is_nullable: string }>(
+        `SELECT is_nullable
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name = 'task_model_attempts'
+            AND column_name = 'principal_id'`,
+      );
+      expect(colAfter.rows[0]?.is_nullable).toBe('NO');
+
+      const constraint = await isolatedPool.query<{ readonly conname: string }>(
+        `SELECT conname
+           FROM pg_constraint
+          WHERE conrelid = 'task_model_attempts'::regclass
+            AND conname = 'task_model_attempts_principal_fk'`,
+      );
+      expect(constraint.rows).toHaveLength(1);
+    });
   });
 });

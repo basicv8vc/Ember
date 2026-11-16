@@ -8,8 +8,6 @@ import {
 } from '@ember/contracts';
 import {
   DomainError,
-  isTerminalTaskStatus,
-  transitionTask,
   type AuthContext,
   type Id,
   type TaskCommand,
@@ -20,8 +18,13 @@ import {
 } from '@ember/domain';
 import type pg from 'pg';
 import { prepareTaskCommand, type PreparedTaskCommand } from '../task-digest.js';
-import { appendTaskEvent } from './event-store.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
+import { cancelTaskInTransaction, type TaskCancelOutcome } from './task-cancellation.js';
+import {
+  parseListEventOptions,
+  queryTaskEvents,
+  type ListEventOptions,
+} from './task-event-queries.js';
 
 interface TaskRow {
   id: string;
@@ -39,15 +42,6 @@ interface TaskRow {
   digest: string;
 }
 
-interface TaskEventRow {
-  task_id: string;
-  sequence: number;
-  phase: string;
-  occurred_at: Date | string;
-  trace_id: string;
-  payload: unknown;
-}
-
 const TASK_COLUMNS = `
   id, tenant_id, agent_id, kind, status, current_run_id, attempt_count,
   accepted_at, created_at, updated_at, deadline_at, cancel_requested_at, digest
@@ -55,9 +49,9 @@ const TASK_COLUMNS = `
 
 const INSERT_TASK_SQL = `
 INSERT INTO tasks (
-  id, tenant_id, agent_id, kind, input, digest, idempotency_key, deadline_at
+  id, tenant_id, agent_id, kind, title, input, digest, idempotency_key, deadline_at
 )
-VALUES ($1, $2, $3, $4, $5::jsonb, $6, $7, $8)
+VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, $8, $9)
 ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 RETURNING ${TASK_COLUMNS}
 `;
@@ -85,120 +79,8 @@ INSERT INTO task_events (id, tenant_id, task_id, sequence, phase, payload, trace
 VALUES ($1, $2, $3, 1, 'accepted', $4::jsonb, $5, now())
 `;
 
-const LIST_EVENTS_SQL = `
-SELECT task_id, sequence, phase, occurred_at, trace_id, payload
-  FROM task_events
- WHERE tenant_id = $1 AND task_id = $2
- ORDER BY sequence ASC
-`;
-
-/**
- * Exclusive-cursor page. `$3` is the last sequence the caller already has, so a polling
- * client can never see the same event twice and never skips one.
- */
-const LIST_EVENT_PAGE_SQL = `
-SELECT task_id, sequence, phase, occurred_at, trace_id, payload
-  FROM task_events
- WHERE tenant_id = $1 AND task_id = $2 AND sequence > $3
- ORDER BY sequence ASC
- LIMIT $4
-`;
-
-/** Hard ceiling for one event read; the HTTP layer asks for less (P0B-07a). */
-const MAX_EVENT_PAGE_SIZE = 1_000;
-
-/** Default page size when a caller asks for a page without a limit. */
-const DEFAULT_EVENT_PAGE_SIZE = 100;
-
-/**
- * Optional paging for `listEvents`.
- *
- * Both bounds are optional so existing callers (worker/tests) keep the unpaged behaviour.
- * `after` is exclusive.
- */
-export interface ListEventOptions {
-  readonly after?: number;
-  readonly limit?: number;
-}
-
-/**
- * Authoritative post-transaction snapshot returned by `PostgresTaskRepository.cancel()`.
- *
- * - `terminal: true` means the Task is already in a terminal state (`cancelled`, `completed`,
- *   or `failed`), so the HTTP API responds `200 OK`.
- * - `terminal: false` means the Task is `running` with `cancel_requested_at` durably recorded,
- *   so the HTTP API responds `202 Accepted` while the active Worker or Reaper converges it.
- */
-export interface TaskCancelOutcome {
-  readonly taskId: Id;
-  readonly status: TaskStatus;
-  readonly cancelRequested: boolean;
-  readonly cancelRequestedAt: string | null;
-  readonly terminal: boolean;
-  readonly updatedAt: string;
-}
-
-function parseListEventOptions(options: ListEventOptions): {
-  readonly after: number;
-  readonly limit: number;
-} {
-  const after = options.after ?? 0;
-  const limit = options.limit ?? DEFAULT_EVENT_PAGE_SIZE;
-
-  if (!Number.isSafeInteger(after) || after < 0) {
-    throw new DomainError('INVALID_ARGUMENT', 'event cursor must be a non-negative integer');
-  }
-
-  if (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_EVENT_PAGE_SIZE) {
-    throw new DomainError('INVALID_ARGUMENT', 'event page limit is out of range');
-  }
-
-  return { after, limit };
-}
-
-const LOCK_TASK_FOR_CANCEL_SQL = `
-SELECT ${TASK_COLUMNS}
-  FROM tasks
- WHERE tenant_id = $1 AND id = $2
- FOR UPDATE
-`;
-
-const RECORD_RUNNING_CANCEL_SQL = `
-UPDATE tasks
-   SET cancel_requested_at = COALESCE(cancel_requested_at, $1),
-       updated_at = CASE WHEN cancel_requested_at IS NULL THEN $1 ELSE updated_at END
- WHERE tenant_id = $2 AND id = $3 AND status = 'running'
-RETURNING ${TASK_COLUMNS}
-`;
-
-const CANCEL_OPEN_TASK_SQL = `
-UPDATE tasks
-   SET status = $1,
-       cancel_requested_at = COALESCE(cancel_requested_at, $2),
-       lease_expires_at = NULL,
-       updated_at = $3
- WHERE tenant_id = $4 AND id = $5
-RETURNING ${TASK_COLUMNS}
-`;
-
-const EXPIRE_PENDING_APPROVALS_ON_CANCEL_SQL = `
-UPDATE approvals
-   SET status = 'expired',
-       decided_at = $3,
-       updated_at = $3
- WHERE tenant_id = $1 AND task_id = $2 AND status = 'pending'
-`;
-
-const SWEEP_RESERVED_BUDGET_ON_CANCEL_SQL = `
-UPDATE budget_operations
-   SET state = 'expired',
-       consumed_steps = reserved_steps,
-       consumed_units = reserved_units,
-       consumed_elapsed_ms = reserved_elapsed_ms,
-       consumed_slots = reserved_slots,
-       settled_at = $3
- WHERE tenant_id = $1 AND task_id = $2 AND state = 'reserved'
-`;
+export type { ListEventOptions } from './task-event-queries.js';
+export type { TaskCancelOutcome } from './task-cancellation.js';
 
 const MAX_IDEMPOTENT_INSERT_ATTEMPTS = 3;
 
@@ -243,21 +125,6 @@ function toTaskView(row: TaskRow): TaskView {
     updatedAt: toIsoTimestamp(row.updated_at),
     deadlineAt: row.deadline_at === null ? null : toIsoTimestamp(row.deadline_at),
   };
-}
-
-function toTaskCancelOutcome(row: TaskRow): TaskCancelOutcome {
-  const status = row.status as TaskStatus;
-  const cancelRequestedAt =
-    row.cancel_requested_at === null ? null : toIsoTimestamp(row.cancel_requested_at);
-
-  return Object.freeze({
-    taskId: row.id,
-    status,
-    cancelRequested: cancelRequestedAt !== null || status === 'cancelled',
-    cancelRequestedAt,
-    terminal: isTerminalTaskStatus(status),
-    updatedAt: toIsoTimestamp(row.updated_at),
-  });
 }
 
 /**
@@ -333,35 +200,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
     const page = options === undefined ? undefined : parseListEventOptions(options);
 
     try {
-      const result =
-        page === undefined
-          ? await this.pool.query<TaskEventRow>(LIST_EVENTS_SQL, [
-              validatedContext.tenantId,
-              validatedTaskId,
-            ])
-          : await this.pool.query<TaskEventRow>(LIST_EVENT_PAGE_SQL, [
-              validatedContext.tenantId,
-              validatedTaskId,
-              page.after,
-              page.limit,
-            ]);
-
-      return result.rows.map((row) => {
-        const parsed = TaskEventSchema.safeParse({
-          taskId: row.task_id,
-          sequence: row.sequence,
-          phase: row.phase,
-          occurredAt: toIsoTimestamp(row.occurred_at),
-          traceId: row.trace_id,
-          payload: row.payload,
-        });
-
-        if (!parsed.success) {
-          throw new DomainError('DB_UNAVAILABLE', 'persisted task event failed its contract');
-        }
-
-        return parsed.data;
-      });
+      return await queryTaskEvents(this.pool, validatedContext.tenantId, validatedTaskId, page);
     } catch (error) {
       throw asDomainError(error);
     }
@@ -385,86 +224,17 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
 
     try {
       return await withTransaction(this.pool, async (client) => {
-        const locked = await client.query<TaskRow>(LOCK_TASK_FOR_CANCEL_SQL, [
+        const outcome = await cancelTaskInTransaction(
+          client,
           validatedContext.tenantId,
           validatedTaskId,
-        ]);
-        const task = locked.rows[0];
+        );
 
-        if (task === undefined) {
+        if (outcome === null) {
           throw new DomainError('NOT_FOUND', 'task is not visible in this tenant');
         }
 
-        const status = task.status as TaskStatus;
-
-        if (isTerminalTaskStatus(status)) {
-          return toTaskCancelOutcome(task);
-        }
-
-        const nowResult = await client.query<{ now: Date }>('SELECT now() AS now');
-        const now = nowResult.rows[0]?.now;
-
-        if (now === undefined) {
-          throw new DomainError('DB_UNAVAILABLE', 'could not read the database clock');
-        }
-
-        if (status === 'running') {
-          // Keep `running`; the currently leased Run or the Reaper resolves it. This is a
-          // monotonic write-once intent, so a repeat does not change timestamps or events.
-          const runningResult = await client.query<TaskRow>(RECORD_RUNNING_CANCEL_SQL, [
-            now,
-            validatedContext.tenantId,
-            validatedTaskId,
-          ]);
-          const runningRow = runningResult.rows[0];
-
-          if (runningRow === undefined) {
-            throw new DomainError('DB_UNAVAILABLE', 'could not record cancellation intent');
-          }
-
-          return toTaskCancelOutcome(runningRow);
-        }
-
-        const nextStatus = transitionTask(status, 'cancelled');
-        const updated = await client.query<TaskRow>(CANCEL_OPEN_TASK_SQL, [
-          nextStatus,
-          now,
-          now,
-          validatedContext.tenantId,
-          validatedTaskId,
-        ]);
-        const cancelledRow = updated.rows[0];
-
-        if (updated.rowCount !== 1 || cancelledRow === undefined) {
-          throw new DomainError('DB_UNAVAILABLE', 'could not apply cancellation to the task');
-        }
-
-        if (status === 'waiting_approval') {
-          await client.query(EXPIRE_PENDING_APPROVALS_ON_CANCEL_SQL, [
-            validatedContext.tenantId,
-            validatedTaskId,
-            now,
-          ]);
-          await client.query(SWEEP_RESERVED_BUDGET_ON_CANCEL_SQL, [
-            validatedContext.tenantId,
-            validatedTaskId,
-            now,
-          ]);
-        }
-
-        await appendTaskEvent(client, {
-          tenantId: validatedContext.tenantId,
-          taskId: validatedTaskId,
-          phase: 'cancelled',
-          occurredAt: now,
-          payload: {
-            fromStatus: status,
-            toStatus: nextStatus,
-            cancelRequested: true,
-          },
-        });
-
-        return toTaskCancelOutcome(cancelledRow);
+        return outcome;
       });
     } catch (error) {
       throw asDomainError(error);
@@ -488,6 +258,7 @@ export class PostgresTaskRepository implements TaskRepositoryContract {
         ctx.tenantId,
         prepared.command.agentId,
         prepared.command.kind,
+        prepared.command.title ?? null,
         JSON.stringify(prepared.command.input),
         prepared.digest,
         prepared.command.idempotencyKey,

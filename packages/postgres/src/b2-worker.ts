@@ -1,12 +1,39 @@
 /**
- * Narrow Postgres entry point for the Cloudflare Assistant Turn runtime. It excludes Node-only
- * migration, filesystem, task, artifact and CLI modules from the Worker bundle.
+ * Narrow Postgres entry point for the Cloudflare Assistant Turn & Notes Task runtime. It excludes
+ * Node-only migration, filesystem, artifact and CLI modules from the Worker bundle.
  */
+export { systemClock, parseNow, type Clock } from './lease-queue/clock.js';
+export {
+  resolveLeaseQueueConfig,
+  type LeaseQueueConfig,
+  type LeaseQueueConfigOverrides,
+  type RetryPolicyConfig,
+} from './lease-queue/config.js';
+export {
+  PostgresLeaseQueue,
+  type PostgresLeaseQueueOptions,
+  type TaskClaimOutcome,
+} from './lease-queue/postgres-lease-queue.js';
 export { PostgresModelTurnExecutionRepository } from './repositories/b2-model-turn-execution-repository.js';
 export {
+  PostgresNotesTaskExecutionRepository,
+  type NotesAttemptCharge,
+  type NotesAttemptReservation,
+  type NotesCommitCompletionCommand,
+  type NotesCommitResult,
+  type NotesReserveAttemptCommand,
+  type NotesReserveOutcome,
+} from './repositories/notes-task-execution-repository.js';
+export { PostgresRunExecutionContextReader } from './repositories/run-execution-context-reader.js';
+export {
+  getOpenNotesTaskStatus,
   insertB1TurnDispatchOutbox,
+  listDueNotesTaskDispatches,
+  parseB1TaskDispatchEnvelope,
   parseB1TurnDispatchEnvelope,
   PostgresB1TurnDispatchOutboxRepository,
+  type B1TaskDispatchEnvelope,
+  type B1TaskDispatchTarget,
   type B1TurnDispatchEnvelope,
   type B1TurnDispatchEvent,
   type B1TurnDispatchStatus,

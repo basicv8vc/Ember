@@ -4,9 +4,13 @@ import type {
   B1MessageSubmissionReconciliationDto,
   B1SendMessageRequest,
   B1SendMessageReceipt,
+  B1TaskCancelDto,
+  B1TaskDetailDto,
+  B1TaskEventPageDto,
+  B1TaskListDto,
   B1TaskResultDto,
 } from '@ember/contracts';
-import type { Id } from '@ember/domain';
+import type { Id, TaskStatus } from '@ember/domain';
 
 /**
  * B1-1 persistence boundaries. No implementation uses network auth or model egress.
@@ -184,4 +188,21 @@ export interface B1AssistantTurnRepository {
 export interface B1TaskResultRepository {
   /** Read joins authoritative Task status; terminal tasks must never appear pending. */
   getTaskResult(tenantId: Id, taskId: Id): Promise<B1TaskResultDto | null>;
+}
+
+export interface B1TaskListQuery {
+  readonly status?: TaskStatus;
+  readonly limit?: number;
+  readonly after?: string;
+}
+
+export interface B1TaskReadRepository {
+  /** Tenant-scoped keyset-paginated list of Tasks sorted newest-first. */
+  listTasks(tenantId: Id, query?: B1TaskListQuery): Promise<B1TaskListDto>;
+  /** Tenant-scoped detail read returning the canonical Task summary DTO. */
+  getTaskDetail(tenantId: Id, taskId: Id): Promise<B1TaskDetailDto | null>;
+  /** Tenant-scoped exclusive-sequence page of durable `task_events`. */
+  listTaskEvents(tenantId: Id, taskId: Id, after?: number): Promise<B1TaskEventPageDto | null>;
+  /** Tenant-scoped transactional Task cancellation following ADR-0001 convergence rules. */
+  cancelTask(tenantId: Id, taskId: Id): Promise<B1TaskCancelDto | null>;
 }

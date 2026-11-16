@@ -1,19 +1,32 @@
 import { randomUUID } from 'node:crypto';
+import { getOpenNotesTaskStatus, listDueNotesTaskDispatches } from '@ember/postgres/b2-worker';
 import { Pool } from 'pg';
 import {
   TURN_DISPATCH_DLQ_NAME,
   TURN_DISPATCH_QUEUE_NAME,
   TURN_OUTBOX_BATCH_SIZE,
   TURN_OUTBOX_PUBLISH_LEASE_MS,
+  consumeTaskDispatchMessage,
   consumeTurnDispatchMessage,
+  parseB1TaskDispatchEnvelope,
   parseB1TurnDispatchEnvelope,
   recoverDeadLetter,
+  recoverTaskDeadLetter,
   type TurnDispatchLogger,
   type TurnDispatchQueueMessage,
 } from './dispatch.js';
-import { resolveCloudRuntimeModelConfig } from './config.js';
-import { publishDueTurnDispatches, type TurnDispatchQueuePort } from './relay.js';
-import { createTurnDispatchOutbox, createTurnExecutor } from './runtime.js';
+import { isCloudModelTenantAuthorized, resolveCloudRuntimeModelConfig } from './config.js';
+import {
+  publishDueNotesTaskDispatches,
+  publishDueTurnDispatches,
+  type TurnDispatchQueuePort,
+} from './relay.js';
+import {
+  createNotesTaskExecutor,
+  createNotesTaskLeaseQueue,
+  createTurnDispatchOutbox,
+  createTurnExecutor,
+} from './runtime.js';
 
 interface HyperdriveBinding {
   readonly connectionString: string;
@@ -93,9 +106,17 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
     if (batch.queue === dispatchDlqName) {
       for (const message of batch.messages) {
         try {
-          await recoverDeadLetter(message, outbox, logger);
+          if (parseB1TaskDispatchEnvelope(message.body) !== null) {
+            await recoverTaskDeadLetter(
+              message,
+              (tenantId, taskId) => getOpenNotesTaskStatus(pool, tenantId, taskId),
+              logger,
+            );
+          } else {
+            await recoverDeadLetter(message, outbox, logger);
+          }
         } catch {
-          logger.warn('Assistant Turn DLQ reconciliation failed', {
+          logger.warn('Cloud runtime DLQ reconciliation failed', {
             category: 'database_unavailable',
           });
           message.retry({ delaySeconds: 30 });
@@ -106,7 +127,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
 
     if (batch.queue !== dispatchQueueName) {
       for (const message of batch.messages) {
-        logger.warn('discarded Assistant Turn message from an unexpected Queue', {
+        logger.warn('discarded dispatch message from an unexpected Queue', {
           category: 'unexpected_queue',
         });
         message.ack();
@@ -117,36 +138,57 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
     // This purpose is selected by the trusted Cloud Runtime callsite, never by Worker env or Queue data.
     const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
     if (model.kind === 'refused') {
-      logger.warn('Assistant Turn model execution refused by runtime configuration', {
+      logger.warn('Cloud runtime model execution refused by runtime configuration', {
         category: model.reason,
       });
     }
 
+    const leaseQueue = createNotesTaskLeaseQueue(pool, model);
+
     for (const message of batch.messages) {
       try {
-        // Resolve by the event ID in PostgreSQL before creating an executor. A queue body never
-        // supplies transcript text, a provider URL, budget or authority-bearing conversation ID.
-        const envelope = parseB1TurnDispatchEnvelope(message.body);
-        if (envelope === null) {
-          await consumeTurnDispatchMessage(message, { outbox, executor: null, logger });
+        // Resolve by PostgreSQL state before creating an executor. A queue body never supplies
+        // transcript text, notes text, provider URLs, budget or authority-bearing fields.
+        const turnEnvelope = parseB1TurnDispatchEnvelope(message.body);
+        if (turnEnvelope !== null) {
+          const event = await outbox.getEvent(turnEnvelope.eventId);
+          const executor =
+            event === null || event.status !== 'running'
+              ? null
+              : await createTurnExecutor({
+                  pool,
+                  model,
+                  event,
+                  workerId: runtimeWorkerId(),
+                  queue: env.TURN_DISPATCH_QUEUE,
+                });
+          await consumeTurnDispatchMessage(message, { outbox, executor, logger });
           continue;
         }
 
-        const event = await outbox.getEvent(envelope.eventId);
-        const executor =
-          event === null || event.status !== 'running'
-            ? null
-            : await createTurnExecutor({
-                pool,
-                model,
-                event,
-                workerId: runtimeWorkerId(),
-              });
-        await consumeTurnDispatchMessage(message, { outbox, executor, logger });
+        const taskEnvelope = parseB1TaskDispatchEnvelope(message.body);
+        if (taskEnvelope !== null) {
+          const handler = await createNotesTaskExecutor({
+            pool,
+            model,
+            tenantId: taskEnvelope.tenantId,
+            leaseQueue,
+          });
+          await consumeTaskDispatchMessage(message, {
+            leaseQueue,
+            workerId: runtimeWorkerId(),
+            handler,
+            logger,
+            heartbeatIntervalMs: leaseQueue.configuration.heartbeatIntervalMs,
+          });
+          continue;
+        }
+
+        await consumeTurnDispatchMessage(message, { outbox, executor: null, logger });
       } catch {
-        // Queue redelivery and the PostgreSQL outbox are both durable recovery paths. Do not ACK
+        // Queue redelivery and PostgreSQL reconciliation are both durable recovery paths. Do not ACK
         // an unexpected database/provider exception.
-        logger.warn('Assistant Turn Queue delivery failed', {
+        logger.warn('Cloud runtime Queue delivery failed', {
           category: 'runtime_failure',
         });
         message.retry({ delaySeconds: Math.min(300, 2 ** Math.min(message.attempts, 8)) });
@@ -162,7 +204,7 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
   const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
   if (model.kind !== 'enabled') {
     if (model.kind === 'refused') {
-      logger.warn('Assistant Turn outbox relay is paused by runtime configuration', {
+      logger.warn('Cloud runtime relay is paused by runtime configuration', {
         category: model.reason,
       });
     }
@@ -173,9 +215,10 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
 
   const pool = createPool(env);
   const outbox = createTurnDispatchOutbox(pool);
+  const leaseQueue = createNotesTaskLeaseQueue(pool, model);
 
   try {
-    const result = await publishDueTurnDispatches({
+    const turnResult = await publishDueTurnDispatches({
       outbox,
       queue: env.TURN_DISPATCH_QUEUE,
       workerId: runtimeWorkerId(),
@@ -183,10 +226,27 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
       limit: TURN_OUTBOX_BATCH_SIZE,
       leaseMs: TURN_OUTBOX_PUBLISH_LEASE_MS,
     });
-    if (result.failed > 0) {
+    if (turnResult.failed > 0) {
       console.warn('Assistant Turn outbox relay had publication failures', {
-        claimed: result.claimed,
-        failed: result.failed,
+        claimed: turnResult.claimed,
+        failed: turnResult.failed,
+      });
+    }
+
+    const notesResult = await publishDueNotesTaskDispatches({
+      relay: {
+        reapExpired: (now) => leaseQueue.reapExpired(now),
+        listDueNotesTasks: (limit) => listDueNotesTaskDispatches(pool, limit),
+      },
+      queue: env.TURN_DISPATCH_QUEUE,
+      isAuthorizedTenant: (tenantId) => isCloudModelTenantAuthorized(model, tenantId),
+      logger,
+      limit: TURN_OUTBOX_BATCH_SIZE,
+    });
+    if (notesResult.failed > 0) {
+      console.warn('Notes Task reconciliation relay had publication failures', {
+        examined: notesResult.examined,
+        failed: notesResult.failed,
       });
     }
   } finally {

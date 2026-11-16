@@ -13,6 +13,7 @@ import {
   PostgresConsentRepository,
   PostgresLeaseQueue,
   PostgresModelTurnExecutionRepository,
+  PostgresNotesTaskExecutionRepository,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
   PostgresWorkspaceStore,
@@ -21,7 +22,7 @@ import {
   loadDatabaseConfig,
   systemClock,
 } from '@ember/postgres';
-import { createModelGateway } from '@ember/model-gateway';
+import { MODEL_LIMITS, createModelGateway, type ModelGateway } from '@ember/model-gateway';
 import {
   CommitmentOrchestrator,
   createDefaultSentinelPolicy,
@@ -44,6 +45,7 @@ import { startCommitmentScheduler } from './commitment-scheduler-runtime.js';
 import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
+import { createNotesTaskHandler } from './notes-task-handler.js';
 import { createFakeTurnResponder, type FakeTurnResponderRunner } from './b1/fake-turn-responder.js';
 import {
   createModelTurnResponder,
@@ -90,8 +92,13 @@ async function main(): Promise<void> {
 
   // Claim eligibility is derived from the handler's own capability list, so the worker can
   // never claim a Task kind it has no deterministic branch for.
-  const claimableKinds =
+  const baseClaimableKinds =
     config.mode === 'poll' && config.blobRoot !== null ? DURABLE_TASK_KINDS : EXECUTABLE_TASK_KINDS;
+  const modelEnabled = config.model.ok && config.model.mode !== 'disabled';
+  const claimableKinds =
+    config.mode === 'poll' && modelEnabled
+      ? ([...baseClaimableKinds, 'notes.action_items'] as const)
+      : baseClaimableKinds;
   const queue = new PostgresLeaseQueue(pool, {
     ...config.lease,
     clock: systemClock,
@@ -159,6 +166,7 @@ async function main(): Promise<void> {
   let reaperLoop: Promise<void> | undefined;
   let fakeTurnRunner: FakeTurnResponderRunner | undefined;
   let modelTurnRunner: ModelTurnResponderRunner | undefined;
+  let modelGateway: ModelGateway | undefined;
   try {
     if (config.b1FakeResponderEnabled) {
       fakeTurnRunner = createFakeTurnResponder({
@@ -173,12 +181,12 @@ async function main(): Promise<void> {
     // pinned adapter, which itself refuses to be constructed without an approved model and rate.
     if (config.model.ok && config.model.mode !== 'disabled') {
       const mode = config.model.mode;
-      const gateway = createModelGateway(config.model);
+      modelGateway = createModelGateway(config.model);
 
       modelTurnRunner = createModelTurnResponder({
         mode,
         repository: new PostgresModelTurnExecutionRepository(pool),
-        gateway,
+        gateway: modelGateway,
         workerId: config.workerId,
         leaseMs: config.model.settings.leaseMs,
         ceilings: config.model.settings.ceilings,
@@ -348,10 +356,31 @@ async function main(): Promise<void> {
       logger,
     });
 
+    const notesHandler =
+      modelGateway !== undefined && config.model.ok && config.model.mode !== 'disabled'
+        ? createNotesTaskHandler({
+            mode: config.model.mode,
+            contextReader,
+            router,
+            repository: new PostgresNotesTaskExecutionRepository(pool),
+            gateway: modelGateway,
+            policy: config.lease,
+            ceilings: config.model.settings.ceilings,
+            maxAttemptsPerTask: MODEL_LIMITS.maxModelAttemptsPerTask,
+            maxTaskCostMicroUsd: MODEL_LIMITS.maxModelCostPerTaskMicroUsd,
+            attemptTimeoutMs: config.model.settings.attemptTimeoutMs,
+            rate: config.model.mode === 'real' ? config.model.rate : null,
+            clock: systemClock,
+            logger,
+            sentinelPolicy,
+          })
+        : undefined;
+
     const handler = createCommitmentRouteAwareRunHandler({
       contextReader,
       clock: systemClock,
       commitmentHandler,
+      ...(notesHandler === undefined ? {} : { notesHandler }),
       defaultHandler,
       logger,
     });

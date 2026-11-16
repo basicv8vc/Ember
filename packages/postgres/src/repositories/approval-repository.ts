@@ -27,6 +27,7 @@ import { parseLeaseEpoch, parsePersistedTimestamp } from '../lease-queue/validat
 import { postLockInstant } from '../storage/result-committer.js';
 import { appendTaskEvent } from './event-store.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
+import { finalizeTaskTerminalEffects } from './task-terminal-effects.js';
 
 export interface PostgresApprovalRepositoryOptions {
   readonly clock?: Clock;
@@ -391,6 +392,12 @@ export class PostgresApprovalRepository implements ApprovalRepository {
               cancelRequested: true,
             },
           });
+          await finalizeTaskTerminalEffects(client, {
+            tenantId: scoped.tenantId,
+            taskId: task.id,
+            status: 'cancelled',
+            occurredAt: now,
+          });
         }
 
         return {
@@ -437,6 +444,12 @@ export class PostgresApprovalRepository implements ApprovalRepository {
             errorCode: 'DEADLINE_EXCEEDED',
           },
         });
+        await finalizeTaskTerminalEffects(client, {
+          tenantId: scoped.tenantId,
+          taskId: task.id,
+          status: 'failed',
+          occurredAt: now,
+        });
 
         return {
           outcome: 'refused',
@@ -470,6 +483,12 @@ export class PostgresApprovalRepository implements ApprovalRepository {
             toStatus: 'failed',
             errorCode: 'EXECUTION_TIMEOUT',
           },
+        });
+        await finalizeTaskTerminalEffects(client, {
+          tenantId: scoped.tenantId,
+          taskId: task.id,
+          status: 'failed',
+          occurredAt: now,
         });
 
         return {
@@ -532,6 +551,12 @@ export class PostgresApprovalRepository implements ApprovalRepository {
             errorCode: 'POLICY_DENIED',
             policyVersion: scoped.policyVersion,
           },
+        });
+        await finalizeTaskTerminalEffects(client, {
+          tenantId: scoped.tenantId,
+          taskId: task.id,
+          status: 'failed',
+          occurredAt: now,
         });
       }
 

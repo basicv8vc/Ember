@@ -75,7 +75,7 @@ class UsageGateway implements ModelGateway {
   readonly providerId = 'openai' as const;
   readonly modelLabel = MODEL_LABEL;
   readonly simulated = false;
-  readonly operations = ['conversation.turn'] as const;
+  readonly operations = ['conversation.turn', 'task.notes_action_items'] as const;
 
   calls = 0;
 
@@ -88,7 +88,11 @@ class UsageGateway implements ModelGateway {
     this.calls += 1;
 
     return Promise.resolve({
-      output: { text: 'a reply with an uncertain bill', finishReason: 'stop' as const },
+      output: {
+        kind: 'reply',
+        text: 'a reply with an uncertain bill',
+        finishReason: 'stop' as const,
+      },
       modelLabel: MODEL_LABEL,
       simulated: false as const,
       usage:
@@ -101,6 +105,10 @@ class UsageGateway implements ModelGateway {
               rateVersion: RATE.rateVersion,
             },
     });
+  }
+
+  extractNotesActionItems(): Promise<never> {
+    return Promise.reject(new Error('extractNotesActionItems unused in b2-budget-safety test'));
   }
 }
 

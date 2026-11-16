@@ -8,7 +8,7 @@ private struct MockReceiptPresentation: Identifiable {
 
 @MainActor
 enum AppCompositionRoot {
-    static let defaultCloudBaseURL = "https://ember-cloud-api-staging.10kpaper.workers.dev"
+    static let defaultCloudBaseURL = "https://ember-api.slowfast.dev"
 
     private static let mockLaunchArguments: Set<String> = [
         "--ember-mock-demo",

@@ -10,7 +10,7 @@ final class FoundationSmokeTests: XCTestCase {
     func testDefaultCloudBaseURLUsesHTTPSStagingEndpoint() {
         XCTAssertEqual(
             AppCompositionRoot.defaultCloudBaseURL,
-            "https://ember-cloud-api-staging.10kpaper.workers.dev"
+            "https://ember-api.slowfast.dev"
         )
         XCTAssertEqual(URL(string: AppCompositionRoot.defaultCloudBaseURL)?.scheme, "https")
     }

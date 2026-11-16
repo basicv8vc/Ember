@@ -179,6 +179,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
             workerId: runtimeWorkerId(),
             handler,
             logger,
+            heartbeatIntervalMs: leaseQueue.configuration.heartbeatIntervalMs,
           });
           continue;
         }

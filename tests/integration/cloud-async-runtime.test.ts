@@ -4,6 +4,7 @@ import {
   DELEGATE_NOTES_TOOL_NAME,
   FAKE_MODEL_LABEL,
   FAKE_REPLY_PREFIX,
+  ModelGatewayFailure,
   type ModelGateway,
 } from '@ember/model-gateway';
 import {
@@ -20,6 +21,7 @@ import {
 import { resolveCloudRuntimeModelConfig } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
 import {
+  consumeTaskDispatchMessage,
   consumeTurnDispatchMessage,
   type TurnDispatchQueueMessage,
 } from '../../apps/cloud-async-runtime/src/dispatch.js';
@@ -723,6 +725,453 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
           .catch(() => undefined);
         await outbox.markCompleted(relayFixture.turnId).catch(() => undefined);
       }
+    } finally {
+      await turns
+        .cancelTurn({
+          tenantId: fixture.tenantId,
+          conversationId: fixture.conversationId,
+          turnId: fixture.turnId,
+        })
+        .catch(() => undefined);
+      await outbox.markCompleted(fixture.turnId).catch(() => undefined);
+    }
+  });
+
+  it('renews Notes Task lease across multiple LLM attempts exceeding initial TTL and enforces fencing', async () => {
+    const fixture = await createFixture();
+    const sent: unknown[] = [];
+    const env = cloudRuntimeEnv(sent);
+
+    const delegatingGateway: ModelGateway = {
+      providerId: 'fake',
+      modelLabel: FAKE_MODEL_LABEL,
+      simulated: true,
+      operations: ['conversation.turn', 'task.notes_action_items'],
+      generateConversationTurn() {
+        return Promise.resolve({
+          output: {
+            kind: 'delegate' as const,
+            toolName: DELEGATE_NOTES_TOOL_NAME,
+            text: 'Delegating slow multi-call notes task.',
+            finishReason: 'stop' as const,
+            delegation: {
+              toolName: DELEGATE_NOTES_TOOL_NAME,
+              arguments: {
+                title: 'Slow Notes Task',
+                notes: '- Alice: renew lease across multiple model calls',
+              },
+            },
+          },
+          modelLabel: FAKE_MODEL_LABEL,
+          simulated: true,
+          usage: {
+            inputTokens: 10,
+            outputTokens: 12,
+            costMicroUsd: 0,
+            rateVersion: 'fake-zero-cost',
+          },
+        });
+      },
+      extractNotesActionItems() {
+        return Promise.reject(new Error('not used during turn delegation'));
+      },
+    };
+
+    try {
+      const event = await outbox.getEvent(fixture.turnId);
+      if (event === null) throw new Error('outbox event was not found');
+      const turnExecutor = await createTurnExecutor({
+        pool: db.pool,
+        model,
+        event,
+        workerId: 'cloud-runtime-notes-hb-turn',
+        queue: env.TURN_DISPATCH_QUEUE,
+        gateway: delegatingGateway,
+      });
+      await turnExecutor!.processTurn(event);
+      await outbox.markCompleted(fixture.turnId);
+
+      const taskEnvelope = sent[0] as {
+        readonly schemaVersion: number;
+        readonly kind: string;
+        readonly tenantId: string;
+        readonly taskId: string;
+      };
+      expect(taskEnvelope.kind).toBe('task');
+      const taskId = taskEnvelope.taskId;
+
+      const shortLeaseModel = resolveCloudRuntimeModelConfig(
+        {
+          EMBER_ENV: 'staging',
+          NODE_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'real',
+          EMBER_MODEL_PROVIDER: 'openrouter',
+          EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
+          EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
+          EMBER_MODEL_TURN_LEASE_MS: '1000',
+          EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+          EMBER_MODEL_ALPHA_TENANT_IDS: fixture.tenantId,
+        },
+        'staging_alpha',
+        new Date('2026-11-13T12:00:00.000Z'),
+      );
+      expect(shortLeaseModel.kind).toBe('enabled');
+      if (shortLeaseModel.kind !== 'enabled' || shortLeaseModel.mode !== 'real') {
+        throw new Error(`expected enabled real model config, got ${shortLeaseModel.kind}`);
+      }
+
+      const leaseQueue = createNotesTaskLeaseQueue(db.pool, shortLeaseModel);
+      expect(leaseQueue.configuration.leaseDurationMs).toBe(1_000);
+      expect(leaseQueue.configuration.heartbeatIntervalMs).toBe(333);
+
+      const initialClaimRow = await db.pool.query<{ readonly updated_at: Date }>(
+        'SELECT updated_at FROM tasks WHERE tenant_id = $1 AND id = $2',
+        [fixture.tenantId, taskId],
+      );
+      expect(initialClaimRow.rows).toHaveLength(1);
+
+      let llmAttemptCount = 0;
+      let reapedMidFlight = -1;
+      let leaseExtendedPastInitialTtl = false;
+      let initialLeaseSnapshot: Date | null = null;
+
+      const waitMs = (ms: number, signal: AbortSignal): Promise<void> =>
+        new Promise((resolve, reject) => {
+          if (signal.aborted) {
+            reject(new ModelGatewayFailure('client_cancelled'));
+            return;
+          }
+          const timer = setTimeout(() => {
+            signal.removeEventListener('abort', onAbort);
+            resolve();
+          }, ms);
+          const onAbort = (): void => {
+            clearTimeout(timer);
+            reject(new ModelGatewayFailure('client_cancelled'));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        });
+
+      const slowMultiCallGateway: ModelGateway = {
+        providerId: 'openrouter',
+        modelLabel: 'nvidia/nemotron-3.5-lightning',
+        simulated: false,
+        operations: ['conversation.turn', 'task.notes_action_items'],
+        generateConversationTurn() {
+          return Promise.reject(new Error('not used by notes task handler'));
+        },
+        async extractNotesActionItems(_request, signal) {
+          llmAttemptCount += 1;
+          if (llmAttemptCount === 1) {
+            const firstRow = await db.pool.query<{ readonly lease_expires_at: Date }>(
+              'SELECT lease_expires_at FROM tasks WHERE tenant_id = $1 AND id = $2',
+              [fixture.tenantId, taskId],
+            );
+            initialLeaseSnapshot = firstRow.rows[0]?.lease_expires_at ?? null;
+            // Hold longer than heartbeatIntervalMs (333ms) and force retry into attempt 2.
+            await waitMs(650, signal);
+            throw new ModelGatewayFailure('model_unavailable', { kind: 'http_5xx', status: 503 });
+          }
+
+          // Total runtime (~1.3s) exceeds initial 1.0s lease TTL; heartbeat keeps lease alive.
+          await waitMs(650, signal);
+          const midRow = await db.pool.query<{ readonly lease_expires_at: Date }>(
+            'SELECT lease_expires_at FROM tasks WHERE tenant_id = $1 AND id = $2',
+            [fixture.tenantId, taskId],
+          );
+          if (
+            initialLeaseSnapshot !== null &&
+            midRow.rows[0]?.lease_expires_at !== undefined &&
+            midRow.rows[0].lease_expires_at.getTime() > initialLeaseSnapshot.getTime()
+          ) {
+            leaseExtendedPastInitialTtl = true;
+          }
+          reapedMidFlight = await leaseQueue.reapExpired(new Date());
+
+          return {
+            output: {
+              actionItems: [
+                {
+                  title: 'Verify lease heartbeat across slow attempts',
+                  owner: 'Alice',
+                  dueHint: null,
+                  priority: 'high' as const,
+                },
+              ],
+              summaryText: '1. [Alice] Verify lease heartbeat across slow attempts',
+              detailText: '- [Alice] Verify lease heartbeat across slow attempts',
+              truncated: false,
+              finishReason: 'stop' as const,
+            },
+            modelLabel: 'nvidia/nemotron-3.5-lightning',
+            simulated: false,
+            usage: {
+              inputTokens: 120,
+              outputTokens: 60,
+              costMicroUsd: 40,
+              rateVersion: shortLeaseModel.resolution.rate.rateVersion,
+            },
+          };
+        },
+      };
+
+      const handler = await createNotesTaskExecutor({
+        pool: db.pool,
+        model: shortLeaseModel,
+        tenantId: fixture.tenantId,
+        leaseQueue,
+        gateway: slowMultiCallGateway,
+      });
+      const delivery = new QueueDelivery(taskEnvelope);
+      await consumeTaskDispatchMessage(delivery, {
+        leaseQueue,
+        workerId: 'cloud-notes-hb-worker',
+        handler,
+        heartbeatIntervalMs: leaseQueue.configuration.heartbeatIntervalMs,
+      });
+
+      expect(delivery.ackCount).toBe(1);
+      expect(delivery.retryCount).toBe(0);
+      expect(llmAttemptCount).toBe(2);
+      expect(leaseExtendedPastInitialTtl).toBe(true);
+      expect(reapedMidFlight).toBe(0);
+
+      const result = await taskReads.getTaskResult(fixture.tenantId, taskId);
+      expect(result).toMatchObject({
+        task_id: taskId,
+        task_status: 'completed',
+        result_state: 'available',
+      });
+
+      const attempts = await db.pool.query<{
+        readonly attempt_no: number;
+        readonly state: string;
+        readonly outcome_code: string | null;
+        readonly principal_id: string;
+      }>(
+        `SELECT attempt_no, state, outcome_code, principal_id
+           FROM task_model_attempts
+          WHERE tenant_id = $1 AND task_id = $2
+          ORDER BY attempt_no ASC`,
+        [fixture.tenantId, taskId],
+      );
+      expect(attempts.rows).toEqual([
+        {
+          attempt_no: 1,
+          state: 'unknown_billed',
+          outcome_code: 'model_unavailable',
+          principal_id: fixture.principalId,
+        },
+        {
+          attempt_no: 2,
+          state: 'settled',
+          outcome_code: 'ok',
+          principal_id: fixture.principalId,
+        },
+      ]);
+
+      // Completed/stale lease fences subsequent heartbeats and finishes.
+      const taskRow = await db.pool.query<{
+        readonly current_run_id: string;
+        readonly lease_epoch: string | number;
+      }>('SELECT current_run_id, lease_epoch FROM tasks WHERE tenant_id = $1 AND id = $2', [
+        fixture.tenantId,
+        taskId,
+      ]);
+      const staleLease = {
+        tenantId: fixture.tenantId,
+        taskId,
+        runId: taskRow.rows[0]!.current_run_id,
+        attempt: 1,
+        leaseEpoch: Number(taskRow.rows[0]!.lease_epoch),
+        leaseExpiresAt: new Date(Date.now() + 30_000).toISOString(),
+      };
+      expect(await leaseQueue.heartbeat(staleLease, new Date())).toBe(false);
+      expect(await leaseQueue.finish(staleLease, 'failed_terminal')).toBe(false);
+
+      // Second delivery is gracefully ACKed without re-executing or duplicating task_results.
+      const secondDelivery = new QueueDelivery(taskEnvelope);
+      await consumeTaskDispatchMessage(secondDelivery, {
+        leaseQueue,
+        workerId: 'cloud-notes-hb-worker-2',
+        handler,
+        heartbeatIntervalMs: leaseQueue.configuration.heartbeatIntervalMs,
+      });
+      expect(secondDelivery.ackCount).toBe(1);
+      expect(llmAttemptCount).toBe(2);
+    } finally {
+      await turns
+        .cancelTurn({
+          tenantId: fixture.tenantId,
+          conversationId: fixture.conversationId,
+          turnId: fixture.turnId,
+        })
+        .catch(() => undefined);
+      await outbox.markCompleted(fixture.turnId).catch(() => undefined);
+    }
+  });
+
+  it('aborts slow Cloud Notes LLM call promptly and avoids finishing when heartbeat loses lease epoch', async () => {
+    const fixture = await createFixture();
+    const sent: unknown[] = [];
+    const env = cloudRuntimeEnv(sent);
+
+    const delegatingGateway: ModelGateway = {
+      providerId: 'fake',
+      modelLabel: FAKE_MODEL_LABEL,
+      simulated: true,
+      operations: ['conversation.turn', 'task.notes_action_items'],
+      generateConversationTurn() {
+        return Promise.resolve({
+          output: {
+            kind: 'delegate' as const,
+            toolName: DELEGATE_NOTES_TOOL_NAME,
+            text: 'Delegating fenced notes task.',
+            finishReason: 'stop' as const,
+            delegation: {
+              toolName: DELEGATE_NOTES_TOOL_NAME,
+              arguments: {
+                title: 'Fenced Notes Task',
+                notes: '- Bob: abort on lease loss',
+              },
+            },
+          },
+          modelLabel: FAKE_MODEL_LABEL,
+          simulated: true,
+          usage: {
+            inputTokens: 8,
+            outputTokens: 10,
+            costMicroUsd: 0,
+            rateVersion: 'fake-zero-cost',
+          },
+        });
+      },
+      extractNotesActionItems() {
+        return Promise.reject(new Error('not used during turn delegation'));
+      },
+    };
+
+    try {
+      const event = await outbox.getEvent(fixture.turnId);
+      if (event === null) throw new Error('outbox event was not found');
+      const turnExecutor = await createTurnExecutor({
+        pool: db.pool,
+        model,
+        event,
+        workerId: 'cloud-runtime-notes-fenced-turn',
+        queue: env.TURN_DISPATCH_QUEUE,
+        gateway: delegatingGateway,
+      });
+      await turnExecutor!.processTurn(event);
+      await outbox.markCompleted(fixture.turnId);
+
+      const taskEnvelope = sent[0] as {
+        readonly schemaVersion: number;
+        readonly kind: string;
+        readonly tenantId: string;
+        readonly taskId: string;
+      };
+      const taskId = taskEnvelope.taskId;
+
+      const shortLeaseModel = resolveCloudRuntimeModelConfig(
+        {
+          EMBER_ENV: 'staging',
+          NODE_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'real',
+          EMBER_MODEL_PROVIDER: 'openrouter',
+          EMBER_MODEL_ID: 'nvidia/nemotron-3.5-lightning',
+          EMBER_MODEL_API_KEY: TEST_MODEL_KEY,
+          EMBER_MODEL_TURN_LEASE_MS: '1000',
+          EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+          EMBER_MODEL_ALPHA_TENANT_IDS: fixture.tenantId,
+        },
+        'staging_alpha',
+        new Date('2026-11-13T12:00:00.000Z'),
+      );
+      expect(shortLeaseModel.kind).toBe('enabled');
+      if (shortLeaseModel.kind !== 'enabled' || shortLeaseModel.mode !== 'real') {
+        throw new Error(`expected enabled real model config, got ${shortLeaseModel.kind}`);
+      }
+
+      const leaseQueue = createNotesTaskLeaseQueue(db.pool, shortLeaseModel);
+      let entered!: () => void;
+      const llmEntered = new Promise<void>((resolve) => {
+        entered = resolve;
+      });
+      let gatewayAborted = false;
+
+      const stalledGateway: ModelGateway = {
+        providerId: 'openrouter',
+        modelLabel: 'nvidia/nemotron-3.5-lightning',
+        simulated: false,
+        operations: ['conversation.turn', 'task.notes_action_items'],
+        generateConversationTurn() {
+          return Promise.reject(new Error('not used'));
+        },
+        extractNotesActionItems(_request, signal) {
+          entered();
+          return new Promise((_resolve, reject) => {
+            signal.addEventListener(
+              'abort',
+              () => {
+                gatewayAborted = true;
+                reject(new ModelGatewayFailure('client_cancelled'));
+              },
+              { once: true },
+            );
+          });
+        },
+      };
+
+      const handler = await createNotesTaskExecutor({
+        pool: db.pool,
+        model: shortLeaseModel,
+        tenantId: fixture.tenantId,
+        leaseQueue,
+        gateway: stalledGateway,
+      });
+
+      const finishSpy = vi.spyOn(leaseQueue, 'finish');
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const delivery = new QueueDelivery(taskEnvelope);
+
+      try {
+        const processing = consumeTaskDispatchMessage(delivery, {
+          leaseQueue,
+          workerId: 'cloud-notes-fenced-worker',
+          handler,
+          heartbeatIntervalMs: 120,
+          logger: {
+            warn(message, context) {
+              console.warn(message, context ?? {});
+            },
+          },
+        });
+
+        await llmEntered;
+        // Simulate another worker acquiring a higher lease_epoch while the LLM request is in flight.
+        await db.pool.query(
+          `UPDATE tasks
+              SET lease_epoch = lease_epoch + 1
+            WHERE tenant_id = $1 AND id = $2`,
+          [fixture.tenantId, taskId],
+        );
+
+        await processing;
+      } finally {
+        warnSpy.mockRestore();
+      }
+
+      expect(gatewayAborted).toBe(true);
+      expect(finishSpy).not.toHaveBeenCalled();
+      expect(delivery.ackCount).toBe(0);
+      expect(delivery.retryCount).toBe(1);
+
+      const resultsCount = await db.pool.query<{ readonly count: string }>(
+        'SELECT count(*)::text AS count FROM task_results WHERE tenant_id = $1 AND task_id = $2',
+        [fixture.tenantId, taskId],
+      );
+      expect(resultsCount.rows[0]?.count).toBe('0');
     } finally {
       await turns
         .cancelTurn({

@@ -8,6 +8,7 @@ import {
   resolveCloudRuntimeModelConfig,
 } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
+import { createNotesTaskLeaseQueue } from '../../apps/cloud-async-runtime/src/runtime.js';
 import {
   consumeTaskDispatchMessage,
   consumeTurnDispatchMessage,
@@ -546,6 +547,7 @@ describe('Cloud Async Runtime dispatch', () => {
     function createMockTaskQueue(overrides?: {
       reapExpired?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['reapExpired']>>;
       claimTask?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['claimTask']>>;
+      heartbeat?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['heartbeat']>>;
       finish?: ReturnType<typeof vi.fn<TaskDispatchQueuePort['finish']>>;
     }) {
       const reapExpired =
@@ -554,12 +556,16 @@ describe('Cloud Async Runtime dispatch', () => {
       const claimTask =
         overrides?.claimTask ??
         vi.fn<TaskDispatchQueuePort['claimTask']>(() => Promise.resolve({ kind: 'not_found' }));
+      const heartbeat =
+        overrides?.heartbeat ??
+        vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(true));
       const finish =
         overrides?.finish ?? vi.fn<TaskDispatchQueuePort['finish']>(() => Promise.resolve(true));
       return {
-        port: { reapExpired, claimTask, finish } satisfies TaskDispatchQueuePort,
+        port: { reapExpired, claimTask, heartbeat, finish } satisfies TaskDispatchQueuePort,
         reapExpired,
         claimTask,
+        heartbeat,
         finish,
       };
     }
@@ -723,6 +729,182 @@ describe('Cloud Async Runtime dispatch', () => {
       expect(result).toEqual({ reaped: 2, examined: 1, enqueued: 1, failed: 0 });
       expect(queue.send).toHaveBeenCalledTimes(1);
       expect(queue.send).toHaveBeenCalledWith(sampleTaskEnvelope());
+    });
+
+    it('renews lease heartbeats past the original lease TTL and cleans up timers on exit', async () => {
+      vi.useFakeTimers();
+      try {
+        const start = new Date('2026-11-15T12:00:00.000Z');
+        vi.setSystemTime(start);
+        const lease: LeasedRun = {
+          ...sampleLease(),
+          leaseExpiresAt: new Date(start.getTime() + 100).toISOString(),
+        };
+        const queue = createMockTaskQueue({
+          claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+            Promise.resolve({ kind: 'claimed', lease }),
+          ),
+        });
+
+        let abortedDuringExecution = false;
+        let finishExecution!: () => void;
+        const executionDone = new Promise<void>((resolve) => {
+          finishExecution = resolve;
+        });
+
+        const msg = new Message(sampleTaskEnvelope());
+        const consumePromise = consumeTaskDispatchMessage(msg, {
+          leaseQueue: queue.port,
+          workerId: 'w-hb-1',
+          heartbeatIntervalMs: 30,
+          handler: {
+            handle: async (_run, signal) => {
+              signal.addEventListener('abort', () => {
+                abortedDuringExecution = true;
+              });
+              await executionDone;
+              return { type: 'committed' };
+            },
+          },
+        });
+
+        // Advance well past the 100ms initial lease TTL; heartbeats every 30ms keep extending watchdog.
+        await vi.advanceTimersByTimeAsync(150);
+        expect(queue.heartbeat.mock.calls.length).toBeGreaterThanOrEqual(4);
+        expect(abortedDuringExecution).toBe(false);
+
+        finishExecution();
+        await consumePromise;
+
+        expect(msg.ack).toHaveBeenCalledTimes(1);
+        expect(queue.finish).not.toHaveBeenCalled();
+        expect(vi.getTimerCount()).toBe(0);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('aborts execution and handles fencing/cancellation/errors cleanly when heartbeat fails', async () => {
+      const fixedNow = () => new Date('2026-11-15T12:00:00.000Z');
+      const warn = vi.fn();
+
+      // 1) heartbeat() returns false -> aborts handler, skips non-cancelled finish(), retries message.
+      const lostQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(false)),
+      });
+      const lostMsg = new Message(sampleTaskEnvelope());
+      let signalAbortedOnLost = false;
+      await consumeTaskDispatchMessage(lostMsg, {
+        leaseQueue: lostQueue.port,
+        workerId: 'w-hb-lost',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        logger: { warn },
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  signalAbortedOnLost = true;
+                  resolve({ type: 'finish', outcome: 'failed_retryable' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(signalAbortedOnLost).toBe(true);
+      expect(lostQueue.finish).not.toHaveBeenCalled();
+      expect(lostMsg.ack).not.toHaveBeenCalled();
+      expect(lostMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+      expect(warn).toHaveBeenCalledWith(
+        'Notes Task lease heartbeat rejected',
+        expect.objectContaining({ category: 'lease_lost' }),
+      );
+
+      // 2) heartbeat() returns false due to cooperative cancellation -> converges via finish('cancelled').
+      const cancelQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() => Promise.resolve(false)),
+      });
+      const cancelMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(cancelMsg, {
+        leaseQueue: cancelQueue.port,
+        workerId: 'w-hb-cancel',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  resolve({ type: 'finish', outcome: 'cancelled' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(cancelQueue.finish).toHaveBeenCalledWith(sampleLease(), 'cancelled', fixedNow());
+      expect(cancelMsg.ack).toHaveBeenCalledTimes(1);
+      expect(cancelMsg.retry).not.toHaveBeenCalled();
+
+      // 3) heartbeat() throws -> aborts handler, skips finish() even if outcome looks terminal, retries.
+      const errorQueue = createMockTaskQueue({
+        claimTask: vi.fn<TaskDispatchQueuePort['claimTask']>(() =>
+          Promise.resolve({ kind: 'claimed', lease: sampleLease() }),
+        ),
+        heartbeat: vi.fn<TaskDispatchQueuePort['heartbeat']>(() =>
+          Promise.reject(new DomainError('DB_UNAVAILABLE', 'pool timeout')),
+        ),
+      });
+      const errMsg = new Message(sampleTaskEnvelope());
+      await consumeTaskDispatchMessage(errMsg, {
+        leaseQueue: errorQueue.port,
+        workerId: 'w-hb-err',
+        heartbeatIntervalMs: 1_000,
+        sleep: () => Promise.resolve(),
+        now: fixedNow,
+        logger: { warn },
+        handler: {
+          handle: (_run, signal) =>
+            new Promise((resolve) => {
+              signal.addEventListener(
+                'abort',
+                () => {
+                  resolve({ type: 'finish', outcome: 'cancelled' });
+                },
+                { once: true },
+              );
+            }),
+        },
+      });
+      expect(errorQueue.finish).not.toHaveBeenCalled();
+      expect(errMsg.retry).toHaveBeenCalledWith({ delaySeconds: 1 });
+      expect(warn).toHaveBeenCalledWith(
+        'Notes Task lease heartbeat failed',
+        expect.objectContaining({ category: 'DB_UNAVAILABLE' }),
+      );
+
+      // 4) createNotesTaskLeaseQueue configures heartbeat strictly shorter than short 1s leases.
+      const shortModel = resolveCloudRuntimeModelConfig(
+        stagingAlphaEnv({ EMBER_MODEL_TURN_LEASE_MS: '1000' }),
+        'staging_alpha',
+        ALPHA_NOW,
+      );
+      expect(shortModel.kind).toBe('enabled');
+      const shortLeaseQueue = createNotesTaskLeaseQueue({} as never, shortModel);
+      expect(shortLeaseQueue.configuration.leaseDurationMs).toBe(1_000);
+      expect(shortLeaseQueue.configuration.heartbeatIntervalMs).toBe(333);
     });
   });
 });

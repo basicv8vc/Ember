@@ -1,4 +1,5 @@
 import { isDomainError, type LeasedRun, type RunTerminalStatus } from '@ember/domain';
+import { linkAbortSignals, realSleeper } from '@ember/execution';
 import type {
   B1TaskDispatchEnvelope,
   B1TaskDispatchTarget,
@@ -97,6 +98,7 @@ export interface TurnDispatchConsumerOptions {
 export interface TaskDispatchQueuePort {
   reapExpired(now: Date): Promise<number>;
   claimTask(workerId: string, now: Date, identity: B1TaskDispatchTarget): Promise<TaskClaimOutcome>;
+  heartbeat(run: LeasedRun, now: Date): Promise<boolean>;
   finish(run: LeasedRun, outcome: RunTerminalStatus, now: Date): Promise<boolean>;
 }
 
@@ -117,6 +119,9 @@ export interface TaskDispatchConsumerOptions {
   readonly handler: TaskDispatchHandlerPort | null;
   readonly logger?: TurnDispatchLogger;
   readonly now?: () => Date;
+  readonly heartbeatIntervalMs?: number;
+  /** Test seam for deterministic heartbeat cadence. */
+  readonly sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
 function retry(message: TurnDispatchQueueMessage, delaySeconds?: number): void {
@@ -266,28 +271,124 @@ export async function consumeTaskDispatchMessage(
   }
 
   const lease = claim.lease;
-  const remainingLeaseMs = Math.max(1, Date.parse(lease.leaseExpiresAt) - now().getTime());
+  const leaseExpiresMs = Date.parse(lease.leaseExpiresAt);
+  const leaseWindowMs = Number.isFinite(leaseExpiresMs)
+    ? Math.max(1, leaseExpiresMs - now().getTime())
+    : 30_000;
+  if (
+    options.heartbeatIntervalMs !== undefined &&
+    (!Number.isInteger(options.heartbeatIntervalMs) || options.heartbeatIntervalMs < 1)
+  ) {
+    throw new TypeError('heartbeatIntervalMs must be a positive integer');
+  }
+  const heartbeatIntervalMs = Math.min(
+    options.heartbeatIntervalMs ?? Math.max(1, Math.floor(leaseWindowMs / 3)),
+    Math.max(1, Math.floor(leaseWindowMs / 2)),
+  );
+  const wait = options.sleep ?? realSleeper;
   const execution = new AbortController();
-  const leaseTimer = setTimeout(() => execution.abort(), remainingLeaseMs);
+  const heartbeatStop = new AbortController();
+  const heartbeatWait = linkAbortSignals(execution.signal, heartbeatStop.signal);
+
+  let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  const armLeaseWatchdog = (): void => {
+    if (leaseTimer !== undefined) {
+      clearTimeout(leaseTimer);
+    }
+    leaseTimer = setTimeout(() => execution.abort(), leaseWindowMs);
+  };
+  armLeaseWatchdog();
+
+  let leaseLost = false;
+  let heartbeatFailed = false;
+  let completed = false;
+
+  const heartbeatLoop = (async (): Promise<void> => {
+    while (!execution.signal.aborted && !heartbeatStop.signal.aborted) {
+      await wait(heartbeatIntervalMs, heartbeatWait.signal);
+
+      if (execution.signal.aborted || heartbeatStop.signal.aborted || completed) {
+        return;
+      }
+
+      let renewed = false;
+      try {
+        renewed = await options.leaseQueue.heartbeat(lease, now());
+      } catch (error) {
+        heartbeatFailed = true;
+        options.logger?.warn('Notes Task lease heartbeat failed', {
+          taskId: lease.taskId,
+          runId: lease.runId,
+          leaseEpoch: lease.leaseEpoch,
+          category: isDomainError(error) ? error.code : 'heartbeat_error',
+        });
+        renewed = false;
+      }
+
+      if (!renewed) {
+        if (completed) {
+          return;
+        }
+        if (!heartbeatFailed) {
+          options.logger?.warn('Notes Task lease heartbeat rejected', {
+            taskId: lease.taskId,
+            runId: lease.runId,
+            leaseEpoch: lease.leaseEpoch,
+            category: 'lease_lost',
+          });
+        }
+        leaseLost = true;
+        execution.abort();
+        return;
+      }
+
+      if (!completed && !execution.signal.aborted && !heartbeatStop.signal.aborted) {
+        armLeaseWatchdog();
+      }
+    }
+  })();
 
   let completion:
     | { readonly type: 'finish'; readonly outcome: RunTerminalStatus }
     | { readonly type: 'committed' };
   try {
     completion = await options.handler.handle(lease, execution.signal);
+    if (completion.type === 'committed') {
+      completed = true;
+    }
   } catch (error) {
-    if (isDomainError(error) && (error.code === 'STALE_LEASE' || error.code === 'NOT_FOUND')) {
-      // Another worker took ownership or the task converged; never call finish() on a lost lease.
+    if (
+      (isDomainError(error) && (error.code === 'STALE_LEASE' || error.code === 'NOT_FOUND')) ||
+      leaseLost ||
+      heartbeatFailed ||
+      execution.signal.aborted
+    ) {
+      // Another worker took ownership, the lease lapsed, or heartbeat failed; never call finish().
       retry(message, queueRetryDelaySeconds(Math.max(1, message.attempts)));
       return;
     }
     throw error;
   } finally {
-    clearTimeout(leaseTimer);
+    completed = true;
+    if (leaseTimer !== undefined) {
+      clearTimeout(leaseTimer);
+    }
+    heartbeatStop.abort();
+    await heartbeatLoop;
+    heartbeatWait.dispose();
   }
 
   if (completion.type === 'committed') {
     message.ack();
+    return;
+  }
+
+  if (
+    heartbeatFailed ||
+    ((execution.signal.aborted || leaseLost) && completion.outcome !== 'cancelled')
+  ) {
+    // Heartbeat error or non-cancelled lease loss must retry via queue without fabricating finish().
+    retry(message, queueRetryDelaySeconds(Math.max(1, message.attempts)));
     return;
   }
 

@@ -44,11 +44,16 @@ export function createNotesTaskLeaseQueue(
   pool: pg.Pool,
   model?: CloudRuntimeModelConfig,
 ): PostgresLeaseQueue {
+  const leaseDurationMs =
+    model !== undefined && model.kind === 'enabled' ? model.resolution.settings.leaseMs : undefined;
   return new PostgresLeaseQueue(pool, {
     clock: systemClock,
-    ...(model !== undefined && model.kind === 'enabled'
-      ? { leaseDurationMs: model.resolution.settings.leaseMs }
-      : {}),
+    ...(leaseDurationMs === undefined
+      ? {}
+      : {
+          leaseDurationMs,
+          heartbeatIntervalMs: Math.max(100, Math.floor(leaseDurationMs / 3)),
+        }),
     claimableKinds: ['notes.action_items'],
   });
 }

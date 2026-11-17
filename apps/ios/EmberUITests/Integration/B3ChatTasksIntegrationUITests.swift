@@ -124,6 +124,58 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(cancelledRow.waitForExistence(timeout: 10))
     }
 
+    func testComposerPlusMenuOpensInsertsStarterPromptAndDismisses() {
+        let app = XCUIApplication()
+        launch(app, reset: true)
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+
+        let attachButton = app.buttons["conversation-attach-file"]
+        XCTAssertTrue(attachButton.waitForExistence(timeout: 10))
+        XCTAssertTrue(attachButton.isEnabled)
+        attachButton.tap()
+
+        let menu = app.descendants(matching: .any)["conversation-attachment-menu"]
+        XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        let chooseFileRow = app.buttons["conversation-attachment-menu-file"]
+        XCTAssertTrue(chooseFileRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(chooseFileRow.isHittable)
+        let notesRow = app.buttons["conversation-attachment-menu-notes"]
+        XCTAssertTrue(notesRow.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["conversation-attachment-menu-data"].waitForExistence(timeout: 5))
+
+        attachScreenshot(app: app, name: "b3-04-composer-plus-menu")
+
+        // Tap outside backdrop dismisses menu cleanly
+        let dismissBackdrop = app.buttons["conversation-attachment-menu-dismiss"]
+        if dismissBackdrop.exists && dismissBackdrop.isHittable {
+            dismissBackdrop.tap()
+        } else {
+            attachButton.tap()
+        }
+        let menuDismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: menu
+        )
+        wait(for: [menuDismissed], timeout: 5)
+
+        // Re-open menu and use starter prompt action
+        attachButton.tap()
+        XCTAssertTrue(notesRow.waitForExistence(timeout: 5))
+        notesRow.tap()
+
+        let menuClosedAfterPrompt = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: menu
+        )
+        wait(for: [menuClosedAfterPrompt], timeout: 5)
+
+        let composer = app.textFields["conversation-composer-input"]
+        let value = composer.value as? String ?? ""
+        XCTAssertTrue(value.contains("action items"), "Expected starter prompt in composer, got: \(value)")
+        XCTAssertTrue(app.buttons["conversation-send"].isEnabled)
+    }
+
     private func launch(_ app: XCUIApplication, reset: Bool) {
         var args = ["--ember-mock-chat-tasks"]
         if reset {

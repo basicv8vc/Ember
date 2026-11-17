@@ -482,25 +482,44 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertEqual(messageReloadCount.value, loadsBeforeRejected)
     }
 
-    func testAttachCSVFileRejectsUnsupportedAndClearsAfterSend() async throws {
+    func testAttachFilesAndPhotosRejectsBlockedAndClearsAfterSend() async throws {
         let directory = makeTempDirectory()
         let csvFile = directory.appendingPathComponent("q4 sales.csv")
         let csvData = Data("month,amount\nJan,100\n".utf8)
         try csvData.write(to: csvFile)
 
-        let unsupportedFile = directory.appendingPathComponent("report.pdf")
-        try Data("pdf".utf8).write(to: unsupportedFile)
+        let pdfFile = directory.appendingPathComponent("report.pdf")
+        let pdfData = Data("%PDF-1.4\n".utf8)
+        try pdfData.write(to: pdfFile)
 
-        let uploadID = "00000000-0000-4000-8000-00000000c111"
+        let blockedFile = directory.appendingPathComponent("malicious.html")
+        try Data("<script>alert(1)</script>".utf8).write(to: blockedFile)
+
+        let csvUploadID = "00000000-0000-4000-8000-00000000c111"
+        let pdfUploadID = "00000000-0000-4000-8000-00000000c222"
         let sha = String(repeating: "c", count: 64)
         let capturedSendBody = RequestRecorder()
 
         register { request in
             let path = request.url?.path ?? ""
             if request.httpMethod == "POST" && path == "/v1/me/uploads" {
+                let bodyText = request.httpBody.flatMap { String(data: $0, encoding: .utf8) } ?? ""
+                if bodyText.contains("report.pdf") {
+                    return .json(statusCode: 201, body: """
+                    {
+                      "upload_id":"\(pdfUploadID)",
+                      "filename":"report.pdf",
+                      "media_type":"application/pdf",
+                      "size":\(pdfData.count),
+                      "sha256":"\(sha)",
+                      "expires_at":"2026-11-17T00:00:00Z",
+                      "created_at":"2026-11-16T00:00:00Z"
+                    }
+                    """)
+                }
                 return .json(statusCode: 201, body: """
                 {
-                  "upload_id":"\(uploadID)",
+                  "upload_id":"\(csvUploadID)",
                   "filename":"q4_sales.csv",
                   "media_type":"text/csv",
                   "size":\(csvData.count),
@@ -551,7 +570,7 @@ final class LiveConversationHostTasksTests: XCTestCase {
         let model = try makeHostModel(directory: directory)
         await model.start()
 
-        await model.attachFile(from: unsupportedFile)
+        await model.attachFile(from: blockedFile)
         XCTAssertTrue(model.stagedAttachments.isEmpty)
         XCTAssertNotNil(model.attachmentError)
 
@@ -560,12 +579,17 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertEqual(model.stagedAttachments.count, 1)
         XCTAssertEqual(model.screen.attachments.first?.filename, "q4_sales.csv")
 
+        await model.attachFile(from: pdfFile)
+        XCTAssertNil(model.attachmentError)
+        XCTAssertEqual(model.stagedAttachments.count, 2)
+        XCTAssertEqual(model.screen.attachments.last?.filename, "report.pdf")
+
         await model.send("Summarize revenue")
         XCTAssertTrue(model.stagedAttachments.isEmpty)
         let req = try XCTUnwrap(capturedSendBody.requests.first)
         let body = try XCTUnwrap(req.httpBody)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(obj["attachment_ids"] as? [String], [uploadID])
+        XCTAssertEqual(obj["attachment_ids"] as? [String], [csvUploadID, pdfUploadID])
     }
 
     private func makeHostModel(

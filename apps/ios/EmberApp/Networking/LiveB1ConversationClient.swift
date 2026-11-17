@@ -280,26 +280,24 @@ struct LiveB1ConversationClient: Sendable {
     func bootstrap() async throws -> EmberMeDTO { try await auth.restoreSession() }
 
     func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
-        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
-        guard B3AttachmentLimits.allowedMediaTypes.contains(mediaType),
+        let normalizedType = B3AttachmentLimits.normalizedMediaType(mediaType)
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: normalizedType)
+        guard B3AttachmentLimits.isSafeMediaType(normalizedType),
               data.count <= B3AttachmentLimits.maxFileBytes else {
             throw LiveB1Failure.rejected
         }
-        struct Body: Encodable {
-            let filename: String
-            let media_type: String
-            let content_base64: String
-        }
-        let body = try JSONEncoder().encode(Body(
+        let boundary = "EmberBoundary-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let body = Self.makeMultipartUploadBody(
+            boundary: boundary,
             filename: safeFilename,
-            media_type: mediaType,
-            content_base64: data.base64EncodedString()
-        ))
+            mediaType: normalizedType,
+            fileData: data
+        )
         let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
             method: "POST",
             pathComponents: ["v1", "me", "uploads"],
             body: body,
-            contentType: "application/json",
+            contentType: "multipart/form-data; boundary=\(boundary)",
             idempotency: .nonIdempotent(clientSubmissionID: nil)
         ))
         guard response.statusCode == 200 || response.statusCode == 201 else {
@@ -310,6 +308,33 @@ struct LiveB1ConversationClient: Sendable {
             throw LiveB1Failure.invalidResponse
         }
         return receipt
+    }
+
+    private static func makeMultipartUploadBody(
+        boundary: String,
+        filename: String,
+        mediaType: String,
+        fileData: Data
+    ) -> Data {
+        var body = Data()
+        func appendUTF8(_ string: String) {
+            body.append(Data(string.utf8))
+        }
+
+        appendUTF8("--\(boundary)\r\n")
+        appendUTF8("Content-Disposition: form-data; name=\"filename\"\r\n\r\n")
+        appendUTF8("\(filename)\r\n")
+
+        appendUTF8("--\(boundary)\r\n")
+        appendUTF8("Content-Disposition: form-data; name=\"media_type\"\r\n\r\n")
+        appendUTF8("\(mediaType)\r\n")
+
+        appendUTF8("--\(boundary)\r\n")
+        appendUTF8("Content-Disposition: form-data; name=\"file\"; filename=\"\(filename)\"\r\n")
+        appendUTF8("Content-Type: \(mediaType)\r\n\r\n")
+        body.append(fileData)
+        appendUTF8("\r\n--\(boundary)--\r\n")
+        return body
     }
 
     func send(_ submission: ConversationSubmission) async throws -> LiveB1Receipt {

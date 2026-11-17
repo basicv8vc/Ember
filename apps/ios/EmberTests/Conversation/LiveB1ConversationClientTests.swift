@@ -244,12 +244,50 @@ final class LiveB1ConversationClientTests: XCTestCase {
         let req = try XCTUnwrap(recorder.requests.first)
         XCTAssertEqual(req.httpMethod, "POST")
         XCTAssertEqual(req.url?.path, "/v1/me/uploads")
+        let contentType = try XCTUnwrap(req.value(forHTTPHeaderField: "Content-Type"))
+        XCTAssertTrue(contentType.hasPrefix("multipart/form-data; boundary="))
         let body = try XCTUnwrap(req.httpBody)
-        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
-        XCTAssertEqual(Set(obj.keys), ["filename", "media_type", "content_base64"])
-        XCTAssertEqual(obj["filename"] as? String, "sales_data.csv")
-        XCTAssertEqual(obj["media_type"] as? String, "text/csv")
-        XCTAssertEqual(obj["content_base64"] as? String, csvData.base64EncodedString())
+        let bodyString = try XCTUnwrap(String(data: body, encoding: .utf8))
+        XCTAssertTrue(bodyString.contains("name=\"filename\"\r\n\r\nsales_data.csv\r\n"))
+        XCTAssertTrue(bodyString.contains("name=\"media_type\"\r\n\r\ntext/csv\r\n"))
+        XCTAssertTrue(bodyString.contains("name=\"file\"; filename=\"sales_data.csv\"\r\nContent-Type: text/csv\r\n\r\nmonth,revenue\nJan,1200\n"))
+    }
+
+    func testUploadAttachmentAcceptsPDFAndImageAndRejectsBlockedMIME() async throws {
+        let fixture = try makeClient()
+        let pdfBytes = Data("%PDF-1.4\n1 0 obj\n<<>>\nendobj\n".utf8)
+        let sha = String(repeating: "b", count: 64)
+        register { _ in
+            .json(statusCode: 201, body: """
+            {
+              "upload_id":"88888888-8888-4888-8888-888888888888",
+              "filename":"report.pdf",
+              "media_type":"application/pdf",
+              "size":\(pdfBytes.count),
+              "sha256":"\(sha)",
+              "expires_at":"2026-11-17T00:00:00Z",
+              "created_at":"2026-11-16T00:00:00Z"
+            }
+            """)
+        }
+
+        let pdfReceipt = try await fixture.client.uploadAttachment(
+            filename: "report.pdf",
+            mediaType: "application/pdf",
+            data: pdfBytes
+        )
+        XCTAssertEqual(pdfReceipt.mediaType, "application/pdf")
+
+        do {
+            _ = try await fixture.client.uploadAttachment(
+                filename: "index.html",
+                mediaType: "text/html",
+                data: Data("<h1>blocked</h1>".utf8)
+            )
+            XCTFail("Expected text/html to be rejected client-side")
+        } catch let error as LiveB1Failure {
+            XCTAssertEqual(error, .rejected)
+        }
     }
 
     func testSendWithAttachmentsIncludesAttachmentIDs() async throws {

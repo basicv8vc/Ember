@@ -507,8 +507,8 @@
     },
     "conversation.composer.attach_file" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Attach CSV, TXT, or Markdown file" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附加 CSV、TXT 或 Markdown 文件" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add photo or file" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加照片或文件" } }
       }
     },
     "conversation.composer.remove_attachment" : {
@@ -531,14 +531,20 @@
     },
     "conversation.composer.attachment_unsupported" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Only CSV, TXT, and Markdown files are supported." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅支持 CSV、TXT 和 Markdown 文件。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This file type cannot be uploaded." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂不支持上传此文件类型。" } }
       }
     },
     "conversation.composer.attachment_too_large" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "File exceeds the 256 KB upload limit." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件超过 256 KB 上传大小限制。" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "File exceeds the 15 MB upload limit." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件超过 15 MB 上传大小限制。" } }
+      }
+    },
+    "conversation.composer.camera_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera is not available on this device." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前设备不支持拍照。" } }
       }
     },
     "conversation.composer.attachment_upload_failed" : {
@@ -565,6 +571,18 @@
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭选项" } }
       }
     },
+    "conversation.composer.attachment_menu.camera_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Take Photo" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拍照" } }
+      }
+    },
+    "conversation.composer.attachment_menu.photo_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Photo Library" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "照片图库" } }
+      }
+    },
     "conversation.composer.attachment_menu.file_title" : {
       "localizations" : {
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose File" } },
@@ -573,8 +591,14 @@
     },
     "conversation.composer.attachment_menu.file_subtitle" : {
       "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "CSV, TXT, TSV, Markdown · 256 KB max" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "CSV、TXT、TSV、Markdown（上限 256 KB）" } }
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "PDF, images, docs, data · 15 MB max" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "支持 PDF、图片、表格与文档（上限 15 MB）" } }
+      }
+    },
+    "conversation.composer.attachment_menu.file_badge" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "PDF · Docs" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "PDF · 文档" } }
       }
     },
     "conversation.composer.attachment_menu.file_limit_reached" : {

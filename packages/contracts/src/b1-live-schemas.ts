@@ -327,7 +327,24 @@ export type B1TaskDetailDto = z.infer<typeof B1TaskDetailDtoSchema>;
 export type B1TaskEventPageDto = z.infer<typeof B1TaskEventPageDtoSchema>;
 export type B1TaskCancelDto = z.infer<typeof B1TaskCancelDtoSchema>;
 
-export const B3StagedUploadMediaTypeSchema = z.enum(PYTHON_AGENT_LIMITS.allowedMediaTypes);
+export const B3StagedUploadMediaTypeSchema = z
+  .string()
+  .trim()
+  .toLowerCase()
+  .refine(
+    (value) =>
+      value.length >= 3 &&
+      value.length <= 128 &&
+      /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/.test(value),
+    'media_type must be a valid MIME type/subtype',
+  )
+  .refine(
+    (value) =>
+      !PYTHON_AGENT_LIMITS.blockedMediaTypes.includes(
+        value as (typeof PYTHON_AGENT_LIMITS.blockedMediaTypes)[number],
+      ),
+    'media_type is blocked for security reasons',
+  );
 export type B3StagedUploadMediaType = z.infer<typeof B3StagedUploadMediaTypeSchema>;
 
 export const B3StagedUploadReceiptDtoSchema = z.strictObject({

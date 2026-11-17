@@ -14,6 +14,7 @@ import { z } from 'zod';
 import { prepareTaskCommand } from '../task-digest.js';
 import { BLOB_LOCK_NAMESPACE } from '../storage/blob-store.js';
 import { decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
+import { putR2Bytes, readR2Bytes, type R2BucketPort } from '../storage/r2-blob-store.js';
 import { blobKeyFor } from '../storage/validation.js';
 import { insertB3TaskDispatchOutbox } from './b3-task-dispatch-outbox.js';
 import {
@@ -167,7 +168,92 @@ function toIncident(row: IncidentRow): B2BudgetIncident {
  *    crash keeps the reservation as `unknown_billed` until it is reconciled with the invoice.
  */
 export class PostgresModelTurnExecutionRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly r2Bucket: R2BucketPort | undefined;
+
+  constructor(
+    private readonly pool: pg.Pool,
+    options: { readonly r2Bucket?: R2BucketPort } = {},
+  ) {
+    this.r2Bucket = options.r2Bucket;
+  }
+
+  /**
+   * Load bounded staged upload payloads for inline multimodal Vision inference, skipping uploads
+   * whose size would push total buffered bytes past `maxTotalBytes`.
+   */
+  async loadAttachmentBytes(command: {
+    readonly tenantId: string;
+    readonly uploadIds: readonly string[];
+    readonly maxTotalBytes: number;
+  }): Promise<ReadonlyMap<string, Uint8Array>> {
+    if (command.uploadIds.length === 0 || command.maxTotalBytes <= 0) {
+      return new Map();
+    }
+
+    const parsedTenant = IdSchema.safeParse(command.tenantId);
+    if (!parsedTenant.success) {
+      throw toInvalidArgumentError(parsedTenant.error);
+    }
+    const parsedIds = z.array(IdSchema).max(20).safeParse(command.uploadIds);
+    if (!parsedIds.success) {
+      throw toInvalidArgumentError(parsedIds.error);
+    }
+
+    try {
+      const result = await this.pool.query<{
+        readonly id: string;
+        readonly size: string | number;
+        readonly sha256: string;
+        readonly storage_backend: 'postgres' | 'r2';
+        readonly storage_key: string | null;
+        readonly bytes: unknown;
+      }>(
+        `SELECT id, size, sha256, storage_backend, storage_key, bytes
+           FROM user_staged_uploads
+          WHERE tenant_id = $1::uuid
+            AND id = ANY($2::uuid[])`,
+        [parsedTenant.data, parsedIds.data],
+      );
+
+      const byId = new Map(result.rows.map((row) => [row.id, row]));
+      const loaded = new Map<string, Uint8Array>();
+      let accumulatedBytes = 0;
+
+      for (const uploadId of parsedIds.data) {
+        if (loaded.has(uploadId)) {
+          continue;
+        }
+        const row = byId.get(uploadId);
+        if (row === undefined) {
+          continue;
+        }
+        const size = Number(row.size);
+        if (size <= 0 || accumulatedBytes + size > command.maxTotalBytes) {
+          continue;
+        }
+
+        let bytes: Uint8Array;
+        if (row.storage_backend === 'r2') {
+          if (this.r2Bucket === undefined || row.storage_key === null) {
+            continue;
+          }
+          bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+            size,
+            sha256: row.sha256,
+          });
+        } else {
+          bytes = decodePgBytea(row.bytes);
+        }
+
+        accumulatedBytes += bytes.byteLength;
+        loaded.set(uploadId, bytes);
+      }
+
+      return loaded;
+    } catch (error) {
+      throw asDomainError(error);
+    }
+  }
 
   /** Candidate scan: running, not currently leased, not past its deadline. */
   async listRunningTurns(
@@ -856,7 +942,12 @@ UPDATE model_turn_attempts
       // Guard against the sub-millisecond edge where `deadline_at` crosses right as
       // `markTurnCompleted` runs: rolling back the savepoint discards Task + task_reference cleanly.
       await client.query('SAVEPOINT b3_delegation_attempt');
-      const taskId = await createOrReuseTurnDelegatedTask(client, identity, result.delegation);
+      const taskId = await createOrReuseTurnDelegatedTask(
+        client,
+        identity,
+        result.delegation,
+        this.r2Bucket,
+      );
       const messageId = await insertTurnResponse(client, identity, result.text, model);
       await ensureTurnTaskReference(client, identity, taskId);
       const completed = await markTurnCompleted(client, identity, messageId);
@@ -1235,6 +1326,7 @@ async function createOrReuseTurnDelegatedTask(
   client: pg.PoolClient,
   identity: PendingAssistantTurn,
   delegation: z.infer<typeof delegationSchema>,
+  r2Bucket?: R2BucketPort,
 ): Promise<Id> {
   const agentLookup = await client.query<{
     readonly agent_id: string;
@@ -1398,6 +1490,8 @@ async function createOrReuseTurnDelegatedTask(
     readonly media_type: string;
     readonly sha256: string;
     readonly size: string | number;
+    readonly storage_backend: 'postgres' | 'r2';
+    readonly storage_key: string | null;
     readonly bytes: unknown;
     readonly status: string;
     readonly not_expired: boolean;
@@ -1406,7 +1500,7 @@ async function createOrReuseTurnDelegatedTask(
   const lockedUploadsById = new Map<string, LockedUploadRow>();
   if (uploadIds.length > 0) {
     const locked = await client.query<LockedUploadRow>(
-      `SELECT id, filename, media_type, sha256, size, bytes, status,
+      `SELECT id, filename, media_type, sha256, size, storage_backend, storage_key, bytes, status,
               (expires_at > clock_timestamp()) AS not_expired
          FROM user_staged_uploads
         WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])
@@ -1463,15 +1557,48 @@ async function createOrReuseTurnDelegatedTask(
       const uploadId = uploadIds[index]!;
       const upload = lockedUploadsById.get(uploadId)!;
       const artifactId = inputArtifactIds[index]!;
-      const bytes = decodePgBytea(upload.bytes);
       const size = Number(upload.size);
       const storageKey = blobKeyFor(identity.tenantId, upload.sha256);
 
+      const bytes =
+        upload.storage_backend === 'r2'
+          ? await (async () => {
+              if (r2Bucket === undefined || upload.storage_key === null) {
+                throw new DomainError(
+                  'DB_UNAVAILABLE',
+                  'r2 bucket binding or storage_key missing for r2-backed upload',
+                );
+              }
+              return readR2Bytes(r2Bucket, upload.storage_key, {
+                size,
+                sha256: upload.sha256,
+              });
+            })()
+          : decodePgBytea(upload.bytes);
+
+      const targetBackend: 'postgres' | 'r2' = r2Bucket !== undefined ? 'r2' : 'postgres';
+      if (r2Bucket !== undefined) {
+        await putR2Bytes(r2Bucket, storageKey, bytes, {
+          httpMetadata: { contentType: upload.media_type },
+          customMetadata: { tenantId: identity.tenantId, sha256: upload.sha256 },
+        });
+      }
+
       await client.query(
-        `INSERT INTO bytea_blobs (tenant_id, storage_key, sha256, size, media_type, bytes)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO bytea_blobs (
+           tenant_id, storage_key, sha256, size, media_type, storage_backend, bytes
+         )
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (tenant_id, storage_key) DO NOTHING`,
-        [identity.tenantId, storageKey, upload.sha256, size, upload.media_type, bytes],
+        [
+          identity.tenantId,
+          storageKey,
+          upload.sha256,
+          size,
+          upload.media_type,
+          targetBackend,
+          targetBackend === 'r2' ? null : bytes,
+        ],
       );
       await client.query(
         `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)

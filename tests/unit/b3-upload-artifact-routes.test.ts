@@ -23,7 +23,7 @@ const REQUEST_ID = 'b3-upload-route-test-req';
 const TENANT_ID = randomUUID();
 const PRINCIPAL_ID = randomUUID();
 const TOKEN = generateSessionToken();
-const MAX_UPLOAD_REQUEST_BYTES = 524_288;
+const MAX_UPLOAD_REQUEST_BYTES = 16_777_216;
 
 function createTestSessionService() {
   const authenticated: B1AuthenticatedSession = {
@@ -255,6 +255,64 @@ describe('B3 upload and artifact routes', () => {
     expect(recorded[1]!.input.filename).toBe('notes.md');
     expect(recorded[1]!.input.mediaType).toBe('text/markdown');
     expect(new TextDecoder().decode(recorded[1]!.input.bytes)).toBe('# Summary\nhello\n');
+
+    const pdfBytes = encodeMultipartParts(boundary, [
+      {
+        name: 'file',
+        filename: 'report.pdf',
+        contentType: 'application/pdf',
+        value: '%PDF-1.4\n1 0 obj\n<<>>\nendobj\n',
+      },
+      { name: 'filename', value: 'report.pdf' },
+      { name: 'media_type', value: 'application/pdf' },
+    ]);
+    const pdfRes = await app.request('/v1/me/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: pdfBytes,
+    });
+    expect(pdfRes.status).toBe(201);
+    expect(recorded[2]!.input.mediaType).toBe('application/pdf');
+
+    const imgBytes = encodeMultipartParts(boundary, [
+      {
+        name: 'file',
+        filename: 'photo.jpg',
+        contentType: 'image/jpeg',
+        value: '\xff\xd8\xff\xe0JFIF',
+      },
+      { name: 'filename', value: 'photo.jpg' },
+      { name: 'media_type', value: 'image/jpeg' },
+    ]);
+    const imgRes = await app.request('/v1/me/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': `multipart/form-data; boundary=${boundary}`,
+      },
+      body: imgBytes,
+    });
+    expect(imgRes.status).toBe(201);
+    expect(recorded[3]!.input.mediaType).toBe('image/jpeg');
+
+    for (const blockedMime of ['text/html', 'image/svg+xml']) {
+      const blockedRes = await app.request('/v1/me/uploads', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${TOKEN}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          filename: 'payload.txt',
+          media_type: blockedMime,
+          content: 'blocked',
+        }),
+      });
+      expect(blockedRes.status).toBe(400);
+    }
   });
 
   it('aborts streamed multipart upload with no Content-Length before reading past MAX_UPLOAD_REQUEST_BYTES', async () => {

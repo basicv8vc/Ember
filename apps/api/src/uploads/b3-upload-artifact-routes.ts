@@ -30,7 +30,7 @@ import {
 } from '../http/error-mapping.js';
 import type { Logger } from '../logger.js';
 
-const MAX_UPLOAD_REQUEST_BYTES = 524_288;
+const MAX_UPLOAD_REQUEST_BYTES = 16_777_216;
 const ALLOWED_MULTIPART_FIELDS = new Set(['file', 'filename', 'media_type']);
 const MULTIPART_CONTENT_TYPE = /^multipart\/form-data(?:\s*;.*)?$/i;
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;.*)?$/i;
@@ -293,10 +293,7 @@ async function parseUploadPayload(c: AppContext): Promise<
     if (!mediaTypeParsed.success) {
       return {
         ok: false,
-        response: respondInvalidArgument(
-          c,
-          'media_type must be text/plain, text/csv, or text/markdown',
-        ),
+        response: respondInvalidArgument(c, 'media_type must be a supported safe MIME type'),
       };
     }
 

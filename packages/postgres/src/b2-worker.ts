@@ -38,6 +38,13 @@ export {
   type B1TurnDispatchEvent,
   type B1TurnDispatchStatus,
 } from './repositories/b1-turn-dispatch-outbox.js';
+export {
+  UPLOAD_KEY_PATTERN,
+  uploadKeyFor,
+  type R2BucketPort,
+  type R2ObjectBodyPort,
+  type R2PutOptionsPort,
+} from './storage/r2-blob-store.js';
 export type {
   B2AttemptCharge,
   B2AttemptReservation,

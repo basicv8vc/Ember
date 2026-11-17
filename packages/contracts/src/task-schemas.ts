@@ -46,14 +46,57 @@ export const TASK_INPUT_LIMITS = Object.freeze({
   idempotencyKeyMaxChars: 128,
 });
 
+const SAFE_MEDIA_TYPE_PATTERN =
+  /^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}\/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$/;
+
+export const BLOCKED_UPLOAD_MEDIA_TYPES = new Set<string>([
+  'text/html',
+  'application/xhtml+xml',
+  'image/svg+xml',
+  'application/javascript',
+  'text/javascript',
+]);
+
+export const ALLOWED_VISION_IMAGE_MEDIA_TYPES = new Set<string>([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/gif',
+]);
+
+export function isSafeUploadMediaType(value: string): boolean {
+  return (
+    value.length >= 3 &&
+    value.length <= 128 &&
+    SAFE_MEDIA_TYPE_PATTERN.test(value) &&
+    !BLOCKED_UPLOAD_MEDIA_TYPES.has(value)
+  );
+}
+
+export function isVisionImageMediaType(value: string): boolean {
+  return ALLOWED_VISION_IMAGE_MEDIA_TYPES.has(value.toLowerCase());
+}
+
 export const PYTHON_AGENT_LIMITS = Object.freeze({
   promptMaxChars: 8_000,
   instructionsMaxChars: 500,
-  maxFileBytes: 262_144,
+  maxFileBytes: 15_728_640,
   maxUploadTtlMs: 86_400_000,
   maxUnboundUploadsPerUser: 10,
   maxAttachmentsPerMessage: 5,
-  allowedMediaTypes: Object.freeze(['text/plain', 'text/csv', 'text/markdown'] as const),
+  blockedMediaTypes: Object.freeze([
+    'text/html',
+    'application/xhtml+xml',
+    'image/svg+xml',
+    'application/javascript',
+    'text/javascript',
+  ] as const),
+  visionImageMediaTypes: Object.freeze([
+    'image/jpeg',
+    'image/png',
+    'image/webp',
+    'image/gif',
+  ] as const),
   maxSandboxesPerRun: 1,
   maxPythonExecsPerRun: 3,
   maxLlmCallsPerRun: 4,

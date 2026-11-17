@@ -14,6 +14,13 @@ import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { z } from 'zod';
 import { decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
+import {
+  deleteR2Keys,
+  putR2Bytes,
+  readR2Bytes,
+  uploadKeyFor,
+  type R2BucketPort,
+} from '../storage/r2-blob-store.js';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 
 const UPLOAD_LOCK_SQL = `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`;
@@ -36,12 +43,14 @@ INSERT INTO user_staged_uploads (
   media_type,
   sha256,
   size,
+  storage_backend,
+  storage_key,
   bytes,
   status,
   expires_at,
   created_at
 )
-VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, 'unbound', $9::timestamptz, $10::timestamptz)
+VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, 'unbound', $11::timestamptz, $12::timestamptz)
 RETURNING id, filename, media_type, size, sha256, expires_at, created_at
 `;
 
@@ -73,6 +82,8 @@ SELECT a.id AS artifact_id,
        a.media_type,
        a.size,
        a.sha256,
+       bb.storage_backend,
+       bb.storage_key,
        bb.bytes
   FROM artifacts a
   JOIN blobs b
@@ -87,6 +98,7 @@ const SWEEP_EXPIRED_UPLOADS_SQL = `
 DELETE FROM user_staged_uploads
  WHERE status = 'unbound'
    AND expires_at <= COALESCE($1::timestamptz, clock_timestamp())
+ RETURNING storage_backend, storage_key
 `;
 
 const stageUploadInputSchema = z.strictObject({
@@ -119,12 +131,23 @@ export interface B3StagedUploadRepository {
   sweepExpiredUnboundUploads(now?: Date): Promise<{ readonly removed: number }>;
 }
 
+export interface PostgresB3StagedUploadRepositoryOptions {
+  readonly r2Bucket?: R2BucketPort;
+}
+
 /**
  * Edge-safe PostgreSQL repository for pre-delegation tenant-private staged uploads and
- * session-authenticated Task artifact downloads (`bytea_blobs`-backed).
+ * session-authenticated Task artifact downloads (R2 or `bytea_blobs`-backed).
  */
 export class PostgresB3StagedUploadRepository implements B3StagedUploadRepository {
-  constructor(private readonly pool: pg.Pool) {}
+  private readonly r2Bucket: R2BucketPort | undefined;
+
+  constructor(
+    private readonly pool: pg.Pool,
+    options: PostgresB3StagedUploadRepositoryOptions = {},
+  ) {
+    this.r2Bucket = options.r2Bucket;
+  }
 
   async stageUpload(ctx: AuthContext, input: StageUploadInput): Promise<B3StagedUploadReceiptDto> {
     const authResult = AuthContextSchema.safeParse(ctx);
@@ -140,7 +163,10 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
     const parsed = inputResult.data;
 
     if (parsed.bytes.byteLength > PYTHON_AGENT_LIMITS.maxFileBytes) {
-      throw new DomainError('INVALID_ARGUMENT', 'uploaded file exceeds 262144 byte limit');
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        `uploaded file exceeds ${PYTHON_AGENT_LIMITS.maxFileBytes} byte limit`,
+      );
     }
 
     const bytes = new Uint8Array(
@@ -151,6 +177,18 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
     const sha256 = await sha256Hex(bytes);
     const uploadId = globalThis.crypto.randomUUID();
     const lockKey = `ember.upload:${auth.tenantId}:${auth.principalId}`;
+    const r2Key = this.r2Bucket === undefined ? null : uploadKeyFor(auth.tenantId, uploadId);
+
+    if (this.r2Bucket !== undefined && r2Key !== null) {
+      await putR2Bytes(this.r2Bucket, r2Key, bytes, {
+        httpMetadata: { contentType: parsed.mediaType },
+        customMetadata: {
+          tenantId: auth.tenantId,
+          uploadId,
+          sha256,
+        },
+      });
+    }
 
     try {
       return await withTransaction(this.pool, async (client) => {
@@ -193,7 +231,9 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
           parsed.mediaType,
           sha256,
           bytes.byteLength,
-          bytes,
+          r2Key === null ? 'postgres' : 'r2',
+          r2Key,
+          r2Key === null ? bytes : null,
           expiresAt,
           createdAt,
         ]);
@@ -210,6 +250,9 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
         });
       });
     } catch (error) {
+      if (r2Key !== null) {
+        await deleteR2Keys(this.r2Bucket, [r2Key]);
+      }
       throw asDomainError(error);
     }
   }
@@ -280,6 +323,8 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
         media_type: string;
         size: string | number;
         sha256: string;
+        storage_backend: 'postgres' | 'r2';
+        storage_key: string;
         bytes: unknown;
       }>(GET_ARTIFACT_DOWNLOAD_SQL, [authResult.data.tenantId, idResult.data]);
 
@@ -288,16 +333,28 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
       }
 
       const row = result.rows[0]!;
-      const bytes = decodePgBytea(row.bytes);
       const expectedSize = Number(row.size);
-
-      if (bytes.byteLength !== expectedSize) {
-        throw new DomainError('DB_UNAVAILABLE', 'artifact byte length mismatch');
-      }
-
-      const actualDigest = await sha256Hex(bytes);
-      if (actualDigest !== row.sha256) {
-        throw new DomainError('DB_UNAVAILABLE', 'artifact sha256 integrity verification failed');
+      let bytes: Uint8Array;
+      if (row.storage_backend === 'r2') {
+        if (this.r2Bucket === undefined) {
+          throw new DomainError(
+            'DB_UNAVAILABLE',
+            'r2 bucket binding missing for r2-backed artifact',
+          );
+        }
+        bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+          size: expectedSize,
+          sha256: row.sha256,
+        });
+      } else {
+        bytes = decodePgBytea(row.bytes);
+        if (bytes.byteLength !== expectedSize) {
+          throw new DomainError('DB_UNAVAILABLE', 'artifact byte length mismatch');
+        }
+        const actualDigest = await sha256Hex(bytes);
+        if (actualDigest !== row.sha256) {
+          throw new DomainError('DB_UNAVAILABLE', 'artifact sha256 integrity verification failed');
+        }
       }
 
       return Object.freeze({
@@ -315,7 +372,16 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
 
   async sweepExpiredUnboundUploads(now?: Date): Promise<{ readonly removed: number }> {
     try {
-      const result = await this.pool.query(SWEEP_EXPIRED_UPLOADS_SQL, [now ?? null]);
+      const result = await this.pool.query<{
+        storage_backend: 'postgres' | 'r2';
+        storage_key: string | null;
+      }>(SWEEP_EXPIRED_UPLOADS_SQL, [now ?? null]);
+      const r2Keys = result.rows
+        .filter((row) => row.storage_backend === 'r2' && row.storage_key !== null)
+        .map((row) => row.storage_key!);
+      if (r2Keys.length > 0) {
+        await deleteR2Keys(this.r2Bucket, r2Keys);
+      }
       return Object.freeze({ removed: result.rowCount ?? 0 });
     } catch (error) {
       throw asDomainError(error);

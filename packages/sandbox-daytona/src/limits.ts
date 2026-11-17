@@ -44,8 +44,8 @@ export const DAYTONA_SANDBOX_LIMITS = Object.freeze({
   maxStderrBytes: 65_536,
   /** Number of retained exec outputs held in memory per sandbox. */
   maxRetainedOutputsPerSandbox: 32,
-  /** Single text-file transfer ceiling (PoC-only extension). */
-  maxFileBytes: 262_144,
+  /** Single-file transfer ceiling (matches Cloudflare R2 / upload limit). */
+  maxFileBytes: 15_728_640,
   /** Number of characters allowed in a confined file path. */
   maxFilePathChars: 256,
   /** Number of live sandbox records this provider instance will track. */

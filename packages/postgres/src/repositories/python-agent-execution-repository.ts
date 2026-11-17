@@ -27,6 +27,7 @@ import {
 import { parseLeaseEpoch, parsePersistedTimestamp } from '../lease-queue/validation.js';
 import { lockBlobDigests } from '../storage/blob-store.js';
 import { PostgresByteaBlobStore, decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
+import { readR2Bytes, type R2BucketPort } from '../storage/r2-blob-store.js';
 import type { B2ModelProviderId, B2SettlementOutcome } from './b2-interfaces.js';
 import { B2_ABSOLUTE_DAY_CEILINGS } from './b2-ledger-limits.js';
 import {
@@ -507,9 +508,22 @@ async function resolveTenantPrincipalId(
  */
 export class PostgresPythonAgentExecutionRepository {
   private readonly byteaStore: PostgresByteaBlobStore;
+  private readonly r2Bucket: R2BucketPort | undefined;
 
-  constructor(private readonly pool: pg.Pool) {
-    this.byteaStore = new PostgresByteaBlobStore(pool);
+  constructor(
+    private readonly pool: pg.Pool,
+    options: {
+      readonly blobStore?: PostgresByteaBlobStore;
+      readonly r2Bucket?: R2BucketPort;
+    } = {},
+  ) {
+    this.r2Bucket = options.r2Bucket ?? options.blobStore?.r2Bucket;
+    this.byteaStore =
+      options.blobStore ??
+      new PostgresByteaBlobStore(
+        pool,
+        this.r2Bucket === undefined ? {} : { r2Bucket: this.r2Bucket },
+      );
   }
 
   async loadAgentContext(lease: LeasedRun): Promise<PythonAgentLoadContextResult> {
@@ -553,9 +567,12 @@ export class PostgresPythonAgentExecutionRepository {
         readonly media_type: string;
         readonly sha256: string;
         readonly size: string | number;
+        readonly storage_backend: 'postgres' | 'r2';
+        readonly storage_key: string;
         readonly bytes: unknown;
       }>(
-        `SELECT a.id, a.filename, a.media_type, a.sha256, a.size, bb.bytes
+        `SELECT a.id, a.filename, a.media_type, a.sha256, a.size,
+                bb.storage_backend, bb.storage_key, bb.bytes
            FROM artifacts a
            JOIN blobs b ON b.tenant_id = a.tenant_id AND b.sha256 = a.sha256
            JOIN bytea_blobs bb ON bb.tenant_id = b.tenant_id AND bb.storage_key = b.storage_key
@@ -568,10 +585,24 @@ export class PostgresPythonAgentExecutionRepository {
 
       const fileById = new Map<string, PythonAgentInputFile>();
       for (const row of artifactRows.rows) {
-        const bytes = decodePgBytea(row.bytes);
         const expectedSize = Number(row.size);
-        if (bytes.byteLength !== expectedSize || (await sha256Hex(bytes)) !== row.sha256) {
-          throw new DomainError('DB_UNAVAILABLE', 'persisted input artifact failed verification');
+        let bytes: Uint8Array;
+        if (row.storage_backend === 'r2') {
+          if (this.r2Bucket === undefined) {
+            throw new DomainError(
+              'DB_UNAVAILABLE',
+              'r2 bucket binding missing for r2-backed input artifact',
+            );
+          }
+          bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+            size: expectedSize,
+            sha256: row.sha256,
+          });
+        } else {
+          bytes = decodePgBytea(row.bytes);
+          if (bytes.byteLength !== expectedSize || (await sha256Hex(bytes)) !== row.sha256) {
+            throw new DomainError('DB_UNAVAILABLE', 'persisted input artifact failed verification');
+          }
         }
         const safeFilename = row.filename ?? `${row.id}.txt`;
         fileById.set(
@@ -629,25 +660,37 @@ export class PostgresPythonAgentExecutionRepository {
         const storageKeys = selectedOutputs.map((entry) => entry.storageKey);
         const stagedRows = await client.query<{
           readonly storage_key: string;
+          readonly storage_backend: 'postgres' | 'r2';
           readonly bytes: unknown;
         }>(
-          `SELECT storage_key, bytes
+          `SELECT storage_key, storage_backend, bytes
              FROM bytea_staged_blobs
             WHERE tenant_id = $1::uuid AND storage_key = ANY($2::text[])`,
           [task.tenant_id, storageKeys],
         );
-        const bytesByKey = new Map<string, Uint8Array>();
-        for (const row of stagedRows.rows) {
-          bytesByKey.set(row.storage_key, decodePgBytea(row.bytes));
-        }
+        const rowByKey = new Map(stagedRows.rows.map((row) => [row.storage_key, row]));
         for (const meta of selectedOutputs) {
-          const bytes = bytesByKey.get(meta.storageKey);
-          if (
-            bytes !== undefined &&
-            bytes.byteLength === meta.size &&
-            (await sha256Hex(bytes)) === meta.sha256
-          ) {
+          const row = rowByKey.get(meta.storageKey);
+          if (row === undefined) {
+            continue;
+          }
+          if (row.storage_backend === 'r2') {
+            if (this.r2Bucket === undefined) {
+              throw new DomainError(
+                'DB_UNAVAILABLE',
+                'r2 bucket binding missing for r2-backed staged output',
+              );
+            }
+            const bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+              size: meta.size,
+              sha256: meta.sha256,
+            });
             latestStagedOutputs.push(Object.freeze({ ...meta, bytes }));
+          } else {
+            const bytes = decodePgBytea(row.bytes);
+            if (bytes.byteLength === meta.size && (await sha256Hex(bytes)) === meta.sha256) {
+              latestStagedOutputs.push(Object.freeze({ ...meta, bytes }));
+            }
           }
         }
       }
@@ -1371,8 +1414,9 @@ export class PostgresPythonAgentExecutionRepository {
     }
 
     const input = parsed.data;
+    const cleanupR2Keys: string[] = [];
 
-    return runTx(this.pool, async (client) => {
+    const result = await runTx(this.pool, async (client) => {
       const { task, run, now, leaseLive } = await lockTaskAndRun(client, input.lease);
       if (task === null) {
         throw new DomainError('NOT_FOUND', 'task does not exist in this tenant');
@@ -1441,6 +1485,7 @@ export class PostgresPythonAgentExecutionRepository {
           client,
           input.lease.tenantId,
           staged,
+          cleanupR2Keys,
         );
         await client.query(
           `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)
@@ -1532,6 +1577,12 @@ export class PostgresPythonAgentExecutionRepository {
         publishedArtifactIds: Object.freeze(publishedArtifactIds),
       };
     });
+
+    if (result.outcome === 'committed' && cleanupR2Keys.length > 0) {
+      await this.byteaStore.cleanupR2Keys(cleanupR2Keys);
+    }
+
+    return result;
   }
 
   async commitFailure(command: PythonAgentCommitFailureCommand): Promise<PythonAgentFailureResult> {

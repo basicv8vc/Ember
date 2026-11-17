@@ -10,10 +10,16 @@ final class SessionTaskStore {
     private(set) var tasksByID: [UUID: SessionTaskDTO] = [:]
     private(set) var eventsByTaskID: [UUID: [SessionTaskEventDTO]] = [:]
     private(set) var resultsByTaskID: [UUID: SessionTaskResultDTO] = [:]
+    private(set) var artifactsByTaskID: [UUID: [TaskArtifactItemDTO]] = [:]
     private(set) var cancelResponseByTaskID: [UUID: TaskCancelDTO] = [:]
     private(set) var missingTaskIDs: Set<UUID> = []
     private(set) var eventsUnavailableTaskIDs: Set<UUID> = []
+    private(set) var artifactsUnavailableTaskIDs: Set<UUID> = []
     private(set) var loadingDetailTaskIDs: Set<UUID> = []
+    private(set) var loadingArtifactsTaskIDs: Set<UUID> = []
+    private(set) var downloadingArtifactIDs: Set<UUID> = []
+    private(set) var downloadedArtifactFileByID: [UUID: URL] = [:]
+    private(set) var downloadedArtifactPreviewByID: [UUID: String] = [:]
     private(set) var cancellingTaskIDs: Set<UUID> = []
     private(set) var isLoadingList = false
     private(set) var isLoadingMoreTasks = false
@@ -24,6 +30,8 @@ final class SessionTaskStore {
     private(set) var listEndpointUnavailable = false
     private(set) var detailErrorByTaskID: [UUID: String] = [:]
     private(set) var resultErrorByTaskID: [UUID: String] = [:]
+    private(set) var artifactListErrorByTaskID: [UUID: String] = [:]
+    private(set) var artifactDownloadErrorByID: [UUID: String] = [:]
     private(set) var cancelErrorByTaskID: [UUID: String] = [:]
 
     init(repository: (any SessionTaskRepositoryProtocol)? = nil, pageSize: Int = 50) {
@@ -124,6 +132,17 @@ final class SessionTaskStore {
             guard generation == startGeneration, !Task.isCancelled else { return }
             guard shouldFetchResult(for: taskID) else { continue }
             await refreshResult(taskID, using: repository, generation: startGeneration)
+        }
+
+        let terminalPythonIDs = tasksByID.values.filter { task in
+            task.status.isTerminal &&
+            (task.kind == .pythonAgent || task.kind == .pythonSandbox) &&
+            artifactsByTaskID[task.taskID] == nil &&
+            !artifactsUnavailableTaskIDs.contains(task.taskID)
+        }.map(\.taskID)
+        for taskID in terminalPythonIDs {
+            guard generation == startGeneration, !Task.isCancelled else { return }
+            await refreshArtifacts(taskID, using: repository, generation: startGeneration)
         }
     }
 
@@ -238,6 +257,10 @@ final class SessionTaskStore {
            shouldFetchResult(for: taskID) {
             await refreshResult(taskID, using: repository, generation: startGeneration)
         }
+
+        if !missingTaskIDs.contains(taskID), tasksByID[taskID] != nil {
+            await refreshArtifacts(taskID, using: repository, generation: startGeneration)
+        }
     }
 
     func cancelTask(taskID: UUID) async {
@@ -280,10 +303,16 @@ final class SessionTaskStore {
         tasksByID.removeAll()
         eventsByTaskID.removeAll()
         resultsByTaskID.removeAll()
+        artifactsByTaskID.removeAll()
         cancelResponseByTaskID.removeAll()
         missingTaskIDs.removeAll()
         eventsUnavailableTaskIDs.removeAll()
+        artifactsUnavailableTaskIDs.removeAll()
         loadingDetailTaskIDs.removeAll()
+        loadingArtifactsTaskIDs.removeAll()
+        downloadingArtifactIDs.removeAll()
+        downloadedArtifactFileByID.removeAll()
+        downloadedArtifactPreviewByID.removeAll()
         cancellingTaskIDs.removeAll()
         isLoadingList = false
         isLoadingMoreTasks = false
@@ -294,7 +323,59 @@ final class SessionTaskStore {
         listEndpointUnavailable = false
         detailErrorByTaskID.removeAll()
         resultErrorByTaskID.removeAll()
+        artifactListErrorByIDReset()
         cancelErrorByTaskID.removeAll()
+        Self.cleanupDownloadedTempFiles()
+    }
+
+    private func artifactListErrorByIDReset() {
+        artifactListErrorByTaskID.removeAll()
+        artifactDownloadErrorByID.removeAll()
+    }
+
+    func downloadArtifact(_ item: TaskArtifactItemDTO) async {
+        guard let repository, !downloadingArtifactIDs.contains(item.artifactID) else { return }
+        if let existingURL = downloadedArtifactFileByID[item.artifactID],
+           FileManager.default.fileExists(atPath: existingURL.path) {
+            return
+        }
+
+        let startGeneration = generation
+        downloadingArtifactIDs.insert(item.artifactID)
+        artifactDownloadErrorByID[item.artifactID] = nil
+        defer {
+            if generation == startGeneration {
+                downloadingArtifactIDs.remove(item.artifactID)
+            }
+        }
+
+        do {
+            let downloaded = try await repository.downloadArtifact(
+                artifactID: item.artifactID,
+                filename: item.displayFilename,
+                mediaType: item.mediaType
+            )
+            guard generation == startGeneration, !Task.isCancelled else { return }
+
+            let folder = Self.artifactsTempRoot()
+                .appendingPathComponent(item.artifactID.uuidString.lowercased(), isDirectory: true)
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let fileURL = folder.appendingPathComponent(downloaded.filename, isDirectory: false)
+            try downloaded.data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
+            downloadedArtifactFileByID[item.artifactID] = fileURL
+            if downloaded.data.count <= B3AttachmentLimits.maxFileBytes,
+               let text = String(data: downloaded.data, encoding: .utf8) {
+                downloadedArtifactPreviewByID[item.artifactID] = text
+            }
+        } catch is CancellationError {
+            return
+        } catch SessionTaskRepositoryError.notFound {
+            guard generation == startGeneration else { return }
+            artifactDownloadErrorByID[item.artifactID] = String(localized: "tasks.artifacts.not_found", table: "Conversation")
+        } catch {
+            guard generation == startGeneration else { return }
+            artifactDownloadErrorByID[item.artifactID] = String(localized: "tasks.artifacts.download_failed", table: "Conversation")
+        }
     }
 
     private func refreshSingleTask(
@@ -373,6 +454,45 @@ final class SessionTaskStore {
             guard generation == startGeneration else { return }
             resultErrorByTaskID[taskID] = String(localized: "tasks.error.result_load", table: "Conversation")
         }
+    }
+
+    private func refreshArtifacts(
+        _ taskID: UUID,
+        using repository: any SessionTaskRepositoryProtocol,
+        generation startGeneration: UInt64
+    ) async {
+        loadingArtifactsTaskIDs.insert(taskID)
+        artifactListErrorByTaskID[taskID] = nil
+        defer {
+            if generation == startGeneration {
+                loadingArtifactsTaskIDs.remove(taskID)
+            }
+        }
+
+        do {
+            let list = try await repository.fetchArtifacts(taskID: taskID)
+            guard generation == startGeneration else { return }
+            artifactsUnavailableTaskIDs.remove(taskID)
+            artifactsByTaskID[taskID] = list.artifacts
+            artifactListErrorByTaskID[taskID] = nil
+        } catch is CancellationError {
+            return
+        } catch SessionTaskRepositoryError.notFound, SessionTaskRepositoryError.endpointNotReady {
+            guard generation == startGeneration else { return }
+            artifactsUnavailableTaskIDs.insert(taskID)
+            artifactListErrorByTaskID[taskID] = nil
+        } catch {
+            guard generation == startGeneration else { return }
+            artifactListErrorByTaskID[taskID] = String(localized: "tasks.artifacts.list_failed", table: "Conversation")
+        }
+    }
+
+    private static func artifactsTempRoot() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("EmberArtifacts", isDirectory: true)
+    }
+
+    private static func cleanupDownloadedTempFiles() {
+        try? FileManager.default.removeItem(at: artifactsTempRoot())
     }
 
     private func mergeEvents(_ incoming: [SessionTaskEventDTO], for taskID: UUID) {

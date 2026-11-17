@@ -1,5 +1,12 @@
 import SwiftUI
 
+struct ComposerAttachment: Identifiable, Equatable {
+    let id: UUID
+    let filename: String
+    let mediaType: String
+    let sizeBytes: Int
+}
+
 /// Display-only state for the conversation surface. The caller owns message truth and ordering.
 struct ConversationScreenState {
     var partnerName: String = "Ember"
@@ -10,6 +17,9 @@ struct ConversationScreenState {
     var isLoading = false
     var isSubmitting = false
     var commandStatus: ConversationCommandStatus = .idle
+    var attachments: [ComposerAttachment] = []
+    var isUploadingAttachment = false
+    var attachmentError: String? = nil
 }
 
 enum ConversationReplyState: Equatable {
@@ -87,16 +97,22 @@ struct ConversationScreenActions {
     var retry: () -> Void
     var stopGenerating: () -> Void
     var selectPrompt: (String) -> Void
+    var onPickAttachment: (() -> Void)?
+    var onRemoveAttachment: ((UUID) -> Void)?
 
     init(
         send: @escaping (String) -> Void,
         retry: @escaping () -> Void,
         stopGenerating: @escaping () -> Void,
-        selectPrompt: @escaping (String) -> Void
+        selectPrompt: @escaping (String) -> Void,
+        onPickAttachment: (() -> Void)? = nil,
+        onRemoveAttachment: ((UUID) -> Void)? = nil
     ) {
         self.send = send
         self.retry = retry
         self.stopGenerating = stopGenerating
         self.selectPrompt = selectPrompt
+        self.onPickAttachment = onPickAttachment
+        self.onRemoveAttachment = onRemoveAttachment
     }
 }

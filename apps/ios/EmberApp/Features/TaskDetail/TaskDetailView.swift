@@ -27,11 +27,18 @@ struct TaskDetailView: View {
     }
 }
 
+private struct ArtifactPreviewPayload: Identifiable {
+    let id: UUID
+    let filename: String
+    let text: String
+}
+
 private struct SessionTaskDetailContent: View {
     let taskID: UUID
     @Bindable var store: SessionTaskStore
 
     @State private var copiedResultAlert = false
+    @State private var previewPayload: ArtifactPreviewPayload?
 
     private var task: SessionTaskDTO? {
         store.tasksByID[taskID]
@@ -70,6 +77,7 @@ private struct SessionTaskDetailContent: View {
                     cancelSectionIfNeeded(task)
                     activitySection
                     resultSection(for: task)
+                    artifactsSectionIfNeeded
                 } else if isLoading {
                     LoadingPlaceholder(title: "placeholder.loading")
                 } else if store.missingTaskIDs.contains(taskID) {
@@ -127,6 +135,37 @@ private struct SessionTaskDetailContent: View {
         ) {
             Button(role: .cancel) {} label: {
                 Text("tasks.detail.ok", tableName: "Conversation")
+            }
+        }
+        .sheet(item: $previewPayload) { payload in
+            NavigationStack {
+                ScrollView([.vertical, .horizontal]) {
+                    Text(payload.text)
+                        .font(.footnote.monospaced())
+                        .textSelection(.enabled)
+                        .padding(EmberDesignTokens.standardSpacing)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .background(EmberDesignTokens.groupedBackground)
+                .navigationTitle(payload.filename)
+                .navigationBarTitleDisplayMode(.inline)
+                .toolbar {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            previewPayload = nil
+                        } label: {
+                            Text("tasks.detail.close", tableName: "Conversation")
+                        }
+                    }
+                    if let fileURL = store.downloadedArtifactFileByID[payload.id] {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            ShareLink(item: fileURL) {
+                                Image(systemName: "square.and.arrow.up")
+                                    .accessibilityLabel(Text("tasks.artifacts.export", tableName: "Conversation"))
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -376,6 +415,145 @@ private struct SessionTaskDetailContent: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-detail-outcome")
+    }
+
+    @ViewBuilder
+    private var artifactsSectionIfNeeded: some View {
+        let artifacts = store.artifactsByTaskID[taskID] ?? []
+        let isLoadingArtifacts = store.loadingArtifactsTaskIDs.contains(taskID)
+        let listError = store.artifactListErrorByTaskID[taskID]
+
+        if !artifacts.isEmpty || isLoadingArtifacts || listError != nil {
+            VStack(alignment: .leading, spacing: 12) {
+                Text("tasks.artifacts.section_title", tableName: "Conversation")
+                    .font(.headline)
+
+                if isLoadingArtifacts && artifacts.isEmpty {
+                    ProgressView()
+                } else if let listError, artifacts.isEmpty {
+                    ErrorPlaceholder(
+                        title: LocalizedStringKey("tasks.error.title"),
+                        message: LocalizedStringKey(listError),
+                        retryTitle: LocalizedStringKey("placeholder.retry")
+                    ) {
+                        Task { await store.loadDetail(taskID: taskID) }
+                    }
+                } else {
+                    ForEach(artifacts) { item in
+                        artifactRow(item)
+                    }
+                }
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                EmberDesignTokens.cardBackground,
+                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+            )
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("task-detail-artifacts")
+        }
+    }
+
+    private func artifactRow(_ item: TaskArtifactItemDTO) -> some View {
+        let isDownloading = store.downloadingArtifactIDs.contains(item.artifactID)
+        let downloadedURL = store.downloadedArtifactFileByID[item.artifactID]
+        let previewText = store.downloadedArtifactPreviewByID[item.artifactID]
+        let downloadError = store.artifactDownloadErrorByID[item.artifactID]
+
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: item.createdBy == .user ? "doc.text" : "doc.badge.gearshape")
+                    .font(.body)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(item.displayFilename)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(2)
+
+                    HStack(spacing: 8) {
+                        Text(
+                            item.createdBy == .user
+                                ? "tasks.artifacts.source_user"
+                                : "tasks.artifacts.source_run",
+                            tableName: "Conversation"
+                        )
+                        Text("·")
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(item.size), countStyle: .file))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+
+                Spacer(minLength: 8)
+            }
+
+            if let downloadedURL {
+                HStack(spacing: 8) {
+                    if let previewText {
+                        Button {
+                            previewPayload = ArtifactPreviewPayload(
+                                id: item.artifactID,
+                                filename: item.displayFilename,
+                                text: previewText
+                            )
+                        } label: {
+                            Label {
+                                Text("tasks.artifacts.preview", tableName: "Conversation")
+                            } icon: {
+                                Image(systemName: "eye")
+                            }
+                        }
+                        .buttonStyle(.bordered)
+                        .frame(minHeight: 44)
+                        .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
+                    }
+
+                    ShareLink(item: downloadedURL) {
+                        Label {
+                            Text("tasks.artifacts.export", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "square.and.arrow.up")
+                        }
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("task-artifact-export-\(item.artifactID.uuidString.lowercased())")
+                }
+            } else {
+                Button {
+                    Task { await store.downloadArtifact(item) }
+                } label: {
+                    if isDownloading {
+                        ProgressView()
+                            .frame(maxWidth: .infinity)
+                    } else {
+                        Label {
+                            Text("tasks.artifacts.download", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "arrow.down.circle")
+                        }
+                        .frame(maxWidth: .infinity)
+                    }
+                }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 44)
+                .disabled(isDownloading)
+                .accessibilityIdentifier("task-artifact-download-\(item.artifactID.uuidString.lowercased())")
+            }
+
+            if let downloadError {
+                Text(downloadError)
+                    .font(.caption)
+                    .foregroundStyle(Color(uiColor: .systemRed))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(12)
+        .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
     }
 }
 

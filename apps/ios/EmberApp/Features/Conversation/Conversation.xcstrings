@@ -504,6 +504,186 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Result" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务结果" } }
       }
+    },
+    "conversation.composer.attach_file" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Attach CSV, TXT, or Markdown file" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "附加 CSV、TXT 或 Markdown 文件" } }
+      }
+    },
+    "conversation.composer.remove_attachment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove attachment" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除附件" } }
+      }
+    },
+    "conversation.composer.uploading_attachment" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Uploading file…" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在上传文件…" } }
+      }
+    },
+    "conversation.composer.attachment_limit" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "You can attach up to 5 files per message." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每条消息最多只能附加 5 个文件。" } }
+      }
+    },
+    "conversation.composer.attachment_unsupported" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Only CSV, TXT, and Markdown files are supported." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅支持 CSV、TXT 和 Markdown 文件。" } }
+      }
+    },
+    "conversation.composer.attachment_too_large" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "File exceeds the 256 KB upload limit." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件超过 256 KB 上传大小限制。" } }
+      }
+    },
+    "conversation.composer.attachment_upload_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not upload the file to Ember Cloud." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件上传至 Ember 云端失败。" } }
+      }
+    },
+    "conversation.composer.attachment_read_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not open the selected file." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法读取所选文件。" } }
+      }
+    },
+    "conversation.composer.attachment_menu.open_hint" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Opens attachment and prompt options." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开文件上传与快捷提示选项。" } }
+      }
+    },
+    "conversation.composer.attachment_menu.close" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close options" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭选项" } }
+      }
+    },
+    "conversation.composer.attachment_menu.file_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose File" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择文件" } }
+      }
+    },
+    "conversation.composer.attachment_menu.file_subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "CSV, TXT, TSV, Markdown · 256 KB max" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "CSV、TXT、TSV、Markdown（上限 256 KB）" } }
+      }
+    },
+    "conversation.composer.attachment_menu.file_limit_reached" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "5-file limit reached for this message" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前消息已达到 5 个文件上限" } }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Organize Notes" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "整理笔记为清单" } }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Insert an action-items prompt" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入提取行动项的提示词" } }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_prompt" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Turn these notes into clear, prioritized action items." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请把这些笔记整理成清晰、按优先级排列的行动清单。" } }
+      }
+    },
+    "conversation.composer.attachment_menu.data_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Analyze Spreadsheet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分析表格数据" } }
+      }
+    },
+    "conversation.composer.attachment_menu.data_subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Insert a Python & CSV summary prompt" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入表格分析与汇总提示词" } }
+      }
+    },
+    "conversation.composer.attachment_menu.data_prompt" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Analyze the attached dataset, check for issues, and summarize key metrics." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请分析这份数据文件，检查异常并汇总关键指标。" } }
+      }
+    },
+    "tasks.artifacts.section_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files & Artifacts" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件与产物" } }
+      }
+    },
+    "tasks.artifacts.source_user" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Uploaded input" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "用户上传输入" } }
+      }
+    },
+    "tasks.artifacts.source_run" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Generated output" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务生成输出" } }
+      }
+    },
+    "tasks.artifacts.download" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Download File" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下载文件" } }
+      }
+    },
+    "tasks.artifacts.preview" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "预览" } }
+      }
+    },
+    "tasks.artifacts.export" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Share / Save" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "导出 / 分享" } }
+      }
+    },
+    "tasks.artifacts.not_found" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "This file is no longer available on the server." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "该文件在服务端已不可用。" } }
+      }
+    },
+    "tasks.artifacts.download_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not download this file. Try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下载文件失败，请重试。" } }
+      }
+    },
+    "tasks.artifacts.list_failed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task files." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法加载任务文件列表。" } }
+      }
+    },
+    "tasks.artifacts.open_files_count %lld" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "View Generated Files (%lld)" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看生成文件 (%lld)" } }
+      }
+    },
+    "tasks.detail.close" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
+      }
     }
   },
   "version" : "1.0"

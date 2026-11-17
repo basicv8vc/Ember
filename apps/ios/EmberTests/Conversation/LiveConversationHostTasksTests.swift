@@ -482,6 +482,92 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertEqual(messageReloadCount.value, loadsBeforeRejected)
     }
 
+    func testAttachCSVFileRejectsUnsupportedAndClearsAfterSend() async throws {
+        let directory = makeTempDirectory()
+        let csvFile = directory.appendingPathComponent("q4 sales.csv")
+        let csvData = Data("month,amount\nJan,100\n".utf8)
+        try csvData.write(to: csvFile)
+
+        let unsupportedFile = directory.appendingPathComponent("report.pdf")
+        try Data("pdf".utf8).write(to: unsupportedFile)
+
+        let uploadID = "00000000-0000-4000-8000-00000000c111"
+        let sha = String(repeating: "c", count: 64)
+        let capturedSendBody = RequestRecorder()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST" && path == "/v1/me/uploads" {
+                return .json(statusCode: 201, body: """
+                {
+                  "upload_id":"\(uploadID)",
+                  "filename":"q4_sales.csv",
+                  "media_type":"text/csv",
+                  "size":\(csvData.count),
+                  "sha256":"\(sha)",
+                  "expires_at":"2026-11-17T00:00:00Z",
+                  "created_at":"2026-11-16T00:00:00Z"
+                }
+                """)
+            }
+            if request.httpMethod == "POST" && path.contains("/messages") {
+                capturedSendBody.record(request)
+                let payload = request.httpBody.flatMap {
+                    try? JSONSerialization.jsonObject(with: $0) as? [String: Any]
+                } ?? [:]
+                let submissionID = (payload["client_submission_id"] as? String)
+                    ?? "66666666-6666-4666-8666-666666666611"
+                return .json(statusCode: 201, body: """
+                {
+                  "message":{
+                    "message_id":"55555555-5555-4555-8555-555555555511",
+                    "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                    "sequence":1,"created_at":"2026-11-16T00:00:00Z",
+                    "kind":"user","text":"Summarize revenue",
+                    "client_submission_id":"\(submissionID)"
+                  },
+                  "turn":{"turn_id":"88888888-8888-4888-8888-888888888811",
+                          "status":"running","created_at":"2026-11-16T00:00:00Z"},
+                  "transcript_epoch":0
+                }
+                """)
+            }
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[]}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory)
+        await model.start()
+
+        await model.attachFile(from: unsupportedFile)
+        XCTAssertTrue(model.stagedAttachments.isEmpty)
+        XCTAssertNotNil(model.attachmentError)
+
+        await model.attachFile(from: csvFile)
+        XCTAssertNil(model.attachmentError)
+        XCTAssertEqual(model.stagedAttachments.count, 1)
+        XCTAssertEqual(model.screen.attachments.first?.filename, "q4_sales.csv")
+
+        await model.send("Summarize revenue")
+        XCTAssertTrue(model.stagedAttachments.isEmpty)
+        let req = try XCTUnwrap(capturedSendBody.requests.first)
+        let body = try XCTUnwrap(req.httpBody)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(obj["attachment_ids"] as? [String], [uploadID])
+    }
+
     private func makeHostModel(
         directory: URL,
         taskPollInterval: Duration = .seconds(2)

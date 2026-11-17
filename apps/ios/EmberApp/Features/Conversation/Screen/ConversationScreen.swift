@@ -11,9 +11,17 @@ struct ConversationScreen: View {
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
 
     @FocusState private var composerIsFocused: Bool
+    @State private var isAttachmentMenuPresented = false
+    @State private var isAttachmentMenuOverlayVisible = false
 
     private var isGenerating: Bool {
         state.replyState == .generating || state.isSubmitting || state.isLoading
+    }
+
+    private var canAttachMoreFiles: Bool {
+        !isGenerating
+            && !state.isUploadingAttachment
+            && state.attachments.count < B3AttachmentLimits.maxAttachmentsPerMessage
     }
 
     var body: some View {
@@ -48,8 +56,46 @@ struct ConversationScreen: View {
                 focused: $composerIsFocused,
                 isGenerating: isGenerating,
                 note: composerNote,
+                attachments: state.attachments,
+                isUploadingAttachment: state.isUploadingAttachment,
+                attachmentError: state.attachmentError,
+                isAttachmentMenuPresented: $isAttachmentMenuPresented,
+                hidesAttachmentTrigger: isAttachmentMenuOverlayVisible,
+                onPickAttachment: actions.onPickAttachment,
+                onRemoveAttachment: actions.onRemoveAttachment,
                 onSend: actions.send
             )
+        }
+        .overlayPreferenceValue(ConversationAttachmentButtonAnchorKey.self) { anchor in
+            GeometryReader { proxy in
+                if let onPickAttachment = actions.onPickAttachment,
+                   let anchor,
+                   isAttachmentMenuPresented || isAttachmentMenuOverlayVisible {
+                    ConversationAttachmentPopoverOverlay(
+                        isPresented: $isAttachmentMenuPresented,
+                        isOverlayVisible: $isAttachmentMenuOverlayVisible,
+                        sourceRect: proxy[anchor],
+                        containerSize: proxy.size,
+                        canAttachFile: canAttachMoreFiles,
+                        attachedCount: state.attachments.count,
+                        onChooseFile: onPickAttachment,
+                        onSelectStarterPrompt: { starter in
+                            draft = ConversationInteractionRules.insertingStarterPrompt(starter, into: draft)
+                            composerIsFocused = true
+                        }
+                    )
+                }
+            }
+        }
+        .onChange(of: isGenerating) { _, generating in
+            if generating && isAttachmentMenuPresented {
+                isAttachmentMenuPresented = false
+            }
+        }
+        .onChange(of: state.isUploadingAttachment) { _, uploading in
+            if uploading && isAttachmentMenuPresented {
+                isAttachmentMenuPresented = false
+            }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
         .accessibilityElement(children: .contain)

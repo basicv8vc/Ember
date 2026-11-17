@@ -90,9 +90,30 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
 
     func rejectedDraft() async throws -> LiveConversationJournal.Pending? { nil }
 
-    func send(text: String) async throws -> LiveB1Receipt {
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        let safeName = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
+        guard B3AttachmentLimits.allowedMediaTypes.contains(mediaType),
+              data.count <= B3AttachmentLimits.maxFileBytes else {
+            throw LiveB1Failure.rejected
+        }
+        let now = ISO8601DateFormatter().string(from: Date())
+        let expires = ISO8601DateFormatter().string(from: Date().addingTimeInterval(86_400))
+        return StagedUploadReceiptDTO(
+            uploadID: UUID(),
+            filename: safeName,
+            mediaType: mediaType,
+            size: data.count,
+            sha256: String(repeating: "0", count: 64),
+            expiresAt: expires,
+            createdAt: now
+        )
+    }
+
+    func send(text: String, attachmentIDs: [UUID] = []) async throws -> LiveB1Receipt {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { throw LiveB1Failure.rejected }
+        guard !trimmed.isEmpty, attachmentIDs.count <= B3AttachmentLimits.maxAttachmentsPerMessage else {
+            throw LiveB1Failure.rejected
+        }
         await taskRepository.recordUserMessage(trimmed)
         let persisted = await taskRepository.appendedUserMessages()
         messages = Self.buildMessages(extraUserTexts: persisted)

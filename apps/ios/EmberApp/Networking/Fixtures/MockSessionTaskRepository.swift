@@ -130,6 +130,47 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
         )
     }
 
+    func fetchArtifacts(taskID: UUID) async throws -> TaskArtifactsListDTO {
+        guard state.tasks.contains(where: { $0.taskID == taskID }) else {
+            throw SessionTaskRepositoryError.notFound
+        }
+        if taskID == Self.notesTaskID {
+            let sample = "item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n"
+            return TaskArtifactsListDTO(
+                taskID: taskID,
+                artifacts: [
+                    TaskArtifactItemDTO(
+                        artifactID: UUID(uuidString: "00000000-0000-4000-8000-00000000b371")!,
+                        filename: "action_items.csv",
+                        mediaType: "text/csv",
+                        size: sample.utf8.count,
+                        sha256: String(repeating: "a", count: 64),
+                        createdBy: .run,
+                        createdAt: "2026-11-15T09:02:00Z"
+                    )
+                ]
+            )
+        }
+        return TaskArtifactsListDTO(taskID: taskID, artifacts: [])
+    }
+
+    func downloadArtifact(
+        artifactID: UUID,
+        filename: String,
+        mediaType: String
+    ) async throws -> DownloadedTaskArtifact {
+        guard artifactID == UUID(uuidString: "00000000-0000-4000-8000-00000000b371")! else {
+            throw SessionTaskRepositoryError.notFound
+        }
+        let sample = Data("item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n".utf8)
+        return DownloadedTaskArtifact(
+            artifactID: artifactID,
+            filename: B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType),
+            mediaType: mediaType,
+            data: sample
+        )
+    }
+
     func cancelTask(id: UUID) async throws -> TaskCancelDTO {
         guard let index = state.tasks.firstIndex(where: { $0.taskID == id }) else {
             throw SessionTaskRepositoryError.notFound

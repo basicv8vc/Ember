@@ -47,4 +47,21 @@ final class ConversationInteractionRulesTests: XCTestCase {
         XCTAssertNil(ConversationInteractionRules.retryAction(for: .generating))
         XCTAssertNil(ConversationInteractionRules.retryAction(for: .idle))
     }
+
+    func testInsertingStarterPromptPopulatesEmptyDraftAndAppendsWithoutOverwriting() {
+        let starter = "Turn these notes into clear, prioritized action items."
+
+        XCTAssertEqual(
+            ConversationInteractionRules.insertingStarterPrompt(starter, into: "  \n "),
+            starter
+        )
+        XCTAssertEqual(
+            ConversationInteractionRules.insertingStarterPrompt(starter, into: "Weekly sync:"),
+            "Weekly sync:\n\n\(starter)"
+        )
+        XCTAssertEqual(
+            ConversationInteractionRules.insertingStarterPrompt(starter, into: "Weekly sync:\n\n\(starter)"),
+            "Weekly sync:\n\n\(starter)"
+        )
+    }
 }

@@ -82,10 +82,19 @@ actor LiveConversationRepository {
         return try await journal.rejectedDraft(for: me.consumerID)
     }
 
-    /// A fresh UUIDv4 is created once, persisted with its exact body and epoch, then sent.
-    func send(text: String) async throws -> LiveB1Receipt {
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        _ = try await ensureProfile()
+        return try await client.uploadAttachment(filename: filename, mediaType: mediaType, data: data)
+    }
+
+    /// A fresh UUIDv4 is created once, persisted with its exact body, attachments and epoch, then sent.
+    func send(text: String, attachmentIDs: [UUID] = []) async throws -> LiveB1Receipt {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized.count <= 4096 else {
+            throw LiveB1Failure.rejected
+        }
+        guard attachmentIDs.count <= B3AttachmentLimits.maxAttachmentsPerMessage,
+              Set(attachmentIDs).count == attachmentIDs.count else {
             throw LiveB1Failure.rejected
         }
         let me = try await ensureProfile()
@@ -96,7 +105,8 @@ actor LiveConversationRepository {
             clientSubmissionID: UUID(),
             conversationID: me.conversation.conversationID,
             transcriptEpoch: Int64(me.conversation.transcriptEpoch),
-            text: normalized)
+            text: normalized,
+            attachmentIDs: attachmentIDs)
         try await journal.prepare(pending, consumerID: me.consumerID)
         return try await dispatch(pending, consumerID: me.consumerID)
     }

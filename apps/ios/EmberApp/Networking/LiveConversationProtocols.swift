@@ -9,11 +9,18 @@ protocol LiveConversationServiceProtocol: Sendable {
     func pending() async throws -> LiveConversationJournal.Pending?
     func activeTurn() async throws -> LiveConversationJournal.Turn?
     func rejectedDraft() async throws -> LiveConversationJournal.Pending?
-    func send(text: String) async throws -> LiveB1Receipt
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO
+    func send(text: String, attachmentIDs: [UUID]) async throws -> LiveB1Receipt
     func reconcilePending() async throws -> LiveB1Receipt?
     func pollActiveTurn() async throws -> LiveB1Turn?
     func cancelActiveTurn() async throws -> LiveB1Turn?
     func clearOnLogout() async
+}
+
+extension LiveConversationServiceProtocol {
+    func send(text: String) async throws -> LiveB1Receipt {
+        try await send(text: text, attachmentIDs: [])
+    }
 }
 
 protocol LiveAuthControlling: Sendable {

@@ -14,6 +14,12 @@ protocol SessionTaskRepositoryProtocol: Sendable {
     func fetchTask(id: UUID) async throws -> SessionTaskDetailDTO
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO
     func fetchResult(taskID: UUID) async throws -> SessionTaskResultDTO
+    func fetchArtifacts(taskID: UUID) async throws -> TaskArtifactsListDTO
+    func downloadArtifact(
+        artifactID: UUID,
+        filename: String,
+        mediaType: String
+    ) async throws -> DownloadedTaskArtifact
     func cancelTask(id: UUID) async throws -> TaskCancelDTO
 }
 
@@ -104,6 +110,38 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         let result = try decode(SessionTaskResultDTO.self, from: response.data)
         guard result.taskID == taskID else { throw SessionTaskRepositoryError.invalidResponse }
         return result
+    }
+
+    func fetchArtifacts(taskID: UUID) async throws -> TaskArtifactsListDTO {
+        let response = try await sendRead(pathComponents: [
+            "v1", "me", "tasks", taskID.uuidString.lowercased(), "artifacts",
+        ])
+        guard response.statusCode == 200 else {
+            throw Self.mapStatusError(response.statusCode)
+        }
+        let list = try decode(TaskArtifactsListDTO.self, from: response.data)
+        guard list.taskID == taskID else { throw SessionTaskRepositoryError.invalidResponse }
+        return list
+    }
+
+    func downloadArtifact(
+        artifactID: UUID,
+        filename: String,
+        mediaType: String
+    ) async throws -> DownloadedTaskArtifact {
+        let response = try await sendRead(pathComponents: [
+            "v1", "me", "artifacts", artifactID.uuidString.lowercased(),
+        ])
+        guard response.statusCode == 200 else {
+            throw Self.mapStatusError(response.statusCode)
+        }
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
+        return DownloadedTaskArtifact(
+            artifactID: artifactID,
+            filename: safeFilename,
+            mediaType: mediaType,
+            data: response.data
+        )
     }
 
     func cancelTask(id: UUID) async throws -> TaskCancelDTO {

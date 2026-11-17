@@ -279,16 +279,54 @@ struct LiveB1ConversationClient: Sendable {
 
     func bootstrap() async throws -> EmberMeDTO { try await auth.restoreSession() }
 
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
+        guard B3AttachmentLimits.allowedMediaTypes.contains(mediaType),
+              data.count <= B3AttachmentLimits.maxFileBytes else {
+            throw LiveB1Failure.rejected
+        }
+        struct Body: Encodable {
+            let filename: String
+            let media_type: String
+            let content_base64: String
+        }
+        let body = try JSONEncoder().encode(Body(
+            filename: safeFilename,
+            media_type: mediaType,
+            content_base64: data.base64EncodedString()
+        ))
+        let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
+            method: "POST",
+            pathComponents: ["v1", "me", "uploads"],
+            body: body,
+            contentType: "application/json",
+            idempotency: .nonIdempotent(clientSubmissionID: nil)
+        ))
+        guard response.statusCode == 200 || response.statusCode == 201 else {
+            throw Self.uploadFailure(response.statusCode)
+        }
+        let receipt = try decode(StagedUploadReceiptDTO.self, response.data)
+        guard receipt.size == data.count else {
+            throw LiveB1Failure.invalidResponse
+        }
+        return receipt
+    }
+
     func send(_ submission: ConversationSubmission) async throws -> LiveB1Receipt {
         struct Body: Encodable {
             let client_submission_id: String
             let text: String
             let transcript_epoch: Int64
+            let attachment_ids: [String]?
         }
+        let attachmentIDs = submission.attachmentIDs.isEmpty
+            ? nil
+            : submission.attachmentIDs.map { $0.uuidString.lowercased() }
         let body = try JSONEncoder().encode(Body(
             client_submission_id: submission.clientSubmissionID.uuidString.lowercased(),
             text: submission.text,
-            transcript_epoch: submission.transcriptEpoch))
+            transcript_epoch: submission.transcriptEpoch,
+            attachment_ids: attachmentIDs))
         let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
             method: "POST",
             pathComponents: ["v1", "conversations",
@@ -364,6 +402,16 @@ struct LiveB1ConversationClient: Sendable {
     private static func failure(_ code: Int) -> LiveB1Failure {
         switch code {
         case 401: .rejected
+        case 404: .notFound
+        case 409: .conflict
+        case 429, 500...599: .unavailable
+        default: .invalidResponse
+        }
+    }
+
+    private static func uploadFailure(_ code: Int) -> LiveB1Failure {
+        switch code {
+        case 400, 401: .rejected
         case 404: .notFound
         case 409: .conflict
         case 429, 500...599: .unavailable

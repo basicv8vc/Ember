@@ -209,6 +209,74 @@ final class LiveB1ConversationClientTests: XCTestCase {
         XCTAssertThrowsError(try JSONDecoder().decode(LiveB1Page.self, from: data))
     }
 
+    func testUploadAttachmentUsesB3RouteAndDecodesReceipt() async throws {
+        let fixture = try makeClient()
+        let recorder = RequestRecorder()
+        let uploadID = "99999999-9999-4999-8999-999999999999"
+        let sha = String(repeating: "a", count: 64)
+        let csvData = Data("month,revenue\nJan,1200\n".utf8)
+
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 201, body: """
+            {
+              "upload_id":"\(uploadID)",
+              "filename":"sales_data.csv",
+              "media_type":"text/csv",
+              "size":\(csvData.count),
+              "sha256":"\(sha)",
+              "expires_at":"2026-11-17T00:00:00Z",
+              "created_at":"2026-11-16T00:00:00Z"
+            }
+            """)
+        }
+
+        let receipt = try await fixture.client.uploadAttachment(
+            filename: "sales_data.csv",
+            mediaType: "text/csv",
+            data: csvData
+        )
+        XCTAssertEqual(receipt.uploadID.uuidString.lowercased(), uploadID)
+        XCTAssertEqual(receipt.filename, "sales_data.csv")
+        XCTAssertEqual(receipt.mediaType, "text/csv")
+        XCTAssertEqual(receipt.size, csvData.count)
+
+        let req = try XCTUnwrap(recorder.requests.first)
+        XCTAssertEqual(req.httpMethod, "POST")
+        XCTAssertEqual(req.url?.path, "/v1/me/uploads")
+        let body = try XCTUnwrap(req.httpBody)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(obj.keys), ["filename", "media_type", "content_base64"])
+        XCTAssertEqual(obj["filename"] as? String, "sales_data.csv")
+        XCTAssertEqual(obj["media_type"] as? String, "text/csv")
+        XCTAssertEqual(obj["content_base64"] as? String, csvData.base64EncodedString())
+    }
+
+    func testSendWithAttachmentsIncludesAttachmentIDs() async throws {
+        let fixture = try makeClient()
+        let uploadID = UUID(uuidString: "99999999-9999-4999-8999-999999999999")!
+        let submission = ConversationSubmission(
+            clientSubmissionID: UUID(),
+            conversationID: ConversationID(rawValue: AuthFixture.conversationID),
+            transcriptEpoch: 0,
+            text: "Analyze this CSV",
+            attachmentIDs: [uploadID]
+        )
+        let recorder = RequestRecorder()
+        let replyBody = receiptJSON(for: submission)
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 201, body: replyBody)
+        }
+
+        _ = try await fixture.client.send(submission)
+        let req = try XCTUnwrap(recorder.requests.first)
+        let body = try XCTUnwrap(req.httpBody)
+        let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
+        XCTAssertEqual(Set(obj.keys), ["client_submission_id", "text", "transcript_epoch", "attachment_ids"])
+        XCTAssertEqual(obj["attachment_ids"] as? [String], [uploadID.uuidString.lowercased()])
+    }
+
     private func makeClient() throws -> (client: LiveB1ConversationClient, session: URLSession) {
         let session = StubSession.make()
         sessions.append(session)
@@ -244,7 +312,7 @@ final class LiveB1ConversationClientTests: XCTestCase {
             "message_id":"55555555-5555-4555-8555-555555555555",
             "conversation_id":"44444444-4444-4444-8444-444444444444",
             "sequence":6,"created_at":"2026-11-06T00:00:00Z",
-            "kind":"user","text":"hello",
+            "kind":"user","text":"\(submission.text)",
             "client_submission_id":"\(submission.clientSubmissionID.uuidString.lowercased())"
           },
           "turn":{"turn_id":"88888888-8888-4888-8888-888888888888",

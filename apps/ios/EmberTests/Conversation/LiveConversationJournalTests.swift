@@ -103,4 +103,31 @@ final class LiveConversationJournalTests: XCTestCase {
         let pending = try await relaunched.pending(for: consumer)
         XCTAssertNil(pending)
     }
+
+    func testPendingPreservesAttachmentIDsAndDecodesLegacyRecordsWithoutThem() async throws {
+        let uploadID = UUID()
+        let withAttachments = LiveConversationJournal.Pending(
+            clientSubmissionID: UUID(),
+            conversationID: UUID(),
+            transcriptEpoch: 1,
+            text: "Run regression on CSV",
+            attachmentIDs: [uploadID]
+        )
+        let encoded = try JSONEncoder().encode(withAttachments)
+        let decoded = try JSONDecoder().decode(LiveConversationJournal.Pending.self, from: encoded)
+        XCTAssertEqual(decoded.attachmentIDs, [uploadID])
+        XCTAssertEqual(decoded.submission.attachmentIDs, [uploadID])
+
+        let legacyJSON = Data("""
+        {
+          "clientSubmissionID":"11111111-1111-4111-8111-111111111111",
+          "conversationID":"22222222-2222-4222-8222-222222222222",
+          "transcriptEpoch":3,
+          "text":"Legacy entry"
+        }
+        """.utf8)
+        let decodedLegacy = try JSONDecoder().decode(LiveConversationJournal.Pending.self, from: legacyJSON)
+        XCTAssertTrue(decodedLegacy.attachmentIDs.isEmpty)
+        XCTAssertTrue(decodedLegacy.submission.attachmentIDs.isEmpty)
+    }
 }

@@ -31,6 +31,20 @@ enum ConversationInteractionRules {
         .populateDraft(prompt)
     }
 
+    /// Inserts a quick starter prompt into an existing composer draft without overwriting user text.
+    static func insertingStarterPrompt(_ starter: String, into currentDraft: String) -> String {
+        let trimmedStarter = starter.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedStarter.isEmpty else { return currentDraft }
+        let trimmedDraft = currentDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmedDraft.isEmpty {
+            return trimmedStarter
+        }
+        if trimmedDraft.contains(trimmedStarter) {
+            return currentDraft
+        }
+        return "\(currentDraft.trimmingCharacters(in: .newlines))\n\n\(trimmedStarter)"
+    }
+
     static func stopAction(for replyState: ConversationReplyState) -> ConversationReplyAction? {
         replyState == .generating ? .stopMockReply : nil
     }

@@ -280,8 +280,13 @@ export class OpenRouterModelGateway implements ModelGateway {
     }
 
     const parsed = completionSchema.safeParse(payload);
+    const matchesModel =
+      parsed.success &&
+      (parsed.data.model === this.#modelId ||
+        (this.#rate.canonicalModelId !== undefined &&
+          parsed.data.model === this.#rate.canonicalModelId));
 
-    if (!parsed.success || parsed.data.model !== this.#modelId) {
+    if (!parsed.success || !matchesModel) {
       throw new ModelGatewayFailure('model_invalid_output');
     }
 

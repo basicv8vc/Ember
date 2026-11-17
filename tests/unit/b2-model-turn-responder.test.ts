@@ -115,6 +115,12 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
 
   /** Replaces the transcript this port returns, for context-bound tests. */
   contextOverride: readonly B2TurnContextRow[] | null = null;
+  attachmentBytesMap: ReadonlyMap<string, Uint8Array> | null = null;
+  loadAttachmentBytesCalls: Array<{
+    readonly tenantId: string;
+    readonly uploadIds: readonly string[];
+    readonly maxTotalBytes?: number;
+  }> = [];
 
   attemptsIssued = 0;
 
@@ -159,6 +165,25 @@ class MemoryExecutionPort implements ModelTurnExecutionPort {
   loadTurnContext(): Promise<readonly B2TurnContextRow[]> {
     this.calls.push('loadTurnContext');
     return Promise.resolve(this.contextOverride ?? contextRows);
+  }
+
+  loadAttachmentBytes(command: {
+    readonly tenantId: string;
+    readonly uploadIds: readonly string[];
+    readonly maxTotalBytes?: number;
+  }): Promise<ReadonlyMap<string, Uint8Array>> {
+    this.loadAttachmentBytesCalls.push(command);
+    if (this.attachmentBytesMap === null) {
+      return Promise.resolve(new Map());
+    }
+    const out = new Map<string, Uint8Array>();
+    for (const id of command.uploadIds) {
+      const value = this.attachmentBytesMap.get(id);
+      if (value !== undefined) {
+        out.set(id, value);
+      }
+    }
+    return Promise.resolve(out);
   }
 
   reserveAttempt(command: {
@@ -1067,5 +1092,70 @@ describe('B2 responder: per-process concurrency gate', () => {
 
     expect(next.busy).toBe(false);
     expect(next.examined).toBe(0);
+  });
+});
+
+describe('B2 responder: multimodal image hydration', () => {
+  it('hydrates data URLs only for vision images on the latest user turn, skipping PDFs and older turns', async () => {
+    const olderImageId = '44444444-4444-4444-8444-444444444444';
+    const latestImageId = '55555555-5555-4555-8555-555555555555';
+    const latestPdfId = '66666666-6666-4666-8666-666666666666';
+
+    const repository = new MemoryExecutionPort();
+    repository.contextOverride = [
+      {
+        sequence: 1,
+        kind: 'user',
+        text: 'Older photo',
+        attachments: [
+          {
+            uploadId: olderImageId,
+            filename: 'old.jpg',
+            mediaType: 'image/jpeg',
+            sizeBytes: 3,
+          },
+        ],
+      },
+      { sequence: 2, kind: 'ember', text: 'Saw old photo.' },
+      {
+        sequence: 3,
+        kind: 'user',
+        text: 'What is in this screenshot and PDF?',
+        attachments: [
+          {
+            uploadId: latestImageId,
+            filename: 'screen.png',
+            mediaType: 'image/png',
+            sizeBytes: 4,
+          },
+          {
+            uploadId: latestPdfId,
+            filename: 'doc.pdf',
+            mediaType: 'application/pdf',
+            sizeBytes: 100,
+          },
+        ],
+      },
+    ];
+    repository.attachmentBytesMap = new Map([
+      [olderImageId, new Uint8Array([1, 2, 3])],
+      [latestImageId, new Uint8Array([137, 80, 78, 71])],
+      [latestPdfId, new Uint8Array([37, 80, 68, 70])],
+    ]);
+
+    const gateway = new ScriptedGateway(['ok']);
+    const responder = realResponder(repository, gateway);
+
+    const summary = await responder.processOnce();
+    expect(summary.completed).toBe(1);
+    expect(repository.loadAttachmentBytesCalls).toHaveLength(1);
+    expect(repository.loadAttachmentBytesCalls[0]?.uploadIds).toEqual([latestImageId]);
+
+    const sentContext = gateway.inputs[0]!.context;
+    expect(sentContext[0]?.attachments?.[0]?.imageDataUrl).toBeUndefined();
+    expect(sentContext[2]?.attachments?.[0]?.imageDataUrl).toBe('data:image/png;base64,iVBORw==');
+    expect(sentContext[2]?.attachments?.[1]?.imageDataUrl).toBeUndefined();
+    // Multimodal reserve (1024 tokens) raises reservation above minimum text reserve.
+    expect(repository.reserveCommands[0]?.reservedMicroUsd).toBeGreaterThan(200);
   });
 });

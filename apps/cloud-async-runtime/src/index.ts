@@ -3,6 +3,7 @@ import { getOpenNotesTaskStatus, listDueNotesTaskDispatches } from '@ember/postg
 import {
   PostgresB3StagedUploadRepository,
   PostgresByteaBlobStore,
+  type R2BucketPort,
 } from '@ember/postgres/b3-worker';
 import { Pool } from 'pg';
 import {
@@ -60,6 +61,7 @@ interface RuntimeEnv {
   readonly HYPERDRIVE: HyperdriveBinding;
   readonly TURN_DISPATCH_QUEUE: QueueBinding;
   readonly AGENT_TASK_QUEUE?: QueueBinding;
+  readonly EMBER_BLOBS?: R2BucketPort;
   /** Optional names for isolated environments that bind a dedicated Queue/DLQ pair. */
   readonly EMBER_TURN_DISPATCH_QUEUE_NAME?: string;
   readonly EMBER_TURN_DISPATCH_DLQ_NAME?: string;
@@ -211,6 +213,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
                   daytona,
                   event,
                   workerId: runtimeWorkerId(),
+                  ...(env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS }),
                 });
           await consumeAgentDispatchMessage(message, { outbox: agentOutbox, executor, logger });
         } catch {
@@ -258,6 +261,7 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
                   model,
                   event,
                   workerId: runtimeWorkerId(),
+                  ...(env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS }),
                   queue: env.TURN_DISPATCH_QUEUE,
                   ...(env.AGENT_TASK_QUEUE === undefined
                     ? {}
@@ -367,11 +371,14 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
       }
     }
 
-    await new PostgresB3StagedUploadRepository(pool).sweepExpiredUnboundUploads().catch(() => {
-      logger.warn('expired upload GC sweep failed', { category: 'database_unavailable' });
-    });
+    const blobOpts = env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS };
+    await new PostgresB3StagedUploadRepository(pool, blobOpts)
+      .sweepExpiredUnboundUploads()
+      .catch(() => {
+        logger.warn('expired upload GC sweep failed', { category: 'database_unavailable' });
+      });
 
-    await new PostgresByteaBlobStore(pool)
+    await new PostgresByteaBlobStore(pool, blobOpts)
       .sweepOrphans(new Date(), { retentionMs: BLOB_GC_MAX_AGE_MS })
       .catch(() => {
         logger.warn('bytea blob GC sweep failed', { category: 'database_unavailable' });

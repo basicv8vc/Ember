@@ -13,6 +13,12 @@
       "id": "f7da9cff26b843fda8187764f9b81b25",
     },
   ],
+  "r2_buckets": [
+    {
+      "binding": "EMBER_BLOBS",
+      "bucket_name": "ember-blobs-staging",
+    },
+  ],
   "queues": {
     "producers": [
       {
@@ -62,7 +68,7 @@
     "EMBER_AGENT_TASK_QUEUE_NAME": "ember-staging-agent-tasks",
     "EMBER_AGENT_TASK_DLQ_NAME": "ember-staging-agent-tasks-dlq",
     "EMBER_MODEL_PROVIDER": "openrouter",
-    "EMBER_MODEL_ID": "nvidia/nemotron-3.5-lightning",
+    "EMBER_MODEL_ID": "deepseek/deepseek-v4.1-flash-1017",
     "EMBER_MODEL_ALPHA_SCOPE": "authenticated_tenants",
     "EMBER_MODEL_TURN_LEASE_MS": "30000",
     "EMBER_MODEL_ATTEMPT_TIMEOUT_MS": "20000",

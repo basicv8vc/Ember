@@ -79,7 +79,7 @@ export const DELEGATION_TOOLS = Object.freeze([
     function: Object.freeze({
       name: DELEGATE_PYTHON_TOOL_NAME,
       description:
-        'Create a durable background Python task inside an isolated sandbox with optional uploaded TXT/CSV/Markdown attachment IDs.',
+        'Create a durable background Python task inside an isolated sandbox with optional uploaded file, image, or PDF attachment IDs.',
       parameters: Object.freeze({
         type: 'object',
         additionalProperties: false,
@@ -217,10 +217,18 @@ const notesExtractionJsonSchema = z.object({
   action_items: z.array(notesActionItemSchema).max(100),
 });
 
+export type ProviderUserContentPart =
+  | { readonly type: 'text'; readonly text: string }
+  | { readonly type: 'image_url'; readonly image_url: { readonly url: string } };
+
 export type ProviderChatMessage =
   | {
-      readonly role: 'system' | 'user';
+      readonly role: 'system';
       readonly content: string;
+    }
+  | {
+      readonly role: 'user';
+      readonly content: string | readonly ProviderUserContentPart[];
     }
   | {
       readonly role: 'assistant';
@@ -254,9 +262,28 @@ function formatContextTurnMessage(
     }
   }
 
+  const formattedText = formatConversationMessageText(message);
+  if (message.role === 'user' && message.attachments !== undefined) {
+    const imageParts = message.attachments
+      .filter(
+        (att): att is typeof att & { readonly imageDataUrl: string } =>
+          typeof att.imageDataUrl === 'string' && att.imageDataUrl.length > 0,
+      )
+      .map((att) => ({
+        type: 'image_url' as const,
+        image_url: { url: att.imageDataUrl },
+      }));
+    if (imageParts.length > 0) {
+      return {
+        role: 'user',
+        content: [{ type: 'text', text: formattedText }, ...imageParts],
+      };
+    }
+  }
+
   return {
     role: message.role,
-    content: formatConversationMessageText(message),
+    content: formattedText,
   };
 }
 

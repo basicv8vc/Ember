@@ -29,6 +29,7 @@ export interface ConversationAttachmentMetadata {
   readonly filename: string;
   readonly mediaType: string;
   readonly sizeBytes: number;
+  readonly imageDataUrl?: string;
 }
 
 export interface ModelMessage {

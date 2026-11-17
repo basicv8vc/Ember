@@ -27,6 +27,7 @@ const TODAY = new Date('2026-11-11T09:00:00Z');
 
 const MODEL_ID = 'gpt-5.6-luna';
 const OPENROUTER_MODEL_ID = 'nvidia/nemotron-3.5-lightning';
+const OPENROUTER_VISION_MODEL_ID = 'deepseek/deepseek-v4.1-flash-1017';
 const AUTHORIZED_KEY = 'sk-live-AbCdEf0123456789AbCdEf0123456789';
 
 function stagingEnv(): Map<string, string> {
@@ -130,8 +131,14 @@ describe('paid model authorization artifact', () => {
     const onDisk = loadModelAuthorizationManifest();
 
     expect(onDisk.readable).toBe(true);
-    expect(onDisk.entries).toHaveLength(1);
+    expect(onDisk.entries).toHaveLength(2);
     expect(onDisk.entries[0]).toMatchObject(openRouterAuthorization());
+    expect(onDisk.entries[1]).toMatchObject({
+      authorizationId: 'L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17',
+      providerId: 'openrouter',
+      modelId: OPENROUTER_VISION_MODEL_ID,
+      executionScope: 'smoke_only',
+    });
 
     const normalStagingEnv = stagingEnv();
     expect(normalStagingEnv.get('EMBER_MODEL_EXECUTION')).toBe('disabled');
@@ -479,8 +486,34 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     };
 
     expect(parsed.schemaVersion).toBe(1);
-    expect(parsed.authorizations).toHaveLength(1);
+    expect(parsed.authorizations).toHaveLength(2);
     expect(parsed.authorizations[0]).toMatchObject(openRouterAuthorization());
+    expect(parsed.authorizations[1]).toMatchObject(
+      openRouterAuthorization({
+        authorizationId: 'L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17',
+        modelId: OPENROUTER_VISION_MODEL_ID,
+        rateVersion: 'openrouter-deepseek-v4.1-flash-1017-deepinfra-fp8-2026-11-17',
+        approvedAt: '2026-11-17',
+        expiresAt: '2026-11-18',
+        priceSource: 'https://openrouter.ai/deepseek/deepseek-v4.1-flash-1017/providers',
+        stagingAlpha: {
+          approval: {
+            approvalId: 'EMBER-CLOUD-INTERNAL-VISION-MULTI-TURN',
+            approvedBy: 'CTO',
+            approvedAt: '2026-11-17',
+          },
+          budgetCeilings: {
+            perAttemptMicroUsd: 5_000,
+            principalDailyMicroUsd: 250_000,
+            tenantDailyMicroUsd: 1_000_000,
+            globalDailyMicroUsd: 1_000_000,
+            principalDailyTurns: 60,
+          },
+          externalApiKeySpendLimitUsd: 1,
+          maxProviderAttemptsPerTurn: 1,
+        },
+      }),
+    );
     expect(APPROVED_REAL_MODELS).toMatchObject([
       {
         providerId: 'openrouter',
@@ -508,13 +541,42 @@ describe('authorization artifact ↔ code allowlist parity', () => {
           requireParameters: true,
         },
       },
+      {
+        providerId: 'openrouter',
+        modelId: OPENROUTER_VISION_MODEL_ID,
+        approval: {
+          approvalId: 'L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17',
+          approvedBy: 'CTO',
+          approvedAt: '2026-11-17',
+          expiresAt: '2026-11-18',
+        },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+        maxPaidSmokeTurns: 1,
+        openRouterRouting: {
+          only: ['deepinfra'],
+          allowFallbacks: false,
+          dataCollection: 'deny',
+          zdr: true,
+          requireParameters: true,
+        },
+      },
     ]);
     expect(
       MODEL_RATE_ROWS.filter((row) => row.provenance !== 'unverified').map((row) => [
         row.providerId,
         row.modelId,
       ]),
-    ).toEqual([['openrouter', OPENROUTER_MODEL_ID]]);
+    ).toEqual([
+      ['openrouter', OPENROUTER_MODEL_ID],
+      ['openrouter', OPENROUTER_VISION_MODEL_ID],
+    ]);
   });
 
   it('leaves direct OpenAI routing unapproved', () => {
@@ -530,7 +592,7 @@ describe('authorization artifact ↔ code allowlist parity', () => {
     for (const candidate of PENDING_MODEL_CANDIDATES) {
       expect(approvedIds.has(candidate.modelId)).toBe(false);
     }
-    expect(approvedIds).toEqual(new Set([OPENROUTER_MODEL_ID]));
+    expect(approvedIds).toEqual(new Set([OPENROUTER_MODEL_ID, OPENROUTER_VISION_MODEL_ID]));
   });
 
   it('prices the candidate and records shutdown dates for deprecated snapshots', () => {

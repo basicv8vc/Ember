@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// Preference key reporting the `+` trigger button's bounds so the floating attachment menu
-/// can anchor directly above it in full-screen coordinates without clipping or private APIs.
+/// Preference key reporting the `+` trigger button's bounds so the Hielo-inspired morphing menu
+/// can bloom directly out of the `+` circle in screen coordinates using 100% public SwiftUI APIs.
 struct ConversationAttachmentButtonAnchorKey: PreferenceKey {
     static let defaultValue: Anchor<CGRect>? = nil
 
@@ -11,8 +11,49 @@ struct ConversationAttachmentButtonAnchorKey: PreferenceKey {
 }
 
 enum ConversationComposerMotion {
-    static let menuSpring = Animation.spring(response: 0.30, dampingFraction: 0.80)
+    static let morphExpand = Animation.spring(response: 0.36, dampingFraction: 0.84)
+    static let morphCollapse = Animation.spring(response: 0.30, dampingFraction: 0.86)
     static let pillSpring = Animation.spring(response: 0.24, dampingFraction: 0.84)
+}
+
+private enum AttachmentPopoverDragBehavior {
+    static let horizontalLimit: CGFloat = 36
+    static let upwardLimit: CGFloat = 28
+    static let downwardLimit: CGFloat = 80
+    static let maxUpwardScale: CGFloat = 1.04
+    static let minDownwardScale: CGFloat = 0.90
+    static let dismissalTranslation: CGFloat = 60
+    static let dismissalPrediction: CGFloat = 110
+
+    static func rubberBandedOffset(for translation: CGSize) -> CGSize {
+        CGSize(
+            width: rubberBand(translation.width, limit: horizontalLimit),
+            height: rubberBand(
+                translation.height,
+                limit: translation.height < 0 ? upwardLimit : downwardLimit
+            )
+        )
+    }
+
+    static func scale(for offset: CGSize) -> CGFloat {
+        if offset.height < 0 {
+            let progress = min(abs(offset.height) / upwardLimit, 1)
+            return 1 + progress * (maxUpwardScale - 1)
+        }
+        let progress = min(offset.height / downwardLimit, 1)
+        return 1 - progress * (1 - minDownwardScale)
+    }
+
+    static func shouldDismiss(translation: CGSize, predictedEndTranslation: CGSize) -> Bool {
+        translation.height > dismissalTranslation || predictedEndTranslation.height > dismissalPrediction
+    }
+
+    private static func rubberBand(_ value: CGFloat, limit: CGFloat) -> CGFloat {
+        let magnitude = abs(value)
+        guard magnitude > 0 else { return 0 }
+        let resisted = limit * (1 - 1 / (magnitude / limit + 1))
+        return value < 0 ? -resisted : resisted
+    }
 }
 
 struct ConversationComposer: View {
@@ -24,6 +65,7 @@ struct ConversationComposer: View {
     var isUploadingAttachment: Bool = false
     var attachmentError: String? = nil
     @Binding var isAttachmentMenuPresented: Bool
+    var hidesAttachmentTrigger: Bool = false
     var onPickAttachment: (() -> Void)? = nil
     var onRemoveAttachment: ((UUID) -> Void)? = nil
     let onSend: (String) -> Void
@@ -37,6 +79,7 @@ struct ConversationComposer: View {
         isUploadingAttachment: Bool = false,
         attachmentError: String? = nil,
         isAttachmentMenuPresented: Binding<Bool> = .constant(false),
+        hidesAttachmentTrigger: Bool = false,
         onPickAttachment: (() -> Void)? = nil,
         onRemoveAttachment: ((UUID) -> Void)? = nil,
         onSend: @escaping (String) -> Void
@@ -49,6 +92,7 @@ struct ConversationComposer: View {
         self.isUploadingAttachment = isUploadingAttachment
         self.attachmentError = attachmentError
         _isAttachmentMenuPresented = isAttachmentMenuPresented
+        self.hidesAttachmentTrigger = hidesAttachmentTrigger
         self.onPickAttachment = onPickAttachment
         self.onRemoveAttachment = onRemoveAttachment
         self.onSend = onSend
@@ -74,7 +118,7 @@ struct ConversationComposer: View {
     }
 
     var body: some View {
-        VStack(spacing: 8) {
+        VStack(spacing: 7) {
             if let attachmentError {
                 attachmentErrorBanner(attachmentError)
                     .transition(.move(edge: .bottom).combined(with: .opacity))
@@ -95,22 +139,26 @@ struct ConversationComposer: View {
                 .frame(maxWidth: 640)
                 .padding(.horizontal, 8)
         }
-        .padding(.horizontal, 12)
+        .padding(.horizontal, 14)
         .padding(.top, 8)
         .padding(.bottom, 8)
         .frame(maxWidth: .infinity)
         .background {
-            LinearGradient(
-                stops: [
-                    .init(color: EmberDesignTokens.groupedBackground.opacity(0), location: 0),
-                    .init(color: EmberDesignTokens.groupedBackground.opacity(0.72), location: 0.25),
-                    .init(color: EmberDesignTokens.groupedBackground.opacity(0.96), location: 0.58),
-                    .init(color: EmberDesignTokens.groupedBackground, location: 1.0),
-                ],
-                startPoint: .top,
-                endPoint: .bottom
-            )
-            .ignoresSafeArea(edges: .bottom)
+            VStack(spacing: 0) {
+                LinearGradient(
+                    stops: [
+                        .init(color: EmberDesignTokens.groupedBackground.opacity(0), location: 0),
+                        .init(color: EmberDesignTokens.groupedBackground.opacity(0.75), location: 0.6),
+                        .init(color: EmberDesignTokens.groupedBackground, location: 1.0),
+                    ],
+                    startPoint: .top,
+                    endPoint: .bottom
+                )
+                .frame(height: 52)
+
+                EmberDesignTokens.groupedBackground
+                    .ignoresSafeArea(edges: .bottom)
+            }
         }
         .animation(ConversationComposerMotion.pillSpring, value: attachments.count)
         .animation(ConversationComposerMotion.pillSpring, value: isUploadingAttachment)
@@ -133,32 +181,28 @@ struct ConversationComposer: View {
 
     private var attachmentTriggerButton: some View {
         Button {
-            withAnimation(ConversationComposerMotion.menuSpring) {
-                isAttachmentMenuPresented.toggle()
-            }
+            isAttachmentMenuPresented.toggle()
         } label: {
             Image(systemName: "plus")
-                .font(.system(size: 18, weight: .semibold))
-                .foregroundStyle(isAttachmentMenuPresented ? Color.accentColor : Color.primary)
-                .rotationEffect(.degrees(isAttachmentMenuPresented ? 45 : 0))
-                .frame(width: 44, height: 44)
+                .font(.title3.weight(.medium))
+                .foregroundStyle(.primary)
+                .frame(width: 42, height: 42)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .emberGlassCircleSurface(interactive: canOpenAttachmentMenu)
         .anchorPreference(key: ConversationAttachmentButtonAnchorKey.self, value: .bounds) { $0 }
+        // Hide the underlying glass source while the morphed popover owns this spot.
+        .opacity(hidesAttachmentTrigger ? 0 : (canOpenAttachmentMenu ? 1 : 0.45))
+        .allowsHitTesting(!hidesAttachmentTrigger)
         .disabled(!canOpenAttachmentMenu)
-        .opacity(canOpenAttachmentMenu ? 1 : 0.45)
-        .accessibilityLabel(
-            Text(
-                isAttachmentMenuPresented
-                    ? "conversation.composer.attachment_menu.close"
-                    : "conversation.composer.attach_file",
-                tableName: "Conversation"
-            )
-        )
+        .accessibilityLabel(Text("conversation.composer.attach_file", tableName: "Conversation"))
         .accessibilityHint(Text("conversation.composer.attachment_menu.open_hint", tableName: "Conversation"))
-        .accessibilityValue(canAttachMore ? Text(verbatim: "") : Text("conversation.composer.attachment_menu.file_limit_reached", tableName: "Conversation"))
+        .accessibilityValue(
+            canAttachMore
+                ? Text(verbatim: "")
+                : Text("conversation.composer.attachment_menu.file_limit_reached", tableName: "Conversation")
+        )
         .accessibilityIdentifier("conversation-attach-file")
     }
 
@@ -176,7 +220,7 @@ struct ConversationComposer: View {
             .submitLabel(.send)
             .onSubmit(sendIfPossible)
             .padding(.leading, 16)
-            .padding(.vertical, 10)
+            .padding(.vertical, 9)
             .accessibilityLabel(Text("conversation.composer.accessibility", tableName: "Conversation"))
             .accessibilityIdentifier("conversation-composer-input")
 
@@ -184,7 +228,7 @@ struct ConversationComposer: View {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .bold))
                     .foregroundStyle(canSend ? Color.white : Color.secondary)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 32, height: 32)
                     .background(
                         canSend ? Color.accentColor : Color.primary.opacity(0.08),
                         in: Circle()
@@ -201,8 +245,8 @@ struct ConversationComposer: View {
             .accessibilityHint(Text("conversation.composer.send_hint", tableName: "Conversation"))
             .accessibilityIdentifier("conversation-send")
         }
-        .frame(minHeight: 44)
-        .emberGlassRoundedSurface(cornerRadius: 22, interactive: false, elevated: false)
+        .frame(minHeight: 42)
+        .emberGlassRoundedSurface(cornerRadius: 21, interactive: false, tintOpacity: 0.52, elevated: false)
     }
 
     private func attachmentErrorBanner(_ message: String) -> some View {
@@ -285,7 +329,7 @@ struct ConversationComposer: View {
         .padding(.leading, 7)
         .padding(.trailing, 6)
         .padding(.vertical, 6)
-        .emberGlassRoundedSurface(cornerRadius: 16, interactive: false, elevated: false)
+        .emberGlassRoundedSurface(cornerRadius: 16, interactive: false, tintOpacity: 0.42, elevated: false)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-attachment-chip-\(attachment.filename)")
     }
@@ -300,7 +344,7 @@ struct ConversationComposer: View {
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 9)
-        .emberGlassRoundedSurface(cornerRadius: 16, interactive: false, elevated: false)
+        .emberGlassRoundedSurface(cornerRadius: 16, interactive: false, tintOpacity: 0.42, elevated: false)
         .accessibilityIdentifier("conversation-attachment-uploading")
     }
 
@@ -319,9 +363,7 @@ struct ConversationComposer: View {
     private func sendIfPossible() {
         guard let submission else { return }
         if isAttachmentMenuPresented {
-            withAnimation(ConversationComposerMotion.menuSpring) {
-                isAttachmentMenuPresented = false
-            }
+            isAttachmentMenuPresented = false
         }
         draft = submission.draftAfterSubmission
         focused.wrappedValue = submission.composerShouldFocusAfterSubmission
@@ -329,7 +371,246 @@ struct ConversationComposer: View {
     }
 }
 
-/// Floating glass action menu anchored above the composer's `+` button.
+/// Morphs the `+` Liquid Glass circle directly into a sleek Hielo-style floating menu card
+/// and back again on tap outside, action selection, or swipe-down drag.
+struct ConversationAttachmentPopoverOverlay: View {
+    @Binding var isPresented: Bool
+    @Binding var isOverlayVisible: Bool
+
+    let sourceRect: CGRect
+    let containerSize: CGSize
+    let canAttachFile: Bool
+    let attachedCount: Int
+    let onChooseFile: () -> Void
+    let onSelectStarterPrompt: (String) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var measuredMenuSize: CGSize = .zero
+    @State private var expansionProgress: CGFloat = 0
+    @State private var dragOffset: CGSize = .zero
+    @State private var isDismissing = false
+
+    private var menuWidth: CGFloat {
+        min(316, max(264, containerSize.width - 28))
+    }
+
+    private var destinationRect: CGRect {
+        let size = measuredMenuSize == .zero ? CGSize(width: menuWidth, height: 184) : measuredMenuSize
+        let x = max(12, min(sourceRect.minX, containerSize.width - size.width - 12))
+        let y = max(12, sourceRect.maxY - size.height)
+        return CGRect(origin: CGPoint(x: x, y: y), size: size)
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            if isOverlayVisible {
+                Color.black.opacity(0.03 * Double(expansionProgress))
+                    .ignoresSafeArea()
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: dismissPopover)
+                    .accessibilityAction(.escape, dismissPopover)
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityLabel(Text("conversation.composer.attachment_menu.close", tableName: "Conversation"))
+                    .accessibilityIdentifier("conversation-attachment-menu-dismiss")
+
+                HieloMorphingCard(
+                    progress: expansionProgress,
+                    sourceRect: sourceRect,
+                    destinationRect: destinationRect,
+                    dragOffset: dragOffset,
+                    dragScale: AttachmentPopoverDragBehavior.scale(for: dragOffset)
+                ) {
+                    ConversationComposerAttachmentMenu(
+                        canAttachFile: canAttachFile,
+                        attachedCount: attachedCount,
+                        onChooseFile: {
+                            dismissPopover()
+                            onChooseFile()
+                        },
+                        onSelectStarterPrompt: { starter in
+                            dismissPopover()
+                            onSelectStarterPrompt(starter)
+                        }
+                    )
+                    .frame(width: menuWidth)
+                    .onGeometryChange(for: CGSize.self) { proxy in
+                        proxy.size
+                    } action: { newSize in
+                        guard !isDismissing,
+                              newSize.width > 0,
+                              newSize.height > 0,
+                              newSize.width.isFinite,
+                              newSize.height.isFinite,
+                              newSize != measuredMenuSize else { return }
+                        measuredMenuSize = newSize
+                    }
+                }
+                .opacity(measuredMenuSize == .zero ? 0 : 1)
+                .gesture(
+                    DragGesture(minimumDistance: 6)
+                        .onChanged { value in
+                            guard expansionProgress >= 0.95, !isDismissing else { return }
+                            dragOffset = AttachmentPopoverDragBehavior.rubberBandedOffset(for: value.translation)
+                        }
+                        .onEnded { value in
+                            guard expansionProgress >= 0.95, !isDismissing else { return }
+                            if AttachmentPopoverDragBehavior.shouldDismiss(
+                                translation: value.translation,
+                                predictedEndTranslation: value.predictedEndTranslation
+                            ) {
+                                dismissPopover()
+                            } else {
+                                withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
+                                    dragOffset = .zero
+                                }
+                            }
+                        }
+                )
+            }
+        }
+        .frame(width: containerSize.width, height: containerSize.height, alignment: .topLeading)
+        .onChange(of: isPresented, initial: true) { _, presented in
+            if presented {
+                presentPopover()
+            } else if isOverlayVisible && !isDismissing {
+                collapsePopover()
+            }
+        }
+        .onChange(of: measuredMenuSize) { _, size in
+            guard isPresented, isOverlayVisible, size != .zero, expansionProgress == 0 else { return }
+            animateExpansion()
+        }
+    }
+
+    private func presentPopover() {
+        isDismissing = false
+        dragOffset = .zero
+        expansionProgress = 0
+        isOverlayVisible = true
+        if measuredMenuSize != .zero {
+            animateExpansion()
+        }
+    }
+
+    private func animateExpansion() {
+        if reduceMotion {
+            expansionProgress = 1
+        } else {
+            withAnimation(ConversationComposerMotion.morphExpand) {
+                expansionProgress = 1
+            }
+        }
+    }
+
+    private func dismissPopover() {
+        if isPresented {
+            isPresented = false
+        }
+        collapsePopover()
+    }
+
+    private func collapsePopover() {
+        guard isOverlayVisible, !isDismissing else { return }
+        isDismissing = true
+        if reduceMotion {
+            dragOffset = .zero
+            expansionProgress = 0
+            isOverlayVisible = false
+            isDismissing = false
+        } else {
+            withAnimation(ConversationComposerMotion.morphCollapse) {
+                dragOffset = .zero
+                expansionProgress = 0
+            } completion: {
+                isOverlayVisible = false
+                isDismissing = false
+            }
+        }
+    }
+}
+
+private struct HieloMorphingCard<MenuContent: View>: View, Animatable {
+    var progress: CGFloat
+    let sourceRect: CGRect
+    let destinationRect: CGRect
+    let dragOffset: CGSize
+    let dragScale: CGFloat
+    @ViewBuilder let menuContent: () -> MenuContent
+
+    var animatableData: CGFloat {
+        get { progress }
+        set { progress = newValue }
+    }
+
+    private var clampedProgress: CGFloat {
+        min(max(progress, 0), 1)
+    }
+
+    private var currentRect: CGRect {
+        CGRect(
+            x: lerp(sourceRect.minX, destinationRect.minX),
+            y: lerp(sourceRect.minY, destinationRect.minY),
+            width: lerp(sourceRect.width, destinationRect.width),
+            height: lerp(sourceRect.height, destinationRect.height)
+        )
+    }
+
+    private var currentCornerRadius: CGFloat {
+        let sourceRadius = min(sourceRect.width, sourceRect.height) / 2
+        return lerp(sourceRadius, 30)
+    }
+
+    private var sourceOpacity: Double {
+        max(0, 1 - Double(clampedProgress) * 4.5)
+    }
+
+    private var sourceBlur: CGFloat {
+        14 * min(1, clampedProgress * 3)
+    }
+
+    private var contentOpacity: Double {
+        max(0, (Double(clampedProgress) - 0.14) / 0.86)
+    }
+
+    private var contentScale: CGFloat {
+        lerp(0.86, 1.0)
+    }
+
+    var body: some View {
+        let shape = RoundedRectangle(cornerRadius: currentCornerRadius, style: .continuous)
+        let rect = currentRect
+
+        ZStack {
+            // Fading/blurring `+` source icon as the circle blooms into the menu.
+            Image(systemName: "plus")
+                .font(.title3.weight(.medium))
+                .foregroundStyle(.primary)
+                .frame(width: sourceRect.width, height: sourceRect.height)
+                .scaleEffect(1 + 0.35 * clampedProgress)
+                .blur(radius: sourceBlur)
+                .opacity(sourceOpacity)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
+            menuContent()
+                .frame(width: destinationRect.width, height: destinationRect.height)
+                .scaleEffect(contentScale, anchor: .bottomLeading)
+                .opacity(contentOpacity)
+                .allowsHitTesting(clampedProgress > 0.5)
+        }
+        .frame(width: rect.width, height: rect.height)
+        .clipShape(shape)
+        .emberGlassRoundedSurface(cornerRadius: currentCornerRadius, interactive: true, tintOpacity: 0, elevated: true)
+        .scaleEffect(dragScale, anchor: .center)
+        .offset(x: rect.minX + dragOffset.width, y: rect.minY + dragOffset.height)
+    }
+
+    private func lerp(_ start: CGFloat, _ end: CGFloat) -> CGFloat {
+        start + (end - start) * clampedProgress
+    }
+}
+
+/// Clean Hielo-style glass menu rows containing Ember's real file-upload & starter-prompt actions.
 struct ConversationComposerAttachmentMenu: View {
     let canAttachFile: Bool
     let attachedCount: Int
@@ -342,23 +623,19 @@ struct ConversationComposerAttachmentMenu: View {
                 icon: "doc.badge.plus",
                 badgeColor: .accentColor,
                 title: "conversation.composer.attachment_menu.file_title",
-                subtitle: canAttachFile
-                    ? LocalizedStringKey("conversation.composer.attachment_menu.file_subtitle")
-                    : LocalizedStringKey("conversation.composer.attachment_menu.file_limit_reached"),
-                trailingText: attachedCount > 0 ? "\(attachedCount)/\(B3AttachmentLimits.maxAttachmentsPerMessage)" : nil,
+                trailingBadge: attachedCount > 0
+                    ? "\(attachedCount)/\(B3AttachmentLimits.maxAttachmentsPerMessage)"
+                    : "CSV · TXT · MD",
                 isEnabled: canAttachFile,
                 accessibilityID: "conversation-attachment-menu-file",
                 action: onChooseFile
             )
 
-            Divider()
-                .padding(.leading, 56)
-
             menuRow(
                 icon: "checklist",
                 badgeColor: Color(uiColor: .systemIndigo),
                 title: "conversation.composer.attachment_menu.notes_title",
-                subtitle: "conversation.composer.attachment_menu.notes_subtitle",
+                trailingBadge: nil,
                 isEnabled: true,
                 accessibilityID: "conversation-attachment-menu-notes"
             ) {
@@ -371,7 +648,7 @@ struct ConversationComposerAttachmentMenu: View {
                 icon: "tablecells",
                 badgeColor: Color(uiColor: .systemTeal),
                 title: "conversation.composer.attachment_menu.data_title",
-                subtitle: "conversation.composer.attachment_menu.data_subtitle",
+                trailingBadge: nil,
                 isEnabled: true,
                 accessibilityID: "conversation-attachment-menu-data"
             ) {
@@ -380,8 +657,8 @@ struct ConversationComposerAttachmentMenu: View {
                 )
             }
         }
-        .padding(8)
-        .emberGlassRoundedSurface(cornerRadius: 24, interactive: true, elevated: true)
+        .padding(.vertical, 10)
+        .padding(.horizontal, 8)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-attachment-menu")
     }
@@ -390,50 +667,45 @@ struct ConversationComposerAttachmentMenu: View {
         icon: String,
         badgeColor: Color,
         title: LocalizedStringKey,
-        subtitle: LocalizedStringKey,
-        trailingText: String? = nil,
+        trailingBadge: String?,
         isEnabled: Bool,
         accessibilityID: String,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
-            HStack(spacing: 12) {
+            HStack(spacing: 14) {
                 Image(systemName: icon)
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundStyle(.white)
-                    .frame(width: 34, height: 34)
+                    .frame(width: 36, height: 36)
                     .background(badgeColor.gradient, in: Circle())
                     .accessibilityHidden(true)
 
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(title, tableName: "Conversation")
-                        .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
+                Text(title, tableName: "Conversation")
+                    .font(.body.weight(.medium))
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
 
-                    Text(subtitle, tableName: "Conversation")
-                        .font(.caption)
+                if let trailingBadge {
+                    Text(trailingBadge)
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-
-                if let trailingText {
-                    Text(trailingText)
-                        .font(.caption2.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .fixedSize(horizontal: true, vertical: false)
                         .padding(.horizontal, 7)
                         .padding(.vertical, 3)
                         .background(Color.primary.opacity(0.07), in: Capsule())
                 }
             }
-            .padding(.horizontal, 10)
-            .padding(.vertical, 9)
-            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(ComposerMenuRowButtonStyle())
         .disabled(!isEnabled)
-        .opacity(isEnabled ? 1 : 0.45)
+        .opacity(isEnabled ? 1 : 0.42)
         .accessibilityIdentifier(accessibilityID)
     }
 }
@@ -443,7 +715,7 @@ private struct ComposerMenuRowButtonStyle: ButtonStyle {
         configuration.label
             .background(
                 configuration.isPressed ? Color.primary.opacity(0.08) : Color.clear,
-                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
             .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
             .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
@@ -469,15 +741,14 @@ private extension View {
     @ViewBuilder
     func emberGlassCircleSurface(interactive: Bool = true) -> some View {
         if #available(iOS 26.0, *) {
-            let baseGlass = Glass.regular.tint(EmberDesignTokens.cardBackground.opacity(0.45))
-            let glass = interactive ? baseGlass.interactive() : baseGlass
+            let glass = interactive ? Glass.regular.interactive() : Glass.regular
             self
                 .glassEffect(glass, in: Circle())
                 .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 3)
         } else {
             self
                 .background(.ultraThinMaterial, in: Circle())
-                .background(EmberDesignTokens.cardBackground.opacity(0.55), in: Circle())
+                .background(EmberDesignTokens.cardBackground.opacity(0.48), in: Circle())
                 .overlay {
                     Circle().strokeBorder(Color.primary.opacity(0.11), lineWidth: 0.75)
                 }
@@ -489,19 +760,20 @@ private extension View {
     func emberGlassRoundedSurface(
         cornerRadius: CGFloat,
         interactive: Bool = false,
+        tintOpacity: Double = 0,
         elevated: Bool = false
     ) -> some View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         if #available(iOS 26.0, *) {
-            let baseGlass = Glass.regular.tint(
-                EmberDesignTokens.cardBackground.opacity(elevated ? 0.58 : 0.48)
-            )
+            let baseGlass = tintOpacity > 0
+                ? Glass.regular.tint(EmberDesignTokens.cardBackground.opacity(tintOpacity))
+                : Glass.regular
             let glass = interactive ? baseGlass.interactive() : baseGlass
             self
                 .glassEffect(glass, in: shape)
                 .shadow(
                     color: Color.black.opacity(elevated ? 0.14 : 0.06),
-                    radius: elevated ? 20 : 10,
+                    radius: elevated ? 22 : 10,
                     x: 0,
                     y: elevated ? 8 : 3
                 )
@@ -509,7 +781,7 @@ private extension View {
             self
                 .background(.ultraThinMaterial, in: shape)
                 .background(
-                    EmberDesignTokens.cardBackground.opacity(elevated ? 0.78 : 0.58),
+                    EmberDesignTokens.cardBackground.opacity(elevated ? 0.78 : 0.56),
                     in: shape
                 )
                 .overlay {

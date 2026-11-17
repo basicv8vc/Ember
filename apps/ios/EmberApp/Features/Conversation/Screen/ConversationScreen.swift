@@ -12,6 +12,7 @@ struct ConversationScreen: View {
 
     @FocusState private var composerIsFocused: Bool
     @State private var isAttachmentMenuPresented = false
+    @State private var isAttachmentMenuOverlayVisible = false
 
     private var isGenerating: Bool {
         state.replyState == .generating || state.isSubmitting || state.isLoading
@@ -59,6 +60,7 @@ struct ConversationScreen: View {
                 isUploadingAttachment: state.isUploadingAttachment,
                 attachmentError: state.attachmentError,
                 isAttachmentMenuPresented: $isAttachmentMenuPresented,
+                hidesAttachmentTrigger: isAttachmentMenuOverlayVisible,
                 onPickAttachment: actions.onPickAttachment,
                 onRemoveAttachment: actions.onRemoveAttachment,
                 onSend: actions.send
@@ -66,58 +68,33 @@ struct ConversationScreen: View {
         }
         .overlayPreferenceValue(ConversationAttachmentButtonAnchorKey.self) { anchor in
             GeometryReader { proxy in
-                ZStack(alignment: .bottomLeading) {
-                    if isAttachmentMenuPresented,
-                       let onPickAttachment = actions.onPickAttachment,
-                       let anchor {
-                        let triggerRect = proxy[anchor]
-                        let menuWidth = min(336, max(240, proxy.size.width - 24))
-                        let leadingOffset = max(12, min(triggerRect.minX, proxy.size.width - menuWidth - 12))
-                        let bottomOffset = max(16, proxy.size.height - triggerRect.minY + 10)
-
-                        Color.black.opacity(0.05)
-                            .ignoresSafeArea()
-                            .contentShape(Rectangle())
-                            .onTapGesture(perform: dismissAttachmentMenu)
-                            .accessibilityAction(.escape, dismissAttachmentMenu)
-                            .accessibilityAddTraits(.isButton)
-                            .accessibilityLabel(Text("conversation.composer.attachment_menu.close", tableName: "Conversation"))
-                            .accessibilityIdentifier("conversation-attachment-menu-dismiss")
-
-                        ConversationComposerAttachmentMenu(
-                            canAttachFile: canAttachMoreFiles,
-                            attachedCount: state.attachments.count,
-                            onChooseFile: {
-                                dismissAttachmentMenu()
-                                onPickAttachment()
-                            },
-                            onSelectStarterPrompt: { starter in
-                                dismissAttachmentMenu()
-                                draft = ConversationInteractionRules.insertingStarterPrompt(starter, into: draft)
-                                composerIsFocused = true
-                            }
-                        )
-                        .frame(width: menuWidth)
-                        .padding(.leading, leadingOffset)
-                        .padding(.bottom, bottomOffset)
-                        .transition(
-                            .scale(scale: 0.90, anchor: .bottomLeading)
-                                .combined(with: .opacity)
-                        )
-                    }
+                if let onPickAttachment = actions.onPickAttachment,
+                   let anchor,
+                   isAttachmentMenuPresented || isAttachmentMenuOverlayVisible {
+                    ConversationAttachmentPopoverOverlay(
+                        isPresented: $isAttachmentMenuPresented,
+                        isOverlayVisible: $isAttachmentMenuOverlayVisible,
+                        sourceRect: proxy[anchor],
+                        containerSize: proxy.size,
+                        canAttachFile: canAttachMoreFiles,
+                        attachedCount: state.attachments.count,
+                        onChooseFile: onPickAttachment,
+                        onSelectStarterPrompt: { starter in
+                            draft = ConversationInteractionRules.insertingStarterPrompt(starter, into: draft)
+                            composerIsFocused = true
+                        }
+                    )
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
-                .animation(ConversationComposerMotion.menuSpring, value: isAttachmentMenuPresented)
             }
         }
         .onChange(of: isGenerating) { _, generating in
             if generating && isAttachmentMenuPresented {
-                dismissAttachmentMenu()
+                isAttachmentMenuPresented = false
             }
         }
         .onChange(of: state.isUploadingAttachment) { _, uploading in
             if uploading && isAttachmentMenuPresented {
-                dismissAttachmentMenu()
+                isAttachmentMenuPresented = false
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
@@ -158,12 +135,6 @@ struct ConversationScreen: View {
         guard case .populateDraft(let draft) = ConversationInteractionRules.promptSelection(prompt) else { return }
         actions.selectPrompt(draft)
         composerIsFocused = true
-    }
-
-    private func dismissAttachmentMenu() {
-        withAnimation(ConversationComposerMotion.menuSpring) {
-            isAttachmentMenuPresented = false
-        }
     }
 }
 

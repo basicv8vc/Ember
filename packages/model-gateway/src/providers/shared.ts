@@ -25,6 +25,15 @@ export const DEFAULT_DELEGATION_ACK_TEXT =
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
 
+const HISTORICAL_NOTES_DELEGATION_MARKER = '[Prior turn called delegate_notes_action_items.]';
+const HISTORICAL_PYTHON_DELEGATION_MARKER = '[Prior turn called delegate_python_agent.]';
+const FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES = new Set([
+  DEFAULT_DELEGATION_ACK_TEXT,
+  DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
+  HISTORICAL_NOTES_DELEGATION_MARKER,
+  HISTORICAL_PYTHON_DELEGATION_MARKER,
+]);
+
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
@@ -230,13 +239,31 @@ export type ProviderChatMessage =
 
 export { formatConversationMessageText };
 
+function formatContextTurnMessage(
+  message: ConversationTurnInput['context'][number],
+): ProviderChatMessage {
+  if (message.role === 'assistant') {
+    const trimmed = message.text.trim();
+    // Neutralize prior canned delegation acknowledgements so subsequent turns do not imitate
+    // them as plain-text answers instead of emitting tool calls.
+    if (trimmed === DEFAULT_DELEGATION_ACK_TEXT) {
+      return { role: 'assistant', content: HISTORICAL_NOTES_DELEGATION_MARKER };
+    }
+    if (trimmed === DEFAULT_PYTHON_DELEGATION_ACK_TEXT) {
+      return { role: 'assistant', content: HISTORICAL_PYTHON_DELEGATION_MARKER };
+    }
+  }
+
+  return {
+    role: message.role,
+    content: formatConversationMessageText(message),
+  };
+}
+
 export function buildConversationTurnMessages(input: ConversationTurnInput): ProviderChatMessage[] {
   return [
     { role: 'system' as const, content: CONVERSATION_SYSTEM_PROMPT },
-    ...input.context.map((message) => ({
-      role: message.role,
-      content: formatConversationMessageText(message),
-    })),
+    ...input.context.map(formatContextTurnMessage),
   ];
 }
 
@@ -428,6 +455,10 @@ export function parseConversationTurnChoice(choice: {
 
   const text = choice.message.content;
   if (typeof text !== 'string' || text.trim().length === 0) {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+
+  if (FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES.has(text.trim())) {
     throw new ModelGatewayFailure('model_invalid_output');
   }
 

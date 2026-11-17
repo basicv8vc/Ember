@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
+  CONVERSATION_SYSTEM_PROMPT,
+  DEFAULT_DELEGATION_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   DELEGATE_NOTES_TOOL_NAME,
   DELEGATE_PYTHON_TOOL_NAME,
@@ -147,6 +149,79 @@ describe('B3-B1 controlled Python delegation and agent step gateway', () => {
   it('ships both closed delegation tools on conversation turns', () => {
     const names = DELEGATION_TOOLS.map((tool) => tool.function.name);
     expect(names).toEqual([DELEGATE_NOTES_TOOL_NAME, DELEGATE_PYTHON_TOOL_NAME]);
+    expect(CONVERSATION_SYSTEM_PROMPT.length).toBeLessThanOrEqual(MODEL_LIMITS.systemPromptChars);
+  });
+
+  it('neutralizes prior canned delegation acknowledgements in assistant history', async () => {
+    const stub = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          model: OPENROUTER_MODEL,
+          choices: [{ message: { content: 'Sure, send the notes.' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 90, completion_tokens: 10 },
+        }),
+      ),
+    );
+
+    await openRouter(stub.fetchImpl).generateConversationTurn(
+      {
+        conversationId: '33333333-3333-4333-8333-333333333333',
+        turnId: '44444444-4444-4444-8444-444444444444',
+        context: [
+          { role: 'user', text: 'Extract action items' },
+          { role: 'assistant', text: DEFAULT_DELEGATION_ACK_TEXT },
+          { role: 'user', text: 'Run python on sales.csv' },
+          { role: 'assistant', text: DEFAULT_PYTHON_DELEGATION_ACK_TEXT },
+          { role: 'user', text: `Why did it say "${DEFAULT_PYTHON_DELEGATION_ACK_TEXT}"?` },
+        ],
+        maxOutputTokens: 256,
+      },
+      new AbortController().signal,
+    );
+
+    const body = JSON.parse(stub.calls[0]!.init.body) as {
+      messages: Array<{ role: string; content: string }>;
+    };
+    expect(body.messages[2]).toEqual({
+      role: 'assistant',
+      content: '[Prior turn called delegate_notes_action_items.]',
+    });
+    expect(body.messages[4]).toEqual({
+      role: 'assistant',
+      content: '[Prior turn called delegate_python_agent.]',
+    });
+    expect(body.messages[5]).toEqual({
+      role: 'user',
+      content: `Why did it say "${DEFAULT_PYTHON_DELEGATION_ACK_TEXT}"?`,
+    });
+  });
+
+  it('rejects unbacked plain-text delegation claims with model_invalid_output', async () => {
+    for (const mimicked of [
+      DEFAULT_DELEGATION_ACK_TEXT,
+      DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
+      '[Prior turn called delegate_notes_action_items.]',
+      '[Prior turn called delegate_python_agent.]',
+    ]) {
+      const stub = stubFetch(() =>
+        Promise.resolve(
+          response(200, {
+            model: OPENROUTER_MODEL,
+            choices: [{ message: { content: mimicked }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 60, completion_tokens: 13 },
+          }),
+        ),
+      );
+
+      await expect(
+        openRouter(stub.fetchImpl).generateConversationTurn(
+          turnInput(),
+          new AbortController().signal,
+        ),
+      ).rejects.toSatisfy(
+        (err: unknown) => isModelGatewayFailure(err) && err.code === 'model_invalid_output',
+      );
+    }
   });
 
   it('parses delegate_python_agent tool calls with deduplicated attachmentIds and default ack text', async () => {

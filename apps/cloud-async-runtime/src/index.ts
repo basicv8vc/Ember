@@ -49,7 +49,8 @@ import {
 } from './runtime.js';
 
 const BLOB_GC_MAX_AGE_MS = 60 * 60 * 1_000;
-export const RECOVERY_RELAY_CRON = '*/30 * * * *';
+export const TURN_RECOVERY_CRON = '* * * * *';
+export const TASK_RECOVERY_CRON = '*/30 * * * *';
 export const MAINTENANCE_GC_CRON = '0 */6 * * *';
 
 interface HyperdriveBinding {
@@ -318,8 +319,8 @@ async function runQueueBatch(
   }
 }
 
-async function runRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
-  // The recovery Cron shares code-owned Alpha authorization; disabled environments must not wake Neon.
+function resolveEnabledModelConfig(env: RuntimeEnv) {
+  // Recovery relays share code-owned Alpha authorization; paused environments must not wake Neon.
   const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
   if (model.kind !== 'enabled') {
     if (model.kind === 'refused') {
@@ -327,10 +328,18 @@ async function runRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): 
         category: model.reason,
       });
     }
+    return null;
+  }
+
+  return model;
+}
+
+async function runTurnRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
+  const model = resolveEnabledModelConfig(env);
+  if (model === null) {
     return;
   }
 
-  const daytona = resolveCloudDaytonaConfig(env);
   const pool = makePool(env);
   const workerId = runtimeWorkerId();
 
@@ -350,7 +359,22 @@ async function runRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): 
         failed: turnResult.failed,
       });
     }
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+}
 
+async function runTaskRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
+  const model = resolveEnabledModelConfig(env);
+  if (model === null) {
+    return;
+  }
+
+  const daytona = resolveCloudDaytonaConfig(env);
+  const pool = makePool(env);
+  const workerId = runtimeWorkerId();
+
+  try {
     const leaseQueue = createNotesTaskLeaseQueue(pool, model);
     const notesResult = await publishDueNotesTaskDispatches({
       relay: {
@@ -426,7 +450,12 @@ export function createCloudAsyncRuntime(deps: { readonly createPool?: RuntimePoo
         return;
       }
 
-      context.waitUntil(runRecoveryRelay(env, makePool));
+      if (controller.cron === TASK_RECOVERY_CRON) {
+        context.waitUntil(runTaskRecoveryRelay(env, makePool));
+        return;
+      }
+
+      context.waitUntil(runTurnRecoveryRelay(env, makePool));
     },
   };
 }

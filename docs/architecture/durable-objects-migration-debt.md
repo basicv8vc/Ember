@@ -7,7 +7,7 @@
 
 Ember Cloud currently runs a stateless Cloudflare Workers tier (`apps/api` and `apps/cloud-async-runtime`) backed by Neon PostgreSQL via Hyperdrive (`HYPERDRIVE`) and Cloudflare Queues (`TURN_DISPATCH_QUEUE`, `AGENT_TASK_QUEUE`, and their DLQs).
 
-With the queue-first dispatch path (`onTurnCommitted` in `apps/api/src/cloudflare-worker.ts` and immediate delegation sends in `apps/cloud-async-runtime/src/runtime.ts`), Cloudflare Queues already drive steady-state execution, while `apps/cloud-async-runtime/src/index.ts` retains low-frequency Cron Triggers solely for gap recovery (`*/30 * * * *`) and maintenance GC (`0 */6 * * *`).
+With the queue-first dispatch path (`onTurnCommitted` in `apps/api/src/cloudflare-worker.ts` with bounded `waitUntil` Queue retries, and immediate delegation sends in `apps/cloud-async-runtime/src/runtime.ts`), Cloudflare Queues drive steady-state execution, while `apps/cloud-async-runtime/src/index.ts` separates Cron Triggers into latency-sensitive Turn outbox recovery (`* * * * *`, preserving `B1_TURN_DEADLINE_SECONDS = 60` while `model.kind === 'enabled'`), async Task reconciliation (`*/30 * * * *`), and maintenance GC (`0 */6 * * *`, running 4x/day even when model execution is disabled). Retaining `* * * * *` Turn recovery while model execution is enabled keeps an enabled environment's Neon endpoint awake because no atomic cross-worker external dirty signal exists without provisioning new infra or moving state into Durable Objects.
 
 Moving the runtime state/orchestration from Neon PostgreSQL into Cloudflare Durable Objects (with SQLite-backed DO storage / D1 / R2) aligns with Cloudflare Native Architecture, but the current codebase has five structural dependencies on PostgreSQL semantics that block a drop-in migration.
 

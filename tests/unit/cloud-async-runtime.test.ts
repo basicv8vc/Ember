@@ -19,9 +19,14 @@ import {
 } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime, {
   MAINTENANCE_GC_CRON,
-  RECOVERY_RELAY_CRON,
+  TASK_RECOVERY_CRON,
+  TURN_RECOVERY_CRON,
   createCloudAsyncRuntime,
 } from '../../apps/cloud-async-runtime/src/index.js';
+import {
+  TURN_WAKEUP_RETRY_DELAYS_MS,
+  createTurnWakeupDispatcher,
+} from '../../apps/api/src/turn-wakeup.js';
 import { createNotesTaskLeaseQueue } from '../../apps/cloud-async-runtime/src/runtime.js';
 import {
   consumeTaskDispatchMessage,
@@ -182,7 +187,7 @@ describe('Cloud Async Runtime dispatch', () => {
     }
   });
 
-  it('keeps Wrangler cron triggers low-frequency and free of per-minute polling', () => {
+  it('separates Wrangler cron triggers into 1m Turn recovery, 30m Task reconciliation, and 6h GC', () => {
     const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
     for (const relPath of [
       'apps/cloud-async-runtime/wrangler.jsonc',
@@ -195,12 +200,11 @@ describe('Cloud Async Runtime dispatch', () => {
         readonly triggers?: { readonly crons?: readonly string[] };
       };
       const crons = parsed.triggers?.crons ?? [];
-      expect(crons, relPath).not.toContain('* * * * *');
-      expect(crons, relPath).toEqual([RECOVERY_RELAY_CRON, MAINTENANCE_GC_CRON]);
+      expect(crons, relPath).toEqual([TURN_RECOVERY_CRON, TASK_RECOVERY_CRON, MAINTENANCE_GC_CRON]);
     }
   });
 
-  it('avoids PostgreSQL access for empty/unexpected queues and disabled/refused recovery ticks', async () => {
+  it('avoids PostgreSQL access for empty/unexpected queues and disabled/refused Turn or Task recovery ticks', async () => {
     const createPoolSpy = vi.fn(() => {
       throw new Error('unexpected DB pool creation');
     });
@@ -250,8 +254,10 @@ describe('Cloud Async Runtime dispatch', () => {
       );
       expect(unexpectedMessage.ack).toHaveBeenCalledTimes(1);
 
-      await runScheduled(RECOVERY_RELAY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
-      await runScheduled(RECOVERY_RELAY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
+      await runScheduled(TURN_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
+      await runScheduled(TURN_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
+      await runScheduled(TASK_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
+      await runScheduled(TASK_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
 
       expect(createPoolSpy).not.toHaveBeenCalled();
     } finally {
@@ -259,7 +265,7 @@ describe('Cloud Async Runtime dispatch', () => {
     }
   });
 
-  it('dispatches recovery relay and maintenance GC crons exclusively by schedule expression', async () => {
+  it('routes Turn recovery, Task reconciliation, and maintenance GC crons exclusively by schedule expression', async () => {
     const fakePool = {
       query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
       connect: vi.fn(),
@@ -299,15 +305,26 @@ describe('Cloud Async Runtime dispatch', () => {
     };
 
     try {
-      await runScheduled(RECOVERY_RELAY_CRON);
+      await runScheduled(TURN_RECOVERY_CRON);
       expect(createPoolSpy).toHaveBeenCalledTimes(1);
       expect(claimDueSpy).toHaveBeenCalledTimes(1);
-      expect(reapSpy).toHaveBeenCalledTimes(1);
+      expect(reapSpy).not.toHaveBeenCalled();
       expect(uploadGcSpy).not.toHaveBeenCalled();
       expect(blobGcSpy).not.toHaveBeenCalled();
       expect(fakePool.end).toHaveBeenCalledTimes(1);
 
       claimDueSpy.mockClear();
+      createPoolSpy.mockClear();
+      fakePool.end.mockClear();
+
+      await runScheduled(TASK_RECOVERY_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(reapSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).not.toHaveBeenCalled();
+      expect(uploadGcSpy).not.toHaveBeenCalled();
+      expect(blobGcSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+
       reapSpy.mockClear();
       createPoolSpy.mockClear();
       fakePool.end.mockClear();
@@ -325,6 +342,62 @@ describe('Cloud Async Runtime dispatch', () => {
       reapSpy.mockRestore();
       claimDueSpy.mockRestore();
     }
+  });
+
+  it('retries transient post-commit Queue wakeup failures in waitUntil before falling back to outbox', async () => {
+    const waitUntilPromises: Array<Promise<unknown>> = [];
+    const sleepCalls: number[] = [];
+    const send = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient queue 503'))
+      .mockResolvedValueOnce(undefined);
+    const warn = vi.fn();
+    const dispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: { send },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: { warn },
+      sleep: (ms) => {
+        sleepCalls.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    dispatcher({ tenantId: TENANT_ID, turnId: TURN_ID });
+    await Promise.all(waitUntilPromises);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(sleepCalls).toEqual([TURN_WAKEUP_RETRY_DELAYS_MS[0]]);
+    expect(warn).not.toHaveBeenCalled();
+
+    waitUntilPromises.length = 0;
+    sleepCalls.length = 0;
+    const alwaysFail = vi.fn().mockRejectedValue(new Error('persistent queue outage'));
+    const failingDispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: { send: alwaysFail },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: { warn },
+      sleep: (ms) => {
+        sleepCalls.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    failingDispatcher({ tenantId: TENANT_ID, turnId: TURN_ID });
+    await Promise.all(waitUntilPromises);
+
+    expect(alwaysFail).toHaveBeenCalledTimes(TURN_WAKEUP_RETRY_DELAYS_MS.length + 1);
+    expect(sleepCalls).toEqual([...TURN_WAKEUP_RETRY_DELAYS_MS]);
+    expect(warn).toHaveBeenCalledWith('Assistant Turn Queue wake failed', {
+      category: 'queue_send_failed',
+    });
   });
 
   it('parses only the closed, prompt-free Queue envelope', () => {

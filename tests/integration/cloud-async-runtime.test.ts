@@ -20,10 +20,13 @@ import {
   insertB1TurnDispatchOutbox,
   PostgresB1TurnDispatchOutboxRepository,
 } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
+import { B1_TURN_DEADLINE_SECONDS } from '../../packages/postgres/src/repositories/b1-conversation-write.js';
+import { createTurnWakeupDispatcher } from '../../apps/api/src/turn-wakeup.js';
 import { resolveCloudRuntimeModelConfig } from '../../apps/cloud-async-runtime/src/config.js';
 import cloudAsyncRuntime, {
   MAINTENANCE_GC_CRON,
-  RECOVERY_RELAY_CRON,
+  TASK_RECOVERY_CRON,
+  TURN_RECOVERY_CRON,
 } from '../../apps/cloud-async-runtime/src/index.js';
 import { consumeAgentDispatchMessage } from '../../apps/cloud-async-runtime/src/agent-dispatch.js';
 import {
@@ -184,7 +187,7 @@ function cloudRuntimeEnv(sent: unknown[]) {
 
 async function runScheduledRelay(
   env: ReturnType<typeof cloudRuntimeEnv>,
-  cron: string = RECOVERY_RELAY_CRON,
+  cron: string = TURN_RECOVERY_CRON,
 ): Promise<void> {
   let scheduledWork: Promise<unknown> | undefined;
   cloudAsyncRuntime.scheduled({ cron, scheduledTime: Date.now() }, env, {
@@ -711,7 +714,7 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
         await outbox.markCompleted(relayFixture.turnId);
 
         sent.length = 0;
-        await runScheduledRelay(env);
+        await runScheduledRelay(env, TASK_RECOVERY_CRON);
         expect(sent).toHaveLength(1);
         const cronEnvelope = sent[0] as {
           readonly schemaVersion: number;
@@ -1463,8 +1466,8 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       const agentEnvelope = agentSent[0] as { readonly taskId: string; readonly tenantId: string };
       expect(agentEnvelope.tenantId).toBe(fixture.tenantId);
 
-      // Scheduled Cron relay also reconciles un-completed Python Agent outbox rows onto AGENT_TASK_QUEUE.
-      await runScheduledRelay(env);
+      // Scheduled Task Cron relay also reconciles un-completed Python Agent outbox rows onto AGENT_TASK_QUEUE.
+      await runScheduledRelay(env, TASK_RECOVERY_CRON);
       expect(agentSent).toHaveLength(2);
 
       const agentEvent = await agentOutbox.getEvent(agentEnvelope.taskId);
@@ -1668,8 +1671,8 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       );
       expect(uploadRows.rows.map((r) => r.id)).toEqual([activeUpload.upload_id]);
 
-      // Recovery Cron rescues the committed-but-not-enqueued outbox row without losing it.
-      await runScheduledRelay(env, RECOVERY_RELAY_CRON);
+      // Turn Recovery Cron rescues the committed-but-not-enqueued outbox row without losing it.
+      await runScheduledRelay(env, TURN_RECOVERY_CRON);
       expect(sent).toHaveLength(1);
       expect(sent[0]).toMatchObject({ eventId: droppedTurnId, turnId: droppedTurnId });
       const recoveredDelivery = new QueueDelivery(sent[0]);
@@ -1821,6 +1824,219 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
       await db.pool
         .query('DELETE FROM user_staged_uploads WHERE tenant_id = $1', [immediateFixture.tenantId])
         .catch(() => undefined);
+    }
+  });
+
+  it('recovers from initial Queue publication failures within the 60s B1_TURN_DEADLINE_SECONDS contract', async () => {
+    const sent: unknown[] = [];
+    const env = cloudRuntimeEnv(sent);
+    const fixture = await createFixture();
+    const waitUntilPromises: Array<Promise<unknown>> = [];
+    const wakeupWarnings: string[] = [];
+
+    // 1. Transient initial Queue publish failure heals via bounded async waitUntil retry without Cron.
+    let transientCalls = 0;
+    const transientDispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: {
+        send: (message) => {
+          transientCalls += 1;
+          if (transientCalls === 1) {
+            return Promise.reject(new Error('simulated transient Queue 503'));
+          }
+          sent.push(message);
+          return Promise.resolve();
+        },
+      },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: {
+        warn(message) {
+          wakeupWarnings.push(message);
+        },
+      },
+      retryDelaysMs: [50, 100],
+    });
+    const transientWriter = new PostgresB1ConversationWriteRepository(db.pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: transientDispatcher,
+    });
+
+    const transientSubmitted = await transientWriter.submitUserMessage({
+      tenantId: fixture.tenantId,
+      conversationId: fixture.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Transient initial Queue publish failure recovers via retry.',
+        transcript_epoch: 0,
+      },
+    });
+    const transientTurnId = transientSubmitted.receipt.turn.turn_id;
+
+    // 2. Persistent initial Queue publish failure leaves durable outbox row untouched by 30m/6h Crons,
+    //    but rescued before the 60s Turn deadline by the 1m Turn recovery Cron.
+    const persistentDispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: {
+        send: () => Promise.reject(new Error('simulated persistent Queue outage')),
+      },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: {
+        warn(message) {
+          wakeupWarnings.push(message);
+        },
+      },
+      retryDelaysMs: [20, 40],
+    });
+    const persistentWriter = new PostgresB1ConversationWriteRepository(db.pool, {
+      writeTurnDispatchOutbox: true,
+      onTurnCommitted: persistentDispatcher,
+    });
+    const persistentSubmitted = await persistentWriter.submitUserMessage({
+      tenantId: fixture.tenantId,
+      conversationId: fixture.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Persistent initial Queue outage must recover within 60s deadline.',
+        transcript_epoch: 0,
+      },
+    });
+    const persistentTurnId = persistentSubmitted.receipt.turn.turn_id;
+
+    // 3. Turn aged past B1_TURN_DEADLINE_SECONDS (simulating what happened with a 30-minute Cron)
+    //    cannot recover and expires without reaching the model.
+    const expiredSubmitted = await persistentWriter.submitUserMessage({
+      tenantId: fixture.tenantId,
+      conversationId: fixture.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Delayed past 60s deadline expires cleanly without model execution.',
+        transcript_epoch: 0,
+      },
+    });
+    const expiredTurnId = expiredSubmitted.receipt.turn.turn_id;
+
+    try {
+      await turns.cancelTurn({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: fixture.turnId,
+      });
+      await outbox.markCompleted(fixture.turnId);
+
+      // Finish waitUntil wakeup attempts; transient failure retried and enqueued, persistent logged warning.
+      await Promise.all(waitUntilPromises);
+      expect(transientCalls).toBe(2);
+      expect(sent).toHaveLength(1);
+      expect(sent[0]).toMatchObject({ turnId: transientTurnId });
+      expect(wakeupWarnings).toEqual([
+        'Assistant Turn Queue wake failed',
+        'Assistant Turn Queue wake failed',
+      ]);
+
+      const transientDelivery = new QueueDelivery(sent[0]);
+      await cloudAsyncRuntime.queue(
+        { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [transientDelivery] },
+        env,
+      );
+      expect(transientDelivery.ackCount).toBe(1);
+      expect(
+        (
+          await turns.getTurn({
+            tenantId: fixture.tenantId,
+            conversationId: fixture.conversationId,
+            turnId: transientTurnId,
+          })
+        )?.status,
+      ).toBe('completed');
+
+      // Age the third turn past the 60s contract to model a delayed recovery tick (> B1_TURN_DEADLINE_SECONDS).
+      await db.pool.query(
+        `UPDATE assistant_turns
+            SET created_at = created_at - interval '70 seconds',
+                deadline_at = deadline_at - interval '70 seconds'
+          WHERE tenant_id = $1 AND id = $2`,
+        [fixture.tenantId, expiredTurnId],
+      );
+
+      // Confirm persisted Turn deadline is exactly B1_TURN_DEADLINE_SECONDS (60s) from creation.
+      const deadlineCheck = await db.pool.query<{ readonly deadline_seconds: string }>(
+        `SELECT EXTRACT(EPOCH FROM (deadline_at - created_at))::int::text AS deadline_seconds
+           FROM assistant_turns
+          WHERE tenant_id = $1 AND id = $2`,
+        [fixture.tenantId, persistentTurnId],
+      );
+      expect(deadlineCheck.rows[0]?.deadline_seconds).toBe(String(B1_TURN_DEADLINE_SECONDS));
+
+      // Non-Turn Crons (30m Task reconciliation + 6h GC) do NOT touch committed Turn outbox rows.
+      sent.length = 0;
+      await runScheduledRelay(env, TASK_RECOVERY_CRON);
+      await runScheduledRelay(env, MAINTENANCE_GC_CRON);
+      expect(sent).toHaveLength(0);
+
+      // 1m Turn Recovery Cron picks up due outbox rows cleanly within the 60s window.
+      await runScheduledRelay(env, TURN_RECOVERY_CRON);
+      const recoveredTurnIds = sent.map((entry) => (entry as { readonly turnId: string }).turnId);
+      expect(recoveredTurnIds).toContain(persistentTurnId);
+      expect(recoveredTurnIds).toContain(expiredTurnId);
+
+      for (const messageBody of sent) {
+        const delivery = new QueueDelivery(messageBody);
+        await cloudAsyncRuntime.queue(
+          { queue: env.EMBER_TURN_DISPATCH_QUEUE_NAME, messages: [delivery] },
+          env,
+        );
+        expect(delivery.ackCount).toBe(1);
+      }
+
+      expect(
+        (
+          await turns.getTurn({
+            tenantId: fixture.tenantId,
+            conversationId: fixture.conversationId,
+            turnId: persistentTurnId,
+          })
+        )?.status,
+      ).toBe('completed');
+      expect(
+        (
+          await turns.getTurn({
+            tenantId: fixture.tenantId,
+            conversationId: fixture.conversationId,
+            turnId: expiredTurnId,
+          })
+        )?.status,
+      ).toBe('failed');
+
+      const assistantMessages = await readAssistantMessages(fixture);
+      expect(assistantMessages).toHaveLength(3);
+      expect(
+        assistantMessages.filter((message) => message.text.startsWith(FAKE_REPLY_PREFIX)),
+      ).toHaveLength(2);
+      const expiredTurn = await turns.getTurn({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: expiredTurnId,
+      });
+      expect(expiredTurn).toMatchObject({
+        status: 'failed',
+      });
+    } finally {
+      for (const turnId of [fixture.turnId, transientTurnId, persistentTurnId, expiredTurnId]) {
+        await turns
+          .cancelTurn({
+            tenantId: fixture.tenantId,
+            conversationId: fixture.conversationId,
+            turnId,
+          })
+          .catch(() => undefined);
+        await outbox.markCompleted(turnId).catch(() => undefined);
+      }
     }
   });
 });

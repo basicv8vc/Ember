@@ -675,6 +675,8 @@ public struct SessionTaskResultDTO: Codable, Equatable, Sendable {
 
 public enum B3AttachmentLimits {
     public static let maxFileBytes = 15_728_640
+    /// Inline Vision image byte ceiling enforced by the worker when attaching images to model prompts.
+    public static let maxVisionImageBytes = 4_194_304
     public static let maxAttachmentsPerMessage = 5
     public static let blockedMediaTypes: Set<String> = [
         "text/html",

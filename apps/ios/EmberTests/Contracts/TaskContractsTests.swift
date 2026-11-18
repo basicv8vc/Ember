@@ -134,6 +134,7 @@ final class TaskContractsTests: XCTestCase {
 
     func testB3AttachmentLimitsAllowPDFImagesAndBlockDangerousMIME() throws {
         XCTAssertEqual(B3AttachmentLimits.maxFileBytes, 15_728_640)
+        XCTAssertEqual(B3AttachmentLimits.maxVisionImageBytes, 4_194_304)
         XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("application/pdf"))
         XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("IMAGE/JPEG; charset=utf-8"))
         XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("application/octet-stream"))

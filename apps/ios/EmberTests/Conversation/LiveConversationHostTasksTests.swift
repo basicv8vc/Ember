@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 import XCTest
 @testable import Ember
 
@@ -590,6 +591,110 @@ final class LiveConversationHostTasksTests: XCTestCase {
         let body = try XCTUnwrap(req.httpBody)
         let obj = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: Any])
         XCTAssertEqual(obj["attachment_ids"] as? [String], [csvUploadID, pdfUploadID])
+    }
+
+    func testAttachFileCompressesOversizedVisionImageToJpegUnder4MiB() async throws {
+        let directory = makeTempDirectory()
+        let largePngFile = directory.appendingPathComponent("diagram.png")
+        let pngData = try makeNoisyPngData(width: 1400, height: 1400)
+        XCTAssertGreaterThan(pngData.count, B3AttachmentLimits.maxVisionImageBytes)
+        XCTAssertLessThanOrEqual(pngData.count, B3AttachmentLimits.maxFileBytes)
+        try pngData.write(to: largePngFile)
+
+        let uploadID = "00000000-0000-4000-8000-00000000c333"
+        let sha = String(repeating: "d", count: 64)
+        let capturedUploads = RequestRecorder()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST" && path == "/v1/me/uploads" {
+                capturedUploads.record(request)
+                let bodyData = request.httpBody ?? Data()
+                let parsedSize = Self.multipartFileByteCount(in: bodyData) ?? bodyData.count
+                return .json(statusCode: 201, body: """
+                {
+                  "upload_id":"\(uploadID)",
+                  "filename":"diagram.jpg",
+                  "media_type":"image/jpeg",
+                  "size":\(parsedSize),
+                  "sha256":"\(sha)",
+                  "expires_at":"2026-11-17T00:00:00Z",
+                  "created_at":"2026-11-16T00:00:00Z"
+                }
+                """)
+            }
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[]}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory)
+        await model.start()
+
+        await model.attachFile(from: largePngFile)
+        XCTAssertNil(model.attachmentError)
+        XCTAssertEqual(model.stagedAttachments.count, 1)
+        let staged = try XCTUnwrap(model.stagedAttachments.first)
+        XCTAssertEqual(staged.filename, "diagram.jpg")
+        XCTAssertEqual(staged.mediaType, "image/jpeg")
+        XCTAssertLessThanOrEqual(staged.sizeBytes, B3AttachmentLimits.maxVisionImageBytes)
+
+        let uploadReq = try XCTUnwrap(capturedUploads.requests.first)
+        let uploadBody = try XCTUnwrap(uploadReq.httpBody)
+        let bodyPrefix = String(decoding: uploadBody.prefix(512), as: UTF8.self)
+        XCTAssertTrue(bodyPrefix.contains("filename=\"diagram.jpg\""))
+        XCTAssertTrue(bodyPrefix.contains("image/jpeg"))
+    }
+
+    private func makeNoisyPngData(width: Int, height: Int) throws -> Data {
+        var bytes = [UInt8](repeating: 255, count: width * height * 4)
+        var state: UInt32 = 0x1234_5678
+        for index in stride(from: 0, to: bytes.count, by: 4) {
+            state ^= state << 13
+            state ^= state >> 17
+            state ^= state << 5
+            bytes[index] = UInt8(truncatingIfNeeded: state)
+            bytes[index + 1] = UInt8(truncatingIfNeeded: state >> 8)
+            bytes[index + 2] = UInt8(truncatingIfNeeded: state >> 16)
+            bytes[index + 3] = 255
+        }
+        let provider = try XCTUnwrap(CGDataProvider(data: Data(bytes) as CFData))
+        let cgImage = try XCTUnwrap(
+            CGImage(
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bitsPerPixel: 32,
+                bytesPerRow: width * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
+                provider: provider,
+                decode: nil,
+                shouldInterpolate: false,
+                intent: .defaultIntent
+            )
+        )
+        return try XCTUnwrap(UIImage(cgImage: cgImage).pngData())
+    }
+
+    private nonisolated static func multipartFileByteCount(in body: Data) -> Int? {
+        guard let markerRange = body.range(of: Data("Content-Type: image/jpeg\r\n\r\n".utf8)),
+              let tailRange = body.range(of: Data("\r\n--EmberBoundary-".utf8), options: [], in: markerRange.upperBound..<body.endIndex)
+        else {
+            return nil
+        }
+        return tailRange.lowerBound - markerRange.upperBound
     }
 
     private func makeHostModel(

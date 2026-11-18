@@ -14,7 +14,12 @@ import { z } from 'zod';
 import { prepareTaskCommand } from '../task-digest.js';
 import { BLOB_LOCK_NAMESPACE } from '../storage/blob-store.js';
 import { decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
-import { putR2Bytes, readR2Bytes, type R2BucketPort } from '../storage/r2-blob-store.js';
+import {
+  deleteR2Keys,
+  putR2Bytes,
+  readR2Bytes,
+  type R2BucketPort,
+} from '../storage/r2-blob-store.js';
 import { blobKeyFor } from '../storage/validation.js';
 import { insertB3TaskDispatchOutbox } from './b3-task-dispatch-outbox.js';
 import {
@@ -883,104 +888,117 @@ UPDATE model_turn_attempts
       turnId: lease.turnId,
     };
 
-    return transaction(this.pool, async (client) => {
-      const locked = await lockTurn(client, identity);
+    const writtenR2Keys = new Set<string>();
+    let delegationCommitted = false;
+    try {
+      let savepointCommitted = false;
+      const publication = await transaction(this.pool, async (client) => {
+        const locked = await lockTurn(client, identity);
 
-      if (locked === null) {
-        return { outcome: 'fenced' as const, turn: null };
-      }
+        if (locked === null) {
+          return { outcome: 'fenced' as const, turn: null };
+        }
 
-      const fence = await readFence(client, lease);
+        const fence = await readFence(client, lease);
 
-      if (!isFenceValid(fence, lease)) {
-        return { outcome: 'fenced' as const, turn: toTurnDto(locked) };
-      }
+        if (!isFenceValid(fence, lease)) {
+          return { outcome: 'fenced' as const, turn: toTurnDto(locked) };
+        }
 
-      if (result.status === 'failed') {
-        const messageId = await insertTurnResponse(
+        if (result.status === 'failed') {
+          const messageId = await insertTurnResponse(
+            client,
+            identity,
+            B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+            SIMULATED_MODEL_IDENTITY,
+          );
+          const failed = await markTurnFailed(client, identity, messageId, result.failureReason);
+
+          return failed === null
+            ? { outcome: 'fenced' as const, turn: null }
+            : { outcome: 'published' as const, turn: toTurnDto(failed) };
+        }
+
+        const model: AssistantModelIdentity = {
+          label: result.modelLabel,
+          simulated: result.simulated,
+        };
+
+        if (result.delegation === undefined) {
+          const messageId = await insertTurnResponse(client, identity, result.text, model);
+          const completed = await markTurnCompleted(client, identity, messageId);
+
+          return completed === null
+            ? { outcome: 'fenced' as const, turn: null }
+            : { outcome: 'published' as const, turn: toTurnDto(completed), delegatedTaskId: null };
+        }
+
+        // Expired turns never create Tasks or task_reference rows.
+        if (await isExpired(client, locked)) {
+          const timeoutMessageId = await insertTurnResponse(
+            client,
+            identity,
+            B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+            SIMULATED_MODEL_IDENTITY,
+          );
+          const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
+
+          return timedOut === null
+            ? { outcome: 'fenced' as const, turn: null }
+            : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
+        }
+
+        // Guard against the sub-millisecond edge where `deadline_at` crosses right as
+        // `markTurnCompleted` runs: rolling back the savepoint discards Task + task_reference cleanly.
+        await client.query('SAVEPOINT b3_delegation_attempt');
+        const taskId = await createOrReuseTurnDelegatedTask(
           client,
           identity,
-          B1_ASSISTANT_TURN_FAILURE_MESSAGE,
-          SIMULATED_MODEL_IDENTITY,
+          result.delegation,
+          this.r2Bucket,
+          writtenR2Keys,
         );
-        const failed = await markTurnFailed(client, identity, messageId, result.failureReason);
-
-        return failed === null
-          ? { outcome: 'fenced' as const, turn: null }
-          : { outcome: 'published' as const, turn: toTurnDto(failed) };
-      }
-
-      const model: AssistantModelIdentity = {
-        label: result.modelLabel,
-        simulated: result.simulated,
-      };
-
-      if (result.delegation === undefined) {
         const messageId = await insertTurnResponse(client, identity, result.text, model);
+        await ensureTurnTaskReference(client, identity, taskId);
         const completed = await markTurnCompleted(client, identity, messageId);
 
-        return completed === null
-          ? { outcome: 'fenced' as const, turn: null }
-          : { outcome: 'published' as const, turn: toTurnDto(completed), delegatedTaskId: null };
-      }
+        if (completed === null) {
+          await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
+          await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
+          return { outcome: 'fenced' as const, turn: null };
+        }
 
-      // Expired turns never create Tasks or task_reference rows.
-      if (await isExpired(client, locked)) {
-        const timeoutMessageId = await insertTurnResponse(
-          client,
-          identity,
-          B1_ASSISTANT_TURN_FAILURE_MESSAGE,
-          SIMULATED_MODEL_IDENTITY,
-        );
-        const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
+        if (completed.status === 'failed' && completed.failure_reason === 'timeout') {
+          await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
+          await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
+          const timeoutMessageId = await insertTurnResponse(
+            client,
+            identity,
+            B1_ASSISTANT_TURN_FAILURE_MESSAGE,
+            SIMULATED_MODEL_IDENTITY,
+          );
+          const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
 
-        return timedOut === null
-          ? { outcome: 'fenced' as const, turn: null }
-          : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
-      }
+          return timedOut === null
+            ? { outcome: 'fenced' as const, turn: null }
+            : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
+        }
 
-      // Guard against the sub-millisecond edge where `deadline_at` crosses right as
-      // `markTurnCompleted` runs: rolling back the savepoint discards Task + task_reference cleanly.
-      await client.query('SAVEPOINT b3_delegation_attempt');
-      const taskId = await createOrReuseTurnDelegatedTask(
-        client,
-        identity,
-        result.delegation,
-        this.r2Bucket,
-      );
-      const messageId = await insertTurnResponse(client, identity, result.text, model);
-      await ensureTurnTaskReference(client, identity, taskId);
-      const completed = await markTurnCompleted(client, identity, messageId);
-
-      if (completed === null) {
-        await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
         await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
-        return { outcome: 'fenced' as const, turn: null };
+        savepointCommitted = true;
+        return {
+          outcome: 'published' as const,
+          turn: toTurnDto(completed),
+          delegatedTaskId: taskId,
+        };
+      });
+      delegationCommitted = savepointCommitted;
+      return publication;
+    } finally {
+      if (!delegationCommitted && writtenR2Keys.size > 0) {
+        await deleteR2Keys(this.r2Bucket, [...writtenR2Keys]);
       }
-
-      if (completed.status === 'failed' && completed.failure_reason === 'timeout') {
-        await client.query('ROLLBACK TO SAVEPOINT b3_delegation_attempt');
-        await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
-        const timeoutMessageId = await insertTurnResponse(
-          client,
-          identity,
-          B1_ASSISTANT_TURN_FAILURE_MESSAGE,
-          SIMULATED_MODEL_IDENTITY,
-        );
-        const timedOut = await markTurnFailed(client, identity, timeoutMessageId, 'timeout');
-
-        return timedOut === null
-          ? { outcome: 'fenced' as const, turn: null }
-          : { outcome: 'published' as const, turn: toTurnDto(timedOut), delegatedTaskId: null };
-      }
-
-      await client.query('RELEASE SAVEPOINT b3_delegation_attempt');
-      return {
-        outcome: 'published' as const,
-        turn: toTurnDto(completed),
-        delegatedTaskId: taskId,
-      };
-    });
+    }
   }
 
   /**
@@ -1327,6 +1345,7 @@ async function createOrReuseTurnDelegatedTask(
   identity: PendingAssistantTurn,
   delegation: z.infer<typeof delegationSchema>,
   r2Bucket?: R2BucketPort,
+  writtenR2Keys?: Set<string>,
 ): Promise<Id> {
   const agentLookup = await client.query<{
     readonly agent_id: string;
@@ -1577,11 +1596,21 @@ async function createOrReuseTurnDelegatedTask(
           : decodePgBytea(upload.bytes);
 
       const targetBackend: 'postgres' | 'r2' = r2Bucket !== undefined ? 'r2' : 'postgres';
-      if (r2Bucket !== undefined) {
-        await putR2Bytes(r2Bucket, storageKey, bytes, {
-          httpMetadata: { contentType: upload.media_type },
-          customMetadata: { tenantId: identity.tenantId, sha256: upload.sha256 },
-        });
+      if (r2Bucket !== undefined && !writtenR2Keys?.has(storageKey)) {
+        const existingBlob = await client.query<{ readonly exists: number }>(
+          `SELECT 1 AS exists
+             FROM bytea_blobs
+            WHERE tenant_id = $1 AND storage_key = $2
+            LIMIT 1`,
+          [identity.tenantId, storageKey],
+        );
+        if ((existingBlob.rowCount ?? 0) === 0) {
+          await putR2Bytes(r2Bucket, storageKey, bytes, {
+            httpMetadata: { contentType: upload.media_type },
+            customMetadata: { tenantId: identity.tenantId, sha256: upload.sha256 },
+          });
+          writtenR2Keys?.add(storageKey);
+        }
       }
 
       await client.query(

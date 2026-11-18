@@ -231,8 +231,7 @@ final class LiveConversationHostModel {
         }
 
         do {
-            let baseStem = (suggestedFilename as NSString).deletingPathExtension
-            let jpegName = baseStem.isEmpty ? "photo.jpg" : "\(baseStem).jpg"
+            let jpegName = Self.jpegFilename(for: suggestedFilename)
             let filename = B3AttachmentLimits.safeUploadFilename(jpegName, mediaType: "image/jpeg")
             let receipt = try await repository.uploadAttachment(
                 filename: filename,
@@ -306,13 +305,18 @@ final class LiveConversationHostModel {
             var rawFilename = url.lastPathComponent
             var thumbnailData: Data?
 
-            if resolvedMediaType == "image/heic" || resolvedMediaType == "image/heif",
+            let shouldTranscodeToJpeg = resolvedMediaType == "image/heic"
+                || resolvedMediaType == "image/heif"
+                || (B3AttachmentLimits.isVisionImageMediaType(resolvedMediaType)
+                    && resolvedMediaType != "image/gif"
+                    && data.count > B3AttachmentLimits.maxVisionImageBytes)
+
+            if shouldTranscodeToJpeg,
                let image = UIImage(data: data),
                let converted = Self.encodeUploadImage(image) {
                 data = converted.uploadData
                 resolvedMediaType = "image/jpeg"
-                let stem = (rawFilename as NSString).deletingPathExtension
-                rawFilename = stem.isEmpty ? "photo.jpg" : "\(stem).jpg"
+                rawFilename = Self.jpegFilename(for: rawFilename)
                 thumbnailData = converted.thumbnailData
             } else if B3AttachmentLimits.isVisionImageMediaType(resolvedMediaType),
                       let image = UIImage(data: data) {
@@ -348,6 +352,11 @@ final class LiveConversationHostModel {
         }
     }
 
+    private static func jpegFilename(for rawFilename: String) -> String {
+        let baseStem = (rawFilename as NSString).deletingPathExtension
+        return baseStem.isEmpty ? "photo.jpg" : "\(baseStem).jpg"
+    }
+
     private static func encodeUploadImage(_ image: UIImage) -> (uploadData: Data, thumbnailData: Data?)? {
         let maxDimension: CGFloat = 2048
         let originalSize = image.size
@@ -364,7 +373,15 @@ final class LiveConversationHostModel {
         let rendered = renderer.image { _ in
             image.draw(in: CGRect(origin: .zero, size: targetSize))
         }
-        guard let uploadData = rendered.jpegData(compressionQuality: 0.82) else { return nil }
+        var uploadData: Data?
+        for quality: CGFloat in [0.82, 0.65, 0.5] {
+            guard let candidate = rendered.jpegData(compressionQuality: quality) else { continue }
+            uploadData = candidate
+            if candidate.count <= B3AttachmentLimits.maxVisionImageBytes {
+                break
+            }
+        }
+        guard let uploadData else { return nil }
         let thumbData = makeThumbnailData(from: rendered)
         return (uploadData, thumbData)
     }

@@ -438,4 +438,45 @@ describe('B3 upload and artifact routes', () => {
     expect(dupRes.status).toBe(400);
     expect(recorded).toHaveLength(0);
   });
+
+  it('accepts a 15 MiB base64-encoded JSON upload while rejecting >15 MiB decoded payloads', async () => {
+    const recorded: Array<{ ctx: AuthContext; input: StageUploadInput }> = [];
+    const app = buildTestApp(makeFakeUploadsRepo(recorded));
+
+    const maxBytes = new Uint8Array(15_728_640);
+    maxBytes[0] = 0x25;
+    maxBytes[maxBytes.byteLength - 1] = 0x45;
+    const maxRes = await app.request('/v1/me/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        filename: 'max.bin',
+        media_type: 'application/octet-stream',
+        content_base64: Buffer.from(maxBytes).toString('base64'),
+      }),
+    });
+    expect(maxRes.status).toBe(201);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]!.input.bytes.byteLength).toBe(15_728_640);
+
+    const overMaxBytes = new Uint8Array(15_728_641);
+    const overRes = await app.request('/v1/me/uploads', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${TOKEN}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        filename: 'over.bin',
+        media_type: 'application/octet-stream',
+        content_base64: Buffer.from(overMaxBytes).toString('base64'),
+      }),
+    });
+    expect(overRes.status).toBe(400);
+    expect(ErrorResponseSchema.parse(await overRes.json()).error.code).toBe('INVALID_ARGUMENT');
+    expect(recorded).toHaveLength(1);
+  });
 });

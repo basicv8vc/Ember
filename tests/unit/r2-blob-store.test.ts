@@ -2,8 +2,10 @@ import { createHash, randomUUID } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   PostgresB3StagedUploadRepository,
+  PostgresModelTurnExecutionRepository,
   PostgresR2BlobStore,
   UPLOAD_KEY_PATTERN,
+  blobKeyFor,
   uploadKeyFor,
   type R2BucketPort,
   type R2ObjectBodyPort,
@@ -13,6 +15,7 @@ import {
 type PoolArg = ConstructorParameters<typeof PostgresR2BlobStore>[0];
 
 class MemoryR2Bucket implements R2BucketPort {
+  readonly putKeys: string[] = [];
   readonly objects = new Map<
     string,
     {
@@ -26,6 +29,7 @@ class MemoryR2Bucket implements R2BucketPort {
     value: ArrayBuffer | ArrayBufferView,
     options?: R2PutOptionsPort,
   ): Promise<unknown> {
+    this.putKeys.push(key);
     const view =
       value instanceof ArrayBuffer
         ? new Uint8Array(value)
@@ -189,5 +193,226 @@ describe('R2 blob storage keys and stageUpload lifecycle', () => {
     const swept = await repo.sweepExpiredUnboundUploads();
     expect(swept.removed).toBe(1);
     expect(bucket.objects.size).toBe(0);
+  });
+
+  it('cleans up newly written task R2 blobs on savepoint or transaction rollback without deleting pre-existing blobs', async () => {
+    const bucket = new MemoryR2Bucket();
+    const tenantId = randomUUID();
+    const conversationId = randomUUID();
+    const turnId = randomUUID();
+    const sourceMessageId = randomUUID();
+    const agentId = randomUUID();
+    const existingUploadId = randomUUID();
+    const newUploadId = randomUUID();
+
+    const existingBytes = new TextEncoder().encode('existing-shared-blob');
+    const existingSha = createHash('sha256').update(existingBytes).digest('hex');
+    const existingBlobKey = blobKeyFor(tenantId, existingSha);
+    const existingSentinel = new TextEncoder().encode('existing-shared-blob');
+    await bucket.put(existingBlobKey, existingSentinel);
+
+    const newBytes = new TextEncoder().encode('new-delegation-blob');
+    const newSha = createHash('sha256').update(newBytes).digest('hex');
+    const newBlobKey = blobKeyFor(tenantId, newSha);
+    const stagedUploadKey = uploadKeyFor(tenantId, newUploadId);
+    await bucket.put(stagedUploadKey, newBytes);
+
+    const makePool = (mode: 'savepoint_timeout' | 'outer_throw') => {
+      const runQuery = (text: string, params?: readonly unknown[]) => {
+        if (
+          text === 'BEGIN' ||
+          text === 'COMMIT' ||
+          text === 'ROLLBACK' ||
+          text.startsWith('SAVEPOINT') ||
+          text.startsWith('ROLLBACK TO SAVEPOINT') ||
+          text.startsWith('RELEASE SAVEPOINT') ||
+          text.includes('pg_advisory_xact_lock')
+        ) {
+          return Promise.resolve({ rowCount: 0, rows: [] });
+        }
+        if (text.includes('FROM conversations') && text.includes('FOR UPDATE')) {
+          return Promise.resolve({ rowCount: 1, rows: [{ id: conversationId }] });
+        }
+        if (text.includes('FROM assistant_turns t') && text.includes('FOR UPDATE')) {
+          return Promise.resolve({
+            rowCount: 1,
+            rows: [
+              {
+                id: turnId,
+                conversation_id: conversationId,
+                source_message_id: sourceMessageId,
+                status: 'running',
+                created_at: '2026-11-18T00:00:00.000Z',
+                updated_at: '2026-11-18T00:00:00.000Z',
+                response_message_id: null,
+                failure_reason: null,
+                deadline_at: '2026-11-18T00:05:00.000Z',
+              },
+            ],
+          });
+        }
+        if (text.includes('AS within_deadline')) {
+          return Promise.resolve({
+            rowCount: 1,
+            rows: [
+              {
+                status: 'running',
+                lease_epoch: 1,
+                lease_owner: 'worker-1',
+                within_deadline: true,
+                lease_live: true,
+              },
+            ],
+          });
+        }
+        if (text.includes('AS expired')) {
+          return Promise.resolve({ rowCount: 1, rows: [{ expired: false }] });
+        }
+        if (text.includes('FROM conversations c') && text.includes('JOIN agents a')) {
+          return Promise.resolve({
+            rowCount: 1,
+            rows: [{ agent_id: agentId, policy_version: 1 }],
+          });
+        }
+        if (text.includes('JOIN conversation_message_attachments cma')) {
+          return Promise.resolve({
+            rowCount: 2,
+            rows: [{ upload_id: existingUploadId }, { upload_id: newUploadId }],
+          });
+        }
+        if (text.includes('FROM tasks') && text.includes('idempotency_key')) {
+          return Promise.resolve({ rowCount: 0, rows: [] });
+        }
+        if (text.includes('FROM user_staged_uploads') && text.includes('FOR UPDATE')) {
+          return Promise.resolve({
+            rowCount: 2,
+            rows: [
+              {
+                id: existingUploadId,
+                filename: 'existing.txt',
+                media_type: 'text/plain',
+                sha256: existingSha,
+                size: existingBytes.byteLength,
+                storage_backend: 'postgres',
+                storage_key: null,
+                bytes: Buffer.from(existingBytes),
+                status: 'unbound',
+                not_expired: true,
+              },
+              {
+                id: newUploadId,
+                filename: 'new.txt',
+                media_type: 'text/plain',
+                sha256: newSha,
+                size: newBytes.byteLength,
+                storage_backend: 'r2',
+                storage_key: stagedUploadKey,
+                bytes: null,
+                status: 'unbound',
+                not_expired: true,
+              },
+            ],
+          });
+        }
+        if (text.includes('INSERT INTO tasks')) {
+          return Promise.resolve({
+            rowCount: 1,
+            rows: [{ id: params?.[0], accepted_at: '2026-11-18T00:00:01.000Z' }],
+          });
+        }
+        if (
+          text.includes('FROM bytea_blobs') &&
+          text.includes('WHERE tenant_id = $1 AND storage_key = $2')
+        ) {
+          const requestedKey = params?.[1];
+          return requestedKey === existingBlobKey
+            ? Promise.resolve({ rowCount: 1, rows: [{ exists: 1 }] })
+            : Promise.resolve({ rowCount: 0, rows: [] });
+        }
+        if (text.includes('UPDATE conversations') && text.includes('RETURNING last_sequence')) {
+          return Promise.resolve({ rowCount: 1, rows: [{ last_sequence: 2 }] });
+        }
+        if (text.includes('WITH decision AS') && text.includes('UPDATE assistant_turns t')) {
+          if (mode === 'outer_throw') {
+            return Promise.reject(new Error('db failed before commit'));
+          }
+          const isTimeoutFallback = text.includes("SET status = 'failed'");
+          return Promise.resolve({
+            rowCount: 1,
+            rows: [
+              {
+                id: turnId,
+                conversation_id: conversationId,
+                source_message_id: sourceMessageId,
+                status: 'failed',
+                created_at: '2026-11-18T00:00:00.000Z',
+                updated_at: '2026-11-18T00:05:00.000Z',
+                response_message_id: params?.[isTimeoutFallback ? 4 : 3],
+                failure_reason: 'timeout',
+                deadline_at: '2026-11-18T00:05:00.000Z',
+              },
+            ],
+          });
+        }
+        return Promise.resolve({ rowCount: 0, rows: [] });
+      };
+
+      return {
+        query: runQuery,
+        connect() {
+          return Promise.resolve({
+            query: runQuery,
+            release() {},
+          });
+        },
+      } as unknown as PoolArg;
+    };
+
+    const command = {
+      lease: {
+        tenantId,
+        conversationId,
+        turnId,
+        leaseEpoch: 1,
+        leaseOwner: 'worker-1',
+        deadlineAt: '2026-11-18T00:05:00.000Z',
+        leaseExpiresAt: '2026-11-18T00:01:00.000Z',
+      },
+      result: {
+        status: 'completed' as const,
+        text: 'Running analysis',
+        modelLabel: 'openrouter/deepseek-v4.1-flash-1017',
+        simulated: false,
+        delegation: {
+          toolName: 'delegate_python_agent' as const,
+          title: 'Analyze attachments',
+          input: { prompt: 'Inspect files' },
+        },
+      },
+    };
+
+    const savepointRepo = new PostgresModelTurnExecutionRepository(makePool('savepoint_timeout'), {
+      r2Bucket: bucket,
+    });
+    bucket.putKeys.length = 0;
+    const savepointOutcome = await savepointRepo.publishCompletion(command);
+    expect(savepointOutcome).toMatchObject({
+      outcome: 'published',
+      delegatedTaskId: null,
+    });
+    expect(bucket.putKeys).toEqual([newBlobKey]);
+    expect(bucket.objects.has(newBlobKey)).toBe(false);
+    expect(bucket.objects.has(existingBlobKey)).toBe(true);
+    expect(bucket.objects.has(stagedUploadKey)).toBe(true);
+
+    const throwRepo = new PostgresModelTurnExecutionRepository(makePool('outer_throw'), {
+      r2Bucket: bucket,
+    });
+    bucket.putKeys.length = 0;
+    await expect(throwRepo.publishCompletion(command)).rejects.toBeDefined();
+    expect(bucket.putKeys).toEqual([newBlobKey]);
+    expect(bucket.objects.has(newBlobKey)).toBe(false);
+    expect(bucket.objects.has(existingBlobKey)).toBe(true);
+    expect(bucket.objects.has(stagedUploadKey)).toBe(true);
   });
 });

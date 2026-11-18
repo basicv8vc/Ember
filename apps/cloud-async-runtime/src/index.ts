@@ -50,6 +50,9 @@ import {
 } from './runtime.js';
 
 const BLOB_GC_MAX_AGE_MS = 60 * 60 * 1_000;
+export const TURN_RECOVERY_CRON = '* * * * *';
+export const TASK_RECOVERY_CRON = '*/30 * * * *';
+export const MAINTENANCE_GC_CRON = '0 */6 * * *';
 
 interface HyperdriveBinding {
   readonly connectionString: string;
@@ -111,6 +114,8 @@ const logger: TurnDispatchLogger = {
   },
 };
 
+type RuntimePoolFactory = (env: RuntimeEnv) => Pool;
+
 function createPool(env: RuntimeEnv): Pool {
   return new Pool({
     connectionString: env.HYPERDRIVE.connectionString,
@@ -127,12 +132,36 @@ function runtimeWorkerId(): string {
   return `cf-turn-${randomUUID()}`;
 }
 
-async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> {
-  const pool = createPool(env);
+async function runQueueBatch(
+  batch: QueueBatch,
+  env: RuntimeEnv,
+  makePool: RuntimePoolFactory,
+): Promise<void> {
+  if (batch.messages.length === 0) {
+    return;
+  }
+
   const dispatchQueueName = env.EMBER_TURN_DISPATCH_QUEUE_NAME?.trim() || TURN_DISPATCH_QUEUE_NAME;
   const dispatchDlqName = env.EMBER_TURN_DISPATCH_DLQ_NAME?.trim() || TURN_DISPATCH_DLQ_NAME;
   const agentQueueName = env.EMBER_AGENT_TASK_QUEUE_NAME?.trim() || AGENT_TASK_QUEUE_NAME;
   const agentDlqName = env.EMBER_AGENT_TASK_DLQ_NAME?.trim() || AGENT_TASK_DLQ_NAME;
+
+  if (
+    batch.queue !== dispatchQueueName &&
+    batch.queue !== dispatchDlqName &&
+    batch.queue !== agentQueueName &&
+    batch.queue !== agentDlqName
+  ) {
+    for (const message of batch.messages) {
+      logger.warn('discarded dispatch message from an unexpected Queue', {
+        category: 'unexpected_queue',
+      });
+      message.ack();
+    }
+    return;
+  }
+
+  const pool = makePool(env);
 
   try {
     if (batch.queue === dispatchDlqName) {
@@ -226,16 +255,6 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
       return;
     }
 
-    if (batch.queue !== dispatchQueueName) {
-      for (const message of batch.messages) {
-        logger.warn('discarded dispatch message from an unexpected Queue', {
-          category: 'unexpected_queue',
-        });
-        message.ack();
-      }
-      return;
-    }
-
     // This purpose is selected by the trusted Cloud Runtime callsite, never by Worker env or Queue data.
     const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
     if (model.kind === 'refused') {
@@ -304,74 +323,107 @@ async function runQueueBatch(batch: QueueBatch, env: RuntimeEnv): Promise<void> 
   }
 }
 
-async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
-  // The Cron relay shares the same code-owned Alpha authorization and remains off by default.
+function resolveEnabledModelConfig(env: RuntimeEnv) {
+  // Recovery relays share code-owned Alpha authorization; paused environments must not wake Neon.
   const model = resolveCloudRuntimeModelConfig(env, 'staging_alpha');
-  if (model.kind === 'refused') {
-    logger.warn('Cloud runtime relay is paused by runtime configuration', {
-      category: model.reason,
-    });
+  if (model.kind !== 'enabled') {
+    if (model.kind === 'refused') {
+      logger.warn('Cloud runtime relay is paused by runtime configuration', {
+        category: model.reason,
+      });
+    }
+    return null;
   }
-  const daytona = resolveCloudDaytonaConfig(env);
-  const pool = createPool(env);
+
+  return model;
+}
+
+async function runTurnRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
+  const model = resolveEnabledModelConfig(env);
+  if (model === null) {
+    return;
+  }
+
+  const pool = makePool(env);
   const workerId = runtimeWorkerId();
 
   try {
-    if (model.kind === 'enabled') {
-      const turnOutbox = createTurnDispatchOutbox(pool);
-      const turnResult = await publishDueTurnDispatches({
-        outbox: turnOutbox,
-        queue: env.TURN_DISPATCH_QUEUE,
-        workerId,
-        logger,
-        limit: TURN_OUTBOX_BATCH_SIZE,
-        leaseMs: TURN_OUTBOX_PUBLISH_LEASE_MS,
+    const turnOutbox = createTurnDispatchOutbox(pool);
+    const turnResult = await publishDueTurnDispatches({
+      outbox: turnOutbox,
+      queue: env.TURN_DISPATCH_QUEUE,
+      workerId,
+      logger,
+      limit: TURN_OUTBOX_BATCH_SIZE,
+      leaseMs: TURN_OUTBOX_PUBLISH_LEASE_MS,
+    });
+    if (turnResult.failed > 0) {
+      console.warn('Assistant Turn outbox relay had publication failures', {
+        claimed: turnResult.claimed,
+        failed: turnResult.failed,
       });
-      if (turnResult.failed > 0) {
-        console.warn('Assistant Turn outbox relay had publication failures', {
-          claimed: turnResult.claimed,
-          failed: turnResult.failed,
-        });
-      }
+    }
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+}
 
-      const leaseQueue = createNotesTaskLeaseQueue(pool, model);
-      const notesResult = await publishDueNotesTaskDispatches({
-        relay: {
-          reapExpired: (now) => leaseQueue.reapExpired(now),
-          listDueNotesTasks: (limit) => listDueNotesTaskDispatches(pool, limit),
-        },
-        queue: env.TURN_DISPATCH_QUEUE,
-        isAuthorizedTenant: (tenantId) => isCloudModelTenantAuthorized(model, tenantId),
-        logger,
-        limit: TURN_OUTBOX_BATCH_SIZE,
+async function runTaskRecoveryRelay(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
+  const model = resolveEnabledModelConfig(env);
+  if (model === null) {
+    return;
+  }
+
+  const daytona = resolveCloudDaytonaConfig(env);
+  const pool = makePool(env);
+  const workerId = runtimeWorkerId();
+
+  try {
+    const leaseQueue = createNotesTaskLeaseQueue(pool, model);
+    const notesResult = await publishDueNotesTaskDispatches({
+      relay: {
+        reapExpired: (now) => leaseQueue.reapExpired(now),
+        listDueNotesTasks: (limit) => listDueNotesTaskDispatches(pool, limit),
+      },
+      queue: env.TURN_DISPATCH_QUEUE,
+      isAuthorizedTenant: (tenantId) => isCloudModelTenantAuthorized(model, tenantId),
+      logger,
+      limit: TURN_OUTBOX_BATCH_SIZE,
+    });
+    if (notesResult.failed > 0) {
+      console.warn('Notes Task reconciliation relay had publication failures', {
+        examined: notesResult.examined,
+        failed: notesResult.failed,
       });
-      if (notesResult.failed > 0) {
-        console.warn('Notes Task reconciliation relay had publication failures', {
-          examined: notesResult.examined,
-          failed: notesResult.failed,
-        });
-      }
-
-      if (daytona.kind === 'enabled' && env.AGENT_TASK_QUEUE !== undefined) {
-        const agentOutbox = createAgentDispatchOutbox(pool);
-        const agentResult = await publishDueAgentDispatches({
-          outbox: agentOutbox,
-          queue: env.AGENT_TASK_QUEUE,
-          workerId,
-          logger,
-          limit: AGENT_OUTBOX_BATCH_SIZE,
-          leaseMs: AGENT_OUTBOX_PUBLISH_LEASE_MS,
-        });
-        if (agentResult.failed > 0) {
-          console.warn('Agent Task outbox relay had publication failures', {
-            claimed: agentResult.claimed,
-            failed: agentResult.failed,
-          });
-        }
-      }
     }
 
-    const blobOpts = env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS };
+    if (daytona.kind === 'enabled' && env.AGENT_TASK_QUEUE !== undefined) {
+      const agentOutbox = createAgentDispatchOutbox(pool);
+      const agentResult = await publishDueAgentDispatches({
+        outbox: agentOutbox,
+        queue: env.AGENT_TASK_QUEUE,
+        workerId,
+        logger,
+        limit: AGENT_OUTBOX_BATCH_SIZE,
+        leaseMs: AGENT_OUTBOX_PUBLISH_LEASE_MS,
+      });
+      if (agentResult.failed > 0) {
+        console.warn('Agent Task outbox relay had publication failures', {
+          claimed: agentResult.claimed,
+          failed: agentResult.failed,
+        });
+      }
+    }
+  } finally {
+    await pool.end().catch(() => undefined);
+  }
+}
+
+async function runMaintenanceGc(env: RuntimeEnv, makePool: RuntimePoolFactory): Promise<void> {
+  const pool = makePool(env);
+  const blobOpts = env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS };
+
+  try {
     await new PostgresB3StagedUploadRepository(pool, blobOpts)
       .sweepExpiredUnboundUploads()
       .catch(() => {
@@ -388,16 +440,31 @@ async function runOutboxRelay(env: RuntimeEnv): Promise<void> {
   }
 }
 
-export default {
-  queue(batch: QueueBatch, env: RuntimeEnv): Promise<void> {
-    return runQueueBatch(batch, env);
-  },
+export function createCloudAsyncRuntime(deps: { readonly createPool?: RuntimePoolFactory } = {}) {
+  const makePool = deps.createPool ?? createPool;
+  return {
+    queue(batch: QueueBatch, env: RuntimeEnv): Promise<void> {
+      return runQueueBatch(batch, env, makePool);
+    },
 
-  scheduled(
-    _controller: ScheduledController,
-    env: RuntimeEnv,
-    context: WorkerExecutionContext,
-  ): void {
-    context.waitUntil(runOutboxRelay(env));
-  },
-};
+    scheduled(
+      controller: ScheduledController,
+      env: RuntimeEnv,
+      context: WorkerExecutionContext,
+    ): void {
+      if (controller.cron === MAINTENANCE_GC_CRON) {
+        context.waitUntil(runMaintenanceGc(env, makePool));
+        return;
+      }
+
+      if (controller.cron === TASK_RECOVERY_CRON) {
+        context.waitUntil(runTaskRecoveryRelay(env, makePool));
+        return;
+      }
+
+      context.waitUntil(runTurnRecoveryRelay(env, makePool));
+    },
+  };
+}
+
+export default createCloudAsyncRuntime();

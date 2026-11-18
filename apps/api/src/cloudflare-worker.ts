@@ -30,18 +30,16 @@ import {
 import { loadCloudflareAppleVerifierConfig } from './cloudflare-worker-apple-config.js';
 import { createRemoteJWKSet } from 'jose';
 import type { JWTVerifyGetKey } from 'jose';
+import {
+  createTurnWakeupDispatcher,
+  type TurnWakeupExecutionContext,
+  type TurnWakeupQueueBinding,
+} from './turn-wakeup.js';
+
+export type CloudflareTurnDispatchQueueBinding = TurnWakeupQueueBinding;
 
 export interface CloudflareHyperdriveBinding {
   readonly connectionString: string;
-}
-
-export interface CloudflareTurnDispatchQueueBinding {
-  send(message: {
-    readonly schemaVersion: 1;
-    readonly eventId: string;
-    readonly tenantId: string;
-    readonly turnId: string;
-  }): Promise<void>;
 }
 
 export interface CloudflareApiBindings {
@@ -56,9 +54,7 @@ export interface CloudflareApiBindings {
   readonly EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS?: string;
 }
 
-export interface WorkerExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
-}
+export type WorkerExecutionContext = TurnWakeupExecutionContext;
 
 type WorkerPool = ReturnType<typeof createPool>;
 
@@ -139,30 +135,11 @@ function createWorkerApp(
     ),
   });
   const logger = createWorkerLogger();
-  const dispatchQueue = bindings.TURN_DISPATCH_QUEUE;
-  const wakeTurnRuntime = (event: { readonly tenantId: string; readonly turnId: string }): void => {
-    if (dispatchQueue === undefined) return;
-
-    const envelope = {
-      schemaVersion: 1 as const,
-      eventId: event.turnId,
-      tenantId: event.tenantId,
-      turnId: event.turnId,
-    };
-
-    try {
-      context.waitUntil(
-        dispatchQueue.send(envelope).catch(() => {
-          // PostgreSQL outbox relay is authoritative; keep Queue diagnostics free of body/credentials.
-          logger.warn('Assistant Turn Queue wake failed', { category: 'queue_send_failed' });
-        }),
-      );
-    } catch {
-      logger.warn('Assistant Turn Queue wake could not be scheduled', {
-        category: 'queue_send_failed',
-      });
-    }
-  };
+  const wakeTurnRuntime = createTurnWakeupDispatcher({
+    dispatchQueue: bindings.TURN_DISPATCH_QUEUE,
+    context,
+    logger,
+  });
 
   const b1TaskReadRepository = new PostgresB1TaskReadRepository(pool);
 

@@ -1,13 +1,32 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { DomainError, type LeasedRun } from '@ember/domain';
-import type { B1TurnDispatchEvent } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
+import {
+  PostgresB1TurnDispatchOutboxRepository,
+  type B1TurnDispatchEvent,
+} from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
+import { PostgresLeaseQueue } from '../../packages/postgres/src/lease-queue/postgres-lease-queue.js';
+import {
+  PostgresB3StagedUploadRepository,
+  PostgresByteaBlobStore,
+} from '@ember/postgres/b3-worker';
 import {
   isAuthorizedCloudModelTurn,
   isCloudModelConversationAuthorized,
   isCloudModelTenantAuthorized,
   resolveCloudRuntimeModelConfig,
 } from '../../apps/cloud-async-runtime/src/config.js';
-import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
+import cloudAsyncRuntime, {
+  MAINTENANCE_GC_CRON,
+  TASK_RECOVERY_CRON,
+  TURN_RECOVERY_CRON,
+  createCloudAsyncRuntime,
+} from '../../apps/cloud-async-runtime/src/index.js';
+import {
+  TURN_WAKEUP_RETRY_DELAYS_MS,
+  createTurnWakeupDispatcher,
+} from '../../apps/api/src/turn-wakeup.js';
 import { createNotesTaskLeaseQueue } from '../../apps/cloud-async-runtime/src/runtime.js';
 import {
   consumeTaskDispatchMessage,
@@ -166,6 +185,219 @@ describe('Cloud Async Runtime dispatch', () => {
     } finally {
       warn.mockRestore();
     }
+  });
+
+  it('separates Wrangler cron triggers into 1m Turn recovery, 30m Task reconciliation, and 6h GC', () => {
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    for (const relPath of [
+      'apps/cloud-async-runtime/wrangler.jsonc',
+      'apps/cloud-async-runtime/wrangler.staging.jsonc',
+    ]) {
+      const raw = readFileSync(`${repoRoot}${relPath}`, 'utf8');
+      // Strip trailing commas before closing braces/brackets so JSON.parse accepts valid JSONC.
+      const normalized = raw.replace(/,\s*([}\]])/g, '$1');
+      const parsed = JSON.parse(normalized) as {
+        readonly triggers?: { readonly crons?: readonly string[] };
+      };
+      const crons = parsed.triggers?.crons ?? [];
+      expect(crons, relPath).toEqual([TURN_RECOVERY_CRON, TASK_RECOVERY_CRON, MAINTENANCE_GC_CRON]);
+    }
+  });
+
+  it('avoids PostgreSQL access for empty/unexpected queues and disabled/refused Turn or Task recovery ticks', async () => {
+    const createPoolSpy = vi.fn(() => {
+      throw new Error('unexpected DB pool creation');
+    });
+    const worker = createCloudAsyncRuntime({ createPool: createPoolSpy });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const runScheduled = (cron: string, envOverrides: Record<string, unknown> = {}) => {
+      let pending: Promise<unknown> | undefined;
+      worker.scheduled(
+        { cron, scheduledTime: Date.now() },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+          ...envOverrides,
+        },
+        {
+          waitUntil(promise) {
+            pending = promise;
+          },
+        },
+      );
+      if (pending === undefined) throw new Error('expected scheduled work promise');
+      return pending;
+    };
+
+    try {
+      await worker.queue(
+        { queue: 'ember-staging-assistant-turns', messages: [] },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+        },
+      );
+      const unexpectedMessage = new Message();
+      await worker.queue(
+        { queue: 'ember-unknown-queue', messages: [unexpectedMessage] },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+        },
+      );
+      expect(unexpectedMessage.ack).toHaveBeenCalledTimes(1);
+
+      await runScheduled(TURN_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
+      await runScheduled(TURN_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
+      await runScheduled(TASK_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
+      await runScheduled(TASK_RECOVERY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
+
+      expect(createPoolSpy).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('routes Turn recovery, Task reconciliation, and maintenance GC crons exclusively by schedule expression', async () => {
+    const fakePool = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const createPoolSpy = vi.fn(() => fakePool as never);
+    const worker = createCloudAsyncRuntime({ createPool: createPoolSpy });
+    const claimDueSpy = vi
+      .spyOn(PostgresB1TurnDispatchOutboxRepository.prototype, 'claimDue')
+      .mockResolvedValue([]);
+    const reapSpy = vi.spyOn(PostgresLeaseQueue.prototype, 'reapExpired').mockResolvedValue(0);
+    const uploadGcSpy = vi
+      .spyOn(PostgresB3StagedUploadRepository.prototype, 'sweepExpiredUnboundUploads')
+      .mockResolvedValue({ removed: 0 });
+    const blobGcSpy = vi
+      .spyOn(PostgresByteaBlobStore.prototype, 'sweepOrphans')
+      .mockResolvedValue({ scanned: 0, removedStaged: 0, removedBlobs: 0, retained: 0 });
+
+    const runScheduled = (cron: string) => {
+      let pending: Promise<unknown> | undefined;
+      worker.scheduled(
+        { cron, scheduledTime: Date.now() },
+        {
+          ...stagingAlphaEnv(),
+          EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants',
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+        },
+        {
+          waitUntil(promise) {
+            pending = promise;
+          },
+        },
+      );
+      if (pending === undefined) throw new Error('expected scheduled work promise');
+      return pending;
+    };
+
+    try {
+      await runScheduled(TURN_RECOVERY_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).toHaveBeenCalledTimes(1);
+      expect(reapSpy).not.toHaveBeenCalled();
+      expect(uploadGcSpy).not.toHaveBeenCalled();
+      expect(blobGcSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+
+      claimDueSpy.mockClear();
+      createPoolSpy.mockClear();
+      fakePool.end.mockClear();
+
+      await runScheduled(TASK_RECOVERY_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(reapSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).not.toHaveBeenCalled();
+      expect(uploadGcSpy).not.toHaveBeenCalled();
+      expect(blobGcSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+
+      reapSpy.mockClear();
+      createPoolSpy.mockClear();
+      fakePool.end.mockClear();
+
+      await runScheduled(MAINTENANCE_GC_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(uploadGcSpy).toHaveBeenCalledTimes(1);
+      expect(blobGcSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).not.toHaveBeenCalled();
+      expect(reapSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+    } finally {
+      blobGcSpy.mockRestore();
+      uploadGcSpy.mockRestore();
+      reapSpy.mockRestore();
+      claimDueSpy.mockRestore();
+    }
+  });
+
+  it('retries transient post-commit Queue wakeup failures in waitUntil before falling back to outbox', async () => {
+    const waitUntilPromises: Array<Promise<unknown>> = [];
+    const sleepCalls: number[] = [];
+    const send = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('transient queue 503'))
+      .mockResolvedValueOnce(undefined);
+    const warn = vi.fn();
+    const dispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: { send },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: { warn },
+      sleep: (ms) => {
+        sleepCalls.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    dispatcher({ tenantId: TENANT_ID, turnId: TURN_ID });
+    await Promise.all(waitUntilPromises);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(sleepCalls).toEqual([TURN_WAKEUP_RETRY_DELAYS_MS[0]]);
+    expect(warn).not.toHaveBeenCalled();
+
+    waitUntilPromises.length = 0;
+    sleepCalls.length = 0;
+    const alwaysFail = vi.fn().mockRejectedValue(new Error('persistent queue outage'));
+    const failingDispatcher = createTurnWakeupDispatcher({
+      dispatchQueue: { send: alwaysFail },
+      context: {
+        waitUntil(promise) {
+          waitUntilPromises.push(promise);
+        },
+      },
+      logger: { warn },
+      sleep: (ms) => {
+        sleepCalls.push(ms);
+        return Promise.resolve();
+      },
+    });
+
+    failingDispatcher({ tenantId: TENANT_ID, turnId: TURN_ID });
+    await Promise.all(waitUntilPromises);
+
+    expect(alwaysFail).toHaveBeenCalledTimes(TURN_WAKEUP_RETRY_DELAYS_MS.length + 1);
+    expect(sleepCalls).toEqual([...TURN_WAKEUP_RETRY_DELAYS_MS]);
+    expect(warn).toHaveBeenCalledWith('Assistant Turn Queue wake failed', {
+      category: 'queue_send_failed',
+    });
   });
 
   it('parses only the closed, prompt-free Queue envelope', () => {

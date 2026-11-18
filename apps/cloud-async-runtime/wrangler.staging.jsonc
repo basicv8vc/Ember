@@ -58,7 +58,7 @@
     ],
   },
   "triggers": {
-    "crons": ["* * * * *"],
+    "crons": ["* * * * *", "*/30 * * * *", "0 */6 * * *"],
   },
   "vars": {
     "EMBER_ENV": "staging",

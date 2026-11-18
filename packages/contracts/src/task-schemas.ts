@@ -81,6 +81,7 @@ export const PYTHON_AGENT_LIMITS = Object.freeze({
   promptMaxChars: 8_000,
   instructionsMaxChars: 500,
   maxFileBytes: 15_728_640,
+  maxTaskTotalFileBytes: 33_554_432,
   maxUploadTtlMs: 86_400_000,
   maxUnboundUploadsPerUser: 10,
   maxAttachmentsPerMessage: 5,

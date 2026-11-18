@@ -13,13 +13,12 @@ import type pg from 'pg';
 import { z } from 'zod';
 import { prepareTaskCommand } from '../task-digest.js';
 import { BLOB_LOCK_NAMESPACE } from '../storage/blob-store.js';
-import { decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
 import {
-  deleteR2Keys,
-  putR2Bytes,
-  readR2Bytes,
-  type R2BucketPort,
-} from '../storage/r2-blob-store.js';
+  cleanupUnreferencedR2Keys,
+  decodePgBytea,
+  sha256Hex,
+} from '../storage/bytea-blob-store.js';
+import { putR2Bytes, readR2Bytes, type R2BucketPort } from '../storage/r2-blob-store.js';
 import { blobKeyFor } from '../storage/validation.js';
 import { insertB3TaskDispatchOutbox } from './b3-task-dispatch-outbox.js';
 import {
@@ -996,7 +995,11 @@ UPDATE model_turn_attempts
       return publication;
     } finally {
       if (!delegationCommitted && writtenR2Keys.size > 0) {
-        await deleteR2Keys(this.r2Bucket, [...writtenR2Keys]);
+        try {
+          await cleanupUnreferencedR2Keys(this.pool, this.r2Bucket, [...writtenR2Keys]);
+        } catch {
+          // Best-effort locked cleanup; avoid masking publication outcome or original error.
+        }
       }
     }
   }

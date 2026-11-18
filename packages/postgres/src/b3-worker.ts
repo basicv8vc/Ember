@@ -19,6 +19,7 @@ export {
   MAX_BYTEA_BLOB_BYTES,
   PostgresByteaBlobStore,
   PostgresR2BlobStore,
+  cleanupUnreferencedR2Keys,
   decodePgBytea,
   readBoundedBlobSource,
   sha256Hex,

@@ -415,4 +415,99 @@ describe('R2 blob storage keys and stageUpload lifecycle', () => {
     expect(bucket.objects.has(existingBlobKey)).toBe(true);
     expect(bucket.objects.has(stagedUploadKey)).toBe(true);
   });
+
+  it('acquires digest lock in stage() before R2 write and preserves R2 on rollback if another TX holds a DB reference', async () => {
+    const bucket = new MemoryR2Bucket();
+    const tenantId = randomUUID();
+    const payload = new TextEncoder().encode('concurrent-stage-and-rollback-payload');
+    const sha256 = createHash('sha256').update(payload).digest('hex');
+    const stagedKey = `staging/${tenantId}/${sha256}`;
+    const blobKey = blobKeyFor(tenantId, sha256);
+
+    const events: string[] = [];
+    const loggedQueries: string[] = [];
+    let stagedMetadataFail = true;
+    const stagePool = {
+      connect() {
+        return Promise.resolve({
+          query(text: string) {
+            loggedQueries.push(text);
+            if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') {
+              events.push(text);
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            }
+            if (text.includes('pg_advisory_xact_lock')) {
+              events.push('LOCK');
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            }
+            if (text.includes('INSERT INTO staged_blobs') && stagedMetadataFail) {
+              return Promise.reject(new Error('staged metadata failed'));
+            }
+            return Promise.resolve({ rowCount: 0, rows: [] });
+          },
+          release() {},
+        });
+      },
+    } as unknown as PoolArg;
+
+    const trackedBucket: R2BucketPort = {
+      put(key, value, options) {
+        events.push(`PUT:${key}`);
+        return bucket.put(key, value as ArrayBuffer | ArrayBufferView, options);
+      },
+      get: (key) => bucket.get(key),
+      delete(keys) {
+        events.push(`DELETE:${Array.isArray(keys) ? keys.join(',') : keys}`);
+        return bucket.delete(keys);
+      },
+    };
+
+    const blobStore = new PostgresR2BlobStore(stagePool, trackedBucket);
+    await expect(blobStore.stage(tenantId, payload, 'text/plain')).rejects.toBeDefined();
+
+    // First TX acquired LOCK before PUT; rollback TX acquired LOCK before DELETE.
+    expect(events).toEqual([
+      'BEGIN',
+      'LOCK',
+      `PUT:${stagedKey}`,
+      'ROLLBACK',
+      'BEGIN',
+      'LOCK',
+      `DELETE:${stagedKey}`,
+      'COMMIT',
+    ]);
+    expect(bucket.objects.has(stagedKey)).toBe(false);
+
+    // Concurrent commit race: rollback happened, another worker committed a DB reference before cleanup locked.
+    events.length = 0;
+    stagedMetadataFail = false;
+    await bucket.put(blobKey, payload);
+    const racePool = {
+      connect() {
+        return Promise.resolve({
+          query(text: string) {
+            if (text === 'BEGIN' || text === 'COMMIT' || text === 'ROLLBACK') {
+              events.push(text);
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            }
+            if (text.includes('pg_advisory_xact_lock')) {
+              events.push('LOCK');
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            }
+            if (text.includes('FROM blobs WHERE tenant_id = $1 AND sha256 = $2')) {
+              return Promise.resolve({ rowCount: 1, rows: [{ '?column?': 1 }] });
+            }
+            return Promise.resolve({ rowCount: 0, rows: [] });
+          },
+          release() {},
+        });
+      },
+    } as unknown as PoolArg;
+
+    const { cleanupUnreferencedR2Keys } = await import('@ember/postgres');
+    await cleanupUnreferencedR2Keys(racePool, trackedBucket, [blobKey]);
+    expect(bucket.objects.has(blobKey)).toBe(true);
+    expect(events).toEqual(['BEGIN', 'LOCK', 'COMMIT']);
+    expect(loggedQueries.length).toBeGreaterThan(0);
+  });
 });

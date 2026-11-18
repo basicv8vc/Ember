@@ -10,7 +10,7 @@ import type {
 import { DomainError, InvalidArgumentError, type Id } from '@ember/domain';
 import type pg from 'pg';
 import { asDomainError, withTransaction } from '../repositories/support.js';
-import { BLOB_LOCK_NAMESPACE, DEFAULT_BLOB_GC_QUARANTINE_MS } from './blob-store.js';
+import { BLOB_LOCK_NAMESPACE, DEFAULT_BLOB_GC_QUARANTINE_MS, blobLockKey } from './blob-store.js';
 import {
   deleteR2Keys,
   putR2Bytes,
@@ -19,6 +19,8 @@ import {
   type R2BucketPort,
 } from './r2-blob-store.js';
 import {
+  BLOB_KEY_PATTERN,
+  STAGING_KEY_PATTERN,
   blobKeyFor,
   parseDigest,
   parseMediaType,
@@ -43,16 +45,37 @@ VALUES ($1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (tenant_id, storage_key) DO NOTHING
 `;
 
+const SELECT_BYTEA_STAGED_BACKEND_SQL = `
+SELECT storage_backend
+  FROM bytea_staged_blobs
+ WHERE tenant_id = $1 AND storage_key = $2
+ LIMIT 1
+`;
+
 const SELECT_BYTEA_STAGED_SQL = `
 SELECT sha256, size, media_type, storage_backend, bytes
   FROM bytea_staged_blobs
  WHERE tenant_id = $1 AND storage_key = $2
 `;
 
+const HAS_BYTEA_STAGED_KEY_SQL = `
+SELECT 1
+  FROM bytea_staged_blobs
+ WHERE tenant_id = $1 AND storage_key = $2
+ LIMIT 1
+`;
+
 const SELECT_BYTEA_BLOB_SQL = `
 SELECT sha256, size, media_type, storage_backend, bytes
   FROM bytea_blobs
  WHERE tenant_id = $1 AND storage_key = $2
+`;
+
+const HAS_BYTEA_BLOB_KEY_SQL = `
+SELECT 1
+  FROM bytea_blobs
+ WHERE tenant_id = $1 AND storage_key = $2
+ LIMIT 1
 `;
 
 const SELECT_BYTEA_BLOB_SIZE_SQL = `
@@ -197,6 +220,118 @@ export async function readBoundedBlobSource(
   return combined;
 }
 
+interface ContentAddressedR2Target {
+  readonly scope: 'staged' | 'blob';
+  readonly tenantId: string;
+  readonly sha256: string;
+  readonly storageKey: string;
+}
+
+function parseContentAddressedR2Target(storageKey: string): ContentAddressedR2Target | null {
+  if (STAGING_KEY_PATTERN.test(storageKey)) {
+    const [, tenantId, sha256] = storageKey.split('/');
+    if (tenantId !== undefined && sha256 !== undefined) {
+      return { scope: 'staged', tenantId, sha256, storageKey };
+    }
+  }
+  if (BLOB_KEY_PATTERN.test(storageKey)) {
+    const [, tenantId, sha256] = storageKey.split('/');
+    if (tenantId !== undefined && sha256 !== undefined) {
+      return { scope: 'blob', tenantId, sha256, storageKey };
+    }
+  }
+  return null;
+}
+
+async function hasLiveDbReference(
+  client: pg.PoolClient,
+  target: ContentAddressedR2Target,
+): Promise<boolean> {
+  if (target.scope === 'staged') {
+    const stagedBytes = await client.query(HAS_BYTEA_STAGED_KEY_SQL, [
+      target.tenantId,
+      target.storageKey,
+    ]);
+    if ((stagedBytes.rowCount ?? 0) > 0) {
+      return true;
+    }
+    const pendingStaged = await client.query(HAS_PENDING_STAGED_KEY_SQL, [
+      target.tenantId,
+      target.storageKey,
+    ]);
+    return (pendingStaged.rowCount ?? 0) > 0;
+  }
+
+  const blobBytes = await client.query(HAS_BYTEA_BLOB_KEY_SQL, [
+    target.tenantId,
+    target.storageKey,
+  ]);
+  if ((blobBytes.rowCount ?? 0) > 0) {
+    return true;
+  }
+  const blobRow = await client.query(BLOB_ROW_SQL, [target.tenantId, target.sha256]);
+  if ((blobRow.rowCount ?? 0) > 0) {
+    return true;
+  }
+  const artifactRef = await client.query(ARTIFACT_REFERENCE_SQL, [target.tenantId, target.sha256]);
+  return (artifactRef.rowCount ?? 0) > 0;
+}
+
+/**
+ * Delete content-addressed R2 objects only after re-acquiring the `(tenant, digest)` advisory
+ * lock, re-checking latest Postgres references, and deleting inside the holding transaction.
+ */
+export async function cleanupUnreferencedR2Keys(
+  pool: pg.Pool,
+  r2Bucket: R2BucketPort | undefined,
+  keys: readonly string[],
+): Promise<void> {
+  if (r2Bucket === undefined || keys.length === 0) {
+    return;
+  }
+
+  const uniqueKeys = [...new Set(keys)];
+  const targets: ContentAddressedR2Target[] = [];
+  const otherKeys: string[] = [];
+
+  for (const key of uniqueKeys) {
+    const parsed = parseContentAddressedR2Target(key);
+    if (parsed !== null) {
+      targets.push(parsed);
+    } else {
+      otherKeys.push(key);
+    }
+  }
+
+  if (targets.length > 0) {
+    targets.sort(
+      (a, b) =>
+        a.tenantId.localeCompare(b.tenantId) ||
+        a.sha256.localeCompare(b.sha256) ||
+        a.scope.localeCompare(b.scope),
+    );
+
+    await withTransaction(pool, async (client) => {
+      let lastLockKey: string | null = null;
+      for (const target of targets) {
+        const lockKey = blobLockKey(target.tenantId, target.sha256);
+        if (lockKey !== lastLockKey) {
+          await client.query(ADVISORY_LOCK_SQL, [lockKey]);
+          lastLockKey = lockKey;
+        }
+        const referenced = await hasLiveDbReference(client, target);
+        if (!referenced) {
+          await deleteR2Keys(r2Bucket, [target.storageKey]);
+        }
+      }
+    });
+  }
+
+  if (otherKeys.length > 0) {
+    await deleteR2Keys(r2Bucket, otherKeys);
+  }
+}
+
 /**
  * Edge-safe Neon PostgreSQL `bytea` or Cloudflare R2 `BlobStore` adapter.
  *
@@ -256,7 +391,7 @@ export class PostgresByteaBlobStore implements BlobStore {
   }
 
   async cleanupR2Keys(keys: readonly string[]): Promise<void> {
-    await deleteR2Keys(this.r2Bucket, keys);
+    await cleanupUnreferencedR2Keys(this.pool, this.r2Bucket, keys);
   }
 
   async stage(
@@ -279,17 +414,26 @@ export class PostgresByteaBlobStore implements BlobStore {
     const storageKey = stagingKeyFor(tenant, sha256);
     const ownership = this.options.ownership ?? {};
     const backend: StorageBackend = this.r2Bucket !== undefined ? 'r2' : 'postgres';
-
-    if (this.r2Bucket !== undefined) {
-      await putR2Bytes(this.r2Bucket, storageKey, bytes, {
-        httpMetadata: { contentType: type },
-        customMetadata: { tenantId: tenant, sha256 },
-      });
-    }
+    let wroteR2 = false;
 
     try {
       await withTransaction(this.pool, async (client) => {
-        await client.query(ADVISORY_LOCK_SQL, [`${BLOB_LOCK_NAMESPACE}:${tenant}:${sha256}`]);
+        await client.query(ADVISORY_LOCK_SQL, [blobLockKey(tenant, sha256)]);
+
+        if (this.r2Bucket !== undefined) {
+          const existingStaged = await client.query<{ storage_backend: StorageBackend }>(
+            SELECT_BYTEA_STAGED_BACKEND_SQL,
+            [tenant, storageKey],
+          );
+          if ((existingStaged.rowCount ?? 0) === 0) {
+            await putR2Bytes(this.r2Bucket, storageKey, bytes, {
+              httpMetadata: { contentType: type },
+              customMetadata: { tenantId: tenant, sha256 },
+            });
+            wroteR2 = true;
+          }
+        }
+
         await client.query(UPSERT_BYTEA_STAGED_SQL, [
           tenant,
           storageKey,
@@ -312,6 +456,11 @@ export class PostgresByteaBlobStore implements BlobStore {
         ]);
       });
     } catch (error) {
+      if (wroteR2) {
+        await cleanupUnreferencedR2Keys(this.pool, this.r2Bucket, [storageKey]).catch(
+          () => undefined,
+        );
+      }
       throw asDomainError(error);
     }
 
@@ -326,13 +475,19 @@ export class PostgresByteaBlobStore implements BlobStore {
 
   async install(tenantId: Id, staged: StagedBlobRef): Promise<InstalledBlobRef> {
     const cleanupKeys: string[] = [];
+    const rollbackKeys: string[] = [];
     try {
       const installed = await withTransaction(this.pool, async (client) =>
-        this.installInTransaction(client, tenantId, staged, cleanupKeys),
+        this.installInTransaction(client, tenantId, staged, cleanupKeys, rollbackKeys),
       );
       await this.cleanupR2Keys(cleanupKeys);
       return installed;
     } catch (error) {
+      if (rollbackKeys.length > 0) {
+        await cleanupUnreferencedR2Keys(this.pool, this.r2Bucket, rollbackKeys).catch(
+          () => undefined,
+        );
+      }
       throw asDomainError(error);
     }
   }
@@ -346,6 +501,7 @@ export class PostgresByteaBlobStore implements BlobStore {
     tenantId: Id,
     staged: StagedBlobRef,
     cleanupR2Keys?: string[],
+    rollbackR2Keys?: string[],
   ): Promise<InstalledBlobRef> {
     const tenant = parseTenantId(tenantId);
     const digest = parseDigest(staged.sha256);
@@ -356,7 +512,7 @@ export class PostgresByteaBlobStore implements BlobStore {
     }
 
     const targetKey = blobKeyFor(tenant, digest);
-    await client.query(ADVISORY_LOCK_SQL, [`${BLOB_LOCK_NAMESPACE}:${tenant}:${digest}`]);
+    await client.query(ADVISORY_LOCK_SQL, [blobLockKey(tenant, digest)]);
 
     const existing = await client.query<{
       sha256: string;
@@ -402,6 +558,7 @@ export class PostgresByteaBlobStore implements BlobStore {
           httpMetadata: { contentType: mediaType },
           customMetadata: { tenantId: tenant, sha256: digest },
         });
+        rollbackR2Keys?.push(targetKey);
       }
 
       await client.query(INSERT_BYTEA_BLOB_SQL, [

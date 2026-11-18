@@ -78,6 +78,8 @@ struct ConversationScreen: View {
                         containerSize: proxy.size,
                         canAttachFile: canAttachMoreFiles,
                         attachedCount: state.attachments.count,
+                        onTakePhoto: actions.onTakePhoto,
+                        onChoosePhoto: actions.onChoosePhoto,
                         onChooseFile: onPickAttachment,
                         onSelectStarterPrompt: { starter in
                             draft = ConversationInteractionRules.insertingStarterPrompt(starter, into: draft)

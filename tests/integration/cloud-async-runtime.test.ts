@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   DELEGATE_NOTES_TOOL_NAME,
@@ -8,7 +8,13 @@ import {
   ModelGatewayFailure,
   type ModelGateway,
 } from '@ember/model-gateway';
-import { PostgresB3StagedUploadRepository } from '@ember/postgres/b3-worker';
+import {
+  PostgresB3StagedUploadRepository,
+  uploadKeyFor,
+  type R2BucketPort,
+  type R2ObjectBodyPort,
+  type R2PutOptionsPort,
+} from '@ember/postgres/b3-worker';
 import {
   B1_ASSISTANT_TURN_MODEL_LABEL,
   PostgresB1AssistantTurnRepository,
@@ -2037,6 +2043,155 @@ describe('Cloud Async Runtime on PostgreSQL', () => {
           .catch(() => undefined);
         await outbox.markCompleted(turnId).catch(() => undefined);
       }
+    }
+  });
+
+  it('forwards EMBER_BLOBS in MAINTENANCE_GC_CRON to sweep expired R2 uploads and orphaned R2 blobs alongside PostgreSQL GC', async () => {
+    const r2Objects = new Map<string, Uint8Array>();
+    const r2Bucket: R2BucketPort = {
+      put(
+        key: string,
+        value: ArrayBuffer | ArrayBufferView,
+        _options?: R2PutOptionsPort,
+      ): Promise<unknown> {
+        const view =
+          value instanceof ArrayBuffer
+            ? new Uint8Array(value)
+            : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+        r2Objects.set(key, new Uint8Array(view));
+        return Promise.resolve({ key, size: view.byteLength });
+      },
+      get(key: string): Promise<R2ObjectBodyPort | null> {
+        const entry = r2Objects.get(key);
+        if (entry === undefined) {
+          return Promise.resolve(null);
+        }
+        const copy = new Uint8Array(entry);
+        return Promise.resolve({
+          size: copy.byteLength,
+          arrayBuffer: () => Promise.resolve(copy.buffer),
+        });
+      },
+      delete(keys: string | string[]): Promise<void> {
+        for (const key of Array.isArray(keys) ? keys : [keys]) {
+          r2Objects.delete(key);
+        }
+        return Promise.resolve();
+      },
+    };
+
+    const fixture = await createFixture();
+    const uploadRepo = new PostgresB3StagedUploadRepository(db.pool, { r2Bucket });
+    const expiredBytes = new TextEncoder().encode('expired r2 upload');
+    const activeBytes = new TextEncoder().encode('active r2 upload');
+    const orphanBlobBytes = new TextEncoder().encode('orphaned r2 blob');
+    const retainedOrphanKey = `blobs/${fixture.tenantId}/${createHash('sha256')
+      .update('retained-when-r2-missing')
+      .digest('hex')}`;
+    const orphanSha = createHash('sha256').update(orphanBlobBytes).digest('hex');
+    const orphanKey = `blobs/${fixture.tenantId}/${orphanSha}`;
+    const retainedSha = retainedOrphanKey.split('/')[2]!;
+
+    try {
+      await turns.cancelTurn({
+        tenantId: fixture.tenantId,
+        conversationId: fixture.conversationId,
+        turnId: fixture.turnId,
+      });
+      await outbox.markCompleted(fixture.turnId);
+
+      const expiredUpload = await uploadRepo.stageUpload(
+        {
+          tenantId: fixture.tenantId,
+          principalId: fixture.principalId,
+          policyVersion: 1,
+        },
+        {
+          filename: 'expired-r2.png',
+          mediaType: 'image/png',
+          bytes: expiredBytes,
+          now: new Date(Date.now() - 48 * 60 * 60 * 1_000),
+        },
+      );
+      const activeUpload = await uploadRepo.stageUpload(
+        {
+          tenantId: fixture.tenantId,
+          principalId: fixture.principalId,
+          policyVersion: 1,
+        },
+        {
+          filename: 'active-r2.png',
+          mediaType: 'image/png',
+          bytes: activeBytes,
+        },
+      );
+
+      await r2Bucket.put(orphanKey, orphanBlobBytes);
+      const staleCreatedAt = new Date(Date.now() - 2 * 60 * 60 * 1_000);
+      await db.pool.query(
+        `INSERT INTO bytea_blobs (tenant_id, storage_key, sha256, size, media_type, storage_backend, bytes, created_at)
+         VALUES ($1::uuid, $2, $3, $4, 'application/octet-stream', 'r2', NULL, $5::timestamptz)`,
+        [fixture.tenantId, orphanKey, orphanSha, orphanBlobBytes.byteLength, staleCreatedAt],
+      );
+
+      const sent: unknown[] = [];
+      // 1. With EMBER_BLOBS bound, Maintenance GC removes expired R2 uploads and orphaned R2 blobs from both PostgreSQL and R2.
+      const r2Env = { ...cloudRuntimeEnv(sent), EMBER_BLOBS: r2Bucket };
+      await runScheduledRelay(r2Env, MAINTENANCE_GC_CRON);
+
+      const expiredKey = uploadKeyFor(fixture.tenantId, expiredUpload.upload_id);
+      const activeKey = uploadKeyFor(fixture.tenantId, activeUpload.upload_id);
+      expect(r2Objects.has(expiredKey)).toBe(false);
+      expect(r2Objects.has(activeKey)).toBe(true);
+      expect(r2Objects.has(orphanKey)).toBe(false);
+
+      const remainingUploads = await db.pool.query<{ readonly id: string }>(
+        `SELECT id FROM user_staged_uploads WHERE tenant_id = $1::uuid AND id = ANY($2::uuid[])`,
+        [fixture.tenantId, [expiredUpload.upload_id, activeUpload.upload_id]],
+      );
+      expect(remainingUploads.rows.map((r) => r.id)).toEqual([activeUpload.upload_id]);
+
+      const remainingBlobs = await db.pool.query<{ readonly storage_key: string }>(
+        `SELECT storage_key FROM bytea_blobs WHERE tenant_id = $1::uuid AND storage_key = $2`,
+        [fixture.tenantId, orphanKey],
+      );
+      expect(remainingBlobs.rows).toHaveLength(0);
+
+      // 2. Without EMBER_BLOBS, Maintenance GC safely skips R2-backed orphan bytea_blobs rather than dropping metadata alone.
+      await r2Bucket.put(retainedOrphanKey, orphanBlobBytes);
+      await db.pool.query(
+        `INSERT INTO bytea_blobs (tenant_id, storage_key, sha256, size, media_type, storage_backend, bytes, created_at)
+         VALUES ($1::uuid, $2, $3, $4, 'application/octet-stream', 'r2', NULL, $5::timestamptz)`,
+        [
+          fixture.tenantId,
+          retainedOrphanKey,
+          retainedSha,
+          orphanBlobBytes.byteLength,
+          staleCreatedAt,
+        ],
+      );
+      await runScheduledRelay(cloudRuntimeEnv(sent), MAINTENANCE_GC_CRON);
+      const retainedCheck = await db.pool.query<{ readonly storage_key: string }>(
+        `SELECT storage_key FROM bytea_blobs WHERE tenant_id = $1::uuid AND storage_key = $2`,
+        [fixture.tenantId, retainedOrphanKey],
+      );
+      expect(retainedCheck.rows).toHaveLength(1);
+      expect(r2Objects.has(retainedOrphanKey)).toBe(true);
+    } finally {
+      await turns
+        .cancelTurn({
+          tenantId: fixture.tenantId,
+          conversationId: fixture.conversationId,
+          turnId: fixture.turnId,
+        })
+        .catch(() => undefined);
+      await outbox.markCompleted(fixture.turnId).catch(() => undefined);
+      await db.pool
+        .query('DELETE FROM user_staged_uploads WHERE tenant_id = $1::uuid', [fixture.tenantId])
+        .catch(() => undefined);
+      await db.pool
+        .query('DELETE FROM bytea_blobs WHERE tenant_id = $1::uuid', [fixture.tenantId])
+        .catch(() => undefined);
     }
   });
 });

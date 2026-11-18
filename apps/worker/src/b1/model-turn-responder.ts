@@ -1,4 +1,4 @@
-import type { B1AssistantTurnDto } from '@ember/contracts';
+import { isVisionImageMediaType, type B1AssistantTurnDto } from '@ember/contracts';
 import { realSleeper, type Sleeper } from '@ember/execution';
 import {
   MODEL_LIMITS,
@@ -59,6 +59,11 @@ export interface ModelTurnExecutionPort {
     readonly turn: PendingModelTurn;
     readonly maxMessages: number;
   }): Promise<readonly B2TurnContextRow[]>;
+  loadAttachmentBytes?(command: {
+    readonly tenantId: string;
+    readonly uploadIds: readonly string[];
+    readonly maxTotalBytes?: number;
+  }): Promise<ReadonlyMap<string, Uint8Array>>;
   reserveAttempt(command: {
     readonly lease: B2TurnLease;
     readonly ceilings: ModelBudgetCeilings;
@@ -467,7 +472,8 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
       maxMessages: MODEL_LIMITS.maxContextMessages,
     });
 
-    const bounded = buildBoundedContext(context);
+    const hydratedContext = await hydrateLatestTurnVisionImages(context, lease, options.repository);
+    const bounded = buildBoundedContext(hydratedContext);
     const preflight = preflightConversationTurn({
       messages: bounded.messages,
       maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
@@ -756,4 +762,81 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
   };
 
   return Object.freeze({ processOnce, start });
+}
+
+const VISION_IMAGE_MAX_COUNT = 3;
+const VISION_IMAGE_MAX_SINGLE_BYTES = 4_194_304;
+const VISION_IMAGE_MAX_TOTAL_BYTES = 6_291_456;
+
+function uint8ArrayToBase64(bytes: Uint8Array): string {
+  const chunkSize = 0x2000;
+  let binary = '';
+  for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return globalThis.btoa(binary);
+}
+
+async function hydrateLatestTurnVisionImages(
+  rows: readonly B2TurnContextRow[],
+  lease: B2TurnLease,
+  repository: Pick<ModelTurnExecutionPort, 'loadAttachmentBytes'>,
+): Promise<readonly B2TurnContextRow[]> {
+  if (rows.length === 0 || repository.loadAttachmentBytes === undefined) {
+    return rows;
+  }
+
+  const latest = rows[rows.length - 1]!;
+  if (
+    latest.kind !== 'user' ||
+    latest.attachments === undefined ||
+    latest.attachments.length === 0
+  ) {
+    return rows;
+  }
+
+  const selectedIds: string[] = [];
+  let totalBytes = 0;
+  for (const att of latest.attachments) {
+    if (selectedIds.length >= VISION_IMAGE_MAX_COUNT) {
+      break;
+    }
+    if (
+      isVisionImageMediaType(att.mediaType) &&
+      att.sizeBytes > 0 &&
+      att.sizeBytes <= VISION_IMAGE_MAX_SINGLE_BYTES &&
+      totalBytes + att.sizeBytes <= VISION_IMAGE_MAX_TOTAL_BYTES
+    ) {
+      selectedIds.push(att.uploadId);
+      totalBytes += att.sizeBytes;
+    }
+  }
+
+  if (selectedIds.length === 0) {
+    return rows;
+  }
+
+  const bytesByUploadId = await repository.loadAttachmentBytes({
+    tenantId: lease.tenantId,
+    uploadIds: selectedIds,
+    maxTotalBytes: VISION_IMAGE_MAX_TOTAL_BYTES,
+  });
+
+  if (bytesByUploadId.size === 0) {
+    return rows;
+  }
+
+  const updatedAttachments = latest.attachments.map((att) => {
+    const bytes = bytesByUploadId.get(att.uploadId);
+    if (bytes === undefined || !isVisionImageMediaType(att.mediaType)) {
+      return att;
+    }
+    return {
+      ...att,
+      imageDataUrl: `data:${att.mediaType};base64,${uint8ArrayToBase64(bytes)}`,
+    };
+  });
+
+  return [...rows.slice(0, -1), { ...latest, attachments: updatedAttachments }];
 }

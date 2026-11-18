@@ -7,7 +7,7 @@ import {
   PostgresB1TaskReadRepository,
   createPool,
 } from '@ember/postgres/b1-worker';
-import { PostgresB3StagedUploadRepository } from '@ember/postgres/b3-worker';
+import { PostgresB3StagedUploadRepository, type R2BucketPort } from '@ember/postgres/b3-worker';
 import type { B1SessionPorts } from './auth/session-service.js';
 import { createB1SessionRuntime } from './auth/b1-auth-runtime.js';
 import {
@@ -45,6 +45,7 @@ export interface CloudflareHyperdriveBinding {
 export interface CloudflareApiBindings {
   readonly HYPERDRIVE: CloudflareHyperdriveBinding;
   readonly TURN_DISPATCH_QUEUE?: CloudflareTurnDispatchQueueBinding;
+  readonly EMBER_BLOBS?: R2BucketPort;
   readonly EMBER_APPLE_BUNDLE_ID: string;
   readonly EMBER_APPLE_CLOCK_SKEW_SECONDS?: string;
   readonly EMBER_APPLE_MAX_TOKEN_AGE_SECONDS?: string;
@@ -160,7 +161,10 @@ function createWorkerApp(
     }),
     b1TaskResultRepository: b1TaskReadRepository,
     b1TaskReadRepository,
-    b3UploadRepository: new PostgresB3StagedUploadRepository(pool),
+    b3UploadRepository: new PostgresB3StagedUploadRepository(
+      pool,
+      bindings.EMBER_BLOBS === undefined ? {} : { r2Bucket: bindings.EMBER_BLOBS },
+    ),
   });
 }
 

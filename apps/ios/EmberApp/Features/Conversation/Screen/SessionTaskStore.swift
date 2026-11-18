@@ -363,7 +363,8 @@ final class SessionTaskStore {
             let fileURL = folder.appendingPathComponent(downloaded.filename, isDirectory: false)
             try downloaded.data.write(to: fileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
             downloadedArtifactFileByID[item.artifactID] = fileURL
-            if downloaded.data.count <= B3AttachmentLimits.maxFileBytes,
+            if B3AttachmentLimits.isTextPreviewMediaType(downloaded.mediaType),
+               downloaded.data.count <= 2_097_152,
                let text = String(data: downloaded.data, encoding: .utf8) {
                 downloadedArtifactPreviewByID[item.artifactID] = text
             }

@@ -27,6 +27,12 @@
       "id": "f7da9cff26b843fda8187764f9b81b25",
     },
   ],
+  "r2_buckets": [
+    {
+      "binding": "EMBER_BLOBS",
+      "bucket_name": "ember-blobs-staging",
+    },
+  ],
   "queues": {
     "producers": [
       {

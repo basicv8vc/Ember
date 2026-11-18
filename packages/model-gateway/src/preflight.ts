@@ -24,6 +24,9 @@ export interface TokenPreflight {
   readonly maxOutputTokens: number;
 }
 
+/** Conservative per-image input token reserve for multimodal turns. */
+export const IMAGE_ATTACHMENT_TOKEN_ESTIMATE = 1_024;
+
 /** Fixed prompt and tool schema token estimates, computed once: compile-time constants. */
 const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROMPT);
 const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
@@ -84,6 +87,13 @@ export function preflightConversationTurn(input: {
         : message.text;
     messageChars += formatted.length;
     messageTokens += estimateTokensConservative(formatted);
+    if (message.attachments !== undefined) {
+      for (const att of message.attachments) {
+        if (typeof att.imageDataUrl === 'string' && att.imageDataUrl.length > 0) {
+          messageTokens += IMAGE_ATTACHMENT_TOKEN_ESTIMATE;
+        }
+      }
+    }
   }
 
   if (!Number.isInteger(messageChars) || messageChars < 1) {

@@ -55,6 +55,7 @@ export {
   type ContextRow,
 } from './context.js';
 export {
+  IMAGE_ATTACHMENT_TOKEN_ESTIMATE,
   preflightConversationTurn,
   preflightNotesActionItems,
   preflightPythonAgentStep,

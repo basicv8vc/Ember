@@ -479,7 +479,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     return Buffer.from(bytes).toString('utf8');
   }
 
-  /** Writes raw bytes (<= 256 KiB) to a path confined under the workspace root. */
+  /** Writes raw bytes (<= maxFileBytes) to a path confined under the workspace root. */
   public async putBytesFile(sandboxId: Id, relativePath: string, bytes: Uint8Array): Promise<void> {
     const record = this.requireRecord(sandboxId);
     this.requireReady(record);
@@ -496,7 +496,7 @@ export class DaytonaSandboxProvider implements SandboxProvider {
     );
   }
 
-  /** Reads raw bytes (<= 256 KiB) from a path confined under the workspace root. */
+  /** Reads raw bytes (<= maxFileBytes) from a path confined under the workspace root. */
   public async getBytesFile(sandboxId: Id, relativePath: string): Promise<Uint8Array> {
     const record = this.requireRecord(sandboxId);
     this.requireReady(record);

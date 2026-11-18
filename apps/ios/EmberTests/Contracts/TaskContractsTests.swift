@@ -131,6 +131,37 @@ final class TaskContractsTests: XCTestCase {
         XCTAssertNil(object["idempotency_key"])
         XCTAssertNil(object["tenant_id"])
     }
+
+    func testB3AttachmentLimitsAllowPDFImagesAndBlockDangerousMIME() throws {
+        XCTAssertEqual(B3AttachmentLimits.maxFileBytes, 15_728_640)
+        XCTAssertEqual(B3AttachmentLimits.maxVisionImageBytes, 4_194_304)
+        XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("application/pdf"))
+        XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("IMAGE/JPEG; charset=utf-8"))
+        XCTAssertTrue(B3AttachmentLimits.isSafeMediaType("application/octet-stream"))
+        XCTAssertFalse(B3AttachmentLimits.isSafeMediaType("text/html"))
+        XCTAssertFalse(B3AttachmentLimits.isSafeMediaType("text/html; charset=utf-8"))
+        XCTAssertFalse(B3AttachmentLimits.isSafeMediaType("image/svg+xml"))
+        XCTAssertFalse(B3AttachmentLimits.isSafeMediaType("application/javascript"))
+        XCTAssertFalse(B3AttachmentLimits.isSafeMediaType("invalid"))
+
+        XCTAssertTrue(B3AttachmentLimits.isVisionImageMediaType("image/jpeg"))
+        XCTAssertTrue(B3AttachmentLimits.isVisionImageMediaType("image/png"))
+        XCTAssertFalse(B3AttachmentLimits.isVisionImageMediaType("application/pdf"))
+
+        XCTAssertTrue(B3AttachmentLimits.isTextPreviewMediaType("text/csv"))
+        XCTAssertTrue(B3AttachmentLimits.isTextPreviewMediaType("application/json"))
+        XCTAssertFalse(B3AttachmentLimits.isTextPreviewMediaType("text/html"))
+        XCTAssertFalse(B3AttachmentLimits.isTextPreviewMediaType("application/pdf"))
+
+        XCTAssertEqual(
+            B3AttachmentLimits.safeUploadFilename("会议纪要 2026.pdf", mediaType: "application/pdf"),
+            "2026.pdf"
+        )
+        XCTAssertEqual(
+            B3AttachmentLimits.safeUploadFilename("report Q4.pdf", mediaType: "application/pdf"),
+            "report_Q4.pdf"
+        )
+    }
 }
 
 final class FakeTaskRepositoryTests: XCTestCase {

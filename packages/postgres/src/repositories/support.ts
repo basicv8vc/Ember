@@ -31,9 +31,14 @@ export function asDomainError(error: unknown): DomainError {
   );
 }
 
+export interface WithTransactionOptions {
+  readonly onCommitAttempt?: () => void;
+}
+
 export async function withTransaction<T>(
   pool: pg.Pool,
   operation: (client: pg.PoolClient) => Promise<T>,
+  options: WithTransactionOptions = {},
 ): Promise<T> {
   let client: pg.PoolClient;
 
@@ -43,16 +48,33 @@ export async function withTransaction<T>(
     throw asDomainError(error);
   }
 
+  let commitAttempted = false;
+  let destroyClient = false;
+
   try {
     await client.query('BEGIN');
     const result = await operation(client);
+    commitAttempted = true;
+    options.onCommitAttempt?.();
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    await client.query('ROLLBACK').catch(() => undefined);
+    if (commitAttempted) {
+      destroyClient = true;
+    } else {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        destroyClient = true;
+      }
+    }
     throw asDomainError(error);
   } finally {
-    client.release();
+    if (destroyClient) {
+      client.release(true);
+    } else {
+      client.release();
+    }
   }
 }
 

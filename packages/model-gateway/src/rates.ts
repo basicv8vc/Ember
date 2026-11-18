@@ -114,6 +114,48 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
       requireParameters: true,
     }),
   }),
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'deepseek/deepseek-v4.1-flash-1017',
+    approval: Object.freeze({
+      approvalId: 'L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17',
+      approvedBy: 'CTO',
+      approvedAt: '2026-11-17',
+      expiresAt: '2026-11-18',
+    }),
+    executionScope: 'smoke_only' as const,
+    budgetCeilings: Object.freeze({
+      perAttemptMicroUsd: 5_000,
+      principalDailyMicroUsd: 5_000,
+      tenantDailyMicroUsd: 5_000,
+      globalDailyMicroUsd: 5_000,
+      principalDailyTurns: 1,
+    }),
+    maxPaidSmokeTurns: 1,
+    stagingAlpha: Object.freeze({
+      approval: Object.freeze({
+        approvalId: 'EMBER-CLOUD-INTERNAL-VISION-MULTI-TURN',
+        approvedBy: 'CTO',
+        approvedAt: '2026-11-17',
+      }),
+      budgetCeilings: Object.freeze({
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 250_000,
+        tenantDailyMicroUsd: 1_000_000,
+        globalDailyMicroUsd: 1_000_000,
+        principalDailyTurns: 60,
+      }),
+      externalApiKeySpendLimitUsd: 1 as const,
+      maxProviderAttemptsPerTurn: 1 as const,
+    }),
+    openRouterRouting: Object.freeze({
+      only: Object.freeze(['deepinfra']),
+      allowFallbacks: false,
+      dataCollection: 'deny' as const,
+      zdr: true,
+      requireParameters: true,
+    }),
+  }),
 ]);
 
 /**
@@ -165,6 +207,8 @@ export type ModelReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high
 export interface ModelRateRow {
   readonly providerId: RealModelProviderId;
   readonly modelId: string;
+  /** Optional canonical slug echoed by OpenRouter responses when `modelId` is a dated alias. */
+  readonly canonicalModelId?: string;
   /** Micro-USD per one million input tokens (i.e. $0.25/1M → 250000). */
   readonly inputMicroUsdPerMillion: number;
   readonly outputMicroUsdPerMillion: number;
@@ -218,6 +262,9 @@ const GPT_5_6_LUNA_DOCS_SOURCE =
 const OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE =
   'https://openrouter.ai/api/v1/models/nvidia/nemotron-3.5-lightning/endpoints and https://openrouter.ai/api/v1/endpoints/zdr, read 2026-11-11 — exact DeepInfra endpoint is listed for this model in the ZDR endpoint catalog; $0.06/M input and $0.16/M output';
 
+const OPENROUTER_DEEPSEEK_V41_FLASH_DEEPINFRA_SOURCE =
+  'https://openrouter.ai/api/v1/models/deepseek/deepseek-v4.1-flash-1017/endpoints and https://openrouter.ai/api/v1/endpoints/zdr, read 2026-11-17 — exact DeepInfra fp8 ZDR endpoint supports image input + tools + tool_choice; $0.098/M input and $0.294/M output';
+
 /**
  * Rate rows known to this tree.
  *
@@ -240,6 +287,18 @@ export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
     rateVersion: 'openrouter-nvidia-nemotron-3.5-lightning-deepinfra-bf16-2026-11-11',
     provenance: 'official_price_verified' as const,
     source: OPENROUTER_NEMOTRON_DEEPINFRA_SOURCE,
+    shutdownDate: null,
+    reasoningEffort: 'none' as const,
+  }),
+  Object.freeze({
+    providerId: 'openrouter' as const,
+    modelId: 'deepseek/deepseek-v4.1-flash-1017',
+    canonicalModelId: 'deepseek/deepseek-v4.1-flash-20261017',
+    inputMicroUsdPerMillion: 98_000,
+    outputMicroUsdPerMillion: 294_000,
+    rateVersion: 'openrouter-deepseek-v4.1-flash-1017-deepinfra-fp8-2026-11-17',
+    provenance: 'official_price_verified' as const,
+    source: OPENROUTER_DEEPSEEK_V41_FLASH_DEEPINFRA_SOURCE,
     shutdownDate: null,
     reasoningEffort: 'none' as const,
   }),

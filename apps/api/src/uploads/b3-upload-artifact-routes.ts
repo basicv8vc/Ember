@@ -30,7 +30,9 @@ import {
 } from '../http/error-mapping.js';
 import type { Logger } from '../logger.js';
 
-const MAX_UPLOAD_REQUEST_BYTES = 524_288;
+const MAX_MULTIPART_UPLOAD_REQUEST_BYTES = 16_777_216;
+// Base64 encoding inflates the 15 MiB decoded file cap by 4/3 (~20 MiB) before JSON envelope overhead.
+const MAX_JSON_UPLOAD_REQUEST_BYTES = 22_020_096;
 const ALLOWED_MULTIPART_FIELDS = new Set(['file', 'filename', 'media_type']);
 const MULTIPART_CONTENT_TYPE = /^multipart\/form-data(?:\s*;.*)?$/i;
 const JSON_CONTENT_TYPE = /^application\/json(?:\s*;.*)?$/i;
@@ -46,14 +48,20 @@ const FORBIDDEN_SCOPE_QUERY_KEYS = [
 ] as const;
 const FORBIDDEN_SCOPE_HEADERS = ['x-tenant-id', 'x-principal-id', 'x-policy-version'] as const;
 
-const BODY_REJECTION_MESSAGES: Readonly<Record<BodyRejectionReason, string>> = Object.freeze({
-  missing_content_type: 'Content-Type header is required',
-  unsupported_content_type: 'Content-Type must be application/json or multipart/form-data',
-  empty_body: 'request body must be a non-empty JSON object or multipart payload',
-  too_large: `request body must not exceed ${MAX_UPLOAD_REQUEST_BYTES} bytes`,
-  invalid_encoding: 'request body must be UTF-8 encoded JSON',
-  invalid_json: 'request body must be valid JSON',
-});
+const BODY_REJECTION_MESSAGES: Readonly<Record<Exclude<BodyRejectionReason, 'too_large'>, string>> =
+  Object.freeze({
+    missing_content_type: 'Content-Type header is required',
+    unsupported_content_type: 'Content-Type must be application/json or multipart/form-data',
+    empty_body: 'request body must be a non-empty JSON object or multipart payload',
+    invalid_encoding: 'request body must be UTF-8 encoded JSON',
+    invalid_json: 'request body must be valid JSON',
+  });
+
+function bodyRejectionMessage(reason: BodyRejectionReason, maxBytes: number): string {
+  return reason === 'too_large'
+    ? `request body must not exceed ${maxBytes} bytes`
+    : BODY_REJECTION_MESSAGES[reason];
+}
 
 const jsonUploadSchema = z
   .strictObject({
@@ -136,11 +144,14 @@ async function parseUploadPayload(c: AppContext): Promise<
   }
 
   if (JSON_CONTENT_TYPE.test(contentType)) {
-    const body = await readJsonBody(c.req.raw, MAX_UPLOAD_REQUEST_BYTES);
+    const body = await readJsonBody(c.req.raw, MAX_JSON_UPLOAD_REQUEST_BYTES);
     if (!body.ok) {
       return {
         ok: false,
-        response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES[body.reason]),
+        response: respondInvalidArgument(
+          c,
+          bodyRejectionMessage(body.reason, MAX_JSON_UPLOAD_REQUEST_BYTES),
+        ),
       };
     }
 
@@ -185,11 +196,14 @@ async function parseUploadPayload(c: AppContext): Promise<
   }
 
   if (MULTIPART_CONTENT_TYPE.test(contentType)) {
-    const bounded = await readBoundedBodyBytes(c.req.raw, MAX_UPLOAD_REQUEST_BYTES);
+    const bounded = await readBoundedBodyBytes(c.req.raw, MAX_MULTIPART_UPLOAD_REQUEST_BYTES);
     if (!bounded.ok) {
       return {
         ok: false,
-        response: respondInvalidArgument(c, BODY_REJECTION_MESSAGES[bounded.reason]),
+        response: respondInvalidArgument(
+          c,
+          bodyRejectionMessage(bounded.reason, MAX_MULTIPART_UPLOAD_REQUEST_BYTES),
+        ),
       };
     }
 
@@ -293,10 +307,7 @@ async function parseUploadPayload(c: AppContext): Promise<
     if (!mediaTypeParsed.success) {
       return {
         ok: false,
-        response: respondInvalidArgument(
-          c,
-          'media_type must be text/plain, text/csv, or text/markdown',
-        ),
+        response: respondInvalidArgument(c, 'media_type must be a supported safe MIME type'),
       };
     }
 

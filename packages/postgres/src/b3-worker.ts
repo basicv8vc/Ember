@@ -18,11 +18,20 @@ export { systemClock, parseNow, type Clock } from './lease-queue/clock.js';
 export {
   MAX_BYTEA_BLOB_BYTES,
   PostgresByteaBlobStore,
+  PostgresR2BlobStore,
+  cleanupUnreferencedR2Keys,
   decodePgBytea,
   readBoundedBlobSource,
   sha256Hex,
   type PostgresByteaBlobStoreOptions,
 } from './storage/bytea-blob-store.js';
+export {
+  UPLOAD_KEY_PATTERN,
+  uploadKeyFor,
+  type R2BucketPort,
+  type R2ObjectBodyPort,
+  type R2PutOptionsPort,
+} from './storage/r2-blob-store.js';
 export {
   PostgresB3StagedUploadRepository,
   type B3ArtifactDownload,

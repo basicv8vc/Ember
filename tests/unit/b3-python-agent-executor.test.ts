@@ -949,4 +949,195 @@ describe('B3-B1 PythonAgentExecutor unit tests', () => {
       expect(repo.failures[0]!.errorCode).toBe(testCase.expectedErrorCode);
     }
   });
+
+  it('fails terminal without launching sandbox when loadAgentContext reports aggregate file budget exceeded', async () => {
+    const repo = new MemoryPythonAgentRepository();
+    repo.loadAgentContext = () =>
+      Promise.resolve({
+        kind: 'file_budget_exceeded',
+        totalBytes: 36_000_000,
+        maxBytes: PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes,
+      });
+
+    let sandboxCreated = false;
+    let gatewayCalled = false;
+    const outcome = await executePythonAgentRun(makeLease(), {
+      mode: 'real',
+      leaseQueue: { heartbeat: () => Promise.resolve(true) },
+      repository: repo as unknown as PostgresPythonAgentExecutionRepository,
+      blobStore: new MemoryBlobStore(),
+      gateway: {
+        providerId: 'openrouter',
+        modelLabel: TEST_RATE.modelId,
+        simulated: false,
+        operations: ['conversation.turn', 'task.notes_action_items', 'task.python_agent'],
+        generateConversationTurn: () => Promise.reject(new Error('unused')),
+        extractNotesActionItems: () => Promise.reject(new Error('unused')),
+        stepPythonAgent: () => {
+          gatewayCalled = true;
+          return Promise.reject(new Error('must not call gateway'));
+        },
+      },
+      createSandbox: () => {
+        sandboxCreated = true;
+        throw new Error('must not create sandbox');
+      },
+      sandboxOwner: 'test-owner',
+      policy: TEST_POLICY,
+      ceilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
+        tenantDailyMicroUsd: 100_000,
+        globalDailyMicroUsd: 500_000,
+      },
+      rate: TEST_RATE,
+      leaseDurationMs: 15_000,
+      attemptTimeoutMs: 5_000,
+      logger: { info: () => {}, warn: () => {} },
+    });
+
+    expect(outcome).toEqual({
+      outcome: 'failed_terminal',
+      reason: 'task_file_budget_exceeded',
+    });
+    expect(sandboxCreated).toBe(false);
+    expect(gatewayCalled).toBe(false);
+    expect(repo.failures[0]!.errorCode).toBe('POLICY_DENIED');
+  });
+
+  it('allows single 15 MiB file workflows within the 32 MiB aggregate budget and rejects oversized output checkpoints', async () => {
+    const fifteenMiB = PYTHON_AGENT_LIMITS.maxFileBytes;
+    const inputBytes = new Uint8Array(fifteenMiB);
+    inputBytes.fill(0x61);
+    const repoOk = new MemoryPythonAgentRepository({
+      inputFiles: [
+        {
+          artifactId: randomUUID(),
+          filename: 'big.bin',
+          mediaType: 'application/octet-stream',
+          sha256: 'a'.repeat(64),
+          size: fifteenMiB,
+          bytes: inputBytes,
+        },
+      ],
+    });
+    const out15 = new Uint8Array(fifteenMiB);
+    out15.fill(0x62);
+
+    const { gateway: okGateway } = scriptedGateway([
+      {
+        kind: 'tool_call',
+        toolCallId: 'call_big_ok',
+        code: 'pass',
+        rawArgumentsJson: '{"code":"pass"}',
+      },
+      {
+        kind: 'final',
+        summaryText: 'Done',
+        detailText: '15+15 MiB OK',
+        truncated: false,
+        finishReason: 'stop',
+      },
+    ]);
+    const okSandbox = new MemorySandbox((_code, files, outputsEntries) => {
+      files.set('outputs/out.bin', out15);
+      outputsEntries.push({
+        name: 'out.bin',
+        isDir: false,
+        isSymlink: false,
+        sizeBytes: fifteenMiB,
+      });
+      return Promise.resolve({ exitCode: 0, stdout: 'ok', stderr: '' });
+    });
+
+    const okOutcome = await executePythonAgentRun(makeLease(), {
+      mode: 'real',
+      leaseQueue: { heartbeat: () => Promise.resolve(true) },
+      repository: repoOk as unknown as PostgresPythonAgentExecutionRepository,
+      blobStore: new MemoryBlobStore(),
+      gateway: okGateway,
+      createSandbox: (): PythonAgentSandboxHandle => ({
+        provider: okSandbox,
+        close: () => Promise.resolve(),
+      }),
+      sandboxOwner: 'test-owner',
+      policy: TEST_POLICY,
+      ceilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
+        tenantDailyMicroUsd: 100_000,
+        globalDailyMicroUsd: 500_000,
+      },
+      rate: TEST_RATE,
+      leaseDurationMs: 15_000,
+      attemptTimeoutMs: 5_000,
+      logger: { info: () => {}, warn: () => {} },
+    });
+    expect(okOutcome.outcome).toBe('succeeded');
+    expect(repoOk.completions[0]!.finalStagedOutputs).toHaveLength(1);
+
+    // Now test 15 MiB input + two 10 MiB outputs (35 MiB > 32 MiB): rejected BEFORE reading outputs.
+    const repoTooBig = new MemoryPythonAgentRepository({
+      inputFiles: [
+        {
+          artifactId: randomUUID(),
+          filename: 'big.bin',
+          mediaType: 'application/octet-stream',
+          sha256: 'a'.repeat(64),
+          size: fifteenMiB,
+          bytes: inputBytes,
+        },
+      ],
+    });
+    const { gateway: bigGateway } = scriptedGateway([
+      {
+        kind: 'tool_call',
+        toolCallId: 'call_too_big',
+        code: 'pass',
+        rawArgumentsJson: '{"code":"pass"}',
+      },
+    ]);
+    let downloadCalled = false;
+    const bigSandbox = new MemorySandbox((_code, _files, outputsEntries) => {
+      outputsEntries.push(
+        { name: 'out1.bin', isDir: false, isSymlink: false, sizeBytes: 10 * 1024 * 1024 },
+        { name: 'out2.bin', isDir: false, isSymlink: false, sizeBytes: 10 * 1024 * 1024 },
+      );
+      return Promise.resolve({ exitCode: 0, stdout: 'big', stderr: '' });
+    });
+    bigSandbox.getBytesFile = () => {
+      downloadCalled = true;
+      return Promise.reject(new Error('should not download outputs past task aggregate budget'));
+    };
+
+    const bigOutcome = await executePythonAgentRun(makeLease(), {
+      mode: 'real',
+      leaseQueue: { heartbeat: () => Promise.resolve(true) },
+      repository: repoTooBig as unknown as PostgresPythonAgentExecutionRepository,
+      blobStore: new MemoryBlobStore(),
+      gateway: bigGateway,
+      createSandbox: (): PythonAgentSandboxHandle => ({
+        provider: bigSandbox,
+        close: () => Promise.resolve(),
+      }),
+      sandboxOwner: 'test-owner',
+      policy: TEST_POLICY,
+      ceilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 50_000,
+        tenantDailyMicroUsd: 100_000,
+        globalDailyMicroUsd: 500_000,
+      },
+      rate: TEST_RATE,
+      leaseDurationMs: 15_000,
+      attemptTimeoutMs: 5_000,
+      logger: { info: () => {}, warn: () => {} },
+    });
+    expect(bigOutcome).toEqual({
+      outcome: 'failed_terminal',
+      reason: 'task_file_budget_exceeded',
+    });
+    expect(downloadCalled).toBe(false);
+    expect(repoTooBig.failures[0]!.errorCode).toBe('POLICY_DENIED');
+  });
 });

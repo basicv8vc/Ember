@@ -174,7 +174,7 @@ describe('model gateway limits and pricing', () => {
     expect(worstCasePerAttempt).toBeLessThanOrEqual(MODEL_LIMITS.maxReservedMicroUsdPerAttempt);
   });
 
-  it('ships only the time-limited OpenRouter route approved by the CTO', () => {
+  it('ships only the CTO-approved OpenRouter routes', () => {
     expect(APPROVED_REAL_MODELS).toMatchObject([
       {
         providerId: 'openrouter',
@@ -195,8 +195,27 @@ describe('model gateway limits and pricing', () => {
         maxPaidSmokeTurns: 1,
         openRouterRouting: OPENROUTER_ROUTING,
       },
+      {
+        providerId: 'openrouter',
+        modelId: 'deepseek/deepseek-v4.1-flash-1017',
+        approval: {
+          approvalId: 'L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17',
+          approvedAt: '2026-11-17',
+          expiresAt: '2026-11-18',
+        },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 5_000,
+          tenantDailyMicroUsd: 5_000,
+          globalDailyMicroUsd: 5_000,
+          principalDailyTurns: 1,
+        },
+        maxPaidSmokeTurns: 1,
+        openRouterRouting: OPENROUTER_ROUTING,
+      },
     ]);
-    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(1);
+    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(2);
     expect(OPENROUTER_RATE.provenance).toBe('official_price_verified');
   });
 });
@@ -1488,5 +1507,107 @@ describe('pinned reasoning effort', () => {
       'tool_choice',
       'tools',
     ]);
+  });
+});
+
+describe('multimodal vision messages and canonical OpenRouter slugs', () => {
+  it('adds vision token reserves in preflight and sends image_url parts while accepting canonicalModelId', async () => {
+    const deepseekRate = MODEL_RATE_ROWS.find(
+      (row) =>
+        row.providerId === 'openrouter' && row.modelId === 'deepseek/deepseek-v4.1-flash-1017',
+    )!;
+    expect(deepseekRate).toBeDefined();
+    expect(deepseekRate.canonicalModelId).toBe('deepseek/deepseek-v4.1-flash-20261017');
+
+    const textOnlyPreflight = preflightConversationTurn({
+      messages: [{ role: 'user', text: 'What is in this photo?' }],
+      maxOutputTokens: 256,
+    });
+    const visionPreflight = preflightConversationTurn({
+      messages: [
+        {
+          role: 'user',
+          text: 'What is in this photo?',
+          attachments: [
+            {
+              uploadId: '11111111-1111-4111-8111-111111111111',
+              filename: 'photo.jpg',
+              mediaType: 'image/jpeg',
+              sizeBytes: 1234,
+              imageDataUrl: 'data:image/jpeg;base64,/9j/4AAQ',
+            },
+          ],
+        },
+      ],
+      maxOutputTokens: 256,
+    });
+    expect(visionPreflight.inputTokens - textOnlyPreflight.inputTokens).toBeGreaterThanOrEqual(
+      1_024,
+    );
+
+    const stub = stubFetch(() =>
+      Promise.resolve(
+        response(200, {
+          model: 'deepseek/deepseek-v4.1-flash-20261017',
+          choices: [{ message: { content: 'It is a receipt.' }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1200, completion_tokens: 12 },
+        }),
+      ),
+    );
+
+    const gateway = new OpenRouterModelGateway({
+      apiKey: VALID_KEY,
+      modelId: 'deepseek/deepseek-v4.1-flash-1017',
+      rate: deepseekRate,
+      routing: OPENROUTER_ROUTING,
+      isAuthorized: () => true,
+      fetchImpl: stub.fetchImpl,
+    });
+
+    const result = await gateway.generateConversationTurn(
+      {
+        conversationId: '11111111-1111-4111-8111-111111111111',
+        turnId: '22222222-2222-4222-8222-222222222222',
+        context: [
+          {
+            role: 'user',
+            text: 'Read this receipt',
+            attachments: [
+              {
+                uploadId: '33333333-3333-4333-8333-333333333333',
+                filename: 'receipt.jpg',
+                mediaType: 'image/jpeg',
+                sizeBytes: 512,
+                imageDataUrl: 'data:image/jpeg;base64,AQI=',
+              },
+            ],
+          },
+        ],
+        maxOutputTokens: 256,
+      },
+      new AbortController().signal,
+    );
+
+    expect(result.output).toEqual({
+      kind: 'reply',
+      text: 'It is a receipt.',
+      finishReason: 'stop',
+    });
+    const sentBody = JSON.parse(stub.calls[0]!.init.body) as {
+      messages: Array<{ role: string; content: unknown }>;
+    };
+    const content = sentBody.messages[1]?.content as Array<{
+      type: string;
+      text?: string;
+      image_url?: { url: string };
+    }>;
+    expect(Array.isArray(content)).toBe(true);
+    expect(content).toHaveLength(2);
+    expect(content[0]?.type).toBe('text');
+    expect(content[0]?.text).toContain('Read this receipt');
+    expect(content[1]).toEqual({
+      type: 'image_url',
+      image_url: { url: 'data:image/jpeg;base64,AQI=' },
+    });
   });
 });

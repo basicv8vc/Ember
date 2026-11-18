@@ -1,3 +1,4 @@
+import QuickLook
 import SwiftUI
 import UIKit
 
@@ -28,9 +29,15 @@ struct TaskDetailView: View {
 }
 
 private struct ArtifactPreviewPayload: Identifiable {
+    enum Content {
+        case text(String)
+        case image(UIImage)
+        case quickLook(URL)
+    }
+
     let id: UUID
     let filename: String
-    let text: String
+    let content: Content
 }
 
 private struct SessionTaskDetailContent: View {
@@ -138,34 +145,74 @@ private struct SessionTaskDetailContent: View {
             }
         }
         .sheet(item: $previewPayload) { payload in
-            NavigationStack {
-                ScrollView([.vertical, .horizontal]) {
-                    Text(payload.text)
-                        .font(.footnote.monospaced())
-                        .textSelection(.enabled)
-                        .padding(EmberDesignTokens.standardSpacing)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
-                .background(EmberDesignTokens.groupedBackground)
-                .navigationTitle(payload.filename)
-                .navigationBarTitleDisplayMode(.inline)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button {
-                            previewPayload = nil
-                        } label: {
-                            Text("tasks.detail.close", tableName: "Conversation")
-                        }
+            switch payload.content {
+            case .text(let text):
+                NavigationStack {
+                    ScrollView([.vertical, .horizontal]) {
+                        Text(text)
+                            .font(.footnote.monospaced())
+                            .textSelection(.enabled)
+                            .padding(EmberDesignTokens.standardSpacing)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    if let fileURL = store.downloadedArtifactFileByID[payload.id] {
-                        ToolbarItem(placement: .topBarTrailing) {
-                            ShareLink(item: fileURL) {
-                                Image(systemName: "square.and.arrow.up")
-                                    .accessibilityLabel(Text("tasks.artifacts.export", tableName: "Conversation"))
+                    .background(EmberDesignTokens.groupedBackground)
+                    .navigationTitle(payload.filename)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                previewPayload = nil
+                            } label: {
+                                Text("tasks.detail.close", tableName: "Conversation")
+                            }
+                        }
+                        if let fileURL = store.downloadedArtifactFileByID[payload.id] {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                ShareLink(item: fileURL) {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .accessibilityLabel(Text("tasks.artifacts.export", tableName: "Conversation"))
+                                }
                             }
                         }
                     }
                 }
+            case .image(let image):
+                NavigationStack {
+                    GeometryReader { geometry in
+                        ScrollView([.vertical, .horizontal]) {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(
+                                    minWidth: geometry.size.width,
+                                    minHeight: geometry.size.height
+                                )
+                        }
+                    }
+                    .background(Color.black.opacity(0.92))
+                    .navigationTitle(payload.filename)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarLeading) {
+                            Button {
+                                previewPayload = nil
+                            } label: {
+                                Text("tasks.detail.close", tableName: "Conversation")
+                            }
+                        }
+                        if let fileURL = store.downloadedArtifactFileByID[payload.id] {
+                            ToolbarItem(placement: .topBarTrailing) {
+                                ShareLink(item: fileURL) {
+                                    Image(systemName: "square.and.arrow.up")
+                                        .accessibilityLabel(Text("tasks.artifacts.export", tableName: "Conversation"))
+                                }
+                            }
+                        }
+                    }
+                }
+            case .quickLook(let url):
+                QuickLookPreviewSheet(url: url)
+                    .ignoresSafeArea()
             }
         }
     }
@@ -493,24 +540,39 @@ private struct SessionTaskDetailContent: View {
 
             if let downloadedURL {
                 HStack(spacing: 8) {
-                    if let previewText {
-                        Button {
+                    Button {
+                        if let previewText {
                             previewPayload = ArtifactPreviewPayload(
                                 id: item.artifactID,
                                 filename: item.displayFilename,
-                                text: previewText
+                                content: .text(previewText)
                             )
-                        } label: {
-                            Label {
-                                Text("tasks.artifacts.preview", tableName: "Conversation")
-                            } icon: {
-                                Image(systemName: "eye")
-                            }
+                        } else if item.mediaType.lowercased().hasPrefix("image/"),
+                                  !B3AttachmentLimits.blockedMediaTypes.contains(B3AttachmentLimits.normalizedMediaType(item.mediaType)),
+                                  let data = try? Data(contentsOf: downloadedURL),
+                                  let uiImage = UIImage(data: data) {
+                            previewPayload = ArtifactPreviewPayload(
+                                id: item.artifactID,
+                                filename: item.displayFilename,
+                                content: .image(uiImage)
+                            )
+                        } else {
+                            previewPayload = ArtifactPreviewPayload(
+                                id: item.artifactID,
+                                filename: item.displayFilename,
+                                content: .quickLook(downloadedURL)
+                            )
                         }
-                        .buttonStyle(.bordered)
-                        .frame(minHeight: 44)
-                        .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
+                    } label: {
+                        Label {
+                            Text("tasks.artifacts.preview", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "eye")
+                        }
                     }
+                    .buttonStyle(.bordered)
+                    .frame(minHeight: 44)
+                    .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
 
                     ShareLink(item: downloadedURL) {
                         Label {
@@ -554,6 +616,55 @@ private struct SessionTaskDetailContent: View {
         }
         .padding(12)
         .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+    }
+}
+
+private struct QuickLookPreviewSheet: UIViewControllerRepresentable {
+    let url: URL
+    @Environment(\.dismiss) private var dismiss
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(url: url, onDismiss: { dismiss() })
+    }
+
+    func makeUIViewController(context: Context) -> UINavigationController {
+        let controller = QLPreviewController()
+        controller.dataSource = context.coordinator
+        controller.navigationItem.leftBarButtonItem = UIBarButtonItem(
+            barButtonSystemItem: .close,
+            target: context.coordinator,
+            action: #selector(Coordinator.closeTapped)
+        )
+        return UINavigationController(rootViewController: controller)
+    }
+
+    func updateUIViewController(_ uiViewController: UINavigationController, context: Context) {
+        context.coordinator.url = url
+        if let ql = uiViewController.topViewController as? QLPreviewController {
+            ql.reloadData()
+        }
+    }
+
+    final class Coordinator: NSObject, QLPreviewControllerDataSource {
+        var url: URL
+        let onDismiss: () -> Void
+
+        init(url: URL, onDismiss: @escaping () -> Void) {
+            self.url = url
+            self.onDismiss = onDismiss
+        }
+
+        @objc func closeTapped() {
+            onDismiss()
+        }
+
+        func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+            1
+        }
+
+        func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> any QLPreviewItem {
+            url as NSURL
+        }
     }
 }
 

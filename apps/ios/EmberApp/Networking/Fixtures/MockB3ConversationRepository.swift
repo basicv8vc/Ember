@@ -91,8 +91,9 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
     func rejectedDraft() async throws -> LiveConversationJournal.Pending? { nil }
 
     func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
-        let safeName = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
-        guard B3AttachmentLimits.allowedMediaTypes.contains(mediaType),
+        let normalizedType = B3AttachmentLimits.normalizedMediaType(mediaType)
+        let safeName = B3AttachmentLimits.safeUploadFilename(filename, mediaType: normalizedType)
+        guard B3AttachmentLimits.isSafeMediaType(normalizedType),
               data.count <= B3AttachmentLimits.maxFileBytes else {
             throw LiveB1Failure.rejected
         }
@@ -101,7 +102,7 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
         return StagedUploadReceiptDTO(
             uploadID: UUID(),
             filename: safeName,
-            mediaType: mediaType,
+            mediaType: normalizedType,
             size: data.count,
             sha256: String(repeating: "0", count: 64),
             expiresAt: expires,

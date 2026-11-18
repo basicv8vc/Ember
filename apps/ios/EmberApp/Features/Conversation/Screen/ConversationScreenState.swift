@@ -5,6 +5,21 @@ struct ComposerAttachment: Identifiable, Equatable {
     let filename: String
     let mediaType: String
     let sizeBytes: Int
+    let thumbnailData: Data?
+
+    init(
+        id: UUID,
+        filename: String,
+        mediaType: String,
+        sizeBytes: Int,
+        thumbnailData: Data? = nil
+    ) {
+        self.id = id
+        self.filename = filename
+        self.mediaType = mediaType
+        self.sizeBytes = sizeBytes
+        self.thumbnailData = thumbnailData
+    }
 }
 
 /// Display-only state for the conversation surface. The caller owns message truth and ordering.
@@ -97,6 +112,8 @@ struct ConversationScreenActions {
     var retry: () -> Void
     var stopGenerating: () -> Void
     var selectPrompt: (String) -> Void
+    var onTakePhoto: (() -> Void)?
+    var onChoosePhoto: (() -> Void)?
     var onPickAttachment: (() -> Void)?
     var onRemoveAttachment: ((UUID) -> Void)?
 
@@ -105,6 +122,8 @@ struct ConversationScreenActions {
         retry: @escaping () -> Void,
         stopGenerating: @escaping () -> Void,
         selectPrompt: @escaping (String) -> Void,
+        onTakePhoto: (() -> Void)? = nil,
+        onChoosePhoto: (() -> Void)? = nil,
         onPickAttachment: (() -> Void)? = nil,
         onRemoveAttachment: ((UUID) -> Void)? = nil
     ) {
@@ -112,6 +131,8 @@ struct ConversationScreenActions {
         self.retry = retry
         self.stopGenerating = stopGenerating
         self.selectPrompt = selectPrompt
+        self.onTakePhoto = onTakePhoto
+        self.onChoosePhoto = onChoosePhoto
         self.onPickAttachment = onPickAttachment
         self.onRemoveAttachment = onRemoveAttachment
     }

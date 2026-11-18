@@ -290,12 +290,22 @@ struct ConversationComposer: View {
 
     private func attachmentChip(_ attachment: ComposerAttachment) -> some View {
         HStack(spacing: 7) {
-            Image(systemName: symbolName(for: attachment))
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 24, height: 24)
-                .background(Color.accentColor.opacity(0.12), in: Circle())
-                .accessibilityHidden(true)
+            if let thumbnailData = attachment.thumbnailData,
+               let uiImage = UIImage(data: thumbnailData) {
+                Image(uiImage: uiImage)
+                    .resizable()
+                    .scaledToFill()
+                    .frame(width: 28, height: 28)
+                    .clipShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+                    .accessibilityHidden(true)
+            } else {
+                Image(systemName: symbolName(for: attachment))
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 24, height: 24)
+                    .background(Color.accentColor.opacity(0.12), in: Circle())
+                    .accessibilityHidden(true)
+            }
 
             VStack(alignment: .leading, spacing: 1) {
                 Text(attachment.filename)
@@ -349,12 +359,23 @@ struct ConversationComposer: View {
     }
 
     private func symbolName(for attachment: ComposerAttachment) -> String {
+        let mime = attachment.mediaType.lowercased()
+        if mime.hasPrefix("image/") {
+            return "photo"
+        }
+        if mime == "application/pdf" {
+            return "doc.richtext.fill"
+        }
         let ext = URL(fileURLWithPath: attachment.filename).pathExtension.lowercased()
         switch ext {
-        case "csv", "tsv":
+        case "pdf":
+            return "doc.richtext.fill"
+        case "csv", "tsv", "xlsx", "xls":
             return "tablecells"
         case "md", "markdown":
             return "doc.richtext"
+        case "zip":
+            return "doc.zipper"
         default:
             return "doc.text"
         }
@@ -381,6 +402,8 @@ struct ConversationAttachmentPopoverOverlay: View {
     let containerSize: CGSize
     let canAttachFile: Bool
     let attachedCount: Int
+    let onTakePhoto: (() -> Void)?
+    let onChoosePhoto: (() -> Void)?
     let onChooseFile: () -> Void
     let onSelectStarterPrompt: (String) -> Void
 
@@ -395,7 +418,7 @@ struct ConversationAttachmentPopoverOverlay: View {
     }
 
     private var destinationRect: CGRect {
-        let size = measuredMenuSize == .zero ? CGSize(width: menuWidth, height: 184) : measuredMenuSize
+        let size = measuredMenuSize == .zero ? CGSize(width: menuWidth, height: 268) : measuredMenuSize
         let x = max(12, min(sourceRect.minX, containerSize.width - size.width - 12))
         let y = max(12, sourceRect.maxY - size.height)
         return CGRect(origin: CGPoint(x: x, y: y), size: size)
@@ -423,6 +446,18 @@ struct ConversationAttachmentPopoverOverlay: View {
                     ConversationComposerAttachmentMenu(
                         canAttachFile: canAttachFile,
                         attachedCount: attachedCount,
+                        onTakePhoto: onTakePhoto.map { handler in
+                            {
+                                dismissPopover()
+                                handler()
+                            }
+                        },
+                        onChoosePhoto: onChoosePhoto.map { handler in
+                            {
+                                dismissPopover()
+                                handler()
+                            }
+                        },
                         onChooseFile: {
                             dismissPopover()
                             onChooseFile()
@@ -529,18 +564,13 @@ struct ConversationAttachmentPopoverOverlay: View {
     }
 }
 
-private struct HieloMorphingCard<MenuContent: View>: View, Animatable {
-    var progress: CGFloat
+private struct HieloMorphingCard<MenuContent: View>: View {
+    let progress: CGFloat
     let sourceRect: CGRect
     let destinationRect: CGRect
     let dragOffset: CGSize
     let dragScale: CGFloat
     @ViewBuilder let menuContent: () -> MenuContent
-
-    var animatableData: CGFloat {
-        get { progress }
-        set { progress = newValue }
-    }
 
     private var clampedProgress: CGFloat {
         min(max(progress, 0), 1)
@@ -610,26 +640,56 @@ private struct HieloMorphingCard<MenuContent: View>: View, Animatable {
     }
 }
 
-/// Clean Hielo-style glass menu rows containing Ember's real file-upload & starter-prompt actions.
+/// Clean Hielo-style glass menu rows containing Ember's photo, file-upload & starter-prompt actions.
 struct ConversationComposerAttachmentMenu: View {
     let canAttachFile: Bool
     let attachedCount: Int
+    var onTakePhoto: (() -> Void)? = nil
+    var onChoosePhoto: (() -> Void)? = nil
     let onChooseFile: () -> Void
     let onSelectStarterPrompt: (String) -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            if let onTakePhoto {
+                menuRow(
+                    icon: "camera.fill",
+                    badgeColor: Color(uiColor: .systemBlue),
+                    title: "conversation.composer.attachment_menu.camera_title",
+                    trailingBadge: nil,
+                    isEnabled: canAttachFile,
+                    accessibilityID: "conversation-attachment-menu-camera",
+                    action: onTakePhoto
+                )
+            }
+
+            if let onChoosePhoto {
+                menuRow(
+                    icon: "photo.on.rectangle.angled",
+                    badgeColor: Color(uiColor: .systemGreen),
+                    title: "conversation.composer.attachment_menu.photo_title",
+                    trailingBadge: nil,
+                    isEnabled: canAttachFile,
+                    accessibilityID: "conversation-attachment-menu-photo",
+                    action: onChoosePhoto
+                )
+            }
+
             menuRow(
                 icon: "doc.badge.plus",
                 badgeColor: .accentColor,
                 title: "conversation.composer.attachment_menu.file_title",
                 trailingBadge: attachedCount > 0
                     ? "\(attachedCount)/\(B3AttachmentLimits.maxAttachmentsPerMessage)"
-                    : "CSV · TXT · MD",
+                    : String(localized: "conversation.composer.attachment_menu.file_badge", table: "Conversation"),
                 isEnabled: canAttachFile,
                 accessibilityID: "conversation-attachment-menu-file",
                 action: onChooseFile
             )
+
+            Divider()
+                .padding(.horizontal, 14)
+                .padding(.vertical, 3)
 
             menuRow(
                 icon: "checklist",

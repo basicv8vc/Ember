@@ -137,6 +137,10 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
 
         let menu = app.descendants(matching: .any)["conversation-attachment-menu"]
         XCTAssertTrue(menu.waitForExistence(timeout: 5))
+        let cameraRow = app.buttons["conversation-attachment-menu-camera"]
+        XCTAssertTrue(cameraRow.waitForExistence(timeout: 5))
+        let photoRow = app.buttons["conversation-attachment-menu-photo"]
+        XCTAssertTrue(photoRow.waitForExistence(timeout: 5))
         let chooseFileRow = app.buttons["conversation-attachment-menu-file"]
         XCTAssertTrue(chooseFileRow.waitForExistence(timeout: 5))
         XCTAssertTrue(chooseFileRow.isHittable)

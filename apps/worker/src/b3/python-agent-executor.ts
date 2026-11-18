@@ -25,6 +25,7 @@ import {
 } from '@ember/model-gateway';
 import {
   type PostgresPythonAgentExecutionRepository,
+  type PythonAgentLoadContextResult,
   type PythonStepStagedOutput,
   type RetryPolicyConfig,
 } from '@ember/postgres/b3-worker';
@@ -151,6 +152,21 @@ function clampText(
 
 function detectOutputMediaType(filename: string): string {
   const lower = filename.toLowerCase();
+  if (lower.endsWith('.pdf')) {
+    return 'application/pdf';
+  }
+  if (lower.endsWith('.png')) {
+    return 'image/png';
+  }
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) {
+    return 'image/jpeg';
+  }
+  if (lower.endsWith('.webp')) {
+    return 'image/webp';
+  }
+  if (lower.endsWith('.gif')) {
+    return 'image/gif';
+  }
   if (lower.endsWith('.csv')) {
     return 'text/csv';
   }
@@ -159,6 +175,21 @@ function detectOutputMediaType(filename: string): string {
   }
   if (lower.endsWith('.json')) {
     return 'application/json';
+  }
+  if (lower.endsWith('.xml')) {
+    return 'application/xml';
+  }
+  if (lower.endsWith('.xlsx')) {
+    return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+  }
+  if (lower.endsWith('.docx')) {
+    return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  }
+  if (lower.endsWith('.pptx')) {
+    return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+  }
+  if (lower.endsWith('.zip')) {
+    return 'application/zip';
   }
   if (lower.endsWith('.txt') || lower.endsWith('.log') || lower.endsWith('.py')) {
     return 'text/plain';
@@ -360,7 +391,7 @@ export async function executePythonAgentRun(
   };
 
   try {
-    const loaded = await deps.repository.loadAgentContext(run);
+    let loaded: PythonAgentLoadContextResult | null = await deps.repository.loadAgentContext(run);
     if (loaded.kind === 'lease_lost') {
       return { outcome: 'lease_lost' };
     }
@@ -370,8 +401,31 @@ export async function executePythonAgentRun(
     if (loaded.kind === 'deadline_exceeded') {
       return await failRun('failed_terminal', 'DEADLINE_EXCEEDED', 'deadline_exceeded');
     }
+    if (loaded.kind === 'file_budget_exceeded') {
+      return await failRun('failed_terminal', 'POLICY_DENIED', 'task_file_budget_exceeded');
+    }
 
-    const context = loaded.context;
+    let loadedContext:
+      Extract<PythonAgentLoadContextResult, { readonly kind: 'ready' }>['context'] | null =
+      loaded.context;
+    loaded = null;
+    const context = {
+      tenantId: loadedContext.tenantId,
+      taskId: loadedContext.taskId,
+      runId: loadedContext.runId,
+      deadlineAt: loadedContext.deadlineAt,
+      input: loadedContext.input,
+      checkpoints: loadedContext.checkpoints,
+      usage: loadedContext.usage,
+    };
+    const inputTotalBytes = loadedContext.inputFiles.reduce((sum, file) => sum + file.size, 0);
+    let pendingHydration: {
+      readonly inputFiles: typeof loadedContext.inputFiles;
+      readonly latestStagedOutputs: typeof loadedContext.latestStagedOutputs;
+    } | null = {
+      inputFiles: loadedContext.inputFiles,
+      latestStagedOutputs: loadedContext.latestStagedOutputs,
+    };
     const deadlineAtMs = context.deadlineAt === null ? null : Date.parse(context.deadlineAt);
     if (deadlineAtMs !== null) {
       const remaining = deadlineAtMs - nowFn().getTime();
@@ -399,7 +453,7 @@ export async function executePythonAgentRun(
       return await failRun('failed_terminal', 'BUDGET_EXCEEDED', 'task_budget_exhausted');
     }
 
-    const inputFiles: PythonAgentInputFile[] = context.inputFiles.map((file) =>
+    const inputFiles: PythonAgentInputFile[] = loadedContext.inputFiles.map((file) =>
       Object.freeze({
         artifactId: file.artifactId,
         filename: file.filename,
@@ -412,7 +466,7 @@ export async function executePythonAgentRun(
     const stagedOutputsByName = new Map<string, PythonStepStagedOutput>();
     const restoredOutputsBySha = new Map<string, PythonStepStagedOutput>();
 
-    for (const restored of context.latestStagedOutputs) {
+    for (const restored of loadedContext.latestStagedOutputs) {
       const meta: PythonStepStagedOutput = {
         stagedId: restored.stagedId,
         storageKey: restored.storageKey,
@@ -424,6 +478,7 @@ export async function executePythonAgentRun(
       stagedOutputsByName.set(restored.filename, meta);
       restoredOutputsBySha.set(`${restored.filename}:${restored.sha256}`, meta);
     }
+    loadedContext = null;
 
     for (const checkpoint of context.checkpoints) {
       messages.push({
@@ -524,20 +579,25 @@ export async function executePythonAgentRun(
           state: 'settled',
         });
 
-        for (const inputFile of context.inputFiles) {
-          await sandboxHandle.provider.putBytesFile(
-            sandboxId,
-            `inputs/${inputFile.filename}`,
-            inputFile.bytes,
-          );
-        }
+        if (pendingHydration !== null) {
+          for (const inputFile of pendingHydration.inputFiles) {
+            await sandboxHandle.provider.putBytesFile(
+              sandboxId,
+              `inputs/${inputFile.filename}`,
+              inputFile.bytes,
+            );
+          }
 
-        for (const restored of context.latestStagedOutputs) {
-          await sandboxHandle.provider.putBytesFile(
-            sandboxId,
-            `outputs/${restored.filename}`,
-            restored.bytes,
-          );
+          for (const restored of pendingHydration.latestStagedOutputs) {
+            await sandboxHandle.provider.putBytesFile(
+              sandboxId,
+              `outputs/${restored.filename}`,
+              restored.bytes,
+            );
+          }
+
+          // Release in-memory payload buffers once copied into the sandbox.
+          pendingHydration = null;
         }
 
         return { kind: 'ready', provider: sandboxHandle.provider, id: sandboxId };
@@ -935,6 +995,7 @@ export async function executePythonAgentRun(
           return await failRun('failed_terminal', 'POLICY_DENIED', 'too_many_output_artifacts');
         }
 
+        let plannedOutputBytes = 0;
         for (const entry of entries) {
           if (entry.isSymlink) {
             return await failRun('failed_terminal', 'POLICY_DENIED', 'symlink_output_forbidden');
@@ -948,13 +1009,24 @@ export async function executePythonAgentRun(
           if (entry.sizeBytes > PYTHON_AGENT_LIMITS.maxFileBytes) {
             return await failRun('failed_terminal', 'POLICY_DENIED', 'output_artifact_too_large');
           }
+          plannedOutputBytes += entry.sizeBytes;
+        }
+        if (inputTotalBytes + plannedOutputBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+          return await failRun('failed_terminal', 'POLICY_DENIED', 'task_file_budget_exceeded');
+        }
 
+        let actualOutputBytes = 0;
+        for (const entry of entries) {
           const rawBytes = await sandboxReady.provider.getBytesFile(
             sandboxReady.id,
             `outputs/${entry.name}`,
           );
           if (rawBytes.byteLength > PYTHON_AGENT_LIMITS.maxFileBytes) {
             return await failRun('failed_terminal', 'POLICY_DENIED', 'output_artifact_too_large');
+          }
+          actualOutputBytes += rawBytes.byteLength;
+          if (inputTotalBytes + actualOutputBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+            return await failRun('failed_terminal', 'POLICY_DENIED', 'task_file_budget_exceeded');
           }
 
           const sha256 = await sha256HexBytes(rawBytes);

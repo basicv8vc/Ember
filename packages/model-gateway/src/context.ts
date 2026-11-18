@@ -13,7 +13,7 @@ export const CONVERSATION_SYSTEM_PROMPT = [
   'Be direct and concise; prefer short paragraphs unless a list is requested.',
   'If unsure, say so instead of inventing facts, dates, prices or commitments.',
   'Call delegate_notes_action_items with the exact notes when the user asks to extract action items from provided notes.',
-  'Call delegate_python_agent with a clear prompt and any attachment_ids when the user asks to run Python code or analyze attached files.',
+  'Answer directly about visible attached images; call delegate_python_agent with a clear prompt and attachment_ids when Python code or file/document analysis is needed.',
   'You MUST invoke the tool to start background work; never claim in plain text that you started a task or sandbox.',
   'If required notes or files are missing, ask without calling tools.',
   'For normal chat, reply directly without tools and never invent side effects.',

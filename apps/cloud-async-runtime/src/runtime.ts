@@ -22,6 +22,7 @@ import {
   PostgresByteaBlobStore,
   PostgresPythonAgentExecutionRepository,
   type B3TaskDispatchEvent,
+  type R2BucketPort,
 } from '@ember/postgres/b3-worker';
 import { DaytonaSandboxProvider, DaytonaSdkSandboxClient } from '@ember/sandbox-daytona';
 import { createModelTurnResponder } from '@ember/worker/b1/model-turn-responder';
@@ -90,6 +91,7 @@ export function createTurnExecutor(input: {
   readonly model: CloudRuntimeModelConfig;
   readonly event: B1TurnDispatchEvent;
   readonly workerId: string;
+  readonly r2Bucket?: R2BucketPort;
   readonly queue?: TurnDispatchQueuePort;
   readonly agentQueue?: TurnDispatchQueuePort;
   readonly onTaskDelegated?: (delegated: {
@@ -114,7 +116,10 @@ export function createTurnExecutor(input: {
   }
 
   const { mode, resolution } = input.model;
-  const repository = new PostgresModelTurnExecutionRepository(input.pool);
+  const repository = new PostgresModelTurnExecutionRepository(
+    input.pool,
+    input.r2Bucket === undefined ? {} : { r2Bucket: input.r2Bucket },
+  );
   const delegatedTasks: Array<{
     readonly target: B1TaskDispatchTarget;
     readonly toolName: 'delegate_notes_action_items' | 'delegate_python_agent';
@@ -249,6 +254,7 @@ export function createPythonAgentExecutor(input: {
   readonly daytona: CloudDaytonaConfig;
   readonly event: B3TaskDispatchEvent;
   readonly workerId: string;
+  readonly r2Bucket?: R2BucketPort;
   readonly gateway?: ModelGateway;
   readonly sandboxFactory?: PythonAgentSandboxFactory;
 }): Promise<AgentTaskExecutionPort | null> {
@@ -267,7 +273,10 @@ export function createPythonAgentExecutor(input: {
     heartbeatIntervalMs: LEASE_QUEUE_DEFAULTS.heartbeatIntervalMs,
     claimableKinds: ['python.agent'],
   });
-  const repository = new PostgresPythonAgentExecutionRepository(input.pool);
+  const repository = new PostgresPythonAgentExecutionRepository(
+    input.pool,
+    input.r2Bucket === undefined ? {} : { r2Bucket: input.r2Bucket },
+  );
   const gateway = input.gateway ?? createModelGateway(resolution);
 
   const createSandbox: PythonAgentSandboxFactory =
@@ -306,6 +315,7 @@ export function createPythonAgentExecutor(input: {
       }
 
       const blobStore = new PostgresByteaBlobStore(input.pool, {
+        ...(input.r2Bucket === undefined ? {} : { r2Bucket: input.r2Bucket }),
         ownership: {
           taskId: claimed.taskId,
           runId: claimed.runId,

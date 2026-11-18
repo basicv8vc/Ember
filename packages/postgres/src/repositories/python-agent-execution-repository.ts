@@ -27,6 +27,7 @@ import {
 import { parseLeaseEpoch, parsePersistedTimestamp } from '../lease-queue/validation.js';
 import { lockBlobDigests } from '../storage/blob-store.js';
 import { PostgresByteaBlobStore, decodePgBytea, sha256Hex } from '../storage/bytea-blob-store.js';
+import { readR2Bytes, type R2BucketPort } from '../storage/r2-blob-store.js';
 import type { B2ModelProviderId, B2SettlementOutcome } from './b2-interfaces.js';
 import { B2_ABSOLUTE_DAY_CEILINGS } from './b2-ledger-limits.js';
 import {
@@ -145,7 +146,12 @@ export type PythonAgentLoadContextResult =
   | { readonly kind: 'ready'; readonly context: PythonAgentLoadedContext }
   | { readonly kind: 'lease_lost' }
   | { readonly kind: 'cancelled' }
-  | { readonly kind: 'deadline_exceeded' };
+  | { readonly kind: 'deadline_exceeded' }
+  | {
+      readonly kind: 'file_budget_exceeded';
+      readonly totalBytes: number;
+      readonly maxBytes: number;
+    };
 
 export interface PythonAgentReserveLlmCommand {
   readonly lease: LeasedRun;
@@ -507,9 +513,22 @@ async function resolveTenantPrincipalId(
  */
 export class PostgresPythonAgentExecutionRepository {
   private readonly byteaStore: PostgresByteaBlobStore;
+  private readonly r2Bucket: R2BucketPort | undefined;
 
-  constructor(private readonly pool: pg.Pool) {
-    this.byteaStore = new PostgresByteaBlobStore(pool);
+  constructor(
+    private readonly pool: pg.Pool,
+    options: {
+      readonly blobStore?: PostgresByteaBlobStore;
+      readonly r2Bucket?: R2BucketPort;
+    } = {},
+  ) {
+    this.r2Bucket = options.r2Bucket ?? options.blobStore?.r2Bucket;
+    this.byteaStore =
+      options.blobStore ??
+      new PostgresByteaBlobStore(
+        pool,
+        this.r2Bucket === undefined ? {} : { r2Bucket: this.r2Bucket },
+      );
   }
 
   async loadAgentContext(lease: LeasedRun): Promise<PythonAgentLoadContextResult> {
@@ -553,9 +572,11 @@ export class PostgresPythonAgentExecutionRepository {
         readonly media_type: string;
         readonly sha256: string;
         readonly size: string | number;
-        readonly bytes: unknown;
+        readonly storage_backend: 'postgres' | 'r2';
+        readonly storage_key: string;
       }>(
-        `SELECT a.id, a.filename, a.media_type, a.sha256, a.size, bb.bytes
+        `SELECT a.id, a.filename, a.media_type, a.sha256, a.size,
+                bb.storage_backend, bb.storage_key
            FROM artifacts a
            JOIN blobs b ON b.tenant_id = a.tenant_id AND b.sha256 = a.sha256
            JOIN bytea_blobs bb ON bb.tenant_id = b.tenant_id AND bb.storage_key = b.storage_key
@@ -566,38 +587,13 @@ export class PostgresPythonAgentExecutionRepository {
         [task.tenant_id, task.id],
       );
 
-      const fileById = new Map<string, PythonAgentInputFile>();
-      for (const row of artifactRows.rows) {
-        const bytes = decodePgBytea(row.bytes);
-        const expectedSize = Number(row.size);
-        if (bytes.byteLength !== expectedSize || (await sha256Hex(bytes)) !== row.sha256) {
-          throw new DomainError('DB_UNAVAILABLE', 'persisted input artifact failed verification');
-        }
-        const safeFilename = row.filename ?? `${row.id}.txt`;
-        fileById.set(
-          row.id,
-          Object.freeze({
-            artifactId: row.id,
-            filename: safeFilename,
-            mediaType: row.media_type,
-            sha256: row.sha256,
-            size: expectedSize,
-            bytes,
-          }),
-        );
-      }
-
-      const orderedInputFiles: PythonAgentInputFile[] = [];
-      if (input.inputArtifactIds !== undefined && input.inputArtifactIds.length > 0) {
-        for (const id of input.inputArtifactIds) {
-          const found = fileById.get(id);
-          if (found !== undefined) {
-            orderedInputFiles.push(found);
-          }
-        }
-      } else {
-        orderedInputFiles.push(...fileById.values());
-      }
+      const artifactRowById = new Map(artifactRows.rows.map((row) => [row.id, row]));
+      const orderedInputRows =
+        input.inputArtifactIds !== undefined && input.inputArtifactIds.length > 0
+          ? input.inputArtifactIds
+              .map((id) => artifactRowById.get(id))
+              .filter((row): row is NonNullable<typeof row> => row !== undefined)
+          : artifactRows.rows;
 
       const checkpointRows = await client.query<{ readonly cursor: unknown }>(
         `SELECT cursor
@@ -620,33 +616,170 @@ export class PostgresPythonAgentExecutionRepository {
         }
       }
 
-      const latestStagedOutputs: PythonAgentRestoredOutput[] = [];
       const selectedOutputs = [...latestOutputByName.values()].slice(
         0,
         PYTHON_AGENT_LIMITS.maxOutputArtifactsPerTask,
       );
+      const stagedMetaByKey = new Map<
+        string,
+        { readonly storage_key: string; readonly storage_backend: 'postgres' | 'r2' }
+      >();
       if (selectedOutputs.length > 0) {
         const storageKeys = selectedOutputs.map((entry) => entry.storageKey);
-        const stagedRows = await client.query<{
+        const stagedMetaRows = await client.query<{
+          readonly storage_key: string;
+          readonly storage_backend: 'postgres' | 'r2';
+        }>(
+          `SELECT storage_key, storage_backend
+             FROM bytea_staged_blobs
+            WHERE tenant_id = $1::uuid AND storage_key = ANY($2::text[])`,
+          [task.tenant_id, storageKeys],
+        );
+        for (const row of stagedMetaRows.rows) {
+          stagedMetaByKey.set(row.storage_key, row);
+        }
+      }
+
+      const existingSelectedOutputs = selectedOutputs.filter((meta) =>
+        stagedMetaByKey.has(meta.storageKey),
+      );
+      const plannedInputBytes = orderedInputRows.reduce((sum, row) => sum + Number(row.size), 0);
+      const plannedOutputBytes = existingSelectedOutputs.reduce((sum, meta) => sum + meta.size, 0);
+      const plannedTotalBytes = plannedInputBytes + plannedOutputBytes;
+      if (plannedTotalBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+        return {
+          kind: 'file_budget_exceeded' as const,
+          totalBytes: plannedTotalBytes,
+          maxBytes: PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes,
+        };
+      }
+
+      const pgBlobKeys = [
+        ...new Set(
+          orderedInputRows
+            .filter((row) => row.storage_backend !== 'r2')
+            .map((row) => row.storage_key),
+        ),
+      ];
+      const pgBlobBytesByKey = new Map<string, unknown>();
+      if (pgBlobKeys.length > 0) {
+        const pgBlobRows = await client.query<{
+          readonly storage_key: string;
+          readonly bytes: unknown;
+        }>(
+          `SELECT storage_key, bytes
+             FROM bytea_blobs
+            WHERE tenant_id = $1::uuid AND storage_key = ANY($2::text[])`,
+          [task.tenant_id, pgBlobKeys],
+        );
+        for (const row of pgBlobRows.rows) {
+          pgBlobBytesByKey.set(row.storage_key, row.bytes);
+        }
+      }
+
+      let loadedTotalBytes = 0;
+      const orderedInputFiles: PythonAgentInputFile[] = [];
+      for (const row of orderedInputRows) {
+        const expectedSize = Number(row.size);
+        let bytes: Uint8Array;
+        if (row.storage_backend === 'r2') {
+          if (this.r2Bucket === undefined) {
+            throw new DomainError(
+              'DB_UNAVAILABLE',
+              'r2 bucket binding missing for r2-backed input artifact',
+            );
+          }
+          bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+            size: expectedSize,
+            sha256: row.sha256,
+          });
+        } else {
+          bytes = decodePgBytea(pgBlobBytesByKey.get(row.storage_key));
+          if (bytes.byteLength !== expectedSize || (await sha256Hex(bytes)) !== row.sha256) {
+            throw new DomainError('DB_UNAVAILABLE', 'persisted input artifact failed verification');
+          }
+        }
+        loadedTotalBytes += bytes.byteLength;
+        if (loadedTotalBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+          return {
+            kind: 'file_budget_exceeded' as const,
+            totalBytes: loadedTotalBytes,
+            maxBytes: PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes,
+          };
+        }
+        const safeFilename = row.filename ?? `${row.id}.txt`;
+        orderedInputFiles.push(
+          Object.freeze({
+            artifactId: row.id,
+            filename: safeFilename,
+            mediaType: row.media_type,
+            sha256: row.sha256,
+            size: expectedSize,
+            bytes,
+          }),
+        );
+      }
+
+      const pgStagedKeys = [
+        ...new Set(
+          existingSelectedOutputs
+            .filter((meta) => stagedMetaByKey.get(meta.storageKey)?.storage_backend !== 'r2')
+            .map((meta) => meta.storageKey),
+        ),
+      ];
+      const pgStagedBytesByKey = new Map<string, unknown>();
+      if (pgStagedKeys.length > 0) {
+        const pgStagedRows = await client.query<{
           readonly storage_key: string;
           readonly bytes: unknown;
         }>(
           `SELECT storage_key, bytes
              FROM bytea_staged_blobs
             WHERE tenant_id = $1::uuid AND storage_key = ANY($2::text[])`,
-          [task.tenant_id, storageKeys],
+          [task.tenant_id, pgStagedKeys],
         );
-        const bytesByKey = new Map<string, Uint8Array>();
-        for (const row of stagedRows.rows) {
-          bytesByKey.set(row.storage_key, decodePgBytea(row.bytes));
+        for (const row of pgStagedRows.rows) {
+          pgStagedBytesByKey.set(row.storage_key, row.bytes);
         }
-        for (const meta of selectedOutputs) {
-          const bytes = bytesByKey.get(meta.storageKey);
-          if (
-            bytes !== undefined &&
-            bytes.byteLength === meta.size &&
-            (await sha256Hex(bytes)) === meta.sha256
-          ) {
+      }
+
+      const latestStagedOutputs: PythonAgentRestoredOutput[] = [];
+      for (const meta of existingSelectedOutputs) {
+        const row = stagedMetaByKey.get(meta.storageKey);
+        if (row === undefined) {
+          continue;
+        }
+        if (row.storage_backend === 'r2') {
+          if (this.r2Bucket === undefined) {
+            throw new DomainError(
+              'DB_UNAVAILABLE',
+              'r2 bucket binding missing for r2-backed staged output',
+            );
+          }
+          const bytes = await readR2Bytes(this.r2Bucket, row.storage_key, {
+            size: meta.size,
+            sha256: meta.sha256,
+          });
+          loadedTotalBytes += bytes.byteLength;
+          if (loadedTotalBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+            return {
+              kind: 'file_budget_exceeded' as const,
+              totalBytes: loadedTotalBytes,
+              maxBytes: PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes,
+            };
+          }
+          latestStagedOutputs.push(Object.freeze({ ...meta, bytes }));
+        } else {
+          const bytes = decodePgBytea(pgStagedBytesByKey.get(meta.storageKey));
+          if (bytes.byteLength === meta.size && (await sha256Hex(bytes)) === meta.sha256) {
+            loadedTotalBytes += bytes.byteLength;
+            if (loadedTotalBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+              return {
+                kind: 'file_budget_exceeded' as const,
+                totalBytes: loadedTotalBytes,
+                maxBytes: PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes,
+              };
+            }
             latestStagedOutputs.push(Object.freeze({ ...meta, bytes }));
           }
         }
@@ -1371,31 +1504,161 @@ export class PostgresPythonAgentExecutionRepository {
     }
 
     const input = parsed.data;
+    const cleanupR2Keys: string[] = [];
+    const rollbackR2Keys: string[] = [];
 
-    return runTx(this.pool, async (client) => {
-      const { task, run, now, leaseLive } = await lockTaskAndRun(client, input.lease);
-      if (task === null) {
-        throw new DomainError('NOT_FOUND', 'task does not exist in this tenant');
-      }
-      if (!leaseLive || run === null) {
-        throw new DomainError('STALE_LEASE', 'python agent completion refused by lease fence');
-      }
+    try {
+      const result = await runTx(this.pool, async (client) => {
+        const { task, run, now, leaseLive } = await lockTaskAndRun(client, input.lease);
+        if (task === null) {
+          throw new DomainError('NOT_FOUND', 'task does not exist in this tenant');
+        }
+        if (!leaseLive || run === null) {
+          throw new DomainError('STALE_LEASE', 'python agent completion refused by lease fence');
+        }
 
-      const deadlineAt = parsePersistedTimestamp(task.deadline_at);
-      const cancelRequested = task.cancel_requested_at !== null;
-      const deadlineReached = deadlineAt !== null && deadlineAt.getTime() <= now.getTime();
+        const deadlineAt = parsePersistedTimestamp(task.deadline_at);
+        const cancelRequested = task.cancel_requested_at !== null;
+        const deadlineReached = deadlineAt !== null && deadlineAt.getTime() <= now.getTime();
 
-      if (cancelRequested || deadlineReached) {
+        if (cancelRequested || deadlineReached) {
+          const convergence = planFinishConvergence({
+            outcome: cancelRequested ? 'cancelled' : 'failed_terminal',
+            task,
+            runRow: run,
+            finishedAt: now,
+            deadlineAt,
+            cancelRequested,
+            policy,
+          });
+          await applyFinishConvergence(client, {
+            task,
+            runRow: run,
+            convergence,
+            finishedAt: now,
+            payloadExtra: {
+              taskKind: 'python.agent',
+              route: 'standard',
+              durationMs: input.durationMs,
+              simulated: input.simulated,
+            },
+          });
+          await client.query(
+            `UPDATE b3_task_dispatch_outbox
+                SET completed_at = COALESCE(completed_at, clock_timestamp()),
+                    dispatch_lease_owner = NULL,
+                    dispatch_lease_expires_at = NULL
+              WHERE task_id = $1`,
+            [input.lease.taskId],
+          );
+          return cancelRequested
+            ? { outcome: 'cancelled' as const }
+            : { outcome: 'deadline_exceeded' as const };
+        }
+
+        const uniqueOutputsByName = new Map<string, PythonStepStagedOutput>();
+        for (const output of input.finalStagedOutputs) {
+          uniqueOutputsByName.set(output.filename, output);
+        }
+        const dedupedOutputs = [...uniqueOutputsByName.values()]
+          .sort((a, b) => a.filename.localeCompare(b.filename))
+          .slice(0, PYTHON_AGENT_LIMITS.maxOutputArtifactsPerTask);
+
+        const inputSizeResult = await client.query<{
+          readonly total_input_bytes: string | number;
+        }>(
+          `SELECT COALESCE(SUM(size), 0)::bigint AS total_input_bytes
+             FROM artifacts
+            WHERE tenant_id = $1 AND task_id = $2 AND created_by = 'user'`,
+          [input.lease.tenantId, input.lease.taskId],
+        );
+        const totalInputBytes = Number(inputSizeResult.rows[0]?.total_input_bytes ?? 0);
+        const totalOutputBytes = dedupedOutputs.reduce((sum, output) => sum + output.size, 0);
+        if (totalInputBytes + totalOutputBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+          throw new DomainError(
+            'POLICY_DENIED',
+            'task total file size exceeds aggregate byte budget',
+          );
+        }
+
+        // Acquire content-digest advisory locks in sorted order before filename-ordered installs.
+        await lockBlobDigests(
+          client,
+          input.lease.tenantId,
+          dedupedOutputs.map((output) => output.sha256),
+        );
+
+        const publishedArtifactIds: Id[] = [];
+        for (const staged of dedupedOutputs) {
+          const installed = await this.byteaStore.installInTransaction(
+            client,
+            input.lease.tenantId,
+            staged,
+            cleanupR2Keys,
+            rollbackR2Keys,
+          );
+          await client.query(
+            `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (tenant_id, sha256) DO NOTHING`,
+            [
+              input.lease.tenantId,
+              installed.sha256,
+              installed.size,
+              installed.mediaType,
+              installed.storageKey,
+            ],
+          );
+          const artifactId = globalThis.crypto.randomUUID();
+          await client.query(
+            `INSERT INTO artifacts (
+               id, tenant_id, task_id, run_id, created_by, sha256, size, media_type, retention, filename
+             )
+             VALUES ($1, $2, $3, $4, 'run', $5, $6, $7, 'task', $8)`,
+            [
+              artifactId,
+              input.lease.tenantId,
+              input.lease.taskId,
+              input.lease.runId,
+              installed.sha256,
+              installed.size,
+              installed.mediaType,
+              staged.filename,
+            ],
+          );
+          publishedArtifactIds.push(artifactId);
+        }
+
+        await client.query(
+          `INSERT INTO task_results (
+             id, tenant_id, task_id, result_state, reason_code, summary_text, detail_text,
+             truncated, model_label, simulated, produced_at, created_at, updated_at
+           )
+           VALUES ($1, $2, $3, 'available', NULL, $4, $5, $6, $7, $8, $9, $9, $9)
+           ON CONFLICT (tenant_id, task_id) DO NOTHING`,
+          [
+            globalThis.crypto.randomUUID(),
+            input.lease.tenantId,
+            input.lease.taskId,
+            input.summaryText,
+            input.detailText,
+            input.truncated,
+            input.modelLabel,
+            input.simulated,
+            now,
+          ],
+        );
+
         const convergence = planFinishConvergence({
-          outcome: cancelRequested ? 'cancelled' : 'failed_terminal',
+          outcome: 'succeeded',
           task,
           runRow: run,
           finishedAt: now,
           deadlineAt,
-          cancelRequested,
+          cancelRequested: false,
           policy,
         });
-        await applyFinishConvergence(client, {
+        const finished = await applyFinishConvergence(client, {
           task,
           runRow: run,
           convergence,
@@ -1407,6 +1670,7 @@ export class PostgresPythonAgentExecutionRepository {
             simulated: input.simulated,
           },
         });
+
         await client.query(
           `UPDATE b3_task_dispatch_outbox
               SET completed_at = COALESCE(completed_at, clock_timestamp()),
@@ -1415,123 +1679,26 @@ export class PostgresPythonAgentExecutionRepository {
             WHERE task_id = $1`,
           [input.lease.taskId],
         );
-        return cancelRequested
-          ? { outcome: 'cancelled' as const }
-          : { outcome: 'deadline_exceeded' as const };
-      }
 
-      const uniqueOutputsByName = new Map<string, PythonStepStagedOutput>();
-      for (const output of input.finalStagedOutputs) {
-        uniqueOutputsByName.set(output.filename, output);
-      }
-      const dedupedOutputs = [...uniqueOutputsByName.values()]
-        .sort((a, b) => a.filename.localeCompare(b.filename))
-        .slice(0, PYTHON_AGENT_LIMITS.maxOutputArtifactsPerTask);
-
-      // Acquire content-digest advisory locks in sorted order before filename-ordered installs.
-      await lockBlobDigests(
-        client,
-        input.lease.tenantId,
-        dedupedOutputs.map((output) => output.sha256),
-      );
-
-      const publishedArtifactIds: Id[] = [];
-      for (const staged of dedupedOutputs) {
-        const installed = await this.byteaStore.installInTransaction(
-          client,
-          input.lease.tenantId,
-          staged,
-        );
-        await client.query(
-          `INSERT INTO blobs (tenant_id, sha256, size, media_type, storage_key)
-           VALUES ($1, $2, $3, $4, $5)
-           ON CONFLICT (tenant_id, sha256) DO NOTHING`,
-          [
-            input.lease.tenantId,
-            installed.sha256,
-            installed.size,
-            installed.mediaType,
-            installed.storageKey,
-          ],
-        );
-        const artifactId = globalThis.crypto.randomUUID();
-        await client.query(
-          `INSERT INTO artifacts (
-             id, tenant_id, task_id, run_id, created_by, sha256, size, media_type, retention, filename
-           )
-           VALUES ($1, $2, $3, $4, 'run', $5, $6, $7, 'task', $8)`,
-          [
-            artifactId,
-            input.lease.tenantId,
-            input.lease.taskId,
-            input.lease.runId,
-            installed.sha256,
-            installed.size,
-            installed.mediaType,
-            staged.filename,
-          ],
-        );
-        publishedArtifactIds.push(artifactId);
-      }
-
-      await client.query(
-        `INSERT INTO task_results (
-           id, tenant_id, task_id, result_state, reason_code, summary_text, detail_text,
-           truncated, model_label, simulated, produced_at, created_at, updated_at
-         )
-         VALUES ($1, $2, $3, 'available', NULL, $4, $5, $6, $7, $8, $9, $9, $9)
-         ON CONFLICT (tenant_id, task_id) DO NOTHING`,
-        [
-          globalThis.crypto.randomUUID(),
-          input.lease.tenantId,
-          input.lease.taskId,
-          input.summaryText,
-          input.detailText,
-          input.truncated,
-          input.modelLabel,
-          input.simulated,
-          now,
-        ],
-      );
-
-      const convergence = planFinishConvergence({
-        outcome: 'succeeded',
-        task,
-        runRow: run,
-        finishedAt: now,
-        deadlineAt,
-        cancelRequested: false,
-        policy,
-      });
-      const finished = await applyFinishConvergence(client, {
-        task,
-        runRow: run,
-        convergence,
-        finishedAt: now,
-        payloadExtra: {
-          taskKind: 'python.agent',
-          route: 'standard',
-          durationMs: input.durationMs,
-          simulated: input.simulated,
-        },
+        return {
+          outcome: 'committed' as const,
+          taskStatus: finished.taskStatus,
+          runStatus: finished.runStatus,
+          publishedArtifactIds: Object.freeze(publishedArtifactIds),
+        };
       });
 
-      await client.query(
-        `UPDATE b3_task_dispatch_outbox
-            SET completed_at = COALESCE(completed_at, clock_timestamp()),
-                dispatch_lease_owner = NULL,
-                dispatch_lease_expires_at = NULL
-          WHERE task_id = $1`,
-        [input.lease.taskId],
-      );
+      if (result.outcome === 'committed' && cleanupR2Keys.length > 0) {
+        await this.byteaStore.cleanupR2Keys(cleanupR2Keys);
+      }
 
-      return {
-        outcome: 'committed' as const,
-        taskStatus: finished.taskStatus,
-        runStatus: finished.runStatus,
-        publishedArtifactIds: Object.freeze(publishedArtifactIds),
-      };
-    });
+      return result;
+    } catch (error) {
+      if (rollbackR2Keys.length > 0) {
+        await this.byteaStore.cleanupR2Keys(rollbackR2Keys).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   async commitFailure(command: PythonAgentCommitFailureCommand): Promise<PythonAgentFailureResult> {

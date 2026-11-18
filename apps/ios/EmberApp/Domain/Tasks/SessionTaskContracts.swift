@@ -674,13 +674,60 @@ public struct SessionTaskResultDTO: Codable, Equatable, Sendable {
 }
 
 public enum B3AttachmentLimits {
-    public static let maxFileBytes = 262_144
+    public static let maxFileBytes = 15_728_640
+    /// Inline Vision image byte ceiling enforced by the worker when attaching images to model prompts.
+    public static let maxVisionImageBytes = 4_194_304
     public static let maxAttachmentsPerMessage = 5
-    public static let allowedMediaTypes: Set<String> = [
-        "text/plain",
-        "text/csv",
-        "text/markdown",
+    public static let blockedMediaTypes: Set<String> = [
+        "text/html",
+        "application/xhtml+xml",
+        "image/svg+xml",
+        "application/javascript",
+        "text/javascript",
     ]
+    public static let visionImageMediaTypes: Set<String> = [
+        "image/jpeg",
+        "image/png",
+        "image/webp",
+        "image/gif",
+    ]
+    private static let tokenChars: Set<UnicodeScalar> = Set(
+        "abcdefghijklmnopqrstuvwxyz0123456789!#$&^_.+-".unicodeScalars
+    )
+
+    public static func normalizedMediaType(_ raw: String) -> String {
+        let base = raw.split(separator: ";", maxSplits: 1, omittingEmptySubsequences: false).first ?? ""
+        return String(base).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    public static func isSafeMediaType(_ raw: String) -> Bool {
+        let value = normalizedMediaType(raw)
+        guard value.count >= 3, value.count <= 128, !blockedMediaTypes.contains(value) else {
+            return false
+        }
+        let parts = value.split(separator: "/", omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return false }
+        let typePart = parts[0]
+        let subtypePart = parts[1]
+        guard (1...64).contains(typePart.count), (1...64).contains(subtypePart.count) else {
+            return false
+        }
+        return isValidMediaToken(typePart) && isValidMediaToken(subtypePart)
+    }
+
+    public static func isVisionImageMediaType(_ raw: String) -> Bool {
+        visionImageMediaTypes.contains(normalizedMediaType(raw))
+    }
+
+    public static func isTextPreviewMediaType(_ raw: String) -> Bool {
+        let value = normalizedMediaType(raw)
+        guard !blockedMediaTypes.contains(value) else { return false }
+        return value.hasPrefix("text/")
+            || value == "application/json"
+            || value == "application/xml"
+            || value == "application/yaml"
+            || value == "application/csv"
+    }
 
     public static func mediaType(forFileExtension rawExtension: String) -> String? {
         switch rawExtension.lowercased() {
@@ -690,20 +737,112 @@ public enum B3AttachmentLimits {
             "text/markdown"
         case "txt", "text", "log", "tsv":
             "text/plain"
+        case "pdf":
+            "application/pdf"
+        case "jpg", "jpeg":
+            "image/jpeg"
+        case "png":
+            "image/png"
+        case "webp":
+            "image/webp"
+        case "gif":
+            "image/gif"
+        case "heic":
+            "image/heic"
+        case "heif":
+            "image/heif"
+        case "json":
+            "application/json"
+        case "xml":
+            "application/xml"
+        case "yaml", "yml":
+            "application/yaml"
+        case "xlsx":
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        case "xls":
+            "application/vnd.ms-excel"
+        case "docx":
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        case "doc":
+            "application/msword"
+        case "pptx":
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        case "ppt":
+            "application/vnd.ms-powerpoint"
+        case "zip":
+            "application/zip"
+        case "py":
+            "text/x-python"
+        case "html", "htm":
+            "text/html"
+        case "xhtml":
+            "application/xhtml+xml"
+        case "svg":
+            "image/svg+xml"
+        case "js", "mjs":
+            "text/javascript"
         default:
             nil
         }
     }
 
     public static func defaultExtension(forMediaType mediaType: String) -> String {
-        switch mediaType {
+        switch normalizedMediaType(mediaType) {
         case "text/csv":
             "csv"
         case "text/markdown":
             "md"
-        default:
+        case "text/plain":
             "txt"
+        case "application/pdf":
+            "pdf"
+        case "image/jpeg":
+            "jpg"
+        case "image/png":
+            "png"
+        case "image/webp":
+            "webp"
+        case "image/gif":
+            "gif"
+        case "image/heic":
+            "heic"
+        case "image/heif":
+            "heif"
+        case "application/json":
+            "json"
+        case "application/xml", "text/xml":
+            "xml"
+        case "application/yaml":
+            "yaml"
+        case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+            "xlsx"
+        case "application/vnd.ms-excel":
+            "xls"
+        case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+            "docx"
+        case "application/msword":
+            "doc"
+        case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+            "pptx"
+        case "application/vnd.ms-powerpoint":
+            "ppt"
+        case "application/zip":
+            "zip"
+        case "text/x-python":
+            "py"
+        default:
+            "bin"
         }
+    }
+
+    private static func isValidMediaToken(_ substring: Substring) -> Bool {
+        let scalars = Array(substring.unicodeScalars)
+        guard let first = scalars.first, isAsciiLowerAlnum(first) else { return false }
+        return scalars.allSatisfy { tokenChars.contains($0) }
+    }
+
+    private static func isAsciiLowerAlnum(_ scalar: UnicodeScalar) -> Bool {
+        (scalar >= "a" && scalar <= "z") || (scalar >= "0" && scalar <= "9")
     }
 
     public static func isSafeArtifactFilename(_ value: String) -> Bool {
@@ -827,10 +966,10 @@ public struct StagedUploadReceiptDTO: Identifiable, Codable, Equatable, Sendable
         filename = decodedFilename
 
         let decodedMediaType = try container.decode(String.self, forKey: SessionWireDecode.key("media_type"))
-        guard B3AttachmentLimits.allowedMediaTypes.contains(decodedMediaType) else {
+        guard B3AttachmentLimits.isSafeMediaType(decodedMediaType) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Unsupported upload media_type."))
         }
-        mediaType = decodedMediaType
+        mediaType = B3AttachmentLimits.normalizedMediaType(decodedMediaType)
 
         let decodedSize = try container.decode(Int.self, forKey: SessionWireDecode.key("size"))
         guard decodedSize >= 0 && decodedSize <= B3AttachmentLimits.maxFileBytes else {

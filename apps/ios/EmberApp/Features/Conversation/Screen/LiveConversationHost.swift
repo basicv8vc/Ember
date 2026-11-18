@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import PhotosUI
 import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
@@ -191,6 +192,70 @@ final class LiveConversationHostModel {
         attachmentError = String(localized: "conversation.composer.attachment_read_failed", table: "Conversation")
     }
 
+    func reportCameraUnavailable() {
+        attachmentError = String(localized: "conversation.composer.camera_unavailable", table: "Conversation")
+    }
+
+    func attachImageData(_ rawData: Data, suggestedFilename: String = "photo.jpg") async {
+        guard let image = UIImage(data: rawData) else {
+            attachmentError = String(localized: "conversation.composer.attachment_read_failed", table: "Conversation")
+            return
+        }
+        await attachUIImage(image, suggestedFilename: suggestedFilename)
+    }
+
+    func attachUIImage(_ image: UIImage, suggestedFilename: String = "photo.jpg") async {
+        guard !isUploadingAttachment, !isSubmitting else { return }
+        guard stagedAttachments.count < B3AttachmentLimits.maxAttachmentsPerMessage else {
+            attachmentError = String(localized: "conversation.composer.attachment_limit", table: "Conversation")
+            return
+        }
+
+        guard let prepared = Self.encodeUploadImage(image) else {
+            attachmentError = String(localized: "conversation.composer.attachment_read_failed", table: "Conversation")
+            return
+        }
+
+        let startGeneration = sessionGeneration
+        isUploadingAttachment = true
+        attachmentError = nil
+        defer {
+            if sessionGeneration == startGeneration {
+                isUploadingAttachment = false
+            }
+        }
+
+        guard prepared.uploadData.count <= B3AttachmentLimits.maxFileBytes else {
+            attachmentError = String(localized: "conversation.composer.attachment_too_large", table: "Conversation")
+            return
+        }
+
+        do {
+            let jpegName = Self.jpegFilename(for: suggestedFilename)
+            let filename = B3AttachmentLimits.safeUploadFilename(jpegName, mediaType: "image/jpeg")
+            let receipt = try await repository.uploadAttachment(
+                filename: filename,
+                mediaType: "image/jpeg",
+                data: prepared.uploadData
+            )
+            guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
+            if !stagedAttachments.contains(where: { $0.id == receipt.uploadID }) {
+                stagedAttachments.append(
+                    ComposerAttachment(
+                        id: receipt.uploadID,
+                        filename: receipt.filename,
+                        mediaType: receipt.mediaType,
+                        sizeBytes: receipt.size,
+                        thumbnailData: prepared.thumbnailData
+                    )
+                )
+            }
+        } catch {
+            guard sessionGeneration == startGeneration else { return }
+            attachmentError = String(localized: "conversation.composer.attachment_upload_failed", table: "Conversation")
+        }
+    }
+
     func attachFile(from url: URL) async {
         guard !isUploadingAttachment, !isSubmitting else { return }
         guard stagedAttachments.count < B3AttachmentLimits.maxAttachmentsPerMessage else {
@@ -214,22 +279,17 @@ final class LiveConversationHostModel {
             }
         }
 
-        let resolvedMediaType: String?
+        var resolvedMediaType: String
         if let byExtension = B3AttachmentLimits.mediaType(forFileExtension: url.pathExtension) {
             resolvedMediaType = byExtension
-        } else if let contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            if contentType.conforms(to: .commaSeparatedText) {
-                resolvedMediaType = "text/csv"
-            } else if contentType.conforms(to: .plainText) {
-                resolvedMediaType = "text/plain"
-            } else {
-                resolvedMediaType = nil
-            }
+        } else if let contentType = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType,
+                  let preferred = contentType.preferredMIMEType {
+            resolvedMediaType = B3AttachmentLimits.normalizedMediaType(preferred)
         } else {
-            resolvedMediaType = nil
+            resolvedMediaType = "application/octet-stream"
         }
 
-        guard let mediaType = resolvedMediaType else {
+        guard B3AttachmentLimits.isSafeMediaType(resolvedMediaType) else {
             attachmentError = String(localized: "conversation.composer.attachment_unsupported", table: "Conversation")
             return
         }
@@ -241,16 +301,37 @@ final class LiveConversationHostModel {
                 return
             }
 
-            let data = try Data(contentsOf: url)
+            var data = try Data(contentsOf: url)
+            var rawFilename = url.lastPathComponent
+            var thumbnailData: Data?
+
+            let shouldTranscodeToJpeg = resolvedMediaType == "image/heic"
+                || resolvedMediaType == "image/heif"
+                || (B3AttachmentLimits.isVisionImageMediaType(resolvedMediaType)
+                    && resolvedMediaType != "image/gif"
+                    && data.count > B3AttachmentLimits.maxVisionImageBytes)
+
+            if shouldTranscodeToJpeg,
+               let image = UIImage(data: data),
+               let converted = Self.encodeUploadImage(image) {
+                data = converted.uploadData
+                resolvedMediaType = "image/jpeg"
+                rawFilename = Self.jpegFilename(for: rawFilename)
+                thumbnailData = converted.thumbnailData
+            } else if B3AttachmentLimits.isVisionImageMediaType(resolvedMediaType),
+                      let image = UIImage(data: data) {
+                thumbnailData = Self.makeThumbnailData(from: image)
+            }
+
             guard data.count <= B3AttachmentLimits.maxFileBytes else {
                 attachmentError = String(localized: "conversation.composer.attachment_too_large", table: "Conversation")
                 return
             }
 
-            let filename = B3AttachmentLimits.safeUploadFilename(url.lastPathComponent, mediaType: mediaType)
+            let filename = B3AttachmentLimits.safeUploadFilename(rawFilename, mediaType: resolvedMediaType)
             let receipt = try await repository.uploadAttachment(
                 filename: filename,
-                mediaType: mediaType,
+                mediaType: resolvedMediaType,
                 data: data
             )
             guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
@@ -260,7 +341,8 @@ final class LiveConversationHostModel {
                         id: receipt.uploadID,
                         filename: receipt.filename,
                         mediaType: receipt.mediaType,
-                        sizeBytes: receipt.size
+                        sizeBytes: receipt.size,
+                        thumbnailData: thumbnailData
                     )
                 )
             }
@@ -268,6 +350,59 @@ final class LiveConversationHostModel {
             guard sessionGeneration == startGeneration else { return }
             attachmentError = String(localized: "conversation.composer.attachment_upload_failed", table: "Conversation")
         }
+    }
+
+    private static func jpegFilename(for rawFilename: String) -> String {
+        let baseStem = (rawFilename as NSString).deletingPathExtension
+        return baseStem.isEmpty ? "photo.jpg" : "\(baseStem).jpg"
+    }
+
+    private static func encodeUploadImage(_ image: UIImage) -> (uploadData: Data, thumbnailData: Data?)? {
+        let maxDimension: CGFloat = 2048
+        let originalSize = image.size
+        guard originalSize.width > 0, originalSize.height > 0 else { return nil }
+        let longest = max(originalSize.width, originalSize.height)
+        let scale = longest > maxDimension ? (maxDimension / longest) : 1.0
+        let targetSize = CGSize(
+            width: max(1, (originalSize.width * scale).rounded()),
+            height: max(1, (originalSize.height * scale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let rendered = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        var uploadData: Data?
+        for quality: CGFloat in [0.82, 0.65, 0.5] {
+            guard let candidate = rendered.jpegData(compressionQuality: quality) else { continue }
+            uploadData = candidate
+            if candidate.count <= B3AttachmentLimits.maxVisionImageBytes {
+                break
+            }
+        }
+        guard let uploadData else { return nil }
+        let thumbData = makeThumbnailData(from: rendered)
+        return (uploadData, thumbData)
+    }
+
+    private static func makeThumbnailData(from image: UIImage) -> Data? {
+        let maxThumb: CGFloat = 112
+        let size = image.size
+        guard size.width > 0, size.height > 0 else { return nil }
+        let longest = max(size.width, size.height)
+        let scale = min(1.0, maxThumb / longest)
+        let targetSize = CGSize(
+            width: max(1, (size.width * scale).rounded()),
+            height: max(1, (size.height * scale).rounded())
+        )
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1.0
+        let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+        let thumb = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: targetSize))
+        }
+        return thumb.jpegData(compressionQuality: 0.7)
     }
 
     func send(_ text: String) async {
@@ -914,16 +1049,12 @@ struct LiveConversationHost: View {
     @State private var draft = ""
     @State private var isConfirmingSignOut = false
     @State private var isShowingFileImporter = false
+    @State private var isShowingPhotoPicker = false
+    @State private var isShowingCamera = false
+    @State private var selectedPhotoItems: [PhotosPickerItem] = []
 
     private static var allowedAttachmentTypes: [UTType] {
-        var types: [UTType] = [.commaSeparatedText, .plainText, .tabSeparatedText]
-        if let md = UTType(filenameExtension: "md") {
-            types.append(md)
-        }
-        if let markdown = UTType(filenameExtension: "markdown") {
-            types.append(markdown)
-        }
-        return types
+        [.item]
     }
 
     init(model: LiveConversationHostModel) {
@@ -1082,6 +1213,14 @@ struct LiveConversationHost: View {
                         retry: { Task { await model.retry() } },
                         stopGenerating: { Task { await model.stop() } },
                         selectPrompt: { draft = $0 },
+                        onTakePhoto: {
+                            if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                                isShowingCamera = true
+                            } else {
+                                model.reportCameraUnavailable()
+                            }
+                        },
+                        onChoosePhoto: { isShowingPhotoPicker = true },
                         onPickAttachment: { isShowingFileImporter = true },
                         onRemoveAttachment: { model.removeAttachment($0) }
                     ),
@@ -1099,6 +1238,43 @@ struct LiveConversationHost: View {
                         ? "conversation.message.ember_mock"
                         : "conversation.message.ember_cloud"
                 )
+            }
+            .photosPicker(
+                isPresented: $isShowingPhotoPicker,
+                selection: $selectedPhotoItems,
+                maxSelectionCount: max(1, B3AttachmentLimits.maxAttachmentsPerMessage - model.stagedAttachments.count),
+                matching: .images
+            )
+            .onChange(of: selectedPhotoItems) { _, items in
+                guard !items.isEmpty else { return }
+                let picked = items
+                selectedPhotoItems = []
+                Task {
+                    for (index, item) in picked.enumerated() {
+                        if model.stagedAttachments.count >= B3AttachmentLimits.maxAttachmentsPerMessage {
+                            break
+                        }
+                        if let data = try? await item.loadTransferable(type: Data.self) {
+                            await model.attachImageData(data, suggestedFilename: "photo_\(index + 1).jpg")
+                        } else {
+                            model.reportAttachmentPickerFailure()
+                        }
+                    }
+                }
+            }
+            .fullScreenCover(isPresented: $isShowingCamera) {
+                CameraCaptureSheet(
+                    onCapture: { image in
+                        isShowingCamera = false
+                        Task {
+                            await model.attachUIImage(image, suggestedFilename: "camera_photo.jpg")
+                        }
+                    },
+                    onCancel: {
+                        isShowingCamera = false
+                    }
+                )
+                .ignoresSafeArea()
             }
             .fileImporter(
                 isPresented: $isShowingFileImporter,
@@ -1131,6 +1307,50 @@ struct LiveConversationHost: View {
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
             }
+        }
+    }
+}
+
+private struct CameraCaptureSheet: UIViewControllerRepresentable {
+    let onCapture: (UIImage) -> Void
+    let onCancel: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onCapture: onCapture, onCancel: onCancel)
+    }
+
+    func makeUIViewController(context: Context) -> UIImagePickerController {
+        let picker = UIImagePickerController()
+        picker.sourceType = .camera
+        picker.delegate = context.coordinator
+        picker.allowsEditing = false
+        return picker
+    }
+
+    func updateUIViewController(_ uiViewController: UIImagePickerController, context: Context) {}
+
+    final class Coordinator: NSObject, UIImagePickerControllerDelegate, UINavigationControllerDelegate {
+        let onCapture: (UIImage) -> Void
+        let onCancel: () -> Void
+
+        init(onCapture: @escaping (UIImage) -> Void, onCancel: @escaping () -> Void) {
+            self.onCapture = onCapture
+            self.onCancel = onCancel
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            if let image = info[.originalImage] as? UIImage {
+                onCapture(image)
+            } else {
+                onCancel()
+            }
+        }
+
+        func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
+            onCancel()
         }
     }
 }

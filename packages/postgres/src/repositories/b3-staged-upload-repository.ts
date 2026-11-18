@@ -54,6 +54,14 @@ VALUES ($1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, $9, $10, 'unbound', $1
 RETURNING id, filename, media_type, size, sha256, expires_at, created_at
 `;
 
+const STAGED_UPLOAD_EXISTS_SQL = `
+SELECT 1
+  FROM user_staged_uploads
+ WHERE tenant_id = $1::uuid
+   AND id = $2::uuid
+ LIMIT 1
+`;
+
 const TASK_EXISTS_SQL = `
 SELECT 1
   FROM tasks
@@ -190,70 +198,112 @@ export class PostgresB3StagedUploadRepository implements B3StagedUploadRepositor
       });
     }
 
+    let commitAttempted = false;
+
     try {
-      return await withTransaction(this.pool, async (client) => {
-        await client.query(UPLOAD_LOCK_SQL, [lockKey]);
+      return await withTransaction(
+        this.pool,
+        async (client) => {
+          await client.query(UPLOAD_LOCK_SQL, [lockKey]);
 
-        const createdAt =
-          parsed.now ??
-          new Date(
-            (await client.query<{ now: Date | string }>('SELECT clock_timestamp() AS now')).rows[0]!
-              .now,
+          const createdAt =
+            parsed.now ??
+            new Date(
+              (await client.query<{ now: Date | string }>('SELECT clock_timestamp() AS now'))
+                .rows[0]!.now,
+            );
+          const expiresAt = new Date(createdAt.getTime() + PYTHON_AGENT_LIMITS.maxUploadTtlMs);
+
+          const countResult = await client.query<{ active_count: number }>(
+            COUNT_UNBOUND_UPLOADS_SQL,
+            [auth.tenantId, auth.principalId, createdAt],
           );
-        const expiresAt = new Date(createdAt.getTime() + PYTHON_AGENT_LIMITS.maxUploadTtlMs);
 
-        const countResult = await client.query<{ active_count: number }>(
-          COUNT_UNBOUND_UPLOADS_SQL,
-          [auth.tenantId, auth.principalId, createdAt],
-        );
+          const activeCount = Number(countResult.rows[0]?.active_count ?? 0);
+          if (activeCount >= PYTHON_AGENT_LIMITS.maxUnboundUploadsPerUser) {
+            throw new DomainError(
+              'BUDGET_EXCEEDED',
+              'unbound staged upload quota reached for principal',
+            );
+          }
 
-        const activeCount = Number(countResult.rows[0]?.active_count ?? 0);
-        if (activeCount >= PYTHON_AGENT_LIMITS.maxUnboundUploadsPerUser) {
-          throw new DomainError(
-            'BUDGET_EXCEEDED',
-            'unbound staged upload quota reached for principal',
-          );
-        }
+          const inserted = await client.query<{
+            id: string;
+            filename: string;
+            media_type: string;
+            size: string | number;
+            sha256: string;
+            expires_at: Date | string;
+            created_at: Date | string;
+          }>(INSERT_STAGED_UPLOAD_SQL, [
+            uploadId,
+            auth.tenantId,
+            auth.principalId,
+            parsed.filename,
+            parsed.mediaType,
+            sha256,
+            bytes.byteLength,
+            r2Key === null ? 'postgres' : 'r2',
+            r2Key,
+            r2Key === null ? bytes : null,
+            expiresAt,
+            createdAt,
+          ]);
 
-        const inserted = await client.query<{
-          id: string;
-          filename: string;
-          media_type: string;
-          size: string | number;
-          sha256: string;
-          expires_at: Date | string;
-          created_at: Date | string;
-        }>(INSERT_STAGED_UPLOAD_SQL, [
-          uploadId,
-          auth.tenantId,
-          auth.principalId,
-          parsed.filename,
-          parsed.mediaType,
-          sha256,
-          bytes.byteLength,
-          r2Key === null ? 'postgres' : 'r2',
-          r2Key,
-          r2Key === null ? bytes : null,
-          expiresAt,
-          createdAt,
-        ]);
-
-        const row = inserted.rows[0]!;
-        return B3StagedUploadReceiptDtoSchema.parse({
-          upload_id: row.id,
-          filename: row.filename,
-          media_type: row.media_type,
-          size: Number(row.size),
-          sha256: row.sha256,
-          expires_at: toIsoTimestamp(row.expires_at),
-          created_at: toIsoTimestamp(row.created_at),
-        });
-      });
+          const row = inserted.rows[0]!;
+          return B3StagedUploadReceiptDtoSchema.parse({
+            upload_id: row.id,
+            filename: row.filename,
+            media_type: row.media_type,
+            size: Number(row.size),
+            sha256: row.sha256,
+            expires_at: toIsoTimestamp(row.expires_at),
+            created_at: toIsoTimestamp(row.created_at),
+          });
+        },
+        {
+          onCommitAttempt: () => {
+            commitAttempted = true;
+          },
+        },
+      );
     } catch (error) {
       if (r2Key !== null) {
-        await deleteR2Keys(this.r2Bucket, [r2Key]);
+        if (!commitAttempted) {
+          await deleteR2Keys(this.r2Bucket, [r2Key]);
+        } else {
+          await this.cleanupUncommittedR2Upload(auth.tenantId, uploadId, lockKey, r2Key);
+        }
       }
       throw asDomainError(error);
+    }
+  }
+
+  /**
+   * When a `COMMIT` outcome is uncertain, reacquire the upload advisory lock and delete the
+   * staged R2 object only if we positively confirm the upload row does not exist. Any
+   * confirmation failure retains the object (leaving potential orphan cleanup to deferred GC).
+   */
+  private async cleanupUncommittedR2Upload(
+    tenantId: Id,
+    uploadId: Id,
+    lockKey: string,
+    r2Key: string,
+  ): Promise<void> {
+    if (this.r2Bucket === undefined) {
+      return;
+    }
+
+    try {
+      await withTransaction(this.pool, async (client) => {
+        await client.query(UPLOAD_LOCK_SQL, [lockKey]);
+        const existing = await client.query(STAGED_UPLOAD_EXISTS_SQL, [tenantId, uploadId]);
+        if ((existing.rowCount ?? 0) === 0 && existing.rows.length === 0) {
+          await deleteR2Keys(this.r2Bucket, [r2Key]);
+        }
+      });
+    } catch {
+      // Retain R2 object if confirmation fails so an ambiguously committed upload never loses data.
     }
   }
 

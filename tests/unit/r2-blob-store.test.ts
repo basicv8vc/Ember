@@ -510,4 +510,149 @@ describe('R2 blob storage keys and stageUpload lifecycle', () => {
     expect(events).toEqual(['BEGIN', 'LOCK', 'COMMIT']);
     expect(loggedQueries.length).toBeGreaterThan(0);
   });
+
+  it('retains R2 upload object when COMMIT succeeds on server but client loses the ACK, and cleans up only on confirmed absence or normal rollback', async () => {
+    const tenantId = randomUUID();
+    const principalId = randomUUID();
+    const payload = new TextEncoder().encode('%PDF-1.4\nambiguous-commit\n');
+    const sha256 = createHash('sha256').update(payload).digest('hex');
+
+    const runScenario = async (
+      mode: 'lost_ack_committed' | 'commit_failed_absent' | 'confirm_failed',
+    ) => {
+      const bucket = new MemoryR2Bucket();
+      const events: string[] = [];
+      let txCount = 0;
+      let committedUploadId: string | null = null;
+      const deletedKeys: string[] = [];
+
+      const trackedBucket: R2BucketPort = {
+        put: (key, value, options) =>
+          bucket.put(key, value as ArrayBuffer | ArrayBufferView, options),
+        get: (key) => bucket.get(key),
+        delete(keys) {
+          const list = Array.isArray(keys) ? keys : [keys];
+          deletedKeys.push(...list);
+          return bucket.delete(keys);
+        },
+      };
+
+      const pool = {
+        connect() {
+          txCount += 1;
+          const currentTx = txCount;
+          if (currentTx === 2 && mode === 'confirm_failed') {
+            return Promise.reject(new Error('confirm connection unavailable'));
+          }
+          return Promise.resolve({
+            query(text: string, params?: readonly unknown[]) {
+              if (text === 'BEGIN') {
+                events.push(`TX${currentTx}:BEGIN`);
+                return Promise.resolve({ rowCount: 0, rows: [] });
+              }
+              if (text === 'ROLLBACK') {
+                events.push(`TX${currentTx}:ROLLBACK`);
+                return Promise.resolve({ rowCount: 0, rows: [] });
+              }
+              if (text.includes('pg_advisory_xact_lock')) {
+                events.push(`TX${currentTx}:LOCK:${String(params?.[0])}`);
+                return Promise.resolve({ rowCount: 0, rows: [] });
+              }
+              if (text.includes('clock_timestamp()')) {
+                return Promise.resolve({
+                  rowCount: 1,
+                  rows: [{ now: '2026-11-18T00:00:00.000Z' }],
+                });
+              }
+              if (text.includes('FROM user_staged_uploads') && text.includes('count(*)')) {
+                return Promise.resolve({ rowCount: 1, rows: [{ active_count: 0 }] });
+              }
+              if (text.includes('INSERT INTO user_staged_uploads')) {
+                committedUploadId = String(params?.[0]);
+                return Promise.resolve({
+                  rowCount: 1,
+                  rows: [
+                    {
+                      id: committedUploadId,
+                      filename: 'doc.pdf',
+                      media_type: 'application/pdf',
+                      size: payload.byteLength,
+                      sha256,
+                      expires_at: '2026-11-19T00:00:00.000Z',
+                      created_at: '2026-11-18T00:00:00.000Z',
+                    },
+                  ],
+                });
+              }
+              if (text === 'COMMIT') {
+                events.push(`TX${currentTx}:COMMIT`);
+                if (currentTx === 1) {
+                  if (mode === 'commit_failed_absent') {
+                    committedUploadId = null;
+                  }
+                  return Promise.reject(new Error('socket reset after commit'));
+                }
+                return Promise.resolve({ rowCount: 0, rows: [] });
+              }
+              if (text.includes('FROM user_staged_uploads') && text.includes('LIMIT 1')) {
+                events.push(`TX${currentTx}:CHECK_EXISTS`);
+                const exists = committedUploadId !== null && params?.[1] === committedUploadId;
+                return Promise.resolve({
+                  rowCount: exists ? 1 : 0,
+                  rows: exists ? [{ '?column?': 1 }] : [],
+                });
+              }
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            },
+            release() {},
+          });
+        },
+      } as unknown as PoolArg;
+
+      const repo = new PostgresB3StagedUploadRepository(pool, { r2Bucket: trackedBucket });
+      await expect(
+        repo.stageUpload(
+          { tenantId, principalId, policyVersion: 1 },
+          { filename: 'doc.pdf', mediaType: 'application/pdf', bytes: payload },
+        ),
+      ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+      return { bucket, events, deletedKeys };
+    };
+
+    const lostAck = await runScenario('lost_ack_committed');
+    expect(lostAck.bucket.objects.size).toBe(1);
+    expect(lostAck.deletedKeys).toEqual([]);
+    expect(lostAck.events).toEqual([
+      'TX1:BEGIN',
+      `TX1:LOCK:ember.upload:${tenantId}:${principalId}`,
+      'TX1:COMMIT',
+      'TX2:BEGIN',
+      `TX2:LOCK:ember.upload:${tenantId}:${principalId}`,
+      'TX2:CHECK_EXISTS',
+      'TX2:COMMIT',
+    ]);
+
+    const confirmedAbsent = await runScenario('commit_failed_absent');
+    expect(confirmedAbsent.bucket.objects.size).toBe(0);
+    expect(confirmedAbsent.deletedKeys).toHaveLength(1);
+    expect(confirmedAbsent.events).toEqual([
+      'TX1:BEGIN',
+      `TX1:LOCK:ember.upload:${tenantId}:${principalId}`,
+      'TX1:COMMIT',
+      'TX2:BEGIN',
+      `TX2:LOCK:ember.upload:${tenantId}:${principalId}`,
+      'TX2:CHECK_EXISTS',
+      'TX2:COMMIT',
+    ]);
+
+    const confirmFailed = await runScenario('confirm_failed');
+    expect(confirmFailed.bucket.objects.size).toBe(1);
+    expect(confirmFailed.deletedKeys).toEqual([]);
+    expect(confirmFailed.events).toEqual([
+      'TX1:BEGIN',
+      `TX1:LOCK:ember.upload:${tenantId}:${principalId}`,
+      'TX1:COMMIT',
+    ]);
+  });
 });

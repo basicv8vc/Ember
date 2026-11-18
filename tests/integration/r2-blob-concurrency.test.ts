@@ -1038,4 +1038,199 @@ describe('PG17 R2 lock-held write/delete concurrency, migration 0023, and aggreg
     );
     expect(taskRow.rows[0]?.status).toBe('failed');
   });
+
+  it('retains R2 staged upload object on successful PG17 COMMIT followed by lost ACK, while preserving rollback and confirmed-absence cleanup', async () => {
+    const tenant = await createTenantFixture();
+    const auth = {
+      tenantId: tenant.tenantId,
+      principalId: tenant.principalId,
+      policyVersion: 1,
+    };
+    const lockKey = `ember.upload:${tenant.tenantId}:${tenant.principalId}`;
+    const bucket = new InstrumentedR2Bucket();
+    const deletedKeys: string[] = [];
+    bucket.deleteHook = (keys) => {
+      deletedKeys.push(...keys);
+    };
+
+    // 1. Successful PG17 COMMIT followed by a client-side exception (lost ACK):
+    //    stageUpload throws DB_UNAVAILABLE, reacquires upload advisory lock, sees the committed
+    //    row in PG17, and retains the R2 object with intact bytes.
+    const committedPayload = new TextEncoder().encode('pg17-committed-lost-ack-payload');
+    let txCount = 0;
+    let confirmTxSawLock = false;
+    const lostAckPool = {
+      query: (...args: unknown[]) => (db.pool.query as (...a: unknown[]) => unknown)(...args),
+      connect: async () => {
+        txCount += 1;
+        const currentTx = txCount;
+        const client = await db.pool.connect();
+        const rawQuery = client.query.bind(client) as (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<unknown>;
+        return {
+          query: async (...args: unknown[]) => {
+            const sql = typeof args[0] === 'string' ? args[0] : '';
+            if (currentTx === 1 && sql === 'COMMIT') {
+              await rawQuery('COMMIT');
+              throw new Error('simulated lost ACK after PG17 COMMIT');
+            }
+            if (
+              currentTx === 2 &&
+              sql.includes('pg_advisory_xact_lock') &&
+              Array.isArray(args[1]) &&
+              args[1][0] === lockKey
+            ) {
+              confirmTxSawLock = true;
+            }
+            return (rawQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+          },
+          release: (err?: Error | boolean) => client.release(err),
+        };
+      },
+    } as unknown as typeof db.pool;
+
+    const lostAckRepo = new PostgresB3StagedUploadRepository(lostAckPool, { r2Bucket: bucket });
+    await expect(
+      lostAckRepo.stageUpload(auth, {
+        filename: 'lost-ack.txt',
+        mediaType: 'text/plain',
+        bytes: committedPayload,
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+    expect(txCount).toBe(2);
+    expect(confirmTxSawLock).toBe(true);
+    expect(deletedKeys).toEqual([]);
+    expect(bucket.objects.size).toBe(1);
+
+    const committedRows = await db.observerPool.query<{
+      readonly id: string;
+      readonly storage_backend: string;
+      readonly storage_key: string;
+    }>(
+      `SELECT id, storage_backend, storage_key
+         FROM user_staged_uploads
+        WHERE tenant_id = $1::uuid AND filename = 'lost-ack.txt'`,
+      [tenant.tenantId],
+    );
+    expect(committedRows.rowCount).toBe(1);
+    const committedRow = committedRows.rows[0]!;
+    expect(committedRow.storage_backend).toBe('r2');
+    expect(bucket.objects.get(committedRow.storage_key)?.body).toEqual(committedPayload);
+
+    // 2. Uncertain COMMIT where confirmation itself fails: retains the R2 object safely.
+    const confirmFailPayload = new TextEncoder().encode('pg17-confirm-fail-payload');
+    let confirmFailTxCount = 0;
+    const confirmFailPool = {
+      query: (...args: unknown[]) => (db.pool.query as (...a: unknown[]) => unknown)(...args),
+      connect: async () => {
+        confirmFailTxCount += 1;
+        if (confirmFailTxCount === 2) {
+          throw new Error('confirmation DB connection failed');
+        }
+        const client = await db.pool.connect();
+        const rawQuery = client.query.bind(client) as (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<unknown>;
+        return {
+          query: async (...args: unknown[]) => {
+            const sql = typeof args[0] === 'string' ? args[0] : '';
+            if (confirmFailTxCount === 1 && sql === 'COMMIT') {
+              await rawQuery('COMMIT');
+              throw new Error('simulated lost ACK before confirm outage');
+            }
+            return (rawQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+          },
+          release: (err?: Error | boolean) => client.release(err),
+        };
+      },
+    } as unknown as typeof db.pool;
+
+    const confirmFailRepo = new PostgresB3StagedUploadRepository(confirmFailPool, {
+      r2Bucket: bucket,
+    });
+    await expect(
+      confirmFailRepo.stageUpload(auth, {
+        filename: 'confirm-fail.txt',
+        mediaType: 'text/plain',
+        bytes: confirmFailPayload,
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+    expect(bucket.objects.size).toBe(2);
+    expect(deletedKeys).toEqual([]);
+
+    // 3. Failed COMMIT (aborted on PG17) followed by locked confirmation:
+    //    confirmation positively confirms absence in PG17 and deletes the R2 object.
+    let failedCommitTxCount = 0;
+    let failedCommitConfirmLocked = false;
+    const failedCommitPool = {
+      query: (...args: unknown[]) => (db.pool.query as (...a: unknown[]) => unknown)(...args),
+      connect: async () => {
+        failedCommitTxCount += 1;
+        const currentTx = failedCommitTxCount;
+        const client = await db.pool.connect();
+        const rawQuery = client.query.bind(client) as (
+          sql: string,
+          params?: unknown[],
+        ) => Promise<unknown>;
+        return {
+          query: async (...args: unknown[]) => {
+            const sql = typeof args[0] === 'string' ? args[0] : '';
+            if (currentTx === 1 && sql === 'COMMIT') {
+              await rawQuery('ROLLBACK');
+              throw new Error('simulated server COMMIT rejection');
+            }
+            if (
+              currentTx === 2 &&
+              sql.includes('pg_advisory_xact_lock') &&
+              Array.isArray(args[1]) &&
+              args[1][0] === lockKey
+            ) {
+              failedCommitConfirmLocked = true;
+            }
+            return (rawQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+          },
+          release: (err?: Error | boolean) => client.release(err),
+        };
+      },
+    } as unknown as typeof db.pool;
+
+    const failedCommitRepo = new PostgresB3StagedUploadRepository(failedCommitPool, {
+      r2Bucket: bucket,
+    });
+    await expect(
+      failedCommitRepo.stageUpload(auth, {
+        filename: 'commit-rejected.txt',
+        mediaType: 'text/plain',
+        bytes: new TextEncoder().encode('commit-rejected-payload'),
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+    expect(failedCommitTxCount).toBe(2);
+    expect(failedCommitConfirmLocked).toBe(true);
+    expect(bucket.objects.size).toBe(2);
+    expect(deletedKeys).toHaveLength(1);
+
+    // 4. Normal pre-commit rollback (INSERT fails): cleans up R2 immediately without confirmation TX.
+    let rollbackTxCount = 0;
+    const rollbackPool = createInterceptedPool(db.pool, ({ sql, txIndex }) => {
+      rollbackTxCount = Math.max(rollbackTxCount, txIndex);
+      if (sql.includes('INSERT INTO user_staged_uploads')) {
+        throw new Error('injected pre-commit insert failure');
+      }
+    });
+    const rollbackRepo = new PostgresB3StagedUploadRepository(rollbackPool, { r2Bucket: bucket });
+    await expect(
+      rollbackRepo.stageUpload(auth, {
+        filename: 'pre-commit-fail.txt',
+        mediaType: 'text/plain',
+        bytes: new TextEncoder().encode('pre-commit-fail-payload'),
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+    expect(rollbackTxCount).toBe(1);
+    expect(bucket.objects.size).toBe(2);
+    expect(deletedKeys).toHaveLength(2);
+  });
 });

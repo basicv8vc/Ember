@@ -11,6 +11,7 @@ import {
   type R2ObjectBodyPort,
   type R2PutOptionsPort,
 } from '@ember/postgres';
+import { withTransaction } from '../../packages/postgres/src/repositories/support.js';
 
 type PoolArg = ConstructorParameters<typeof PostgresR2BlobStore>[0];
 
@@ -654,5 +655,80 @@ describe('R2 blob storage keys and stageUpload lifecycle', () => {
       `TX1:LOCK:ember.upload:${tenantId}:${principalId}`,
       'TX1:COMMIT',
     ]);
+  });
+
+  it('destroys pooled client via release(true) on uncertain COMMIT or failed ROLLBACK and releases each client once', async () => {
+    const runTx = async (mode: 'commit_ok' | 'rollback_ok' | 'rollback_fails' | 'commit_fails') => {
+      const queries: string[] = [];
+      const releaseCalls: Array<readonly unknown[]> = [];
+      let commitAttempted = false;
+
+      const pool = {
+        connect() {
+          return Promise.resolve({
+            query(text: string) {
+              queries.push(text);
+              if (text === 'ROLLBACK' && mode === 'rollback_fails') {
+                return Promise.reject(new Error('rollback failed'));
+              }
+              if (text === 'COMMIT' && mode === 'commit_fails') {
+                return Promise.reject(new Error('commit failed before reaching pg'));
+              }
+              return Promise.resolve({ rowCount: 0, rows: [] });
+            },
+            release(...args: unknown[]) {
+              releaseCalls.push(args);
+            },
+          });
+        },
+      } as unknown as PoolArg;
+
+      if (mode === 'commit_ok') {
+        const result = await withTransaction(pool, () => Promise.resolve('ok'), {
+          onCommitAttempt: () => {
+            commitAttempted = true;
+          },
+        });
+        expect(result).toBe('ok');
+      } else if (mode === 'commit_fails') {
+        await expect(
+          withTransaction(pool, () => Promise.resolve('never'), {
+            onCommitAttempt: () => {
+              commitAttempted = true;
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+      } else {
+        await expect(
+          withTransaction(pool, () => Promise.reject(new Error('operation failed')), {
+            onCommitAttempt: () => {
+              commitAttempted = true;
+            },
+          }),
+        ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+      }
+
+      return { queries, releaseCalls, commitAttempted };
+    };
+
+    const commitOk = await runTx('commit_ok');
+    expect(commitOk.commitAttempted).toBe(true);
+    expect(commitOk.queries).toEqual(['BEGIN', 'COMMIT']);
+    expect(commitOk.releaseCalls).toEqual([[]]);
+
+    const rollbackOk = await runTx('rollback_ok');
+    expect(rollbackOk.commitAttempted).toBe(false);
+    expect(rollbackOk.queries).toEqual(['BEGIN', 'ROLLBACK']);
+    expect(rollbackOk.releaseCalls).toEqual([[]]);
+
+    const rollbackFails = await runTx('rollback_fails');
+    expect(rollbackFails.commitAttempted).toBe(false);
+    expect(rollbackFails.queries).toEqual(['BEGIN', 'ROLLBACK']);
+    expect(rollbackFails.releaseCalls).toEqual([[true]]);
+
+    const commitFails = await runTx('commit_fails');
+    expect(commitFails.commitAttempted).toBe(true);
+    expect(commitFails.queries).toEqual(['BEGIN', 'COMMIT']);
+    expect(commitFails.releaseCalls).toEqual([[true]]);
   });
 });

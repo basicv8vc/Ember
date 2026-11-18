@@ -49,6 +49,7 @@ export async function withTransaction<T>(
   }
 
   let commitAttempted = false;
+  let destroyClient = false;
 
   try {
     await client.query('BEGIN');
@@ -58,12 +59,22 @@ export async function withTransaction<T>(
     await client.query('COMMIT');
     return result;
   } catch (error) {
-    if (!commitAttempted) {
-      await client.query('ROLLBACK').catch(() => undefined);
+    if (commitAttempted) {
+      destroyClient = true;
+    } else {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        destroyClient = true;
+      }
     }
     throw asDomainError(error);
   } finally {
-    client.release();
+    if (destroyClient) {
+      client.release(true);
+    } else {
+      client.release();
+    }
   }
 }
 

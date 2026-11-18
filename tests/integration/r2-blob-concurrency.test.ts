@@ -11,6 +11,8 @@ import {
   PostgresR2BlobStore,
   blobKeyFor,
   blobLockKey,
+  createPool,
+  loadDatabaseConfig,
   resolveLeaseQueueConfig,
   stagingKeyFor,
   systemClock,
@@ -18,6 +20,7 @@ import {
   type R2ObjectBodyPort,
   type R2PutOptionsPort,
 } from '@ember/postgres';
+import { withTransaction } from '../../packages/postgres/src/repositories/support.js';
 import { executePythonAgentRun } from '../../apps/worker/src/b3/python-agent-executor.js';
 import type { WorkerLogger } from '../../apps/worker/src/logger.js';
 import { createTestDatabase, type TestDatabase } from './support/database.js';
@@ -1232,5 +1235,164 @@ describe('PG17 R2 lock-held write/delete concurrency, migration 0023, and aggreg
     expect(rollbackTxCount).toBe(1);
     expect(bucket.objects.size).toBe(2);
     expect(deletedKeys).toHaveLength(2);
+  });
+
+  it('destroys pooled PG17 client when COMMIT fails before reaching PostgreSQL so subsequent transactions cannot commit previous uncommitted writes', async () => {
+    const tenant = await createTenantFixture();
+    const auth = {
+      tenantId: tenant.tenantId,
+      principalId: tenant.principalId,
+      policyVersion: 1,
+    };
+    const bucket = new InstrumentedR2Bucket();
+
+    const singleConnPool = createPool({
+      ...loadDatabaseConfig({ DATABASE_URL: process.env.TEST_DATABASE_URL! }),
+      maxConnections: 1,
+      searchPath: db.schema,
+    });
+
+    try {
+      const pids: number[] = [];
+      const releaseArgs: Array<Error | boolean | undefined> = [];
+      let txCount = 0;
+
+      // Wrap single-connection pool (max=1) and inject a client-side failure BEFORE `COMMIT` is
+      // sent to PostgreSQL on TX #1 while the PG17 connection itself remains open and usable.
+      const wrappedSinglePool = {
+        query: (...args: unknown[]) =>
+          (singleConnPool.query as (...a: unknown[]) => unknown)(...args),
+        connect: async () => {
+          txCount += 1;
+          const currentTx = txCount;
+          const client = await singleConnPool.connect();
+          const rawQuery = client.query.bind(client) as (
+            sql: string,
+            params?: unknown[],
+          ) => Promise<{ readonly rows: Array<Record<string, unknown>> }>;
+          const pidResult = await rawQuery('SELECT pg_backend_pid() AS pid');
+          pids.push(Number(pidResult.rows[0]?.pid));
+
+          return {
+            query: async (...args: unknown[]) => {
+              const sql = typeof args[0] === 'string' ? args[0] : '';
+              if (currentTx === 1 && sql === 'COMMIT') {
+                // Fail BEFORE sending COMMIT to PG17 while the session has an open uncommitted TX.
+                throw new Error('simulated client error before COMMIT reached PostgreSQL');
+              }
+              return (rawQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+            },
+            release: (err?: Error | boolean) => {
+              releaseArgs.push(err);
+              client.release(err);
+            },
+          };
+        },
+      } as unknown as typeof db.pool;
+
+      const repo = new PostgresB3StagedUploadRepository(wrappedSinglePool, { r2Bucket: bucket });
+
+      // 1. TX #1 fails before COMMIT reaches PG17 -> client must be destroyed via release(true),
+      //    so PG17 aborts the open transaction and TX #2 (confirmation) opens a fresh backend pid,
+      //    confirms absence, and cleans up R2.
+      await expect(
+        repo.stageUpload(auth, {
+          filename: 'aborted-before-commit.txt',
+          mediaType: 'text/plain',
+          bytes: new TextEncoder().encode('must-never-commit-later'),
+        }),
+      ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+      expect(txCount).toBe(2);
+      expect(releaseArgs).toEqual([true, undefined]);
+      expect(pids).toHaveLength(2);
+      expect(pids[1]).not.toBe(pids[0]);
+      expect(bucket.objects.size).toBe(0);
+
+      // 2. A subsequent normal transaction on the same max=1 pool commits cleanly and must NOT
+      //    accidentally commit TX #1's previous uncommitted row.
+      const cleanReceipt = await repo.stageUpload(auth, {
+        filename: 'subsequent-clean.txt',
+        mediaType: 'text/plain',
+        bytes: new TextEncoder().encode('clean-committed-payload'),
+      });
+      expect(cleanReceipt.filename).toBe('subsequent-clean.txt');
+      expect(bucket.objects.size).toBe(1);
+
+      const leakedRows = await db.observerPool.query(
+        `SELECT id FROM user_staged_uploads WHERE tenant_id = $1::uuid AND filename = 'aborted-before-commit.txt'`,
+        [tenant.tenantId],
+      );
+      expect(leakedRows.rowCount).toBe(0);
+
+      // 3. Direct withTransaction coverage: when ROLLBACK also fails on an open usable connection,
+      //    release(true) destroys the client so the next withTransaction on max=1 cannot commit it.
+      const directPids: number[] = [];
+      const directReleases: Array<Error | boolean | undefined> = [];
+      let directTx = 0;
+      const directWrappedPool = {
+        connect: async () => {
+          directTx += 1;
+          const currentDirectTx = directTx;
+          const client = await singleConnPool.connect();
+          const rawQuery = client.query.bind(client) as (
+            sql: string,
+            params?: unknown[],
+          ) => Promise<{ readonly rows: Array<Record<string, unknown>> }>;
+          const pidResult = await rawQuery('SELECT pg_backend_pid() AS pid');
+          directPids.push(Number(pidResult.rows[0]?.pid));
+
+          return {
+            query: async (...args: unknown[]) => {
+              const sql = typeof args[0] === 'string' ? args[0] : '';
+              if (currentDirectTx === 1 && sql === 'ROLLBACK') {
+                throw new Error('simulated ROLLBACK transport failure');
+              }
+              return (rawQuery as (...a: unknown[]) => Promise<unknown>)(...args);
+            },
+            release: (err?: Error | boolean) => {
+              directReleases.push(err);
+              client.release(err);
+            },
+          };
+        },
+      } as unknown as typeof db.pool;
+
+      const leakedUploadId = randomUUID();
+      await expect(
+        withTransaction(directWrappedPool, async (client) => {
+          await client.query(
+            `INSERT INTO user_staged_uploads (
+               id, tenant_id, principal_id, filename, media_type, sha256, size, storage_backend, bytes, status, expires_at
+             )
+             VALUES ($1::uuid, $2::uuid, $3::uuid, 'rollback-fail.txt', 'text/plain', $4, 4, 'postgres', $5, 'unbound', clock_timestamp() + interval '1 hour')`,
+            [
+              leakedUploadId,
+              tenant.tenantId,
+              tenant.principalId,
+              sha256Of(new Uint8Array([1, 2, 3, 4])),
+              new Uint8Array([1, 2, 3, 4]),
+            ],
+          );
+          throw new Error('force rollback');
+        }),
+      ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+      const cleanDirectResult = await withTransaction(directWrappedPool, async (client) => {
+        const res = await client.query<{ readonly ok: number }>('SELECT 1 AS ok');
+        return res.rows[0]?.ok;
+      });
+      expect(cleanDirectResult).toBe(1);
+      expect(directReleases).toEqual([true, undefined]);
+      expect(directPids[1]).not.toBe(directPids[0]);
+
+      const leakedDirectRows = await db.observerPool.query(
+        `SELECT id FROM user_staged_uploads WHERE tenant_id = $1::uuid AND id = $2::uuid`,
+        [tenant.tenantId, leakedUploadId],
+      );
+      expect(leakedDirectRows.rowCount).toBe(0);
+    } finally {
+      await singleConnPool.end();
+    }
   });
 });

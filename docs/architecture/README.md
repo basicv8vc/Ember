@@ -10,6 +10,10 @@
 | [Architecture RFC v0.1](./Personal_Agent_Platform_Architecture_RFC_v0.1.md)                                 | 历史 Draft                                                       | 早期 Always-on Agent、按需 Sandbox 架构探索。                                                                                  |
 | [P0-B Minimum Vertical Slice Task Spec](./Personal_Agent_Platform_P0-B_Minimum_Vertical_Slice_Task_Spec.md) | 历史任务书                                                       | 原定本地验证目标；通过情况以对应 Acceptance 文档为准。                                                                         |
 
+## Cloud Runtime V2 方向
+
+- [ADR-0005：Cloudflare-native Cloud Runtime V2](../adr/0005-cloudflare-native-runtime-v2.md)：合并后锁定长期技术方向与 V1 防腐纪律；不授权迁移或 PoC，不覆盖 V1 已批准契约。
+
 ## 决策权威和阅读顺序
 
 1. 对具体事项，优先遵守 `docs/adr/` 中明确标记 **Accepted** 的决策：

@@ -1,13 +1,27 @@
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { DomainError, type LeasedRun } from '@ember/domain';
-import type { B1TurnDispatchEvent } from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
+import {
+  PostgresB1TurnDispatchOutboxRepository,
+  type B1TurnDispatchEvent,
+} from '../../packages/postgres/src/repositories/b1-turn-dispatch-outbox.js';
+import { PostgresLeaseQueue } from '../../packages/postgres/src/lease-queue/postgres-lease-queue.js';
+import {
+  PostgresB3StagedUploadRepository,
+  PostgresByteaBlobStore,
+} from '@ember/postgres/b3-worker';
 import {
   isAuthorizedCloudModelTurn,
   isCloudModelConversationAuthorized,
   isCloudModelTenantAuthorized,
   resolveCloudRuntimeModelConfig,
 } from '../../apps/cloud-async-runtime/src/config.js';
-import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
+import cloudAsyncRuntime, {
+  MAINTENANCE_GC_CRON,
+  RECOVERY_RELAY_CRON,
+  createCloudAsyncRuntime,
+} from '../../apps/cloud-async-runtime/src/index.js';
 import { createNotesTaskLeaseQueue } from '../../apps/cloud-async-runtime/src/runtime.js';
 import {
   consumeTaskDispatchMessage,
@@ -165,6 +179,151 @@ describe('Cloud Async Runtime dispatch', () => {
       );
     } finally {
       warn.mockRestore();
+    }
+  });
+
+  it('keeps Wrangler cron triggers low-frequency and free of per-minute polling', () => {
+    const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+    for (const relPath of [
+      'apps/cloud-async-runtime/wrangler.jsonc',
+      'apps/cloud-async-runtime/wrangler.staging.jsonc',
+    ]) {
+      const raw = readFileSync(`${repoRoot}${relPath}`, 'utf8');
+      // Strip trailing commas before closing braces/brackets so JSON.parse accepts valid JSONC.
+      const normalized = raw.replace(/,\s*([}\]])/g, '$1');
+      const parsed = JSON.parse(normalized) as {
+        readonly triggers?: { readonly crons?: readonly string[] };
+      };
+      const crons = parsed.triggers?.crons ?? [];
+      expect(crons, relPath).not.toContain('* * * * *');
+      expect(crons, relPath).toEqual([RECOVERY_RELAY_CRON, MAINTENANCE_GC_CRON]);
+    }
+  });
+
+  it('avoids PostgreSQL access for empty/unexpected queues and disabled/refused recovery ticks', async () => {
+    const createPoolSpy = vi.fn(() => {
+      throw new Error('unexpected DB pool creation');
+    });
+    const worker = createCloudAsyncRuntime({ createPool: createPoolSpy });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    const runScheduled = (cron: string, envOverrides: Record<string, unknown> = {}) => {
+      let pending: Promise<unknown> | undefined;
+      worker.scheduled(
+        { cron, scheduledTime: Date.now() },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+          ...envOverrides,
+        },
+        {
+          waitUntil(promise) {
+            pending = promise;
+          },
+        },
+      );
+      if (pending === undefined) throw new Error('expected scheduled work promise');
+      return pending;
+    };
+
+    try {
+      await worker.queue(
+        { queue: 'ember-staging-assistant-turns', messages: [] },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+        },
+      );
+      const unexpectedMessage = new Message();
+      await worker.queue(
+        { queue: 'ember-unknown-queue', messages: [unexpectedMessage] },
+        {
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+          EMBER_ENV: 'staging',
+          EMBER_MODEL_EXECUTION: 'disabled',
+        },
+      );
+      expect(unexpectedMessage.ack).toHaveBeenCalledTimes(1);
+
+      await runScheduled(RECOVERY_RELAY_CRON, { EMBER_MODEL_EXECUTION: 'disabled' });
+      await runScheduled(RECOVERY_RELAY_CRON, { EMBER_MODEL_EXECUTION: 'fake' });
+
+      expect(createPoolSpy).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('dispatches recovery relay and maintenance GC crons exclusively by schedule expression', async () => {
+    const fakePool = {
+      query: vi.fn().mockResolvedValue({ rows: [], rowCount: 0 }),
+      connect: vi.fn(),
+      end: vi.fn().mockResolvedValue(undefined),
+    };
+    const createPoolSpy = vi.fn(() => fakePool as never);
+    const worker = createCloudAsyncRuntime({ createPool: createPoolSpy });
+    const claimDueSpy = vi
+      .spyOn(PostgresB1TurnDispatchOutboxRepository.prototype, 'claimDue')
+      .mockResolvedValue([]);
+    const reapSpy = vi.spyOn(PostgresLeaseQueue.prototype, 'reapExpired').mockResolvedValue(0);
+    const uploadGcSpy = vi
+      .spyOn(PostgresB3StagedUploadRepository.prototype, 'sweepExpiredUnboundUploads')
+      .mockResolvedValue({ removed: 0 });
+    const blobGcSpy = vi
+      .spyOn(PostgresByteaBlobStore.prototype, 'sweepOrphans')
+      .mockResolvedValue({ scanned: 0, removedStaged: 0, removedBlobs: 0, retained: 0 });
+
+    const runScheduled = (cron: string) => {
+      let pending: Promise<unknown> | undefined;
+      worker.scheduled(
+        { cron, scheduledTime: Date.now() },
+        {
+          ...stagingAlphaEnv(),
+          EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants',
+          HYPERDRIVE: { connectionString: 'postgresql://127.0.0.1/unused' },
+          TURN_DISPATCH_QUEUE: { send: vi.fn().mockResolvedValue(undefined) },
+        },
+        {
+          waitUntil(promise) {
+            pending = promise;
+          },
+        },
+      );
+      if (pending === undefined) throw new Error('expected scheduled work promise');
+      return pending;
+    };
+
+    try {
+      await runScheduled(RECOVERY_RELAY_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).toHaveBeenCalledTimes(1);
+      expect(reapSpy).toHaveBeenCalledTimes(1);
+      expect(uploadGcSpy).not.toHaveBeenCalled();
+      expect(blobGcSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+
+      claimDueSpy.mockClear();
+      reapSpy.mockClear();
+      createPoolSpy.mockClear();
+      fakePool.end.mockClear();
+
+      await runScheduled(MAINTENANCE_GC_CRON);
+      expect(createPoolSpy).toHaveBeenCalledTimes(1);
+      expect(uploadGcSpy).toHaveBeenCalledTimes(1);
+      expect(blobGcSpy).toHaveBeenCalledTimes(1);
+      expect(claimDueSpy).not.toHaveBeenCalled();
+      expect(reapSpy).not.toHaveBeenCalled();
+      expect(fakePool.end).toHaveBeenCalledTimes(1);
+    } finally {
+      blobGcSpy.mockRestore();
+      uploadGcSpy.mockRestore();
+      reapSpy.mockRestore();
+      claimDueSpy.mockRestore();
     }
   });
 

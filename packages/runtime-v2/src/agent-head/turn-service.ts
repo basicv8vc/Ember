@@ -49,6 +49,7 @@ import type { V2RecoveryCoverageRow } from '../recovery/schema.js';
 import type { DurableObjectStorageLike } from '../storage.js';
 import {
   checkLocalBudgetCapacitySync,
+  enqueueBudgetReleaseCompensationSync,
   findLocalUnresolvedIncidentSync,
   reserveLocalAttemptSync,
   settleLocalAttemptAndEnqueueSync,
@@ -681,31 +682,17 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           const hasValidCoverage = canConfirmOnAbort || this.isCoverageValidAtSync(compBound);
 
           if (hasValidCoverage) {
-            this.deps.eventCoordinator.enqueueDurableOutboxSync({
-              outboxId: `budget_sync:${stage1.operationId}:rev:0`,
-              entityKind: 'budget_sync',
-              entityId: stage1.operationId,
-              queueName: null,
-              payloadJson: JSON.stringify({
-                schemaVersion: 1,
-                tenantId: req.scope.tenantId,
-                principalId: req.scope.principalId,
-                agentId: req.scope.agentId,
-                utcDay: stage1.utcDay,
-                globalGrantId,
-                operationId: stage1.operationId,
-                settlementRevision: 0,
-                state: 'released',
-                reservedMicroUsd: estimatedMicroUsd,
-                chargeMicroUsd: 0,
-                observedCostMicroUsd: null,
-                overageMicroUsd: 0,
-                openIncidentReason: null,
-              }),
+            enqueueBudgetReleaseCompensationSync({
+              coordinator: this.deps.eventCoordinator,
+              tenantId: req.scope.tenantId,
+              principalId: req.scope.principalId,
+              agentId: req.scope.agentId,
+              utcDay: stage1.utcDay,
+              globalGrantId,
               operationId: stage1.operationId,
-              revision: 0,
+              reservedMicroUsd: estimatedMicroUsd,
               fenceEpoch: 1,
-              nextAttemptAtMs: commitNow,
+              nowMs: commitNow,
             });
             alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(commitNow);
             durableComp = true;
@@ -1519,6 +1506,10 @@ export class AgentHeadTurnService implements AgentHeadRpc {
     }
 
     let preparedDelegation: PreparedDelegationPayload | null = null;
+    let delegationRegistration: {
+      readonly generation: number;
+      readonly actualRecoveryAtMs: number;
+    } | null = null;
     if (req.result.status === 'completed' && req.result.delegation !== undefined) {
       preparedDelegation = await this.prepareDelegationCommand(
         req.scope.tenantId,
@@ -1540,15 +1531,10 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           targetAtMs: delegationPlan.targetAtMs,
           requiredDiscoveryMs: delegationBound,
         });
-        this.deps.storage.transactionSync(() => {
-          this.deps.recoveryAdmission.confirmCoverageSync({
-            generation: assured.activeGeneration,
-            actualRecoveryAtMs: assured.actualRecoveryAtMs,
-            applied: true,
-            earliestRequiredRecoveryMs: delegationBound,
-            nowMs: this.deps.nowMs(),
-          });
-        });
+        delegationRegistration = {
+          generation: assured.activeGeneration,
+          actualRecoveryAtMs: assured.actualRecoveryAtMs,
+        };
       }
     }
 
@@ -1807,6 +1793,26 @@ export class AgentHeadTurnService implements AgentHeadRpc {
 
       let delegatedTaskId: Id | null = null;
       if (preparedDelegation !== null) {
+        const taskCoverageBound = nowMs + V2_TIMING_LIMITS.d1RecoveryGraceMs;
+        let delegationCovered = false;
+        if (delegationRegistration !== null) {
+          delegationCovered = this.deps.recoveryAdmission.confirmCoverageSync({
+            generation: delegationRegistration.generation,
+            actualRecoveryAtMs: delegationRegistration.actualRecoveryAtMs,
+            applied: true,
+            earliestRequiredRecoveryMs: taskCoverageBound,
+            nowMs,
+          });
+        }
+        if (!delegationCovered) {
+          delegationCovered = this.isCoverageValidAtSync(taskCoverageBound);
+        }
+        if (!delegationCovered) {
+          throw new DomainError(
+            'DB_UNAVAILABLE',
+            'recovery coverage lost or insufficient for delegated task',
+          );
+        }
         delegatedTaskId = this.createOrReuseDelegatedTaskSync(
           req.scope.tenantId,
           req.scope.agentId,

@@ -3,6 +3,7 @@ import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants
 import {
   computePreDeadlineRetryAtMs,
   validateDispatchEnvelope,
+  type BudgetSyncSettlementState,
   type V2DispatchEnvelope,
 } from '../recovery/envelope.js';
 import type {
@@ -21,6 +22,7 @@ import {
   assertHeadScopeSync,
   earliestBusinessAlarmAtMsSync,
   getHeadMetaSync,
+  getLatestAttemptForSubjectSync,
   getLatestRunForTaskSync,
   getTaskRowSync,
   getTurnRowSync,
@@ -1053,6 +1055,11 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
 
         const context = readRecentTurnContextSync(this.deps.storage.sql, turn.conversation_id);
+        const latestAttempt = getLatestAttemptForSubjectSync(
+          this.deps.storage.sql,
+          'turn',
+          turn.id,
+        );
         return {
           res: {
             kind: 'claimed' as const,
@@ -1061,9 +1068,15 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             leaseEpoch: nextEpoch,
             leaseExpiresAtMs,
             contextJson: JSON.stringify({
+              entityKind: 'turn' as const,
+              entityId: turn.id,
+              operationId: latestAttempt?.operation_id ?? turn.id,
+              ...(latestAttempt !== null ? { attemptId: String(latestAttempt.attempt_no) } : {}),
+              sendStartedAtMs: latestAttempt?.send_started_at_ms ?? null,
+              providerJobHandle: turn.provider_job_handle,
+              interactiveHandoff: turn.handoff_reason !== null,
               turnId: turn.id,
               conversationId: turn.conversation_id,
-              providerJobHandle: turn.provider_job_handle,
               deadlineAtMs: turn.deadline_at_ms,
               utcDay: toUtcDayString(nowMs),
               context,
@@ -1128,6 +1141,11 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       );
       this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+      const latestTaskAttempt = getLatestAttemptForSubjectSync(
+        this.deps.storage.sql,
+        'task',
+        task.id,
+      );
 
       return {
         res: {
@@ -1137,12 +1155,19 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           leaseEpoch: nextEpoch,
           leaseExpiresAtMs,
           contextJson: JSON.stringify({
+            entityKind: 'task' as const,
+            entityId: task.id,
+            operationId: latestTaskAttempt?.operation_id ?? `${task.id}:run:${runId}`,
+            ...(latestTaskAttempt !== null
+              ? { attemptId: String(latestTaskAttempt.attempt_no) }
+              : {}),
+            sendStartedAtMs: latestTaskAttempt?.send_started_at_ms ?? null,
+            providerJobHandle: task.provider_job_handle,
             taskId: task.id,
             runId,
             attempt: nextAttempt,
             kind: task.kind,
             inputJson: task.input_json,
-            providerJobHandle: task.provider_job_handle,
             deadlineAtMs: task.deadline_at_ms,
           }),
         },
@@ -1192,58 +1217,71 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           readonly modelLabel?: string;
           readonly simulated?: boolean;
           readonly failureReason?: 'timeout' | 'internal_error';
+          readonly settlement?: {
+            readonly state: BudgetSyncSettlementState;
+            readonly outcomeCode: string;
+            readonly observedCostMicroUsd?: number | null;
+            readonly inputTokens?: number | null;
+            readonly outputTokens?: number | null;
+          };
         };
-        if (
+
+        if (payload?.settlement !== undefined) {
+          const latestAttempt = getLatestAttemptForSubjectSync(
+            this.deps.storage.sql,
+            'turn',
+            turn.id,
+          );
+          if (latestAttempt !== null) {
+            settleLocalAttemptAndEnqueueSync({
+              sql: this.deps.storage.sql,
+              coordinator: this.deps.eventCoordinator,
+              tenantId: cmd.tenantId,
+              agentId: cmd.agentId,
+              attempt: latestAttempt,
+              requestedState: payload.settlement.state,
+              outcomeCode: payload.settlement.outcomeCode,
+              observedCostMicroUsd: payload.settlement.observedCostMicroUsd ?? null,
+              inputTokens: payload.settlement.inputTokens ?? null,
+              outputTokens: payload.settlement.outputTokens ?? null,
+              nowMs,
+              ...(this.deps.localCeilings !== undefined
+                ? { ceilings: this.deps.localCeilings }
+                : {}),
+              idFactory: this.newId,
+            });
+          }
+        }
+
+        const completedText =
           payload?.status === 'completed' &&
           typeof payload.text === 'string' &&
           payload.text.length > 0
-        ) {
-          const { messageId } = insertEmberMessageSync({
-            sql: this.deps.storage.sql,
-            messageId: this.newId(),
-            conversationId: turn.conversation_id,
-            text: payload.text,
-            modelLabel: payload.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-            simulated: payload.simulated ?? true,
-            nowMs,
-          });
-          this.deps.storage.sql.exec(
-            `UPDATE assistant_turns
-                SET status = 'completed',
-                    response_message_id = ?,
-                    lease_owner = NULL,
-                    lease_expires_at_ms = NULL,
-                    updated_at_ms = ?
-              WHERE id = ?`,
-            messageId,
-            nowMs,
-            turn.id,
-          );
-          this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-          this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-          const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-          return { accepted: true, alarmAtMs };
-        }
-
+            ? payload.text
+            : null;
+        const isCompleted = completedText !== null;
         const { messageId } = insertEmberMessageSync({
           sql: this.deps.storage.sql,
           messageId: this.newId(),
           conversationId: turn.conversation_id,
-          text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
-          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-          simulated: true,
+          text: completedText ?? V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
+          modelLabel: isCompleted
+            ? (payload.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel)
+            : V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: isCompleted ? (payload.simulated ?? true) : true,
           nowMs,
         });
         this.deps.storage.sql.exec(
           `UPDATE assistant_turns
-              SET status = 'failed',
+              SET status = ?,
                   failure_reason = ?,
                   response_message_id = ?,
                   lease_owner = NULL,
                   lease_expires_at_ms = NULL,
                   updated_at_ms = ?
             WHERE id = ?`,
-          payload?.failureReason === 'timeout' ? 'timeout' : 'internal_error',
+          isCompleted ? 'completed' : 'failed',
+          isCompleted ? null : payload?.failureReason === 'timeout' ? 'timeout' : 'internal_error',
           messageId,
           nowMs,
           turn.id,

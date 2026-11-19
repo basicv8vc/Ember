@@ -464,7 +464,13 @@ function createTestBRuntimeSeam(deps: {
   tenantId: string;
   agentId: string;
   nowMs: () => number;
-  getCore: () => AgentHeadCore;
+  getCore: () => Pick<
+    AgentHeadCore,
+    | 'earliestRequiredDiscoveryAtMsSync'
+    | 'listDueBusinessActionsSync'
+    | 'convergeDueBusinessItemSync'
+    | 'createGlobalBudgetSettlePort'
+  >;
 }) {
   const { doStorage, tenantId, agentId, nowMs, getCore } = deps;
   const sql = doStorage.storage.sql;
@@ -1778,6 +1784,193 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     });
     expect(retirePlan.action).toBe('retire');
     expect(h.doStorage.getAlarmSync()).toBeNull();
+  });
+
+  it('B4/F seam: supports single-step eventRuntimeFactory, exposes DurableExecutionClaimContext fields, and enforces delegation coverage atomically', async () => {
+    const clock = { ms: 1_700_100_000_000 };
+    const nowMs = () => clock.ms;
+    const doStorage = createInstrumentedDoStorage();
+    const recoveryRegistry = new FakeRecoveryRegistry();
+    const globalBudget = new FakeGlobalBudgetAuthority(nowMs);
+    const tenantId = randomUUID();
+    const principalId = randomUUID();
+    const agentId = randomUUID();
+    const conversationId = randomUUID();
+
+    let seamRef!: ReturnType<typeof createTestBRuntimeSeam>;
+    const core = new AgentHeadCore({
+      storage: doStorage.storage,
+      tenantId,
+      agentId,
+      recoveryRegistry,
+      globalBudget,
+      nowMs,
+      eventRuntimeFactory: (business) => {
+        seamRef = createTestBRuntimeSeam({
+          doStorage,
+          tenantId,
+          agentId,
+          nowMs,
+          getCore: () => ({
+            earliestRequiredDiscoveryAtMsSync: (ts) =>
+              business.earliestRequiredDiscoveryAtMsSync(ts),
+            listDueBusinessActionsSync: (ts, limit) =>
+              business.listDueBusinessActionsSync(ts, limit),
+            convergeDueBusinessItemSync: (kind, id, ts) =>
+              business.convergeDueBusinessItemSync(kind, id, ts),
+            createGlobalBudgetSettlePort: () => core.createGlobalBudgetSettlePort(),
+          }),
+        });
+        return seamRef;
+      },
+    });
+    core.bootstrapHead({ conversationId, policyVersion: 1 });
+
+    // 1. Hand off an in-flight paid turn and verify B4 DurableExecutionClaimContext fields
+    const prep = await core.prepareTurn({
+      scope: { tenantId, principalId, agentId, policyVersion: 1, requestId: randomUUID() },
+      conversationId,
+      request: { client_submission_id: randomUUID(), text: 'b4 handoff', transcript_epoch: 0 },
+      workerId: 'edge-sse',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 1_200,
+      },
+    });
+    expect(prep.kind).toBe('prepared');
+    if (prep.kind !== 'prepared') return;
+
+    const sent = await core.markAttemptSent({
+      scope: { tenantId, agentId },
+      subjectType: 'turn',
+      subjectId: prep.turnId,
+      attemptNo: 1,
+      operationId: prep.operationId,
+      leaseEpoch: prep.leaseEpoch,
+      leaseOwner: 'edge-sse',
+    });
+    expect(sent.authorized).toBe(true);
+
+    const handedOff = await core.handoffTurnToDurable({
+      scope: { tenantId, agentId },
+      conversationId,
+      turnId: prep.turnId,
+      leaseEpoch: prep.leaseEpoch,
+      leaseOwner: 'edge-sse',
+      reason: 'client_disconnect_handoff',
+      providerJobHandle: 'job-b4-1',
+    });
+    expect(handedOff.outcome).toBe('handed_off');
+    if (handedOff.outcome !== 'handed_off') return;
+
+    const claim = await core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `handoff:${prep.turnId}:epoch:${handedOff.nextLeaseEpoch}`,
+        tenantId,
+        agentId,
+        entityKind: 'handoff',
+        entityId: prep.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: handedOff.nextLeaseEpoch,
+      },
+      workerId: 'durable-worker-1',
+      leaseMs: 60_000,
+    });
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') return;
+    const claimCtx = JSON.parse(claim.contextJson) as Record<string, unknown>;
+    expect(claimCtx).toMatchObject({
+      entityKind: 'turn',
+      entityId: prep.turnId,
+      operationId: prep.operationId,
+      attemptId: '1',
+      providerJobHandle: 'job-b4-1',
+      interactiveHandoff: true,
+    });
+    expect(typeof claimCtx.sendStartedAtMs).toBe('number');
+
+    const durableCommit = await core.commitDurableResult({
+      tenantId,
+      agentId,
+      entityType: 'turn',
+      entityId: prep.turnId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'durable-worker-1',
+      outcome: {
+        status: 'completed',
+        text: 'Recovered durable answer',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+        settlement: {
+          state: 'settled',
+          outcomeCode: 'ok',
+          observedCostMicroUsd: 900,
+          inputTokens: 50,
+          outputTokens: 120,
+        },
+      },
+    });
+    expect(durableCommit.accepted).toBe(true);
+    expect(globalBudget.consumedMicroUsd).toBe(900);
+
+    // 2. Delegation in commitTurn fails closed with DB_UNAVAILABLE if coverage is lost before commit
+    const prepDel = await core.prepareTurn({
+      scope: { tenantId, principalId, agentId, policyVersion: 1, requestId: randomUUID() },
+      conversationId,
+      request: { client_submission_id: randomUUID(), text: 'delegate fail', transcript_epoch: 0 },
+      workerId: 'edge-sse-2',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+    });
+    if (prepDel.kind !== 'prepared') throw new Error('expected prepared');
+    doStorage.db
+      .prepare(
+        "UPDATE v2_recovery_coverage SET coverage_state = 'uncovered', covered_recovery_at_ms = NULL WHERE id = 1",
+      )
+      .run();
+    recoveryRegistry.mode = 'unavailable';
+
+    await expect(
+      core.commitTurn({
+        scope: { tenantId, agentId },
+        conversationId,
+        turnId: prepDel.turnId,
+        leaseEpoch: prepDel.leaseEpoch,
+        leaseOwner: 'edge-sse-2',
+        attemptNo: 1,
+        operationId: prepDel.operationId,
+        settlement: { state: 'released', outcomeCode: 'ok' },
+        result: {
+          status: 'completed',
+          text: 'Delegating...',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+          delegation: {
+            toolName: 'delegate_notes_action_items',
+            title: 'Should fail closed',
+            input: { notes: 'Must not commit without coverage' },
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+    const taskCount = doStorage.db.prepare('SELECT COUNT(*) AS c FROM tasks').get() as {
+      c: number;
+    };
+    expect(taskCount.c).toBe(0);
+    // Keep seamRef referenced for closure lifecycle verification
+    expect(seamRef).toBeDefined();
   });
 });
 

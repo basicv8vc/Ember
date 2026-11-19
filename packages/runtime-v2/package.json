@@ -9,6 +9,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./global-budget-do": {
+      "types": "./dist/global-budget/worker.d.ts",
+      "default": "./dist/global-budget/worker.js"
     }
   },
   "files": [
@@ -17,6 +21,9 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261107.1"
   },
   "dependencies": {
     "@ember/contracts": "workspace:*",

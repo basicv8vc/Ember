@@ -21,13 +21,13 @@ The main reasons for selecting Neon as the Alpha database were:
 
 ## 1. Decision background and timeline
 
-| Date | Event |
-| --- | --- |
-| 2026-11-07 | Issue #132 initiated the Neon/Supabase comparison; one Free test project per provider was authorized, using synthetic data only. Existing PostgreSQL business and transaction contracts had to be preserved, without migrating to D1. |
-| 2026-11-08 | PR #135 summarized P0–P4 measurements and recommended Neon for Alpha. PR #139 recorded Neon as the CTO-approved provider and retained follow-up diagnostic work. |
-| 2026-11 (subsequently) | Neon became part of the shared Ember Cloud environment, serving the API and Async Runtime through Hyperdrive. See [Ember Cloud](../cloud-staging.md) for the deployment path. |
-| 2026-11-18 | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) recorded the Neon compute warning and the Cloudflare-native V2 direction, requiring measurement and mitigation of unnecessary V1 database wakeups first. |
-| 2026-11-19 | The user provided an email warning of an upcoming inactivity pause for the Supabase Free experiment. This was not an Ember Cloud database outage notice. |
+| Date                   | Event                                                                                                                                                                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-11-07             | Issue #132 initiated the Neon/Supabase comparison; one Free test project per provider was authorized, using synthetic data only. Existing PostgreSQL business and transaction contracts had to be preserved, without migrating to D1. |
+| 2026-11-08             | PR #135 summarized P0–P4 measurements and recommended Neon for Alpha. PR #139 recorded Neon as the CTO-approved provider and retained follow-up diagnostic work.                                                                      |
+| 2026-11 (subsequently) | Neon became part of the shared Ember Cloud environment, serving the API and Async Runtime through Hyperdrive. See [Ember Cloud](../cloud-staging.md) for the deployment path.                                                         |
+| 2026-11-18             | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) recorded the Neon compute warning and the Cloudflare-native V2 direction, requiring measurement and mitigation of unnecessary V1 database wakeups first.                      |
+| 2026-11-19             | The user provided an email warning of an upcoming inactivity pause for the Supabase Free experiment. This was not an Ember Cloud database outage notice.                                                                              |
 
 The original comparison report remains Draft; its outstanding issues must not be treated as resolved. The actual selection and current deployment are corroborated by the deployment documentation on main and ADR-0005.
 
@@ -35,15 +35,15 @@ The original comparison report remains Draft; its outstanding issues must not be
 
 The established approach was Cloudflare-first and pay-as-you-grow. Managed PostgreSQL had to preserve Ember's existing persistence, tenant isolation, transactions, idempotency, and worker lease semantics.
 
-| Supabase capability | Ember's current approach |
-| --- | --- |
-| Auth | Apple Sign-in + Ember-owned authentication and tenant identity |
-| Data API | Hono API + PostgreSQL repositories |
-| Edge Functions | Cloudflare Workers |
-| Asynchronous tasks | Cloudflare Queues + Async Runtime |
-| Storage | Cloudflare R2 (objects) + PostgreSQL (business state and metadata) |
-| Realtime | Ember-owned API/client state synchronization; no current Supabase dependency |
-| PostgreSQL | Neon + Hyperdrive |
+| Supabase capability | Ember's current approach                                                     |
+| ------------------- | ---------------------------------------------------------------------------- |
+| Auth                | Apple Sign-in + Ember-owned authentication and tenant identity               |
+| Data API            | Hono API + PostgreSQL repositories                                           |
+| Edge Functions      | Cloudflare Workers                                                           |
+| Asynchronous tasks  | Cloudflare Queues + Async Runtime                                            |
+| Storage             | Cloudflare R2 (objects) + PostgreSQL (business state and metadata)           |
+| Realtime            | Ember-owned API/client state synchronization; no current Supabase dependency |
+| PostgreSQL          | Neon + Hyperdrive                                                            |
 
 Database selection therefore prioritizes PostgreSQL compatibility, connection semantics, availability, cost, and recovery. There is no need to pay a fixed platform fee for BaaS features that are not required or introduce a direct dependency between the iOS app and the database API.
 
@@ -51,17 +51,17 @@ Database selection therefore prioritizes PostgreSQL compatibility, connection se
 
 Both experimental databases were located in Singapore for a matched regional comparison, not as a production region decision or a global latency benchmark. The following is historical evidence from PR #135, not a new execution of the tests.
 
-| Item | Neon Free | Supabase Free |
-| --- | --- | --- |
-| PostgreSQL version | 17.11 | 17.11 |
-| Migrations 0001–0017 (PR #138 baseline) | All applied; second run found all already applied; checksums and normalized schema matched local baseline | Same |
-| Core persistence, tenant isolation, idempotency, rollback | Targeted checks passed | Targeted checks passed |
-| Advisory locks | Direct migration lock and Hyperdrive transaction lock passed | Direct migration lock and Hyperdrive transaction lock passed |
-| Hyperdrive Worker | Live calls passed | Live calls passed |
-| Connection failure recovery | Recovered after backend termination in approximately 2.2–2.7 s | Direct connection approximately 2.567 s; next Hyperdrive request approximately 409 ms |
-| Idle/resume | Entered Idle in two controlled observations and automatically resumed on the next request | Five idle origin sessions remained after 11m18s; project pause/resume not verified |
-| Synthetic logical export/restore | Passed | Passed |
-| Hosted load testing | Some concurrency scenarios remained unresolved | Targeted scenarios passed; no production-grade load test |
+| Item                                                      | Neon Free                                                                                                 | Supabase Free                                                                         |
+| --------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| PostgreSQL version                                        | 17.11                                                                                                     | 17.11                                                                                 |
+| Migrations 0001–0017 (PR #138 baseline)                   | All applied; second run found all already applied; checksums and normalized schema matched local baseline | Same                                                                                  |
+| Core persistence, tenant isolation, idempotency, rollback | Targeted checks passed                                                                                    | Targeted checks passed                                                                |
+| Advisory locks                                            | Direct migration lock and Hyperdrive transaction lock passed                                              | Direct migration lock and Hyperdrive transaction lock passed                          |
+| Hyperdrive Worker                                         | Live calls passed                                                                                         | Live calls passed                                                                     |
+| Connection failure recovery                               | Recovered after backend termination in approximately 2.2–2.7 s                                            | Direct connection approximately 2.567 s; next Hyperdrive request approximately 409 ms |
+| Idle/resume                                               | Entered Idle in two controlled observations and automatically resumed on the next request                 | Five idle origin sessions remained after 11m18s; project pause/resume not verified    |
+| Synthetic logical export/restore                          | Passed                                                                                                    | Passed                                                                                |
+| Hosted load testing                                       | Some concurrency scenarios remained unresolved                                                            | Targeted scenarios passed; no production-grade load test                              |
 
 ### Key differentiating evidence: Scale-to-zero
 
@@ -89,13 +89,13 @@ See [PR #135](https://github.com/basicv8vc/Ember/pull/135) and [PR #139](https:/
 
 The following allowances and prices come from the original report dated 2026-11-08. They have not been rechecked for this document and are not commitments about future plans.
 
-| Item | Neon | Supabase |
-| --- | --- | --- |
-| Free database capacity | 1 GB | 500 MB |
-| Free compute | 100 CU-hours/month | Instance model; low activity may trigger a pause |
-| Free transfer | 5 GB public transfer | 5 GB uncached + 5 GB cached egress |
-| Free recovery | 6-hour/1 GB history; one manual snapshot | No automatic project backups |
-| Paid entry | Usage-based Launch: $0.106/CU-hour and $0.35/GB-month at the time | Pro: starting at $25/month at the time |
+| Item                   | Neon                                                              | Supabase                                         |
+| ---------------------- | ----------------------------------------------------------------- | ------------------------------------------------ |
+| Free database capacity | 1 GB                                                              | 500 MB                                           |
+| Free compute           | 100 CU-hours/month                                                | Instance model; low activity may trigger a pause |
+| Free transfer          | 5 GB public transfer                                              | 5 GB uncached + 5 GB cached egress               |
+| Free recovery          | 6-hour/1 GB history; one manual snapshot                          | No automatic project backups                     |
+| Paid entry             | Usage-based Launch: $0.106/CU-hour and $0.35/GB-month at the time | Pro: starting at $25/month at the time           |
 
 Historical Neon Launch example: 0.25 CU for 8 hours per day gives approximately 60 CU-hours per month and $6.36 in compute costs, excluding storage, restore history, and excess transfer. Running continuously for 24 hours per day gives approximately 180 CU-hours and $19.08 in compute costs alone. These are modeled estimates, not observed bills.
 

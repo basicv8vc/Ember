@@ -398,6 +398,7 @@ CREATE TABLE IF NOT EXISTS model_attempts (
   global_grant_id         TEXT,
   global_grant_expires_ms INTEGER,
   global_synced_at_ms     INTEGER,
+  send_authorizing_at_ms  INTEGER, -- durable intent before global send authorization
   send_started_at_ms      INTEGER,
   started_at_ms           INTEGER NOT NULL,
   settled_at_ms           INTEGER,
@@ -481,6 +482,9 @@ CREATE TABLE IF NOT EXISTS v2_recovery_coverage (
   coverage_state         TEXT    NOT NULL DEFAULT 'uncovered'
     CHECK (coverage_state IN ('uncovered', 'registering', 'covered')),
   covered_recovery_at_ms INTEGER,
+  pending_kind           TEXT CHECK (pending_kind IN ('ensure', 'postpone', 'retire')),
+  pending_prev_generation INTEGER,
+  pending_target_at_ms   INTEGER,
   armed_alarm_at_ms      INTEGER,
   alarm_fail_count       INTEGER NOT NULL DEFAULT 0 CHECK (alarm_fail_count >= 0),
   last_d1_sync_at_ms     INTEGER,
@@ -575,7 +579,7 @@ export interface MarkAttemptSentRequest {
 }
 
 export type MarkAttemptSentResult =
-  | { readonly authorized: true; readonly sentAtMs: number }
+  | { readonly authorized: true; readonly sentAtMs: number; readonly startBeforeMs: number }
   | {
       readonly authorized: false;
       readonly reason:
@@ -601,7 +605,7 @@ export interface HandoffTurnRequest {
   readonly turnId: Id;
   readonly leaseEpoch: number;
   readonly leaseOwner: string;
-  readonly reason: 'interactive_deadline_120s' | 'client_disconnect_handoff' | 'tool_delegation';
+  readonly reason: 'interactive_deadline_120s' | 'client_disconnect_handoff' | 'tool_delegation' | 'waituntil_window_handoff';
   readonly providerJobHandle?: string;
   readonly checkpointRef?: string;
 }
@@ -729,31 +733,31 @@ export interface AgentHeadRpc {
    - 校验附件指针有效性，读取最近 `maxContextMessages = 8` 条上下文。
    - 计算所需发现截止时间 `requiredDiscoveryMs = nowMs + leaseMs + 15_000`（Fast Path），读取 `v2_recovery_coverage`：
      - 若 `coverage_state === 'covered' && covered_recovery_at_ms !== null && covered_recovery_at_ms <= requiredDiscoveryMs`：标记 `needsRegistryUpsert = false`（**已覆盖路径零同步 D1 I/O**）。
-     - 否则（`uncovered`、`registering` 或 `requiredDiscoveryMs < covered_recovery_at_ms`）：在**同一 `transactionSync` #1 内**原子推进 `generation = generation + 1`，置 `coverage_state = 'registering'`，获取本次独占的 `intendedGen`（`needsRegistryUpsert = true`），从而保证并发请求绝不会使用同一个 `generation` 写 D1。
+     - 否则（`uncovered`、`registering` 或 `requiredDiscoveryMs < covered_recovery_at_ms`）：在**同一 `transactionSync` #1 内**原子推进 `generation = generation + 1`，置 `coverage_state = 'registering'`，持久化 pending_kind='ensure'、目标时间、旧世代，获取本次独占的 `intendedGen`（`needsRegistryUpsert = true`），从而保证并发请求绝不会使用同一个 `generation` 写 D1。
    - 预先生成唯一 `operationId`（UUIDv4）。
 2. **Stage 2 — 外部权威预注册（仅按需，位于任何 SQLite 事务之外）**:
    - **恢复覆盖登记**: 仅当 `needsRegistryUpsert === true` 时，调用 `RecoveryRegistryPort.upsertCoverage({ tenantId, agentId, generation: intendedGen, recoveryAtMs: requiredDiscoveryMs })`。若 D1 返回 `{ accepted: false, currentGeneration }`（D1 世代超前 DO），DO 通过单次受限快进把本地 `generation` 同步至 `max(generation, currentGeneration) + 1` 并重试一次；若 D1 不可用则 **Fail Closed (`DB_UNAVAILABLE` 503)**，绝不提交未覆盖义务。
    - **全局预算预留**: 仅当 `budgetMode !== 'disabled_echo_only'`（即 `'real'` 与 M1 `'simulated_full_protocol'` 的 Fake Provider 均须执行！）且预留金额 `> 0` 时，调用 `GlobalBudgetAuthority.reserveGlobal(...)`；若超限或存在全局未解决事故，返回 `BUDGET_EXCEEDED` (429)；若不可用，返回 `DB_UNAVAILABLE` (503)。
 3. **Stage 3 — 原子本地提交 (`transactionSync` #2)**:
-   - 重新校验 Stage 1 所有前置条件（`transcript_epoch`、`client_submission_id`、配额、本地预算与 Incidents）以及覆盖条件（若 `needsRegistryUpsert`：要求 `v2_recovery_coverage.generation === intendedGen && coverage_state === 'registering'`，或已被并发完成且 `coverage_state === 'covered' && covered_recovery_at_ms <= requiredDiscoveryMs`；若未需要登记：要求依然满足 `coverage_state === 'covered' && covered_recovery_at_ms <= requiredDiscoveryMs`）。
-   - **Stage 3 交错失败补偿**: 若校验发现已被并发 `clearTranscript` / 并发重放 / Sweeper 失效打断，且 Stage 2 已获取 `globalGrantId`：必须在**本次 `transactionSync` 内**写入一条 `v2_dispatch_outbox` 补偿行（`entity_kind = 'budget_sync'`, `payload_json = { op: 'release', operationId, globalGrantId }`）并重算 Alarm，随后立即异步尝试 `GlobalBudgetAuthority.settleGlobal({ state: 'released', ... })`，再返回 `409` / `replay` / `503`！绝不允许孤儿全局预留泄露。
+   - 重新校验 Stage 1 所有前置条件（`transcript_epoch`、`client_submission_id`、配额、本地预算与 Incidents）以及覆盖条件（若 `needsRegistryUpsert`：要求 `v2_recovery_coverage.generation === intendedGen && coverage_state === 'registering'` 且有同代 D1 成功回执、实际时间覆盖全部现存义务和本次 D(O)，或已被并发完成且 `coverage_state === 'covered' && covered_recovery_at_ms <= requiredDiscoveryMs`；若未需要登记：要求依然满足 `coverage_state === 'covered' && covered_recovery_at_ms <= requiredDiscoveryMs`）。
+   - **Stage 3 交错失败补偿**: 若校验发现已被并发 `clearTranscript` / 并发重放 / Sweeper 失效打断，且 Stage 2 已获取 `globalGrantId`：在已具备有效覆盖且证明仅是本候选未提交预留时，在**本次 `transactionSync` 内**写入一条 `v2_dispatch_outbox` 补偿行（`entity_kind = 'budget_sync'`, `payload_json = { op: 'release', operationId, globalGrantId }`）并重算 Alarm，随后立即异步尝试 `GlobalBudgetAuthority.settleGlobal({ state: 'released', ... })`，再返回 `409` / `replay` / `503`！补偿 Outbox 必须具备已确认独立恢复覆盖；若覆盖已失效，仅可安全尝试按自身未提交 Operation 释放，未知或失败由 Global TTL 保守结转，不能创建新的不可恢复义务。事务应正常返回分类结果后再映射 HTTP 错误，不能抛错回滚已持久化的补偿记录。
    - 校验全部通过后，在同一 `transactionSync` 内：
      - 分配 `sequence = last_sequence + 1`；插入 `user` 消息 + `message_attachments`；
      - 创建 `assistant_turns`（`status = 'running'`，`lease_epoch = 1`，`lease_owner = workerId`，`lease_expires_at_ms = nowMs + leaseMs`，`interactive_deadline_ms = nowMs + interactiveDeadlineMs`，`deadline_at_ms = nowMs + turnDeadlineMs`）；
      - 写入 `model_attempts`（`attempt_no = 1`，`state = 'reserved'`，**`send_started_at_ms = NULL`**，`global_grant_id`）；
      - 更新 `agent_spend_days`；
      - 写入 `v2_dispatch_outbox`（`next_attempt_at_ms = lease_expires_at_ms + 5_000`）；
-     - 若本次以 `intendedGen` 完成登记，将 `v2_recovery_coverage` 推进为 `coverage_state = 'covered'`、`covered_recovery_at_ms = MIN(existing, requiredDiscoveryMs)`，并按第 4.2 节重算重装 Alarm。
+     - 若本次以 `intendedGen` 完成登记，将 `v2_recovery_coverage` 推进为 `coverage_state = 'covered'`、`covered_recovery_at_ms = actualRecoveryAtMs`（权威实际值而非本地推算），确认后清除 pending，并按第 4.2 节重算重装 Alarm。
 
 #### (2) `markAttemptSent` 单次发送授权与有效租约检查（第 2 次 DO RPC）
 
-每次出网调用模型前（无论是 Fast Path 还是 Durable Execution Worker），执行器**必须**先调用 `AgentHeadDO.markAttemptSent`：
+每次出网调用模型前（Fast/Durable），必须调用 markAttemptSent。先在本地事务验证条件并以 CAS 写入唯一 send_authorizing_at_ms 意图；计价真实/Fake 在事务外调用 GlobalBudgetAuthority.authorizeGlobalSend（匹配绑定、未过期未结算 Grant、全局 Halt、一次性授权），再在最终本地事务重验全部条件及当前意图。响应未知不重复发放授权、不自动退款；disabled_echo_only 不能调用真实供应商。最终 CAS：
 
 - 在单个 `transactionSync` 内检查：
   1. `model_attempts` 存在且 `state === 'reserved'` 且 **`send_started_at_ms IS NULL`**（保证每个 `attempt_no` 最多一次出网发送）；
   2. 对应 Turn/Task 仍为 `status === 'running'`、`cancel_requested_at_ms IS NULL`、`lease_epoch === req.leaseEpoch`、`lease_owner === req.leaseOwner`、`nowMs < lease_expires_at_ms`、`nowMs < deadline_at_ms`；
-  3. 当前无未解决的 `agent_budget_incidents`。
-- 仅当全部满足时原子写入 `send_started_at_ms = nowMs` 并返回 `{ authorized: true, sentAtMs }`；否则返回 `{ authorized: false, reason }`，执行器**严禁调用 Provider**，若仍持有租约应调用 `commitTurn` 以 `settlement: { state: 'released', outcomeCode: 'not_sent' }` 归还额度。
+  3. 当前无相关未解决的 `agent_budget_incidents`，Operation/Attempt/Grant 归属、Turn 原 Transcript Epoch 或 Task current_run_id、阶段截止与 Grant 期限都有效；严禁使用旧缓存代替权威检查。
+- 仅当全部满足时原子写入 `send_started_at_ms = nowMs` 并返回 `{ authorized: true, sentAtMs, startBeforeMs }`（不得晚于 Grant、Lease、阶段及总截止）；否则返回 `{ authorized: false, reason }`，执行器**严禁调用 Provider**，只有能证明该 Operation 未获发送授权、未发且无不确定结果时才允许 released；already_sent 或未知授权不能退款。成功结果在 startBeforeMs 之前单次 fetch、检查 AbortSignal 与受信 Provider 配置，不作无幂等保证的 SDK 自动重发。授权后取消不能撤回已授权外部调用，应中止可中止请求并 Fence 结果。
 
 #### (3) V1 Model Attempt 与累计成本上限对齐（强制不变量）
 
@@ -768,6 +772,8 @@ export interface AgentHeadRpc {
 | 日预算与 Turn 次数               | `principalDailyTurns = 60`, `principalDailyMicroUsd = 250_000`, `tenantDailyMicroUsd = 1_000_000`, `globalDailyMicroUsd = 5_000_000` | 严格继承，由 `AgentHeadDO` + `GlobalBudgetDO` 原子校验        | `prepareTurn` / `reserveAttempt` + `GlobalBudgetAuthority` |
 
 ### 5.3 `commitTurn` 原子结算与发布语义（第 3 次 DO RPC）
+
+发送前的恢复覆盖须包含后续 budget_sync 义务直至权威 ACK；取消/Transcript 清除不得删除账本和未同步记录。按 tenant/subject/attempt/operation/grant 原绑定校验每次结算。固定结算载荷不可被重复结果覆盖；迟到超额以 operationId + revision 的独立幂等修正补记，不覆盖已 ACK 的原结算。failed 的固定安全 ember 回复与终态必须同事务，取消保持 B1 T-2/T-4。
 
 - **Fencing 失败路径**（`lease_epoch` / `lease_owner` 不匹配，或 `status !== 'running'`）：
   - **绝对禁止**写入 `conversation_messages` 或触发 `delegation`，返回 `{ outcome: 'fenced', turn }`；
@@ -792,11 +798,13 @@ export interface AgentHeadRpc {
 | `leaseRenewalIntervalMs`                   | `10_000` (Tasks)                      | **SSE 连接流式**: `15_000` ms（仅在活跃流式执行期间续期）；B1 `waitUntil` 不续期                                | 严格小于 `leaseDurationMs / 2`，零空闲心跳。                                                       |
 | 静默丢失恢复窗口                           | Cron `* * * * *`                      | **SSE 正常路径 `<= 60_000` ms**（`45 s + <= 15 s`）；**`waitUntil` 路径 `<= 40_000` ms**（`25 s + <= 15 s`）    | 非平台 SLA，为 M1 确定性故障测试目标。                                                             |
 | `attemptTimeoutMs`                         | `20_000`                              | 单次非流式 HTTP 请求 `20_000` ms；流式首 Token / 空闲分片超时 `30_000` ms                                       | 绑定 `AbortSignal`，防止无限悬挂。                                                                 |
-| `interactive_deadline_ms`（交互窗口上限）  | —                                     | **SSE 流式**: `120_000` ms（软移交窗口 `105–115 s`）；**B1 `waitUntil`**: **`22_000` ms**（30 s 前软移交）      | 到达交互窗口上限仅触发向 Durable Path 的 Fenced 移交，**不**直接宣判逻辑任务失败。                 |
-| `turn.deadline_at_ms`（Turn 总生命期上限） | `60_000` (`B1_TURN_DEADLINE_SECONDS`) | **B1 兼容 Turn**: `60_000` ms；**V2 长推理移交 Turn**: `600_000` ms（或关联 Task Deadline）                     | **必须与 `interactive_deadline_ms` 分离**，否则 >120 s 移交入队后会被 `expireTurnIfDue` 立即误杀。 |
+| `interactive_deadline_ms`（交互窗口上限）  | —                                     | **SSE 流式**: `120_000` ms（软移交窗口 `105–115 s`）；**B1 `waitUntil`**: **`22_000` ms**（30 s 前软移交）      | 仅在逻辑总时限仍有效时 Fenced 移交；转移/续租不延长总时限，已到期按原契约终止。                 |
+| `turn.deadline_at_ms`（Turn 总生命期上限） | `60_000` (`B1_TURN_DEADLINE_SECONDS`) | **B1 兼容 Turn**: `60_000` ms；**V2 长推理移交 Turn 本地实验**: `600_000` ms（独立受信总时限，非已批准 Wire）                     | **必须与 `interactive_deadline_ms` 分离**，否则 >120 s 移交入队后会被 `expireTurnIfDue` 立即误杀。 |
 | `task.deadline_at_ms`（Task 总截止时间）   | `CreateTaskRequest.deadline_at`       | 由客户端请求或 Task 策略独立设置，不受单次交互 `120 s` 窗口约束                                                 | ADR-0002 未领超时规则仅作用于 `task.deadline_at_ms`。                                              |
 
 ### 6.2 Streaming 托管、`waitUntil` 对齐与防重复规则
+
+B1 加速窗口从权威接受时刻计时；只有在剩余 22 s 窗口可容纳授权、Provider 超时、提交或安全移交余量时才启动一次调用，否则直接以 Durable Queue 优先派发。默认可退回立即到期的 Durable Outbox（不预占 Fast Lease）；waitUntil 不能作为唯一执行保证。B1 model-disabled staging 与开发环境 on-read timeout 行为保持不变。
 
 - **托管位置**: Interactive Executor 运行于 Edge API Worker 请求处理生命周期内，**绝不在 Agent Head DO 内持有流式连接或 `await` 模型输出**，避免 DO 产生高额 Duration 计费并阻塞同一用户的其他并发请求。
 - **零 Per-Token 持久化**: 流式输出使用有界内存缓冲（仅聚合最终完整文本用于 `commitTurn`），严禁每个 Token 写入 DO SQLite。
@@ -804,8 +812,8 @@ export interface AgentHeadRpc {
   - Edge Worker 在 `prepareTurn` 提交后同步返回 `201/200 B1SendMessageReceipt`；`prepareTurn` 为该加速路径签发 **`leaseMs = 25_000 ms`**、**`interactiveDeadlineMs = 22_000 ms`**、`turnDeadlineMs = 60_000 ms`（且写入 `v2_dispatch_outbox` 于 `T + 27_000 ms`）。
   - 随后在 `ctx.waitUntil(...)` 内调用 `markAttemptSent` 并执行最多 **1 次**有界尝试（`attemptTimeoutMs = 20_000 ms`）：
     - 若在 `<= 22 s` 内完成：调用 `commitTurn` 发布回复（正常 1–3 s 完成，绕过队列冷延迟）；
-    - 若逼近 `22 s`（CF 30 s `waitUntil` 截断前）仍未完成，或遇到可重试错误且距 `60 s` B1 Deadline 仍有余量：立即调用 `handoffTurnToDurable(reason: 'waituntil_window_handoff')` 将控制权原子移交至 Durable Queue（`Execution Worker` 无 30 s HTTP 限制，于 `T + 23–25 s` 接管并在剩余 `~35 s` 内完成）；
-    - 若 `waitUntil` 在 `25 s` 内静默崩溃：租约于 `T + 25 s` 到期，DO Alarm 在 `<= T + 40 s` 触发接管并派发 Queue，仍远早于 `60 s` B1 Deadline。
+    - 若逼近 `22 s`（CF 30 s `waitUntil` 截断前）仍未完成，或遇到可重试错误且距 `60 s` B1 Deadline 仍有余量：立即调用 `handoffTurnToDurable(reason: 'waituntil_window_handoff')` 将控制权原子移交至 Durable Queue（`Execution Worker` 无 30 s HTTP 限制，目标于 `T + 23–25 s` 接管，在剩余 B1 总时限内合法执行或收敛（不保证模型完成））；
+    - 若 `waitUntil` 在 `25 s` 内静默崩溃：租约于 `T + 25 s` 到期，DO Alarm 在 `<= T + 40 s` 触发接管并派发 Queue，仅在剩余总 Deadline 内继续可恢复/确定未发的工作；不足则按 B1 原有超时规则收敛，不盲目重发。
 - **V2 流式路径（M1/M3 需经版本化 Wire 审批后启用，如 `POST /v2/conversations/{id}/messages/stream`）**:
   - 只要 HTTP 响应流保持连接，Workers Standard 不受 `waitUntil` 30 s 限制，使用 **`leaseMs = 45_000 ms`**、**`15_000 ms` 续期**、**`interactiveDeadlineMs = 120_000 ms`** 及 **`turnDeadlineMs = 600_000 ms`**；
   - `prepareTurn` 成功后下发 `event: turn.accepted`（含完整 `B1SendMessageReceipt` 与 `transcript_epoch`）；`markAttemptSent` 通过后持续推送 `event: turn.delta`（临时未提交文本，不入库）；完成时先调用 `commitTurn` 成功再下发 `event: turn.committed`；触发 >120 s 移交时在 `handoffTurnToDurable` 成功后下发 `event: turn.handed_off`。
@@ -883,6 +891,13 @@ export interface GlobalBudgetAuthority {
       }
   >;
 
+  /** Global 权威串行校验未使用、未过期 Grant 与 Incident，只发一次许可。 */
+  authorizeGlobalSend(req: {
+    readonly tenantId: Id;
+    readonly operationId: Id;
+    readonly globalGrantId: string;
+  }): Promise<{ readonly authorized: boolean; readonly startBeforeMs?: number }>;
+
   renewGlobalGrant(req: {
     readonly tenantId: Id;
     readonly operationId: Id;
@@ -911,16 +926,18 @@ export interface GlobalBudgetAuthority {
 
 ### 7.2 预留归属、补偿释放、过期 Grant、迟到结算与 Incident Halt 规则
 
+**权威边界（强制）**：M1 限于 B1 一个 tenant/principal 对一个 canonical Agent 的映射，不能用多个 Agent 重复获得同一作用域预算。Global 事务串行 reserve/authorize/settle/Incident；本地发现事故立即阻断相关作用域，Global 确认结算前该 Agent 禁止新计价 Attempt。跨 DO 尚未同步的事故不具备原子可见性；M1 必测其他 Agent 并发、同步失败及事故传播窗口，若不能证明 V1 全局 Halt 语义，须在真实供应商许可前采用经审核的严格权威协议，不得宣称已通过。预算预留上限不是对供应商实际超额收费的保证。Budget check 50 ms P95 包括 reserve 和 authorize 的累计关键路径，仍计入 Runtime 200 ms。
+
 1. **预留先于 Egress 与预留归属（Ownership）**:
    - 调用链：`GlobalBudgetAuthority.reserveGlobal` → `AgentHeadDO` 本地提交（`state = 'reserved'`, `send_started_at_ms = NULL`）→ `AgentHeadDO.markAttemptSent`（校验有效租约、`cancel_requested_at_ms IS NULL`、无 Halt）→ `isModelExecutionAuthorized` → 发起 Provider 请求。
-   - 每笔预留唯一归属 `(tenantId, principalId, agentId, operationId, leaseEpoch)`。后续重领或新尝试（`attempt_no += 1` 或 `lease_epoch += 1`）必须生成新的 `operationId`，绝不能结算或释放旧尝试的预留。
+   - 每笔预留唯一归属 `(tenantId, principalId, agentId, operationId, leaseEpoch)`。新计价 Attempt 必须生成新 Operation ID；同一 provider handle 的移交或恢复保留原 Operation，仅查询原调用，不重复预留/发送。账务核对按原绑定独立于发布 Fence。并发 prepare 候选各持独立 UUID；失败方仅可释放自己的确定未提交、未授权 Grant，不得释放赢家预留。
 2. **本地结算与 `budget_sync` Outbox 原子提交**:
    - 无论 `commitTurn`、`cancelTurn` 还是 DO Alarm 租约清理，只要涉及带 `global_grant_id` 的 `model_attempts` 状态转换，必须在**同一个本地 `transactionSync`** 内同时写 `v2_dispatch_outbox(entity_kind = 'budget_sync')`（含 `operationId`、`globalGrantId`、目标 `state`、`chargeMicroUsd`、`observedCostMicroUsd` 及 `openIncidentReason`），并在事务外立即刷新、失败时由 Alarm 无限期可靠重试直至 `GlobalBudgetAuthority` 确认。
 3. **补偿释放（Compensating Release）**:
-   - **Stage 3 TOCTOU 中止补偿**: 若 `prepareTurn` Stage 2 已获得 `globalGrantId`，但在 Stage 3 `transactionSync` 发现 `transcript_epoch` 已变、`client_submission_id` 已被并发提交或 `v2_recovery_coverage` 失效，必须在本地 `transactionSync` 内写入 `v2_dispatch_outbox('budget_sync', op='release')` 并触发即时异步 `settleGlobal(released)` 后再返回 `409` / `replay` / `503`。
-   - **未出网释放**: 若 `markAttemptSent` 拒绝（返回 `authorized: false`）或租约过期/取消时 `send_started_at_ms IS NULL`，证明请求从未离开进程，合法结算为 `released`（`chargeMicroUsd = 0`）并全额退还本地与全局额度。
+   - **Stage 3 TOCTOU 中止补偿**: 若 `prepareTurn` Stage 2 已获得 `globalGrantId`，但在 Stage 3 `transactionSync` 发现 `transcript_epoch` 已变、`client_submission_id` 已被并发提交或 `v2_recovery_coverage` 失效，必须在本地 `transactionSync` 内写入 `v2_dispatch_outbox('budget_sync', op='release')` 并触发即时异步 `settleGlobal(released)` 后再返回 `409` / `replay` / `503`；覆盖已失效时采用 §5.2 的保守 TTL，不建立不可恢复的本地义务。
+   - **未出网释放**: 只有 Operation 未获发送授权、`send_started_at_ms IS NULL` 且无不确定授权/提交，合法结算为 `released`（`chargeMicroUsd = 0`）并全额退还本地与全局额度。
 4. **过期 Grant（Expired Grant）规则**:
-   - `reserveGlobal` 签发的初始有效期为 `expiresAtMs = nowMs + Math.max(leaseMs, turnDeadlineMs) + 30_000`（或随 `renewTurnLease` 同步延长），确保正常续租 Turn 不会中途过期，同时为崩溃孤儿持仓设定硬边界。
+   - `reserveGlobal` 签发的初始有效期为 `expiresAtMs = nowMs + Math.max(leaseMs, turnDeadlineMs) + 30_000`（或随 `renewTurnLease` 同步延长），续期须在原 Grant 和本地 Lease 仍有效时权威确认，不能复活过期 Grant；每次 Egress 前检查实际有效期。
    - 当 `GlobalBudgetAuthority` 扫描到 `nowMs >= expiresAtMs` 且仍为 `reserved` 的 Grant 时，**绝不退款（Never Refund）**：将其原子转换为 `expired_consumed`，把 `amount_micro_usd` 从 `reserved_micro_usd` 转入 `consumed_micro_usd`（等价 `unknown_billed`），彻底封堵崩溃退款导致的并发超支漏洞。
 5. **迟到结算（Late Settlement）规则**:
    - 若 `settleGlobal(released)` 抵达时 Grant 已转为 `expired_consumed`：拒绝退还已保守计入的额度，维持 `expired_consumed`（`applied: false, alreadySettled: true`）。
@@ -947,7 +964,9 @@ Agent A（Agent Head / Fast Path）与 Agent B（Event Runtime / Recovery，见 
 | 独立恢复登记（D1 + Sweeper） | `prepareTurn` / 委派在未覆盖或提前截止时以单调递增 `generation` + `'registering'` 态调用 `upsertCoverage`（已覆盖零 D1 I/O）；暴露 `reconcileFromRegistry` | 维护外部 D1 `v2_recovery_registry` 与每分钟有界 `RecoverySweeper`（处理 Alarm 6 次重试耗尽、DO 断电与过期标记清理）             |
 | Durable Execution Worker     | 定义 `claimDurableWork` / `commitDurableResult` 租约与 `markAttemptSent` / 累计成本 Fencing 规则                                                           | 运行 Queue 消费者、`ExecutionWorker`（Notes/Python/Daytona/长 Turn 恢复）与指数退避重试                                         |
 
-### 8.2 Agent A ↔ Agent B 最小接口边界（与 V2-M0-B 严格对齐）
+### 8.2 Agent A ↔ Agent B 最小接口边界（共同冻结待确认）
+
+对照 [Agent B PR #171](https://github.com/basicv8vc/Ember/pull/171)（`f8994e3`）：A/B 共享一套 v2_schedules、v2_dispatch_outbox、v2_recovery_coverage Migration；A 的 Turn/Task/Run 为唯一 Lease/Epoch 业务权威，B 通过同一 transactionSync 内的同步协调/收敛端口访问，不复制可写 v2_execution_leases。budget_sync 复用同一 Outbox 内部处理（不将结算载荷发到普通 Queue）。下面的 pending 修复、实际回执及共享端口须 #171 同步确认后共同冻结；目前不是已完成的 A/B 联合批准。
 
 ```typescript
 /** Agent B 提供的外部 D1 `v2_recovery_registry` CAS 端口 */
@@ -956,15 +975,15 @@ export interface RecoveryRegistryPort {
    * D1 条件 Upsert：
    * - 仅当不存在行，或 `v2_recovery_registry.generation < cmd.generation` 时写入；
    * - 重置 `status = 'armed'`, `recovery_attempts = 0`, `sweep_lease_owner = NULL`；
-   * - 若原行非 `quarantined` 且仍有更早 `next_recovery_at_ms`，取 `MIN(existing, cmd.recoveryAtMs)`；
-   * - 若 D1 已有 `generation >= cmd.generation`，返回 `{ accepted: false, currentGeneration }` 供 DO 单次快进修复。
+   * - 所有仍可能覆盖已接受义务的原行（含 quarantined/backoff），取 `MIN(existing, cmd.recoveryAtMs)`；
+   * - 同代重放只能保持或提前时间，旧代不写；返回实际权威世代和时间，不能回显请求目标。
    */
   upsertCoverage(cmd: {
     readonly tenantId: Id;
     readonly agentId: Id;
     readonly generation: number;
     readonly recoveryAtMs: number;
-  }): Promise<{ readonly accepted: boolean; readonly currentGeneration: number }>;
+  }): Promise<{ readonly accepted: boolean; readonly currentGeneration: number; readonly actualRecoveryAtMs: number | null }>;
 
   /** 条件退休删除：`DELETE FROM v2_recovery_registry WHERE agent_key = ? AND generation <= cmd.retireUpToGen` */
   retireCoverage(cmd: {
@@ -980,7 +999,7 @@ export interface RecoveryRegistryPort {
     readonly expectedPrevGen: number;
     readonly newGeneration: number;
     readonly nextRecoveryAtMs: number;
-  }): Promise<{ readonly updated: boolean }>;
+  }): Promise<{ readonly updated: boolean; readonly currentGeneration: number; readonly actualRecoveryAtMs: number | null }>;
 }
 
 /** Agent Head DO 暴露给 Agent B Sweeper 与 Queue Worker 的收敛接口 */
@@ -991,7 +1010,7 @@ export interface AgentHeadRecoveryPort {
    *    `generation = max(cov.generation, cmd.expectedGen) + 1`, 返回 `retireUpToGen = nextGen - 1`；
    * 2. 若仅剩更晚的未来义务：先在 DO `transactionSync` 置 `coverage_state = 'registering'`,
    *    `generation = cov.generation + 1`, 返回 `postpone(expectedPrevGen, newGeneration, nextRecoveryAtMs)`；
-   * 3. 若 DO 在刚才的收敛中仍需立即执行或已有更新标记覆盖，返回 `keep_armed` / `noop_stale`。
+   * 3. 若 DO 在刚才的收敛中仍需立即执行或已有更新标记覆盖，返回 `keep_armed`；仅在无 pending 修复且已有可验证覆盖时允许 `noop_stale`。
    */
   reconcileFromRegistry(cmd: {
     readonly tenantId: Id;
@@ -999,6 +1018,7 @@ export interface AgentHeadRecoveryPort {
     readonly expectedGen: number;
     readonly nowMs: number;
   }): Promise<
+    | { readonly action: 'repair_ensure'; readonly generation: number; readonly recoveryAtMs: number }
     | { readonly action: 'noop_stale'; readonly currentGeneration: number }
     | { readonly action: 'retire'; readonly retireUpToGen: number }
     | {
@@ -1009,6 +1029,13 @@ export interface AgentHeadRecoveryPort {
       }
     | { readonly action: 'keep_armed'; readonly currentGeneration: number }
   >;
+
+  /** 只确认当前 pending 世代的权威回执，迟到回调不得复活覆盖。 */
+  confirmRegistryPlan(cmd: {
+    readonly generation: number;
+    readonly actualRecoveryAtMs: number | null;
+    readonly applied: boolean;
+  }): Promise<{ readonly confirmed: boolean }>;
 
   /** Durable Execution Worker 认领/续期/提交接口 */
   claimDurableWork(cmd: {
@@ -1045,6 +1072,8 @@ export interface AgentHeadRecoveryPort {
 
 ### 8.3 Generation/CAS 关键竞态与修复协议（Zero-D1-I/O on Covered Path）
 
+**规范补充：独立修复优先于下面的正常场景。** ensure/postpone/retire 的本地事务必须先持久化 pending_kind、唯一新 Generation、旧 CAS 世代与目标时间，并使旧准入覆盖失效。目标不得晚于全部已接受义务（含 budget_sync）及尚可提交候选的最早 D(O)；退休排除尚可提交的旧候选。DO 更新后、D1 CAS 前崩溃时，旧到期标记触发 Sweeper；即使 observedGeneration 落后，也须读取当前 pending/义务并重放计划或以更高世代 repair_ensure（MIN），禁止无条件 noop_stale。D1 CAS 已完成但确认丢失时读回实际标记，重新确认当前计划；若已延后则下一到期 Sweep 或新准入修复；若退休已删除且无义务，保持 uncovered，下次准入使用更高世代重建。远程确认只能在当前计划及实际标记覆盖所有义务时生效。旧回调不确认新计划；迟到 UPSERT 复活空标记只能安全退役，不删除较新义务。所有未终态义务在 backoff/quarantine 中仍须有界可发现、可恢复并告警。首个未接受候选无标记且无既有义务时可等待重试，不存在已接受任务丢失。M1 必须以离线客户端复现 DO pending 后崩溃、D1 CAS 后 ACK 丢失、有未来日程的旧世代 Sweep 及同代重放；不得以重新打开 App 作为修复条件。
+
 1. **已覆盖快速路径**: 在 `transactionSync` 内校验 `v2_recovery_coverage.coverage_state === 'covered'` 且 `covered_recovery_at_ms <= requiredDiscoveryMs`，满足则**零 D1 读写**直接进入后续阶段。
 2. **DO 更新 `'registering'` 后、D1 更新前崩溃 / 不明确超时**:
    - Stage 1 `transactionSync` 先推进 `generation += 1` 并把 `coverage_state` 置为 `'registering'`（此时尚未写入任何 Turn/Task 业务行）；
@@ -1054,7 +1083,7 @@ export interface AgentHeadRecoveryPort {
    - 两个并发未覆盖请求在 DO `transactionSync` #1 中被严格串行化：请求 A 原子获得 `intendedGen = g + 1`，请求 B 原子获得 `intendedGen = g + 2`，**不可能产生同 Generation 的 D1 写请求**。
    - 若请求 A 在 Stage 2 返回较慢、落后于请求 B 完成：Stage 3 中请求 A 校验 `v2_recovery_coverage.generation === intendedGen && coverage_state === 'registering'` 失败；仅当 B 已完成且 `coverage_state === 'covered' && covered_recovery_at_ms <= D(A)` 时 A 才可借用 B 的覆盖继续，否则 A 触发第 5.2 节 `budget_sync` 补偿释放并返回可重试 `503 DB_UNAVAILABLE`。
 4. **过期 / Quarantined / 世代超前标记修复**:
-   - 若 D1 因历史故障残留了过期 `next_recovery_at_ms` 或 `status = 'quarantined'` / `'backoff'` 的行：下一次 `upsertCoverage` 以严格更大 `generation` 覆盖并强制重置 `status = 'armed'`、`recovery_attempts = 0`、`sweep_lease_owner = NULL`（当原状态为 `'quarantined'` 时直接采用新 `recoveryAtMs` 修复唤醒）。
+   - 若 D1 因历史故障残留了过期 `next_recovery_at_ms` 或 `status = 'quarantined'` / `'backoff'` 的行：下一次 `upsertCoverage` 以严格更大 `generation` 覆盖并强制重置 `status = 'armed'`、`recovery_attempts = 0`、`sweep_lease_owner = NULL`（包括 quarantined 仍取全部现存义务与新义务的最早时间，不能丢弃既有覆盖）。
    - 若因 DO 快照恢复或异常跳变导致 D1 的 `generation >= intendedGen`（`upsertCoverage` 返回 `accepted: false, currentGeneration: d1Gen`）：DO 在新短事务中将 `v2_recovery_coverage.generation` 快进同步为 `max(cov.generation, d1Gen) + 1`（保持 `'registering'`），随后执行**至多 1 次**重试写入 D1，自动自愈世代错位。
 5. **Sweeper 退休/延后竞争防护与降级运行**:
    - Sweeper 执行 `reconcileFromRegistry` 时，DO 必须**先**在 `transactionSync` 内将本地 `v2_recovery_coverage` 推进 `generation` 并置 `'uncovered'`（退休）或 `'registering'`（延后），之后 Sweeper 才能向 D1 发送条件 `retireCoverage(retireUpToGen)` 或 `postponeCoverage(expectedPrevGen)`。
@@ -1085,10 +1114,10 @@ export interface AgentHeadRecoveryPort {
 | F-3  | `clearTranscript` 与 `prepareTurn` 并发交错                            | Stage 2 `await` 期间执行删除              | Stage 3 `transactionSync` 检测到 `transcript_epoch` 已递增 → 原子写入 `budget_sync(release)` Outbox 并异步释放 `GlobalBudget` 预留，抛出 `409 IDEMPOTENCY_CONFLICT`；已删会话零复活消息。                                                |
 | F-4  | 未覆盖 Turn 遇 D1 Recovery Registry 不可用                             | `prepareTurn` Stage 2                     | Fail Closed 返回 `503 DB_UNAVAILABLE`，DO 无写入（`v2_recovery_coverage` 保持 `'registering'`）；客户端保留 Protected Outbox 待恢复后用原 `client_submission_id` 重试或对账。                                                            |
 | F-5  | 已覆盖 Turn 遇 D1 Recovery Registry 不可用                             | `prepareTurn` Stage 1                     | 跳过 D1（0 D1 I/O），只要 Auth 与 GlobalBudget 可用即正常完成 `prepareTurn` 与后续执行；现有 D1 标记仍保障离线可恢复。                                                                                                                   |
-| F-6  | Global Budget Authority 不可用、超限或存在全局 Halt                    | `prepareTurn` Stage 2 / `markAttemptSent` | 超限或存在未解决 Incident（`day_ceiling_exceeded` / `reservation_exceeded` / `usage_missing`）返回 `429 BUDGET_EXCEEDED`；不可用返回 `503 DB_UNAVAILABLE`。DO 零落盘、零付费 Egress。                                                    |
-| F-7  | Edge Worker 在 `prepareTurn` 后、`markAttemptSent` 前崩溃              | `prepareTurn` 与 `markAttemptSent` 之间   | 租约到期后 DO Alarm 触发回收；因 **`send_started_at_ms IS NULL`** 证明请求从未出网，本地结算为 **`released`**（0 扣费）并原子写入 `budget_sync(release)` 归还全局额度。                                                                  |
+| F-6  | Global Budget Authority 不可用、超限或存在全局 Halt                    | `prepareTurn` Stage 2 / `markAttemptSent` | 超限或存在未解决 Incident（`day_ceiling_exceeded` / `reservation_exceeded` / `usage_missing`）返回 `429 BUDGET_EXCEEDED`；不可用返回 `503 DB_UNAVAILABLE`。无新增已接受业务义务或付费 Egress；既有工作、预留及账务按恢复规则保留。                                                    |
+| F-7  | Edge Worker 在 `prepareTurn` 后、`markAttemptSent` 前崩溃              | `prepareTurn` 与 `markAttemptSent` 之间   | 租约到期后 DO Alarm 触发回收；因未发且无 send_authorizing 意图/未知授权，本地结算为 **`released`**（0 扣费）并原子写入 `budget_sync(release)` 归还全局额度。                                                                  |
 | F-8  | Edge Worker 在 `markAttemptSent` 成功后、Provider 返回前静默崩溃       | `markAttemptSent` 与 `commitTurn` 之间    | 租约到期（SSE `45 s` / `waitUntil` `25 s`）后 `<= 15 s` 内 Alarm 触发对账；因 **`send_started_at_ms IS NOT NULL`**，按 **`unknown_billed`** 保留全额预留并原子写 `budget_sync`，严禁盲目重放非幂等调用。                                 |
-| F-9  | `markAttemptSent` 遭遇取消、`STALE_LEASE` 或 `already_sent`            | 发起 Provider `fetch` 前                  | 返回 `{ authorized: false }`，执行器严禁出网；若仍持租约且从未发送，调用 `commitTurn` 以 `not_sent` 结算 `released` 退还额度。                                                                                                           |
+| F-9  | `markAttemptSent` 遭遇取消、`STALE_LEASE` 或 `already_sent`            | 发起 Provider `fetch` 前                  | 返回 `{ authorized: false }`，执行器严禁出网；只在确定未授权未发送时 released；already_sent/不确定不得退款。                                                                                                           |
 | F-10 | 流式途中客户端断连                                                     | `Interactive Executor` 活跃流             | 立即停止 15 s 续期，撤销本地 Provider 请求（或若已生成句柄则 `handoffTurnToDurable`）；客户端重连后仅通过 `GET /messages` 与 `GET /turns/{id}` 恢复，零重复文本。                                                                        |
 | F-11 | B1 非流式 `waitUntil` 超出 22 s 或在 25 s 内被杀                       | `POST .../messages` 后台执行              | 正常于 22 s 软移交 Durable Queue，无 30 s 截断损失；若崩溃则 `25 s` 租约到期后由 Alarm 接力，在 `60 s` B1 Deadline 内交付 Queue 执行或收敛。                                                                                             |
 | F-12 | 推理耗时超过 120 s 移交                                                | 达到 `105–115 s` 移交窗口                 | 调用 `handoffTurnToDurable`（`lease_epoch += 1`, `execution_mode = 'durable_queue'`），保持 `turn.deadline_at_ms = 600 s`（不被 120 s 误杀），由 Queue Worker 凭 `provider_job_handle` 接力；旧 Executor 迟到提交被 `STALE_LEASE` 拒绝。 |
@@ -1130,3 +1159,5 @@ export interface AgentHeadRecoveryPort {
 - [ ] **Fast/Durable/Handoff 与 Alarm 重装故障注入**: 覆盖连接中流式输出、客户端断连、Worker 静默崩溃（验证 `<= 60 s` 进入恢复对账）、`> 120 s` 推理通过 `provider_job_handle` 原子移交至 Durable Path 且不被错误总 Deadline 误杀、旧 Executor 迟到提交被 `STALE_LEASE` 拒绝、以及最早任务完成后 Alarm 正确**向后重装**至未来 Schedule。
 - [ ] **覆盖路径、并发登记与降级证明**: 证明“已覆盖 Turn 零同步 D1 I/O”；测试 `'registering'` 崩溃恢复、多请求并发获取严格递增不同 `generation`、D1 过期/`quarantined`/超前世代修复、Sweeper 退休/延后 CAS 竞态、以及 D1 不可用时未覆盖 Fail Closed（503）且已覆盖/Direct Path 可用。
 - [ ] **完整预算协议与上限门禁（Fake Provider 全链路）**: `FakeModelGateway` 走通 `GlobalBudgetDO` + `AgentHeadDO` + `budget_sync` Outbox 原子同提交链路；10+ 并发压测下绝不突破 `globalDailyMicroUsd` / `tenantDailyMicroUsd` / `principalDailyMicroUsd` 及 Task 累计 Attempt（4/6）/ 成本（20k/30k）上限；验证 Stage 3 交错失败补偿释放、过期 Grant 不退款、迟到超支补开 Incident Halt、`usage_missing` 触发跨租户全局 Halt，并报告 `GlobalBudget` P95、Runtime 耗时、SQLite 写放大与流式 CPU 指标。
+- [ ] **追加竞态门禁**：同代登记重放不延后；DO pending 后 D1 CAS 前崩溃且客户端全离线，旧世代 Sweeper 修复并保留后续日程；远端 CAS 已成功但确认丢失；Global 授权超时/重复、过期/Halt 与发送竞争、不确定时禁止退款；候选补偿不误释放赢家、事务不因错误回滚、无覆盖时 TTL 保守结转；本地结算与同步意图同提交、Global ACK 丢失、迟到超额修正及跨 Agent Incident 传播。验证完整预算门禁关键路径延迟。
+- [ ] **A/B 联合冻结**：#171 同步确认 pending 修复、唯一 Lease 权威、共享 DDL/端口与 budget_sync 后才启动依赖性编码。

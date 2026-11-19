@@ -3,6 +3,7 @@ import http from 'node:http';
 import {
   FAKE_MODEL_LABEL,
   FAKE_REPLY_PREFIX,
+  FAKE_V2_RATE_VERSION,
   estimateTokensConservative,
 } from '@ember/model-gateway';
 
@@ -50,13 +51,14 @@ export interface FakeModelGatewayAuditSnapshot {
 }
 
 interface PendingJobRecord {
-  readonly handle: string;
   readonly operationId: string | null;
   readonly replyText: string;
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costMicroUsd: number;
   readonly readyAtMs: number;
+  readonly deadlineAtMs: number | null;
+  readonly usageMissing: boolean;
 }
 
 /**
@@ -181,37 +183,53 @@ export class FakeModelGatewayServer {
       return;
     }
 
+    const operationUsage = /^\/v2\/fake-model\/operations\/([A-Za-z0-9_-]+)\/usage$/.exec(pathname);
+    if (req.method === 'GET' && operationUsage !== null) {
+      const operationId = operationUsage[1]!;
+      const job = [...this.#jobs.values()].find((record) => record.operationId === operationId);
+      if (job === undefined || headerString(req, 'x-ember-operation-id') !== operationId) {
+        this.#sendJson(res, 404, { error: 'JOB_NOT_FOUND' });
+      } else if (Date.now() < job.readyAtMs) {
+        this.#sendJson(res, 200, { operationId, status: 'running' });
+      } else {
+        this.#sendJson(res, 200, {
+          operationId,
+          status: 'completed',
+          usage: usageOf(job),
+        });
+      }
+      return;
+    }
+
     if (req.method === 'GET' && pathname.startsWith('/v2/fake-model/jobs/')) {
       this.#jobPollCount += 1;
-      const handle = decodeURIComponent(pathname.slice('/v2/fake-model/jobs/'.length));
+      const handle = pathname.slice('/v2/fake-model/jobs/'.length);
+      const operationId = headerString(req, 'x-ember-operation-id');
       const job = this.#jobs.get(handle);
-      if (job === undefined) {
-        this.#sendJson(res, 404, { error: 'JOB_NOT_FOUND', handle });
+      if (
+        job === undefined ||
+        (operationId !== null && operationId !== job.operationId) ||
+        (job.deadlineAtMs !== null && Date.now() >= job.deadlineAtMs)
+      ) {
+        this.#sendJson(res, 404, { error: 'JOB_NOT_FOUND' });
         return;
       }
-      const ready = Date.now() >= job.readyAtMs;
-      if (!ready) {
-        this.#sendJson(res, 200, {
-          handle,
-          status: 'running',
-          modelLabel: FAKE_MODEL_LABEL,
-          simulated: true,
-        });
-        return;
-      }
-      this.#sendJson(res, 200, {
+      const common = {
         handle,
-        status: 'completed',
+        operationId: job.operationId,
         modelLabel: FAKE_MODEL_LABEL,
         simulated: true,
-        text: job.replyText,
-        usage: {
-          inputTokens: job.inputTokens,
-          outputTokens: job.outputTokens,
-          costMicroUsd: job.costMicroUsd,
-          rateVersion: 'fake-v2-m1',
-        },
-      });
+      };
+      if (Date.now() < job.readyAtMs) {
+        this.#sendJson(res, 200, { ...common, status: 'running' });
+      } else {
+        this.#sendJson(res, 200, {
+          ...common,
+          status: 'completed',
+          text: job.replyText,
+          usage: usageOf(job),
+        });
+      }
       return;
     }
 
@@ -219,7 +237,10 @@ export class FakeModelGatewayServer {
       const opId = decodeURIComponent(pathname.slice('/v2/fake-model/revisions/'.length));
       const rev = this.#lateRevisions.get(opId);
       if (rev === undefined) {
-        this.#sendJson(res, 404, { error: 'NO_LATE_REVISION', operationId: opId });
+        this.#sendJson(res, 404, {
+          error: 'NO_LATE_REVISION',
+          operationId: opId,
+        });
         return;
       }
       this.#sendJson(res, 200, {
@@ -280,7 +301,7 @@ export class FakeModelGatewayServer {
           aborted = true;
         }
       };
-      req.on('close', onClose);
+      res.on('close', onClose);
 
       const handle =
         rule.mode === 'missing_handle_hang'
@@ -288,7 +309,7 @@ export class FakeModelGatewayServer {
           : (rule.providerJobHandle ?? `fake_job_${randomUUID()}`);
 
       const recordCall = (statusCode: number): void => {
-        req.off('close', onClose);
+        res.off('close', onClose);
         this.#calls.push({
           callIndex: this.#calls.length + 1,
           operationId,
@@ -313,39 +334,68 @@ export class FakeModelGatewayServer {
           return;
         }
         recordCall(503);
-        this.#sendJson(res, 503, { error: 'MODEL_UNAVAILABLE', simulated: true });
+        this.#sendJson(res, 503, {
+          error: 'MODEL_UNAVAILABLE',
+          simulated: true,
+        });
         return;
       }
 
       if (rule.mode === 'rate_limited') {
         recordCall(429);
-        this.#sendJson(res, 429, { error: 'MODEL_RATE_LIMITED', simulated: true });
+        this.#sendJson(res, 429, {
+          error: 'MODEL_RATE_LIMITED',
+          simulated: true,
+        });
         return;
       }
 
       if (rule.mode === 'missing_handle_hang') {
-        await waitWithAbort(rule.delayMs ?? 5_000, req, () => aborted);
+        await waitWithAbort(rule.delayMs ?? 5_000, res, () => aborted);
         if (aborted) {
           recordCall(499);
           return;
         }
         recordCall(504);
-        this.#sendJson(res, 504, { error: 'MODEL_TIMEOUT_NO_HANDLE', simulated: true });
+        this.#sendJson(res, 504, {
+          error: 'MODEL_TIMEOUT_NO_HANDLE',
+          simulated: true,
+        });
         return;
       }
 
-      if (rule.mode === 'slow_handoff' && handle !== null) {
-        const waitMs = rule.delayMs ?? 2_500;
-        this.#jobs.set(handle, {
-          handle,
-          operationId,
-          replyText,
-          inputTokens,
-          outputTokens,
-          costMicroUsd,
-          readyAtMs: Date.now() + Math.min(200, waitMs),
-        });
+      const deadlineAtMs =
+        typeof body.deadlineAtMs === 'number' && Number.isSafeInteger(body.deadlineAtMs)
+          ? body.deadlineAtMs
+          : null;
+      const reasoningMs =
+        rule.mode === 'slow_handoff' ? (rule.delayMs ?? 2_500) : (rule.delayMs ?? 0);
+      const job: PendingJobRecord = {
+        operationId,
+        replyText,
+        inputTokens,
+        outputTokens,
+        costMicroUsd,
+        readyAtMs: startedAtMs + reasoningMs,
+        deadlineAtMs,
+        usageMissing: rule.mode === 'usage_missing',
+      };
+      if (handle !== null) {
+        if (
+          this.#jobs.has(handle) ||
+          (operationId !== null &&
+            [...this.#jobs.values()].some((existing) => existing.operationId === operationId))
+        ) {
+          recordCall(409);
+          this.#sendJson(res, 409, { error: 'JOB_ALREADY_EXISTS' });
+          return;
+        }
+        this.#jobs.set(handle, job);
+      }
+      const usage = usageOf(job);
 
+      if (rule.mode === 'slow_handoff' && handle !== null) {
+        const waitMs = reasoningMs;
         if (isStream) {
           res.writeHead(200, {
             'content-type': 'text/event-stream; charset=utf-8',
@@ -356,13 +406,17 @@ export class FakeModelGatewayServer {
             `event: job_handle\ndata: ${JSON.stringify({ providerJobHandle: handle, modelLabel: FAKE_MODEL_LABEL })}\n\n`,
           );
           res.write(`event: delta\ndata: ${JSON.stringify({ text: FAKE_REPLY_PREFIX })}\n\n`);
-          await waitWithAbort(waitMs, req, () => aborted);
+          while (!aborted && Date.now() < job.readyAtMs) {
+            await waitWithAbort(Math.min(10_000, job.readyAtMs - Date.now()), res, () => aborted);
+            if (!aborted && Date.now() < job.readyAtMs) res.write('event: progress\ndata: {}\n\n');
+          }
           if (!aborted && !res.writableEnded) {
             res.write(
               `event: done\ndata: ${JSON.stringify({
                 text: replyText,
                 providerJobHandle: handle,
-                usage: { inputTokens, outputTokens, costMicroUsd, rateVersion: 'fake-v2-m1' },
+                operationId,
+                usage,
               })}\n\n`,
             );
             res.end();
@@ -371,7 +425,7 @@ export class FakeModelGatewayServer {
           return;
         }
 
-        await waitWithAbort(waitMs, req, () => aborted);
+        await waitWithAbort(waitMs, res, () => aborted);
         if (aborted) {
           recordCall(499);
           return;
@@ -382,7 +436,8 @@ export class FakeModelGatewayServer {
           simulated: true,
           providerJobHandle: handle,
           text: replyText,
-          usage: { inputTokens, outputTokens, costMicroUsd, rateVersion: 'fake-v2-m1' },
+          operationId,
+          usage,
         });
         return;
       }
@@ -395,22 +450,12 @@ export class FakeModelGatewayServer {
       }
 
       if ((rule.delayMs ?? 0) > 0) {
-        await waitWithAbort(rule.delayMs!, req, () => aborted);
+        await waitWithAbort(rule.delayMs!, res, () => aborted);
         if (aborted) {
           recordCall(499);
           return;
         }
       }
-
-      const usage =
-        rule.mode === 'usage_missing'
-          ? null
-          : {
-              inputTokens,
-              outputTokens,
-              costMicroUsd,
-              rateVersion: 'fake-v2-m1',
-            };
 
       if (isStream) {
         const chunkCount = Math.max(2, rule.streamChunks ?? 4);
@@ -433,7 +478,7 @@ export class FakeModelGatewayServer {
           }
           res.write(`event: delta\ndata: ${JSON.stringify({ text: chunk })}\n\n`);
           if (chunkDelay > 0) {
-            await waitWithAbort(chunkDelay, req, () => aborted);
+            await waitWithAbort(chunkDelay, res, () => aborted);
           }
         }
         if (!aborted && !res.writableEnded) {
@@ -442,6 +487,7 @@ export class FakeModelGatewayServer {
               modelLabel: FAKE_MODEL_LABEL,
               simulated: true,
               providerJobHandle: handle,
+              operationId,
               text: replyText,
               usage,
             })}\n\n`,
@@ -487,8 +533,10 @@ export class FakeModelGatewayServer {
   }
 
   #sendJson(res: http.ServerResponse, statusCode: number, payload: unknown): void {
-    if (res.writableEnded) return;
-    res.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' });
+    if (res.writableEnded || res.destroyed) return;
+    res.writeHead(statusCode, {
+      'content-type': 'application/json; charset=utf-8',
+    });
     res.end(JSON.stringify(payload));
   }
 }
@@ -516,7 +564,7 @@ function sleep(ms: number): Promise<void> {
 
 function waitWithAbort(
   ms: number,
-  req: http.IncomingMessage,
+  response: http.ServerResponse,
   isAborted: () => boolean,
 ): Promise<void> {
   if (ms <= 0 || isAborted()) return Promise.resolve();
@@ -526,11 +574,22 @@ function waitWithAbort(
       resolve();
     };
     const timer = setTimeout(() => {
-      req.off('close', onClose);
+      response.off('close', onClose);
       resolve();
     }, ms);
-    req.once('close', onClose);
+    response.once('close', onClose);
   });
+}
+
+function usageOf(job: PendingJobRecord) {
+  return job.usageMissing
+    ? null
+    : {
+        inputTokens: job.inputTokens,
+        outputTokens: job.outputTokens,
+        costMicroUsd: job.costMicroUsd,
+        rateVersion: FAKE_V2_RATE_VERSION,
+      };
 }
 
 function splitIntoChunks(text: string, parts: number): string[] {

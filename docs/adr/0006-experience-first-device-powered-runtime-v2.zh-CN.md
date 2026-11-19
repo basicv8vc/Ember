@@ -64,6 +64,12 @@
 
 Fast Path 与 Durable Path 共享同一权威状态机、Run 身份、Lease/Epoch、取消、预算与安全规则。客户端断开不撤销已接受的工作。租约过期后，恢复必须核对尚在进行的供应商调用、隔离过期结果，并遵循明确的结果未知或幂等重试规则。不得盲目重放非幂等外部副作用，也不得推定供应商计费具有 Exactly-once 保证。仅依靠 HTTP `waitUntil` 不能实现可靠的持久化恢复。流式输出在最终提交前是暂时性的；客户端重连后读取持久状态，不得产生重复消息。在支持的情况下从持久化 Checkpoint 恢复，不承诺精确恢复中断时的每一个 Token。
 
+### Interactive Executor 部署与恢复
+
+初期 Interactive Executor 是 Edge API Worker 内的 HTTP Handler，不额外引入容器/服务，也不经 DO 转发流。增量 Streaming 使用有界缓冲。Workers Standard 在客户端保持连接时无墙钟 Duration 费用或 HTTP Duration 硬限制；CPU、内存及 Subrequest 限制仍生效。断连或 Runtime 重启可能取消执行；waitUntil 在响应结束/断连后最多延长 30 秒。参见 [Workers 限制](https://developers.cloudflare.com/workers/platform/limits/) 与 [Workers 定价](https://developers.cloudflare.com/workers/platform/pricing/)。不依靠该宽限时间保证任务活性。
+
+M0 初始测试配置（非 Wire Contract 或 SLA）：交互执行总 Deadline 为 120 s，Lease 为 45 s，仅在活跃执行期间每 15 s 续租；供应商调用使用有界 Timeout 与 Abort Signal。发现断连后停止续租并尽快请求供应商取消/移交；执行器静默丢失时，正常恢复目标为最后一次成功续租后 60 s 内进入核对（45 s 到期 + 15 s 发现/派发余量）。合法的带 Fencing 移交或 Lease 到期前不得抢占活跃 Run。进入恢复不意味着可重复结果未知的供应商调用，也不承诺 60 s 内完成任务。Alarm 失败时使用下文独立恢复门禁。更长或不受支持的工作以持久化状态转入 Durable Path，而非启动第二份执行。M0 在验证现有 V1 Lease/Deadline 兼容性后冻结精确超时及续租规则；M1 使用 Fake Provider 测试连接期间 Streaming、断连、静默崩溃、慢供应商、重复/过期完成及长任务移交，报告恢复时间和实际 P50/P95/P99。不设置空闲心跳。
+
 ### Agent Head 与存储边界
 
 - 初期每个由服务端解析的 Agent/Tenant 所有权域对应一个 canonical DO；保留 Tenant、Principal、Agent 的区别。不得根据不可信客户端 ID 路由。不建立全局业务状态 DO。仅在有热点证据后进一步分片。
@@ -111,6 +117,8 @@ DO 只执行短时协调 Handler；不在内部等待 LLM/Sandbox/Tool 完成。
 | 前台取消状态反馈 | ≤ 500 ms |
 | 后台负载导致的前台 P95 延迟增幅 | ≤ 10% |
 
+M1 退出门禁：在前后台并发负载下，独立测量完整同步全局预算预留/检查（包括争用、冷启动、跨区域 RPC），也计入端到端 Runtime/TTFT 测量。初始分配：近区域 P95 ≤ 50 ms，包含在 200 ms Runtime 开销内，不是额外预算。Fake Provider 测试必须覆盖实际预留语义、并发、额度耗尽及 Fail-closed 行为；在另行批准的 Cloud/Provider Canary 中复验。权威预留前不得调用付费供应商，不能以最终一致的缓存余额替代。如延迟未达标，优化权威状态/事务，或经明确审核、证明全局上限不变量后评估有界预分配额度；不得削弱上限。首 Token 数字在真实模型测试前仍是假设。
+
 不得为了这些目标降低数据完整性。测试离线/Outbox 重启及缓存淘汰、账号隔离、未知 ACK 与 B1 冲突/删除对账、重复事件、并发预算/全局上限、Transcript 删除、跨租户隔离、断连、过期 Epoch、Outbox 发布间隙、Alarm 重试耗尽、供应商结果未知、凭据撤销、R2 不一致、设备休眠/离线及授权回退。保留所有 B1 Wire Contract 和 Domain Contract 行为；Streaming/Device Wire 扩展需要明确的版本化批准。
 
 ## 部署预算（美元/月）
@@ -134,7 +142,7 @@ DO 只执行短时协调 Handler；不在内部等待 LLM/Sandbox/Tool 完成。
 | R2 Class A / B | 100 万 / 1,000 万 | $4.50/百万 / $0.36/百万 |
 | Observability（2026-12-01 起） | 摄入 50 GB / 保留 10 GB-month | $0.25/GB / $0.10/GB-month |
 
-Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个活跃 Object 0.128 GB 内存计费；符合 Hibernation 条件的空闲时间不计 Duration。模型将 DO 计算请求/Duration 及 R2 Standard 存储/操作的超额向上取整至计费单位；DO SQLite 行数/存储及其他计费项按比例估算，以账单验证为准。小于 64 KB 的 Queue Message 通常需要三次操作，重试增加操作次数。D1 与 DO SQLite 分别计算包含额度。索引写入、删除及 `setAlarm` 写入计入用量；需要测量实际计费行数。D1 包含前 10 万个数据库，Queues 包含前 1 万个队列；V2 不需要为每位用户创建独立 Queue/D1 数据库。R2 公网出站流量免费，其他服务可能收费。12 月 1 日之前的 Workers Logs：每月包含 2,000 万个事件，超额 $0.60/百万；本模型采用面向未来的 Observability 价格。来源见文末。
+Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个活跃 Object 0.128 GB 内存计费；符合 Hibernation 条件的空闲时间不计 Duration。模型对 DO 计算请求数和 GB-s 超额向上取整至整百万；R2 Standard 操作向上取整至整百万，存储向上取整至整 GB-month；DO SQLite 行数/存储及其他计费项按比例估算，以账单验证为准。这并非单纯的保守余量：DO 官方定价页 Compute billing 明确规定超额用量（含 Duration）向上取整至下一计费单位。10k MAU 时，437,760 GB-s 减去包含的 400,000，超出 37,760 GB-s；ceil(37,760 / 1,000,000) × $12.50 = $12.50，而非假设按比例计费的 $0.472。修正后的取整总额为 $176.07（旧 $176.27 包含 $0.20 的额外存储取整）。小于 64 KB 的 Queue Message 通常需要三次操作，重试增加操作次数。D1 与 DO SQLite 分别计算包含额度。索引写入、删除及 `setAlarm` 写入计入用量；需要测量实际计费行数。D1 包含前 10 万个数据库，Queues 包含前 1 万个队列；V2 不需要为每位用户创建独立 Queue/D1 数据库。R2 公网出站流量免费，其他服务可能收费。12 月 1 日之前的 Workers Logs：每月包含 2,000 万个事件，超额 $0.60/百万；本模型采用面向未来的 Observability 价格。来源见文末。
 
 ### 工作负载与可复现估算
 
@@ -151,7 +159,7 @@ Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个
 
 设 N 为 Agent 数量，E = 684 × N（或采用上表单一用户画像的工作负载）。月度用量：
 
-- Workers：6E 次请求、40E ms。
+- Workers：6E 次请求、累计 40E ms 活跃 CPU。Workers Standard 对 Streaming 墙钟时间不单独收费，但需独立测量其延迟/并发及供应商工作。为便于复算，将示意 40 ms/事件拆为所有事件平均 30 ms 其他处理 + 10 ms 流处理（非实测）；CPU 总量 = E × (30 + 10) ms。若未计入单事件向量，额外 Streaming 重连、活跃 Lease 续租请求/写入、字节/日志及重试单独计量。100k MAU 时，包含 CPU 已用尽的情况下，每事件额外 10 ms CPU 增加 $13.68/月；单纯 30 s 网络等待增加 $0 Worker Duration 费用。不得为 Streaming 持续占用 DO。M1/M4 测量墙钟和活跃 CPU 后替换假设。
 - DO：4E 次请求、0.128 × 0.5E GB-s、200E 行读取、20E 行写入、0.019N GB-month。
 - D1：10E 行读取、0.2E 行写入、0.00025N GB-month。
 - Queues：1.2E 次操作。R2：0.092N GB-month、0.1E 次 Class A、0.2E 次 Class B。
@@ -171,6 +179,10 @@ Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个
 
 同为 1,000 位用户，分别全部为轻度/中度/重度时，按相同假设估算为 $5.15/$9.65/$62.54。10 万混合用户下，仅 DO 行写入超额费用约 $1,318；每次事件额外增加 10 行写入，会增加约 $684/月。10 万 MAU 时，若每事件计费 DO Duration 从 0.5 s 增至 10 s，模型中的 Duration 费用将从 $50 增至 $1,100/月。这些是工作负载推演，不证明吞吐量已经达标，也不保证实际账单。保留必要的审计、预算和恢复写入。因成本调整架构前，应先使用真实计费数据。
 
+M0 退出门禁：定义可重复的单事件计费 Trace，测量可取得的 V1 基线（逻辑数据库变更、保留字节、任务构成，而非 SQLite 计费行数的替代），并使用最小本地 SQLite/DO Probe 校准普通 Turn、Task、重试、活跃 Lease 续租及 Alarm/恢复操作；记录实测或明确估算的计费行数（含索引、删除及 Alarm）、存储字节与局限。M1 报告本地 V2 实测，M4 退出须通过另行批准的云端计量取得各路径/用户画像的实际单事件计费写入、P50/P95 与加权平均，并与供应商指标核对；上线前替换 20 行/事件假设并重估。不得为成本门禁删除必要的完整性/恢复写入。
+
+存储是存量，不是每用户固定的终身上限。M0 定义活跃与休眠用户的初始字节、单事件净新增字节、保留/删除/备份假设。M4 使用代表性长历史负载实测数据库/索引/元数据与 R2 增长，并预测 1/6/12 个月平均 GB-month，含保留的非活跃用户及备份。敏感性分析：100k MAU 下，DO 平均存储从 19 增至 38 MB/Agent，按 $0.20/GB-month 每月额外 $380；实际使用真实保留及额度数据。归档/删除须遵守已有用户保留、导出及完整性契约；不为满足成本模型强制裁剪历史。
+
 ### 独立的可变执行预算
 
 LLM 支出独立于基础设施。以下仅为示意价格，而非已选模型报价：Input Token $0.50/百万，Output Token $2/百万；每次事件 5,000 Input 和 1,000 Output Tokens，则每事件 $0.0045，每位混合活跃用户每月 $3.078（1,000 MAU 为 $3,078）。实际 Input/Output、缓存 Input、模型/工具步骤数及重试均需要计量；不设无条件的单事件 Token 额度。
@@ -179,13 +191,15 @@ Daytona 官方标价：CPU $0.0504/vCPU-hour，RAM $0.0162/GiB-hour，存储在�
 
 1,000 混合 MAU 的示意预算：$30 Cloud Runtime + $3,078 LLM + $166.50 Sandbox = $3,274.50/月（不含其他费用）；50% 可分流任务在端侧执行时，Sandbox 部分节省 $83.25。采用 $60 条件性 Cloud Runtime 预算时，相同情景为 $3,304.50/月（不含其他费用）。这些数字不构成支出授权或产品定价。PoC 默认使用 Fake Model/Executor；真实供应商 Canary 支出需要单独批准的明确硬上限及单用户/全局预算预留。本 ADR 不授权 Supabase 或 Neon 付费升级。
 
+在 1k MAU 的 $3,274.50 示意预算中，LLM 约占 94%，Cloud Runtime 约占 1%；这是情景估算而非实测成本构成。优先优化推理单位经济模型，再优化基础设施细节：复用现有 Model Gateway 与预算控制，设定获批准的单用户/套餐及全局上限，每次付费调用前预留最大估计支出，核对实际 Input/Output/缓存 Token 与重试，对未知 Usage 保守处理。M0 定义小型模型路由评估矩阵（延迟、正确性/任务成功率、每成功任务成本、工具能力、隐私）；从确定性路由及有界上下文/输出/工具步骤/调用预算开始。只在支持且保持质量、延迟和隐私时评估 Prompt Cache 或端侧推理；不单纯为省 Token 强制降级。额度耗尽时准确告知用户并保留已接受工作恢复能力；不得静默截断或超出批准上限自动支出。M1 Fake Provider 测试验证单用户/全局上限与计量；付费模型评估另行授权。M4 发布要求实测推理成本分布和修订的单用户预算，而非仅基础设施估算。本 ADR 不批准具体模型选型或真实供应商支出。
+
 ### 预算控制与部署
 
 - 使用现有 Workers Paid 套餐；先做本地 Wrangler 测试。建立隔离的 V2 Staging Worker、DO Namespace、Queue、R2 Prefix/Bucket 及按需 D1，使用专用非生产身份，不使用真实用户数据；不修改 V1 路由。云端资源创建/部署/Smoke 须按前述规则单独批准；不引入新的固定费用订阅。
 - 首次云端 PoC 预算：Cloud Runtime 合计 $10/月（已支付的 $5 基础费 + 至多 $5 规划余量），默认外部 LLM/Sandbox 支出 $0。对比账户基线记录实际增量用量，因为包含额度共享且费用归属并不完全精确。
 - 达到阶段规划预算的 50%、80%、100% 时告警；PoC 期间每日复核支出、流量及延迟，上线后每周复核。普通成本偏差应告警而非全面停止生产；限制未经批准的模型/Sandbox 支出和滥用负载，保留已接受任务的恢复能力。账户级 Workers/DO 支出限制可能影响其他 App，已存储数据仍可能产生费用。未经产品负责人审核不启用大范围硬限制。实施开发环境隔离、单次调用 CPU 限制、供应商预算检查、产物保留与非敏感日志采样。
 - 按事件及工作负载画像追踪 Workers CPU/请求、DO Duration/请求/行数、D1、Queue 重试/DLQ、R2 存储/操作、Observability 字节、模型 Token/成本、Sandbox 分配的活跃/存储时长。与供应商账单核对；不记录私有文本、文件或凭据。
-- 每次发布门禁时重新预测预算，使用实测 P95 延迟、每操作计费写入行数和单用户成本。支出超出规划时应调查；产品体验和可靠恢复优先。预算是暂定规划决策，不是自动硬性停止服务的限制。
+- 首次及后续每次发布门禁复核官方价格（尤其 12 月 1 日 Observability 切换）、计费模式及剩余共享额度；根据实测 P95 延迟、每操作计费写入行数、存储增长、Streaming CPU 和单用户成本重估。支出超出规划时应调查；产品体验和可靠恢复优先。预算是暂定规划决策，不是自动硬性停止服务的限制。
 
 ## 实施与切换
 
@@ -202,6 +216,7 @@ M0：ADR、最小公共 Execution/Streaming/Recovery Contract 及匹配负载的
 ## 参考资料（价格核实日期：2026-11-19）
 
 - https://developers.cloudflare.com/workers/platform/pricing/
+- https://developers.cloudflare.com/workers/platform/limits/
 - https://developers.cloudflare.com/durable-objects/platform/pricing/
 - https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 - https://developers.cloudflare.com/durable-objects/api/alarms/

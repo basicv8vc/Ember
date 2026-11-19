@@ -85,7 +85,7 @@ export class OutboxCoordinator implements EventRuntimeCoordinatorPort {
   readonly #storage?: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
   readonly #business?: Pick<
     AuthoritativeBusinessPort,
-    'earliestRequiredDiscoveryAtMsSync' | 'inspectOutboxTargetSync' | 'convergeDueBusinessItemSync'
+    'listDueBusinessActionsSync' | 'inspectOutboxTargetSync' | 'convergeDueBusinessItemSync'
   >;
 
   constructor(
@@ -94,9 +94,7 @@ export class OutboxCoordinator implements EventRuntimeCoordinatorPort {
       readonly storage?: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
       readonly business?: Pick<
         AuthoritativeBusinessPort,
-        | 'earliestRequiredDiscoveryAtMsSync'
-        | 'inspectOutboxTargetSync'
-        | 'convergeDueBusinessItemSync'
+        'listDueBusinessActionsSync' | 'inspectOutboxTargetSync' | 'convergeDueBusinessItemSync'
       >;
     },
   ) {
@@ -232,12 +230,13 @@ export class OutboxCoordinator implements EventRuntimeCoordinatorPort {
    * - Active `v2_schedules.next_fire_at_ms`
    * - Pending / enqueued / dead_lettered `v2_dispatch_outbox.next_attempt_at_ms` (including `budget_sync`)
    */
-  recomputeAlarmSync(nowMs: number): number | null {
+  recomputeAlarmSync(_nowMs: number): number | null {
     const candidates: number[] = [];
 
-    const businessDue = this.#business?.earliestRequiredDiscoveryAtMsSync(nowMs) ?? null;
-    if (businessDue !== null) {
-      candidates.push(businessDue);
+    const dueActions =
+      this.#business?.listDueBusinessActionsSync(Number.MAX_SAFE_INTEGER, 10) ?? [];
+    for (const action of dueActions) {
+      candidates.push(action.deadlineAtMs);
     }
 
     const schedMin = this.#sql

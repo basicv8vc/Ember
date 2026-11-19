@@ -13,3 +13,4 @@ export * from './rtt-simulation.js';
 export * from './cost-model.js';
 export * from './model-routing-matrix.js';
 export * from './v2-suite.js';
+export * from './v2-m1/index.js';

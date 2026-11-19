@@ -28,10 +28,12 @@ function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: st
   for (const relPath of files) {
     let source = readFileSync(resolve(REPO_ROOT, 'packages/runtime-v2/src', relPath), 'utf8');
     if (relPath === 'index.ts') {
-      // Keep only recovery/storage/migration exports so merged A+B+E index entries don't pull unbundled workspace packages into Miniflare.
+      // Keep only B1 smoke exports so added B2-B4/A/E index entries don't pull unbundled modules into Miniflare.
       source = source
         .split('\n')
-        .filter((line) => /from\s+['"]\.\/(?:storage|migrations|recovery\/)/.test(line))
+        .filter((line) =>
+          /from\s+['"]\.\/(?:storage|migrations|recovery\/(?:schema|envelope|ports))/.test(line),
+        )
         .join('\n');
     }
     const transpiled = ts.transpileModule(source, {

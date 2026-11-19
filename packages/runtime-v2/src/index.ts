@@ -10,3 +10,4 @@ export * from './recovery/budget-sync.js';
 export * from './recovery/queue-worker.js';
 export * from './contracts/index.js';
 export * from './agent-head/index.js';
+export * from './global-budget/platform.js';

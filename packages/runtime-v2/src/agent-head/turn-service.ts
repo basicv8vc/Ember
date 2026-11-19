@@ -18,7 +18,6 @@ import type {
   B1ConversationIdentity,
   B1TranscriptClearResult,
   B2MessageAttachmentMeta,
-  B2TaskDelegationCommand,
   CommitTurnRequest,
   CommitTurnResult,
   HandoffTurnRequest,
@@ -58,16 +57,15 @@ import {
 import {
   allocateConversationSequenceSync,
   assertHeadScopeSync,
-  deterministicEdgeUuid,
   getConversationSync,
   getHeadMetaSync,
   getLatestAttemptForSubjectSync,
+  getLatestRunForTaskSync,
   getMainConversationSync,
+  getTaskRowSync,
   getTurnRowSync,
-  insertEmberMessageSync,
   listAttachmentsForMessageSync,
   listReservedAttemptsSync,
-  prepareEdgeSafeTaskCommand,
   readRecentTurnContextSync,
   sqlExecAll,
   sqlExecMaybe,
@@ -82,8 +80,14 @@ import {
   toIsoTimestamp,
   toUtcDayString,
 } from './state-machine.js';
+import {
+  ensureRecoveryCoverageAsync as ensureSharedRecoveryCoverageAsync,
+  executeAuthoritativeTurnCommit,
+  isCoverageValidAtSync as isSharedCoverageValidAtSync,
+  syncAlarmAndRelayBudget as syncSharedAlarmAndRelayBudget,
+  type TurnCommitDeps,
+} from './turn-commit.js';
 
-const SIMULATED_LABEL_PATTERN = /-(fake|echo)-/;
 const B1_MESSAGE_PAGE_MAX_LIMIT = 100;
 
 export interface TurnRecoverySeamHooks extends RecoveryCoordinatorHooks {
@@ -110,16 +114,6 @@ interface ReplayLookupResult {
   readonly currentTurnStatus: AssistantTurnRow['status'];
 }
 
-interface PreparedDelegationPayload {
-  readonly kind: 'notes.action_items' | 'python.agent';
-  readonly title?: string;
-  readonly inputJson: string;
-  readonly digest: string;
-  readonly idempotencyKey: string;
-  readonly traceId: Id;
-  readonly executionPath: 'standard' | 'heavy';
-}
-
 export class AgentHeadTurnService implements AgentHeadRpc {
   private readonly newId: () => Id;
   private readonly globalDailyCeilingMicroUsd: number;
@@ -130,152 +124,48 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       deps.globalDailyCeilingMicroUsd ?? V2_BUDGET_LIMITS.globalDailyMicroUsd;
   }
 
-  private readCoverageRowSync(): V2RecoveryCoverageRow | null {
-    if (this.deps.recoveryHooks.getCoverageRowSync !== undefined) {
-      return this.deps.recoveryHooks.getCoverageRowSync();
-    }
-    return sqlExecMaybe<V2RecoveryCoverageRow>(
-      this.deps.storage.sql,
-      `SELECT * FROM v2_recovery_coverage WHERE id = 1`,
-    );
+  private toTurnCommitDeps(): TurnCommitDeps {
+    return {
+      storage: this.deps.storage,
+      recoveryAdmission: this.deps.recoveryAdmission,
+      eventCoordinator: this.deps.eventCoordinator,
+      recoveryHooks: this.deps.recoveryHooks,
+      recoveryRegistry: this.deps.recoveryRegistry,
+      earliestDiscovery: this.deps.recoveryService,
+      nowMs: this.deps.nowMs,
+      idFactory: this.newId,
+      ...(this.deps.localCeilings !== undefined ? { localCeilings: this.deps.localCeilings } : {}),
+    };
   }
 
   private isCoverageValidAtSync(requiredRecoveryAtMs: number): boolean {
-    const cov = this.readCoverageRowSync();
-    return (
-      cov !== null &&
-      cov.coverage_state === 'covered' &&
-      cov.covered_recovery_at_ms !== null &&
-      cov.covered_recovery_at_ms <= requiredRecoveryAtMs
+    return isSharedCoverageValidAtSync(
+      { storage: this.deps.storage, recoveryHooks: this.deps.recoveryHooks },
+      requiredRecoveryAtMs,
     );
   }
 
-  private planHigherGenerationRetrySync(
-    observedGen: number,
-    fallbackRequiredMs: number,
-  ): { readonly generation: number; readonly targetAtMs: number } {
-    const now = this.deps.nowMs();
-    const earliest = this.deps.recoveryService.earliestRequiredDiscoveryAtMsSync(now);
-    const boundedReq =
-      earliest === null ? fallbackRequiredMs : Math.min(earliest, fallbackRequiredMs);
-
-    const planned = this.deps.recoveryHooks.reconcileCoverageSync({
-      expectedGen: observedGen,
-      nowMs: now,
-    });
-    if (planned.action === 'repair_ensure') {
-      return {
-        generation: planned.generation,
-        targetAtMs: Math.min(planned.recoveryAtMs, boundedReq),
-      };
-    }
-
-    const inspect = this.deps.recoveryAdmission.inspectCoverageSync(boundedReq, now);
-    if (inspect.kind === 'register') {
-      return { generation: inspect.generation, targetAtMs: inspect.targetAtMs };
-    }
-    return { generation: inspect.generation, targetAtMs: inspect.coveredRecoveryAtMs };
-  }
-
-  private async ensureRecoveryCoverageAsync(input: {
+  private ensureRecoveryCoverageAsync(input: {
     readonly tenantId: Id;
     readonly agentId: Id;
     readonly generation: number;
     readonly targetAtMs: number;
     readonly requiredDiscoveryMs: number;
   }): Promise<{ readonly activeGeneration: number; readonly actualRecoveryAtMs: number }> {
-    let activeGen = input.generation;
-    let activeTarget = input.targetAtMs;
-
-    for (let attempt = 0; attempt < 2; attempt += 1) {
-      let upsertRes:
-        | {
-            readonly accepted: boolean;
-            readonly currentGeneration: number;
-            readonly actualRecoveryAtMs: number | null;
-          }
-        | undefined;
-      try {
-        upsertRes = await this.deps.recoveryRegistry.upsertCoverage({
-          tenantId: input.tenantId,
-          agentId: input.agentId,
-          generation: activeGen,
-          recoveryAtMs: activeTarget,
-          nowMs: this.deps.nowMs(),
-        });
-      } catch {
-        try {
-          const readBack = await this.deps.recoveryRegistry.getCoverage({
-            tenantId: input.tenantId,
-            agentId: input.agentId,
-          });
-          if (
-            readBack.exists &&
-            readBack.currentGeneration === activeGen &&
-            readBack.actualRecoveryAtMs !== null &&
-            readBack.actualRecoveryAtMs <= activeTarget
-          ) {
-            return {
-              activeGeneration: activeGen,
-              actualRecoveryAtMs: readBack.actualRecoveryAtMs,
-            };
-          }
-          if (attempt === 0 && readBack.exists && readBack.currentGeneration !== null) {
-            const observedGen = readBack.currentGeneration;
-            const ff = this.deps.storage.transactionSync(() =>
-              this.planHigherGenerationRetrySync(observedGen, input.requiredDiscoveryMs),
-            );
-            activeGen = ff.generation;
-            activeTarget = ff.targetAtMs;
-            continue;
-          }
-          throw new DomainError('DB_UNAVAILABLE', 'recovery registry upsert failed');
-        } catch (err) {
-          if (err instanceof DomainError) {
-            throw err;
-          }
-          throw new DomainError('DB_UNAVAILABLE', 'recovery registry unavailable');
-        }
-      }
-
-      if (
-        upsertRes.accepted &&
-        upsertRes.actualRecoveryAtMs !== null &&
-        upsertRes.actualRecoveryAtMs <= activeTarget
-      ) {
-        return {
-          activeGeneration: upsertRes.currentGeneration,
-          actualRecoveryAtMs: upsertRes.actualRecoveryAtMs,
-        };
-      }
-
-      if (attempt === 0) {
-        const observedGen = upsertRes.currentGeneration;
-        const ff = this.deps.storage.transactionSync(() =>
-          this.planHigherGenerationRetrySync(observedGen, input.requiredDiscoveryMs),
-        );
-        activeGen = ff.generation;
-        activeTarget = ff.targetAtMs;
-        continue;
-      }
-
-      throw new DomainError('DB_UNAVAILABLE', 'recovery registry could not accept coverage');
-    }
-
-    throw new DomainError('DB_UNAVAILABLE', 'recovery registry coverage unresolved');
+    return ensureSharedRecoveryCoverageAsync(this.toTurnCommitDeps(), input);
   }
 
-  private async syncAlarmAndRelayBudget(input: {
+  private syncAlarmAndRelayBudget(input: {
     readonly alarmAtMs: number | null | undefined;
     readonly nowMs: number;
     readonly shouldRelayBudgetSync: boolean;
   }): Promise<void> {
-    if (input.alarmAtMs !== undefined && this.deps.recoveryHooks.syncPlatformAlarm !== undefined) {
-      await this.deps.recoveryHooks.syncPlatformAlarm(input.alarmAtMs, input.nowMs);
-    }
-    if (input.shouldRelayBudgetSync && this.deps.recoveryHooks.relayBudgetSync !== undefined) {
-      await this.deps.recoveryHooks.relayBudgetSync(input.nowMs);
-    }
+    return syncSharedAlarmAndRelayBudget({
+      recoveryHooks: this.deps.recoveryHooks,
+      alarmAtMs: input.alarmAtMs,
+      nowMs: input.nowMs,
+      shouldRelayBudgetSync: input.shouldRelayBudgetSync,
+    });
   }
 
   private findSubmissionReplaySync(
@@ -405,6 +295,12 @@ export class AgentHeadTurnService implements AgentHeadRpc {
 
     const budgetMode = req.modelReservation?.budgetMode ?? 'disabled_echo_only';
     const estimatedMicroUsd = req.modelReservation?.estimatedMicroUsd ?? 0;
+    if (budgetMode !== 'disabled_echo_only' && estimatedMicroUsd <= 0) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'metered budget mode requires positive estimatedMicroUsd reservation',
+      );
+    }
 
     // Stage 1: Synchronous SQLite pre-check + exclusive coverage generation claim via Agent B port
     const stage1 = this.deps.storage.transactionSync(() => {
@@ -1018,37 +914,40 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         deadlineAtMs = turn.deadline_at_ms;
         leaseExpiresAtMs = turn.lease_expires_at_ms;
       } else {
-        const task = this.deps.storage.sql
-          .exec<{
-            readonly status: string;
-            readonly lease_epoch: number;
-            readonly lease_expires_at_ms: number | null;
-            readonly deadline_at_ms: number | null;
-            readonly cancel_requested_at_ms: number | null;
-          }>(
-            `SELECT status, lease_epoch, lease_expires_at_ms, deadline_at_ms, cancel_requested_at_ms
-               FROM tasks WHERE id = ?`,
-            req.subjectId,
-          )
-          .toArray()[0];
-        if (task === undefined) {
+        const task = getTaskRowSync(this.deps.storage.sql, req.subjectId);
+        if (task === null) {
           return { ok: false, reason: 'not_found' };
         }
         if (task.cancel_requested_at_ms !== null) {
           return { ok: false, reason: 'cancelled' };
         }
-        if (task.status !== 'running' || task.lease_epoch !== req.leaseEpoch) {
+        const run =
+          task.current_run_id !== null
+            ? getLatestRunForTaskSync(this.deps.storage.sql, task.id)
+            : null;
+        if (
+          task.status !== 'running' ||
+          task.lease_epoch !== req.leaseEpoch ||
+          task.current_run_id === null ||
+          run === null ||
+          run.id !== task.current_run_id ||
+          run.status !== 'running' ||
+          run.lease_epoch !== req.leaseEpoch ||
+          run.worker_id !== req.leaseOwner
+        ) {
           return { ok: false, reason: 'fenced' };
         }
         if (
           task.lease_expires_at_ms === null ||
           nowMs >= task.lease_expires_at_ms ||
+          nowMs >= run.leased_until_ms ||
           (task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms)
         ) {
           return { ok: false, reason: 'expired' };
         }
-        deadlineAtMs = task.deadline_at_ms ?? task.lease_expires_at_ms;
-        leaseExpiresAtMs = task.lease_expires_at_ms;
+        deadlineAtMs =
+          task.deadline_at_ms ?? Math.min(task.lease_expires_at_ms, run.leased_until_ms);
+        leaseExpiresAtMs = Math.min(task.lease_expires_at_ms, run.leased_until_ms);
       }
 
       if (attempt.global_grant_expires_ms !== null && nowMs >= attempt.global_grant_expires_ms) {
@@ -1100,7 +999,10 @@ export class AgentHeadTurnService implements AgentHeadRpc {
     }
 
     let globalStartBeforeMs: number | null = null;
-    if (pre.budgetMode !== 'disabled_echo_only' && pre.globalGrantId !== null) {
+    if (pre.budgetMode !== 'disabled_echo_only') {
+      if (pre.globalGrantId === null) {
+        return { authorized: false, reason: 'budget_halted' };
+      }
       let authRes;
       try {
         authRes = await this.deps.globalBudget.authorizeGlobalSend({
@@ -1335,543 +1237,22 @@ export class AgentHeadTurnService implements AgentHeadRpc {
     return tx.res;
   }
 
-  private async prepareDelegationCommand(
-    tenantId: Id,
-    agentId: Id,
-    turnId: Id,
-    delegation: B2TaskDelegationCommand,
-  ): Promise<PreparedDelegationPayload> {
-    const idempotencyKey = `turn-delegation:${turnId}:${delegation.toolName}`;
-
-    if (delegation.toolName === 'delegate_notes_action_items') {
-      const prepared = await prepareEdgeSafeTaskCommand({
-        agentId,
-        idempotencyKey,
-        kind: 'notes.action_items',
-        ...(delegation.title !== undefined ? { title: delegation.title } : {}),
-        input: delegation.input,
-      });
-      return {
-        kind: 'notes.action_items',
-        ...(delegation.title !== undefined ? { title: delegation.title } : {}),
-        inputJson: JSON.stringify(prepared.command.input),
-        digest: prepared.digest,
-        idempotencyKey,
-        traceId: this.newId(),
-        executionPath: 'standard',
-      };
-    }
-
-    const attachmentIds = delegation.input.attachmentIds ?? [];
-    const inputArtifactIds = await Promise.all(
-      attachmentIds.map((uploadId) =>
-        deterministicEdgeUuid(`ember.artifact:${tenantId}:${turnId}:${uploadId}`),
-      ),
-    );
-    const prepared = await prepareEdgeSafeTaskCommand({
-      agentId,
-      idempotencyKey,
-      kind: 'python.agent',
-      ...(delegation.title !== undefined ? { title: delegation.title } : {}),
-      input: {
-        prompt: delegation.input.prompt,
-        ...(delegation.input.instructions !== undefined
-          ? { instructions: delegation.input.instructions }
-          : {}),
-        ...(inputArtifactIds.length > 0 ? { inputArtifactIds } : {}),
-      },
-    });
-    return {
-      kind: 'python.agent',
-      ...(delegation.title !== undefined ? { title: delegation.title } : {}),
-      inputJson: JSON.stringify(prepared.command.input),
-      digest: prepared.digest,
-      idempotencyKey,
-      traceId: this.newId(),
-      executionPath: 'heavy',
-    };
-  }
-
-  private createOrReuseDelegatedTaskSync(
-    tenantId: Id,
-    agentId: Id,
-    conversationId: Id,
-    turnId: Id,
-    prepared: PreparedDelegationPayload,
-    nowMs: number,
-  ): Id {
-    const sql = this.deps.storage.sql;
-    const existing = sql
-      .exec<{ readonly id: string; readonly digest: string }>(
-        `SELECT id, digest FROM tasks WHERE idempotency_key = ?`,
-        prepared.idempotencyKey,
-      )
-      .toArray()[0];
-
-    let taskId: Id;
-    if (existing !== undefined) {
-      if (existing.digest !== prepared.digest) {
-        throw new DomainError(
-          'IDEMPOTENCY_CONFLICT',
-          'delegated task idempotency key conflicts with existing command',
-        );
-      }
-      taskId = existing.id;
-    } else {
-      taskId = this.newId();
-      sql.exec(
-        `INSERT INTO tasks (
-           id, kind, title, input_json, digest, idempotency_key, status,
-           execution_path, execution_target, attempt_count, max_attempts,
-           lease_epoch, next_run_at_ms, created_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 'cloud', 0, 3, 1, ?, ?, ?)`,
-        taskId,
-        prepared.kind,
-        prepared.title ?? null,
-        prepared.inputJson,
-        prepared.digest,
-        prepared.idempotencyKey,
-        prepared.executionPath,
-        nowMs,
-        nowMs,
-        nowMs,
-      );
-      sql.exec(
-        `INSERT INTO task_events (
-           id, task_id, sequence, phase, payload_json, trace_id, occurred_at_ms
-         ) VALUES (?, ?, 1, 'accepted', ?, ?, ?)`,
-        this.newId(),
-        taskId,
-        JSON.stringify({ taskKind: prepared.kind, replayed: false }),
-        prepared.traceId,
-        nowMs,
-      );
-      const outboxId = `task:${taskId}:epoch:1`;
-      const envelope: V2DispatchEnvelope = {
-        schemaVersion: 2,
-        eventId: outboxId,
-        tenantId,
-        agentId,
-        entityKind: 'task',
-        entityId: taskId,
-        queueName: 'agent_task',
-        fenceEpoch: 1,
-      };
-      this.deps.eventCoordinator.enqueueDurableOutboxSync({
-        outboxId,
-        entityKind: 'task',
-        entityId: taskId,
-        queueName: 'agent_task',
-        payloadJson: JSON.stringify(envelope),
-        fenceEpoch: 1,
-        nextAttemptAtMs: nowMs,
-      });
-    }
-
-    const existingRef = sql
-      .exec<{ readonly id: string }>(
-        `SELECT id FROM conversation_messages WHERE task_id = ? AND kind = 'task_reference' LIMIT 1`,
-        taskId,
-      )
-      .toArray()[0];
-
-    if (existingRef === undefined) {
-      const seq = allocateConversationSequenceSync(sql, conversationId, nowMs);
-      sql.exec(
-        `INSERT INTO conversation_messages (
-           id, conversation_id, sequence, kind, task_id, created_at_ms
-         ) VALUES (?, ?, ?, 'task_reference', ?, ?)`,
-        this.newId(),
-        conversationId,
-        seq,
-        taskId,
-        nowMs,
-      );
-    }
-
-    return taskId;
-  }
-
   async commitTurn(rawReq: CommitTurnRequest): Promise<CommitTurnResult> {
     const req = parseCommitTurnRequest(rawReq);
-    if (
-      req.result.status === 'completed' &&
-      !req.result.simulated &&
-      SIMULATED_LABEL_PATTERN.test(req.result.modelLabel)
-    ) {
-      throw new DomainError(
-        'INVALID_ARGUMENT',
-        'simulated model label cannot be committed with simulated=false',
-      );
-    }
-
-    let preparedDelegation: PreparedDelegationPayload | null = null;
-    let delegationRegistration: {
-      readonly generation: number;
-      readonly actualRecoveryAtMs: number;
-    } | null = null;
-    if (req.result.status === 'completed' && req.result.delegation !== undefined) {
-      preparedDelegation = await this.prepareDelegationCommand(
-        req.scope.tenantId,
-        req.scope.agentId,
-        req.turnId,
-        req.result.delegation,
-      );
-
-      const nowPre = this.deps.nowMs();
-      const delegationBound = nowPre + V2_TIMING_LIMITS.d1RecoveryGraceMs;
-      const delegationPlan = this.deps.storage.transactionSync(() =>
-        this.deps.recoveryAdmission.inspectCoverageSync(delegationBound, nowPre),
-      );
-      if (delegationPlan.kind === 'register') {
-        const assured = await this.ensureRecoveryCoverageAsync({
-          tenantId: req.scope.tenantId,
-          agentId: req.scope.agentId,
-          generation: delegationPlan.generation,
-          targetAtMs: delegationPlan.targetAtMs,
-          requiredDiscoveryMs: delegationBound,
-        });
-        delegationRegistration = {
-          generation: assured.activeGeneration,
-          actualRecoveryAtMs: assured.actualRecoveryAtMs,
-        };
-      }
-    }
-
-    const tx = this.deps.storage.transactionSync(() => {
-      const nowMs = this.deps.nowMs();
-      assertHeadScopeSync(this.deps.storage.sql, req.scope.tenantId, req.scope.agentId);
-
-      const turn = getTurnRowSync(this.deps.storage.sql, req.turnId);
-      const attempt =
-        sqlExecMaybe<ModelAttemptRow>(
-          this.deps.storage.sql,
-          `SELECT *
-             FROM model_attempts
-            WHERE subject_type = 'turn' AND subject_id = ? AND attempt_no = ?`,
-          req.turnId,
-          req.attemptNo,
-        ) ?? undefined;
-
-      if (turn === null || turn.conversation_id !== req.conversationId) {
-        return {
-          result: { outcome: 'fenced' as const, turn: null },
-          alarmAtMs: undefined as number | null | undefined,
-          nowMs,
-          hasBudgetSync: false,
-        };
-      }
-
-      const fence = evaluateTurnFence(turn, req.leaseEpoch, req.leaseOwner, nowMs, {
-        allowCancelRequested: true,
-      });
-
-      if (
-        !fence.ok &&
-        !(
-          turn.status === 'running' &&
-          fence.reason === 'expired' &&
-          nowMs >= turn.deadline_at_ms &&
-          turn.lease_owner === req.leaseOwner &&
-          turn.lease_epoch === req.leaseEpoch
-        )
-      ) {
-        let alarmAtMs: number | null | undefined;
-        let hasBudgetSync = false;
-        if (
-          attempt !== undefined &&
-          attempt.operation_id === req.operationId &&
-          (attempt.state !== 'reserved' || turn.status !== 'running')
-        ) {
-          const settled = settleLocalAttemptAndEnqueueSync({
-            sql: this.deps.storage.sql,
-            coordinator: this.deps.eventCoordinator,
-            tenantId: req.scope.tenantId,
-            agentId: req.scope.agentId,
-            attempt,
-            requestedState: req.settlement.state,
-            outcomeCode: req.settlement.outcomeCode,
-            observedCostMicroUsd: req.settlement.observedCostMicroUsd ?? null,
-            inputTokens: req.settlement.inputTokens ?? null,
-            outputTokens: req.settlement.outputTokens ?? null,
-            nowMs,
-            ...(this.deps.localCeilings !== undefined ? { ceilings: this.deps.localCeilings } : {}),
-            idFactory: this.newId,
-          });
-          hasBudgetSync = settled.outboxId !== null;
-          alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-        }
-        return {
-          result: { outcome: 'fenced' as const, turn: toTurnDto(turn) },
-          alarmAtMs,
-          nowMs,
-          hasBudgetSync,
-        };
-      }
-
-      let hasBudgetSync = false;
-      if (attempt !== undefined && attempt.operation_id === req.operationId) {
-        const settled = settleLocalAttemptAndEnqueueSync({
-          sql: this.deps.storage.sql,
-          coordinator: this.deps.eventCoordinator,
-          tenantId: req.scope.tenantId,
-          agentId: req.scope.agentId,
-          attempt,
-          requestedState: req.settlement.state,
-          outcomeCode: req.settlement.outcomeCode,
-          observedCostMicroUsd: req.settlement.observedCostMicroUsd ?? null,
-          inputTokens: req.settlement.inputTokens ?? null,
-          outputTokens: req.settlement.outputTokens ?? null,
-          nowMs,
-          ...(this.deps.localCeilings !== undefined ? { ceilings: this.deps.localCeilings } : {}),
-          idFactory: this.newId,
-        });
-        hasBudgetSync = settled.outboxId !== null;
-      }
-
-      if (turn.cancel_requested_at_ms !== null) {
-        this.deps.storage.sql.exec(
-          `UPDATE assistant_turns
-              SET status = 'cancelled',
-                  failure_reason = NULL,
-                  response_message_id = NULL,
-                  lease_owner = NULL,
-                  lease_expires_at_ms = NULL,
-                  updated_at_ms = ?
-            WHERE id = ?`,
-          nowMs,
-          turn.id,
-        );
-        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-        const updated = getTurnRowSync(this.deps.storage.sql, turn.id)!;
-        return {
-          result: { outcome: 'reconciled_only' as const, turn: toTurnDto(updated) },
-          alarmAtMs,
-          nowMs,
-          hasBudgetSync,
-        };
-      }
-
-      if (nowMs >= turn.deadline_at_ms) {
-        const { messageId, sequence } = insertEmberMessageSync({
-          sql: this.deps.storage.sql,
-          messageId: this.newId(),
-          conversationId: turn.conversation_id,
-          text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
-          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-          simulated: true,
-          nowMs,
-        });
-        this.deps.storage.sql.exec(
-          `UPDATE assistant_turns
-              SET status = 'failed',
-                  failure_reason = 'timeout',
-                  response_message_id = ?,
-                  lease_owner = NULL,
-                  lease_expires_at_ms = NULL,
-                  updated_at_ms = ?
-            WHERE id = ?`,
-          messageId,
-          nowMs,
-          turn.id,
-        );
-        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-        const updated = getTurnRowSync(this.deps.storage.sql, turn.id)!;
-        if (req.result.status === 'failed') {
-          return {
-            result: {
-              outcome: 'published' as const,
-              turn: toTurnDto(updated),
-              responseMessageId: messageId,
-              sequence,
-              delegatedTaskId: null,
-            },
-            alarmAtMs,
-            nowMs,
-            hasBudgetSync,
-          };
-        }
-        return {
-          result: { outcome: 'reconciled_only' as const, turn: toTurnDto(updated) },
-          alarmAtMs,
-          nowMs,
-          hasBudgetSync,
-        };
-      }
-
-      if (req.result.status === 'aborted_for_retry_or_reconcile') {
-        const nextEpoch = turn.lease_epoch + 1;
-        this.deps.storage.sql.exec(
-          `UPDATE assistant_turns
-              SET execution_mode = 'durable_queue',
-                  lease_epoch = ?,
-                  lease_owner = NULL,
-                  lease_expires_at_ms = NULL,
-                  updated_at_ms = ?
-            WHERE id = ?`,
-          nextEpoch,
-          nowMs,
-          turn.id,
-        );
-        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-        const outboxId = `turn:${turn.id}:epoch:${nextEpoch}`;
-        const envelope: V2DispatchEnvelope = {
-          schemaVersion: 2,
-          eventId: outboxId,
-          tenantId: req.scope.tenantId,
-          agentId: req.scope.agentId,
-          entityKind: 'turn',
-          entityId: turn.id,
-          queueName: 'durable_turn',
-          fenceEpoch: nextEpoch,
-        };
-        this.deps.eventCoordinator.enqueueDurableOutboxSync({
-          outboxId,
-          entityKind: 'turn',
-          entityId: turn.id,
-          queueName: 'durable_turn',
-          payloadJson: JSON.stringify(envelope),
-          fenceEpoch: nextEpoch,
-          nextAttemptAtMs: nowMs,
-        });
-        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-        const updated = getTurnRowSync(this.deps.storage.sql, turn.id)!;
-        return {
-          result: { outcome: 'reconciled_only' as const, turn: toTurnDto(updated) },
-          alarmAtMs,
-          nowMs,
-          hasBudgetSync,
-        };
-      }
-
-      if (req.result.status === 'failed') {
-        const { messageId, sequence } = insertEmberMessageSync({
-          sql: this.deps.storage.sql,
-          messageId: this.newId(),
-          conversationId: turn.conversation_id,
-          text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
-          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-          simulated: true,
-          nowMs,
-        });
-        this.deps.storage.sql.exec(
-          `UPDATE assistant_turns
-              SET status = 'failed',
-                  failure_reason = ?,
-                  response_message_id = ?,
-                  lease_owner = NULL,
-                  lease_expires_at_ms = NULL,
-                  updated_at_ms = ?
-            WHERE id = ?`,
-          req.result.failureReason,
-          messageId,
-          nowMs,
-          turn.id,
-        );
-        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-        const updated = getTurnRowSync(this.deps.storage.sql, turn.id)!;
-        return {
-          result: {
-            outcome: 'published' as const,
-            turn: toTurnDto(updated),
-            responseMessageId: messageId,
-            sequence,
-            delegatedTaskId: null,
-          },
-          alarmAtMs,
-          nowMs,
-          hasBudgetSync,
-        };
-      }
-
-      let delegatedTaskId: Id | null = null;
-      if (preparedDelegation !== null) {
-        const taskCoverageBound = nowMs + V2_TIMING_LIMITS.d1RecoveryGraceMs;
-        let delegationCovered = false;
-        if (delegationRegistration !== null) {
-          delegationCovered = this.deps.recoveryAdmission.confirmCoverageSync({
-            generation: delegationRegistration.generation,
-            actualRecoveryAtMs: delegationRegistration.actualRecoveryAtMs,
-            applied: true,
-            earliestRequiredRecoveryMs: taskCoverageBound,
-            nowMs,
-          });
-        }
-        if (!delegationCovered) {
-          delegationCovered = this.isCoverageValidAtSync(taskCoverageBound);
-        }
-        if (!delegationCovered) {
-          throw new DomainError(
-            'DB_UNAVAILABLE',
-            'recovery coverage lost or insufficient for delegated task',
-          );
-        }
-        delegatedTaskId = this.createOrReuseDelegatedTaskSync(
-          req.scope.tenantId,
-          req.scope.agentId,
-          turn.conversation_id,
-          turn.id,
-          preparedDelegation,
-          nowMs,
-        );
-      }
-
-      const { messageId, sequence } = insertEmberMessageSync({
-        sql: this.deps.storage.sql,
-        messageId: this.newId(),
-        conversationId: turn.conversation_id,
-        text: req.result.text,
-        modelLabel: req.result.modelLabel,
-        simulated: req.result.simulated,
-        nowMs,
-      });
-
-      this.deps.storage.sql.exec(
-        `UPDATE assistant_turns
-            SET status = 'completed',
-                response_message_id = ?,
-                linked_task_id = ?,
-                lease_owner = NULL,
-                lease_expires_at_ms = NULL,
-                updated_at_ms = ?
-          WHERE id = ?`,
-        messageId,
-        delegatedTaskId,
-        nowMs,
-        turn.id,
-      );
-      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
-      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
-
-      const updated = getTurnRowSync(this.deps.storage.sql, turn.id)!;
-      return {
-        result: {
-          outcome: 'published' as const,
-          turn: toTurnDto(updated),
-          responseMessageId: messageId,
-          sequence,
-          delegatedTaskId,
-        },
-        alarmAtMs,
-        nowMs,
-        hasBudgetSync,
-      };
+    return executeAuthoritativeTurnCommit(this.toTurnCommitDeps(), {
+      tenantId: req.scope.tenantId,
+      agentId: req.scope.agentId,
+      conversationId: req.conversationId,
+      turnId: req.turnId,
+      leaseEpoch: req.leaseEpoch,
+      leaseOwner: req.leaseOwner,
+      attemptNo: req.attemptNo,
+      operationId: req.operationId,
+      settlement: req.settlement,
+      result: req.result,
+      allowDeadlineTimeoutPublish: true,
+      throwOnScopeMismatch: true,
     });
-
-    await this.syncAlarmAndRelayBudget({
-      alarmAtMs: tx.alarmAtMs,
-      nowMs: tx.nowMs,
-      shouldRelayBudgetSync: tx.hasBudgetSync,
-    });
-    return tx.result;
   }
 
   async cancelTurn(req: {

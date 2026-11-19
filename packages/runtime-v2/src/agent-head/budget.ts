@@ -495,6 +495,130 @@ export interface LocalSettlementResult {
 }
 
 /**
+ * Looks up a `model_attempts` row strictly bound to `(subjectType, subjectId, attemptNo, operationId)`.
+ */
+export function getBoundModelAttemptSync(
+  sql: SqlStorageLike,
+  subjectType: ModelAttemptSubjectType,
+  subjectId: Id,
+  attemptNo: number,
+  operationId: Id,
+): ModelAttemptRow | null {
+  return (
+    sql
+      .exec<ModelAttemptRow & Record<string, string | number | null>>(
+        `SELECT *
+           FROM model_attempts
+          WHERE subject_type = ? AND subject_id = ? AND attempt_no = ? AND operation_id = ?
+          LIMIT 1`,
+        subjectType,
+        subjectId,
+        attemptNo,
+        operationId,
+      )
+      .toArray()[0] ?? null
+  );
+}
+
+/**
+ * Returns `true` when settling/reconciling the exact-bound attempt will enqueue a new
+ * `budget_sync` outbox obligation requiring confirmed D1 recovery coverage.
+ */
+export function doesSettlementNeedBudgetCoverageSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly subjectType: ModelAttemptSubjectType;
+  readonly subjectId: Id;
+  readonly attemptNo: number;
+  readonly operationId: Id;
+  readonly observedCostMicroUsd?: number | null;
+}): boolean {
+  const attempt = getBoundModelAttemptSync(
+    input.sql,
+    input.subjectType,
+    input.subjectId,
+    input.attemptNo,
+    input.operationId,
+  );
+  if (attempt === null || attempt.global_grant_id === null) {
+    return false;
+  }
+  if (attempt.state === 'reserved') {
+    return true;
+  }
+  const observed = input.observedCostMicroUsd ?? null;
+  if (observed === null) {
+    return false;
+  }
+  const previouslyApplied = attempt.applied_cost_micro_usd ?? attempt.reserved_micro_usd;
+  return observed > previouslyApplied;
+}
+
+/**
+ * Single A-owned exact-binding late settlement / fenced reconciliation path.
+ * Never touches active `'reserved'` attempts unless `allowActiveReservedSettle` is explicitly true
+ * (e.g. subject already deleted or terminal), preserving original `utc_day` and monotone revisions.
+ */
+export function reconcileBoundAttemptSettlementSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly coordinator: EventRuntimeCoordinatorPort;
+  readonly tenantId: Id;
+  readonly agentId: Id;
+  readonly subjectType: ModelAttemptSubjectType;
+  readonly subjectId: Id;
+  readonly attemptNo: number;
+  readonly operationId: Id;
+  readonly requestedState: BudgetSyncSettlementState;
+  readonly outcomeCode: string;
+  readonly observedCostMicroUsd?: number | null;
+  readonly inputTokens?: number | null;
+  readonly outputTokens?: number | null;
+  readonly nowMs: number;
+  readonly allowActiveReservedSettle: boolean;
+  readonly ceilings?: LocalBudgetCeilings;
+  readonly idFactory?: () => Id;
+}):
+  | { readonly matched: false; readonly outboxId: null }
+  | {
+      readonly matched: true;
+      readonly outboxId: string | null;
+      readonly result: LocalSettlementResult;
+    } {
+  const attempt = getBoundModelAttemptSync(
+    input.sql,
+    input.subjectType,
+    input.subjectId,
+    input.attemptNo,
+    input.operationId,
+  );
+  if (attempt === null) {
+    return { matched: false, outboxId: null };
+  }
+  if (attempt.state === 'reserved' && !input.allowActiveReservedSettle) {
+    return { matched: false, outboxId: null };
+  }
+  const result = settleLocalAttemptAndEnqueueSync({
+    sql: input.sql,
+    coordinator: input.coordinator,
+    tenantId: input.tenantId,
+    agentId: input.agentId,
+    attempt,
+    requestedState: input.requestedState,
+    outcomeCode: input.outcomeCode,
+    observedCostMicroUsd: input.observedCostMicroUsd ?? null,
+    inputTokens: input.inputTokens ?? null,
+    outputTokens: input.outputTokens ?? null,
+    nowMs: input.nowMs,
+    ...(input.ceilings !== undefined ? { ceilings: input.ceilings } : {}),
+    ...(input.idFactory !== undefined ? { idFactory: input.idFactory } : {}),
+  });
+  return {
+    matched: true,
+    outboxId: result.outboxId,
+    result,
+  };
+}
+
+/**
  * Settles (or applies a late overage revision to) a `model_attempts` row and atomically enqueues
  * a `budget_sync` outbox row inside the same SQLite `transactionSync()` whenever `global_grant_id !== null`.
  *

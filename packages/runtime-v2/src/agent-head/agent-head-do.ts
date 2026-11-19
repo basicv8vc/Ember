@@ -55,6 +55,7 @@ import {
   type ModelAttemptRow,
 } from './schema.js';
 import { checkTaskModelLimits, toUtcDayString } from './state-machine.js';
+import { syncAlarmAndRelayBudget as syncSharedAlarmAndRelayBudget } from './turn-commit.js';
 import { AgentHeadTurnService, type TurnRecoverySeamHooks } from './turn-service.js';
 
 export interface AgentHeadEventRuntimeBindings {
@@ -115,6 +116,16 @@ function createLazyRecoveryHooksProxy(
       getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs) ?? Promise.resolve(),
     relayBudgetSync: (nowMs) => getTarget().relayBudgetSync?.(nowMs) ?? Promise.resolve(),
     getCoverageRowSync: () => getTarget().getCoverageRowSync?.() ?? null,
+  };
+}
+
+function createLazyRecoveryAdmissionProxy(
+  getTarget: () => RecoveryAdmissionPort,
+): RecoveryAdmissionPort {
+  return {
+    inspectCoverageSync: (requiredRecoveryAtMs, nowMs) =>
+      getTarget().inspectCoverageSync(requiredRecoveryAtMs, nowMs),
+    confirmCoverageSync: (cmd) => getTarget().confirmCoverageSync(cmd),
   };
 }
 
@@ -181,10 +192,18 @@ export class AgentHeadCore
       }
       return resolvedBindings.recoveryHooks;
     };
+    const getRecoveryAdmission = (): RecoveryAdmissionPort => {
+      if (resolvedBindings === undefined) {
+        throw new Error('AgentHeadCore eventRuntimeFactory not yet initialized');
+      }
+      return resolvedBindings.recoveryAdmission;
+    };
 
     this.recoveryService = new AgentHeadRecoveryService({
       storage: this.storage,
       eventCoordinator: createLazyEventCoordinatorProxy(getEventCoordinator),
+      recoveryAdmission: createLazyRecoveryAdmissionProxy(getRecoveryAdmission),
+      recoveryRegistry: options.recoveryRegistry,
       hooks: createLazyRecoveryHooksProxy(getRecoveryHooks),
       nowMs: this.nowMsFn,
       idFactory: this.newId,
@@ -213,17 +232,17 @@ export class AgentHeadCore
     });
   }
 
-  private async syncAlarmAndRelayBudget(input: {
+  private syncAlarmAndRelayBudget(input: {
     readonly alarmAtMs: number | null | undefined;
     readonly nowMs: number;
     readonly shouldRelayBudgetSync: boolean;
   }): Promise<void> {
-    if (input.alarmAtMs !== undefined && this.recoveryHooks.syncPlatformAlarm !== undefined) {
-      await this.recoveryHooks.syncPlatformAlarm(input.alarmAtMs, input.nowMs);
-    }
-    if (input.shouldRelayBudgetSync && this.recoveryHooks.relayBudgetSync !== undefined) {
-      await this.recoveryHooks.relayBudgetSync(input.nowMs);
-    }
+    return syncSharedAlarmAndRelayBudget({
+      recoveryHooks: this.recoveryHooks,
+      alarmAtMs: input.alarmAtMs,
+      nowMs: input.nowMs,
+      shouldRelayBudgetSync: input.shouldRelayBudgetSync,
+    });
   }
 
   /**
@@ -472,6 +491,12 @@ export class AgentHeadCore
           | 'budget_halted';
       }
   > {
+    if (cmd.budgetMode !== 'disabled_echo_only' && cmd.estimatedMicroUsd <= 0) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'metered budget mode requires positive estimatedMicroUsd reservation',
+      );
+    }
     const pre = this.storage.transactionSync(() => {
       const nowMs = this.nowMsFn();
       const meta = getHeadMetaSync(this.storage.sql);
@@ -483,6 +508,7 @@ export class AgentHeadCore
       if (
         task === null ||
         task.status !== 'running' ||
+        task.cancel_requested_at_ms !== null ||
         task.lease_epoch !== cmd.leaseEpoch ||
         task.current_run_id !== cmd.runId ||
         task.lease_expires_at_ms === null ||

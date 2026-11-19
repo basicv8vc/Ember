@@ -1893,10 +1893,28 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
       entityId: prep.turnId,
       operationId: prep.operationId,
       attemptId: '1',
+      attemptNo: 1,
+      sendState: 'sent',
       providerJobHandle: 'job-b4-1',
       interactiveHandoff: true,
     });
+    expect(typeof claimCtx.sendAuthorizingAtMs).toBe('number');
     expect(typeof claimCtx.sendStartedAtMs).toBe('number');
+
+    // Missing settlement in Turn commitDurableResult MUST NOT publish!
+    const missingSettle = await core.commitDurableResult({
+      tenantId,
+      agentId,
+      entityType: 'turn',
+      entityId: prep.turnId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'durable-worker-1',
+      outcome: {
+        status: 'completed',
+        text: 'Should be rejected without settlement',
+      },
+    });
+    expect(missingSettle.accepted).toBe(false);
 
     const durableCommit = await core.commitDurableResult({
       tenantId,
@@ -1906,6 +1924,8 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
       leaseEpoch: claim.leaseEpoch,
       workerId: 'durable-worker-1',
       outcome: {
+        attemptNo: 1,
+        operationId: prep.operationId,
         status: 'completed',
         text: 'Recovered durable answer',
         modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
@@ -1971,6 +1991,670 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     expect(taskCount.c).toBe(0);
     // Keep seamRef referenced for closure lifecycle verification
     expect(seamRef).toBeDefined();
+  });
+
+  it('P1-1: reconciles late 400 overage on 250 hold after clearTranscript/cancel/expired Durable with UTC day, D1 coverage & conflict/wrong-op guards', async () => {
+    const h = createHarness();
+    // 2023-11-14T23:55:00.000Z
+    const day1Ms = Date.UTC(2023, 10, 14, 23, 55, 0);
+    h.setClock(day1Ms);
+
+    // 1. Prepare 250 hold, markAttemptSent, then clearTranscript (250 conservative hold -> 0 turns left)
+    const pClear = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'clear then late bill',
+        transcript_epoch: 0,
+      },
+      workerId: 'edge-1',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 250,
+      },
+    });
+    if (pClear.kind !== 'prepared') throw new Error('expected prepared');
+    await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn',
+      subjectId: pClear.turnId,
+      attemptNo: 1,
+      operationId: pClear.operationId,
+      leaseEpoch: pClear.leaseEpoch,
+      leaseOwner: 'edge-1',
+    });
+
+    await h.core.clearTranscript({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      conversationId: h.conversationId,
+    });
+    expect(h.globalBudget.consumedMicroUsd).toBe(250);
+
+    // Simulate Sweeper retiring D1 coverage after transcript clear
+    h.doStorage.db
+      .prepare(
+        "UPDATE v2_recovery_coverage SET coverage_state = 'uncovered', covered_recovery_at_ms = NULL WHERE id = 1",
+      )
+      .run();
+    const upsertsBeforeLate = h.recoveryRegistry.upsertCalls;
+
+    // Cross UTC midnight to 2023-11-15T00:05:00.000Z
+    // Advance +6m across UTC midnight to 2023-11-15T00:01:00Z (still inside 600s turnDeadlineMs)
+    h.advanceClock(360_000);
+
+    // Late 400 on 250 hold after clearTranscript -> books 150 delta on ORIGINAL 2023-11-14 day & re-arms D1 coverage!
+    const lateClear = await h.core.commitTurn({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      conversationId: h.conversationId,
+      turnId: pClear.turnId,
+      leaseEpoch: pClear.leaseEpoch,
+      leaseOwner: 'edge-1',
+      attemptNo: 1,
+      operationId: pClear.operationId,
+      settlement: {
+        state: 'settled',
+        outcomeCode: 'ok',
+        observedCostMicroUsd: 400,
+        inputTokens: 20,
+        outputTokens: 60,
+      },
+      result: {
+        status: 'completed',
+        text: 'late cleared answer',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+      },
+    });
+    expect(lateClear).toEqual({ outcome: 'fenced', turn: null });
+    expect(h.recoveryRegistry.upsertCalls).toBe(upsertsBeforeLate + 1);
+    expect(h.globalBudget.consumedMicroUsd).toBe(400);
+    expect(h.globalBudget.overageMicroUsd).toBe(150);
+    expect(h.globalBudget.globalIncident).toBe('reservation_exceeded');
+
+    // Original UTC day & reservation overage preserved in local spend & model_attempts ledgers
+    const day1Spend = h.doStorage.db
+      .prepare(
+        "SELECT consumed_micro_usd, overage_micro_usd FROM agent_spend_days WHERE scope_kind = 'tenant' AND utc_day = '2023-11-14'",
+      )
+      .get() as { consumed_micro_usd: number; overage_micro_usd: number };
+    expect(day1Spend).toEqual({ consumed_micro_usd: 400, overage_micro_usd: 0 });
+    const attemptOverage = h.doStorage.db
+      .prepare(
+        'SELECT applied_cost_micro_usd, overage_micro_usd, settlement_revision, utc_day FROM model_attempts WHERE operation_id = ?',
+      )
+      .get(pClear.operationId) as {
+      applied_cost_micro_usd: number;
+      overage_micro_usd: number;
+      settlement_revision: number;
+      utc_day: string;
+    };
+    expect(attemptOverage).toEqual({
+      applied_cost_micro_usd: 400,
+      overage_micro_usd: 150,
+      settlement_revision: 1,
+      utc_day: '2023-11-14',
+    });
+    expect(
+      h.doStorage.db
+        .prepare(
+          "SELECT * FROM agent_spend_days WHERE scope_kind = 'tenant' AND utc_day = '2023-11-15'",
+        )
+        .all(),
+    ).toHaveLength(0);
+
+    // Repeated 400 & conflicting lower 300 or released evidence must NEVER rebook or refund
+    for (const evidence of [400, 300, null]) {
+      const rep = await h.core.commitTurn({
+        scope: { tenantId: h.tenantId, agentId: h.agentId },
+        conversationId: h.conversationId,
+        turnId: pClear.turnId,
+        leaseEpoch: pClear.leaseEpoch,
+        leaseOwner: 'edge-1',
+        attemptNo: 1,
+        operationId: pClear.operationId,
+        settlement:
+          evidence === null
+            ? { state: 'released', outcomeCode: 'not_sent' }
+            : { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: evidence },
+        result: {
+          status: 'completed',
+          text: 'repeat',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+        },
+      });
+      expect(rep.outcome).toBe('fenced');
+    }
+    expect(h.globalBudget.consumedMicroUsd).toBe(400);
+
+    // Wrong operationId & wrong tenant rejection
+    const wrongOp = await h.core.commitTurn({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      conversationId: h.conversationId,
+      turnId: pClear.turnId,
+      leaseEpoch: 1,
+      leaseOwner: 'edge-1',
+      attemptNo: 1,
+      operationId: randomUUID(),
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 900 },
+      result: {
+        status: 'completed',
+        text: 'wrong op',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+      },
+    });
+    expect(wrongOp.outcome).toBe('fenced');
+    expect(h.globalBudget.consumedMicroUsd).toBe(400);
+
+    await expect(
+      h.core.commitTurn({
+        scope: { tenantId: randomUUID(), agentId: h.agentId },
+        conversationId: h.conversationId,
+        turnId: pClear.turnId,
+        leaseEpoch: 1,
+        leaseOwner: 'edge-1',
+        attemptNo: 1,
+        operationId: pClear.operationId,
+        settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 900 },
+        result: {
+          status: 'completed',
+          text: 'wrong tenant',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+
+    // Clear incidents so next test turns can reserve
+    h.doStorage.db.prepare('UPDATE agent_budget_incidents SET resolved_at_ms = ?').run(h.nowMs());
+    h.globalBudget.globalIncident = null;
+
+    // 2. Cancel turn -> late overage reconciles via cancel path with 0 publications
+    const pCancel = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'cancel then late',
+        transcript_epoch: 1,
+      },
+      workerId: 'edge-c',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 200,
+      },
+    });
+    if (pCancel.kind !== 'prepared') throw new Error('expected prepared');
+    await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn',
+      subjectId: pCancel.turnId,
+      attemptNo: 1,
+      operationId: pCancel.operationId,
+      leaseEpoch: pCancel.leaseEpoch,
+      leaseOwner: 'edge-c',
+    });
+    await h.core.cancelTurn({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      conversationId: h.conversationId,
+      turnId: pCancel.turnId,
+    });
+    const lateCancel = await h.core.commitTurn({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      conversationId: h.conversationId,
+      turnId: pCancel.turnId,
+      leaseEpoch: 1,
+      leaseOwner: 'edge-c',
+      attemptNo: 1,
+      operationId: pCancel.operationId,
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 350 },
+      result: {
+        status: 'completed',
+        text: 'cancelled reply',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+      },
+    });
+    expect(lateCancel.outcome).toBe('fenced');
+    expect(lateCancel.turn?.status).toBe('cancelled');
+    expect(h.globalBudget.consumedMicroUsd).toBe(400 + 350);
+
+    h.doStorage.db.prepare('UPDATE agent_budget_incidents SET resolved_at_ms = ?').run(h.nowMs());
+    h.globalBudget.globalIncident = null;
+
+    // 3. Expired stale Durable commitDurableResult -> no publication, late 150 delta booked cleanly
+    const pDurable = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'stale durable', transcript_epoch: 1 },
+      workerId: 'edge-d',
+      leaseMs: 20_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'durable_queue',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 250,
+      },
+    });
+    if (pDurable.kind !== 'prepared') throw new Error('expected prepared');
+    const claimStale = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `turn:${pDurable.turnId}:epoch:1`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'turn',
+        entityId: pDurable.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: 1,
+      },
+      workerId: 'durable-stale',
+      leaseMs: 10_000,
+    });
+    if (claimStale.kind !== 'claimed') throw new Error('expected claimed');
+    await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn',
+      subjectId: pDurable.turnId,
+      attemptNo: 1,
+      operationId: pDurable.operationId,
+      leaseEpoch: claimStale.leaseEpoch,
+      leaseOwner: 'durable-stale',
+    });
+
+    // Expire durable lease via Alarm -> converges turn failed / attempt unknown_billed (250)
+    h.advanceClock(15_000);
+    await h.seam.runAlarmCycle();
+    expect(h.globalBudget.consumedMicroUsd).toBe(750 + 250);
+
+    const lateDurable = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'turn',
+      entityId: pDurable.turnId,
+      leaseEpoch: claimStale.leaseEpoch,
+      workerId: 'durable-stale',
+      outcome: {
+        attemptNo: 1,
+        operationId: pDurable.operationId,
+        status: 'completed',
+        text: 'Too late durable response',
+        settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 400 },
+      },
+    });
+    expect(lateDurable.accepted).toBe(false);
+    expect(h.globalBudget.consumedMicroUsd).toBe(750 + 400);
+    const turnDurable = await h.core.getTurn({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      conversationId: h.conversationId,
+      turnId: pDurable.turnId,
+    });
+    expect(turnDurable?.status).toBe('failed');
+
+    // 4. Stale worker / wrong operation MUST NEVER settle or terminalize a live active attempt
+    h.doStorage.db.prepare('UPDATE agent_budget_incidents SET resolved_at_ms = ?').run(h.nowMs());
+    h.globalBudget.globalIncident = null;
+    const pActive = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'live active', transcript_epoch: 1 },
+      workerId: 'edge-live',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 250,
+      },
+    });
+    if (pActive.kind !== 'prepared') throw new Error('expected prepared');
+
+    const staleOnActive = await h.core.commitTurn({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      conversationId: h.conversationId,
+      turnId: pActive.turnId,
+      leaseEpoch: 99,
+      leaseOwner: 'stale-worker',
+      attemptNo: 1,
+      operationId: pActive.operationId,
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 400 },
+      result: {
+        status: 'completed',
+        text: 'hijack',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+      },
+    });
+    expect(staleOnActive.outcome).toBe('fenced');
+    const wrongOpOnActive = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'turn',
+      entityId: pActive.turnId,
+      leaseEpoch: pActive.leaseEpoch,
+      workerId: 'edge-live',
+      outcome: {
+        attemptNo: 1,
+        operationId: randomUUID(),
+        status: 'completed',
+        text: 'wrong op',
+        settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 400 },
+      },
+    });
+    expect(wrongOpOnActive.accepted).toBe(false);
+
+    const activeAttemptRow = h.doStorage.db
+      .prepare('SELECT state FROM model_attempts WHERE operation_id = ?')
+      .get(pActive.operationId) as { state: string };
+    expect(activeAttemptRow.state).toBe('reserved');
+    expect(
+      (
+        await h.core.getTurn({
+          tenantId: h.tenantId,
+          agentId: h.agentId,
+          conversationId: h.conversationId,
+          turnId: pActive.turnId,
+        })
+      )?.status,
+    ).toBe('running');
+  });
+
+  it('P1-2: exposes sendAuthorizingAtMs & original utcDay on Durable claim, fences Task markAttemptSent worker/run, fails closed on missing global grant & binds Task settlements', async () => {
+    const h = createHarness();
+    const day1Ms = Date.UTC(2023, 10, 14, 23, 55, 0);
+    h.setClock(day1Ms);
+
+    // 1. Metered prepareTurn with 0 estimatedMicroUsd must fail closed immediately
+    await expect(
+      h.core.prepareTurn({
+        scope: h.makeScope(),
+        conversationId: h.conversationId,
+        request: { client_submission_id: randomUUID(), text: 'zero metered', transcript_epoch: 0 },
+        workerId: 'edge-1',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: {
+          budgetMode: 'simulated_full_protocol',
+          providerId: 'fake',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          rateVersion: 'v1',
+          maxAttempts: 2,
+          estimatedMicroUsd: 0,
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // 2. Lost authorization ACK (`send_authorizing_at_ms` set, `send_started_at_ms` null) -> Durable claim MUST NOT treat as clean unsent & MUST keep original utcDay across midnight
+    const prepAuthLost = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'auth ack lost', transcript_epoch: 0 },
+      workerId: 'edge-lost-ack',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      executionMode: 'fast_interactive',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 300,
+      },
+    });
+    if (prepAuthLost.kind !== 'prepared') throw new Error('expected prepared');
+
+    // Simulate send_authorizing_at_ms written locally just before DO/provider ACK loss
+    h.doStorage.db
+      .prepare('UPDATE model_attempts SET send_authorizing_at_ms = ? WHERE operation_id = ?')
+      .run(day1Ms + 100, prepAuthLost.operationId);
+
+    // Handoff inside live 45s lease on Day 1, then advance across UTC midnight before claimDurableWork
+    h.advanceClock(200);
+    const handoffAckLost = await h.core.handoffTurnToDurable({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      conversationId: h.conversationId,
+      turnId: prepAuthLost.turnId,
+      leaseEpoch: prepAuthLost.leaseEpoch,
+      leaseOwner: 'edge-lost-ack',
+      reason: 'interactive_deadline_120s',
+      providerJobHandle: 'job-uncertain-ack',
+    });
+    expect(handoffAckLost.outcome).toBe('handed_off');
+    if (handoffAckLost.outcome !== 'handed_off') return;
+
+    // Advance +6m across UTC midnight to 2023-11-15T00:01:00Z (still inside 600s turnDeadlineMs)
+    h.advanceClock(360_000);
+
+    const claimAckLost = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `handoff:${prepAuthLost.turnId}:epoch:${handoffAckLost.nextLeaseEpoch}`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'handoff',
+        entityId: prepAuthLost.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: handoffAckLost.nextLeaseEpoch,
+      },
+      workerId: 'durable-poll-worker',
+      leaseMs: 45_000,
+    });
+    if (claimAckLost.kind !== 'claimed') throw new Error('expected claimed');
+    const ackLostCtx = JSON.parse(claimAckLost.contextJson) as Record<string, unknown>;
+    expect(ackLostCtx).toMatchObject({
+      sendStartedAtMs: null,
+      sendAuthorizingAtMs: day1Ms + 100,
+      sendState: 'authorizing_unknown',
+      utcDay: '2023-11-14',
+      operationId: prepAuthLost.operationId,
+      attemptNo: 1,
+    });
+
+    // markAttemptSent refuses outbound send after authorizing_unknown (`already_sent`)
+    const blockedResend = await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn',
+      subjectId: prepAuthLost.turnId,
+      attemptNo: 1,
+      operationId: prepAuthLost.operationId,
+      leaseEpoch: claimAckLost.leaseEpoch,
+      leaseOwner: 'durable-poll-worker',
+    });
+    expect(blockedResend).toEqual({ authorized: false, reason: 'already_sent' });
+
+    // 3. Metered attempt missing global_grant_id fails closed (`budget_halted`)
+    h.doStorage.db
+      .prepare(
+        'UPDATE model_attempts SET send_authorizing_at_ms = NULL, global_grant_id = NULL WHERE operation_id = ?',
+      )
+      .run(prepAuthLost.operationId);
+    const noGrantSend = await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn',
+      subjectId: prepAuthLost.turnId,
+      attemptNo: 1,
+      operationId: prepAuthLost.operationId,
+      leaseEpoch: claimAckLost.leaseEpoch,
+      leaseOwner: 'durable-poll-worker',
+    });
+    expect(noGrantSend).toEqual({ authorized: false, reason: 'budget_halted' });
+
+    // 4. Task markAttemptSent checks current run worker owner & epoch; Durable task commit binds settlement & preserves non-model tasks
+    const taskModelId = randomUUID();
+    const taskNonModelId = randomUUID();
+    const now = h.nowMs();
+    for (const [tid, kind, path] of [
+      [taskModelId, 'python.agent', 'heavy'],
+      [taskNonModelId, 'notes.action_items', 'standard'],
+    ] as const) {
+      h.doStorage.db
+        .prepare(
+          `INSERT INTO tasks (id, kind, input_json, digest, idempotency_key, status, execution_path, execution_target, attempt_count, max_attempts, lease_epoch, next_run_at_ms, created_at_ms, updated_at_ms)
+           VALUES (?, ?, '{"prompt":"p"}', ?, ?, 'queued', ?, 'cloud', 0, 3, 1, ?, ?, ?)`,
+        )
+        .run(tid, kind, tid, tid, path, now, now, now);
+      h.doStorage.db
+        .prepare(
+          `INSERT INTO v2_dispatch_outbox (outbox_id, entity_kind, entity_id, queue_name, payload_json, operation_id, revision, state, next_attempt_at_ms, publish_attempts, dlq_count, fence_epoch, created_at_ms, updated_at_ms)
+           VALUES (?, 'task', ?, 'agent_task', '{}', NULL, 0, 'pending', ?, 0, 0, 1, ?, ?)`,
+        )
+        .run(`task:${tid}:epoch:1`, tid, now, now, now);
+    }
+
+    // Non-model task succeeds without settlement
+    const nonModelClaim = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `task:${taskNonModelId}:epoch:1`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'task',
+        entityId: taskNonModelId,
+        queueName: 'agent_task',
+        fenceEpoch: 1,
+      },
+      workerId: 'notes-worker',
+      leaseMs: 30_000,
+    });
+    if (nonModelClaim.kind !== 'claimed') throw new Error('expected non-model claim');
+    const nonModelCommit = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'task',
+      entityId: taskNonModelId,
+      leaseEpoch: nonModelClaim.leaseEpoch,
+      workerId: 'notes-worker',
+      outcome: { status: 'completed', summaryText: 'Extracted 2 action items' },
+    });
+    expect(nonModelCommit.accepted).toBe(true);
+
+    // Model-backed task: worker owner check on markAttemptSent + mandatory bound settlement on commitDurableResult
+    const modelClaim = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `task:${taskModelId}:epoch:1`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'task',
+        entityId: taskModelId,
+        queueName: 'agent_task',
+        fenceEpoch: 1,
+      },
+      workerId: 'python-worker-1',
+      leaseMs: 30_000,
+    });
+    if (modelClaim.kind !== 'claimed') throw new Error('expected model claim');
+    const claimedRun = JSON.parse(modelClaim.contextJson) as { readonly runId: string };
+
+    const taskRes = await h.core.reserveTaskModelAttempt({
+      tenantId: h.tenantId,
+      principalId: h.principalId,
+      agentId: h.agentId,
+      taskId: taskModelId,
+      runId: claimedRun.runId,
+      leaseEpoch: modelClaim.leaseEpoch,
+      providerId: 'fake',
+      modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+      rateVersion: 'v1',
+      budgetMode: 'simulated_full_protocol',
+      estimatedMicroUsd: 500,
+    });
+    if (taskRes.kind !== 'reserved') throw new Error('expected reserved');
+
+    // Wrong worker owner MUST be fenced on Task markAttemptSent
+    const wrongWorkerSend = await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'task',
+      subjectId: taskModelId,
+      attemptNo: taskRes.attemptNo,
+      operationId: taskRes.operationId,
+      leaseEpoch: modelClaim.leaseEpoch,
+      leaseOwner: 'wrong-python-worker',
+    });
+    expect(wrongWorkerSend).toEqual({ authorized: false, reason: 'fenced' });
+
+    const ownerSend = await h.core.markAttemptSent({
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'task',
+      subjectId: taskModelId,
+      attemptNo: taskRes.attemptNo,
+      operationId: taskRes.operationId,
+      leaseEpoch: modelClaim.leaseEpoch,
+      leaseOwner: 'python-worker-1',
+    });
+    expect(ownerSend.authorized).toBe(true);
+
+    // Committing model-backed task WITHOUT settlement MUST be rejected!
+    const missingTaskSettle = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'task',
+      entityId: taskModelId,
+      leaseEpoch: modelClaim.leaseEpoch,
+      workerId: 'python-worker-1',
+      outcome: { status: 'completed', summaryText: 'missing settlement' },
+    });
+    expect(missingTaskSettle.accepted).toBe(false);
+
+    // Committing with exact `(attemptNo, operationId, settlement)` completes & settles atomically
+    const validTaskCommit = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'task',
+      entityId: taskModelId,
+      leaseEpoch: modelClaim.leaseEpoch,
+      workerId: 'python-worker-1',
+      outcome: {
+        status: 'completed',
+        summaryText: 'Computed Python analysis',
+        attemptNo: taskRes.attemptNo,
+        operationId: taskRes.operationId,
+        settlement: {
+          state: 'settled',
+          outcomeCode: 'ok',
+          observedCostMicroUsd: 420,
+          inputTokens: 30,
+          outputTokens: 90,
+        },
+      },
+    });
+    expect(validTaskCommit.accepted).toBe(true);
+    expect(h.globalBudget.consumedMicroUsd).toBe(420);
   });
 });
 

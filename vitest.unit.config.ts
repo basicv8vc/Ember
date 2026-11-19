@@ -33,6 +33,9 @@ export default defineConfig({
       '@ember/postgres': fileURLToPath(
         new URL('./packages/postgres/src/index.ts', import.meta.url),
       ),
+      '@ember/runtime-v2': fileURLToPath(
+        new URL('./packages/runtime-v2/src/index.ts', import.meta.url),
+      ),
       '@ember/worker/b1/model-turn-responder': fileURLToPath(
         new URL('./apps/worker/src/b1/model-turn-responder.ts', import.meta.url),
       ),

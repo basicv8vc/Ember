@@ -1,0 +1,1334 @@
+import { type Id, isTerminalTaskStatus } from '@ember/domain';
+import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants.js';
+import {
+  computePreDeadlineRetryAtMs,
+  validateDispatchEnvelope,
+  type V2DispatchEnvelope,
+} from '../recovery/envelope.js';
+import type {
+  AgentHeadRecoveryPort,
+  AuthoritativeBusinessPort,
+  EventRuntimeCoordinatorPort,
+} from '../recovery/ports.js';
+import type {
+  OrdinaryOutboxEntityKind,
+  V2DispatchOutboxRow,
+  V2ScheduleRow,
+} from '../recovery/schema.js';
+import type { DurableObjectStorageLike } from '../storage.js';
+import { settleLocalAttemptAndEnqueueSync, type LocalBudgetCeilings } from './budget.js';
+import {
+  assertHeadScopeSync,
+  earliestBusinessAlarmAtMsSync,
+  getHeadMetaSync,
+  getLatestRunForTaskSync,
+  getTaskRowSync,
+  getTurnRowSync,
+  insertEmberMessageSync,
+  listReservedAttemptsSync,
+  readRecentTurnContextSync,
+  sqlExecAll,
+  sqlExecMaybe,
+  sqlExecOne,
+} from './queries.js';
+import type { ApprovalRow, AssistantTurnRow, TaskRow } from './schema.js';
+import { toUtcDayString } from './state-machine.js';
+
+/**
+ * Seam delegates owned by Agent B (`OutboxCoordinator`, `RecoveryCoverageCoordinator`,
+ * `AlarmMultiplexer`, `relayDueBudgetSyncBatch`) and consumed by Agent A without duplication.
+ */
+export interface RecoveryCoordinatorHooks {
+  /** Maps to `RecoveryCoverageCoordinator.reconcileFromRegistrySync`. */
+  readonly reconcileCoverageSync: (cmd: {
+    readonly expectedGen: number;
+    readonly nowMs: number;
+  }) => Awaited<ReturnType<AgentHeadRecoveryPort['reconcileFromRegistry']>>;
+
+  /** Maps to `RecoveryCoverageCoordinator.confirmRegistryPlanSync`. */
+  readonly confirmCoveragePlanSync: (cmd: {
+    readonly generation: number;
+    readonly actualRecoveryAtMs: number | null;
+    readonly applied: boolean;
+    readonly nowMs: number;
+  }) => { readonly confirmed: boolean };
+
+  /** Maps to `OutboxCoordinator.getOutboxByIdSync`. */
+  readonly getOutboxByIdSync?: (outboxId: string) => V2DispatchOutboxRow | null;
+
+  /** Maps to `AlarmMultiplexer.syncPlatformAlarm`. */
+  readonly syncPlatformAlarm?: (
+    targetAlarmAtMs: number | null,
+    nowMs: number,
+  ) => Promise<boolean | void>;
+
+  /** Maps to `relayDueBudgetSyncBatch`. */
+  readonly relayBudgetSync?: (nowMs: number) => Promise<void>;
+}
+
+export interface RecoveryServiceDeps {
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
+  readonly eventCoordinator: EventRuntimeCoordinatorPort;
+  readonly hooks: RecoveryCoordinatorHooks;
+  readonly nowMs: () => number;
+  readonly idFactory?: () => Id;
+  readonly localCeilings?: LocalBudgetCeilings;
+}
+
+/**
+ * Implements `AuthoritativeBusinessPort` (Agent A synchronous business convergence & inspection
+ * invoked by Agent B coordinators) and `AgentHeadRecoveryPort` (delegating coverage state transitions
+ * to B's `RecoveryCoverageCoordinator` while owning Turn/Task/Run lease & atomic settlement).
+ */
+export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, AgentHeadRecoveryPort {
+  private readonly newId: () => Id;
+
+  constructor(private readonly deps: RecoveryServiceDeps) {
+    this.newId = deps.idFactory ?? (() => globalThis.crypto.randomUUID());
+  }
+
+  earliestRequiredDiscoveryAtMsSync(_nowMs: number): number | null {
+    const sql = this.deps.storage.sql;
+    const bizDue = earliestBusinessAlarmAtMsSync(sql);
+    const outboxDue = sqlExecOne<{ readonly m: number | null }>(
+      sql,
+      `SELECT MIN(next_attempt_at_ms) AS m
+         FROM v2_dispatch_outbox
+        WHERE state IN ('pending', 'enqueued', 'dead_lettered')`,
+    ).m;
+    const schedDue = sqlExecOne<{ readonly m: number | null }>(
+      sql,
+      `SELECT MIN(next_fire_at_ms) AS m
+         FROM v2_schedules
+        WHERE status = 'active'`,
+    ).m;
+
+    const candidates = [bizDue, outboxDue, schedDue].filter((v): v is number => v !== null);
+    if (candidates.length === 0) {
+      return null;
+    }
+    return Math.min(...candidates) + V2_TIMING_LIMITS.d1RecoveryGraceMs;
+  }
+
+  listDueBusinessActionsSync(
+    nowMs: number,
+    limit: number,
+  ): ReadonlyArray<{
+    readonly targetKind: 'turn' | 'task';
+    readonly targetId: string;
+    readonly actionKind: 'preclaim_deadline' | 'lease_expired' | 'cancel_converge' | 'retry_due';
+    readonly deadlineAtMs: number;
+  }> {
+    if (limit <= 0) {
+      return [];
+    }
+    const actions: Array<{
+      readonly targetKind: 'turn' | 'task';
+      readonly targetId: string;
+      readonly actionKind: 'preclaim_deadline' | 'lease_expired' | 'cancel_converge' | 'retry_due';
+      readonly deadlineAtMs: number;
+    }> = [];
+
+    const dueTurns = sqlExecAll<AssistantTurnRow>(
+      this.deps.storage.sql,
+      `SELECT *
+         FROM assistant_turns
+        WHERE status = 'running'
+          AND (
+            cancel_requested_at_ms IS NOT NULL
+            OR deadline_at_ms <= ?
+            OR (lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?)
+          )
+        ORDER BY CASE
+                   WHEN lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms < deadline_at_ms
+                     THEN lease_expires_at_ms
+                   ELSE deadline_at_ms
+                 END ASC, id ASC
+        LIMIT ?`,
+      nowMs,
+      nowMs,
+      limit,
+    );
+
+    for (const turn of dueTurns) {
+      const nextDueMs =
+        turn.lease_expires_at_ms !== null && turn.lease_expires_at_ms < turn.deadline_at_ms
+          ? turn.lease_expires_at_ms
+          : turn.deadline_at_ms;
+      const actionKind =
+        turn.cancel_requested_at_ms !== null
+          ? 'cancel_converge'
+          : nowMs >= turn.deadline_at_ms
+            ? 'preclaim_deadline'
+            : 'lease_expired';
+      actions.push({
+        targetKind: 'turn',
+        targetId: turn.id,
+        actionKind,
+        deadlineAtMs: nextDueMs,
+      });
+    }
+
+    if (actions.length >= limit) {
+      return actions.slice(0, limit);
+    }
+
+    const remaining = limit - actions.length;
+    const dueTasks = sqlExecAll<TaskRow>(
+      this.deps.storage.sql,
+      `SELECT *
+         FROM tasks
+        WHERE status IN ('queued', 'retryable_failed', 'running', 'waiting_approval')
+          AND (
+            (deadline_at_ms IS NOT NULL AND deadline_at_ms <= ?)
+            OR cancel_requested_at_ms IS NOT NULL
+            OR (status = 'running' AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?)
+            OR (status IN ('queued', 'retryable_failed') AND next_run_at_ms <= ?)
+          )
+        ORDER BY COALESCE(lease_expires_at_ms, deadline_at_ms, next_run_at_ms) ASC, id ASC
+        LIMIT ?`,
+      nowMs,
+      nowMs,
+      nowMs,
+      remaining,
+    );
+
+    for (const task of dueTasks) {
+      let nextDueMs = task.next_run_at_ms;
+      if (task.status === 'running' && task.lease_expires_at_ms !== null) {
+        nextDueMs =
+          task.deadline_at_ms !== null
+            ? Math.min(task.lease_expires_at_ms, task.deadline_at_ms)
+            : task.lease_expires_at_ms;
+      } else if (task.deadline_at_ms !== null) {
+        nextDueMs =
+          task.status === 'waiting_approval'
+            ? task.deadline_at_ms
+            : Math.min(task.next_run_at_ms, task.deadline_at_ms);
+      }
+
+      const actionKind =
+        task.cancel_requested_at_ms !== null
+          ? 'cancel_converge'
+          : task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms
+            ? 'preclaim_deadline'
+            : task.status === 'running' &&
+                task.lease_expires_at_ms !== null &&
+                nowMs >= task.lease_expires_at_ms
+              ? 'lease_expired'
+              : 'retry_due';
+      actions.push({
+        targetKind: 'task',
+        targetId: task.id,
+        actionKind,
+        deadlineAtMs: nextDueMs,
+      });
+    }
+
+    if (actions.length < limit) {
+      const remApprovals = limit - actions.length;
+      const dueApprovals = sqlExecAll<ApprovalRow>(
+        this.deps.storage.sql,
+        `SELECT *
+           FROM approvals
+          WHERE status = 'pending' AND expires_at_ms <= ?
+          ORDER BY expires_at_ms ASC, id ASC
+          LIMIT ?`,
+        nowMs,
+        remApprovals,
+      );
+      for (const approval of dueApprovals) {
+        actions.push({
+          targetKind: 'task',
+          targetId: approval.task_id,
+          actionKind: 'preclaim_deadline',
+          deadlineAtMs: approval.expires_at_ms,
+        });
+      }
+    }
+
+    actions.sort((a, b) => a.deadlineAtMs - b.deadlineAtMs);
+    return actions.slice(0, limit);
+  }
+
+  convergeDueBusinessItemSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void {
+    const meta = getHeadMetaSync(this.deps.storage.sql);
+    if (meta === null) {
+      return;
+    }
+
+    if (targetKind === 'turn') {
+      this.convergeDueTurnSync(meta.tenant_id, meta.agent_id, targetId, nowMs);
+    } else {
+      this.convergeDueTaskSync(meta.tenant_id, meta.agent_id, targetId, nowMs);
+    }
+
+    this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+  }
+
+  private settleOpenAttemptsForSubjectSync(
+    tenantId: Id,
+    agentId: Id,
+    subjectType: 'turn' | 'task',
+    subjectId: Id,
+    outcomeCodeOnRelease: string,
+    outcomeCodeOnUncertain: string,
+    nowMs: number,
+  ): { readonly anyUncertain: boolean } {
+    const reservedAttempts = listReservedAttemptsSync(
+      this.deps.storage.sql,
+      subjectType,
+      subjectId,
+    );
+    let anyUncertain = false;
+
+    for (const attempt of reservedAttempts) {
+      const provablyUnsent =
+        attempt.send_started_at_ms === null && attempt.send_authorizing_at_ms === null;
+      if (!provablyUnsent) {
+        anyUncertain = true;
+      }
+
+      settleLocalAttemptAndEnqueueSync({
+        sql: this.deps.storage.sql,
+        coordinator: this.deps.eventCoordinator,
+        tenantId,
+        agentId,
+        attempt,
+        requestedState: provablyUnsent ? 'released' : 'unknown_billed',
+        outcomeCode: provablyUnsent ? outcomeCodeOnRelease : outcomeCodeOnUncertain,
+        nowMs,
+        ...(this.deps.localCeilings !== undefined ? { ceilings: this.deps.localCeilings } : {}),
+        idFactory: this.newId,
+      });
+    }
+
+    return { anyUncertain };
+  }
+
+  private convergeDueTurnSync(tenantId: Id, agentId: Id, turnId: string, nowMs: number): void {
+    const sql = this.deps.storage.sql;
+    const turn = getTurnRowSync(sql, turnId);
+    if (turn === null || turn.status !== 'running') {
+      return;
+    }
+
+    if (turn.cancel_requested_at_ms !== null) {
+      this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'turn',
+        turn.id,
+        'client_cancelled',
+        'client_cancelled',
+        nowMs,
+      );
+      sql.exec(
+        `UPDATE assistant_turns
+            SET status = 'cancelled',
+                failure_reason = NULL,
+                response_message_id = NULL,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nowMs,
+        turn.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      return;
+    }
+
+    if (nowMs >= turn.deadline_at_ms) {
+      this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'turn',
+        turn.id,
+        'not_sent',
+        'model_timeout',
+        nowMs,
+      );
+      const { messageId } = insertEmberMessageSync({
+        sql,
+        messageId: this.newId(),
+        conversationId: turn.conversation_id,
+        text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: true,
+        nowMs,
+      });
+      sql.exec(
+        `UPDATE assistant_turns
+            SET status = 'failed',
+                failure_reason = 'timeout',
+                response_message_id = ?,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        messageId,
+        nowMs,
+        turn.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      return;
+    }
+
+    if (turn.lease_expires_at_ms !== null && nowMs >= turn.lease_expires_at_ms) {
+      const { anyUncertain } = this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'turn',
+        turn.id,
+        'not_sent',
+        'model_unavailable',
+        nowMs,
+      );
+
+      // Honest degradation: uncertain outbound call with NO resumable provider handle never blindly replays
+      const hasResumableHandle =
+        turn.provider_job_handle !== null && turn.provider_job_handle.length > 0;
+      if (anyUncertain && !hasResumableHandle) {
+        const { messageId } = insertEmberMessageSync({
+          sql,
+          messageId: this.newId(),
+          conversationId: turn.conversation_id,
+          text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+          nowMs,
+        });
+        sql.exec(
+          `UPDATE assistant_turns
+              SET status = 'failed',
+                  failure_reason = 'internal_error',
+                  response_message_id = ?,
+                  lease_owner = NULL,
+                  lease_expires_at_ms = NULL,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          messageId,
+          nowMs,
+          turn.id,
+        );
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        return;
+      }
+
+      const retryDecision = computePreDeadlineRetryAtMs(nowMs, turn.deadline_at_ms);
+      if (!retryDecision.shouldRetry) {
+        sql.exec(
+          `UPDATE assistant_turns
+              SET lease_owner = NULL,
+                  lease_expires_at_ms = NULL,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          nowMs,
+          turn.id,
+        );
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        return;
+      }
+
+      const nextEpoch = turn.lease_epoch + 1;
+      sql.exec(
+        `UPDATE assistant_turns
+            SET execution_mode = 'durable_queue',
+                lease_epoch = ?,
+                lease_owner = NULL,
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nextEpoch,
+        nowMs,
+        turn.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      const outboxId = `turn:${turn.id}:epoch:${nextEpoch}`;
+      const envelope: V2DispatchEnvelope = {
+        schemaVersion: 2,
+        eventId: outboxId,
+        tenantId,
+        agentId,
+        entityKind: 'turn',
+        entityId: turn.id,
+        queueName: 'durable_turn',
+        fenceEpoch: nextEpoch,
+      };
+      this.deps.eventCoordinator.enqueueDurableOutboxSync({
+        outboxId,
+        entityKind: 'turn',
+        entityId: turn.id,
+        queueName: 'durable_turn',
+        payloadJson: JSON.stringify(envelope),
+        fenceEpoch: nextEpoch,
+        nextAttemptAtMs: retryDecision.nextAttemptAtMs,
+      });
+    }
+  }
+
+  private convergeDueTaskSync(tenantId: Id, agentId: Id, taskId: string, nowMs: number): void {
+    const sql = this.deps.storage.sql;
+    const task = getTaskRowSync(sql, taskId);
+    if (task === null || isTerminalTaskStatus(task.status)) {
+      return;
+    }
+
+    // Expire overdue pending approvals before checking overall task state
+    sql.exec(
+      `UPDATE approvals
+          SET status = 'expired',
+              decided_at_ms = ?,
+              updated_at_ms = ?
+        WHERE task_id = ? AND status = 'pending' AND expires_at_ms <= ?`,
+      nowMs,
+      nowMs,
+      task.id,
+      nowMs,
+    );
+
+    if (task.cancel_requested_at_ms !== null) {
+      this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'task',
+        task.id,
+        'client_cancelled',
+        'client_cancelled',
+        nowMs,
+      );
+      sql.exec(
+        `UPDATE runs
+            SET status = 'cancelled',
+                finished_at_ms = ?,
+                updated_at_ms = ?
+          WHERE task_id = ? AND status IN ('created', 'running')`,
+        nowMs,
+        nowMs,
+        task.id,
+      );
+      sql.exec(
+        `UPDATE approvals
+            SET status = 'expired',
+                decided_at_ms = ?,
+                updated_at_ms = ?
+          WHERE task_id = ? AND status = 'pending'`,
+        nowMs,
+        nowMs,
+        task.id,
+      );
+      sql.exec(
+        `UPDATE tasks
+            SET status = 'cancelled',
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nowMs,
+        task.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      return;
+    }
+
+    if (task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms) {
+      this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'task',
+        task.id,
+        'not_sent',
+        'model_timeout',
+        nowMs,
+      );
+      sql.exec(
+        `UPDATE runs
+            SET status = 'failed_terminal',
+                finished_at_ms = ?,
+                updated_at_ms = ?
+          WHERE task_id = ? AND status IN ('created', 'running')`,
+        nowMs,
+        nowMs,
+        task.id,
+      );
+      sql.exec(
+        `UPDATE approvals
+            SET status = 'expired',
+                decided_at_ms = ?,
+                updated_at_ms = ?
+          WHERE task_id = ? AND status = 'pending'`,
+        nowMs,
+        nowMs,
+        task.id,
+      );
+      sql.exec(
+        `UPDATE tasks
+            SET status = 'failed',
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nowMs,
+        task.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      return;
+    }
+
+    if (
+      task.status === 'running' &&
+      task.lease_expires_at_ms !== null &&
+      nowMs >= task.lease_expires_at_ms
+    ) {
+      const { anyUncertain } = this.settleOpenAttemptsForSubjectSync(
+        tenantId,
+        agentId,
+        'task',
+        task.id,
+        'not_sent',
+        'model_unavailable',
+        nowMs,
+      );
+      sql.exec(
+        `UPDATE runs
+            SET status = 'lease_expired',
+                finished_at_ms = ?,
+                updated_at_ms = ?
+          WHERE task_id = ? AND status IN ('created', 'running')`,
+        nowMs,
+        nowMs,
+        task.id,
+      );
+
+      const hasHandle = task.provider_job_handle !== null && task.provider_job_handle.length > 0;
+      const canRetry = task.attempt_count < task.max_attempts && (!anyUncertain || hasHandle);
+
+      if (!canRetry) {
+        sql.exec(
+          `UPDATE tasks
+              SET status = 'failed',
+                  lease_expires_at_ms = NULL,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          nowMs,
+          task.id,
+        );
+        this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
+        return;
+      }
+
+      const deadline = task.deadline_at_ms ?? nowMs + 60_000;
+      const retryDecision = computePreDeadlineRetryAtMs(nowMs, deadline, 5_000);
+      if (!retryDecision.shouldRetry) {
+        sql.exec(
+          `UPDATE tasks
+              SET status = 'retryable_failed',
+                  lease_expires_at_ms = NULL,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          nowMs,
+          task.id,
+        );
+        this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+        return;
+      }
+
+      const nextEpoch = task.lease_epoch + 1;
+      sql.exec(
+        `UPDATE tasks
+            SET status = 'queued',
+                lease_epoch = ?,
+                lease_expires_at_ms = NULL,
+                current_run_id = NULL,
+                next_run_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nextEpoch,
+        retryDecision.nextAttemptAtMs,
+        nowMs,
+        task.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      const outboxId = `task:${task.id}:epoch:${nextEpoch}`;
+      const envelope: V2DispatchEnvelope = {
+        schemaVersion: 2,
+        eventId: outboxId,
+        tenantId,
+        agentId,
+        entityKind: 'task',
+        entityId: task.id,
+        queueName: 'agent_task',
+        fenceEpoch: nextEpoch,
+      };
+      this.deps.eventCoordinator.enqueueDurableOutboxSync({
+        outboxId,
+        entityKind: 'task',
+        entityId: task.id,
+        queueName: 'agent_task',
+        payloadJson: JSON.stringify(envelope),
+        fenceEpoch: nextEpoch,
+        nextAttemptAtMs: retryDecision.nextAttemptAtMs,
+      });
+    }
+  }
+
+  inspectOutboxTargetSync(
+    entityKind: OrdinaryOutboxEntityKind,
+    entityId: string,
+  ): {
+    readonly exists: boolean;
+    readonly targetKind: 'turn' | 'task' | null;
+    readonly targetId: string | null;
+    readonly currentLeaseEpoch: number;
+    readonly deadlineAtMs: number;
+    readonly isTerminal: boolean;
+    readonly cancelRequested: boolean;
+  } {
+    const sql = this.deps.storage.sql;
+
+    if (entityKind === 'turn') {
+      const turn = getTurnRowSync(sql, entityId);
+      if (turn === null) {
+        return {
+          exists: false,
+          targetKind: null,
+          targetId: null,
+          currentLeaseEpoch: 0,
+          deadlineAtMs: 0,
+          isTerminal: true,
+          cancelRequested: false,
+        };
+      }
+      return {
+        exists: true,
+        targetKind: 'turn',
+        targetId: turn.id,
+        currentLeaseEpoch: turn.lease_epoch,
+        deadlineAtMs: turn.deadline_at_ms,
+        isTerminal: turn.status !== 'running',
+        cancelRequested: turn.cancel_requested_at_ms !== null,
+      };
+    }
+
+    if (entityKind === 'task') {
+      const task = getTaskRowSync(sql, entityId);
+      if (task === null) {
+        return {
+          exists: false,
+          targetKind: null,
+          targetId: null,
+          currentLeaseEpoch: 0,
+          deadlineAtMs: 0,
+          isTerminal: true,
+          cancelRequested: false,
+        };
+      }
+      return {
+        exists: true,
+        targetKind: 'task',
+        targetId: task.id,
+        currentLeaseEpoch: task.lease_epoch,
+        deadlineAtMs: task.deadline_at_ms ?? Number.MAX_SAFE_INTEGER,
+        isTerminal: isTerminalTaskStatus(task.status),
+        cancelRequested: task.cancel_requested_at_ms !== null,
+      };
+    }
+
+    if (entityKind === 'handoff') {
+      const turn = getTurnRowSync(sql, entityId);
+      if (turn !== null) {
+        return {
+          exists: true,
+          targetKind: 'turn',
+          targetId: turn.id,
+          currentLeaseEpoch: turn.lease_epoch,
+          deadlineAtMs: turn.deadline_at_ms,
+          isTerminal: turn.status !== 'running',
+          cancelRequested: turn.cancel_requested_at_ms !== null,
+        };
+      }
+      const task = getTaskRowSync(sql, entityId);
+      if (task !== null) {
+        return {
+          exists: true,
+          targetKind: 'task',
+          targetId: task.id,
+          currentLeaseEpoch: task.lease_epoch,
+          deadlineAtMs: task.deadline_at_ms ?? Number.MAX_SAFE_INTEGER,
+          isTerminal: isTerminalTaskStatus(task.status),
+          cancelRequested: task.cancel_requested_at_ms !== null,
+        };
+      }
+      return {
+        exists: false,
+        targetKind: null,
+        targetId: null,
+        currentLeaseEpoch: 0,
+        deadlineAtMs: 0,
+        isTerminal: true,
+        cancelRequested: false,
+      };
+    }
+
+    const task = sqlExecMaybe<TaskRow>(
+      sql,
+      `SELECT * FROM tasks WHERE idempotency_key = ? LIMIT 1`,
+      `schedule:${entityId}`,
+    );
+    if (task !== null) {
+      return {
+        exists: true,
+        targetKind: 'task',
+        targetId: task.id,
+        currentLeaseEpoch: task.lease_epoch,
+        deadlineAtMs: task.deadline_at_ms ?? Number.MAX_SAFE_INTEGER,
+        isTerminal: isTerminalTaskStatus(task.status),
+        cancelRequested: task.cancel_requested_at_ms !== null,
+      };
+    }
+
+    return {
+      exists: false,
+      targetKind: null,
+      targetId: null,
+      currentLeaseEpoch: 0,
+      deadlineAtMs: 0,
+      isTerminal: true,
+      cancelRequested: false,
+    };
+  }
+
+  materializeScheduleOccurrenceSync(
+    scheduleId: string,
+    occurrenceSeq: number,
+    nowMs: number,
+  ): void {
+    const sql = this.deps.storage.sql;
+    const sched = sqlExecMaybe<V2ScheduleRow>(
+      sql,
+      `SELECT * FROM v2_schedules WHERE schedule_id = ?`,
+      scheduleId,
+    );
+    if (sched === null || sched.status !== 'active') {
+      return;
+    }
+
+    const idempotencyKey = `schedule:${scheduleId}:${occurrenceSeq}`;
+    const existing = sqlExecMaybe<TaskRow>(
+      sql,
+      `SELECT * FROM tasks WHERE idempotency_key = ?`,
+      idempotencyKey,
+    );
+    if (existing !== null) {
+      return;
+    }
+
+    const taskId = this.newId();
+    const inputJson = JSON.stringify({
+      prompt: `Scheduled execution for ${sched.source_kind}:${sched.source_id}`,
+    });
+    sql.exec(
+      `INSERT INTO tasks (
+         id, kind, title, input_json, digest, idempotency_key, status,
+         execution_path, execution_target, attempt_count, max_attempts,
+         lease_epoch, next_run_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, 'mock.chat', ?, ?, ?, ?, 'queued', 'standard', 'cloud', 0, 3, 1, ?, ?, ?)`,
+      taskId,
+      `Scheduled ${sched.source_kind}`,
+      inputJson,
+      idempotencyKey,
+      idempotencyKey,
+      nowMs,
+      nowMs,
+      nowMs,
+    );
+    sql.exec(
+      `INSERT INTO task_events (id, task_id, sequence, phase, payload_json, trace_id, occurred_at_ms)
+       VALUES (?, ?, 1, 'accepted', ?, ?, ?)`,
+      this.newId(),
+      taskId,
+      JSON.stringify({ taskKind: 'mock.chat', replayed: false }),
+      this.newId(),
+      nowMs,
+    );
+
+    const outboxId = `schedule_occurrence:${scheduleId}:${occurrenceSeq}`;
+    const envelope: V2DispatchEnvelope = {
+      schemaVersion: 2,
+      eventId: outboxId,
+      tenantId: sched.tenant_id,
+      agentId: sched.agent_id,
+      entityKind: 'task',
+      entityId: taskId,
+      queueName: 'agent_task',
+      fenceEpoch: 1,
+    };
+    this.deps.eventCoordinator.enqueueDurableOutboxSync({
+      outboxId,
+      entityKind: 'task',
+      entityId: taskId,
+      queueName: 'agent_task',
+      payloadJson: JSON.stringify(envelope),
+      fenceEpoch: 1,
+      nextAttemptAtMs: nowMs,
+    });
+  }
+
+  /**
+   * Delegates recovery coverage plan decisions to Agent B's `RecoveryCoverageCoordinator`,
+   * then recalculates & syncs the single DO Alarm via B's `OutboxCoordinator` / `AlarmMultiplexer`.
+   */
+  async reconcileFromRegistry(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly expectedGen: number;
+    readonly nowMs: number;
+  }): Promise<Awaited<ReturnType<AgentHeadRecoveryPort['reconcileFromRegistry']>>> {
+    const outcome = this.deps.storage.transactionSync(() => {
+      assertHeadScopeSync(this.deps.storage.sql, cmd.tenantId, cmd.agentId);
+      const plan = this.deps.hooks.reconcileCoverageSync({
+        expectedGen: cmd.expectedGen,
+        nowMs: cmd.nowMs,
+      });
+      const nextAlarm = this.deps.eventCoordinator.recomputeAlarmSync(cmd.nowMs);
+      return { plan, nextAlarm };
+    });
+
+    if (this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(outcome.nextAlarm, cmd.nowMs);
+    }
+    return outcome.plan;
+  }
+
+  confirmRegistryPlan(cmd: {
+    readonly generation: number;
+    readonly actualRecoveryAtMs: number | null;
+    readonly applied: boolean;
+  }): Promise<{ readonly confirmed: boolean }> {
+    const nowMs = this.deps.nowMs();
+    const res = this.deps.storage.transactionSync(() =>
+      this.deps.hooks.confirmCoveragePlanSync({
+        generation: cmd.generation,
+        actualRecoveryAtMs: cmd.actualRecoveryAtMs,
+        applied: cmd.applied,
+        nowMs,
+      }),
+    );
+    return Promise.resolve(res);
+  }
+
+  async claimDurableWork(cmd: {
+    readonly envelope: V2DispatchEnvelope;
+    readonly workerId: string;
+    readonly leaseMs: number;
+  }): Promise<Awaited<ReturnType<AgentHeadRecoveryPort['claimDurableWork']>>> {
+    const envCheck = validateDispatchEnvelope(cmd.envelope);
+    if (!envCheck.ok) {
+      return { kind: 'not_claimed', reason: 'stale_or_invalid_envelope' };
+    }
+    const env = envCheck.envelope;
+    const nowMs = this.deps.nowMs();
+
+    const result = this.deps.storage.transactionSync(() => {
+      const meta = getHeadMetaSync(this.deps.storage.sql);
+      if (meta === null || meta.tenant_id !== env.tenantId || meta.agent_id !== env.agentId) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined as number | null | undefined,
+        };
+      }
+
+      const outbox =
+        this.deps.hooks.getOutboxByIdSync !== undefined
+          ? this.deps.hooks.getOutboxByIdSync(env.eventId)
+          : sqlExecMaybe<V2DispatchOutboxRow>(
+              this.deps.storage.sql,
+              `SELECT * FROM v2_dispatch_outbox WHERE outbox_id = ?`,
+              env.eventId,
+            );
+
+      if (outbox === null) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'not_found' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      if (
+        outbox.entity_kind === 'budget_sync' ||
+        outbox.queue_name === null ||
+        outbox.entity_kind !== env.entityKind ||
+        outbox.entity_id !== env.entityId ||
+        outbox.queue_name !== env.queueName ||
+        outbox.fence_epoch !== env.fenceEpoch
+      ) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      if (outbox.state === 'acked' || outbox.state === 'cancelled') {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      const target = this.inspectOutboxTargetSync(env.entityKind, env.entityId);
+      if (!target.exists || target.targetKind === null || target.targetId === null) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'not_found' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      if (env.fenceEpoch !== target.currentLeaseEpoch) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      if (target.isTerminal) {
+        this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs,
+        };
+      }
+
+      if (target.cancelRequested) {
+        this.convergeDueBusinessItemSync(target.targetKind, target.targetId, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs,
+        };
+      }
+
+      if (nowMs >= target.deadlineAtMs) {
+        this.convergeDueBusinessItemSync(target.targetKind, target.targetId, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'deadline_expired' as const },
+          alarmAtMs,
+        };
+      }
+
+      if (target.targetKind === 'turn') {
+        const turn = getTurnRowSync(this.deps.storage.sql, target.targetId)!;
+        if (turn.lease_expires_at_ms !== null && nowMs < turn.lease_expires_at_ms) {
+          return {
+            res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+            alarmAtMs: undefined,
+          };
+        }
+        const nextEpoch = turn.lease_epoch + 1;
+        const leaseExpiresAtMs = Math.min(nowMs + cmd.leaseMs, turn.deadline_at_ms);
+        this.deps.storage.sql.exec(
+          `UPDATE assistant_turns
+              SET execution_mode = 'durable_queue',
+                  lease_epoch = ?,
+                  lease_owner = ?,
+                  lease_expires_at_ms = ?,
+                  claim_count = claim_count + 1,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          nextEpoch,
+          cmd.workerId,
+          leaseExpiresAtMs,
+          nowMs,
+          turn.id,
+        );
+        this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+
+        const context = readRecentTurnContextSync(this.deps.storage.sql, turn.conversation_id);
+        return {
+          res: {
+            kind: 'claimed' as const,
+            targetKind: 'turn' as const,
+            targetId: turn.id,
+            leaseEpoch: nextEpoch,
+            leaseExpiresAtMs,
+            contextJson: JSON.stringify({
+              turnId: turn.id,
+              conversationId: turn.conversation_id,
+              providerJobHandle: turn.provider_job_handle,
+              deadlineAtMs: turn.deadline_at_ms,
+              utcDay: toUtcDayString(nowMs),
+              context,
+            }),
+          },
+          alarmAtMs,
+        };
+      }
+
+      const task = getTaskRowSync(this.deps.storage.sql, target.targetId)!;
+      if (task.lease_expires_at_ms !== null && nowMs < task.lease_expires_at_ms) {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+          alarmAtMs: undefined,
+        };
+      }
+      if (task.status === 'waiting_approval') {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+          alarmAtMs: undefined,
+        };
+      }
+
+      const nextEpoch = task.lease_epoch + 1;
+      const nextAttempt = task.attempt_count + 1;
+      const leaseExpiresAtMs =
+        task.deadline_at_ms === null
+          ? nowMs + cmd.leaseMs
+          : Math.min(nowMs + cmd.leaseMs, task.deadline_at_ms);
+      const runId = this.newId();
+
+      this.deps.storage.sql.exec(
+        `INSERT INTO runs (
+           id, task_id, attempt, lease_epoch, status, worker_id, executor_kind,
+           leased_until_ms, provider_job_handle, started_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, 'running', ?, 'queue_worker', ?, ?, ?, ?)`,
+        runId,
+        task.id,
+        nextAttempt,
+        nextEpoch,
+        cmd.workerId,
+        leaseExpiresAtMs,
+        task.provider_job_handle,
+        nowMs,
+        nowMs,
+      );
+      this.deps.storage.sql.exec(
+        `UPDATE tasks
+            SET status = 'running',
+                attempt_count = ?,
+                current_run_id = ?,
+                lease_epoch = ?,
+                lease_expires_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        nextAttempt,
+        runId,
+        nextEpoch,
+        leaseExpiresAtMs,
+        nowMs,
+        task.id,
+      );
+      this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+
+      return {
+        res: {
+          kind: 'claimed' as const,
+          targetKind: 'task' as const,
+          targetId: task.id,
+          leaseEpoch: nextEpoch,
+          leaseExpiresAtMs,
+          contextJson: JSON.stringify({
+            taskId: task.id,
+            runId,
+            attempt: nextAttempt,
+            kind: task.kind,
+            inputJson: task.input_json,
+            providerJobHandle: task.provider_job_handle,
+            deadlineAtMs: task.deadline_at_ms,
+          }),
+        },
+        alarmAtMs,
+      };
+    });
+
+    if (result.alarmAtMs !== undefined && this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(result.alarmAtMs, nowMs);
+    }
+    return result.res;
+  }
+
+  async commitDurableResult(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly entityType: 'turn' | 'task';
+    readonly entityId: string;
+    readonly leaseEpoch: number;
+    readonly workerId: string;
+    readonly outcome: unknown;
+  }): Promise<{ readonly accepted: boolean }> {
+    const nowMs = this.deps.nowMs();
+    const committed = this.deps.storage.transactionSync(() => {
+      const meta = getHeadMetaSync(this.deps.storage.sql);
+      if (meta === null || meta.tenant_id !== cmd.tenantId || meta.agent_id !== cmd.agentId) {
+        return { accepted: false, alarmAtMs: undefined as number | null | undefined };
+      }
+
+      if (cmd.entityType === 'turn') {
+        const turn = getTurnRowSync(this.deps.storage.sql, cmd.entityId);
+        if (
+          turn === null ||
+          turn.status !== 'running' ||
+          turn.lease_epoch !== cmd.leaseEpoch ||
+          turn.lease_owner !== cmd.workerId ||
+          turn.lease_expires_at_ms === null ||
+          nowMs >= turn.lease_expires_at_ms ||
+          nowMs >= turn.deadline_at_ms ||
+          turn.cancel_requested_at_ms !== null
+        ) {
+          return { accepted: false, alarmAtMs: undefined };
+        }
+        const payload = cmd.outcome as {
+          readonly status?: string;
+          readonly text?: string;
+          readonly modelLabel?: string;
+          readonly simulated?: boolean;
+          readonly failureReason?: 'timeout' | 'internal_error';
+        };
+        if (
+          payload?.status === 'completed' &&
+          typeof payload.text === 'string' &&
+          payload.text.length > 0
+        ) {
+          const { messageId } = insertEmberMessageSync({
+            sql: this.deps.storage.sql,
+            messageId: this.newId(),
+            conversationId: turn.conversation_id,
+            text: payload.text,
+            modelLabel: payload.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+            simulated: payload.simulated ?? true,
+            nowMs,
+          });
+          this.deps.storage.sql.exec(
+            `UPDATE assistant_turns
+                SET status = 'completed',
+                    response_message_id = ?,
+                    lease_owner = NULL,
+                    lease_expires_at_ms = NULL,
+                    updated_at_ms = ?
+              WHERE id = ?`,
+            messageId,
+            nowMs,
+            turn.id,
+          );
+          this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+          this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+          const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+          return { accepted: true, alarmAtMs };
+        }
+
+        const { messageId } = insertEmberMessageSync({
+          sql: this.deps.storage.sql,
+          messageId: this.newId(),
+          conversationId: turn.conversation_id,
+          text: V2_B1_COMPAT_CONSTANTS.failureAssistantMessageText,
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+          nowMs,
+        });
+        this.deps.storage.sql.exec(
+          `UPDATE assistant_turns
+              SET status = 'failed',
+                  failure_reason = ?,
+                  response_message_id = ?,
+                  lease_owner = NULL,
+                  lease_expires_at_ms = NULL,
+                  updated_at_ms = ?
+            WHERE id = ?`,
+          payload?.failureReason === 'timeout' ? 'timeout' : 'internal_error',
+          messageId,
+          nowMs,
+          turn.id,
+        );
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return { accepted: true, alarmAtMs };
+      }
+
+      const task = getTaskRowSync(this.deps.storage.sql, cmd.entityId);
+      const run = task === null ? null : getLatestRunForTaskSync(this.deps.storage.sql, task.id);
+      if (
+        task === null ||
+        run === null ||
+        task.status !== 'running' ||
+        run.status !== 'running' ||
+        task.lease_epoch !== cmd.leaseEpoch ||
+        run.lease_epoch !== cmd.leaseEpoch ||
+        run.worker_id !== cmd.workerId ||
+        task.lease_expires_at_ms === null ||
+        nowMs >= task.lease_expires_at_ms ||
+        (task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms) ||
+        task.cancel_requested_at_ms !== null
+      ) {
+        return { accepted: false, alarmAtMs: undefined };
+      }
+
+      const payload = cmd.outcome as {
+        readonly status?: 'completed' | 'failed';
+        readonly summaryText?: string | null;
+        readonly detailText?: string | null;
+        readonly modelLabel?: string;
+        readonly simulated?: boolean;
+        readonly truncated?: boolean;
+        readonly reasonCode?: string;
+      };
+      const isCompleted = payload?.status !== 'failed';
+      this.deps.storage.sql.exec(
+        `UPDATE runs
+            SET status = ?,
+                finished_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        isCompleted ? 'succeeded' : 'failed_terminal',
+        nowMs,
+        nowMs,
+        run.id,
+      );
+      this.deps.storage.sql.exec(
+        `INSERT INTO task_results (
+           task_id, summary_text, detail_text, model_label, simulated, truncated, reason_code, produced_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT (task_id) DO NOTHING`,
+        task.id,
+        payload?.summaryText ?? null,
+        payload?.detailText ?? null,
+        payload?.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        (payload?.simulated ?? true) ? 1 : 0,
+        (payload?.truncated ?? false) ? 1 : 0,
+        payload?.reasonCode ?? (isCompleted ? 'ok' : 'internal_error'),
+        nowMs,
+      );
+      this.deps.storage.sql.exec(
+        `UPDATE tasks
+            SET status = ?,
+                lease_expires_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = ?`,
+        isCompleted ? 'completed' : 'failed',
+        nowMs,
+        task.id,
+      );
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+      return { accepted: true, alarmAtMs };
+    });
+
+    if (committed.alarmAtMs !== undefined && this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(committed.alarmAtMs, nowMs);
+    }
+    if (this.deps.hooks.relayBudgetSync !== undefined) {
+      await this.deps.hooks.relayBudgetSync(nowMs);
+    }
+    return { accepted: committed.accepted };
+  }
+}

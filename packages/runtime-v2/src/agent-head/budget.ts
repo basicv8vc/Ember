@@ -1,0 +1,829 @@
+import { DomainError, type Id } from '@ember/domain';
+import { V2_BUDGET_LIMITS } from '../contracts/constants.js';
+import {
+  BUDGET_SYNC_PAYLOAD_SCHEMA_VERSION,
+  type BudgetSyncIncidentReason,
+  type BudgetSyncOutboxPayload,
+  type BudgetSyncSettlementState,
+} from '../recovery/envelope.js';
+import type { EventRuntimeCoordinatorPort } from '../recovery/ports.js';
+import type { SqlStorageLike } from '../storage.js';
+import type {
+  AgentSpendScopeKind,
+  ModelAttemptBudgetMode,
+  ModelAttemptProviderId,
+  ModelAttemptRow,
+  ModelAttemptSubjectType,
+} from './schema.js';
+
+export interface LocalBudgetCeilings {
+  readonly perAttemptMicroUsd: number;
+  readonly principalDailyMicroUsd: number;
+  readonly tenantDailyMicroUsd: number;
+  readonly principalDailyTurns: number;
+}
+
+export const DEFAULT_LOCAL_BUDGET_CEILINGS: LocalBudgetCeilings = Object.freeze({
+  perAttemptMicroUsd: V2_BUDGET_LIMITS.perAttemptMicroUsd,
+  principalDailyMicroUsd: V2_BUDGET_LIMITS.principalDailyMicroUsd,
+  tenantDailyMicroUsd: V2_BUDGET_LIMITS.tenantDailyMicroUsd,
+  principalDailyTurns: V2_BUDGET_LIMITS.principalDailyTurns,
+});
+
+export interface LocalHaltStatus {
+  readonly scopeKind: AgentSpendScopeKind;
+  readonly reason: BudgetSyncIncidentReason;
+}
+
+/**
+ * Checks whether an unresolved local `agent_budget_incidents` row blocks paid execution
+ * for the given tenant or principal.
+ */
+export function findLocalUnresolvedIncidentSync(
+  sql: SqlStorageLike,
+  tenantId: Id,
+  principalId: Id,
+): LocalHaltStatus | null {
+  const row = sql
+    .exec<{ readonly scope_kind: AgentSpendScopeKind; readonly reason: BudgetSyncIncidentReason }>(
+      `SELECT scope_kind, reason
+         FROM agent_budget_incidents
+        WHERE resolved_at_ms IS NULL
+          AND (
+            (scope_kind = 'tenant' AND scope_id = ?)
+            OR (scope_kind = 'principal' AND scope_id = ?)
+          )
+        ORDER BY CASE scope_kind WHEN 'tenant' THEN 0 ELSE 1 END, detected_at_ms ASC
+        LIMIT 1`,
+      tenantId,
+      principalId,
+    )
+    .toArray()[0];
+  return row === undefined ? null : { scopeKind: row.scope_kind, reason: row.reason };
+}
+
+/** Ensures there are no unresolved local incidents in the tenant scope (used on `markAttemptSent`). */
+export function hasAnyUnresolvedLocalIncidentSync(
+  sql: SqlStorageLike,
+  tenantId: Id,
+  principalId: Id,
+): LocalHaltStatus | null {
+  return findLocalUnresolvedIncidentSync(sql, tenantId, principalId);
+}
+
+function getSpendDayRowSync(
+  sql: SqlStorageLike,
+  scopeKind: AgentSpendScopeKind,
+  scopeId: Id,
+  utcDay: string,
+): {
+  readonly reserved_micro_usd: number;
+  readonly consumed_micro_usd: number;
+  readonly turns_started: number;
+} {
+  const row = sql
+    .exec<{
+      readonly reserved_micro_usd: number;
+      readonly consumed_micro_usd: number;
+      readonly turns_started: number;
+    }>(
+      `SELECT reserved_micro_usd, consumed_micro_usd, turns_started
+         FROM agent_spend_days
+        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+      scopeKind,
+      scopeId,
+      utcDay,
+    )
+    .toArray()[0];
+
+  return row ?? { reserved_micro_usd: 0, consumed_micro_usd: 0, turns_started: 0 };
+}
+
+/**
+ * Verifies local tenant/principal daily spend and turn count ceilings BEFORE making any external
+ * `GlobalBudgetAuthority.reserveGlobal` call or mutating local spend buckets.
+ */
+export function checkLocalBudgetCapacitySync(input: {
+  readonly sql: SqlStorageLike;
+  readonly tenantId: Id;
+  readonly principalId: Id;
+  readonly utcDay: string;
+  readonly amountMicroUsd: number;
+  readonly turnsStartedDelta: number;
+  readonly ceilings?: LocalBudgetCeilings;
+}):
+  | { readonly ok: true }
+  | { readonly ok: false; readonly reason: 'budget_halted' | 'budget_exceeded' } {
+  const ceilings = input.ceilings ?? DEFAULT_LOCAL_BUDGET_CEILINGS;
+
+  const halt = findLocalUnresolvedIncidentSync(input.sql, input.tenantId, input.principalId);
+  if (halt !== null) {
+    return { ok: false, reason: 'budget_halted' };
+  }
+
+  if (input.amountMicroUsd > ceilings.perAttemptMicroUsd) {
+    return { ok: false, reason: 'budget_exceeded' };
+  }
+
+  const tenantBucket = getSpendDayRowSync(input.sql, 'tenant', input.tenantId, input.utcDay);
+  if (
+    tenantBucket.reserved_micro_usd + tenantBucket.consumed_micro_usd + input.amountMicroUsd >
+    ceilings.tenantDailyMicroUsd
+  ) {
+    return { ok: false, reason: 'budget_exceeded' };
+  }
+
+  const principalBucket = getSpendDayRowSync(
+    sqlOrPass(input.sql),
+    'principal',
+    input.principalId,
+    input.utcDay,
+  );
+  if (
+    principalBucket.reserved_micro_usd + principalBucket.consumed_micro_usd + input.amountMicroUsd >
+      ceilings.principalDailyMicroUsd ||
+    principalBucket.turns_started + input.turnsStartedDelta > ceilings.principalDailyTurns
+  ) {
+    return { ok: false, reason: 'budget_exceeded' };
+  }
+
+  return { ok: true };
+}
+
+function sqlOrPass(sql: SqlStorageLike): SqlStorageLike {
+  return sql;
+}
+
+function upsertReserveBucketSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly scopeKind: AgentSpendScopeKind;
+  readonly scopeId: Id;
+  readonly utcDay: string;
+  readonly amountMicroUsd: number;
+  readonly turnsStartedDelta: number;
+  readonly nowMs: number;
+}): void {
+  input.sql.exec(
+    `INSERT INTO agent_spend_days
+       (scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
+     VALUES (?, ?, ?, ?, 0, 0, ?, ?)
+     ON CONFLICT (scope_kind, scope_id, utc_day) DO UPDATE
+        SET reserved_micro_usd = agent_spend_days.reserved_micro_usd + excluded.reserved_micro_usd,
+            turns_started = agent_spend_days.turns_started + excluded.turns_started,
+            updated_at_ms = excluded.updated_at_ms`,
+    input.scopeKind,
+    input.scopeId,
+    input.utcDay,
+    input.amountMicroUsd,
+    input.turnsStartedDelta,
+    input.nowMs,
+  );
+}
+
+/**
+ * Reserves local tenant & principal daily spend and inserts the `'reserved'` `model_attempts` row.
+ * Throws `DomainError('BUDGET_EXCEEDED', ...)` on capacity or unresolved incident failure.
+ */
+export function reserveLocalAttemptSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly tenantId: Id;
+  readonly principalId: Id;
+  readonly subjectType: ModelAttemptSubjectType;
+  readonly subjectId: Id;
+  readonly attemptNo: number;
+  readonly operationId: Id;
+  readonly utcDay: string;
+  readonly leaseEpoch: number;
+  readonly providerId: ModelAttemptProviderId;
+  readonly modelLabel: string;
+  readonly rateVersion: string;
+  readonly budgetMode: ModelAttemptBudgetMode;
+  readonly reservedMicroUsd: number;
+  readonly globalGrantId: string | null;
+  readonly globalGrantExpiresMs: number | null;
+  readonly nowMs: number;
+  readonly ceilings?: LocalBudgetCeilings;
+}): void {
+  const turnsDelta =
+    input.subjectType === 'turn' &&
+    input.attemptNo === 1 &&
+    input.budgetMode !== 'disabled_echo_only'
+      ? 1
+      : 0;
+  const check = checkLocalBudgetCapacitySync({
+    sql: input.sql,
+    tenantId: input.tenantId,
+    principalId: input.principalId,
+    utcDay: input.utcDay,
+    amountMicroUsd: input.reservedMicroUsd,
+    turnsStartedDelta: turnsDelta,
+    ceilings: input.ceilings,
+  });
+  if (!check.ok) {
+    throw new DomainError(
+      'BUDGET_EXCEEDED',
+      check.reason === 'budget_halted'
+        ? 'local unresolved budget incident halts paid model calls'
+        : 'local daily budget ceiling exceeded',
+    );
+  }
+
+  if (input.reservedMicroUsd > 0 || turnsDelta > 0) {
+    upsertReserveBucketSync({
+      sql: input.sql,
+      scopeKind: 'tenant',
+      scopeId: input.tenantId,
+      utcDay: input.utcDay,
+      amountMicroUsd: input.reservedMicroUsd,
+      turnsStartedDelta: 0,
+      nowMs: input.nowMs,
+    });
+    upsertReserveBucketSync({
+      sql: input.sql,
+      scopeKind: 'principal',
+      scopeId: input.principalId,
+      utcDay: input.utcDay,
+      amountMicroUsd: input.reservedMicroUsd,
+      turnsStartedDelta: turnsDelta,
+      nowMs: input.nowMs,
+    });
+  }
+
+  input.sql.exec(
+    `INSERT INTO model_attempts (
+       subject_type, subject_id, attempt_no, operation_id, principal_id, utc_day,
+       lease_epoch, provider_id, model_label, rate_version, budget_mode, state,
+       reserved_micro_usd, applied_cost_micro_usd, overage_micro_usd, settlement_revision,
+       global_grant_id, global_grant_expires_ms, started_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?, 0, 0, 0, ?, ?, ?)`,
+    input.subjectType,
+    input.subjectId,
+    input.attemptNo,
+    input.operationId,
+    input.principalId,
+    input.utcDay,
+    input.leaseEpoch,
+    input.providerId,
+    input.modelLabel,
+    input.rateVersion,
+    input.budgetMode,
+    input.reservedMicroUsd,
+    input.globalGrantId,
+    input.globalGrantExpiresMs,
+    input.nowMs,
+  );
+}
+
+function splitBucketCharge(
+  reserved: number,
+  consumed: number,
+  releaseMicroUsd: number,
+  chargeDeltaMicroUsd: number,
+  ceiling: number,
+): {
+  readonly nextReserved: number;
+  readonly appliedDelta: number;
+  readonly overageDelta: number;
+} {
+  const nextReserved = Math.max(0, reserved - releaseMicroUsd);
+  const room = Math.max(0, ceiling - (nextReserved + consumed));
+  const appliedDelta = Math.min(chargeDeltaMicroUsd, room);
+  const overageDelta = Math.max(0, chargeDeltaMicroUsd - appliedDelta);
+  return { nextReserved, appliedDelta, overageDelta };
+}
+
+function applyBucketSettlementDeltaSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly scopeKind: AgentSpendScopeKind;
+  readonly scopeId: Id;
+  readonly utcDay: string;
+  readonly releaseMicroUsd: number;
+  readonly chargeDeltaMicroUsd: number;
+  readonly ceiling: number;
+  readonly nowMs: number;
+}): { readonly appliedDelta: number; readonly overageDelta: number } {
+  input.sql.exec(
+    `INSERT INTO agent_spend_days
+       (scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
+     VALUES (?, ?, ?, 0, 0, 0, 0, ?)
+     ON CONFLICT (scope_kind, scope_id, utc_day) DO NOTHING`,
+    input.scopeKind,
+    input.scopeId,
+    input.utcDay,
+    input.nowMs,
+  );
+
+  const row = input.sql
+    .exec<{ readonly reserved_micro_usd: number; readonly consumed_micro_usd: number }>(
+      `SELECT reserved_micro_usd, consumed_micro_usd
+         FROM agent_spend_days
+        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+      input.scopeKind,
+      input.scopeId,
+      input.utcDay,
+    )
+    .one();
+
+  const split = splitBucketCharge(
+    row.reserved_micro_usd,
+    row.consumed_micro_usd,
+    input.releaseMicroUsd,
+    input.chargeDeltaMicroUsd,
+    input.ceiling,
+  );
+
+  input.sql.exec(
+    `UPDATE agent_spend_days
+        SET reserved_micro_usd = ?,
+            consumed_micro_usd = consumed_micro_usd + ?,
+            overage_micro_usd = overage_micro_usd + ?,
+            updated_at_ms = ?
+      WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+    split.nextReserved,
+    split.appliedDelta,
+    split.overageDelta,
+    input.nowMs,
+    input.scopeKind,
+    input.scopeId,
+    input.utcDay,
+  );
+
+  return { appliedDelta: split.appliedDelta, overageDelta: split.overageDelta };
+}
+
+function insertIncidentSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly id: Id;
+  readonly scopeKind: AgentSpendScopeKind;
+  readonly scopeId: Id;
+  readonly utcDay: string;
+  readonly reason: BudgetSyncIncidentReason;
+  readonly subjectType: ModelAttemptSubjectType;
+  readonly subjectId: Id;
+  readonly attemptNo: number;
+  readonly observedMicroUsd: number;
+  readonly appliedMicroUsd: number;
+  readonly overageMicroUsd: number;
+  readonly reservationMicroUsd: number;
+  readonly nowMs: number;
+}): void {
+  input.sql.exec(
+    `INSERT INTO agent_budget_incidents (
+       id, scope_kind, scope_id, utc_day, reason, subject_type, subject_id, attempt_no,
+       observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd, detected_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    input.id,
+    input.scopeKind,
+    input.scopeId,
+    input.utcDay,
+    input.reason,
+    input.subjectType,
+    input.subjectId,
+    input.attemptNo,
+    input.observedMicroUsd,
+    input.appliedMicroUsd,
+    input.overageMicroUsd,
+    input.reservationMicroUsd,
+    input.nowMs,
+  );
+}
+
+export function formatBudgetSyncOutboxId(operationId: Id, settlementRevision: number): string {
+  return `budget_sync:${operationId}:rev:${settlementRevision}`;
+}
+
+export function buildBudgetSyncOutboxPayload(input: {
+  readonly tenantId: Id;
+  readonly principalId: Id;
+  readonly agentId: Id;
+  readonly utcDay: string;
+  readonly globalGrantId: string;
+  readonly operationId: Id;
+  readonly settlementRevision: number;
+  readonly state: BudgetSyncSettlementState;
+  readonly reservedMicroUsd: number;
+  readonly chargeMicroUsd: number;
+  readonly observedCostMicroUsd: number | null;
+  readonly overageMicroUsd: number;
+  readonly openIncidentReason: BudgetSyncIncidentReason | null;
+}): BudgetSyncOutboxPayload {
+  return {
+    schemaVersion: BUDGET_SYNC_PAYLOAD_SCHEMA_VERSION,
+    tenantId: input.tenantId,
+    principalId: input.principalId,
+    agentId: input.agentId,
+    utcDay: input.utcDay,
+    globalGrantId: input.globalGrantId,
+    operationId: input.operationId,
+    settlementRevision: input.settlementRevision,
+    state: input.state,
+    reservedMicroUsd: input.reservedMicroUsd,
+    chargeMicroUsd: input.chargeMicroUsd,
+    observedCostMicroUsd: input.observedCostMicroUsd,
+    overageMicroUsd: input.overageMicroUsd,
+    openIncidentReason: input.openIncidentReason,
+  };
+}
+
+export function enqueueBudgetSyncOutboxSync(input: {
+  readonly coordinator: EventRuntimeCoordinatorPort;
+  readonly payload: BudgetSyncOutboxPayload;
+  readonly fenceEpoch: number;
+  readonly nowMs: number;
+}): string {
+  const outboxId = formatBudgetSyncOutboxId(
+    input.payload.operationId,
+    input.payload.settlementRevision,
+  );
+  input.coordinator.enqueueDurableOutboxSync({
+    outboxId,
+    entityKind: 'budget_sync',
+    entityId: input.payload.operationId,
+    queueName: null,
+    payloadJson: JSON.stringify(input.payload),
+    operationId: input.payload.operationId,
+    revision: input.payload.settlementRevision,
+    fenceEpoch: input.fenceEpoch,
+    nextAttemptAtMs: input.nowMs,
+  });
+  return outboxId;
+}
+
+export interface LocalSettlementResult {
+  readonly outcome: 'settled' | 'late_overage_booked' | 'audit_only' | 'already_settled';
+  readonly finalState: ModelAttemptRow['state'];
+  readonly settlementRevision: number;
+  readonly outboxId: string | null;
+  readonly incidentsOpened: number;
+}
+
+/**
+ * Settles (or applies a late overage revision to) a `model_attempts` row and atomically enqueues
+ * a `budget_sync` outbox row inside the same SQLite `transactionSync()` whenever `global_grant_id !== null`.
+ *
+ * Enforces V2-M0-A §5.3 & §7.2 invariants:
+ * - Only provably unsent attempts (`send_started_at_ms === null && send_authorizing_at_ms === null`)
+ *   may transition to `released`. Sent/uncertain attempts requesting `released` are safely forced
+ *   to `unknown_billed` (never refunded).
+ * - Initial settlement uses `settlement_revision = 0`; late overage increments `settlement_revision`
+ *   monotonically (`>= 1`) and charges only `delta = newCumulativeCharge - previouslyAppliedCharge`.
+ * - Missing-usage 2xx (`conservative_billed`) and overages open `agent_budget_incidents`.
+ */
+export function settleLocalAttemptAndEnqueueSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly coordinator: EventRuntimeCoordinatorPort;
+  readonly tenantId: Id;
+  readonly agentId: Id;
+  readonly attempt: ModelAttemptRow;
+  readonly requestedState: BudgetSyncSettlementState;
+  readonly outcomeCode: string;
+  readonly observedCostMicroUsd?: number | null;
+  readonly inputTokens?: number | null;
+  readonly outputTokens?: number | null;
+  readonly nowMs: number;
+  readonly ceilings?: LocalBudgetCeilings;
+  readonly idFactory?: () => Id;
+}): LocalSettlementResult {
+  const { sql, coordinator, attempt, nowMs } = input;
+  const ceilings = input.ceilings ?? DEFAULT_LOCAL_BUDGET_CEILINGS;
+  const newId = input.idFactory ?? (() => globalThis.crypto.randomUUID());
+
+  const observed = input.observedCostMicroUsd ?? null;
+
+  // Already past 'reserved': check late settlement overage rules (V2-M0-A §5.3 & §7.2 rule 5)
+  if (attempt.state !== 'reserved') {
+    const previouslyApplied = attempt.applied_cost_micro_usd ?? attempt.reserved_micro_usd;
+    if (observed === null) {
+      return {
+        outcome: 'already_settled',
+        finalState: attempt.state,
+        settlementRevision: attempt.settlement_revision,
+        outboxId: null,
+        incidentsOpened: 0,
+      };
+    }
+
+    // Late overage must NEVER be dropped, even after unknown_billed / conservative_billed / settled
+    if (observed > previouslyApplied) {
+      const nextRev = attempt.settlement_revision + 1;
+      const chargeDelta = observed - previouslyApplied;
+      const newOverageTotal = Math.max(0, observed - attempt.reserved_micro_usd);
+
+      const tenantCharge = applyBucketSettlementDeltaSync({
+        sql,
+        scopeKind: 'tenant',
+        scopeId: input.tenantId,
+        utcDay: attempt.utc_day,
+        releaseMicroUsd: 0,
+        chargeDeltaMicroUsd: chargeDelta,
+        ceiling: ceilings.tenantDailyMicroUsd,
+        nowMs,
+      });
+      applyBucketSettlementDeltaSync({
+        sql,
+        scopeKind: 'principal',
+        scopeId: attempt.principal_id,
+        utcDay: attempt.utc_day,
+        releaseMicroUsd: 0,
+        chargeDeltaMicroUsd: chargeDelta,
+        ceiling: ceilings.principalDailyMicroUsd,
+        nowMs,
+      });
+
+      const incidentReason: BudgetSyncIncidentReason =
+        tenantCharge.overageDelta > 0 ? 'day_ceiling_exceeded' : 'reservation_exceeded';
+
+      insertIncidentSync({
+        sql,
+        id: newId(),
+        scopeKind: 'tenant',
+        scopeId: input.tenantId,
+        utcDay: attempt.utc_day,
+        reason: incidentReason,
+        subjectType: attempt.subject_type,
+        subjectId: attempt.subject_id,
+        attemptNo: attempt.attempt_no,
+        observedMicroUsd: observed,
+        appliedMicroUsd: tenantCharge.appliedDelta,
+        overageMicroUsd: tenantCharge.overageDelta,
+        reservationMicroUsd: attempt.reserved_micro_usd,
+        nowMs,
+      });
+
+      const nextState: ModelAttemptRow['state'] =
+        attempt.state === 'unknown_billed' || attempt.state === 'conservative_billed'
+          ? attempt.state
+          : 'settled';
+
+      sql.exec(
+        `UPDATE model_attempts
+            SET observed_cost_micro_usd = ?,
+                applied_cost_micro_usd = ?,
+                overage_micro_usd = ?,
+                settlement_revision = ?,
+                settled_at_ms = COALESCE(settled_at_ms, ?),
+                global_synced_at_ms = NULL
+          WHERE subject_type = ? AND subject_id = ? AND attempt_no = ?`,
+        observed,
+        observed,
+        newOverageTotal,
+        nextRev,
+        nowMs,
+        attempt.subject_type,
+        attempt.subject_id,
+        attempt.attempt_no,
+      );
+
+      let outboxId: string | null = null;
+      if (attempt.global_grant_id !== null) {
+        const payload = buildBudgetSyncOutboxPayload({
+          tenantId: input.tenantId,
+          principalId: attempt.principal_id,
+          agentId: input.agentId,
+          utcDay: attempt.utc_day,
+          globalGrantId: attempt.global_grant_id,
+          operationId: attempt.operation_id,
+          settlementRevision: nextRev,
+          state: nextState,
+          reservedMicroUsd: attempt.reserved_micro_usd,
+          chargeMicroUsd: observed,
+          observedCostMicroUsd: observed,
+          overageMicroUsd: newOverageTotal,
+          openIncidentReason: incidentReason,
+        });
+        outboxId = enqueueBudgetSyncOutboxSync({
+          coordinator,
+          payload,
+          fenceEpoch: attempt.lease_epoch,
+          nowMs,
+        });
+      }
+
+      return {
+        outcome: 'late_overage_booked',
+        finalState: nextState,
+        settlementRevision: nextRev,
+        outboxId,
+        incidentsOpened: 1,
+      };
+    }
+
+    // Late observed cost <= previouslyApplied: audit field backfill only if missing, NEVER refund!
+    if (attempt.observed_cost_micro_usd === null) {
+      sql.exec(
+        `UPDATE model_attempts
+            SET observed_cost_micro_usd = ?,
+                input_tokens = COALESCE(input_tokens, ?),
+                output_tokens = COALESCE(output_tokens, ?)
+          WHERE subject_type = ? AND subject_id = ? AND attempt_no = ?`,
+        observed,
+        input.inputTokens ?? null,
+        input.outputTokens ?? null,
+        attempt.subject_type,
+        attempt.subject_id,
+        attempt.attempt_no,
+      );
+      return {
+        outcome: 'audit_only',
+        finalState: attempt.state,
+        settlementRevision: attempt.settlement_revision,
+        outboxId: null,
+        incidentsOpened: 0,
+      };
+    }
+
+    return {
+      outcome: 'already_settled',
+      finalState: attempt.state,
+      settlementRevision: attempt.settlement_revision,
+      outboxId: null,
+      incidentsOpened: 0,
+    };
+  }
+
+  // Initial settlement from 'reserved' at revision = 0
+  const provablyUnsent =
+    attempt.send_started_at_ms === null && attempt.send_authorizing_at_ms === null;
+  const effectiveState: BudgetSyncSettlementState =
+    input.requestedState === 'released' && !provablyUnsent
+      ? 'unknown_billed'
+      : input.requestedState;
+
+  let cumulativeCharge = 0;
+  let billingBasis = 'not_billed';
+  let observedToPersist: number | null = null;
+
+  if (effectiveState === 'released') {
+    cumulativeCharge = 0;
+    billingBasis = 'not_billed';
+  } else if (effectiveState === 'conservative_billed') {
+    cumulativeCharge = attempt.reserved_micro_usd;
+    billingBasis = 'conservative_reservation';
+  } else if (effectiveState === 'unknown_billed') {
+    cumulativeCharge = attempt.reserved_micro_usd;
+    billingBasis = 'unknown_billed_reservation';
+    observedToPersist = observed;
+  } else {
+    if (observed === null) {
+      throw new DomainError('INVALID_ARGUMENT', 'settled state requires observedCostMicroUsd');
+    }
+    cumulativeCharge = observed;
+    observedToPersist = observed;
+    billingBasis = 'provider_usage';
+  }
+
+  const releaseFromReserved = attempt.reserved_micro_usd;
+  const chargeDelta = cumulativeCharge;
+  const overageBeyondReservation = Math.max(0, cumulativeCharge - attempt.reserved_micro_usd);
+
+  let incidentsOpened = 0;
+  let openIncidentReason: BudgetSyncIncidentReason | null = null;
+
+  if (releaseFromReserved > 0 || chargeDelta > 0) {
+    const tenantCharge = applyBucketSettlementDeltaSync({
+      sql,
+      scopeKind: 'tenant',
+      scopeId: input.tenantId,
+      utcDay: attempt.utc_day,
+      releaseMicroUsd: releaseFromReserved,
+      chargeDeltaMicroUsd: chargeDelta,
+      ceiling: ceilings.tenantDailyMicroUsd,
+      nowMs,
+    });
+    applyBucketSettlementDeltaSync({
+      sql,
+      scopeKind: 'principal',
+      scopeId: attempt.principal_id,
+      utcDay: attempt.utc_day,
+      releaseMicroUsd: releaseFromReserved,
+      chargeDeltaMicroUsd: chargeDelta,
+      ceiling: ceilings.principalDailyMicroUsd,
+      nowMs,
+    });
+
+    if (tenantCharge.overageDelta > 0) {
+      openIncidentReason = 'day_ceiling_exceeded';
+      insertIncidentSync({
+        sql,
+        id: newId(),
+        scopeKind: 'tenant',
+        scopeId: input.tenantId,
+        utcDay: attempt.utc_day,
+        reason: 'day_ceiling_exceeded',
+        subjectType: attempt.subject_type,
+        subjectId: attempt.subject_id,
+        attemptNo: attempt.attempt_no,
+        observedMicroUsd: cumulativeCharge,
+        appliedMicroUsd: tenantCharge.appliedDelta,
+        overageMicroUsd: tenantCharge.overageDelta,
+        reservationMicroUsd: attempt.reserved_micro_usd,
+        nowMs,
+      });
+      incidentsOpened += 1;
+    } else if (observedToPersist !== null && observedToPersist > attempt.reserved_micro_usd) {
+      openIncidentReason = 'reservation_exceeded';
+      insertIncidentSync({
+        sql,
+        id: newId(),
+        scopeKind: 'tenant',
+        scopeId: input.tenantId,
+        utcDay: attempt.utc_day,
+        reason: 'reservation_exceeded',
+        subjectType: attempt.subject_type,
+        subjectId: attempt.subject_id,
+        attemptNo: attempt.attempt_no,
+        observedMicroUsd: observedToPersist,
+        appliedMicroUsd: observedToPersist,
+        overageMicroUsd: overageBeyondReservation,
+        reservationMicroUsd: attempt.reserved_micro_usd,
+        nowMs,
+      });
+      incidentsOpened += 1;
+    }
+  }
+
+  if (effectiveState === 'conservative_billed') {
+    if (openIncidentReason === null) {
+      openIncidentReason = 'usage_missing';
+    }
+    insertIncidentSync({
+      sql,
+      id: newId(),
+      scopeKind: 'tenant',
+      scopeId: input.tenantId,
+      utcDay: attempt.utc_day,
+      reason: 'usage_missing',
+      subjectType: attempt.subject_type,
+      subjectId: attempt.subject_id,
+      attemptNo: attempt.attempt_no,
+      observedMicroUsd: attempt.reserved_micro_usd,
+      appliedMicroUsd: attempt.reserved_micro_usd,
+      overageMicroUsd: 0,
+      reservationMicroUsd: attempt.reserved_micro_usd,
+      nowMs,
+    });
+    incidentsOpened += 1;
+  }
+
+  const rev = 0;
+  sql.exec(
+    `UPDATE model_attempts
+        SET state = ?,
+            outcome_code = ?,
+            applied_cost_micro_usd = ?,
+            observed_cost_micro_usd = ?,
+            input_tokens = ?,
+            output_tokens = ?,
+            billing_basis = ?,
+            overage_micro_usd = ?,
+            settlement_revision = ?,
+            settled_at_ms = ?
+      WHERE subject_type = ? AND subject_id = ? AND attempt_no = ? AND state = 'reserved'`,
+    effectiveState,
+    input.outcomeCode,
+    cumulativeCharge,
+    observedToPersist,
+    input.inputTokens ?? null,
+    input.outputTokens ?? null,
+    billingBasis,
+    overageBeyondReservation,
+    rev,
+    nowMs,
+    attempt.subject_type,
+    attempt.subject_id,
+    attempt.attempt_no,
+  );
+
+  let outboxId: string | null = null;
+  if (attempt.global_grant_id !== null) {
+    const payload = buildBudgetSyncOutboxPayload({
+      tenantId: input.tenantId,
+      principalId: attempt.principal_id,
+      agentId: input.agentId,
+      utcDay: attempt.utc_day,
+      globalGrantId: attempt.global_grant_id,
+      operationId: attempt.operation_id,
+      settlementRevision: rev,
+      state: effectiveState,
+      reservedMicroUsd: attempt.reserved_micro_usd,
+      chargeMicroUsd: cumulativeCharge,
+      observedCostMicroUsd: observedToPersist,
+      overageMicroUsd: overageBeyondReservation,
+      openIncidentReason,
+    });
+    outboxId = enqueueBudgetSyncOutboxSync({
+      coordinator,
+      payload,
+      fenceEpoch: attempt.lease_epoch,
+      nowMs,
+    });
+  }
+
+  return {
+    outcome: 'settled',
+    finalState: effectiveState,
+    settlementRevision: rev,
+    outboxId,
+    incidentsOpened,
+  };
+}

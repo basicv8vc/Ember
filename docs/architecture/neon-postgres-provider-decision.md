@@ -1,109 +1,111 @@
-# Ember 数据库选型回顾：Why Neon over Supabase
+# Ember PostgreSQL Provider Decision: Why Neon over Supabase
 
-- 日期：2026-11-19
-- 状态：历史决策记录与当前架构说明；不授权新的迁移、资源或付费操作。
-- 范围：Ember Cloud / Private Alpha 的托管 PostgreSQL 选型，以及与 Cloud Runtime V2 的关系。
-- 原始证据：[Issue #132](https://github.com/basicv8vc/Ember/issues/132)、[PR #135](https://github.com/basicv8vc/Ember/pull/135)（实测报告，Draft）、[PR #139](https://github.com/basicv8vc/Ember/pull/139)（后续兼容性与并发诊断，Draft）。
+English | [简体中文](neon-postgres-provider-decision.zh-CN.md)
+
+- Date: 2026-11-19
+- Status: Historical decision record and current architecture description; does not authorize new migrations, resources, or paid operations.
+- Scope: Managed PostgreSQL selection for Ember Cloud / Private Alpha and its relationship to Cloud Runtime V2.
+- Original evidence: [Issue #132](https://github.com/basicv8vc/Ember/issues/132), [PR #135](https://github.com/basicv8vc/Ember/pull/135) (measurement report, Draft), [PR #139](https://github.com/basicv8vc/Ember/pull/139) (follow-up compatibility and concurrency diagnostics, Draft).
 
 ## TL;DR
 
-Ember 选择 Neon 并不是因为 Supabase 不支持所需的 PostgreSQL 能力，也不是因为 Neon 在所有测试中更快。两个服务都通过了核心业务契约的兼容性验证。
+Ember selected Neon neither because Supabase lacked the required PostgreSQL capabilities nor because Neon was faster in every test. Both services passed targeted compatibility checks for the core business contracts.
 
-选择 Neon 作为 Alpha 数据库的主要原因：
+The main reasons for selecting Neon as the Alpha database were:
 
-1. 实测 Neon 在 Cloudflare Hyperdrive 空闲连接存在的情况下仍可进入 Idle，并在下一次请求自动恢复。这比需要人工恢复的 Supabase Free 项目级暂停更符合按需执行的 Personal Agent。
-2. Ember 已拥有认证、业务 API、任务执行和文件存储方案，主要需要的是托管 PostgreSQL，而非完整 BaaS。
-3. 当时 Neon Free 的数据库容量与按量扩容路径更适合低流量起步。但节省计算成本取决于真实工作负载能够让数据库休眠。
+1. Neon was observed entering Idle despite idle Cloudflare Hyperdrive connections, and automatically resumed on the next request. This better matches an on-demand Personal Agent than Supabase Free's project-level pause, which may require manual restoration.
+2. Ember already has authentication, business APIs, task execution, and file storage. It primarily needs managed PostgreSQL rather than a complete BaaS.
+3. Neon's historical Free database capacity and usage-based upgrade path were better suited to starting with low traffic. However, compute savings depend on the actual workload allowing the database to suspend.
 
-**V1 保留 Neon PostgreSQL；Supabase 是经过验证的备选服务，不是当前运行依赖。V2 的 Cloudflare-native Runtime 方向由 ADR-0005 独立约束。**
+**V1 retains Neon PostgreSQL; Supabase is a validated alternative, not a current runtime dependency. ADR-0005 independently governs the Cloudflare-native Runtime V2 direction.**
 
-## 1. 决策背景与时间线
+## 1. Decision background and timeline
 
-| 日期 | 事件 |
+| Date | Event |
 | --- | --- |
-| 2026-11-07 | Issue #132 启动 Neon/Supabase 对照验证；授权各创建一个 Free 测试项目，仅使用合成数据。要求保留现有 PostgreSQL 业务和事务契约，不迁移 D1。 |
-| 2026-11-08 | PR #135 汇总 P0–P4 实测，推荐 Neon 作为 Alpha PostgreSQL。PR #139 记录 Neon 作为 CTO-approved provider，并保留后续诊断任务。 |
-| 2026-11（后续） | Neon 进入 Ember Cloud 共享环境，通过 Hyperdrive 服务 API 与 Async Runtime；具体部署路径见 [Ember Cloud](../cloud-staging.md)。 |
-| 2026-11-18 | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) 记录 Neon compute 预警及 Cloudflare-native V2 方向；要求先测量和缓解 V1 的非必要数据库唤醒。 |
-| 2026-11-19 | 用户提供 Supabase Free 实验项目低活动即将暂停的邮件；这不是 Ember Cloud 的数据库故障通知。 |
+| 2026-11-07 | Issue #132 initiated the Neon/Supabase comparison; one Free test project per provider was authorized, using synthetic data only. Existing PostgreSQL business and transaction contracts had to be preserved, without migrating to D1. |
+| 2026-11-08 | PR #135 summarized P0–P4 measurements and recommended Neon for Alpha. PR #139 recorded Neon as the CTO-approved provider and retained follow-up diagnostic work. |
+| 2026-11 (subsequently) | Neon became part of the shared Ember Cloud environment, serving the API and Async Runtime through Hyperdrive. See [Ember Cloud](../cloud-staging.md) for the deployment path. |
+| 2026-11-18 | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) recorded the Neon compute warning and the Cloudflare-native V2 direction, requiring measurement and mitigation of unnecessary V1 database wakeups first. |
+| 2026-11-19 | The user provided an email warning of an upcoming inactivity pause for the Supabase Free experiment. This was not an Ember Cloud database outage notice. |
 
-原始对照报告仍为 Draft，不应将其全部未解决事项视为已完成。实际选型与当前部署由 main 上的部署说明及 ADR-0005 佐证。
+The original comparison report remains Draft; its outstanding issues must not be treated as resolved. The actual selection and current deployment are corroborated by the deployment documentation on main and ADR-0005.
 
-## 2. 为什么 Ember 不需要完整的 Supabase BaaS
+## 2. Why Ember does not need the complete Supabase BaaS
 
-当时已经确定 Cloudflare-first、按实际需求逐步付费（pay-as-you-grow）的路线。托管 PostgreSQL 需要保持 Ember 已实现的持久化、租户隔离、事务、幂等以及 worker lease 语义。
+The established approach was Cloudflare-first and pay-as-you-grow. Managed PostgreSQL had to preserve Ember's existing persistence, tenant isolation, transactions, idempotency, and worker lease semantics.
 
-| Supabase 能力 | Ember 的现行方案 |
+| Supabase capability | Ember's current approach |
 | --- | --- |
-| Auth | Apple Sign-in + Ember 自有认证与租户身份 |
+| Auth | Apple Sign-in + Ember-owned authentication and tenant identity |
 | Data API | Hono API + PostgreSQL repositories |
 | Edge Functions | Cloudflare Workers |
-| 异步任务 | Cloudflare Queues + Async Runtime |
-| Storage | Cloudflare R2（对象）+ PostgreSQL（业务状态及元数据） |
-| Realtime | Ember 自有 API/客户端状态同步；不是当前 Supabase 依赖 |
+| Asynchronous tasks | Cloudflare Queues + Async Runtime |
+| Storage | Cloudflare R2 (objects) + PostgreSQL (business state and metadata) |
+| Realtime | Ember-owned API/client state synchronization; no current Supabase dependency |
 | PostgreSQL | Neon + Hyperdrive |
 
-因此数据库服务首先按照 PostgreSQL 兼容性、连接语义、可用性、成本和恢复能力选择，不为尚无需求的 BaaS 功能支付固定平台成本，也不引入 iOS 对数据库 API 的直接依赖。
+Database selection therefore prioritizes PostgreSQL compatibility, connection semantics, availability, cost, and recovery. There is no need to pay a fixed platform fee for BaaS features that are not required or introduce a direct dependency between the iOS app and the database API.
 
-## 3. 2026-11-08 对照实测摘要
+## 3. Summary of the 2026-11-08 comparison
 
-两家实验数据库均位于 Singapore，仅用于相同区域对比，并不构成生产区域选择或全球延迟基准。以下是 PR #135 的历史证据（非本次重新运行）。
+Both experimental databases were located in Singapore for a matched regional comparison, not as a production region decision or a global latency benchmark. The following is historical evidence from PR #135, not a new execution of the tests.
 
-| 项目 | Neon Free | Supabase Free |
+| Item | Neon Free | Supabase Free |
 | --- | --- | --- |
-| PostgreSQL 版本 | 17.11 | 17.11 |
-| Migrations 0001–0017（PR #138 基线） | 全部应用，二次运行全部已应用；checksum/规范化 schema 与本地一致 | 同左 |
-| 核心持久化、租户隔离、幂等、回滚 | 针对性验证通过 | 针对性验证通过 |
-| Advisory lock | 直接连接的迁移锁通过；Hyperdrive 事务锁通过 | 直接连接的迁移锁通过；Hyperdrive 事务锁通过 |
-| Hyperdrive Worker | 真实调用通过 | 真实调用通过 |
-| 连接故障恢复 | 终止后端连接后恢复，约 2.2–2.7 s | 直接连接约 2.567 s；Hyperdrive 下一请求约 409 ms |
-| 空闲/恢复 | 两次受控空闲观察进入 Idle，下一请求自动唤醒 | 11m18s 后仍观察到 5 个闲置 origin session，未验证项目暂停/恢复 |
-| 合成数据逻辑导出/恢复 | 通过 | 通过 |
-| Hosted 压测 | 部分并发场景未解决 | 针对性场景通过；未完成生产级负载测试 |
+| PostgreSQL version | 17.11 | 17.11 |
+| Migrations 0001–0017 (PR #138 baseline) | All applied; second run found all already applied; checksums and normalized schema matched local baseline | Same |
+| Core persistence, tenant isolation, idempotency, rollback | Targeted checks passed | Targeted checks passed |
+| Advisory locks | Direct migration lock and Hyperdrive transaction lock passed | Direct migration lock and Hyperdrive transaction lock passed |
+| Hyperdrive Worker | Live calls passed | Live calls passed |
+| Connection failure recovery | Recovered after backend termination in approximately 2.2–2.7 s | Direct connection approximately 2.567 s; next Hyperdrive request approximately 409 ms |
+| Idle/resume | Entered Idle in two controlled observations and automatically resumed on the next request | Five idle origin sessions remained after 11m18s; project pause/resume not verified |
+| Synthetic logical export/restore | Passed | Passed |
+| Hosted load testing | Some concurrency scenarios remained unresolved | Targeted scenarios passed; no production-grade load test |
 
-### 关键胜出证据：Scale-to-zero
+### Key differentiating evidence: Scale-to-zero
 
-Neon 在受控测试中：
+In controlled Neon tests:
 
-- 一次在约 7.5 分钟无请求后观察到 Idle；下一次 Worker 查询内部耗时 640 ms，HTTP 总耗时 1.96 s。
-- 独立复测在 6m19s 后观察到 Idle；下一次查询内部耗时 611 ms，HTTP 总耗时 1.34 s。
+- Idle was observed after approximately 7.5 minutes without requests; the next Worker query took 640 ms inside the Worker and 1.96 s total HTTP time.
+- An independent repeat observed Idle after 6m19s; the next query took 611 ms inside the Worker and 1.34 s total HTTP time.
 
-两次观察均早于当时记录的 Hyperdrive 10 分钟 idle-connection timeout。它说明在该实验配置下，空闲的 Hyperdrive 连接并未阻止 Neon 休眠。但这些是有限样本，不是生产 SLO，也不能保证存在后台 SQL 调用时仍会休眠。
+Both observations preceded the 10-minute Hyperdrive idle-connection timeout documented at the time. This shows that idle Hyperdrive connections did not prevent Neon suspension in the experimental configuration. These are limited samples, not a production SLO, and do not establish that suspension will occur when background SQL calls continue.
 
-Supabase 的七天低活动项目级暂停与 Neon 的短时 compute suspension 不等价。前者可能需要人工恢复；后者在实验中可由下一请求自动唤醒。
+Supabase's seven-day low-activity project pause is not equivalent to Neon's short compute suspension. The former may require manual restoration; the latter was automatically resumed by the next request in the experiment.
 
-### 未解决项与证据限制
+### Outstanding issues and evidence limitations
 
-- Neon 16 路并发 claim 通过；32 路测试 18 成功、14 超时。原始 SQL 诊断未保留；不能认定连接池、数据库延迟或 provider 限制是根因。PR #139 的诊断工具已完成静态验证，但原始报告未记录后续 hosted 诊断执行。
-- 双方均存在固定时间窗口的 lock observer 测试敏感性；核心 advisory lock 的独立探针通过。
-- 当时 Neon role script 的 `ALTER ROLE ... NOSUPERUSER` 被拒绝（SQLSTATE 42501），单独授权与角色属性检查通过，但该次实验未验证 password-authenticated runtime login；Supabase 使用兼容的角色创建方法完成了最小权限登录测试。
-- 当时 Neon direct TLS 已由客户端验证，但 `pg_stat_ssl` 与代理端 TLS 的关系仍存在未解释的观察。
-- 本地完整集成测试的 4 项失败来自旧的 16-migration 数量断言，与新增 0017 不一致；不将这些结果表述为全部测试通过。
-- 两家测试使用不同的 Hyperdrive origin connection cap（Neon 20，Supabase 5），延迟与并发结果不能直接当成供应商性能排名。未验证持续负载、万人容量、完整网络分区或生产级灾难恢复。
+- Neon passed 16 concurrent claims; in the 32-claim test, 18 succeeded and 14 timed out. Exact SQL diagnostics were not retained, so connection pooling, database latency, and provider limits cannot be identified as the root cause. The PR #139 diagnostic tool passed static validation, but the original report does not record a subsequent hosted diagnostic run.
+- Both providers exhibited sensitivity to the fixed timing window in the lock-observer test; independent core advisory-lock probes passed.
+- Neon's role script rejected `ALTER ROLE ... NOSUPERUSER` (SQLSTATE 42501). Separate grants and role-attribute checks passed, but password-authenticated runtime login was not verified in that experiment. Supabase completed least-privilege login testing using a compatible role-creation method.
+- Neon direct TLS was verified by the client; the relationship between `pg_stat_ssl` and proxy-side TLS remained unexplained.
+- Four failures in the local full integration suite came from stale assertions expecting 16 migrations instead of 17 after migration 0017 was added. The results are not presented as an entirely passing suite.
+- The Hyperdrive origin connection caps differed (Neon 20, Supabase 5), so latency and concurrency observations cannot be treated as a provider performance ranking. Sustained load, 10,000-user capacity, complete network partitions, and production-grade disaster recovery were not validated.
 
-细节以 [PR #135](https://github.com/basicv8vc/Ember/pull/135) 和 [PR #139](https://github.com/basicv8vc/Ember/pull/139) 为准；新测试需要独立授权及记录。
+See [PR #135](https://github.com/basicv8vc/Ember/pull/135) and [PR #139](https://github.com/basicv8vc/Ember/pull/139) for details. New tests require separate authorization and evidence records.
 
-## 4. 经济性：按历史套餐评估，而非当前报价
+## 4. Economics: historical plan assessment, not current pricing
 
-以下配额和价格来自 2026-11-08 原始报告；不是本次实时核价，也不是未来套餐承诺。
+The following allowances and prices come from the original report dated 2026-11-08. They have not been rechecked for this document and are not commitments about future plans.
 
-| 项目 | Neon | Supabase |
+| Item | Neon | Supabase |
 | --- | --- | --- |
-| Free 数据库容量 | 1 GB | 500 MB |
-| Free compute | 100 CU-hours/月 | 实例模式，低活跃可能暂停 |
+| Free database capacity | 1 GB | 500 MB |
+| Free compute | 100 CU-hours/month | Instance model; low activity may trigger a pause |
 | Free transfer | 5 GB public transfer | 5 GB uncached + 5 GB cached egress |
-| Free 恢复 | 6 小时/1 GB history；一个手动 snapshot | 无自动项目备份 |
-| Paid 起步 | Launch 按使用量：当时 $0.106/CU-hour、$0.35/GB-month | Pro 当时 $25/月起 |
+| Free recovery | 6-hour/1 GB history; one manual snapshot | No automatic project backups |
+| Paid entry | Usage-based Launch: $0.106/CU-hour and $0.35/GB-month at the time | Pro: starting at $25/month at the time |
 
-当时 Neon Launch 的示例：若 0.25 CU 每天运行 8 小时，每月约 60 CU-hours，计算费用约 $6.36（另计存储、历史恢复与超额流量）。如果持续 24 小时运行，则为约 180 CU-hours、$19.08，仅计算费用就明显增加。以上均为模型估算，而非账单。
+Historical Neon Launch example: 0.25 CU for 8 hours per day gives approximately 60 CU-hours per month and $6.36 in compute costs, excluding storage, restore history, and excess transfer. Running continuously for 24 hours per day gives approximately 180 CU-hours and $19.08 in compute costs alone. These are modeled estimates, not observed bills.
 
-对照报告的万人场景假设 DAU 为注册用户的 10%，每 DAU 每天 10 条消息，每条 10 条 SQL，推算约 100,000 statements/day、1.2 GB/月数据增长、6 GB/月数据库 egress。在该假设下，两家 Free 都不适合继续承担全部负载；应提前规划容量。具体成本需要以实际 SQL、CU-hours、存储、网络、恢复目标与届时定价核算。
+The original 10,000-user scenario assumed DAU equal to 10% of registered users, 10 messages per DAU per day, and 10 SQL statements per message. It estimated 100,000 statements/day, 1.2 GB/month of database growth, and 6 GB/month of database egress. Under these assumptions, neither Free plan is suitable for the entire workload; capacity must be planned in advance. Actual costs must be calculated from measured SQL usage, CU-hours, storage, network traffic, recovery objectives, and then-current pricing.
 
-Free 只是实验和低流量起步的手段，不是架构硬约束。两家 Free 都不提供足够的生产级恢复承诺；应在引入真实用户数据前验证加密逻辑备份及可恢复性。
+Free tiers are a way to experiment and start at low traffic, not an architectural constraint. Neither Free plan provides sufficient production-grade recovery commitments. Encrypted logical backups and recoverability should be verified before introducing real user data.
 
-## 5. 当前 Ember Cloud 架构
+## 5. Current Ember Cloud architecture
 
-根据 [cloud-staging.md](../cloud-staging.md)、[Cloudflare README](../../infra/cloudflare/README.md) 与 [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md)，现行共享环境为：
+According to [cloud-staging.md](../cloud-staging.md), the [Cloudflare README](../../infra/cloudflare/README.md), and [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md), the current shared environment is:
 
 ```text
 iOS App
@@ -120,57 +122,57 @@ R2: file payloads and artifacts
 Migration runner -> separate direct PostgreSQL connection
 ```
 
-Neon PostgreSQL 是业务状态权威。API 和执行 Worker 通过 Hyperdrive 共享数据库；迁移必须走独立直连，因为 session-level advisory lock 不能经过 Hyperdrive transaction pooling。
+Neon PostgreSQL is the source of truth for business state. API and execution Workers share the database through Hyperdrive. Migrations must use a separate direct connection because session-level advisory locks cannot pass through Hyperdrive transaction pooling.
 
-Supabase 项目 `ember-issue132-supabase-free` 是 Issue #132 授权的合成数据对照环境。Ember Cloud 不使用它的 Auth、Storage 或 Data API，也没有将其选为当前主数据库。
+The Supabase project `ember-issue132-supabase-free` is the synthetic-data comparison environment authorized by Issue #132. Ember Cloud does not use its Auth, Storage, or Data API, and it was not selected as the current primary database.
 
-以上是仓库配置与部署文档的核实结果，未重新查询 Cloudflare 线上 Hyperdrive origin、数据库内容或平台用量。
+These findings are verified against repository configuration and deployment documentation. The live Cloudflare Hyperdrive origin, database contents, and platform usage were not queried again.
 
-## 6. 近期服务商通知的实际影响
+## 6. Practical impact of recent provider notices
 
-### Neon compute 预警
+### Neon compute warning
 
-收到 Neon compute 额度预警，说明早期 Free 预算存在现实压力。若 API 状态读取、Worker recovery/relay、lease 检查或定时清理等操作频繁触发 SQL，可能妨碍 scale-to-zero。
+The Neon compute quota warning demonstrates real pressure on the early Free budget. Frequent SQL calls from API state reads, Worker recovery/relay, lease checks, or scheduled cleanup may prevent scale-to-zero.
 
-这是待测量的运行时问题，而不是 PostgreSQL 不适用的结论。需要查看真实唤醒来源、SQL 次数、CU-hours、任务恢复延迟和首请求延迟，不能仅根据邮件断定根因或量化节省额度。
+This is a runtime issue requiring measurement, not a finding that PostgreSQL is unsuitable. Actual wakeup sources, SQL counts, CU-hours, task recovery latency, and first-request latency must be measured. The email alone cannot establish the root cause or quantify potential savings.
 
-### Supabase Free 暂停预警（2026-11-19）
+### Supabase Free pause warning (2026-11-19)
 
-用户转发的邮件称：`ember-issue132-supabase-free` 因超过 7 天活动不足而即将暂停；邮件发送时尚未暂停；暂停后 90 天内可恢复，之后可下载数据但不可原地恢复。具体期限以该项目通知和控制台为准；本次未重新验证账号状态。
+The user's forwarded email says that `ember-issue132-supabase-free` is scheduled for pausing after more than seven days of insufficient activity. It was not paused when the email was sent. It can be restored within 90 days of pausing; afterward, data can be downloaded but the project cannot be restored in place. The specific deadline should follow the project notice and dashboard. Account status was not reverified for this document.
 
-由于该项目是独立实验环境，预计不影响当前 Ember Cloud。建议不为保留实验实例单独升级 Pro；如仍需复测，先检查和保留必要的合成数据、原始报告及逻辑导出，再按需恢复或重新创建测试项目。不要删除、迁移或修改现有共享数据库，也不要通过人为持续请求规避免费层政策。
+As this is an isolated experiment, the pause is not expected to affect current Ember Cloud. Do not upgrade to Pro solely to keep the experimental instance. If retesting is needed, first inspect and preserve necessary synthetic data, original reports, and logical exports, then restore or recreate the test project as needed. Do not delete, migrate, or modify the existing shared database, or use artificial continuous requests to circumvent Free-tier policies.
 
-## 7. 后续方向与重新选型条件
+## 7. Next steps and conditions for reconsideration
 
-### V1：继续 Neon
+### V1: Retain Neon
 
-- 保持已验证的 PostgreSQL 契约与现行部署，不为短期免费额度做数据库迁移。
-- 优先减少不必要的数据库唤醒，保留可靠的 outbox、lease fencing、幂等、预算、取消及 bounded reconciliation；不能以省钱为由丢失任务。
-- 监测 CU-hours、冷启动/尾延迟、任务恢复、SQL/连接使用量和真实账单；接近配额或生产可用性/备份目标时，提交付费方案评估。
-- 对真实用户数据定义备份、恢复和导出要求，定期验证逻辑恢复。
+- Preserve validated PostgreSQL contracts and the current deployment; do not migrate databases merely because of short-term Free-tier quota pressure.
+- Prioritize reducing unnecessary database wakeups while retaining reliable outbox, lease fencing, idempotency, budget, cancellation, and bounded reconciliation semantics. Cost savings must not cause lost tasks.
+- Monitor CU-hours, cold-start/tail latency, task recovery, SQL/connection usage, and actual bills. Submit a paid-plan assessment when quotas or production availability/backup objectives require it.
+- Define backup, recovery, and export requirements for real user data, and periodically verify logical restoration.
 
-### V2：事件驱动的 Cloudflare-native Runtime
+### V2: Event-driven Cloudflare-native Runtime
 
-遵循 [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md)：探索 Workers + SQLite-backed Durable Objects + Alarms + Queues + R2；D1 只作为有明确需求时的可选全局控制面。
+Follow [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md): explore Workers + SQLite-backed Durable Objects + Alarms + Queues + R2, with D1 only as an optional global control plane when a concrete need exists.
 
-薄 DO 负责 agent-local 状态协调及调度，耗时模型或 sandbox I/O 继续由独立 Worker 执行。V2 的潜在收益是按需唤醒、减少空闲轮询和加强 per-agent 调度，而不是承诺零空闲成本。
+A thin DO coordinates agent-local state and scheduling; slow model or sandbox I/O remains with independent Workers. Potential benefits include on-demand wakeups, less idle polling, and improved per-agent scheduling, not a guarantee of zero idle cost.
 
-ADR-0005 的目标包括在条件成熟时退出 Neon，但不等于已经批准迁移、已经实施 V2 或承诺固定时间。迁移前必须获得独立批准，验证租户隔离、事务/幂等/预算语义、故障恢复、schema 生命周期、导出与回滚、端到端延迟和实际费用。
+ADR-0005 targets retiring Neon when conditions are met, but does not itself approve migration, implement V2, or promise a fixed timeline. Migration requires separate approval and validation of tenant isolation, transaction/idempotency/budget semantics, failure recovery, schema lifecycle, export and rollback, end-to-end latency, and actual cost.
 
-### 何时重新考虑 Supabase
+### When to reconsider Supabase
 
-若未来需要其集成的 BaaS 功能、确定性常驻 compute，或优化后的 Neon 在真实工作负载中表现出持续成本/性能劣势，可重新对比 Neon Launch 与 Supabase Pro，并复用已有 PostgreSQL 兼容性证据。重新选择须检查实际套餐、区域、容量、恢复能力与迁移风险，而不是仅凭一次免费额度预警。
+If integrated BaaS capabilities or predictable always-on compute become necessary, or if optimized Neon shows sustained cost or performance disadvantages under real workloads, reassess Neon Launch against Supabase Pro using existing PostgreSQL compatibility evidence. A new decision must consider actual plan pricing, region, capacity, recovery capabilities, and migration risk—not just a single Free-tier warning.
 
 ## References
 
 - [Issue #132 — Managed PostgreSQL: Supabase vs Neon + Hyperdrive](https://github.com/basicv8vc/Ember/issues/132)
-- [PR #135 — Neon/Supabase validation](https://github.com/basicv8vc/Ember/pull/135)（原始实测、成本模型及备份恢复记录）
+- [PR #135 — Neon/Supabase validation](https://github.com/basicv8vc/Ember/pull/135) (original measurements, cost model, and backup/restore evidence)
 - [PR #139 — Follow-up compatibility and claim diagnostics](https://github.com/basicv8vc/Ember/pull/139)
 - [L4 Cloudflare Workers P0](../product/L4_CF_WORKERS_P0.md)
 - [Ember Cloud](../cloud-staging.md)
 - [Cloudflare deployment](../../infra/cloudflare/README.md)
 - [ADR-0005 — Cloudflare-native Cloud Runtime V2](../adr/0005-cloudflare-native-runtime-v2.md)
-- [Neon pricing](https://neon.com/pricing) / [Supabase pricing](https://supabase.com/pricing)（重新评估时核实）
+- [Neon pricing](https://neon.com/pricing) / [Supabase pricing](https://supabase.com/pricing) (recheck when reassessing)
 - [Supabase Free project pausing](https://supabase.com/docs/guides/platform/free-project-pausing)
 
-本文件仅记录决策与证据；不新增运行依赖，不变更数据库、代码、部署、凭证或付费计划。
+This document records decisions and evidence only. It introduces no runtime dependencies and changes no database, code, deployment, credentials, or paid plans.

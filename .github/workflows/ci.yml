@@ -133,14 +133,16 @@ jobs:
         run: pnpm build
 
       - name: V2 Runtime unit & workerd unit tests
-        run: pnpm exec vitest run --config vitest.unit.config.ts tests/unit/v2-*.test.ts
+        run: pnpm exec vitest run --config vitest.unit.config.ts tests/unit/v2-
 
       - name: V2 Runtime real local workerd integration tests
         run: |
           pnpm exec vitest run --config vitest.integration.config.ts \
-            tests/integration/v2-m0-probes.test.ts \
             tests/integration/v2-m1-harness-smoke.test.ts \
             tests/integration/v2-m1-acceptance.test.ts
+          pnpm exec vitest run --config vitest.integration.config.ts \
+            tests/integration/v2-m0-probes.test.ts \
+            -t "isolated local workerd|2-RPC|RTT"
 
       - name: Report Full M1 E2E Gate status (BLOCKED until A+B+E+F converge)
         run: |

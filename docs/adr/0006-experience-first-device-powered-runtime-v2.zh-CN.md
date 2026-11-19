@@ -68,7 +68,7 @@ Fast Path 与 Durable Path 共享同一权威状态机、Run 身份、Lease/Epoc
 
 初期 Interactive Executor 是 Edge API Worker 内的 HTTP Handler，不额外引入容器/服务，也不经 DO 转发流。增量 Streaming 使用有界缓冲。Workers Standard 在客户端保持连接时无墙钟 Duration 费用或 HTTP Duration 硬限制；CPU、内存及 Subrequest 限制仍生效。断连或 Runtime 重启可能取消执行；waitUntil 在响应结束/断连后最多延长 30 秒。参见 [Workers 限制](https://developers.cloudflare.com/workers/platform/limits/) 与 [Workers 定价](https://developers.cloudflare.com/workers/platform/pricing/)。不依靠该宽限时间保证任务活性。
 
-M0 初始测试配置（非 Wire Contract 或 SLA）：交互执行总 Deadline 为 120 s，Lease 为 45 s，仅在活跃执行期间每 15 s 续租；供应商调用使用有界 Timeout 与 Abort Signal。发现断连后停止续租并尽快请求供应商取消/移交；执行器静默丢失时，正常恢复目标为最后一次成功续租后 60 s 内进入核对（45 s 到期 + 15 s 发现/派发余量）。合法的带 Fencing 移交或 Lease 到期前不得抢占活跃 Run。进入恢复不意味着可重复结果未知的供应商调用，也不承诺 60 s 内完成任务。Alarm 失败时使用下文独立恢复门禁。更长或不受支持的工作以持久化状态转入 Durable Path，而非启动第二份执行。M0 在验证现有 V1 Lease/Deadline 兼容性后冻结精确超时及续租规则；M1 使用 Fake Provider 测试连接期间 Streaming、断连、静默崩溃、慢供应商、重复/过期完成及长任务移交，报告恢复时间和实际 P50/P95/P99。不设置空闲心跳。
+M0 初始测试配置（非 Wire Contract 或 SLA）：交互执行总 Deadline 为 120 s，Lease 为 45 s，仅在活跃执行期间每 15 s 续租；供应商调用使用有界 Timeout 与 Abort Signal。发现断连后停止续租并尽快请求供应商取消/移交；执行器静默丢失时，正常恢复目标为最后一次成功续租后 60 s 内进入核对（45 s 到期 + 15 s 发现/派发余量）。合法的带 Fencing 移交或 Lease 到期前不得抢占活跃 Run。进入恢复不意味着可重复结果未知的供应商调用，也不承诺 60 s 内完成任务。Alarm 失败时使用下文独立恢复门禁。更长或不受支持的工作以持久化状态转入 Durable Path，而非启动第二份执行。M0 在验证现有 V1 Lease/Deadline 兼容性后冻结精确超时及续租规则；M1 使用 Fake Provider 测试连接期间 Streaming、断连、静默崩溃、慢供应商、重复/过期完成及长任务移交。显式模拟推理超过 120 s：在截止前保存 Checkpoint 或供应商 Job/Operation Handle，将同一逻辑 Task/Turn 通过带 Fencing 的移交转入 Durable Path，并展示用户可感知的继续执行状态；重连后验证只有一个最终提交结果。若供应商不支持流恢复或结果未知，则核对/取消或明确展示限制；不得承诺同一供应商计算一定无缝续跑、盲目重放或静默截断用户任务。报告恢复时间和实际 P50/P95/P99。不设置空闲心跳。
 
 ### Agent Head 与存储边界
 
@@ -82,7 +82,11 @@ M0 初始测试配置（非 Wire Contract 或 SLA）：交互执行总 Deadline 
 
 ### 事件调度与可靠性
 
-每个 Agent Head 的单个 Alarm 指向有索引的持久化 Schedule/Outbox/Lease 表中最早到期的工作。只在最早截止时间变化或处理需要时重新设置 Alarm；按有界批次处理到期任务，保持顺序，遵守周期性日程的时区及夏令时（DST）规则，隔离失败。正常路径无需全局轮询或持续 Agent Loop。Alarm 与 Queue 采用至少一次（At-least-once）交付语义；处理重复、延迟、重试耗尽、发布前后失败以及终态/结果核对。通过平台 API 和故障注入测试验证存储与 Alarm 的原子性行为。即使存储与 Alarm 注册具备原子性，独立且有界的恢复机制也必须存在：6 次 Alarm 自动重试可能全部失败。在 Agent Head 的 Alarm 故障域之外维持持久化且有索引的唤醒/恢复登记表，仅包含权威 Agent ID、Generation 与下次可恢复时间（初始候选为 D1 + 一个定时 Worker；允许等效的独立持久化触发器）。接受执行义务前必须确保可被发现；不能保证时拒绝接受。登记与 DO 提交之间发生崩溃可以遗留无害的过期标记，但不得使已接受义务无法被发现。使用 Generation/CAS 保守核对；更早的义务仍可能提交时，不得移除或推迟唯一标记。未来日程的标记必须保留到安全退役。定期仅对到期标记作有界扫描，通过同一带 Fencing 的状态机重新设置 Alarm/派发；不全量轮询 DO、不引入全局业务状态 DO、不为每个 Agent 设置心跳。积压、延迟及重复失败必须可观测并告警。不得丢失已提交的工作；Dirty Flag 不是持久化保证。
+每个 Agent Head 的单个 Alarm 指向有索引的持久化 Schedule/Outbox/Lease 表中最早到期的工作。只在最早截止时间变化或处理需要时重新设置 Alarm；按有界批次处理到期任务，保持顺序，遵守周期性日程的时区及夏令时（DST）规则，隔离失败。正常路径无需全局轮询或持续 Agent Loop。Alarm 与 Queue 采用至少一次（At-least-once）交付语义；处理重复、延迟、重试耗尽、发布前后失败以及终态/结果核对。通过平台 API 和故障注入测试验证存储与 Alarm 的原子性行为。即使存储与 Alarm 注册具备原子性，独立且有界的恢复机制也必须存在：6 次 Alarm 自动重试可能全部失败。在 Agent Head 的 Alarm 故障域之外维持持久化且有索引的唤醒/恢复登记表，仅包含权威 Agent ID、Generation 与下次可恢复时间（初始候选为 D1 + 一个定时 Worker；允许等效的独立持久化触发器）。接受执行义务前必须确保可被持久发现；不能保证时拒绝接受未覆盖的工作。登记与 DO 提交之间发生崩溃可以遗留无害的过期标记，但不得使已接受义务无法被发现。使用 Generation/CAS 保守核对；更早的义务仍可能提交时，不得移除或推迟唯一标记。未来日程的标记必须保留到安全退役。定期仅对到期标记作有界扫描，通过同一带 Fencing 的状态机重新设置 Alarm/派发；不全量轮询 DO、不引入全局业务状态 DO、不为每个 Agent 设置心跳。积压、延迟及重复失败必须可观测并告警。不得丢失已提交的工作；Dirty Flag 不是持久化保证。
+
+**Fast Path 登记与降级。** 不为每个普通对话轮次同步读写 D1。当已有持久化标记的恢复时间不晚于新增义务所需发现时间、Generation 经证明有效，且准入/退役协议能防止并发移除或推迟时，可以复用该标记覆盖新增义务。特别是普通对话未提前最早恢复时间且已经建立此覆盖时，无需同步写入登记表。DO 本地持久化覆盖记录只能在经证明的 Generation/Fencing 协议下使用：Sweep 必须从权威 DO 获得安全退役/推迟授权，在远程退役前使旧准入覆盖失效，并按 Generation 条件更新；过期缓存、先前读取时无工作或无条件删除均不足以保证安全。首个未覆盖义务（含此前空闲的 Agent）或要求更早恢复时间的义务，必须在提交前建立覆盖。不为避免一次登记写入而定期唤醒空闲 Agent。若 D1 跨区域写入成为延迟瓶颈，评估区域化部署或等效独立持久化触发器；D1 读副本无法将写入移出主库（[D1 Read Replication](https://developers.cloudflare.com/d1/best-practices/read-replication/)）。
+
+恢复登记表不可用时，继续不创建未覆盖义务的已授权 Direct Path 操作；已覆盖的 Fast Path 轮次仅在其他必需权威（含全局预算与认证）可用且有效时继续。不因 D1 恢复登记失败而阻塞全部聊天，但不得将新增未覆盖工作确认为已接受。保留客户端受保护 Outbox，展示可重试的不可用/ACK 未知状态，按 B1 原 Submission ID/Epoch 对账；提交结果未知不等于已拒绝。安全时继续既有带 Fencing 的执行，保留标记和持久化恢复，并在依赖恢复后核对。不得绕过预算门禁或承诺登记表故障期间一定能够自主恢复。M0 必须冻结准入/退役协议、故障行为及兼容客户端的错误映射；M1 测试登记表不可用时已覆盖/未覆盖轮次、并发 Sweep/退役与接受、提前截止时间、崩溃/重启、过期 Generation 和 ACK 丢失。跨区域 RTT 分别测量首个未覆盖轮次及复用标记轮次的 ACK/Runtime P95，报告实际每轮登记操作数与故障行为。经证明已覆盖的路径无需同步访问登记表，作为明确验收项。
 
 M1 恢复门禁（本地故障注入，随后在单独批准的 Cloud PoC 上复验）：让初次 Alarm 调用和全部 6 次重试失败，同时所有客户端离线，存在待派发任务及后续日程；验证无需用户流量即可独立发现、正确派发及重新设置 Alarm。初始目标：在重试耗尽后（必要依赖不可用时，从恢复可用起算），于明确的 PoC 有界负载下 2 分钟内发现、5 分钟内恢复派发/设置 Alarm；报告实际最大值/P95 及失败情况，而非平台 SLA。测试登记表与 DO 提交前后崩溃、重复 Sweep/Alarm/Queue 交付、过期标记清理、并发日程变更和后续日程实际执行。不得丢失已接受任务或产生重复提交结果；供应商结果未知仍遵循现有核对规则。M0 在实施前冻结精确登记协议、恢复频率/批次与测量定义；Fast Path 延迟及成本 Benchmark 必须包含预登记调用；未满足门禁不得验收 M1 或继续发布。
 
@@ -142,7 +146,7 @@ M1 退出门禁：在前后台并发负载下，独立测量完整同步全局�
 | R2 Class A / B | 100 万 / 1,000 万 | $4.50/百万 / $0.36/百万 |
 | Observability（2026-12-01 起） | 摄入 50 GB / 保留 10 GB-month | $0.25/GB / $0.10/GB-month |
 
-Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个活跃 Object 0.128 GB 内存计费；符合 Hibernation 条件的空闲时间不计 Duration。模型对 DO 计算请求数和 GB-s 超额向上取整至整百万；R2 Standard 操作向上取整至整百万，存储向上取整至整 GB-month；DO SQLite 行数/存储及其他计费项按比例估算，以账单验证为准。这并非单纯的保守余量：DO 官方定价页 Compute billing 明确规定超额用量（含 Duration）向上取整至下一计费单位。10k MAU 时，437,760 GB-s 减去包含的 400,000，超出 37,760 GB-s；ceil(37,760 / 1,000,000) × $12.50 = $12.50，而非假设按比例计费的 $0.472。修正后的取整总额为 $176.07（旧 $176.27 包含 $0.20 的额外存储取整）。小于 64 KB 的 Queue Message 通常需要三次操作，重试增加操作次数。D1 与 DO SQLite 分别计算包含额度。索引写入、删除及 `setAlarm` 写入计入用量；需要测量实际计费行数。D1 包含前 10 万个数据库，Queues 包含前 1 万个队列；V2 不需要为每位用户创建独立 Queue/D1 数据库。R2 公网出站流量免费，其他服务可能收费。12 月 1 日之前的 Workers Logs：每月包含 2,000 万个事件，超额 $0.60/百万；本模型采用面向未来的 Observability 价格。来源见文末。
+Workers Paid 的 $5 基础费每个账户只计算一次。DO Duration 按每个活跃 Object 0.128 GB 内存计费；符合 Hibernation 条件的空闲时间不计 Duration。模型对 DO 计算请求数和 GB-s 超额向上取整至整百万；R2 Standard 操作向上取整至整百万，存储向上取整至整 GB-month；DO SQLite 行数/存储及其他计费项按比例估算，以账单验证为准。这并非单纯的保守余量：DO 官方定价页 [Compute billing](https://developers.cloudflare.com/durable-objects/platform/pricing/#compute-billing) 明确规定超额用量（含 Duration）向上取整至下一计费单位。10k MAU 时，437,760 GB-s 减去包含的 400,000，超出 37,760 GB-s；ceil(37,760 / 1,000,000) × $12.50 = $12.50，而非假设按比例计费的 $0.472。修正后的取整总额为 $176.07（旧 $176.27 包含 $0.20 的额外存储取整）。小于 64 KB 的 Queue Message 通常需要三次操作，重试增加操作次数。D1 与 DO SQLite 分别计算包含额度。索引写入、删除及 `setAlarm` 写入计入用量；需要测量实际计费行数。D1 包含前 10 万个数据库，Queues 包含前 1 万个队列；V2 不需要为每位用户创建独立 Queue/D1 数据库。R2 公网出站流量免费，其他服务可能收费。12 月 1 日之前的 Workers Logs：每月包含 2,000 万个事件，超额 $0.60/百万；本模型采用面向未来的 Observability 价格。来源见文末。
 
 ### 工作负载与可复现估算
 
@@ -205,6 +209,21 @@ Daytona 官方标价：CPU $0.0504/vCPU-hour，RAM $0.0162/GiB-hour，存储在�
 
 M0：ADR、最小公共 Execution/Streaming/Recovery Contract 及匹配负载的 V1 Benchmark。M1：本地 Agent Head + Fast Path 与 Alarm/Queue Durable Path 并行，先用 Fake Executor；独立恢复与受保护 Outbox 验收为强制门禁。M2：获授权的 iPhone 原生工具与路由 Demo（独立移动 Sandbox 研究继续）。M3：复用 V1 LLM、Notes、Daytona，按需增加最小全局控制数据，版本化 API 扩展单独审核。M4：云端 Benchmark、故障注入、导出/导入、删除/恢复、区域与成本验证。M5：可逆的按 Agent 迁移；未经单独切换批准不得使用真实数据。
 
+### M0/M1 验收清单（摘要；以上详细门禁仍为规范）
+
+| 阶段 | 验收项 | 证据 |
+| --- | --- | --- |
+| M0 | 公共 Execution/Streaming/Recovery Contract；已有 B1 兼容 | 经审核的契约及所有权不变量 |
+| M0 | 登记覆盖、退役/Fencing、D1 故障行为；Lease/Deadline 和长轮次移交 | 协议与确定性故障场景 |
+| M0 | V1 基线、计费 Trace、存储增长假设及模型路由矩阵 | 可复现工作负载/测量定义及本地 Probe |
+| M1 | Fast/Durable Path、受保护 Outbox、ACK 未知、租户隔离 | 本地 Fake Provider 端到端及负面测试 |
+| M1 | 已覆盖轮次：零同步登记 I/O；未覆盖轮次与登记故障 | 竞态/故障测试；分别记录 ACK/Runtime 延迟；不丢失已接受工作 |
+| M1 | 全部 6 次 Alarm 重试失败；独立恢复及后续日程 | 指定条件下离线恢复：≤ 2 min 发现 / ≤ 5 min 派发或重新设置 Alarm |
+| M1 | Streaming/断连、执行器静默丢失及推理 > 120 s | 正常恢复 60 s 内进入核对的目标；带 Fencing 的移交，唯一最终结果或明确结果未知 |
+| M1 | 全局/单 Agent 预算、延迟及计费 Trace | 原子预留、近区域 P95 ≤ 50 ms 预算检查目标（包含于 200 ms Runtime）；实测写入量与流处理 CPU |
+
+本次批准级别下，M1 各项仅使用本地/Fake Provider。上线前在另行批准的 Cloud/Provider Canary 中复验相关门禁。失败或无法测量的证据必须如实报告，不得标为通过。
+
 工程分工：A — Agent Core/Fast Path；B — Event Runtime/Recovery；C — Device Runtime；D — Performance/Migration 与 D1 对照。依赖性改动前先冻结共同契约；共享 Schema 与所有权由架构师协调；采用隔离 Worktree、Draft PR、本地测试（不要求 GitHub Actions）。
 
 迁移必须保证每个 Agent 只有一个可写权威 Runtime，隔离旧执行，并暂停或核对未完成的外部副作用。Snapshot/Export，导入后验证 ID、数量、Checksum、顺序、约束和 Schema 版本；验证 API/iOS 兼容；按照服务端解析的 Agent 所有权路由；上线前测试灰度流程及切换后的新增数据反向迁移。仅切换路由不等于回滚。Neon 在范围受限的切换窗口内暂时保留，仅在运维验收通过后退役。不长期双写。
@@ -217,7 +236,8 @@ M0：ADR、最小公共 Execution/Streaming/Recovery Contract 及匹配负载的
 
 - https://developers.cloudflare.com/workers/platform/pricing/
 - https://developers.cloudflare.com/workers/platform/limits/
-- https://developers.cloudflare.com/durable-objects/platform/pricing/
+- https://developers.cloudflare.com/durable-objects/platform/pricing/#compute-billing
+- https://developers.cloudflare.com/d1/best-practices/read-replication/
 - https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/
 - https://developers.cloudflare.com/durable-objects/api/alarms/
 - https://developers.cloudflare.com/d1/platform/pricing/

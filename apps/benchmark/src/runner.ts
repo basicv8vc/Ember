@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { Id, TaskKind } from '@ember/domain';
 
 import { createBenchmarkHarness, type BenchmarkHarness } from './harness.js';
+import { assertSafeLocalDatabaseUrl, DEFAULT_LOCAL_TEST_DATABASE_URL } from './local-guard.js';
 import { calculateDistribution, DeterministicPrng, parseTaskMix } from './metrics.js';
 import { resolveBenchmarkGitSha, sanitizeReportConfig } from './evidence.js';
 import { generateMarkdownReport } from './report.js';
@@ -47,7 +48,11 @@ function resolveConfig(options: BenchmarkOptions): ResolvedBenchmarkConfig {
     options.databaseUrl ||
     process.env.TEST_DATABASE_URL ||
     process.env.DATABASE_URL ||
-    'postgres://ember:ember_local_dev_only@127.0.0.1:5432/ember_test';
+    DEFAULT_LOCAL_TEST_DATABASE_URL;
+
+  if (!options.apiUrl) {
+    assertSafeLocalDatabaseUrl(databaseUrl);
+  }
 
   const agents = options.agents ?? 1_000;
   const concurrency = options.concurrency ?? 100;

@@ -1,0 +1,614 @@
+{
+  "scenarioId": "ember-v2-m0-cost-model",
+  "evidenceKind": "estimated_adr0006",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:39:22.583Z",
+  "adr0006ReferenceMatrix": [
+    {
+      "mau": 10,
+      "fullAllowanceUsd": 5,
+      "halfAllowanceUsd": 5,
+      "zeroAllowanceUsd": 22.73
+    },
+    {
+      "mau": 100,
+      "fullAllowanceUsd": 5,
+      "halfAllowanceUsd": 5.08,
+      "zeroAllowanceUsd": 24.7
+    },
+    {
+      "mau": 1000,
+      "fullAllowanceUsd": 9.33,
+      "halfAllowanceUsd": 10.43,
+      "zeroAllowanceUsd": 44.62
+    },
+    {
+      "mau": 10000,
+      "fullAllowanceUsd": 176.07,
+      "halfAllowanceUsd": 208.14,
+      "zeroAllowanceUsd": 245.01
+    },
+    {
+      "mau": 100000,
+      "fullAllowanceUsd": 2204.8,
+      "halfAllowanceUsd": 2261.13,
+      "zeroAllowanceUsd": 2326
+    }
+  ],
+  "doWriteRowsSensitivity": [
+    {
+      "mau": 1000,
+      "doRowsWrittenPerEvent": 10,
+      "cloudRuntimeUsd": 9.33,
+      "doWriteOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doRowsWrittenPerEvent": 20,
+      "cloudRuntimeUsd": 9.33,
+      "doWriteOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doRowsWrittenPerEvent": 30,
+      "cloudRuntimeUsd": 9.33,
+      "doWriteOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doRowsWrittenPerEvent": 40,
+      "cloudRuntimeUsd": 9.33,
+      "doWriteOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doRowsWrittenPerEvent": 60,
+      "cloudRuntimeUsd": 9.33,
+      "doWriteOverageUsd": 0
+    },
+    {
+      "mau": 10000,
+      "doRowsWrittenPerEvent": 10,
+      "cloudRuntimeUsd": 107.67,
+      "doWriteOverageUsd": 18.4
+    },
+    {
+      "mau": 10000,
+      "doRowsWrittenPerEvent": 20,
+      "cloudRuntimeUsd": 176.07,
+      "doWriteOverageUsd": 86.8
+    },
+    {
+      "mau": 10000,
+      "doRowsWrittenPerEvent": 30,
+      "cloudRuntimeUsd": 244.47,
+      "doWriteOverageUsd": 155.2
+    },
+    {
+      "mau": 10000,
+      "doRowsWrittenPerEvent": 40,
+      "cloudRuntimeUsd": 312.87,
+      "doWriteOverageUsd": 223.6
+    },
+    {
+      "mau": 10000,
+      "doRowsWrittenPerEvent": 60,
+      "cloudRuntimeUsd": 449.67,
+      "doWriteOverageUsd": 360.4
+    },
+    {
+      "mau": 100000,
+      "doRowsWrittenPerEvent": 10,
+      "cloudRuntimeUsd": 1520.8,
+      "doWriteOverageUsd": 634
+    },
+    {
+      "mau": 100000,
+      "doRowsWrittenPerEvent": 20,
+      "cloudRuntimeUsd": 2204.8,
+      "doWriteOverageUsd": 1318
+    },
+    {
+      "mau": 100000,
+      "doRowsWrittenPerEvent": 30,
+      "cloudRuntimeUsd": 2888.8,
+      "doWriteOverageUsd": 2002
+    },
+    {
+      "mau": 100000,
+      "doRowsWrittenPerEvent": 40,
+      "cloudRuntimeUsd": 3572.8,
+      "doWriteOverageUsd": 2686
+    },
+    {
+      "mau": 100000,
+      "doRowsWrittenPerEvent": 60,
+      "cloudRuntimeUsd": 4940.8,
+      "doWriteOverageUsd": 4054
+    }
+  ],
+  "doDurationSensitivity": [
+    {
+      "mau": 1000,
+      "doDurationSecPerEvent": 0.2,
+      "cloudRuntimeUsd": 9.33,
+      "doDurationOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doDurationSecPerEvent": 0.5,
+      "cloudRuntimeUsd": 9.33,
+      "doDurationOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doDurationSecPerEvent": 2,
+      "cloudRuntimeUsd": 9.33,
+      "doDurationOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "doDurationSecPerEvent": 5,
+      "cloudRuntimeUsd": 21.83,
+      "doDurationOverageUsd": 12.5
+    },
+    {
+      "mau": 1000,
+      "doDurationSecPerEvent": 10,
+      "cloudRuntimeUsd": 21.83,
+      "doDurationOverageUsd": 12.5
+    },
+    {
+      "mau": 10000,
+      "doDurationSecPerEvent": 0.2,
+      "cloudRuntimeUsd": 163.57,
+      "doDurationOverageUsd": 0
+    },
+    {
+      "mau": 10000,
+      "doDurationSecPerEvent": 0.5,
+      "cloudRuntimeUsd": 176.07,
+      "doDurationOverageUsd": 12.5
+    },
+    {
+      "mau": 10000,
+      "doDurationSecPerEvent": 2,
+      "cloudRuntimeUsd": 188.57,
+      "doDurationOverageUsd": 25
+    },
+    {
+      "mau": 10000,
+      "doDurationSecPerEvent": 5,
+      "cloudRuntimeUsd": 213.57,
+      "doDurationOverageUsd": 50
+    },
+    {
+      "mau": 10000,
+      "doDurationSecPerEvent": 10,
+      "cloudRuntimeUsd": 276.07,
+      "doDurationOverageUsd": 112.5
+    },
+    {
+      "mau": 100000,
+      "doDurationSecPerEvent": 0.2,
+      "cloudRuntimeUsd": 2179.8,
+      "doDurationOverageUsd": 25
+    },
+    {
+      "mau": 100000,
+      "doDurationSecPerEvent": 0.5,
+      "cloudRuntimeUsd": 2204.8,
+      "doDurationOverageUsd": 50
+    },
+    {
+      "mau": 100000,
+      "doDurationSecPerEvent": 2,
+      "cloudRuntimeUsd": 2379.8,
+      "doDurationOverageUsd": 225
+    },
+    {
+      "mau": 100000,
+      "doDurationSecPerEvent": 5,
+      "cloudRuntimeUsd": 2704.8,
+      "doDurationOverageUsd": 550
+    },
+    {
+      "mau": 100000,
+      "doDurationSecPerEvent": 10,
+      "cloudRuntimeUsd": 3254.8,
+      "doDurationOverageUsd": 1100
+    }
+  ],
+  "streamingCpuSensitivity": [
+    {
+      "mau": 10000,
+      "workerCpuMsPerEvent": 30,
+      "cloudRuntimeUsd": 174.7,
+      "workerCpuOverageUsd": 3.5
+    },
+    {
+      "mau": 10000,
+      "workerCpuMsPerEvent": 40,
+      "cloudRuntimeUsd": 176.07,
+      "workerCpuOverageUsd": 4.87
+    },
+    {
+      "mau": 10000,
+      "workerCpuMsPerEvent": 50,
+      "cloudRuntimeUsd": 177.44,
+      "workerCpuOverageUsd": 6.24
+    },
+    {
+      "mau": 10000,
+      "workerCpuMsPerEvent": 70,
+      "cloudRuntimeUsd": 180.17,
+      "workerCpuOverageUsd": 8.98
+    },
+    {
+      "mau": 10000,
+      "workerCpuMsPerEvent": 110,
+      "cloudRuntimeUsd": 185.64,
+      "workerCpuOverageUsd": 14.45
+    },
+    {
+      "mau": 100000,
+      "workerCpuMsPerEvent": 30,
+      "cloudRuntimeUsd": 2191.12,
+      "workerCpuOverageUsd": 40.44
+    },
+    {
+      "mau": 100000,
+      "workerCpuMsPerEvent": 40,
+      "cloudRuntimeUsd": 2204.8,
+      "workerCpuOverageUsd": 54.12
+    },
+    {
+      "mau": 100000,
+      "workerCpuMsPerEvent": 50,
+      "cloudRuntimeUsd": 2218.48,
+      "workerCpuOverageUsd": 67.8
+    },
+    {
+      "mau": 100000,
+      "workerCpuMsPerEvent": 70,
+      "cloudRuntimeUsd": 2245.84,
+      "workerCpuOverageUsd": 95.16
+    },
+    {
+      "mau": 100000,
+      "workerCpuMsPerEvent": 110,
+      "cloudRuntimeUsd": 2300.56,
+      "workerCpuOverageUsd": 149.88
+    }
+  ],
+  "storageGrowthProjection": [
+    {
+      "mau": 1000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 2.89,
+      "cloudRuntimeUsd": 5.3,
+      "doStorageOverageUsd": 0
+    },
+    {
+      "mau": 1000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 12.89,
+      "cloudRuntimeUsd": 7.45,
+      "doStorageOverageUsd": 1.58
+    },
+    {
+      "mau": 1000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 14.86,
+      "cloudRuntimeUsd": 7.65,
+      "doStorageOverageUsd": 1.97
+    },
+    {
+      "mau": 1000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 24.86,
+      "cloudRuntimeUsd": 10.25,
+      "doStorageOverageUsd": 3.97
+    },
+    {
+      "mau": 1000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 29.23,
+      "cloudRuntimeUsd": 11.02,
+      "doStorageOverageUsd": 4.85
+    },
+    {
+      "mau": 1000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 39.23,
+      "cloudRuntimeUsd": 13.62,
+      "doStorageOverageUsd": 6.85
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 28.94,
+      "cloudRuntimeUsd": 131.18,
+      "doStorageOverageUsd": 4.79
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 128.94,
+      "cloudRuntimeUsd": 157.18,
+      "doStorageOverageUsd": 24.79
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 148.64,
+      "cloudRuntimeUsd": 159.23,
+      "doStorageOverageUsd": 28.73
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 248.64,
+      "cloudRuntimeUsd": 185.23,
+      "doStorageOverageUsd": 48.73
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 292.28,
+      "cloudRuntimeUsd": 192.88,
+      "doStorageOverageUsd": 57.46
+    },
+    {
+      "mau": 10000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 392.28,
+      "cloudRuntimeUsd": 218.88,
+      "doStorageOverageUsd": 77.46
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 289.4,
+      "cloudRuntimeUsd": 1755.9,
+      "doStorageOverageUsd": 56.88
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 1,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 2.89,
+      "totalDoStorageGb": 1289.4,
+      "cloudRuntimeUsd": 2015.9,
+      "doStorageOverageUsd": 256.88
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 1486.4,
+      "cloudRuntimeUsd": 2036.34,
+      "doStorageOverageUsd": 296.28
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 6,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 14.86,
+      "totalDoStorageGb": 2486.4,
+      "cloudRuntimeUsd": 2296.34,
+      "doStorageOverageUsd": 496.28
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 0,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 2922.8,
+      "cloudRuntimeUsd": 2372.87,
+      "doStorageOverageUsd": 583.56
+    },
+    {
+      "mau": 100000,
+      "monthsElapsed": 12,
+      "dormantRetainedRatio": 2,
+      "avgDoMbPerActiveAgent": 29.23,
+      "totalDoStorageGb": 3922.8,
+      "cloudRuntimeUsd": 2632.87,
+      "doStorageOverageUsd": 783.56
+    }
+  ],
+  "independentRecoverySensitivity": [
+    {
+      "mau": 1000,
+      "d1WritesPerEvent": 0,
+      "cloudRuntimeUsd": 9.33,
+      "incrementalRecoveryUsd": 0
+    },
+    {
+      "mau": 1000,
+      "d1WritesPerEvent": 1,
+      "cloudRuntimeUsd": 9.33,
+      "incrementalRecoveryUsd": 0
+    },
+    {
+      "mau": 1000,
+      "d1WritesPerEvent": 2,
+      "cloudRuntimeUsd": 9.33,
+      "incrementalRecoveryUsd": 0
+    },
+    {
+      "mau": 10000,
+      "d1WritesPerEvent": 0,
+      "cloudRuntimeUsd": 176.07,
+      "incrementalRecoveryUsd": 0
+    },
+    {
+      "mau": 10000,
+      "d1WritesPerEvent": 1,
+      "cloudRuntimeUsd": 176.15,
+      "incrementalRecoveryUsd": 0.08
+    },
+    {
+      "mau": 10000,
+      "d1WritesPerEvent": 2,
+      "cloudRuntimeUsd": 176.15,
+      "incrementalRecoveryUsd": 0.08
+    },
+    {
+      "mau": 100000,
+      "d1WritesPerEvent": 0,
+      "cloudRuntimeUsd": 2204.8,
+      "incrementalRecoveryUsd": 0
+    },
+    {
+      "mau": 100000,
+      "d1WritesPerEvent": 1,
+      "cloudRuntimeUsd": 2237.73,
+      "incrementalRecoveryUsd": 32.93
+    },
+    {
+      "mau": 100000,
+      "d1WritesPerEvent": 2,
+      "cloudRuntimeUsd": 2306.13,
+      "incrementalRecoveryUsd": 101.33
+    }
+  ],
+  "variableCostAndOffloadSensitivity": [
+    {
+      "mau": 1000,
+      "llmProfile": "Nemotron-3.5-Lightning ZDR ($0.06/$0.16)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 314.64,
+      "sandboxNetUsd": 166.5,
+      "totalCombinedUsd": 490.47
+    },
+    {
+      "mau": 1000,
+      "llmProfile": "Nemotron-3.5-Lightning ZDR ($0.06/$0.16)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 314.64,
+      "sandboxNetUsd": 83.25,
+      "totalCombinedUsd": 407.22
+    },
+    {
+      "mau": 1000,
+      "llmProfile": "DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 536.26,
+      "sandboxNetUsd": 166.5,
+      "totalCombinedUsd": 712.09
+    },
+    {
+      "mau": 1000,
+      "llmProfile": "DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 536.26,
+      "sandboxNetUsd": 83.25,
+      "totalCombinedUsd": 628.84
+    },
+    {
+      "mau": 1000,
+      "llmProfile": "ADR-0006 Illustrative ($0.50/$2.00)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 3078,
+      "sandboxNetUsd": 166.5,
+      "totalCombinedUsd": 3253.83
+    },
+    {
+      "mau": 1000,
+      "llmProfile": "ADR-0006 Illustrative ($0.50/$2.00)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 9.33,
+      "llmCostUsd": 3078,
+      "sandboxNetUsd": 83.25,
+      "totalCombinedUsd": 3170.58
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "Nemotron-3.5-Lightning ZDR ($0.06/$0.16)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 3146.4,
+      "sandboxNetUsd": 1665,
+      "totalCombinedUsd": 4987.47
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "Nemotron-3.5-Lightning ZDR ($0.06/$0.16)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 3146.4,
+      "sandboxNetUsd": 832.5,
+      "totalCombinedUsd": 4154.97
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 5362.56,
+      "sandboxNetUsd": 1665,
+      "totalCombinedUsd": 7203.63
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 5362.56,
+      "sandboxNetUsd": 832.5,
+      "totalCombinedUsd": 6371.13
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "ADR-0006 Illustrative ($0.50/$2.00)",
+      "deviceOffloadRate": 0,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 30780,
+      "sandboxNetUsd": 1665,
+      "totalCombinedUsd": 32621.07
+    },
+    {
+      "mau": 10000,
+      "llmProfile": "ADR-0006 Illustrative ($0.50/$2.00)",
+      "deviceOffloadRate": 0.5,
+      "cloudRuntimeUsd": 176.07,
+      "llmCostUsd": 30780,
+      "sandboxNetUsd": 832.5,
+      "totalCombinedUsd": 31788.57
+    }
+  ]
+}

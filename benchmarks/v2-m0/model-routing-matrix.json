@@ -1,0 +1,231 @@
+{
+  "scenarioId": "ember-v2-m0-model-routing",
+  "evidenceKind": "simulated_synthetic",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:39:22.592Z",
+  "evaluationDateUtc": "2026-11-19",
+  "evalCaseCount": 8,
+  "candidates": [
+    {
+      "routeId": "cloud-fast-zdr-nemotron",
+      "providerId": "openrouter",
+      "modelId": "nvidia/nemotron-3.5-lightning",
+      "placement": "cloud",
+      "approvalStatus": "smoke_expired_internal_staging_only",
+      "approvalDetail": "Smoke grant L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11 (expired); internal stagingAlpha EMBER-CLOUD-INTERNAL-MULTI-TURN effective",
+      "authorizationEligible": true,
+      "rateProvenance": "official_price_verified",
+      "inputUsdPerMillion": 0.06,
+      "outputUsdPerMillion": 0.16,
+      "simulatedTtftP50Ms": 420,
+      "simulatedTtftP95Ms": 950,
+      "simulatedCompletionP50Ms": 1350,
+      "simulatedCompletionP95Ms": 2600,
+      "assumedAccuracyPercent": 86,
+      "capabilityEligibleCount": 7,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 75,
+      "retryRatePercent": 4.5,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 249,
+      "costPerSuccessfulTaskUsd": 0.000286,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": false,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": false,
+        "summary": "OpenRouter pinned [deepinfra] ZDR (dataCollection=deny)"
+      }
+    },
+    {
+      "routeId": "cloud-vision-tools-deepseek",
+      "providerId": "openrouter",
+      "modelId": "deepseek/deepseek-v4.1-flash-1017",
+      "placement": "cloud",
+      "approvalStatus": "smoke_expired_internal_staging_only",
+      "approvalDetail": "Smoke grant L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17 (expired); internal stagingAlpha EMBER-CLOUD-INTERNAL-VISION-MULTI-TURN effective",
+      "authorizationEligible": true,
+      "rateProvenance": "official_price_verified",
+      "inputUsdPerMillion": 0.098,
+      "outputUsdPerMillion": 0.294,
+      "simulatedTtftP50Ms": 580,
+      "simulatedTtftP95Ms": 1350,
+      "simulatedCompletionP50Ms": 2100,
+      "simulatedCompletionP95Ms": 4100,
+      "assumedAccuracyPercent": 92.7,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
+      "retryRatePercent": 3,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 423,
+      "costPerSuccessfulTaskUsd": 0.000403,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": false,
+        "summary": "OpenRouter pinned [deepinfra] ZDR (dataCollection=deny)"
+      }
+    },
+    {
+      "routeId": "cloud-reasoning-gpt56-luna",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-luna",
+      "placement": "cloud",
+      "approvalStatus": "pending_cto_approval",
+      "approvalDetail": "Pending CTO approval: direct OpenAI routing has not been approved; the current approval is OpenRouter-only",
+      "authorizationEligible": false,
+      "rateProvenance": "unverified",
+      "inputUsdPerMillion": 0.2,
+      "outputUsdPerMillion": 1.2,
+      "simulatedTtftP50Ms": 650,
+      "simulatedTtftP95Ms": 1500,
+      "simulatedCompletionP50Ms": 2400,
+      "simulatedCompletionP95Ms": 4800,
+      "assumedAccuracyPercent": 96.4,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
+      "retryRatePercent": 1.5,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 1170,
+      "costPerSuccessfulTaskUsd": 0.000979,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": false,
+        "dataCollectionDeny": false,
+        "localOnly": false,
+        "summary": "Cloud endpoint without repo-pinned ZDR/dataCollection=deny policy"
+      }
+    },
+    {
+      "routeId": "cloud-adr0006-illustrative",
+      "providerId": "illustrative-provider",
+      "modelId": "adr0006-budget-reference-model",
+      "placement": "cloud",
+      "approvalStatus": "research_only",
+      "approvalDetail": "Illustrative cost benchmark quote from ADR-0006; not a real model pin",
+      "authorizationEligible": false,
+      "rateProvenance": "illustrative",
+      "inputUsdPerMillion": 0.5,
+      "outputUsdPerMillion": 2,
+      "simulatedTtftP50Ms": 750,
+      "simulatedTtftP95Ms": 1800,
+      "simulatedCompletionP50Ms": 2800,
+      "simulatedCompletionP95Ms": 5500,
+      "assumedAccuracyPercent": 94.9,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
+      "retryRatePercent": 2,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 2411,
+      "costPerSuccessfulTaskUsd": 0.002178,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "medium"
+      },
+      "privacy": {
+        "zdr": false,
+        "dataCollectionDeny": false,
+        "localOnly": false,
+        "summary": "Illustrative cloud quote only (no ZDR or approval)"
+      }
+    },
+    {
+      "routeId": "device-local-mlx-small",
+      "providerId": "apple-device-local",
+      "modelId": "local-4bit-instruct-research",
+      "placement": "device_local",
+      "approvalStatus": "research_only",
+      "approvalDetail": "M2+ on-device research profile; requires device runtime implementation & quality gate",
+      "authorizationEligible": false,
+      "rateProvenance": "zero_egress_local",
+      "inputUsdPerMillion": 0,
+      "outputUsdPerMillion": 0,
+      "simulatedTtftP50Ms": 180,
+      "simulatedTtftP95Ms": 420,
+      "simulatedCompletionP50Ms": 1100,
+      "simulatedCompletionP95Ms": 2400,
+      "assumedAccuracyPercent": 81.4,
+      "capabilityEligibleCount": 5,
+      "privacyEligibleCount": 8,
+      "fullyEligibleSuccessRatePercent": 37.5,
+      "retryRatePercent": 8,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 0,
+      "costPerSuccessfulTaskUsd": 0,
+      "capabilities": {
+        "toolCalling": false,
+        "strictJson": false,
+        "visionInput": false,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": true,
+        "summary": "On-device CPU/GPU/NPU execution; zero raw prompt egress to cloud"
+      }
+    }
+  ],
+  "routingPolicySummary": [
+    {
+      "workloadClass": "simple_low_latency_chat",
+      "primaryRouteId": "cloud-fast-zdr-nemotron",
+      "fallbackRouteId": "cloud-vision-tools-deepseek",
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Lowest repo-verified ZDR rate ($0.06/$0.16 per 1M, reasoningEffort=none); authorized for internal stagingAlpha only (smoke grant expired)."
+    },
+    {
+      "workloadClass": "tool_calling_and_multimodal",
+      "primaryRouteId": "cloud-vision-tools-deepseek",
+      "fallbackRouteId": null,
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Supports image input + tools + tool_choice on pinned DeepInfra fp8 ZDR ($0.098/$0.294 per 1M); no pending/unapproved fallback emitted."
+    },
+    {
+      "workloadClass": "privacy_sensitive_local_only",
+      "primaryRouteId": "device-local-mlx-small",
+      "fallbackRouteId": null,
+      "authorizationScope": "research_only_requires_device_m2_and_user_consent",
+      "rationale": "Private local inputs remain restricted to approved local-only processing absent explicit user/policy cloud consent."
+    },
+    {
+      "workloadClass": "complex_high_accuracy_reasoning",
+      "primaryRouteId": "cloud-vision-tools-deepseek",
+      "fallbackRouteId": null,
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Pending candidate gpt-5.6-luna is NOT authorization-eligible and is excluded from operational fallbacks until CTO approval + ZDR review."
+    }
+  ],
+  "caveats": [
+    "NO live LLM API calls were made. Latency, assumedAccuracyPercent, and retryRatePercent are synthetic M0 profiles; real quality/latency require separately approved M4 provider canaries.",
+    "Rates, rateProvenance, reasoningEffort, ZDR settings, and approvalStatus are derived directly from @ember/model-gateway at evaluationDateUtc.",
+    "Hypothetical synthetic scores never constitute live routing authorization; unavailable/pending models are research-only and excluded from operational fallbacks.",
+    "Privacy-sensitive benchmark tasks are scored ineligible (0) on cloud routes absent explicit user consent."
+  ]
+}

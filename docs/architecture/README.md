@@ -12,9 +12,9 @@
 
 ## Cloud Runtime V2 方向
 
-- [ADR-0005：Cloudflare-native Cloud Runtime V2](../adr/0005-cloudflare-native-runtime-v2.md)：合并后锁定长期技术方向与 V1 防腐纪律；不授权迁移或 PoC，不覆盖 V1 已批准契约。
+- [ADR-0005：Cloudflare-native Cloud Runtime V2](../adr/0005-cloudflare-native-runtime-v2.md)：已接受的长期技术方向与 V1 防腐纪律；原 ADR 本身不授权迁移或 PoC。ADR-0006 经批准合并后，仅就 M0/本地 M1 PoC 的授权细化并取代该限制；其余门禁及 V1 契约不变。
 
-- [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)（[中文版](../adr/0006-experience-first-device-powered-runtime-v2.zh-CN.md)，以英文原版为准）：待评审；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。合并后细化 ADR-0005，仅授权有边界的 V2 PoC，不授权生产迁移。
+- [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)（[中文版](../adr/0006-experience-first-device-powered-runtime-v2.zh-CN.md)，以英文原版为准）：经产品负责人/CTO 批准并合并后为 Accepted；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。仅授权 M0 契约/Benchmark 和本地隔离 M1 Fake Provider PoC；M0 公共契约经架构师/CTO 审核后方可实施依赖性改动。云资源创建/部署/Smoke、真实供应商 Canary 支出、M2 及后续实施与生产迁移均须分别取得明确批准。
 
 ## 决策权威和阅读顺序
 
@@ -22,6 +22,7 @@
    - [ADR-0001：Cancellation and Retry](../adr/0001-cancellation-and-retry-coordination.md)
    - [ADR-0002：Pre-claim Deadline Failure](../adr/0002-preclaim-deadline-failure.md)
    - [ADR-0003：P0B-06 Engineering Contract Freeze](../adr/0003-p0b-06-persistence-contract-freeze.md)（合并到 `main` 后生效）
+   - ADR-0005 与 ADR-0006（见上；ADR-0006 经批准合并后，在其明确决策范围内优先，V1 契约不变）
 2. [V1 Architecture Baseline](./v1-architecture-baseline.md) 已经 CTO Architecture Review 接受（PR #8，2026-10-29 合并到 `main`），作为整体系统不变量生效。
 3. [Execution Placement](./v1-execution-placement.md) 仍为待评审专题设计（专项决策 D-01～D-07 未批准）；如与新 Baseline 冲突，记录差异并显式修订。
 4. RFC、旧任务书保留作为决策背景，不覆盖已经合并的代码事实或已批准 ADR。

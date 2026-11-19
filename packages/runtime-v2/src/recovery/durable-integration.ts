@@ -1,10 +1,5 @@
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
-import {
-  createGlobalBudgetAuthoritySettlePort,
-  relayDueBudgetSyncBatch,
-  type GlobalBudgetAuthoritySettleLike,
-  type GlobalBudgetSettlePort,
-} from './budget-sync.js';
+import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
 import {
   OutboxCoordinator,
@@ -371,11 +366,10 @@ export class AgentEventRuntimeFacade {
 
   /**
    * Produces Agent A's `TurnRecoverySeamHooks` / `RecoveryCoordinatorHooks` structure,
-   * connecting Agent A's `AgentHeadCore` to Agent B's coverage, outbox, alarm, and `budget_sync` relay
-   * using either a `GlobalBudgetSettlePort` or Agent E's `GlobalBudgetAuthority` (`GlobalBudgetDO`).
+   * connecting Agent A's `AgentHeadCore` to Agent B's coverage, outbox, alarm, and verbatim `budget_sync` relay.
    */
   asTurnRecoveryHooks(cmd: {
-    readonly globalBudget: GlobalBudgetSettlePort | GlobalBudgetAuthoritySettleLike;
+    readonly globalBudget: GlobalBudgetSettlePort;
     readonly batchLimit?: number;
   }): {
     readonly getCoverageRowSync: () => V2RecoveryCoverageRow | null;
@@ -393,9 +387,6 @@ export class AgentEventRuntimeFacade {
     readonly syncPlatformAlarm: (targetAlarmAtMs: number | null, nowMs: number) => Promise<boolean>;
     readonly relayBudgetSync: (nowMs: number) => Promise<void>;
   } {
-    const budgetPort = createGlobalBudgetAuthoritySettlePort(
-      cmd.globalBudget as GlobalBudgetAuthoritySettleLike,
-    );
     return {
       getCoverageRowSync: () => this.coverage.getCoverageRowSync(),
       reconcileCoverageSync: (req) => this.coverage.reconcileFromRegistrySync(req),
@@ -408,7 +399,7 @@ export class AgentEventRuntimeFacade {
           sql: this.storage.sql,
           storage: this.storage,
           coordinator: this.outbox,
-          globalBudget: budgetPort,
+          globalBudget: cmd.globalBudget,
           nowMs,
           limit: cmd.batchLimit,
         });

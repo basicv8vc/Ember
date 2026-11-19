@@ -1,13 +1,19 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   DST_TRANSITION_FIXTURES,
   FakeModelGatewayServer,
   V2FaultInjector,
+  V2LocalRuntimeHarness,
   V2_M1_ACCEPTANCE_MATRIX,
   assertIsolatedWranglerConfig,
   assertLoopbackHttpUrl,
+  assertNoAccidentalEnvFiles,
   assertSafeLocalV2RuntimeEnv,
   buildSanitizedLocalWorkerVars,
+  parseStrictJsonc,
   resolveAbRuntimeTarget,
   runV2M1CostReestimation,
   runV2M1FullRuntimeBenchmark,
@@ -15,15 +21,21 @@ import {
 
 describe('V2-M1-D Harness Toolkit & Guards (Unit)', () => {
   const serversToClose: Array<() => Promise<void>> = [];
+  const tempDirsToRemove: string[] = [];
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     while (serversToClose.length > 0) {
       const close = serversToClose.pop()!;
       await close();
     }
+    while (tempDirsToRemove.length > 0) {
+      const dir = tempDirsToRemove.pop()!;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
-  it('enforces strict V1/cloud/production isolation guardrails', () => {
+  it('enforces strict V1/cloud/production isolation guardrails and pins immutable worker vars', () => {
     expect(() => assertSafeLocalV2RuntimeEnv({ EMBER_ENV: 'production' })).toThrow(/production/);
     expect(() => assertSafeLocalV2RuntimeEnv({ EMBER_ENV: 'staging' })).toThrow(/staging/);
     expect(() => assertSafeLocalV2RuntimeEnv({ NODE_ENV: 'production' })).toThrow(/production/);
@@ -35,28 +47,172 @@ describe('V2-M1-D Harness Toolkit & Guards (Unit)', () => {
         { fakeGatewayUrl: 'https://api.openai.com' },
       ),
     ).toThrow(/loopback/);
+    expect(() =>
+      assertSafeLocalV2RuntimeEnv(
+        { EMBER_ENV: 'test' },
+        { targetUrl: 'https://ember-api.slowfast.dev' },
+      ),
+    ).toThrow(/loopback/);
 
     expect(() => assertLoopbackHttpUrl('fakeGatewayUrl', 'http://127.0.0.1:8787')).not.toThrow();
+
+    const pinned = {
+      fakeGatewayUrl: 'http://127.0.0.1:19001',
+      faultControlUrl: 'http://127.0.0.1:19002',
+    };
+    const vars = buildSanitizedLocalWorkerVars(pinned, { CUSTOM_FLAG: 'ok' });
+    expect(vars.EMBER_ENV).toBe('test');
+    expect(vars.EMBER_MODEL_MODE).toBe('fake');
+    expect(vars.EMBER_V2_ISOLATED_HARNESS).toBe('true');
+    expect(vars.EMBER_DAYTONA_ENABLED).toBe('false');
+    expect(vars.FAKE_MODEL_GATEWAY_URL).toBe(pinned.fakeGatewayUrl);
+    expect(vars.V2_FAULT_CONTROL_URL).toBe(pinned.faultControlUrl);
+    expect(vars.CUSTOM_FLAG).toBe('ok');
+
+    // Pinned isolation vars cannot be overridden via options.vars
+    for (const pinnedKey of [
+      'EMBER_ENV',
+      'EMBER_MODEL_MODE',
+      'EMBER_DAYTONA_ENABLED',
+      'FAKE_MODEL_GATEWAY_URL',
+      'V2_FAULT_CONTROL_URL',
+    ]) {
+      expect(() => buildSanitizedLocalWorkerVars(pinned, { [pinnedKey]: 'tampered' })).toThrow(
+        /pinned/i,
+      );
+    }
+
+    expect(() => buildSanitizedLocalWorkerVars(pinned, { OPENAI_API_KEY: 'sk-forbidden' })).toThrow(
+      /OPENAI_API_KEY/,
+    );
+    expect(() =>
+      buildSanitizedLocalWorkerVars(pinned, { EXTERNAL_API_URL: 'https://remote.example.com' }),
+    ).toThrow(/loopback/);
+  });
+
+  it('parses strict JSONC with comments/trailing commas and rejects TOML, selected env violations, routes, and remote bindings', () => {
+    const validJsonc = `{
+      // line comment with trailing comma and https://not-parsed-in-comment.example.com
+      "name": "ember-v2-local",
+      /* block comment */
+      "vars": {
+        "EMBER_ENV": "test",
+        "GATEWAY_URL": "http://127.0.0.1:8787",
+      },
+      "env": {
+        "staging": {
+          "vars": { "EMBER_ENV": "staging" },
+          "routes": [{ "pattern": "ember-api.slowfast.dev" }],
+        },
+        "local": {
+          "vars": { "EMBER_LOG_LEVEL": "debug" },
+        },
+      },
+    }`;
+
+    const parsed = parseStrictJsonc(validJsonc, 'wrangler.jsonc');
+    expect(() => assertIsolatedWranglerConfig(parsed, 'local')).not.toThrow();
+    expect(() => assertIsolatedWranglerConfig(parsed, 'staging')).toThrow(/routes|staging/);
+    expect(() => assertIsolatedWranglerConfig(parsed, 'missing_env')).toThrow(/does not exist/);
+
+    // Malformed JSONC and TOML fail closed
+    expect(() =>
+      parseStrictJsonc('name = "ember"\nmain = "src/index.ts"', 'wrangler.toml'),
+    ).toThrow(/Fail-closed/);
+    expect(() => parseStrictJsonc('{ "name": "ok" /* unterminated', 'bad.jsonc')).toThrow(
+      /unterminated block comment/,
+    );
+    expect(() => parseStrictJsonc('{ "name": "unterminated', 'bad-str.jsonc')).toThrow(
+      /unterminated string literal/,
+    );
+
+    // Single route, routes, remote bindings, preview IDs, external DO script_name, Daytona vars
+    expect(() => assertIsolatedWranglerConfig({ route: 'example.com/*' })).toThrow(/route/);
     expect(() =>
       assertIsolatedWranglerConfig({ routes: [{ pattern: 'ember-api.slowfast.dev' }] }),
     ).toThrow(/routes/);
     expect(() => assertIsolatedWranglerConfig({ hyperdrive: [{ binding: 'HYPERDRIVE' }] })).toThrow(
-      /Hyperdrive/,
+      /hyperdrive/,
     );
-    expect(() => assertIsolatedWranglerConfig({ vars: { EMBER_ENV: 'staging' } })).toThrow(
-      /staging/,
+    expect(() =>
+      assertIsolatedWranglerConfig({ d1_databases: [{ binding: 'D1', remote: true }] }),
+    ).toThrow(/remote/);
+    expect(() =>
+      assertIsolatedWranglerConfig({
+        d1_databases: [{ binding: 'D1', preview_database_id: 'remote-preview-id' }],
+      }),
+    ).toThrow(/preview/);
+    expect(() =>
+      assertIsolatedWranglerConfig({
+        durable_objects: {
+          bindings: [{ name: 'DO', class_name: 'X', script_name: 'other-worker' }],
+        },
+      }),
+    ).toThrow(/script_name/);
+    expect(() => assertIsolatedWranglerConfig({ vars: { EMBER_DAYTONA_ENABLED: 'true' } })).toThrow(
+      /DAYTONA/i,
+    );
+    expect(() => assertIsolatedWranglerConfig({ vars: { DAYTONA_ORG_ID: 'org-123' } })).toThrow(
+      /DAYTONA/i,
     );
     expect(() =>
       assertIsolatedWranglerConfig({ vars: { DATABASE_URL: 'postgres://prod/db' } }),
     ).toThrow(/DATABASE_URL/);
 
-    const vars = buildSanitizedLocalWorkerVars({ FAKE_MODEL_GATEWAY_URL: 'http://127.0.0.1:9999' });
-    expect(vars.EMBER_ENV).toBe('test');
-    expect(vars.EMBER_MODEL_MODE).toBe('fake');
-    expect(vars.EMBER_V2_ISOLATED_HARNESS).toBe('true');
-    expect(() => buildSanitizedLocalWorkerVars({ OPENAI_API_KEY: 'sk-forbidden' })).toThrow(
-      /OPENAI_API_KEY/,
+    // .dev.vars / .env inheritance check
+    const dirWithSecrets = mkdtempSync(path.join(os.tmpdir(), 'ember-v2-guard-env-'));
+    tempDirsToRemove.push(dirWithSecrets);
+    writeFileSync(path.join(dirWithSecrets, '.dev.vars'), 'OPENAI_API_KEY=sk-secret\n', 'utf8');
+    expect(() => assertNoAccidentalEnvFiles(dirWithSecrets)).toThrow(/\.dev\.vars/);
+  });
+
+  it('refuses to boot FakeModelGatewayServer or workerd when local isolation preflight fails', async () => {
+    const gatewayStartSpy = vi.spyOn(FakeModelGatewayServer.prototype, 'start');
+
+    // 1. Pinned var override attempt must fail before starting FakeModelGatewayServer or workerd
+    await expect(
+      V2LocalRuntimeHarness.start({
+        target: { kind: 'harness_smoke' },
+        vars: { EMBER_MODEL_MODE: 'real' },
+      }),
+    ).rejects.toThrow(/pinned/i);
+    expect(gatewayStartSpy).not.toHaveBeenCalled();
+
+    // 2. Non-JSON/TOML ab_runtime config must fail before starting FakeModelGatewayServer or workerd
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ember-v2-guard-toml-'));
+    tempDirsToRemove.push(dir);
+    const tomlPath = path.join(dir, 'wrangler.toml');
+    writeFileSync(tomlPath, 'name = "bad"\nmain = "worker.mjs"\n', 'utf8');
+    await expect(
+      V2LocalRuntimeHarness.start({
+        target: { kind: 'ab_runtime', configPath: tomlPath },
+      }),
+    ).rejects.toThrow(/Unsupported Wrangler config format/);
+    expect(gatewayStartSpy).not.toHaveBeenCalled();
+
+    // 3. Unsafe selected env in JSONC must fail before starting FakeModelGatewayServer or workerd
+    const jsoncPath = path.join(dir, 'wrangler.jsonc');
+    writeFileSync(
+      jsoncPath,
+      JSON.stringify({
+        name: 'ember-v2-test',
+        main: 'worker.mjs',
+        compatibility_date: '2026-11-01',
+        env: {
+          staging: {
+            route: 'ember-api.slowfast.dev/*',
+            vars: { EMBER_ENV: 'staging' },
+          },
+        },
+      }),
+      'utf8',
     );
+    await expect(
+      V2LocalRuntimeHarness.start({
+        target: { kind: 'ab_runtime', configPath: jsoncPath, env: 'staging' },
+      }),
+    ).rejects.toThrow(/route|staging/);
+    expect(gatewayStartSpy).not.toHaveBeenCalled();
   });
 
   it('runs FakeModelGatewayServer across fast, stream, handoff, usage_missing, late_revision, and abort modes', async () => {

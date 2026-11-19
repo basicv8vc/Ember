@@ -23,7 +23,7 @@ describe('V2-M1-D Acceptance Matrix Contract (Gate Check)', () => {
 describe.skipIf(!abTarget.available)(
   'V2-M1-D Full A/B Runtime End-to-End Acceptance (F-1..F-23 & FI-01..FI-16)',
   () => {
-    it('boots A/B real Wrangler runtime inside isolated local V2 harness', async () => {
+    it('boot sanity only (NOT F-1..F-23/FI-01..FI-16 proof): boots A/B real Wrangler runtime with B D1 migrations verified', async () => {
       const harness = await V2LocalRuntimeHarness.start({
         target: {
           kind: 'ab_runtime',

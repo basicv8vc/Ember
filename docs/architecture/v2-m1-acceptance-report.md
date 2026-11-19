@@ -24,11 +24,12 @@
 
 ### V1 & Cloud Isolation Controls
 
-Implemented in [local-v2-guard.ts](../../apps/benchmark/src/v2-m1/local-v2-guard.ts):
+Implemented in [local-v2-guard.ts](../../apps/benchmark/src/v2-m1/local-v2-guard.ts) and [local-runtime-harness.ts](../../apps/benchmark/src/v2-m1/local-runtime-harness.ts):
 
-- Refuses `EMBER_ENV=production|staging`, `NODE_ENV=production`, `EMBER_MODEL_MODE=real`, `EMBER_DAYTONA_ENABLED=true`, and any non-loopback target/gateway URL.
-- Inspects Wrangler configs via `assertIsolatedWranglerConfig` to reject `routes`, `hyperdrive`, or forbidden V1/cloud `vars` (`DATABASE_URL`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `DAYTONA_API_KEY`, `CLOUDFLARE_API_TOKEN`).
-- Boots inside an ephemeral OS temp directory (`mkdtempSync`) with isolated `.wrangler` state and loopback-only HTTP servers (`127.0.0.1:0`).
+- **Fail-Closed Preflight Before Runtime Startup**: Refuses `EMBER_ENV=production|staging`, `NODE_ENV=production`, `EMBER_MODEL_MODE=real`, `EMBER_DAYTONA_ENABLED=true`, and any non-loopback URL before starting `FakeModelGatewayServer`, `V2FaultInjector`, or `workerd` (zero processes started on rejection).
+- **Pinned Immutable Worker Vars**: `EMBER_ENV='test'`, `EMBER_MODEL_MODE='fake'`, `EMBER_B1_FAKE_RESPONDER_ENABLED='true'`, `EMBER_V2_ISOLATED_HARNESS='true'`, `EMBER_DAYTONA_ENABLED='false'`, `FAKE_MODEL_GATEWAY_URL`, and `V2_FAULT_CONTROL_URL` are pinned after validation; attempts by `options.vars` to override pinned keys or inject `DAYTONA_*`, V1 DB URLs, or provider credentials fail closed.
+- **Strict JSON/JSONC Config & Selected `env` Validation**: Uses `parseStrictJsonc` (supporting line/block comments and trailing commas; failing closed on malformed input or unsupported formats such as TOML), resolves `env.<selectedEnv>` if specified, rejects single `route`, `routes`, `custom_domain`, `domains`, `zone_id`, `account_id`, `hyperdrive`, `remote: true`, `preview_database_id`/`preview_id`/`preview_bucket_name`, external `services`, cross-script `durable_objects[].script_name`, and unsafe vars; also refuses config directories containing `.dev.vars` or `.env` files to prevent accidental secret inheritance.
+- **Startup Cleanup & Isolated State**: Assigns `#wranglerHarness` before `listen()` and wraps `FakeModelGatewayServer` + `V2FaultInjector` + Wrangler startup in `try/catch` cleanup (`dispose()`), running inside an ephemeral temp directory on loopback ports (`127.0.0.1:0`).
 
 ---
 
@@ -37,10 +38,10 @@ Implemented in [local-v2-guard.ts](../../apps/benchmark/src/v2-m1/local-v2-guard
 Deliverables added under [apps/benchmark/src/v2-m1/](../../apps/benchmark/src/v2-m1/index.ts):
 
 1. **Local `workerd` Topology Launcher** ([local-runtime-harness.ts](../../apps/benchmark/src/v2-m1/local-runtime-harness.ts)):
-   - Uses Wrangler `4.158.0` `createTestHarness` to boot `AgentHeadDO` (SQLite + Alarm + `evictDurableObject`), `GlobalBudgetDO` (SQLite), `D1_RECOVERY` (auto-initialized with M0-B canonical `v2_recovery_registry` DDL), `DURABLE_TURN_QUEUE` (`durable_turn` -> `durable_turn_dlq` after 5 retries), `AGENT_TASK_QUEUE` (`agent_task` -> `agent_task_dlq`), `R2_BLOBS`, and `* * * * *` `scheduled()` cron trigger.
-   - Explicitly separates `target: { kind: 'harness_smoke' }` (infra smoke check) from `target: { kind: 'ab_runtime', configPath }` (A/B's real Wrangler worker).
+   - Uses Wrangler `4.158.0` `createTestHarness` to boot `AgentHeadDO` (SQLite + Alarm + `evictDurableObject`), `GlobalBudgetDO` (SQLite), `D1_RECOVERY`, `DURABLE_TURN_QUEUE` (`durable_turn` -> `durable_turn_dlq` after 5 retries), `AGENT_TASK_QUEUE` (`agent_task` -> `agent_task_dlq`), `R2_BLOBS`, and `* * * * *` `scheduled()` cron trigger.
+   - **Strict Target & D1 Migration Separation**: `target: { kind: 'harness_smoke' }` uses a smoke-only `HARNESS_SMOKE_D1_RECOVERY_STATEMENTS` fixture solely to verify harness plumbing; `target: { kind: 'ab_runtime', configPath, env? }` selected via `EMBER_V2_RUNTIME_CONFIG` **never** applies D-owned copied DDL—it runs Agent B's real Wrangler `migrations_dir` via `applyD1Migrations` and fails closed if the D1 binding or `v2_recovery_registry` table is missing.
 2. **Loopback `FakeModelGatewayServer`** ([fake-model-gateway-server.ts](../../apps/benchmark/src/v2-m1/fake-model-gateway-server.ts)):
-   - Zero-egress loopback HTTP/SSE provider supporting `fast_ok`, `stream_sse`, `slow_handoff` (with `providerJobHandle` issuance + `/v2/fake-model/jobs/:handle` polling), `missing_handle_hang`, `usage_missing`, `late_charge_revision` (`/v2/fake-model/revisions/:operationId`), `error_5xx`, `rate_limited`, and full call/abort auditing.
+   - Zero-egress loopback HTTP/SSE provider aligned with `@ember/model-gateway` (`FakeModelGateway`, preserving `ember-fake-model-gateway-1` labeling) and Agent F/A/B/E integration hooks without inventing a second gateway contract; supports `fast_ok`, `stream_sse`, `slow_handoff` (with `providerJobHandle` issuance + `/v2/fake-model/jobs/:handle` polling), `missing_handle_hang`, `usage_missing`, `late_charge_revision` (`/v2/fake-model/revisions/:operationId`), `error_5xx`, `rate_limited`, and full call/abort auditing.
 3. **Deterministic Fault Injection Toolkit** ([fault-injector.ts](../../apps/benchmark/src/v2-m1/fault-injector.ts)):
    - Programmable D1 fault modes (`healthy`, `unavailable`, `uncertain_timeout_committed`, `uncertain_timeout_aborted`), GlobalBudget fault modes (`unavailable`, `timeout`, `grant_expired`, `halt_*`, `conflict_payload`), Queue/DLQ controls (`duplicateCount`, `forceDlq`, 7 `ForgedEnvelopePreset` builders), 8 crash hook points (`after_do_pending_before_d1` through `alarm_exhaust_6_retries`), `DST_TRANSITION_FIXTURES` (`spring_forward_2026_ny`, `fall_back_2026_ny`), virtual clock advancement, and synchronized `runConcurrentRace` barrier.
 
@@ -48,7 +49,7 @@ Deliverables added under [apps/benchmark/src/v2-m1/](../../apps/benchmark/src/v2
 
 Command:
 
-- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-m1-harness-smoke.test.ts tests/integration/v2-m1-acceptance.test.ts` → **2 files passed** (`v2-m1-harness-smoke.test.ts`: 1/1 passed in `1308 ms`; `v2-m1-acceptance.test.ts`: 1 passed, 1 skipped awaiting A/B M1 runtime).
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-m1-harness-smoke.test.ts tests/integration/v2-m1-acceptance.test.ts` → **2 files passed** (`v2-m1-harness-smoke.test.ts`: 2/2 passed—infra smoke + `ab_runtime` fail-closed D1 migration gate; `v2-m1-acceptance.test.ts`: 1 passed, 1 skipped awaiting A/B M1 runtime).
 - `pnpm bench:local --suite m1-harness-smoke --out-dir benchmarks/v2-m1` → raw JSON saved at [m1-harness-smoke.json](../../benchmarks/v2-m1/m1-harness-smoke.json):
 
 | Harness Smoke Component (`N`, `OK / Err`) | P50 (ms) | P95 (ms) | P99 (ms) | Max (ms) | Verified Capability                                                      |
@@ -79,7 +80,10 @@ All **39** scenarios (`23` from M0-A §10 `F-1..F-23` + `16` from M0-B §9 `FI-0
 | Budget Concurrency, Expiry, `usage_missing` & Revisions | `F-6`, `F-15`, `F-23`, `FI-15`                                       | `global_budget:unavailable/halt/grant_expired/conflict_payload`, `gateway:usage_missing`, `gateway:late_charge_revision`           | **BLOCKED (Awaiting A/B M1)** |
 | Long-Reasoning Fast→Durable Handoff                     | `F-11`, `F-12`, `F-21`, `FI-13`, `FI-14`                             | `gateway:slow_handoff`, `gateway:missing_handle_hang`, `virtual_clock`                                                             | **BLOCKED (Awaiting A/B M1)** |
 
-Once Agent A & B merge their M1 Wrangler runtime, setting `EMBER_V2_RUNTIME_CONFIG=<path/to/wrangler.jsonc>` activates `resolveAbRuntimeTarget()` so the full matrix executes against the real `workerd` runtime.
+Once Agent A & B merge their M1 Wrangler runtime, setting `EMBER_V2_RUNTIME_CONFIG=<path/to/wrangler.jsonc>` activates `resolveAbRuntimeTarget()` so [v2-m1-acceptance.test.ts](../../tests/integration/v2-m1-acceptance.test.ts) runs against the real `workerd` runtime. Note:
+
+- The current `ab_runtime` block in `v2-m1-acceptance.test.ts` is strictly a **boot sanity check** (`GET /v1/health` + Agent B D1 migration verification) and **cannot** be interpreted as passing all 39 `F-1..F-23` / `FI-01..FI-16` cases.
+- Actual fault assertions and full D3 measurements will be wired and executed after owner modules (A/B/E/F) merge, explicitly verifying **budget revision ordering (`rev=0` initial vs monotonic `rev>=1` deltas & conflict rejection)** and **7 total DO Alarm attempts (`1 initial + 6 automatic retries`)** before Sweeper recovery.
 
 ---
 
@@ -97,7 +101,7 @@ Once Agent A & B merge their M1 Wrangler runtime, setting `EMBER_V2_RUNTIME_CONF
 
 ### 4.2 ADR-0006 Cost Re-Estimation Without Fixed `20 rows/event` Constraint `[Estimated: ADR-0006 Cloud Formula]`
 
-Generated via `pnpm bench:local --suite m1-cost-reestimate --out-dir benchmarks/v2-m1` ([m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)). `ADR-0006` `20 rows/event` is treated strictly as an illustrative planning baseline—not a mandatory hard constraint:
+Generated via `pnpm bench:local --suite m1-cost-reestimate --out-dir benchmarks/v2-m1` ([m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)). All figures below are **model estimates only** (not measured cloud bills), and `ADR-0006` `20 rows/event` is treated strictly as an illustrative planning baseline—not a mandatory hard constraint:
 
 | Scenario (`doWrite / d1Write / months / dormant`)          |     MAU | Cloud Runtime / mo |      ADR-0006 Envelope | Notes                                                         |
 | ---------------------------------------------------------- | ------: | -----------------: | ---------------------: | ------------------------------------------------------------- |

@@ -1,4 +1,7 @@
-import { describe, expect, it } from 'vitest';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { afterEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
 
 async function waitFor<T>(
@@ -16,6 +19,13 @@ async function waitFor<T>(
 }
 
 describe('V2-M1-D Local workerd Harness Infrastructure (Integration Smoke)', () => {
+  const tempDirs: string[] = [];
+
+  afterEach(() => {
+    while (tempDirs.length > 0) {
+      rmSync(tempDirs.pop()!, { recursive: true, force: true });
+    }
+  });
   it('boots isolated workerd topology with AgentHeadDO, GlobalBudgetDO, D1, Queues+DLQ, Scheduled, and FakeModelGateway', async () => {
     const harness = await V2LocalRuntimeHarness.start({
       target: { kind: 'harness_smoke' },
@@ -134,6 +144,107 @@ describe('V2-M1-D Local workerd Harness Infrastructure (Integration Smoke)', () 
       expect(modelRes.data.simulated).toBe(true);
       expect(modelRes.data.modelLabel).toBe('ember-fake-model-gateway-1');
       expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(1);
+    } finally {
+      await harness.dispose();
+    }
+  });
+
+  it('requires real Agent B D1 migrations for ab_runtime and fails closed when binding or v2_recovery_registry is missing', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'ember-v2-ab-d1-check-'));
+    tempDirs.push(dir);
+    writeFileSync(
+      path.join(dir, 'worker.mjs'),
+      `export default { async fetch() { return new Response('ok'); } };`,
+      'utf8',
+    );
+
+    // 1. Missing D1 binding fails closed
+    const noD1Config = path.join(dir, 'no-d1.jsonc');
+    writeFileSync(
+      noD1Config,
+      JSON.stringify({
+        name: 'ember-v2-ab-check-nod1',
+        main: 'worker.mjs',
+        compatibility_date: '2026-11-01',
+      }),
+      'utf8',
+    );
+    await expect(
+      V2LocalRuntimeHarness.start({
+        target: { kind: 'ab_runtime', configPath: noD1Config },
+      }),
+    ).rejects.toThrow(/D1 binding "D1_RECOVERY" is missing/);
+
+    // 2. D1 binding without B migrations does NOT mask missing v2_recovery_registry
+    const noMigConfig = path.join(dir, 'no-mig.jsonc');
+    writeFileSync(
+      noMigConfig,
+      JSON.stringify({
+        name: 'ember-v2-ab-check-nomig',
+        main: 'worker.mjs',
+        compatibility_date: '2026-11-01',
+        d1_databases: [
+          {
+            binding: 'D1_RECOVERY',
+            database_name: 'ab-test-d1',
+            database_id: '00000000-0000-0000-0000-000000000011',
+          },
+        ],
+      }),
+      'utf8',
+    );
+    await expect(
+      V2LocalRuntimeHarness.start({
+        target: { kind: 'ab_runtime', configPath: noMigConfig },
+      }),
+    ).rejects.toThrow(/v2_recovery_registry.*missing/);
+
+    // 3. D1 binding with B migrations_dir applies real migrations and passes verification
+    const migDir = path.join(dir, 'd1-migrations');
+    mkdirSync(migDir, { recursive: true });
+    writeFileSync(
+      path.join(migDir, '0001_recovery.sql'),
+      `CREATE TABLE IF NOT EXISTS v2_recovery_registry (
+        agent_key TEXT PRIMARY KEY,
+        tenant_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        generation INTEGER NOT NULL,
+        next_recovery_at_ms INTEGER NOT NULL,
+        retry_not_before_ms INTEGER,
+        status TEXT NOT NULL,
+        sweep_lease_owner TEXT,
+        sweep_lease_expires_at_ms INTEGER,
+        recovery_attempts INTEGER NOT NULL DEFAULT 0,
+        last_error_code TEXT,
+        updated_at_ms INTEGER NOT NULL
+      );`,
+      'utf8',
+    );
+    const withMigConfig = path.join(dir, 'with-mig.jsonc');
+    writeFileSync(
+      withMigConfig,
+      JSON.stringify({
+        name: 'ember-v2-ab-check-withmig',
+        main: 'worker.mjs',
+        compatibility_date: '2026-11-01',
+        d1_databases: [
+          {
+            binding: 'D1_RECOVERY',
+            database_name: 'ab-test-d1-mig',
+            database_id: '00000000-0000-0000-0000-000000000012',
+            migrations_dir: 'd1-migrations',
+          },
+        ],
+      }),
+      'utf8',
+    );
+
+    const harness = await V2LocalRuntimeHarness.start({
+      target: { kind: 'ab_runtime', configPath: withMigConfig },
+    });
+    try {
+      const res = await harness.fetch('/');
+      expect(res.status).toBe(200);
     } finally {
       await harness.dispose();
     }

@@ -6,11 +6,18 @@ import { FakeModelGatewayServer } from './fake-model-gateway-server.js';
 import { V2FaultInjector } from './fault-injector.js';
 import {
   assertIsolatedWranglerConfig,
+  assertNoAccidentalEnvFiles,
   assertSafeLocalV2RuntimeEnv,
   buildSanitizedLocalWorkerVars,
+  parseStrictJsonc,
+  validateWorkerVarOverrides,
 } from './local-v2-guard.js';
 
-export const CANONICAL_D1_RECOVERY_STATEMENTS: readonly string[] = Object.freeze([
+/**
+ * Smoke-only D1 fixture schema used exclusively by `target.kind === 'harness_smoke'`.
+ * Never applied to `ab_runtime`: Agent B owns real D1 migrations and schema verification.
+ */
+export const HARNESS_SMOKE_D1_RECOVERY_STATEMENTS: readonly string[] = Object.freeze([
   `CREATE TABLE IF NOT EXISTS v2_recovery_registry (
   agent_key                 TEXT    PRIMARY KEY,
   tenant_id                 TEXT    NOT NULL,
@@ -45,7 +52,6 @@ export type V2HarnessTarget =
 export interface V2LocalRuntimeHarnessOptions {
   readonly target: V2HarnessTarget;
   readonly vars?: Record<string, string>;
-  readonly applyCanonicalD1Schema?: boolean;
 }
 
 interface WranglerWorkerHandle {
@@ -286,6 +292,26 @@ export default {
 };
 `;
 
+function hasMigrationsDirForBinding(
+  effectiveConfig: Record<string, unknown>,
+  bindingName: string,
+): boolean {
+  const dbs = effectiveConfig.d1_databases;
+  if (!Array.isArray(dbs)) return false;
+  for (const entry of dbs) {
+    if (
+      entry !== null &&
+      typeof entry === 'object' &&
+      !Array.isArray(entry) &&
+      (entry as Record<string, unknown>).binding === bindingName
+    ) {
+      const migrationsDir = (entry as Record<string, unknown>).migrations_dir;
+      return typeof migrationsDir === 'string' && migrationsDir.trim().length > 0;
+    }
+  }
+  return false;
+}
+
 /**
  * Reproducible local Cloudflare `workerd` integration harness for V2 M1.
  * Strictly isolated from V1 production/staging configs and external cloud/LLM egress.
@@ -314,7 +340,38 @@ export class V2LocalRuntimeHarness {
   }
 
   static async start(options: V2LocalRuntimeHarnessOptions): Promise<V2LocalRuntimeHarness> {
+    // Fail-closed preflight BEFORE starting FakeModelGatewayServer, FaultInjector, or workerd.
     assertSafeLocalV2RuntimeEnv(process.env);
+    validateWorkerVarOverrides(options.vars);
+
+    let abConfigPath: string | undefined;
+    let abRoot: string | undefined;
+    let abEnvName: string | undefined;
+    let abPrebuiltWorkerDir: string | undefined;
+    let abEffectiveConfig: Record<string, unknown> | undefined;
+    let d1BindingName = 'D1_RECOVERY';
+
+    if (options.target.kind === 'ab_runtime') {
+      abConfigPath = path.resolve(options.target.configPath);
+      const ext = path.extname(abConfigPath).toLowerCase();
+      if (ext !== '.json' && ext !== '.jsonc') {
+        throw new Error(
+          `Unsupported Wrangler config format "${ext || 'none'}" at "${abConfigPath}": local V2 harness only accepts strict JSON/JSONC configs.`,
+        );
+      }
+
+      abRoot = path.dirname(abConfigPath);
+      abEnvName = options.target.env;
+      abPrebuiltWorkerDir = options.target.prebuiltWorkerDir;
+      if (options.target.d1BindingName !== undefined) {
+        d1BindingName = options.target.d1BindingName;
+      }
+
+      const rawText = readFileSync(abConfigPath, 'utf8');
+      const parsed = parseStrictJsonc(rawText, abConfigPath);
+      abEffectiveConfig = assertIsolatedWranglerConfig(parsed, abEnvName);
+      assertNoAccidentalEnvFiles(abRoot, abEnvName);
+    }
 
     const apiPkgUrl = new URL('../../../api/package.json', import.meta.url);
     const req = createRequire(apiPkgUrl);
@@ -331,36 +388,32 @@ export class V2LocalRuntimeHarness {
     const wranglerMod = (await import(wranglerEntry)) as WranglerModule;
     const fakeGateway = new FakeModelGatewayServer();
     const faultInjector = new V2FaultInjector();
-
-    const fakeGatewayUrl = await fakeGateway.start();
-    const faultControlUrl = await faultInjector.startControlServer();
-    assertSafeLocalV2RuntimeEnv(process.env, { fakeGatewayUrl });
-
     const harness = new V2LocalRuntimeHarness(
       options.target.kind,
       wranglerVersion,
       fakeGateway,
       faultInjector,
     );
-
-    const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ember-v2-m1-harness-'));
-    harness.#tempDir = tempDir;
+    harness.#d1BindingName = d1BindingName;
 
     try {
-      const vars = buildSanitizedLocalWorkerVars({
-        FAKE_MODEL_GATEWAY_URL: fakeGatewayUrl,
-        V2_FAULT_CONTROL_URL: faultControlUrl,
-        ...(options.vars ?? {}),
-      });
+      const fakeGatewayUrl = await fakeGateway.start();
+      const faultControlUrl = await faultInjector.startControlServer();
+      assertSafeLocalV2RuntimeEnv(process.env, { fakeGatewayUrl, faultControlUrl });
 
-      let root = tempDir;
+      const vars = buildSanitizedLocalWorkerVars({ fakeGatewayUrl, faultControlUrl }, options.vars);
+
+      let root: string;
       let configPath: string;
       let envName: string | undefined;
       let prebuiltWorkerDir: string | undefined;
 
       if (options.target.kind === 'harness_smoke') {
+        const tempDir = mkdtempSync(path.join(os.tmpdir(), 'ember-v2-m1-harness-'));
+        harness.#tempDir = tempDir;
         writeFileSync(path.join(tempDir, 'smoke-worker.mjs'), HARNESS_SMOKE_WORKER_SOURCE, 'utf8');
         configPath = path.join(tempDir, 'wrangler.jsonc');
+        root = tempDir;
         const smokeConfig = {
           name: 'ember-v2-m1-harness-smoke',
           main: 'smoke-worker.mjs',
@@ -417,34 +470,10 @@ export class V2LocalRuntimeHarness {
         assertIsolatedWranglerConfig(smokeConfig);
         writeFileSync(configPath, JSON.stringify(smokeConfig, null, 2), 'utf8');
       } else {
-        configPath = path.resolve(options.target.configPath);
-        root = path.dirname(configPath);
-        envName = options.target.env;
-        prebuiltWorkerDir = options.target.prebuiltWorkerDir;
-        if (options.target.d1BindingName !== undefined) {
-          harness.#d1BindingName = options.target.d1BindingName;
-        }
-        const rawText = readFileSync(configPath, 'utf8');
-        // Strip JSONC line comments before safety validation if parseable
-        const stripped = rawText.replace(/^\s*\/\/.*$/gm, '');
-        try {
-          const parsed = JSON.parse(stripped) as Record<string, unknown>;
-          assertIsolatedWranglerConfig(parsed);
-        } catch (err) {
-          if (err instanceof Error && err.message.startsWith('Unsafe Wrangler')) {
-            throw err;
-          }
-          // Non-JSON (e.g. TOML) or trailing-comma JSONC: still validate raw config strings for forbidden staging/prod markers
-          if (
-            /ember-api\.slowfast\.dev|HYPERDRIVE|"EMBER_ENV"\s*:\s*"(production|staging)"/i.test(
-              rawText,
-            )
-          ) {
-            throw new Error(
-              `Unsafe Wrangler config "${configPath}": contains production/staging routes, Hyperdrive, or EMBER_ENV.`,
-            );
-          }
-        }
+        configPath = abConfigPath!;
+        root = abRoot!;
+        envName = abEnvName;
+        prebuiltWorkerDir = abPrebuiltWorkerDir;
       }
 
       const wranglerHarness = wranglerMod.createTestHarness({
@@ -459,18 +488,47 @@ export class V2LocalRuntimeHarness {
         ],
       });
 
+      // Set #wranglerHarness BEFORE listen() so startup failures always clean up via dispose().
+      harness.#wranglerHarness = wranglerHarness;
       await wranglerHarness.listen();
       const worker = await wranglerHarness.getWorker();
-
-      harness.#wranglerHarness = wranglerHarness;
       harness.#worker = worker;
 
-      if (options.applyCanonicalD1Schema !== false) {
-        const d1 = await harness.getD1Database();
-        if (d1 !== null) {
-          for (const stmt of CANONICAL_D1_RECOVERY_STATEMENTS) {
-            await d1.prepare(stmt).run();
+      const d1 = await harness.getD1Database();
+      if (d1 === null) {
+        throw new Error(
+          `Required D1 binding "${d1BindingName}" is missing from Worker environment.`,
+        );
+      }
+
+      if (options.target.kind === 'harness_smoke') {
+        for (const stmt of HARNESS_SMOKE_D1_RECOVERY_STATEMENTS) {
+          await d1.prepare(stmt).run();
+        }
+      } else {
+        // Real ab_runtime path: apply Agent B's actual Wrangler D1 migrations (if declared),
+        // never D's smoke fixture DDL, and fail closed if v2_recovery_registry is absent.
+        if (
+          abEffectiveConfig !== undefined &&
+          hasMigrationsDirForBinding(abEffectiveConfig, d1BindingName)
+        ) {
+          if (typeof worker.applyD1Migrations !== 'function') {
+            throw new Error(
+              `Wrangler worker handle missing applyD1Migrations() for "${d1BindingName}".`,
+            );
           }
+          await worker.applyD1Migrations(d1BindingName);
+        }
+
+        const check = await d1
+          .prepare(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_recovery_registry'",
+          )
+          .all<{ name: string }>();
+        if ((check.results?.length ?? 0) === 0) {
+          throw new Error(
+            `Required D1 table "v2_recovery_registry" is missing on binding "${d1BindingName}". Agent B must provide real D1 migrations; the acceptance harness does not pre-create or mask missing migrations.`,
+          );
         }
       }
 

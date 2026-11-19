@@ -61,7 +61,9 @@ interface PendingJobRecord {
 
 /**
  * Local loopback-only FakeModelGateway HTTP/SSE server for V2 M1 integration & benchmark tests.
- * Never opens external sockets and preserves deterministic `ember-fake-model-gateway-1` labeling.
+ * Never opens external sockets and preserves deterministic `ember-fake-model-gateway-1` labeling
+ * from `@ember/model-gateway` (`FakeModelGateway`) without inventing a second gateway contract;
+ * endpoint paths and fault headers align with Agent F/A/B/E local fake-provider integration.
  */
 export class FakeModelGatewayServer {
   #server: http.Server | null = null;

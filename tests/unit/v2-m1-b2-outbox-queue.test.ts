@@ -20,7 +20,7 @@ import {
   type BudgetSyncOutboxPayload,
   type DurableObjectStorageLike,
   type GlobalBudgetSettlePort,
-  type GlobalBudgetSettleResult,
+  type BudgetSyncGlobalSettleResult,
   type QueueLike,
   type QueueMessageLike,
   type SqlStorageCursorLike,
@@ -516,7 +516,7 @@ describe('V2-M1-B2 Outbox, Queue Fencing, DLQ, Budget Relay, and Schedule Materi
     let simulateOutage = true;
 
     const globalBudget: GlobalBudgetSettlePort = {
-      settleGlobal: async (payload): Promise<GlobalBudgetSettleResult> => {
+      settleGlobal: async (payload): Promise<BudgetSyncGlobalSettleResult> => {
         await Promise.resolve();
         if (simulateOutage) {
           throw new Error('GlobalBudgetDO unavailable');

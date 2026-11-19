@@ -15,6 +15,8 @@ const VALID_V2_SUITES = new Set<V2BenchmarkSuiteName>([
   'rtt-sim',
   'cost-model',
   'model-routing',
+  'm1-harness-smoke',
+  'm1-cost-reestimate',
   'all',
 ]);
 
@@ -39,9 +41,10 @@ Usage: pnpm bench:local [options]
 Ember P0B-09C & V2-M0-D Benchmark Runner
 
 Suite Selection:
-  --suite <name>            Run a V2-M0-D suite instead of legacy load benchmark:
+  --suite <name>            Run a V2-M0-D or V2-M1-D suite instead of legacy load benchmark:
                             v1-baseline | sqlite-probe | timing | rtt-sim |
-                            cost-model | model-routing | all
+                            cost-model | model-routing | m1-harness-smoke |
+                            m1-cost-reestimate | all
 
 V1 Task Load Options (default mode):
   --agents <n>              Number of persistent logical agents to create (default: 1000)

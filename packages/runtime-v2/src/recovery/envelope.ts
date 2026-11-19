@@ -146,7 +146,7 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isNonEmptyString(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0;
+  return typeof value === 'string' && value.trim().length > 0;
 }
 
 function isNonNegativeSafeInt(value: unknown, max = MAX_FENCE_EPOCH): value is number {
@@ -353,7 +353,10 @@ export function validateBudgetSyncOutboxPayload(input: unknown): BudgetSyncValid
     return {
       ok: false,
       code: 'BUDGET_SYNC_INVALID_INCIDENT_REASON',
-      message: `Invalid budget_sync openIncidentReason '${JSON.stringify(openIncidentReason)}'`,
+      message:
+        typeof openIncidentReason === 'string'
+          ? `Invalid budget_sync openIncidentReason '${openIncidentReason}'`
+          : 'Invalid budget_sync openIncidentReason (expected valid reason string or null)',
     };
   }
 

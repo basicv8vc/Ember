@@ -1,12 +1,15 @@
 import { type Id, isTerminalTaskStatus } from '@ember/domain';
 import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants.js';
-import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
 import {
   computePreDeadlineRetryAtMs,
   validateDispatchEnvelope,
   type V2DispatchEnvelope,
 } from '../recovery/envelope.js';
-import type { AgentHeadRecoveryPort, AuthoritativeBusinessPort } from '../recovery/ports.js';
+import type {
+  AgentHeadRecoveryPort,
+  AuthoritativeBusinessPort,
+  EventRuntimeCoordinatorPort,
+} from '../recovery/ports.js';
 import type {
   OrdinaryOutboxEntityKind,
   V2DispatchOutboxRow,
@@ -14,7 +17,6 @@ import type {
 } from '../recovery/schema.js';
 import type { DurableObjectStorageLike } from '../storage.js';
 import { settleLocalAttemptAndEnqueueSync, type LocalBudgetCeilings } from './budget.js';
-import type { DefaultEventRuntimePorts } from './default-event-ports.js';
 import {
   assertHeadScopeSync,
   earliestBusinessAlarmAtMsSync,
@@ -27,23 +29,56 @@ import {
   readRecentTurnContextSync,
   sqlExecAll,
   sqlExecMaybe,
+  sqlExecOne,
 } from './queries.js';
-import type { AssistantTurnRow, TaskRow } from './schema.js';
+import type { ApprovalRow, AssistantTurnRow, TaskRow } from './schema.js';
 import { toUtcDayString } from './state-machine.js';
 
+/**
+ * Seam delegates owned by Agent B (`OutboxCoordinator`, `RecoveryCoverageCoordinator`,
+ * `AlarmMultiplexer`, `relayDueBudgetSyncBatch`) and consumed by Agent A without duplication.
+ */
+export interface RecoveryCoordinatorHooks {
+  /** Maps to `RecoveryCoverageCoordinator.reconcileFromRegistrySync`. */
+  readonly reconcileCoverageSync: (cmd: {
+    readonly expectedGen: number;
+    readonly nowMs: number;
+  }) => Awaited<ReturnType<AgentHeadRecoveryPort['reconcileFromRegistry']>>;
+
+  /** Maps to `RecoveryCoverageCoordinator.confirmRegistryPlanSync`. */
+  readonly confirmCoveragePlanSync: (cmd: {
+    readonly generation: number;
+    readonly actualRecoveryAtMs: number | null;
+    readonly applied: boolean;
+    readonly nowMs: number;
+  }) => { readonly confirmed: boolean };
+
+  /** Maps to `OutboxCoordinator.getOutboxByIdSync`. */
+  readonly getOutboxByIdSync?: (outboxId: string) => V2DispatchOutboxRow | null;
+
+  /** Maps to `AlarmMultiplexer.syncPlatformAlarm`. */
+  readonly syncPlatformAlarm?: (
+    targetAlarmAtMs: number | null,
+    nowMs: number,
+  ) => Promise<boolean | void>;
+
+  /** Maps to `relayDueBudgetSyncBatch`. */
+  readonly relayBudgetSync?: (nowMs: number) => Promise<void>;
+}
+
 export interface RecoveryServiceDeps {
-  readonly storage: DurableObjectStorageLike;
-  readonly eventPorts: DefaultEventRuntimePorts;
-  readonly globalBudget: GlobalBudgetAuthority;
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
+  readonly eventCoordinator: EventRuntimeCoordinatorPort;
+  readonly hooks: RecoveryCoordinatorHooks;
   readonly nowMs: () => number;
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
-  readonly flushBudgetSyncAfterCommit?: () => Promise<void>;
 }
 
 /**
- * Implements `AuthoritativeBusinessPort` (sync DO SQLite contract for Agent B) and
- * `AgentHeadRecoveryPort` (Sweeper reconciliation + Durable Queue worker claim/commit).
+ * Implements `AuthoritativeBusinessPort` (Agent A synchronous business convergence & inspection
+ * invoked by Agent B coordinators) and `AgentHeadRecoveryPort` (delegating coverage state transitions
+ * to B's `RecoveryCoverageCoordinator` while owning Turn/Task/Run lease & atomic settlement).
  */
 export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, AgentHeadRecoveryPort {
   private readonly newId: () => Id;
@@ -55,20 +90,18 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
   earliestRequiredDiscoveryAtMsSync(_nowMs: number): number | null {
     const sql = this.deps.storage.sql;
     const bizDue = earliestBusinessAlarmAtMsSync(sql);
-    const outboxDue = sql
-      .exec<{ readonly m: number | null }>(
-        `SELECT MIN(next_attempt_at_ms) AS m
-           FROM v2_dispatch_outbox
-          WHERE state IN ('pending', 'enqueued', 'dead_lettered')`,
-      )
-      .one().m;
-    const schedDue = sql
-      .exec<{ readonly m: number | null }>(
-        `SELECT MIN(next_fire_at_ms) AS m
-           FROM v2_schedules
-          WHERE status = 'active'`,
-      )
-      .one().m;
+    const outboxDue = sqlExecOne<{ readonly m: number | null }>(
+      sql,
+      `SELECT MIN(next_attempt_at_ms) AS m
+         FROM v2_dispatch_outbox
+        WHERE state IN ('pending', 'enqueued', 'dead_lettered')`,
+    ).m;
+    const schedDue = sqlExecOne<{ readonly m: number | null }>(
+      sql,
+      `SELECT MIN(next_fire_at_ms) AS m
+         FROM v2_schedules
+        WHERE status = 'active'`,
+    ).m;
 
     const candidates = [bizDue, outboxDue, schedDue].filter((v): v is number => v !== null);
     if (candidates.length === 0) {
@@ -102,11 +135,15 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
          FROM assistant_turns
         WHERE status = 'running'
           AND (
-            deadline_at_ms <= ?
-            OR cancel_requested_at_ms IS NOT NULL
+            cancel_requested_at_ms IS NOT NULL
+            OR deadline_at_ms <= ?
             OR (lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?)
           )
-        ORDER BY deadline_at_ms ASC, id ASC
+        ORDER BY CASE
+                   WHEN lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms < deadline_at_ms
+                     THEN lease_expires_at_ms
+                   ELSE deadline_at_ms
+                 END ASC, id ASC
         LIMIT ?`,
       nowMs,
       nowMs,
@@ -114,6 +151,10 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     );
 
     for (const turn of dueTurns) {
+      const nextDueMs =
+        turn.lease_expires_at_ms !== null && turn.lease_expires_at_ms < turn.deadline_at_ms
+          ? turn.lease_expires_at_ms
+          : turn.deadline_at_ms;
       const actionKind =
         turn.cancel_requested_at_ms !== null
           ? 'cancel_converge'
@@ -124,7 +165,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         targetKind: 'turn',
         targetId: turn.id,
         actionKind,
-        deadlineAtMs: turn.deadline_at_ms,
+        deadlineAtMs: nextDueMs,
       });
     }
 
@@ -144,7 +185,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             OR (status = 'running' AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?)
             OR (status IN ('queued', 'retryable_failed') AND next_run_at_ms <= ?)
           )
-        ORDER BY COALESCE(deadline_at_ms, next_run_at_ms) ASC, id ASC
+        ORDER BY COALESCE(lease_expires_at_ms, deadline_at_ms, next_run_at_ms) ASC, id ASC
         LIMIT ?`,
       nowMs,
       nowMs,
@@ -153,7 +194,19 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     );
 
     for (const task of dueTasks) {
-      const deadlineAtMs = task.deadline_at_ms ?? task.next_run_at_ms;
+      let nextDueMs = task.next_run_at_ms;
+      if (task.status === 'running' && task.lease_expires_at_ms !== null) {
+        nextDueMs =
+          task.deadline_at_ms !== null
+            ? Math.min(task.lease_expires_at_ms, task.deadline_at_ms)
+            : task.lease_expires_at_ms;
+      } else if (task.deadline_at_ms !== null) {
+        nextDueMs =
+          task.status === 'waiting_approval'
+            ? task.deadline_at_ms
+            : Math.min(task.next_run_at_ms, task.deadline_at_ms);
+      }
+
       const actionKind =
         task.cancel_requested_at_ms !== null
           ? 'cancel_converge'
@@ -168,11 +221,34 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         targetKind: 'task',
         targetId: task.id,
         actionKind,
-        deadlineAtMs,
+        deadlineAtMs: nextDueMs,
       });
     }
 
-    return actions;
+    if (actions.length < limit) {
+      const remApprovals = limit - actions.length;
+      const dueApprovals = sqlExecAll<ApprovalRow>(
+        this.deps.storage.sql,
+        `SELECT *
+           FROM approvals
+          WHERE status = 'pending' AND expires_at_ms <= ?
+          ORDER BY expires_at_ms ASC, id ASC
+          LIMIT ?`,
+        nowMs,
+        remApprovals,
+      );
+      for (const approval of dueApprovals) {
+        actions.push({
+          targetKind: 'task',
+          targetId: approval.task_id,
+          actionKind: 'preclaim_deadline',
+          deadlineAtMs: approval.expires_at_ms,
+        });
+      }
+    }
+
+    actions.sort((a, b) => a.deadlineAtMs - b.deadlineAtMs);
+    return actions.slice(0, limit);
   }
 
   convergeDueBusinessItemSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void {
@@ -187,7 +263,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       this.convergeDueTaskSync(meta.tenant_id, meta.agent_id, targetId, nowMs);
     }
 
-    this.deps.eventPorts.recomputeAlarmSync(nowMs);
+    this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
   }
 
   private settleOpenAttemptsForSubjectSync(
@@ -215,7 +291,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
 
       settleLocalAttemptAndEnqueueSync({
         sql: this.deps.storage.sql,
-        coordinator: this.deps.eventPorts,
+        coordinator: this.deps.eventCoordinator,
         tenantId,
         agentId,
         attempt,
@@ -259,8 +335,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         turn.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
       return;
     }
 
@@ -296,12 +372,11 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         turn.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
       return;
     }
 
-    // Active lease expired strictly before total deadline
     if (turn.lease_expires_at_ms !== null && nowMs >= turn.lease_expires_at_ms) {
       const { anyUncertain } = this.settleOpenAttemptsForSubjectSync(
         tenantId,
@@ -313,7 +388,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
       );
 
-      // Honest degradation: uncertain outbound call with NO resumable provider handle must never be blindly replayed
+      // Honest degradation: uncertain outbound call with NO resumable provider handle never blindly replays
       const hasResumableHandle =
         turn.provider_job_handle !== null && turn.provider_job_handle.length > 0;
       if (anyUncertain && !hasResumableHandle) {
@@ -339,14 +414,13 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           turn.id,
         );
-        this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
         return;
       }
 
       const retryDecision = computePreDeadlineRetryAtMs(nowMs, turn.deadline_at_ms);
       if (!retryDecision.shouldRetry) {
-        // <= 1_000 ms remaining: no new dispatch, let single alarm converge at deadline_at_ms
         sql.exec(
           `UPDATE assistant_turns
               SET lease_owner = NULL,
@@ -356,8 +430,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           turn.id,
         );
-        this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
         return;
       }
 
@@ -374,8 +448,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         turn.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
       const outboxId = `turn:${turn.id}:epoch:${nextEpoch}`;
       const envelope: V2DispatchEnvelope = {
         schemaVersion: 2,
@@ -387,7 +461,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         queueName: 'durable_turn',
         fenceEpoch: nextEpoch,
       };
-      this.deps.eventPorts.enqueueDurableOutboxSync({
+      this.deps.eventCoordinator.enqueueDurableOutboxSync({
         outboxId,
         entityKind: 'turn',
         entityId: turn.id,
@@ -405,6 +479,19 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     if (task === null || isTerminalTaskStatus(task.status)) {
       return;
     }
+
+    // Expire overdue pending approvals before checking overall task state
+    sql.exec(
+      `UPDATE approvals
+          SET status = 'expired',
+              decided_at_ms = ?,
+              updated_at_ms = ?
+        WHERE task_id = ? AND status = 'pending' AND expires_at_ms <= ?`,
+      nowMs,
+      nowMs,
+      task.id,
+      nowMs,
+    );
 
     if (task.cancel_requested_at_ms !== null) {
       this.settleOpenAttemptsForSubjectSync(
@@ -445,8 +532,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
     }
 
@@ -489,8 +576,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
     }
 
@@ -532,8 +619,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           task.id,
         );
-        this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
-        this.deps.eventPorts.cancelEntityOutboxSync('handoff', task.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
         return;
       }
 
@@ -549,7 +636,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           task.id,
         );
-        this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
         return;
       }
 
@@ -568,7 +655,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       const outboxId = `task:${task.id}:epoch:${nextEpoch}`;
       const envelope: V2DispatchEnvelope = {
         schemaVersion: 2,
@@ -580,7 +667,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         queueName: 'agent_task',
         fenceEpoch: nextEpoch,
       };
-      this.deps.eventPorts.enqueueDurableOutboxSync({
+      this.deps.eventCoordinator.enqueueDurableOutboxSync({
         outboxId,
         entityKind: 'task',
         entityId: task.id,
@@ -690,7 +777,6 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       };
     }
 
-    // schedule_occurrence: entityId is `${scheduleId}:${occurrenceSeq}` or existing task/turn linked
     const task = sqlExecMaybe<TaskRow>(
       sql,
       `SELECT * FROM tasks WHERE idempotency_key = ? LIMIT 1`,
@@ -784,7 +870,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       queueName: 'agent_task',
       fenceEpoch: 1,
     };
-    this.deps.eventPorts.enqueueDurableOutboxSync({
+    this.deps.eventCoordinator.enqueueDurableOutboxSync({
       outboxId,
       entityKind: 'task',
       entityId: taskId,
@@ -795,93 +881,30 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     });
   }
 
+  /**
+   * Delegates recovery coverage plan decisions to Agent B's `RecoveryCoverageCoordinator`,
+   * then recalculates & syncs the single DO Alarm via B's `OutboxCoordinator` / `AlarmMultiplexer`.
+   */
   async reconcileFromRegistry(cmd: {
     readonly tenantId: string;
     readonly agentId: string;
     readonly expectedGen: number;
     readonly nowMs: number;
-  }): Promise<
-    | {
-        readonly action: 'repair_ensure';
-        readonly generation: number;
-        readonly recoveryAtMs: number;
-      }
-    | { readonly action: 'noop_stale'; readonly currentGeneration: number }
-    | { readonly action: 'retire'; readonly retireUpToGen: number }
-    | {
-        readonly action: 'postpone';
-        readonly expectedPrevGen: number;
-        readonly newGeneration: number;
-        readonly nextRecoveryAtMs: number;
-      }
-    | { readonly action: 'keep_armed'; readonly currentGeneration: number }
-  > {
-    const result = this.deps.storage.transactionSync(() => {
+  }): Promise<Awaited<ReturnType<AgentHeadRecoveryPort['reconcileFromRegistry']>>> {
+    const outcome = this.deps.storage.transactionSync(() => {
       assertHeadScopeSync(this.deps.storage.sql, cmd.tenantId, cmd.agentId);
-
-      const earliestDiscovery = this.earliestRequiredDiscoveryAtMsSync(cmd.nowMs);
-      const cov = this.deps.eventPorts.ensureCoverageRowSync(cmd.nowMs);
-
-      // Independent repair priority (V2-M0-A §8.3): never return noop_stale if obligations exist
-      // and coverage is missing/registering/insufficient, even when expectedGen lags cov.generation.
-      if (earliestDiscovery !== null) {
-        const needsRepair =
-          cov.coverage_state !== 'covered' ||
-          cov.pending_kind !== null ||
-          cov.covered_recovery_at_ms === null ||
-          cov.covered_recovery_at_ms > earliestDiscovery;
-
-        if (needsRepair) {
-          const planned = this.deps.eventPorts.fastForwardEnsureSync(
-            cmd.expectedGen,
-            earliestDiscovery,
-            cmd.nowMs,
-          );
-          this.deps.eventPorts.recomputeAlarmSync(cmd.nowMs);
-          return {
-            action: 'repair_ensure' as const,
-            generation: planned.generation,
-            recoveryAtMs: planned.targetAtMs,
-          };
-        }
-
-        if (cov.covered_recovery_at_ms !== null && earliestDiscovery > cov.covered_recovery_at_ms) {
-          if (cmd.nowMs >= cov.covered_recovery_at_ms) {
-            const postponed = this.deps.eventPorts.planPostponeSync(
-              cmd.expectedGen,
-              earliestDiscovery,
-              cmd.nowMs,
-            );
-            this.deps.eventPorts.recomputeAlarmSync(cmd.nowMs);
-            return {
-              action: 'postpone' as const,
-              expectedPrevGen: postponed.expectedPrevGen,
-              newGeneration: postponed.newGeneration,
-              nextRecoveryAtMs: postponed.nextRecoveryAtMs,
-            };
-          }
-        }
-
-        this.deps.eventPorts.recomputeAlarmSync(cmd.nowMs);
-        if (cmd.expectedGen < cov.generation && cov.coverage_state === 'covered') {
-          return { action: 'keep_armed' as const, currentGeneration: cov.generation };
-        }
-        return { action: 'keep_armed' as const, currentGeneration: cov.generation };
-      }
-
-      // Zero committed obligations (including zero pending budget_sync): safe to retire
-      if (cov.coverage_state === 'uncovered' && cmd.expectedGen < cov.generation) {
-        this.deps.eventPorts.recomputeAlarmSync(cmd.nowMs);
-        return { action: 'retire' as const, retireUpToGen: cov.generation };
-      }
-
-      const retired = this.deps.eventPorts.planRetireSync(cmd.expectedGen, cmd.nowMs);
-      this.deps.eventPorts.recomputeAlarmSync(cmd.nowMs);
-      return { action: 'retire' as const, retireUpToGen: retired.retireUpToGen };
+      const plan = this.deps.hooks.reconcileCoverageSync({
+        expectedGen: cmd.expectedGen,
+        nowMs: cmd.nowMs,
+      });
+      const nextAlarm = this.deps.eventCoordinator.recomputeAlarmSync(cmd.nowMs);
+      return { plan, nextAlarm };
     });
 
-    await this.deps.eventPorts.flushPendingAlarmOp();
-    return result;
+    if (this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(outcome.nextAlarm, cmd.nowMs);
+    }
+    return outcome.plan;
   }
 
   confirmRegistryPlan(cmd: {
@@ -890,45 +913,22 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     readonly applied: boolean;
   }): Promise<{ readonly confirmed: boolean }> {
     const nowMs = this.deps.nowMs();
-    const confirmed = this.deps.storage.transactionSync(() => {
-      const earliest = this.earliestRequiredDiscoveryAtMsSync(nowMs);
-      if (earliest === null) {
-        return false;
-      }
-      return this.deps.eventPorts.confirmCoverageSync({
+    const res = this.deps.storage.transactionSync(() =>
+      this.deps.hooks.confirmCoveragePlanSync({
         generation: cmd.generation,
         actualRecoveryAtMs: cmd.actualRecoveryAtMs,
         applied: cmd.applied,
-        earliestRequiredRecoveryMs: earliest,
         nowMs,
-      });
-    });
-    return Promise.resolve({ confirmed });
+      }),
+    );
+    return Promise.resolve(res);
   }
 
   async claimDurableWork(cmd: {
     readonly envelope: V2DispatchEnvelope;
     readonly workerId: string;
     readonly leaseMs: number;
-  }): Promise<
-    | {
-        readonly kind: 'claimed';
-        readonly targetKind: 'turn' | 'task';
-        readonly targetId: string;
-        readonly leaseEpoch: number;
-        readonly leaseExpiresAtMs: number;
-        readonly contextJson: string;
-      }
-    | {
-        readonly kind: 'not_claimed';
-        readonly reason:
-          | 'terminal'
-          | 'lease_active'
-          | 'deadline_expired'
-          | 'not_found'
-          | 'stale_or_invalid_envelope';
-      }
-  > {
+  }): Promise<Awaited<ReturnType<AgentHeadRecoveryPort['claimDurableWork']>>> {
     const envCheck = validateDispatchEnvelope(cmd.envelope);
     if (!envCheck.ok) {
       return { kind: 'not_claimed', reason: 'stale_or_invalid_envelope' };
@@ -936,20 +936,29 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     const env = envCheck.envelope;
     const nowMs = this.deps.nowMs();
 
-    const outcome = this.deps.storage.transactionSync(() => {
+    const result = this.deps.storage.transactionSync(() => {
       const meta = getHeadMetaSync(this.deps.storage.sql);
       if (meta === null || meta.tenant_id !== env.tenantId || meta.agent_id !== env.agentId) {
-        return { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined as number | null | undefined,
+        };
       }
 
-      const outbox = sqlExecMaybe<V2DispatchOutboxRow>(
-        this.deps.storage.sql,
-        `SELECT * FROM v2_dispatch_outbox WHERE outbox_id = ?`,
-        env.eventId,
-      );
+      const outbox =
+        this.deps.hooks.getOutboxByIdSync !== undefined
+          ? this.deps.hooks.getOutboxByIdSync(env.eventId)
+          : sqlExecMaybe<V2DispatchOutboxRow>(
+              this.deps.storage.sql,
+              `SELECT * FROM v2_dispatch_outbox WHERE outbox_id = ?`,
+              env.eventId,
+            );
 
       if (outbox === null) {
-        return { kind: 'not_claimed' as const, reason: 'not_found' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'not_found' as const },
+          alarmAtMs: undefined,
+        };
       }
 
       if (
@@ -960,43 +969,68 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         outbox.queue_name !== env.queueName ||
         outbox.fence_epoch !== env.fenceEpoch
       ) {
-        return { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined,
+        };
       }
 
       if (outbox.state === 'acked' || outbox.state === 'cancelled') {
-        return { kind: 'not_claimed' as const, reason: 'terminal' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs: undefined,
+        };
       }
 
       const target = this.inspectOutboxTargetSync(env.entityKind, env.entityId);
       if (!target.exists || target.targetKind === null || target.targetId === null) {
-        return { kind: 'not_claimed' as const, reason: 'not_found' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'not_found' as const },
+          alarmAtMs: undefined,
+        };
       }
 
-      // Reject BOTH stale (< currentLeaseEpoch) AND future (> currentLeaseEpoch) envelopes
       if (env.fenceEpoch !== target.currentLeaseEpoch) {
-        return { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined,
+        };
       }
 
       if (target.isTerminal) {
-        this.deps.eventPorts.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
-        this.deps.eventPorts.recomputeAlarmSync(nowMs);
-        return { kind: 'not_claimed' as const, reason: 'terminal' as const };
+        this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs,
+        };
       }
 
       if (target.cancelRequested) {
         this.convergeDueBusinessItemSync(target.targetKind, target.targetId, nowMs);
-        return { kind: 'not_claimed' as const, reason: 'terminal' as const };
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'terminal' as const },
+          alarmAtMs,
+        };
       }
 
       if (nowMs >= target.deadlineAtMs) {
         this.convergeDueBusinessItemSync(target.targetKind, target.targetId, nowMs);
-        return { kind: 'not_claimed' as const, reason: 'deadline_expired' as const };
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'deadline_expired' as const },
+          alarmAtMs,
+        };
       }
 
       if (target.targetKind === 'turn') {
         const turn = getTurnRowSync(this.deps.storage.sql, target.targetId)!;
         if (turn.lease_expires_at_ms !== null && nowMs < turn.lease_expires_at_ms) {
-          return { kind: 'not_claimed' as const, reason: 'lease_active' as const };
+          return {
+            res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+            alarmAtMs: undefined,
+          };
         }
         const nextEpoch = turn.lease_epoch + 1;
         const leaseExpiresAtMs = Math.min(nowMs + cmd.leaseMs, turn.deadline_at_ms);
@@ -1015,34 +1049,42 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           turn.id,
         );
-        this.deps.eventPorts.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
-        this.deps.eventPorts.recomputeAlarmSync(nowMs);
+        this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
 
         const context = readRecentTurnContextSync(this.deps.storage.sql, turn.conversation_id);
         return {
-          kind: 'claimed' as const,
-          targetKind: 'turn' as const,
-          targetId: turn.id,
-          leaseEpoch: nextEpoch,
-          leaseExpiresAtMs,
-          contextJson: JSON.stringify({
-            turnId: turn.id,
-            conversationId: turn.conversation_id,
-            providerJobHandle: turn.provider_job_handle,
-            deadlineAtMs: turn.deadline_at_ms,
-            utcDay: toUtcDayString(nowMs),
-            context,
-          }),
+          res: {
+            kind: 'claimed' as const,
+            targetKind: 'turn' as const,
+            targetId: turn.id,
+            leaseEpoch: nextEpoch,
+            leaseExpiresAtMs,
+            contextJson: JSON.stringify({
+              turnId: turn.id,
+              conversationId: turn.conversation_id,
+              providerJobHandle: turn.provider_job_handle,
+              deadlineAtMs: turn.deadline_at_ms,
+              utcDay: toUtcDayString(nowMs),
+              context,
+            }),
+          },
+          alarmAtMs,
         };
       }
 
-      // targetKind === 'task'
       const task = getTaskRowSync(this.deps.storage.sql, target.targetId)!;
       if (task.lease_expires_at_ms !== null && nowMs < task.lease_expires_at_ms) {
-        return { kind: 'not_claimed' as const, reason: 'lease_active' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+          alarmAtMs: undefined,
+        };
       }
       if (task.status === 'waiting_approval') {
-        return { kind: 'not_claimed' as const, reason: 'lease_active' as const };
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
+          alarmAtMs: undefined,
+        };
       }
 
       const nextEpoch = task.lease_epoch + 1;
@@ -1084,29 +1126,34 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.deps.eventPorts.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
-      this.deps.eventPorts.recomputeAlarmSync(nowMs);
+      this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
+      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
 
       return {
-        kind: 'claimed' as const,
-        targetKind: 'task' as const,
-        targetId: task.id,
-        leaseEpoch: nextEpoch,
-        leaseExpiresAtMs,
-        contextJson: JSON.stringify({
-          taskId: task.id,
-          runId,
-          attempt: nextAttempt,
-          kind: task.kind,
-          inputJson: task.input_json,
-          providerJobHandle: task.provider_job_handle,
-          deadlineAtMs: task.deadline_at_ms,
-        }),
+        res: {
+          kind: 'claimed' as const,
+          targetKind: 'task' as const,
+          targetId: task.id,
+          leaseEpoch: nextEpoch,
+          leaseExpiresAtMs,
+          contextJson: JSON.stringify({
+            taskId: task.id,
+            runId,
+            attempt: nextAttempt,
+            kind: task.kind,
+            inputJson: task.input_json,
+            providerJobHandle: task.provider_job_handle,
+            deadlineAtMs: task.deadline_at_ms,
+          }),
+        },
+        alarmAtMs,
       };
     });
 
-    await this.deps.eventPorts.flushPendingAlarmOp();
-    return outcome;
+    if (result.alarmAtMs !== undefined && this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(result.alarmAtMs, nowMs);
+    }
+    return result.res;
   }
 
   async commitDurableResult(cmd: {
@@ -1119,10 +1166,10 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     readonly outcome: unknown;
   }): Promise<{ readonly accepted: boolean }> {
     const nowMs = this.deps.nowMs();
-    const accepted = this.deps.storage.transactionSync(() => {
+    const committed = this.deps.storage.transactionSync(() => {
       const meta = getHeadMetaSync(this.deps.storage.sql);
       if (meta === null || meta.tenant_id !== cmd.tenantId || meta.agent_id !== cmd.agentId) {
-        return false;
+        return { accepted: false, alarmAtMs: undefined as number | null | undefined };
       }
 
       if (cmd.entityType === 'turn') {
@@ -1137,7 +1184,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs >= turn.deadline_at_ms ||
           turn.cancel_requested_at_ms !== null
         ) {
-          return false;
+          return { accepted: false, alarmAtMs: undefined };
         }
         const payload = cmd.outcome as {
           readonly status?: string;
@@ -1172,10 +1219,10 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             nowMs,
             turn.id,
           );
-          this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-          this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-          this.deps.eventPorts.recomputeAlarmSync(nowMs);
-          return true;
+          this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+          this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+          const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+          return { accepted: true, alarmAtMs };
         }
 
         const { messageId } = insertEmberMessageSync({
@@ -1201,13 +1248,12 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           nowMs,
           turn.id,
         );
-        this.deps.eventPorts.cancelEntityOutboxSync('turn', turn.id, nowMs);
-        this.deps.eventPorts.cancelEntityOutboxSync('handoff', turn.id, nowMs);
-        this.deps.eventPorts.recomputeAlarmSync(nowMs);
-        return true;
+        this.deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
+        this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
+        const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+        return { accepted: true, alarmAtMs };
       }
 
-      // entityType === 'task'
       const task = getTaskRowSync(this.deps.storage.sql, cmd.entityId);
       const run = task === null ? null : getLatestRunForTaskSync(this.deps.storage.sql, task.id);
       if (
@@ -1223,7 +1269,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         (task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms) ||
         task.cancel_requested_at_ms !== null
       ) {
-        return false;
+        return { accepted: false, alarmAtMs: undefined };
       }
 
       const payload = cmd.outcome as {
@@ -1271,16 +1317,18 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.deps.eventPorts.cancelEntityOutboxSync('task', task.id, nowMs);
-      this.deps.eventPorts.cancelEntityOutboxSync('handoff', task.id, nowMs);
-      this.deps.eventPorts.recomputeAlarmSync(nowMs);
-      return true;
+      this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
+      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+      return { accepted: true, alarmAtMs };
     });
 
-    await this.deps.eventPorts.flushPendingAlarmOp();
-    if (this.deps.flushBudgetSyncAfterCommit !== undefined) {
-      await this.deps.flushBudgetSyncAfterCommit();
+    if (committed.alarmAtMs !== undefined && this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(committed.alarmAtMs, nowMs);
     }
-    return { accepted };
+    if (this.deps.hooks.relayBudgetSync !== undefined) {
+      await this.deps.hooks.relayBudgetSync(nowMs);
+    }
+    return { accepted: committed.accepted };
   }
 }

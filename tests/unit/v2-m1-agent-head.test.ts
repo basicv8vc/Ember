@@ -8,17 +8,22 @@ import {
   V2_TIMING_LIMITS,
   type AgentBudgetIncidentRow,
   type AgentSpendDayRow,
+  type BudgetSyncOutboxPayload,
   type DurableObjectStorageLike,
+  type EventRuntimeCoordinatorPort,
   type GlobalBudgetAuthority,
   type GlobalBudgetAuthorizeSendRequest,
   type GlobalBudgetRenewGrantRequest,
   type GlobalBudgetReserveRequest,
   type GlobalBudgetSettleRequest,
   type ModelAttemptRow,
+  type RecoveryAdmissionPort,
   type RecoveryRegistryPort,
   type SqlStorageCursorLike,
   type SqlStorageRow,
+  type TurnRecoverySeamHooks,
   type V2DispatchOutboxRow,
+  type V2RecoveryCoverageRow,
 } from '@ember/runtime-v2';
 
 function createInstrumentedDoStorage() {
@@ -454,6 +459,464 @@ class FakeGlobalBudgetAuthority implements GlobalBudgetAuthority {
   }
 }
 
+function createTestBRuntimeSeam(deps: {
+  doStorage: ReturnType<typeof createInstrumentedDoStorage>;
+  tenantId: string;
+  agentId: string;
+  nowMs: () => number;
+  getCore: () => AgentHeadCore;
+}) {
+  const { doStorage, tenantId, agentId, nowMs, getCore } = deps;
+  const sql = doStorage.storage.sql;
+
+  const ensureCoverageRowSync = (tsNow: number): V2RecoveryCoverageRow => {
+    const existing = sql
+      .exec<V2RecoveryCoverageRow & SqlStorageRow>(
+        'SELECT * FROM v2_recovery_coverage WHERE id = 1',
+      )
+      .toArray()[0];
+    if (existing !== undefined) {
+      return existing;
+    }
+    sql.exec(
+      `INSERT INTO v2_recovery_coverage (
+         id, tenant_id, agent_id, generation, coverage_state,
+         covered_recovery_at_ms, pending_kind, pending_prev_generation,
+         pending_target_at_ms, armed_alarm_at_ms, alarm_fail_count,
+         last_d1_sync_at_ms, updated_at_ms
+       ) VALUES (1, ?, ?, 0, 'uncovered', NULL, NULL, NULL, NULL, NULL, 0, NULL, ?)`,
+      tenantId,
+      agentId,
+      tsNow,
+    );
+    return sql
+      .exec<V2RecoveryCoverageRow & SqlStorageRow>(
+        'SELECT * FROM v2_recovery_coverage WHERE id = 1',
+      )
+      .one();
+  };
+
+  const getCoverageRowSync = (): V2RecoveryCoverageRow | null => {
+    const rows = sql
+      .exec<V2RecoveryCoverageRow & SqlStorageRow>(
+        'SELECT * FROM v2_recovery_coverage WHERE id = 1',
+      )
+      .toArray();
+    return rows[0] ?? null;
+  };
+
+  const getOutboxByIdSync = (outboxId: string): V2DispatchOutboxRow | null => {
+    const rows = sql
+      .exec<V2DispatchOutboxRow & SqlStorageRow>(
+        'SELECT * FROM v2_dispatch_outbox WHERE outbox_id = ?',
+        outboxId,
+      )
+      .toArray();
+    return rows[0] ?? null;
+  };
+
+  const recoveryAdmission: RecoveryAdmissionPort = {
+    inspectCoverageSync(requiredRecoveryAtMs, tsNow) {
+      const row = ensureCoverageRowSync(tsNow);
+      if (
+        row.coverage_state === 'covered' &&
+        row.covered_recovery_at_ms !== null &&
+        row.covered_recovery_at_ms <= requiredRecoveryAtMs
+      ) {
+        return {
+          kind: 'covered',
+          generation: row.generation,
+          coveredRecoveryAtMs: row.covered_recovery_at_ms,
+        };
+      }
+      const nextGen = row.generation + 1;
+      const targetAtMs =
+        row.covered_recovery_at_ms !== null
+          ? Math.min(requiredRecoveryAtMs, row.covered_recovery_at_ms)
+          : requiredRecoveryAtMs;
+      const prevGen = row.generation;
+      const nextState = row.coverage_state === 'covered' ? 'covered' : 'registering';
+      sql.exec(
+        `UPDATE v2_recovery_coverage
+            SET generation = ?,
+                coverage_state = ?,
+                pending_kind = 'ensure',
+                pending_prev_generation = ?,
+                pending_target_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = 1`,
+        nextGen,
+        nextState,
+        prevGen,
+        targetAtMs,
+        tsNow,
+      );
+      return { kind: 'register', generation: nextGen, targetAtMs };
+    },
+
+    confirmCoverageSync(cmd) {
+      const row = getCoverageRowSync();
+      if (
+        row === null ||
+        row.generation !== cmd.generation ||
+        !cmd.applied ||
+        cmd.actualRecoveryAtMs === null ||
+        cmd.actualRecoveryAtMs > cmd.earliestRequiredRecoveryMs
+      ) {
+        return false;
+      }
+      sql.exec(
+        `UPDATE v2_recovery_coverage
+            SET coverage_state = 'covered',
+                covered_recovery_at_ms = ?,
+                pending_kind = NULL,
+                pending_prev_generation = NULL,
+                pending_target_at_ms = NULL,
+                last_d1_sync_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = 1`,
+        cmd.actualRecoveryAtMs,
+        cmd.nowMs,
+        cmd.nowMs,
+      );
+      return true;
+    },
+  };
+
+  const eventCoordinator: EventRuntimeCoordinatorPort = {
+    enqueueDurableOutboxSync(cmd) {
+      const ts = nowMs();
+      sql.exec(
+        `INSERT INTO v2_dispatch_outbox (
+           outbox_id, entity_kind, entity_id, queue_name, payload_json, operation_id,
+           revision, state, next_attempt_at_ms, publish_attempts, dlq_count, fence_epoch,
+           created_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, 0, 0, ?, ?, ?)
+         ON CONFLICT(outbox_id) DO UPDATE SET
+           payload_json = excluded.payload_json,
+           state = 'pending',
+           next_attempt_at_ms = excluded.next_attempt_at_ms,
+           fence_epoch = excluded.fence_epoch,
+           updated_at_ms = excluded.updated_at_ms`,
+        cmd.outboxId,
+        cmd.entityKind,
+        cmd.entityId,
+        cmd.queueName,
+        cmd.payloadJson,
+        cmd.operationId ?? null,
+        cmd.revision ?? 0,
+        cmd.nextAttemptAtMs,
+        cmd.fenceEpoch,
+        ts,
+        ts,
+      );
+    },
+
+    cancelEntityOutboxSync(entityKind, entityId, tsNow) {
+      sql.exec(
+        `UPDATE v2_dispatch_outbox
+            SET state = 'cancelled',
+                updated_at_ms = ?
+          WHERE entity_kind = ? AND entity_id = ? AND state IN ('pending', 'enqueued')`,
+        tsNow,
+        entityKind,
+        entityId,
+      );
+    },
+
+    ackOutboxSync(outboxId, fenceEpoch, tsNow) {
+      sql.exec(
+        `UPDATE v2_dispatch_outbox
+            SET state = 'acked',
+                updated_at_ms = ?
+          WHERE outbox_id = ? AND fence_epoch <= ? AND state IN ('pending', 'enqueued')`,
+        tsNow,
+        outboxId,
+        fenceEpoch,
+      );
+    },
+
+    applyOutboxDeadLetterSync(cmd) {
+      sql.exec(
+        `UPDATE v2_dispatch_outbox
+            SET state = 'dead_lettered',
+                dlq_count = dlq_count + 1,
+                last_error_code = ?,
+                next_attempt_at_ms = ?,
+                updated_at_ms = ?
+          WHERE outbox_id = ? AND fence_epoch <= ?`,
+        cmd.errorCode,
+        cmd.nextAttemptAtMs,
+        cmd.nowMs,
+        cmd.outboxId,
+        cmd.fenceEpoch,
+      );
+      return true;
+    },
+
+    recomputeAlarmSync(_tsNow) {
+      const core = getCore();
+      const bizDue = core
+        .listDueBusinessActionsSync(Number.MAX_SAFE_INTEGER, 10)
+        .map((a) => a.deadlineAtMs);
+      const outboxRow = sql
+        .exec<{ readonly m: number | null } & SqlStorageRow>(
+          `SELECT MIN(next_attempt_at_ms) AS m
+             FROM v2_dispatch_outbox
+            WHERE state IN ('pending', 'enqueued', 'dead_lettered')`,
+        )
+        .one().m;
+      const schedRow = sql
+        .exec<{ readonly m: number | null } & SqlStorageRow>(
+          `SELECT MIN(next_fire_at_ms) AS m
+             FROM v2_schedules
+            WHERE status = 'active'`,
+        )
+        .one().m;
+      const candidates = [...bizDue, outboxRow, schedRow].filter((v): v is number => v !== null);
+      return candidates.length === 0 ? null : Math.min(...candidates);
+    },
+  };
+
+  const syncPlatformAlarm = async (targetAlarmAtMs: number | null, tsNow: number) => {
+    const current = await doStorage.storage.getAlarm();
+    if (targetAlarmAtMs === null) {
+      if (current !== null) {
+        await doStorage.storage.deleteAlarm();
+      }
+      sql.exec(
+        'UPDATE v2_recovery_coverage SET armed_alarm_at_ms = NULL, updated_at_ms = ? WHERE id = 1',
+        tsNow,
+      );
+      return;
+    }
+    if (current !== targetAlarmAtMs) {
+      await doStorage.storage.setAlarm(targetAlarmAtMs);
+      sql.exec(
+        'UPDATE v2_recovery_coverage SET armed_alarm_at_ms = ?, updated_at_ms = ? WHERE id = 1',
+        targetAlarmAtMs,
+        tsNow,
+      );
+    }
+  };
+
+  const relayBudgetSync = async (tsNow: number) => {
+    const core = getCore();
+    const dueRows = sql
+      .exec<V2DispatchOutboxRow & SqlStorageRow>(
+        `SELECT *
+           FROM v2_dispatch_outbox
+          WHERE entity_kind = 'budget_sync'
+            AND state IN ('pending', 'enqueued', 'dead_lettered')
+            AND next_attempt_at_ms <= ?
+          ORDER BY created_at_ms ASC`,
+        tsNow,
+      )
+      .toArray();
+    if (dueRows.length === 0) {
+      return;
+    }
+    const settlePort = core.createGlobalBudgetSettlePort();
+    for (const row of dueRows) {
+      try {
+        const payload = JSON.parse(row.payload_json) as BudgetSyncOutboxPayload;
+        const result = await settlePort.settleGlobal(payload);
+        if (result.accepted) {
+          doStorage.storage.transactionSync(() => {
+            eventCoordinator.ackOutboxSync(row.outbox_id, row.fence_epoch, tsNow);
+          });
+        } else {
+          const backoffMs = Math.min(30_000, 1_000 * 2 ** row.publish_attempts);
+          doStorage.storage.transactionSync(() => {
+            sql.exec(
+              `UPDATE v2_dispatch_outbox
+                  SET publish_attempts = publish_attempts + 1,
+                      state = 'pending',
+                      next_attempt_at_ms = ?,
+                      updated_at_ms = ?
+                WHERE outbox_id = ?`,
+              tsNow + backoffMs,
+              tsNow,
+              row.outbox_id,
+            );
+          });
+        }
+      } catch {
+        const backoffMs = Math.min(30_000, 1_000 * 2 ** row.publish_attempts);
+        doStorage.storage.transactionSync(() => {
+          sql.exec(
+            `UPDATE v2_dispatch_outbox
+                SET publish_attempts = publish_attempts + 1,
+                    state = 'pending',
+                    next_attempt_at_ms = ?,
+                    updated_at_ms = ?
+              WHERE outbox_id = ?`,
+            tsNow + backoffMs,
+            tsNow,
+            row.outbox_id,
+          );
+        });
+      }
+    }
+  };
+
+  const recoveryHooks: TurnRecoverySeamHooks = {
+    reconcileCoverageSync({ expectedGen, nowMs: tsNow }) {
+      const row = ensureCoverageRowSync(tsNow);
+      if (row.generation > expectedGen) {
+        return { action: 'noop_stale', currentGeneration: row.generation };
+      }
+      const openD = getCore().earliestRequiredDiscoveryAtMsSync(tsNow);
+      if (row.pending_kind !== null || openD !== null) {
+        if (row.pending_kind === 'retire' && openD === null) {
+          const nextGen = Math.max(row.generation, expectedGen) + 1;
+          sql.exec(
+            `UPDATE v2_recovery_coverage
+                SET generation = ?,
+                    coverage_state = 'uncovered',
+                    covered_recovery_at_ms = NULL,
+                    pending_kind = NULL,
+                    pending_prev_generation = NULL,
+                    pending_target_at_ms = NULL,
+                    updated_at_ms = ?
+              WHERE id = 1`,
+            nextGen,
+            tsNow,
+          );
+          return { action: 'retire', retireUpToGen: nextGen - 1 };
+        }
+        const candidates: number[] = [];
+        if (openD !== null) {
+          candidates.push(openD);
+        }
+        if (
+          (row.pending_kind === 'ensure' || row.pending_kind === 'postpone') &&
+          row.pending_target_at_ms !== null
+        ) {
+          candidates.push(row.pending_target_at_ms);
+        }
+        if (candidates.length > 0) {
+          const requiredAtMs = Math.min(...candidates);
+          if (
+            row.pending_kind === null &&
+            row.coverage_state === 'covered' &&
+            row.covered_recovery_at_ms !== null &&
+            row.covered_recovery_at_ms <= requiredAtMs
+          ) {
+            if (row.covered_recovery_at_ms <= tsNow) {
+              const newGen = Math.max(row.generation, expectedGen) + 1;
+              sql.exec(
+                `UPDATE v2_recovery_coverage
+                    SET generation = ?,
+                        pending_kind = 'postpone',
+                        pending_prev_generation = ?,
+                        pending_target_at_ms = ?,
+                        updated_at_ms = ?
+                  WHERE id = 1`,
+                newGen,
+                row.generation,
+                requiredAtMs,
+                tsNow,
+              );
+              return {
+                action: 'postpone',
+                expectedPrevGen: row.generation,
+                newGeneration: newGen,
+                nextRecoveryAtMs: requiredAtMs,
+              };
+            }
+            return { action: 'keep_armed', currentGeneration: row.generation };
+          }
+          const newGen = Math.max(row.generation, expectedGen) + 1;
+          sql.exec(
+            `UPDATE v2_recovery_coverage
+                SET generation = ?,
+                    coverage_state = 'registering',
+                    pending_kind = 'ensure',
+                    pending_prev_generation = ?,
+                    pending_target_at_ms = ?,
+                    updated_at_ms = ?
+              WHERE id = 1`,
+            newGen,
+            row.generation,
+            requiredAtMs,
+            tsNow,
+          );
+          return { action: 'repair_ensure', generation: newGen, recoveryAtMs: requiredAtMs };
+        }
+      }
+      sql.exec(
+        `UPDATE v2_recovery_coverage
+            SET coverage_state = 'uncovered',
+                covered_recovery_at_ms = NULL,
+                pending_kind = NULL,
+                pending_prev_generation = NULL,
+                pending_target_at_ms = NULL,
+                updated_at_ms = ?
+          WHERE id = 1`,
+        tsNow,
+      );
+      return { action: 'retire', retireUpToGen: row.generation };
+    },
+
+    confirmCoveragePlanSync({ generation, actualRecoveryAtMs, applied, nowMs: tsNow }) {
+      const row = getCoverageRowSync();
+      if (
+        row === null ||
+        !applied ||
+        row.generation !== generation ||
+        actualRecoveryAtMs === null
+      ) {
+        return { confirmed: false };
+      }
+      sql.exec(
+        `UPDATE v2_recovery_coverage
+            SET coverage_state = 'covered',
+                covered_recovery_at_ms = ?,
+                pending_kind = NULL,
+                pending_prev_generation = NULL,
+                pending_target_at_ms = NULL,
+                last_d1_sync_at_ms = ?,
+                updated_at_ms = ?
+          WHERE id = 1`,
+        actualRecoveryAtMs,
+        tsNow,
+        tsNow,
+      );
+      return { confirmed: true };
+    },
+
+    getCoverageRowSync,
+    getOutboxByIdSync,
+    syncPlatformAlarm,
+    relayBudgetSync,
+  };
+
+  const runAlarmCycle = async () => {
+    const ts = nowMs();
+    doStorage.consumeAlarmForFire();
+    const core = getCore();
+    doStorage.storage.transactionSync(() => {
+      const due = core.listDueBusinessActionsSync(ts, 64);
+      for (const item of due) {
+        core.convergeDueBusinessItemSync(item.targetKind, item.targetId, ts);
+      }
+    });
+    await relayBudgetSync(ts);
+    const nextAlarm = doStorage.storage.transactionSync(() =>
+      eventCoordinator.recomputeAlarmSync(ts),
+    );
+    await syncPlatformAlarm(nextAlarm, ts);
+  };
+
+  return {
+    recoveryAdmission,
+    eventCoordinator,
+    recoveryHooks,
+    runAlarmCycle,
+  };
+}
+
 function createHarness(options: { globalDailyCeilingMicroUsd?: number } = {}) {
   let clockMs = 1_700_000_000_000;
   const nowMs = () => clockMs;
@@ -465,10 +928,27 @@ function createHarness(options: { globalDailyCeilingMicroUsd?: number } = {}) {
   const agentId = randomUUID();
   const conversationId = randomUUID();
 
+  const coreRef: { current?: AgentHeadCore } = {};
+  const seam = createTestBRuntimeSeam({
+    doStorage,
+    tenantId,
+    agentId,
+    nowMs,
+    getCore: () => {
+      if (coreRef.current === undefined) {
+        throw new Error('AgentHeadCore not yet initialized');
+      }
+      return coreRef.current;
+    },
+  });
+
   const core = new AgentHeadCore({
     storage: doStorage.storage,
     tenantId,
     agentId,
+    recoveryAdmission: seam.recoveryAdmission,
+    eventCoordinator: seam.eventCoordinator,
+    recoveryHooks: seam.recoveryHooks,
     recoveryRegistry,
     globalBudget,
     nowMs,
@@ -476,11 +956,13 @@ function createHarness(options: { globalDailyCeilingMicroUsd?: number } = {}) {
       ? { globalDailyCeilingMicroUsd: options.globalDailyCeilingMicroUsd }
       : {}),
   });
+  coreRef.current = core;
 
   core.bootstrapHead({ conversationId, policyVersion: 1 });
 
   return {
     core,
+    seam,
     doStorage,
     recoveryRegistry,
     globalBudget,
@@ -740,7 +1222,7 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     expect(h.globalBudget.reservedMicroUsd).toBe(2_000);
 
     h.advanceClock(26_000);
-    await h.core.runAlarmCycle();
+    await h.seam.runAlarmCycle();
 
     const attempt1 = h.doStorage.db
       .prepare('SELECT * FROM model_attempts WHERE operation_id = ?')
@@ -799,7 +1281,7 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
 
     // Simulate silent worker crash past 25s lease -> Alarm converges with unknown_billed
     h.advanceClock(26_000);
-    await h.core.runAlarmCycle();
+    await h.seam.runAlarmCycle();
 
     const attempt2 = h.doStorage.db
       .prepare('SELECT * FROM model_attempts WHERE operation_id = ?')
@@ -1132,7 +1614,7 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
 
     // Advance past backoff and flush outbox via Alarm cycle: delayed `usage_missing` incident propagates to Global!
     h.advanceClock(2_500);
-    await h.core.runAlarmCycle();
+    await h.seam.runAlarmCycle();
     expect(h.globalBudget.consumedMicroUsd).toBe(2_500);
     expect(h.globalBudget.globalIncident).toBe('usage_missing');
 

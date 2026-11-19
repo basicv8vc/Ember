@@ -6,6 +6,11 @@ import type {
   TaskKind,
   TaskStatus,
 } from '@ember/domain';
+import {
+  computeMigrationChecksumSync,
+  createEventRecoveryDoMigration,
+  type AgentHeadMigrationStep,
+} from '../migrations.js';
 import type { BudgetSyncIncidentReason } from '../recovery/envelope.js';
 import type { TurnExecutionMode } from '../recovery/ports.js';
 
@@ -486,3 +491,23 @@ export const V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS = [
   resolution_note       TEXT
 );`,
 ] as const;
+
+/**
+ * Create the A-owned AgentHeadDO business schema migration step (v1), executed alongside
+ * Agent B's `createEventRecoveryDoMigration(2)` through the single `applyAgentHeadMigrations` entrypoint.
+ */
+export function createAgentHeadBusinessDoMigration(
+  version = DEFAULT_AGENT_HEAD_BUSINESS_DO_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_agent_head_business_core',
+    statements: V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS),
+  };
+}
+
+/** Canonical ordered AgentHeadDO migrations (A v1 business tables + B v2 event/recovery tables). */
+export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
+  return [createAgentHeadBusinessDoMigration(), createEventRecoveryDoMigration()];
+}

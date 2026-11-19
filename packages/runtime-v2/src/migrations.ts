@@ -1,16 +1,12 @@
 import type { D1DatabaseLike, DurableObjectStorageLike } from './storage.js';
 import {
-  DEFAULT_AGENT_HEAD_BUSINESS_DO_MIGRATION_VERSION,
-  V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS,
-} from './agent-head/schema.js';
-import {
   V2_EVENT_RECOVERY_DO_STATEMENTS,
   V2_RECOVERY_REGISTRY_D1_STATEMENTS,
 } from './recovery/schema.js';
 
 /**
  * Shared AgentHeadDO schema version ledger per V2-M0-A §4.1 and J1.
- * Both Agent A business migrations (v1) and Agent B event/recovery migrations (v2) execute
+ * Both Agent A business migrations and Agent B event/recovery migrations execute
  * through the single `applyAgentHeadMigrations` entrypoint inside `blockConcurrencyWhile`.
  */
 export const SCHEMA_MIGRATIONS_TABLE_DDL = `CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -109,22 +105,8 @@ function validateAndSortMigrations(
 }
 
 /**
- * Create the A-owned AgentHeadDO business schema migration step (v1).
- */
-export function createAgentHeadBusinessDoMigration(
-  version = DEFAULT_AGENT_HEAD_BUSINESS_DO_MIGRATION_VERSION,
-): AgentHeadMigrationStep {
-  return {
-    version,
-    name: 'v2_agent_head_business_core',
-    statements: V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS,
-    checksum: computeMigrationChecksumSync(V2_AGENT_HEAD_BUSINESS_DO_STATEMENTS),
-  };
-}
-
-/**
  * Create the B-owned AgentHeadDO schema migration step containing
- * `v2_schedules`, `v2_dispatch_outbox`, and `v2_recovery_coverage` (v2).
+ * `v2_schedules`, `v2_dispatch_outbox`, and `v2_recovery_coverage`.
  */
 export function createEventRecoveryDoMigration(
   version = DEFAULT_EVENT_RECOVERY_DO_MIGRATION_VERSION,
@@ -137,13 +119,11 @@ export function createEventRecoveryDoMigration(
   };
 }
 
-/** Canonical ordered AgentHeadDO migrations (A v1 business tables + B v2 event/recovery tables). */
-export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
-  return [createAgentHeadBusinessDoMigration(), createEventRecoveryDoMigration()];
-}
+export const EVENT_RECOVERY_DO_MIGRATION: AgentHeadMigrationStep = createEventRecoveryDoMigration();
 
 /**
- * Idempotent synchronous DO SQLite migration runner per V2-M0-A §4.1.
+ * Single AgentHeadDO migration entrypoint shared by Agent A and Agent B.
+ * Executes idempotently inside `storage.transactionSync()`.
  */
 export function applyAgentHeadMigrations(
   storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>,
@@ -219,6 +199,7 @@ export const V2_RECOVERY_D1_MIGRATIONS: readonly AgentHeadMigrationStep[] = [
 
 /**
  * Idempotent D1 schema initializer for local/workerd harnesses & sweeper bootstrap.
+ * Production deployments apply `migrations/0001_v2_recovery_registry.sql` via Wrangler D1 migrations.
  */
 export async function applyD1RecoveryMigrations(
   db: D1DatabaseLike,

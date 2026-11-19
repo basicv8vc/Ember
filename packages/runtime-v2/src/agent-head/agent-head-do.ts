@@ -21,49 +21,51 @@ import type {
   RenewTurnLeaseResult,
 } from '../contracts/agent-head-rpc.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
-import {
-  applyAgentHeadMigrations,
-  createDefaultAgentHeadMigrations,
-  type AgentHeadMigrationStep,
-} from '../migrations.js';
-import {
-  computePreDeadlineRetryAtMs,
-  validateDispatchEnvelope,
-  type BudgetSyncIncidentReason,
-  type BudgetSyncSettlementState,
-  type V2DispatchEnvelope,
+import { applyAgentHeadMigrations, type AgentHeadMigrationStep } from '../migrations.js';
+import type {
+  BudgetSyncIncidentReason,
+  BudgetSyncOutboxPayload,
+  BudgetSyncSettlementState,
+  V2DispatchEnvelope,
 } from '../recovery/envelope.js';
 import type {
   AgentHeadRecoveryPort,
   AuthoritativeBusinessPort,
+  EventRuntimeCoordinatorPort,
+  RecoveryAdmissionPort,
   RecoveryRegistryPort,
 } from '../recovery/ports.js';
-import type { OrdinaryOutboxEntityKind, V2DispatchOutboxRow } from '../recovery/schema.js';
+import type { OrdinaryOutboxEntityKind } from '../recovery/schema.js';
 import type { DurableObjectStorageLike } from '../storage.js';
 import {
+  createGlobalBudgetSettlePortAdapter,
   reserveLocalAttemptSync,
   settleLocalAttemptAndEnqueueSync,
+  type AgentBudgetSettleBridgeResult,
   type LocalBudgetCeilings,
   type LocalSettlementResult,
 } from './budget.js';
-import { DefaultEventRuntimePorts } from './default-event-ports.js';
-import { flushDueBudgetSyncOutbox, type FlushBudgetSyncSummary } from './outbox-flusher.js';
-import {
-  earliestBusinessAlarmAtMsSync,
-  getHeadMetaSync,
-  getTaskRowSync,
-  sqlExecAll,
-  sqlExecMaybe,
-} from './queries.js';
+import { getHeadMetaSync, getTaskRowSync, sqlExecMaybe } from './queries.js';
 import { AgentHeadRecoveryService } from './recovery-service.js';
-import type { ModelAttemptBudgetMode, ModelAttemptProviderId, ModelAttemptRow } from './schema.js';
+import {
+  createDefaultAgentHeadMigrations,
+  type ModelAttemptBudgetMode,
+  type ModelAttemptProviderId,
+  type ModelAttemptRow,
+} from './schema.js';
 import { checkTaskModelLimits, toUtcDayString } from './state-machine.js';
-import { AgentHeadTurnService } from './turn-service.js';
+import { AgentHeadTurnService, type TurnRecoverySeamHooks } from './turn-service.js';
 
 export interface AgentHeadCoreOptions {
-  readonly storage: DurableObjectStorageLike;
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
   readonly tenantId: Id;
   readonly agentId: Id;
+  /** B-owned `RecoveryAdmissionPort` (production: `RecoveryCoverageCoordinator`). */
+  readonly recoveryAdmission: RecoveryAdmissionPort;
+  /** B-owned `EventRuntimeCoordinatorPort` (production: `OutboxCoordinator`). */
+  readonly eventCoordinator: EventRuntimeCoordinatorPort;
+  /** B-owned coordinator seam delegates (production: `RecoveryCoverageCoordinator`, `AlarmMultiplexer`, `relayDueBudgetSyncBatch`). */
+  readonly recoveryHooks: TurnRecoverySeamHooks;
   readonly recoveryRegistry: RecoveryRegistryPort;
   readonly globalBudget: GlobalBudgetAuthority;
   readonly nowMs?: () => number;
@@ -79,30 +81,29 @@ export interface AgentHeadBootstrapInput {
   readonly homeRegion?: string | null;
 }
 
-export interface AlarmCycleResult {
-  readonly convergedBusinessActions: number;
-  readonly budgetSync: FlushBudgetSyncSummary;
-  readonly dispatchedOrdinaryOutbox: number;
-  readonly nextAlarmAtMs: number | null;
-}
-
 /**
- * Authoritative V2 `AgentHeadDO` core engine unifying:
- * - Single SQLite schema migrations (Agent A business tables v1 + Agent B event/recovery tables v2);
+ * Authoritative V2 `AgentHeadDO` business core composing ONLY Agent A responsibilities:
+ * - Single SQLite schema migrations (`applyAgentHeadMigrations` with v1 business + v2 recovery);
  * - `AgentHeadRpc` (3-RPC `prepareTurn` -> `markAttemptSent` -> `commitTurn`, lease renew, handoff, cancel, clear, Direct reads);
- * - `AgentHeadRecoveryPort` & `AuthoritativeBusinessPort` (D1 recovery reconciliation, Durable claim/commit);
- * - Atomic local settlement + `budget_sync` outbox queueing & single-Alarm re-arming.
+ * - `AuthoritativeBusinessPort` (sync due business actions, convergence, outbox inspection, schedule materialization);
+ * - `AgentHeadRecoveryPort` (`claimDurableWork` / `commitDurableResult`, plus coverage plan delegation to Agent B);
+ * - Local `model_attempts` / `agent_spend_days` / `agent_budget_incidents` & atomic `budget_sync` outbox commits.
+ *
+ * Outbox publishing, Alarm multiplexing, `v2_recovery_coverage` state transitions, and `budget_sync`
+ * relaying are strictly delegated to Agent B via injected ports (`EventRuntimeCoordinatorPort`,
+ * `RecoveryAdmissionPort`, and `recoveryHooks`).
  */
 export class AgentHeadCore
   implements AgentHeadRpc, AgentHeadRecoveryPort, AuthoritativeBusinessPort
 {
-  readonly eventPorts: DefaultEventRuntimePorts;
   readonly recoveryService: AgentHeadRecoveryService;
   readonly turnService: AgentHeadTurnService;
 
-  private readonly storage: DurableObjectStorageLike;
+  private readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
   private readonly tenantId: Id;
   private readonly agentId: Id;
+  private readonly eventCoordinator: EventRuntimeCoordinatorPort;
+  private readonly recoveryHooks: TurnRecoverySeamHooks;
   private readonly globalBudget: GlobalBudgetAuthority;
   private readonly nowMsFn: () => number;
   private readonly newId: () => Id;
@@ -114,6 +115,8 @@ export class AgentHeadCore
     this.storage = options.storage;
     this.tenantId = options.tenantId;
     this.agentId = options.agentId;
+    this.eventCoordinator = options.eventCoordinator;
+    this.recoveryHooks = options.recoveryHooks;
     this.globalBudget = options.globalBudget;
     this.nowMsFn = options.nowMs ?? (() => Date.now());
     this.newId = options.idFactory ?? (() => globalThis.crypto.randomUUID());
@@ -122,44 +125,47 @@ export class AgentHeadCore
       options.globalDailyCeilingMicroUsd ?? V2_BUDGET_LIMITS.globalDailyMicroUsd;
     this.migrations = options.migrations ?? createDefaultAgentHeadMigrations();
 
-    this.eventPorts = new DefaultEventRuntimePorts(
-      this.storage,
-      this.tenantId,
-      this.agentId,
-      earliestBusinessAlarmAtMsSync,
-    );
-
-    const flushFn = async (): Promise<void> => {
-      await this.flushBudgetSyncOutbox();
-    };
-
     this.recoveryService = new AgentHeadRecoveryService({
       storage: this.storage,
-      eventPorts: this.eventPorts,
-      globalBudget: this.globalBudget,
+      eventCoordinator: this.eventCoordinator,
+      hooks: this.recoveryHooks,
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
-      flushBudgetSyncAfterCommit: flushFn,
     });
 
     this.turnService = new AgentHeadTurnService({
       storage: this.storage,
-      eventPorts: this.eventPorts,
+      recoveryAdmission: options.recoveryAdmission,
+      eventCoordinator: this.eventCoordinator,
       recoveryService: this.recoveryService,
+      recoveryHooks: this.recoveryHooks,
       recoveryRegistry: options.recoveryRegistry,
       globalBudget: this.globalBudget,
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
       globalDailyCeilingMicroUsd: this.globalDailyCeilingMicroUsd,
-      flushBudgetSyncAfterCommit: flushFn,
     });
   }
 
   /**
-   * Idempotently applies unified DO SQLite migrations (`v1` business + `v2` event/recovery)
-   * and anchors `agent_head_meta`, the tenant's `main` conversation, and `v2_recovery_coverage`.
+   * Returns a `GlobalBudgetSettlePort`-compatible bridge for Agent B's single
+   * `relayDueBudgetSyncBatch` (`packages/runtime-v2/src/recovery/budget-sync.ts`).
+   */
+  createGlobalBudgetSettlePort(): {
+    settleGlobal(payload: BudgetSyncOutboxPayload): Promise<AgentBudgetSettleBridgeResult>;
+  } {
+    return createGlobalBudgetSettlePortAdapter({
+      storage: this.storage,
+      globalBudget: this.globalBudget,
+      nowMs: this.nowMsFn,
+    });
+  }
+
+  /**
+   * Executes the single unified DO SQLite migration entrypoint (`applyAgentHeadMigrations`)
+   * and anchors `agent_head_meta` + the tenant's `main` conversation.
    */
   bootstrapHead(input: AgentHeadBootstrapInput): B1ConversationIdentity {
     const nowMs = this.nowMsFn();
@@ -197,8 +203,6 @@ export class AgentHeadCore
         nowMs,
         nowMs,
       );
-
-      this.eventPorts.ensureCoverageRowSync(nowMs);
 
       const conv = this.storage.sql
         .exec<{
@@ -498,8 +502,9 @@ export class AgentHeadCore
         nowMs >= task.lease_expires_at_ms ||
         (task.deadline_at_ms !== null && nowMs >= task.deadline_at_ms)
       ) {
+        let alarmAtMs: number | null | undefined;
         if (globalGrantId !== null) {
-          this.eventPorts.enqueueDurableOutboxSync({
+          this.eventCoordinator.enqueueDurableOutboxSync({
             outboxId: `budget_sync:${pre.operationId}:rev:0`,
             entityKind: 'budget_sync',
             entityId: pre.operationId,
@@ -525,9 +530,9 @@ export class AgentHeadCore
             fenceEpoch: cmd.leaseEpoch,
             nextAttemptAtMs: nowMs,
           });
-          this.eventPorts.recomputeAlarmSync(nowMs);
+          alarmAtMs = this.eventCoordinator.recomputeAlarmSync(nowMs);
         }
-        return { ok: false as const, reason: 'fenced' as const };
+        return { ok: false as const, reason: 'fenced' as const, nowMs, alarmAtMs };
       }
 
       try {
@@ -552,8 +557,9 @@ export class AgentHeadCore
           ...(this.localCeilings !== undefined ? { ceilings: this.localCeilings } : {}),
         });
       } catch (err) {
+        let alarmAtMs: number | null | undefined;
         if (globalGrantId !== null) {
-          this.eventPorts.enqueueDurableOutboxSync({
+          this.eventCoordinator.enqueueDurableOutboxSync({
             outboxId: `budget_sync:${pre.operationId}:rev:0`,
             entityKind: 'budget_sync',
             entityId: pre.operationId,
@@ -579,20 +585,24 @@ export class AgentHeadCore
             fenceEpoch: cmd.leaseEpoch,
             nextAttemptAtMs: nowMs,
           });
-          this.eventPorts.recomputeAlarmSync(nowMs);
+          alarmAtMs = this.eventCoordinator.recomputeAlarmSync(nowMs);
         }
         if (err instanceof DomainError && err.code === 'BUDGET_EXCEEDED') {
-          return { ok: false as const, reason: 'budget_exceeded' as const };
+          return { ok: false as const, reason: 'budget_exceeded' as const, nowMs, alarmAtMs };
         }
         throw err;
       }
 
-      return { ok: true as const };
+      return { ok: true as const, nowMs, alarmAtMs: undefined as number | null | undefined };
     });
 
-    await this.eventPorts.flushPendingAlarmOp();
     if (!committed.ok) {
-      await this.flushBudgetSyncOutbox();
+      if (committed.alarmAtMs !== undefined && this.recoveryHooks.syncPlatformAlarm !== undefined) {
+        await this.recoveryHooks.syncPlatformAlarm(committed.alarmAtMs, committed.nowMs);
+      }
+      if (this.recoveryHooks.relayBudgetSync !== undefined) {
+        await this.recoveryHooks.relayBudgetSync(committed.nowMs);
+      }
       return { kind: 'refused', reason: committed.reason };
     }
 
@@ -617,7 +627,7 @@ export class AgentHeadCore
     readonly inputTokens?: number | null;
     readonly outputTokens?: number | null;
   }): Promise<LocalSettlementResult | null> {
-    const settlement = this.storage.transactionSync(() => {
+    const tx = this.storage.transactionSync(() => {
       const nowMs = this.nowMsFn();
       const attempt = sqlExecMaybe<ModelAttemptRow>(
         this.storage.sql,
@@ -631,7 +641,7 @@ export class AgentHeadCore
 
       const res = settleLocalAttemptAndEnqueueSync({
         sql: this.storage.sql,
-        coordinator: this.eventPorts,
+        coordinator: this.eventCoordinator,
         tenantId: cmd.tenantId,
         agentId: cmd.agentId,
         attempt,
@@ -644,170 +654,21 @@ export class AgentHeadCore
         ...(this.localCeilings !== undefined ? { ceilings: this.localCeilings } : {}),
         idFactory: this.newId,
       });
-      this.eventPorts.recomputeAlarmSync(nowMs);
-      return res;
+      const alarmAtMs = this.eventCoordinator.recomputeAlarmSync(nowMs);
+      return { res, alarmAtMs, nowMs };
     });
 
-    await this.eventPorts.flushPendingAlarmOp();
-    await this.flushBudgetSyncOutbox();
-    return settlement;
-  }
-
-  // ---- Outbox Flushing & Bounded DO Alarm Cycle ----
-
-  flushBudgetSyncOutbox(limit?: number): Promise<FlushBudgetSyncSummary> {
-    return flushDueBudgetSyncOutbox({
-      storage: this.storage,
-      eventPorts: this.eventPorts,
-      globalBudget: this.globalBudget,
-      nowMs: this.nowMsFn,
-      ...(limit !== undefined ? { limit } : {}),
-    });
-  }
-
-  /**
-   * Executes one bounded DO `alarm()` cycle:
-   * 1. Marks the fired platform Alarm consumed so `recomputeAlarmSync()` always re-arms (even backward).
-   * 2. Converges up to `alarmBatchLimit = 10` due business actions.
-   * 3. Flushes up to `alarmBatchLimit` due `budget_sync` outbox rows to `GlobalBudgetAuthority`.
-   * 4. Dispatches up to `alarmBatchLimit` due ordinary outbox envelopes (when `dispatchOrdinaryOutbox` provided).
-   * 5. Recomputes and re-arms the single DO Alarm (`setAlarm` or `deleteAlarm`).
-   */
-  async runAlarmCycle(
-    options: {
-      readonly dispatchOrdinaryOutbox?: (envelope: V2DispatchEnvelope) => Promise<void>;
-      readonly batchLimit?: number;
-    } = {},
-  ): Promise<AlarmCycleResult> {
-    const batchLimit = options.batchLimit ?? V2_TIMING_LIMITS.alarmBatchLimit;
-
-    const phase1 = this.storage.transactionSync(() => {
-      const nowMs = this.nowMsFn();
-      this.eventPorts.markAlarmConsumedSync(nowMs);
-
-      const dueActions = this.listDueBusinessActionsSync(nowMs, batchLimit);
-      for (const action of dueActions) {
-        this.convergeDueBusinessItemSync(action.targetKind, action.targetId, nowMs);
-      }
-
-      const dueOrdinaryOutbox =
-        options.dispatchOrdinaryOutbox === undefined
-          ? []
-          : sqlExecAll<V2DispatchOutboxRow>(
-              this.storage.sql,
-              `SELECT *
-                 FROM v2_dispatch_outbox
-                WHERE entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff')
-                  AND state IN ('pending', 'enqueued', 'dead_lettered')
-                  AND next_attempt_at_ms <= ?
-                ORDER BY next_attempt_at_ms ASC, outbox_id ASC
-                LIMIT ?`,
-              nowMs,
-              batchLimit,
-            );
-
-      const nextAlarm = this.eventPorts.recomputeAlarmSync(nowMs);
-      return {
-        convergedBusinessActions: dueActions.length,
-        dueOrdinaryOutbox,
-        nextAlarm,
-      };
-    });
-
-    await this.eventPorts.flushPendingAlarmOp();
-
-    const budgetSync = await this.flushBudgetSyncOutbox(batchLimit);
-
-    let dispatchedOrdinary = 0;
-    if (options.dispatchOrdinaryOutbox !== undefined) {
-      for (const row of phase1.dueOrdinaryOutbox) {
-        let envCheck;
-        try {
-          envCheck = validateDispatchEnvelope(JSON.parse(row.payload_json));
-        } catch {
-          continue;
-        }
-        if (!envCheck.ok) {
-          continue;
-        }
-        try {
-          await options.dispatchOrdinaryOutbox(envCheck.envelope);
-          const sentAt = this.nowMsFn();
-          this.storage.transactionSync(() => {
-            const target = this.inspectOutboxTargetSync(
-              envCheck.envelope.entityKind,
-              envCheck.envelope.entityId,
-            );
-            const decision = target.exists
-              ? computePreDeadlineRetryAtMs(sentAt, target.deadlineAtMs)
-              : { shouldRetry: false as const, alarmAtMs: sentAt, remainingMs: 0 };
-
-            if (!target.exists || target.isTerminal) {
-              this.eventPorts.ackOutboxSync(row.outbox_id, row.fence_epoch, sentAt);
-            } else if (decision.shouldRetry) {
-              this.storage.sql.exec(
-                `UPDATE v2_dispatch_outbox
-                    SET state = 'enqueued',
-                        last_enqueued_at_ms = ?,
-                        publish_attempts = publish_attempts + 1,
-                        next_attempt_at_ms = ?,
-                        updated_at_ms = ?
-                  WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
-                sentAt,
-                decision.nextAttemptAtMs,
-                sentAt,
-                row.outbox_id,
-              );
-            } else {
-              // Within final <= 1_000 ms pre-deadline floor: ack dispatch wait and let deadline alarm converge
-              this.storage.sql.exec(
-                `UPDATE v2_dispatch_outbox
-                    SET state = 'acked',
-                        last_enqueued_at_ms = ?,
-                        publish_attempts = publish_attempts + 1,
-                        updated_at_ms = ?
-                  WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
-                sentAt,
-                sentAt,
-                row.outbox_id,
-              );
-            }
-            this.eventPorts.recomputeAlarmSync(sentAt);
-          });
-          await this.eventPorts.flushPendingAlarmOp();
-          dispatchedOrdinary += 1;
-        } catch {
-          const failAt = this.nowMsFn();
-          this.storage.transactionSync(() => {
-            this.storage.sql.exec(
-              `UPDATE v2_dispatch_outbox
-                  SET publish_attempts = publish_attempts + 1,
-                      last_error_code = 'QUEUE_SEND_FAILED',
-                      next_attempt_at_ms = ?,
-                      updated_at_ms = ?
-                WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
-              failAt + 2_000,
-              failAt,
-              row.outbox_id,
-            );
-            this.eventPorts.recomputeAlarmSync(failAt);
-          });
-          await this.eventPorts.flushPendingAlarmOp();
-        }
-      }
+    if (tx === null) {
+      return null;
     }
 
-    const finalAlarmAtMs = this.storage.transactionSync(() =>
-      this.eventPorts.recomputeAlarmSync(this.nowMsFn()),
-    );
-    await this.eventPorts.flushPendingAlarmOp();
-
-    return {
-      convergedBusinessActions: phase1.convergedBusinessActions,
-      budgetSync,
-      dispatchedOrdinaryOutbox: dispatchedOrdinary,
-      nextAlarmAtMs: finalAlarmAtMs,
-    };
+    if (this.recoveryHooks.syncPlatformAlarm !== undefined) {
+      await this.recoveryHooks.syncPlatformAlarm(tx.alarmAtMs, tx.nowMs);
+    }
+    if (this.recoveryHooks.relayBudgetSync !== undefined) {
+      await this.recoveryHooks.relayBudgetSync(tx.nowMs);
+    }
+    return tx.res;
   }
 }
 

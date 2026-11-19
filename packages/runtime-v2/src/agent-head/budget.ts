@@ -1,5 +1,6 @@
 import { DomainError, type Id } from '@ember/domain';
 import { V2_BUDGET_LIMITS } from '../contracts/constants.js';
+import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
 import {
   BUDGET_SYNC_PAYLOAD_SCHEMA_VERSION,
   type BudgetSyncIncidentReason,
@@ -7,7 +8,7 @@ import {
   type BudgetSyncSettlementState,
 } from '../recovery/envelope.js';
 import type { EventRuntimeCoordinatorPort } from '../recovery/ports.js';
-import type { SqlStorageLike } from '../storage.js';
+import type { DurableObjectStorageLike, SqlStorageLike } from '../storage.js';
 import type {
   AgentSpendScopeKind,
   ModelAttemptBudgetMode,
@@ -825,5 +826,66 @@ export function settleLocalAttemptAndEnqueueSync(input: {
     settlementRevision: rev,
     outboxId,
     incidentsOpened,
+  };
+}
+
+/** Structural bridge matching Agent B's `GlobalBudgetSettlePort` (`recovery/budget-sync.ts`). */
+export interface AgentBudgetSettleBridgeResult {
+  readonly accepted: boolean;
+  readonly conflict?: boolean;
+  readonly alreadySettled?: boolean;
+}
+
+/**
+ * Adapts Agent E's authoritative `GlobalBudgetAuthority` to Agent B's `GlobalBudgetSettlePort`
+ * used by B's single `relayDueBudgetSyncBatch` relay, stamping local
+ * `model_attempts.global_synced_at_ms` strictly upon confirmed Global settlement ACK.
+ */
+export function createGlobalBudgetSettlePortAdapter(input: {
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
+  readonly globalBudget: GlobalBudgetAuthority;
+  readonly nowMs: () => number;
+}): {
+  settleGlobal(payload: BudgetSyncOutboxPayload): Promise<AgentBudgetSettleBridgeResult>;
+} {
+  return {
+    async settleGlobal(payload: BudgetSyncOutboxPayload): Promise<AgentBudgetSettleBridgeResult> {
+      const res = await input.globalBudget.settleGlobal({
+        tenantId: payload.tenantId,
+        operationId: payload.operationId,
+        settlementRevision: payload.settlementRevision,
+        globalGrantId: payload.globalGrantId,
+        state: payload.state,
+        observedCostMicroUsd: payload.observedCostMicroUsd,
+        chargeMicroUsd: payload.chargeMicroUsd,
+        reservedMicroUsd: payload.reservedMicroUsd,
+        ...(payload.openIncidentReason !== null
+          ? { openIncidentReason: payload.openIncidentReason }
+          : {}),
+      });
+
+      const accepted = (res.applied || res.alreadySettled) && !res.conflict;
+      if (accepted) {
+        const syncedAtMs = input.nowMs();
+        input.storage.transactionSync(() => {
+          input.storage.sql.exec(
+            `UPDATE model_attempts
+                SET global_synced_at_ms = ?
+              WHERE operation_id = ?
+                AND settlement_revision <= ?
+                AND global_synced_at_ms IS NULL`,
+            syncedAtMs,
+            payload.operationId,
+            payload.settlementRevision,
+          );
+        });
+      }
+
+      return {
+        accepted,
+        conflict: res.conflict,
+        alreadySettled: res.alreadySettled,
+      };
+    },
   };
 }

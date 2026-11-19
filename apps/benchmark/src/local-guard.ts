@@ -4,6 +4,35 @@ export const DEFAULT_LOCAL_TEST_DATABASE_URL =
   'postgres://ember:ember_local_dev_only@127.0.0.1:5432/ember_test';
 
 const FORBIDDEN_DB_NAME_TOKENS = ['prod', 'production', 'staging', 'live'];
+const ALLOWED_LOCAL_QUERY_PARAMS = new Set(['sslmode']);
+const ALLOWED_LOCAL_SSL_MODES = new Set(['disable', 'allow', 'prefer', 'require']);
+
+function decodeDatabaseNameSegment(rawPathname: string): string {
+  const withoutLeadingSlash = rawPathname.slice(1);
+  if (withoutLeadingSlash.length === 0) {
+    throw new Error('Unsafe databaseUrl: missing database name in path');
+  }
+  if (withoutLeadingSlash.includes('/')) {
+    throw new Error('Unsafe databaseUrl: multi-segment database path is not permitted');
+  }
+
+  let uriDecoded: string;
+  let componentDecoded: string;
+  try {
+    // pg-connection-string decodes pathnames with decodeURI; decode both forms so
+    // percent-encoded prod/staging tokens (e.g. %70rod) or encoded slashes cannot bypass checks.
+    uriDecoded = decodeURI(withoutLeadingSlash);
+    componentDecoded = decodeURIComponent(withoutLeadingSlash);
+  } catch {
+    throw new Error('invalid databaseUrl: malformed percent-encoding in database name');
+  }
+
+  if (uriDecoded !== componentDecoded || componentDecoded.includes('/')) {
+    throw new Error('Unsafe databaseUrl: ambiguous percent-encoding in database name');
+  }
+
+  return componentDecoded;
+}
 
 /**
  * Validate that a positive safe integer lies within [min, max].
@@ -50,9 +79,17 @@ export function assertSafeLocalDatabaseUrl(
     );
   }
 
+  const trimmed = databaseUrl.trim();
+  if (trimmed.length === 0 || trimmed.startsWith('/')) {
+    throw new Error('Unsafe databaseUrl: local benchmark requires a postgres:// loopback URL');
+  }
+  if (/[\s\0]/.test(trimmed)) {
+    throw new Error('invalid databaseUrl: whitespace and control characters are not permitted');
+  }
+
   let parsed: URL;
   try {
-    parsed = new URL(databaseUrl);
+    parsed = new URL(trimmed);
   } catch {
     throw new Error('invalid databaseUrl: failed to parse PostgreSQL connection URL');
   }
@@ -62,18 +99,37 @@ export function assertSafeLocalDatabaseUrl(
       `Unsafe databaseUrl protocol "${parsed.protocol}": expected postgres: or postgresql:`,
     );
   }
+  if (parsed.hash.length > 0) {
+    throw new Error('Unsafe databaseUrl: URL fragments are not permitted');
+  }
 
-  const host = parsed.hostname.toLowerCase();
-  if (!LOOPBACK_HOSTS.has(host)) {
+  for (const [rawKey, rawValue] of parsed.searchParams.entries()) {
+    const key = rawKey.toLowerCase();
+    if (!ALLOWED_LOCAL_QUERY_PARAMS.has(key)) {
+      throw new Error(
+        `Unsafe databaseUrl query parameter "${rawKey}": target-changing or unapproved query options are refused by local benchmark guard.`,
+      );
+    }
+    if (!ALLOWED_LOCAL_SSL_MODES.has(rawValue.trim().toLowerCase())) {
+      throw new Error(
+        `Unsafe databaseUrl sslmode "${rawValue}": local benchmark only permits disable/allow/prefer/require.`,
+      );
+    }
+  }
+
+  let decodedHost: string;
+  try {
+    decodedHost = decodeURIComponent(parsed.hostname).toLowerCase();
+  } catch {
+    throw new Error('invalid databaseUrl: malformed percent-encoding in hostname');
+  }
+  if (parsed.hostname.includes('%') || !LOOPBACK_HOSTS.has(decodedHost)) {
     throw new Error(
-      `Unsafe databaseUrl host "${host}": local benchmark only permits loopback hosts (127.0.0.1, localhost, ::1). Refusing remote/cloud database target.`,
+      `Unsafe databaseUrl host "${decodedHost}": local benchmark only permits loopback hosts (127.0.0.1, localhost, ::1). Refusing remote/cloud database target.`,
     );
   }
 
-  const dbName = parsed.pathname.replace(/^\/+/, '').toLowerCase();
-  if (dbName.length === 0) {
-    throw new Error('Unsafe databaseUrl: missing database name in path');
-  }
+  const dbName = decodeDatabaseNameSegment(parsed.pathname).toLowerCase();
   if (FORBIDDEN_DB_NAME_TOKENS.some((tok) => dbName.includes(tok))) {
     throw new Error(
       `Unsafe databaseUrl target database "${dbName}": refuses production/staging/live database names.`,

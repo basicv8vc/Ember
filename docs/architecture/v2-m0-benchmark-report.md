@@ -4,7 +4,7 @@
 - **Date**: 2026-11-19
 - **Role**: Performance and Reliability Engineer
 - **V1 Reference Baseline SHA**: `ee660f52f02cad196cf724f0f818df3789fe3e8c` (`main`, P0B-09c 1,000-agent load)
-- **Probe / Harness Implementation SHA**: `14812da44197a365a4e08d4148c034e23f8a4c1e` + current PR revision (clean worktree after commit)
+- **Probe / Harness Implementation Revision**: JSON artifacts record `gitSha=14812da44197a365a4e08d4148c034e23f8a4c1e` (measured with uncommitted working-tree revisions on top of `14812da`, subsequently committed clean at `4b4a356`; later guard-only hardening at final PR HEAD did not alter benchmark methodology)
 - **Related**: [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [P0B-09c Local Benchmark](../P0B-09C-BENCHMARK.md), [V1 Architecture Baseline](v1-architecture-baseline.md)
 
 ---
@@ -24,7 +24,7 @@ Per ADR-0006 and V2-M0-D requirements, this report strictly separates four evide
 
 - **Host OS**: `Darwin 27.2.0` (`arm64` / `Apple M1`, 8 cores, 16 GB RAM)
 - **Node.js / PG / Wrangler**: `v24.11.0`, `PostgreSQL 17.11 (Homebrew)`, `wrangler@4.158.0` (`workerd 1.20261104.1`)
-- **Local-Only Guard** ([local-guard.ts](../../apps/benchmark/src/local-guard.ts)): V2 local benchmark refuses remote/cloud DB hosts, production/staging DB names, `EMBER_ENV=production|staging`, `NODE_ENV=production`, invalid concurrency values, and ignores general `DATABASE_URL` fallback—even when `--enable-local-load` is set.
+- **Local-Only Guard** ([local-guard.ts](../../apps/benchmark/src/local-guard.ts)): V2 local benchmark refuses remote/cloud DB hosts, `pg-connection-string` query-host overrides (only `sslmode` in `disable|allow|prefer|require` is allowed), percent-encoded or explicit production/staging DB names, `EMBER_ENV=production|staging`, `NODE_ENV=production`, invalid concurrency values, and ignores general `DATABASE_URL` fallback—even when `--enable-local-load` is set.
 - **External LLM / Daytona / Cloud Deploy / CI**: **Disabled (0 real calls, 0 cloud resources, 0 GitHub Actions runs requested)**.
 
 ---

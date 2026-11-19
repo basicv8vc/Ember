@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import net from 'node:net';
+import { describe, expect, it, vi } from 'vitest';
 import {
   assertPositiveSafeInt,
   assertSafeLocalDatabaseUrl,
@@ -19,6 +20,12 @@ describe('V2-M0-D Local-Only Benchmark Guards (Unit)', () => {
     ).not.toThrow();
     expect(() =>
       assertSafeLocalDatabaseUrl('postgres://ember@[::1]:5432/ember_test', {}),
+    ).not.toThrow();
+    expect(() =>
+      assertSafeLocalDatabaseUrl(
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?sslmode=disable',
+        {},
+      ),
     ).not.toThrow();
   });
 
@@ -88,5 +95,39 @@ describe('V2-M0-D Local-Only Benchmark Guards (Unit)', () => {
         requestsPerLevel: 5,
       }),
     ).rejects.toThrow(/concurrencyLevel/i);
+  });
+
+  it('rejects pg-connection-string query-host overrides, encoded keys, and encoded prod DB names before opening any connection', async () => {
+    const connectSpy = vi.spyOn(net.Socket.prototype, 'connect');
+    try {
+      const unsafeUrls = [
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?host=remote.example',
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?%68ost=remote.example',
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?sslmode=disable&host=remote.example',
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?hostaddr=10.0.0.5',
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?port=6432',
+        'postgres://ember:pass@127.0.0.1:5432/ember_test?sslcert=/etc/passwd',
+        'postgres://ember:pass@127.0.0.1:5432/ember_%70rod_test',
+        'postgres://ember:pass@127.0.0.1:5432/ember_%6cive_test',
+        'postgres://ember:pass@127.0.0.1:5432//ember_prod',
+        '/var/run/postgresql ember_test',
+      ];
+
+      for (const badUrl of unsafeUrls) {
+        expect(() => assertSafeLocalDatabaseUrl(badUrl, {})).toThrow();
+        await expect(
+          runV1BaselineBenchmark({
+            databaseUrl: badUrl,
+            enableLocalLoad: true,
+            concurrencyLevels: [1],
+            requestsPerLevel: 1,
+          }),
+        ).rejects.toThrow();
+      }
+
+      expect(connectSpy).not.toHaveBeenCalled();
+    } finally {
+      connectSpy.mockRestore();
+    }
   });
 });

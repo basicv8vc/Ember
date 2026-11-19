@@ -226,6 +226,61 @@ const DelegationCommandSchema = z.discriminatedUnion('toolName', [
   }),
 ]);
 
+const TurnSettlementSchema = z
+  .strictObject({
+    state: z.enum(BUDGET_SYNC_SETTLEMENT_STATES),
+    outcomeCode: z.enum([
+      'ok',
+      'model_timeout',
+      'model_unavailable',
+      'model_rate_limited',
+      'model_auth_failed',
+      'model_invalid_output',
+      'client_cancelled',
+      'not_sent',
+      'usage_missing',
+    ]),
+    observedCostMicroUsd: z
+      .number()
+      .int()
+      .min(0)
+      .max(Number.MAX_SAFE_INTEGER)
+      .nullable()
+      .optional(),
+    inputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+    outputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
+  })
+  .refine(
+    (v) =>
+      v.state !== 'settled' ||
+      (v.observedCostMicroUsd !== null && v.observedCostMicroUsd !== undefined),
+    { message: 'settled requires observedCostMicroUsd', path: ['observedCostMicroUsd'] },
+  )
+  .refine(
+    (v) =>
+      v.state !== 'conservative_billed' ||
+      v.observedCostMicroUsd === null ||
+      v.observedCostMicroUsd === undefined,
+    { message: 'conservative_billed must not carry observedCostMicroUsd', path: ['state'] },
+  );
+
+const TurnCommitResultSchema = z.discriminatedUnion('status', [
+  z.strictObject({
+    status: z.literal('completed'),
+    text: z.string().min(1).max(8_192),
+    modelLabel: z.string().min(1).max(120),
+    simulated: z.boolean(),
+    delegation: DelegationCommandSchema.optional(),
+  }),
+  z.strictObject({
+    status: z.literal('failed'),
+    failureReason: z.enum(['timeout', 'internal_error']),
+  }),
+  z.strictObject({
+    status: z.literal('aborted_for_retry_or_reconcile'),
+  }),
+]);
+
 export const CommitTurnRequestSchema = z.strictObject({
   scope: AgentHeadTenantScopeSchema,
   conversationId: IdSchema,
@@ -234,60 +289,51 @@ export const CommitTurnRequestSchema = z.strictObject({
   leaseOwner: z.string().min(1).max(128),
   attemptNo: z.number().int().min(1).max(6),
   operationId: IdSchema,
-  settlement: z
-    .strictObject({
-      state: z.enum(BUDGET_SYNC_SETTLEMENT_STATES),
-      outcomeCode: z.enum([
-        'ok',
-        'model_timeout',
-        'model_unavailable',
-        'model_rate_limited',
-        'model_auth_failed',
-        'model_invalid_output',
-        'client_cancelled',
-        'not_sent',
-        'usage_missing',
-      ]),
-      observedCostMicroUsd: z
-        .number()
-        .int()
-        .min(0)
-        .max(Number.MAX_SAFE_INTEGER)
-        .nullable()
-        .optional(),
-      inputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
-      outputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).nullable().optional(),
-    })
-    .refine(
-      (v) =>
-        v.state !== 'settled' ||
-        (v.observedCostMicroUsd !== null && v.observedCostMicroUsd !== undefined),
-      { message: 'settled requires observedCostMicroUsd', path: ['observedCostMicroUsd'] },
-    )
-    .refine(
-      (v) =>
-        v.state !== 'conservative_billed' ||
-        v.observedCostMicroUsd === null ||
-        v.observedCostMicroUsd === undefined,
-      { message: 'conservative_billed must not carry observedCostMicroUsd', path: ['state'] },
-    ),
-  result: z.discriminatedUnion('status', [
-    z.strictObject({
-      status: z.literal('completed'),
-      text: z.string().min(1).max(8_192),
-      modelLabel: z.string().min(1).max(120),
-      simulated: z.boolean(),
-      delegation: DelegationCommandSchema.optional(),
-    }),
-    z.strictObject({
-      status: z.literal('failed'),
-      failureReason: z.enum(['timeout', 'internal_error']),
-    }),
-    z.strictObject({
-      status: z.literal('aborted_for_retry_or_reconcile'),
-    }),
-  ]),
+  settlement: TurnSettlementSchema,
+  result: TurnCommitResultSchema,
 });
+
+export const DurableTurnOutcomeSchema = z.strictObject({
+  attemptNo: z.number().int().min(1).max(6),
+  operationId: IdSchema,
+  settlement: TurnSettlementSchema,
+  status: z.enum(['completed', 'failed', 'aborted_for_retry_or_reconcile']),
+  text: z.string().min(1).max(8_192).optional(),
+  modelLabel: z.string().min(1).max(120).optional(),
+  simulated: z.boolean().optional(),
+  delegation: DelegationCommandSchema.optional(),
+  failureReason: z.enum(['timeout', 'internal_error']).optional(),
+});
+
+export type DurableTurnOutcome = z.infer<typeof DurableTurnOutcomeSchema>;
+
+export const DurableTaskOutcomeSchema = z
+  .strictObject({
+    status: z.enum(['completed', 'failed']).optional(),
+    summaryText: z.string().max(4_096).nullable().optional(),
+    detailText: z.string().max(32_768).nullable().optional(),
+    modelLabel: z.string().min(1).max(120).optional(),
+    simulated: z.boolean().optional(),
+    truncated: z.boolean().optional(),
+    reasonCode: z.string().min(1).max(128).optional(),
+    attemptNo: z.number().int().min(1).max(6).optional(),
+    operationId: IdSchema.optional(),
+    settlement: TurnSettlementSchema.optional(),
+  })
+  .superRefine((v, ctx) => {
+    const count =
+      (v.attemptNo !== undefined ? 1 : 0) +
+      (v.operationId !== undefined ? 1 : 0) +
+      (v.settlement !== undefined ? 1 : 0);
+    if (count > 0 && count < 3) {
+      ctx.addIssue({
+        code: 'custom',
+        message: 'attemptNo, operationId, and settlement must all be supplied together',
+      });
+    }
+  });
+
+export type DurableTaskOutcome = z.infer<typeof DurableTaskOutcomeSchema>;
 
 function parseOrThrow<T>(schema: z.ZodType<T>, input: unknown): T {
   const parsed = schema.safeParse(input);
@@ -295,6 +341,25 @@ function parseOrThrow<T>(schema: z.ZodType<T>, input: unknown): T {
     throw toInvalidArgumentError(parsed.error);
   }
   return parsed.data;
+}
+
+export function parseDurableTurnOutcome(input: unknown): DurableTurnOutcome | null {
+  const parsed = DurableTurnOutcomeSchema.safeParse(input);
+  if (!parsed.success) {
+    return null;
+  }
+  if (
+    parsed.data.status === 'completed' &&
+    (parsed.data.text === undefined || parsed.data.text.length === 0)
+  ) {
+    return null;
+  }
+  return parsed.data;
+}
+
+export function parseDurableTaskOutcome(input: unknown): DurableTaskOutcome | null {
+  const parsed = DurableTaskOutcomeSchema.safeParse(input);
+  return parsed.success ? parsed.data : null;
 }
 
 export function parsePrepareTurnRequest(input: unknown): PrepareTurnRequest {

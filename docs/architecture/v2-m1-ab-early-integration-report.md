@@ -11,7 +11,7 @@
   - Agent B3 — PR `#176` (`feat/v2-m1-b3-alarm-recovery`): `4a4c94114f381813411b70a059dcb9de25355baa`
   - Agent B4 — PR `#178` (`feat/v2-m1-b4-durable-integration`): `2045c9320d5505e044c61c63fa6faedc0fd97d51`
   - Adjacent Pending PRs Noted for D6 Next Stage: Agent E (`#179` @ `3432745e388a756336d262ffce4f257aee005faa`), Agent F (`#180` @ `0066cc4338cb7b67f839f1d3e498c7df946da203`)
-- **CI Restoration PR (separate, non-blocking):** `#181` (`chore/v2-m1-d5-restore-ci` @ `afc66c2691441e134f2c584146be61477060dcb1`)
+- **CI Restoration PR (separate, non-blocking):** `#181` (`chore/v2-m1-d5-restore-ci` @ `b1e0677dc13d7e80efd3463d49a5ee1be01450b5`, Run `44543133180` green)
 
 > [!IMPORTANT]
 > Per V2-M1-D rules, this integration was carried out strictly on an isolated temporary branch (`temp/v2-m1-ab-early-integration`) without rewriting Agent A or Agent B production code and without merging the temporary branch to `main`. Issues discovered below are attributed to their respective module owners for remediation in PRs `#173`–`#178`.

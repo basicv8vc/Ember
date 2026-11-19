@@ -230,13 +230,17 @@ export class OutboxCoordinator implements EventRuntimeCoordinatorPort {
    * - Active `v2_schedules.next_fire_at_ms`
    * - Pending / enqueued / dead_lettered `v2_dispatch_outbox.next_attempt_at_ms` (including `budget_sync`)
    */
-  recomputeAlarmSync(_nowMs: number): number | null {
+  recomputeAlarmSync(nowMs: number): number | null {
     const candidates: number[] = [];
 
     const dueActions =
-      this.#business?.listDueBusinessActionsSync(Number.MAX_SAFE_INTEGER, 10) ?? [];
+      this.#business?.listDueBusinessActionsSync(Number.MAX_SAFE_INTEGER, 64) ?? [];
     for (const action of dueActions) {
-      candidates.push(action.deadlineAtMs);
+      candidates.push(
+        action.actionKind === 'cancel_converge'
+          ? Math.min(nowMs, action.deadlineAtMs)
+          : action.deadlineAtMs,
+      );
     }
 
     const schedMin = this.#sql

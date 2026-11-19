@@ -105,16 +105,16 @@ DO runs short coordination handlers; never wait for LLM/Sandbox/tool completion 
 
 Initial engineering targets, not measured SLA. Compare against optimized V1 using matched regions, models, prompts, data, clients and load; report P50/P95/P99, cold/warm, failures and measurement definitions.
 
-| Metric | Initial target |
-| --- | --- |
-| Local send feedback | <= 50 ms |
-| Cached history first render | <= 100 ms |
-| Durable message ACK (near-region P95) | <= 250 ms |
-| Runtime overhead excluding model/provider (near-region P95) | <= 200 ms |
-| Simple low-latency model first useful token (P50 / P95) | <= 1 s / 2.5 s |
-| Background task dispatch start (P95, not provider startup) | <= 3 s |
-| Foreground cancel state feedback | <= 500 ms |
-| Foreground P95 degradation with background load | <= 10% |
+| Metric                                                      | Initial target |
+| ----------------------------------------------------------- | -------------- |
+| Local send feedback                                         | <= 50 ms       |
+| Cached history first render                                 | <= 100 ms      |
+| Durable message ACK (near-region P95)                       | <= 250 ms      |
+| Runtime overhead excluding model/provider (near-region P95) | <= 200 ms      |
+| Simple low-latency model first useful token (P50 / P95)     | <= 1 s / 2.5 s |
+| Background task dispatch start (P95, not provider startup)  | <= 3 s         |
+| Foreground cancel state feedback                            | <= 500 ms      |
+| Foreground P95 degradation with background load             | <= 10%         |
 
 M1 exit gate: time the full synchronous global budget reservation/check (including contention, cold start and cross-region RPC) separately and inside end-to-end Runtime/TTFT measurements under concurrent foreground/background load. Initial allocation: <= 50 ms near-region P95 within the 200 ms Runtime overhead, not an extra allowance. Fake-provider tests must exercise actual reservation semantics, concurrency, exhaustion and fail-closed behavior; validate again under separately approved cloud and provider canaries. Do not call paid providers before an authoritative reservation or replace it with an eventually consistent cached balance. If the latency budget is missed, optimize the authority/transaction or evaluate bounded preallocated grants with proven global-cap invariants and explicit review; do not weaken the cap. The first-token figures remain hypotheses until real model tests.
 
@@ -126,20 +126,20 @@ Planning date: 2026-11-19. Existing owner account: Workers Paid $5/month, Neon F
 
 ### Official metering inputs
 
-| Meter | Included/month | Additional rate |
-| --- | ---: | ---: |
-| Workers requests | 10M | $0.30/M |
-| Workers CPU | 30M ms | $0.02/M ms |
-| DO requests (including Alarm and billed RPC/WS) | 1M | $0.15/M |
-| DO duration | 400k GB-s | $12.50/M GB-s |
-| DO SQLite rows read / written | 25B / 50M | $0.001/M / $1/M |
-| DO SQLite storage | 5 GB-month | $0.20/GB-month |
-| D1 rows read / written | 25B / 50M | $0.001/M / $1/M |
-| D1 storage | 5 GB-month | $0.75/GB-month |
-| Queues operations | 1M | $0.40/M |
-| R2 Standard storage | 10 GB-month | $0.015/GB-month |
-| R2 Class A / B | 1M / 10M | $4.50/M / $0.36/M |
-| Observability from Dec 1 2026 | 50 GB ingested / 10 GB-month kept | $0.25/GB / $0.10/GB-month |
+| Meter                                           |                    Included/month |           Additional rate |
+| ----------------------------------------------- | --------------------------------: | ------------------------: |
+| Workers requests                                |                               10M |                   $0.30/M |
+| Workers CPU                                     |                            30M ms |                $0.02/M ms |
+| DO requests (including Alarm and billed RPC/WS) |                                1M |                   $0.15/M |
+| DO duration                                     |                         400k GB-s |             $12.50/M GB-s |
+| DO SQLite rows read / written                   |                         25B / 50M |           $0.001/M / $1/M |
+| DO SQLite storage                               |                        5 GB-month |            $0.20/GB-month |
+| D1 rows read / written                          |                         25B / 50M |           $0.001/M / $1/M |
+| D1 storage                                      |                        5 GB-month |            $0.75/GB-month |
+| Queues operations                               |                                1M |                   $0.40/M |
+| R2 Standard storage                             |                       10 GB-month |           $0.015/GB-month |
+| R2 Class A / B                                  |                          1M / 10M |         $4.50/M / $0.36/M |
+| Observability from Dec 1 2026                   | 50 GB ingested / 10 GB-month kept | $0.25/GB / $0.10/GB-month |
 
 Workers Paid base $5 once per account. DO memory metering uses 0.128 GB per active object; idle eligible for hibernation is not duration-billed. For the model, round DO compute request and GB-s overages up to whole millions and R2 Standard operations up to whole millions/storage up to whole GB-month; prorate DO SQLite rows/storage and other meters, subject to invoice validation. This is not merely a discretionary safety margin: the official [DO Pricing > Compute billing](https://developers.cloudflare.com/durable-objects/platform/pricing/#compute-billing) section explicitly rounds excess usage, including duration, to the next billable unit. For 10k MAU, 437,760 GB-s minus 400,000 included = 37,760 GB-s; ceil(37,760 / 1,000,000) * $12.50 = $12.50, rather than $0.472 on a hypothetical proportional basis. The corrected rounded total is $176.07 (the prior $176.27 included $0.20 excess storage rounding). Queue message <64 KB typically requires three operations; retries add operations. D1 and DO SQLite allowances modeled separately. Index writes, deletes, and setAlarm writes count toward metering; measure actual billed rows. D1 first 100k databases and Queues first 10k queues included; V2 does not require a queue/database per user. R2 internet egress free, other services may charge. Workers Logs before Dec 1: 20M events/month included, $0.60/M excess; model forward-looking Observability cost instead. Sources below.
 
@@ -147,16 +147,17 @@ Workers Paid base $5 once per account. DO memory metering uses 0.128 GB per acti
 
 30-day month; MAU = monthly active agents (one per user for this model). Assume 60% light, 30% medium, 10% heavy. Additional dormant retained accounts, history growth, backups and high-volume connectors must be added when known.
 
-| User type | Turns/day | Background tasks/day | Total events/mo | DO DB average MB | R2 average MB |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| Light | 5 | 1 | 180 | 5 | 20 |
-| Medium | 20 | 4 | 720 | 20 | 100 |
-| Heavy | 100 | 20 | 3600 | 100 | 500 |
-| Weighted average | 19 | 3.8 | 684 | 19 | 92 |
+| User type        | Turns/day | Background tasks/day | Total events/mo | DO DB average MB | R2 average MB |
+| ---------------- | --------: | -------------------: | --------------: | ---------------: | ------------: |
+| Light            |         5 |                    1 |             180 |                5 |            20 |
+| Medium           |        20 |                    4 |             720 |               20 |           100 |
+| Heavy            |       100 |                   20 |            3600 |              100 |           500 |
+| Weighted average |        19 |                  3.8 |             684 |               19 |            92 |
 
 Per event, assumed (not measured): 6 billed Worker requests, 40 ms aggregate Worker CPU, 4 billed DO requests, 0.5 s total billable DO wall time, 200 DO rows read, 20 DO billed row writes inclusive of index/alarm overhead, 10 D1 rows read, 0.2 D1 billed row writes on average, 1.2 Queue operations (0.4 small messages on average including recovery/followups), 0.1 R2 Class A and 0.2 Class B operations. D1 storage 0.25 MB/agent. Assume 2 KB aggregate billable observability ingestion per event after sampling, 7-day retention and steady load. Storage MB/GB uses decimal units. Storage estimates represent average metered retained storage, not monthly increments.
 
 For N agents, E = 684*N (or the per-user workload above). Monthly usage vector:
+
 - Workers: 6E requests, 40E ms aggregate active CPU. Streaming wall time has no separate charge on Workers Standard; measure it separately for latency/concurrency and provider work. For a reproducible breakdown, allocate the illustrative 40 ms/event to 30 ms other processing + 10 ms stream processing averaged over all events (not measured); total CPU = E * (30 + 10) ms. Account separately for extra stream reconnects, active lease renewal requests/writes, bytes/logging and retries if not already in the per-event vector. At 100k MAU, an extra 10 ms CPU/event adds $13.68/month after included CPU is consumed; a 30 s network wait alone adds $0 Worker duration cost. Do not hold a DO active for streaming. M1 and M4 measure both wall time and active CPU before replacing these assumptions.
 - DO: 4E requests, 0.128*0.5E GB-s, 200E rows read, 20E rows written, 0.019N GB-month.
 - D1: 10E reads, 0.2E writes, 0.00025N GB-month.
@@ -165,13 +166,13 @@ For N agents, E = 684*N (or the per-user workload above). Monthly usage vector:
 - For each meter i, input A_i (account included allowance), B_i (forecast other products' usage), U_i (Ember usage). Remaining allowance R_i = max(A_i - B_i, 0). Normalize usage by pricing unit Q_i; estimate cost = $5 + sum of p_i * f_i(max(U_i - R_i, 0)/Q_i), where f_i = ceil for DO compute requests/duration and R2 Standard operations/storage; identity otherwise. $5 is the allocated existing account base, not an incremental subscription. Rounded marginal invoice charges can differ at unit boundaries; reconcile total account bills.
 - The table excludes incremental independent-recovery overhead pending M0 protocol measurement. Model it explicitly as an additional usage vector before rollout: e.g. a once/minute scheduled Worker adds 43,200 invocations per 30 days, plus indexed due-row reads, registration/cleanup writes, recovery RPC/CPU, telemetry and retries. Add these to U_i (avoid double-counting existing per-event assumptions); measure and reforecast. Two additional D1 billed writes per event alone can add up to $1.37/month at 1k MAU or $136.80 at 100k MAU if allowances are exhausted. No polling all agents. Recovery is mandatory even if actual cost is higher.
 
-| MAU | Full allowance | 50% allowance remaining | Zero allowance remaining | Proposed planning budget |
-| ---: | ---: | ---: | ---: | ---: |
-| 1-10 (PoC, 10 modeled) | $5.00 | $5.00 | $22.73 | $10 |
-| 100 (Internal Alpha) | $5.00 | $5.08 | $24.70 | $15 |
-| 1,000 (Public Beta) | $9.33 | $10.43 | $44.62 | $30 target / $60 conditional |
-| 10,000 (Growth) | $176.07 | $208.14 | $245.01 | $300 |
-| 100,000 (Scale) | $2,204.80 | $2,261.13 | $2,326.00 | $3,500 |
+|                    MAU | Full allowance | 50% allowance remaining | Zero allowance remaining |     Proposed planning budget |
+| ---------------------: | -------------: | ----------------------: | -----------------------: | ---------------------------: |
+| 1-10 (PoC, 10 modeled) |          $5.00 |                   $5.00 |                   $22.73 |                          $10 |
+|   100 (Internal Alpha) |          $5.00 |                   $5.08 |                   $24.70 |                          $15 |
+|    1,000 (Public Beta) |          $9.33 |                  $10.43 |                   $44.62 | $30 target / $60 conditional |
+|        10,000 (Growth) |        $176.07 |                 $208.14 |                  $245.01 |                         $300 |
+|        100,000 (Scale) |      $2,204.80 |               $2,261.13 |                $2,326.00 |                       $3,500 |
 
 Allowance scenarios apply the stated remaining fraction to every meter only for sensitivity; actual per-meter B_i must be taken from the shared account baseline. Include $5 in all scenarios and exclude incremental independent-recovery cost as noted above. The $30 Beta target is not viable if the shared allowance is exhausted; propose a $60 conditional envelope (including margin), subject to separate owner/CTO budget approval based on actual usage. PoC/Alpha may also exceed $10/$15 under zero allowance; verify capacity and obtain revised approval BEFORE cloud provisioning or expanding load. Do not claim dedicated free allowances or an account-wide hard cap.
 
@@ -205,16 +206,16 @@ M0: ADR, minimal common execution/stream/recovery contract and matched V1 benchm
 
 ### M0/M1 acceptance checklist (summary; detailed gates above remain normative)
 
-| Stage | Check | Evidence |
-| --- | --- | --- |
-| M0 | Common execution/stream/recovery contracts; existing B1 compatibility | Reviewed contract and ownership invariants |
-| M0 | Registry coverage, retirement/fencing and D1 outage behavior; lease/deadline and long-turn handoff | Protocol and deterministic fault scenarios |
-| M0 | V1 baseline, billing trace, storage-growth assumptions and model-routing matrix | Reproducible workload/measurement definitions and local probe |
-| M1 | Fast/Durable paths, protected outbox, unknown ACK, tenant isolation | Local fake-provider end-to-end and negative tests |
-| M1 | Covered turn: zero synchronous registry I/O; uncovered turn and registry outage | Race/fault tests; separate ACK/Runtime latency traces; no lost accepted work |
-| M1 | All six Alarm retries fail; independent recovery and later schedule | Offline recovery <= 2 min detection / <= 5 min dispatch or re-arm under specified conditions |
-| M1 | Streaming/disconnect, silent executor loss and reasoning > 120 s | 60 s normal reconciliation-entry target; fenced handoff, one final result or explicit uncertain outcome |
-| M1 | Global/per-agent budgets, latency and billing trace | Atomic reservations, <= 50 ms near-region P95 budget-check target within 200 ms Runtime; measured writes and stream CPU |
+| Stage | Check                                                                                              | Evidence                                                                                                                |
+| ----- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| M0    | Common execution/stream/recovery contracts; existing B1 compatibility                              | Reviewed contract and ownership invariants                                                                              |
+| M0    | Registry coverage, retirement/fencing and D1 outage behavior; lease/deadline and long-turn handoff | Protocol and deterministic fault scenarios                                                                              |
+| M0    | V1 baseline, billing trace, storage-growth assumptions and model-routing matrix                    | Reproducible workload/measurement definitions and local probe                                                           |
+| M1    | Fast/Durable paths, protected outbox, unknown ACK, tenant isolation                                | Local fake-provider end-to-end and negative tests                                                                       |
+| M1    | Covered turn: zero synchronous registry I/O; uncovered turn and registry outage                    | Race/fault tests; separate ACK/Runtime latency traces; no lost accepted work                                            |
+| M1    | All six Alarm retries fail; independent recovery and later schedule                                | Offline recovery <= 2 min detection / <= 5 min dispatch or re-arm under specified conditions                            |
+| M1    | Streaming/disconnect, silent executor loss and reasoning > 120 s                                   | 60 s normal reconciliation-entry target; fenced handoff, one final result or explicit uncertain outcome                 |
+| M1    | Global/per-agent budgets, latency and billing trace                                                | Atomic reservations, <= 50 ms near-region P95 budget-check target within 200 ms Runtime; measured writes and stream CPU |
 
 All M1 checks use local/fake providers at this approval level. Repeat relevant checks with separately approved cloud/provider canaries before rollout. Failure or unmeasurable evidence must be reported, not marked as a pass.
 

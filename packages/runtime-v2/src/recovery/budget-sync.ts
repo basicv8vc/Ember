@@ -7,7 +7,7 @@ export const DEFAULT_BUDGET_SYNC_BATCH_LIMIT = 10;
 export const DEFAULT_BUDGET_SYNC_RETRY_BASE_MS = 5_000;
 export const DEFAULT_BUDGET_SYNC_RETRY_MAX_MS = 60_000;
 
-export interface GlobalBudgetSettleResult {
+export interface BudgetSyncGlobalSettleResult {
   readonly accepted?: boolean;
   readonly applied?: boolean;
   readonly alreadySettled?: boolean;
@@ -47,7 +47,7 @@ export interface GlobalBudgetAuthoritySettleLike {
  * Agent B passes `BudgetSyncOutboxPayload` verbatim and never computes refunds or fees.
  */
 export interface GlobalBudgetSettlePort {
-  settleGlobal(payload: BudgetSyncOutboxPayload): Promise<GlobalBudgetSettleResult>;
+  settleGlobal(payload: BudgetSyncOutboxPayload): Promise<BudgetSyncGlobalSettleResult>;
 }
 
 /**
@@ -58,7 +58,7 @@ export function createGlobalBudgetAuthoritySettlePort(
   authority: GlobalBudgetAuthoritySettleLike,
 ): GlobalBudgetSettlePort {
   return {
-    settleGlobal(payload: BudgetSyncOutboxPayload): Promise<GlobalBudgetSettleResult> {
+    settleGlobal(payload: BudgetSyncOutboxPayload): Promise<BudgetSyncGlobalSettleResult> {
       return authority.settleGlobal({
         tenantId: payload.tenantId,
         operationId: payload.operationId,

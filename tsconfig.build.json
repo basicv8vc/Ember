@@ -8,6 +8,7 @@
     { "path": "./packages/execution/tsconfig.build.json" },
     { "path": "./packages/model-gateway/tsconfig.build.json" },
     { "path": "./packages/postgres/tsconfig.build.json" },
+    { "path": "./packages/runtime-v2/tsconfig.build.json" },
     { "path": "./packages/sandbox-daytona/tsconfig.build.json" },
     { "path": "./packages/telemetry/tsconfig.build.json" },
     { "path": "./apps/api/tsconfig.build.json" },

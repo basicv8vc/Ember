@@ -16,6 +16,10 @@
 
 - [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)（[中文版](../adr/0006-experience-first-device-powered-runtime-v2.zh-CN.md)，以英文原版为准）：经产品负责人/CTO 批准并合并后为 Accepted；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。仅授权 M0 契约/Benchmark 和本地隔离 M1 Fake Provider PoC；M0 公共契约经架构师/CTO 审核后方可实施依赖性改动。云资源创建/部署/Smoke、真实供应商 Canary 支出、M2 及后续实施与生产迁移均须分别取得明确批准。
 
+- [V2-M0-B：Event Runtime & Recovery Contract](./v2-m0-event-recovery-contract.md)：M0 工程契约冻结（PR `#171`，共享 DO SQLite/D1 `v2_schedules` / `v2_dispatch_outbox` / `v2_recovery_coverage` / `v2_recovery_registry` 规范 DDL 与 `RecoveryAdmissionPort` / `EventRuntimeCoordinatorPort` / `RecoveryRegistryPort` / `V2DispatchEnvelope` 拥有者；仅授权后续本地 Fake Provider M1 编码，须先于 `#170` 合并）。
+
+- [V2-M0-A：Agent Head & Interactive Runtime Contract](./v2-m0-runtime-contract.md)：M0 工程契约冻结（PR `#170`，`AgentHeadDO` 业务状态、`assistant_turns` / `tasks` / `runs` / `model_attempts` 租约与预算权威、3-RPC 门禁、`GlobalBudgetAuthority`、`AuthoritativeBusinessPort` 及 B1 交互执行边界；依赖 `#171` 联合冻结后合入，M0-D `#172` 为独立 Benchmark 门禁）。
+
 ## 决策权威和阅读顺序
 
 1. 对具体事项，优先遵守 `docs/adr/` 中明确标记 **Accepted** 的决策：

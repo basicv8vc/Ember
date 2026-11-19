@@ -22,7 +22,7 @@ const B1_FAST_LEASE_MS = 25_000;
 
 const OUTBOX_IMMEDIATE_GRACE_MS = 2_000;
 const OUTBOX_REENQUEUE_GRACE_MS = 60_000;
-const OUTBOX_MIN_RETRY_FLOOR_MS = 5_000;
+const OUTBOX_MIN_RETRY_FLOOR_MS = 1_000;
 const OUTBOX_RETRY_HEADROOM_MS = 5_000;
 const D1_RECOVERY_GRACE_MS = 45_000;
 const SWEEPER_CADENCE_MS = 60_000;
@@ -33,7 +33,7 @@ const QUARANTINE_THRESHOLD = 3;
 type CoverageState = 'uncovered' | 'registering' | 'covered';
 type PendingKind = 'ensure' | 'postpone' | 'retire';
 type RegistryStatus = 'armed' | 'backoff' | 'quarantined';
-type ExecutionMode = 'interactive_fast' | 'durable_queue' | 'device_node';
+type TurnExecutionMode = 'fast_interactive' | 'durable_queue' | 'device';
 type BusinessStatus =
   | 'queued'
   | 'running'
@@ -55,14 +55,22 @@ interface V2DispatchEnvelope {
   readonly fenceEpoch: number;
 }
 
-interface BudgetSyncPayload {
-  readonly kind: 'budget_sync';
-  readonly op: 'settle' | 'release';
-  readonly subjectType: 'turn' | 'task';
-  readonly subjectId: string;
+interface BudgetSyncOutboxPayload {
+  readonly schemaVersion: 1;
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly agentId: string;
+  readonly utcDay: string;
+  readonly globalGrantId: string;
   readonly operationId: string;
-  readonly revision: number;
-  readonly amountMicroUsd: number;
+  readonly settlementRevision: number; // 0 = initial settlement/release; >= 1 = late correction
+  readonly state: 'settled' | 'conservative_billed' | 'unknown_billed' | 'released';
+  readonly reservedMicroUsd: number;
+  readonly chargeMicroUsd: number; // cumulative corrected amount
+  readonly observedCostMicroUsd: number | null;
+  readonly overageMicroUsd: number;
+  readonly openIncidentReason:
+    'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing' | null;
 }
 
 class VirtualClock {
@@ -89,12 +97,20 @@ class ProtocolError extends Error {
   }
 }
 
-function cappedReenqueueAtMs(nowMs: number, deadlineAtMs: number): number {
-  const remainingWindow = Math.max(
-    nowMs + OUTBOX_MIN_RETRY_FLOOR_MS,
-    deadlineAtMs - OUTBOX_RETRY_HEADROOM_MS,
+function computeNextRetryAttemptAtMs(
+  nowMs: number,
+  deadlineAtMs: number,
+  graceMs = OUTBOX_REENQUEUE_GRACE_MS,
+): { readonly shouldRetry: boolean; readonly nextAttemptAtMs: number } {
+  const remaining = deadlineAtMs - nowMs;
+  if (remaining <= OUTBOX_MIN_RETRY_FLOOR_MS) {
+    return { shouldRetry: false, nextAttemptAtMs: deadlineAtMs };
+  }
+  const nextAt = Math.min(
+    nowMs + graceMs,
+    Math.max(nowMs + OUTBOX_MIN_RETRY_FLOOR_MS, deadlineAtMs - OUTBOX_RETRY_HEADROOM_MS),
   );
-  return Math.min(nowMs + OUTBOX_REENQUEUE_GRACE_MS, remainingWindow);
+  return { shouldRetry: true, nextAttemptAtMs: nextAt };
 }
 
 /**
@@ -141,31 +157,45 @@ class D1RecoveryRegistry {
     }
   }
 
-  readCoverage(cmd: { readonly tenantId: string; readonly agentId: string }): {
+  getCoverage(cmd: { readonly tenantId: string; readonly agentId: string }): {
     readonly exists: boolean;
     readonly currentGeneration: number | null;
     readonly actualRecoveryAtMs: number | null;
     readonly status: RegistryStatus | null;
+    readonly retryNotBeforeMs: number | null;
   } {
     this.maybeInjectFault();
     this.reads += 1;
     const row = this.db
       .prepare(
-        `SELECT generation, next_recovery_at_ms, status
+        `SELECT generation, next_recovery_at_ms, status, retry_not_before_ms
          FROM v2_recovery_registry
          WHERE agent_key = ?`,
       )
       .get(`${cmd.tenantId}:${cmd.agentId}`) as
-      { generation: number; next_recovery_at_ms: number; status: RegistryStatus } | undefined;
+      | {
+          generation: number;
+          next_recovery_at_ms: number;
+          status: RegistryStatus;
+          retry_not_before_ms: number | null;
+        }
+      | undefined;
 
     if (!row) {
-      return { exists: false, currentGeneration: null, actualRecoveryAtMs: null, status: null };
+      return {
+        exists: false,
+        currentGeneration: null,
+        actualRecoveryAtMs: null,
+        status: null,
+        retryNotBeforeMs: null,
+      };
     }
     return {
       exists: true,
       currentGeneration: row.generation,
       actualRecoveryAtMs: row.next_recovery_at_ms,
       status: row.status,
+      retryNotBeforeMs: row.retry_not_before_ms,
     };
   }
 
@@ -475,17 +505,32 @@ class SimulatedQueueBus {
 }
 
 class FakeGlobalBudgetAuthority {
-  readonly settled = new Map<string, BudgetSyncPayload>();
+  readonly revisions = new Map<string, BudgetSyncOutboxPayload>();
+  readonly cumulativeChargedByOp = new Map<string, number>();
   failNextSettles = 0;
 
-  settleGlobal(payload: BudgetSyncPayload): { readonly acked: boolean } {
+  settleGlobal(payload: BudgetSyncOutboxPayload): {
+    readonly applied: boolean;
+    readonly alreadySettled: boolean;
+    readonly conflict: boolean;
+  } {
     if (this.failNextSettles > 0) {
       this.failNextSettles -= 1;
       throw new ProtocolError('BUDGET_UNAVAILABLE', 503, 'Simulated global budget outage');
     }
-    const key = `${payload.operationId}:${payload.revision}`;
-    this.settled.set(key, payload);
-    return { acked: true };
+    const revKey = `${payload.operationId}:${payload.settlementRevision}`;
+    const existing = this.revisions.get(revKey);
+    if (existing !== undefined) {
+      const same = JSON.stringify(existing) === JSON.stringify(payload);
+      return same
+        ? { applied: false, alreadySettled: true, conflict: false }
+        : { applied: false, alreadySettled: false, conflict: true };
+    }
+    this.revisions.set(revKey, payload);
+    const prev = this.cumulativeChargedByOp.get(payload.operationId) ?? 0;
+    const delta = payload.chargeMicroUsd - prev;
+    this.cumulativeChargedByOp.set(payload.operationId, prev + delta);
+    return { applied: true, alreadySettled: false, conflict: false };
   }
 }
 
@@ -567,7 +612,7 @@ class AgentHeadDOProbe {
         queue_name           TEXT    CHECK (queue_name IS NULL OR queue_name IN ('durable_turn', 'agent_task')),
         payload_json         TEXT    NOT NULL,
         operation_id         TEXT,
-        revision             INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1),
+        revision             INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
         state                TEXT    NOT NULL CHECK (state IN ('pending', 'enqueued', 'acked', 'dead_lettered', 'cancelled')),
         next_attempt_at_ms   INTEGER NOT NULL,
         last_enqueued_at_ms  INTEGER,
@@ -580,7 +625,7 @@ class AgentHeadDOProbe {
         CHECK (
           (entity_kind = 'budget_sync' AND queue_name IS NULL AND operation_id IS NOT NULL)
           OR
-          (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IN ('durable_turn', 'agent_task'))
+          (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IS NOT NULL AND queue_name IN ('durable_turn', 'agent_task'))
         )
       );
       CREATE INDEX idx_v2_outbox_due
@@ -613,7 +658,7 @@ class AgentHeadDOProbe {
       CREATE TABLE probe_turns_and_tasks (
         target_kind             TEXT    NOT NULL CHECK (target_kind IN ('turn', 'task')),
         target_id               TEXT    NOT NULL,
-        execution_mode          TEXT    NOT NULL CHECK (execution_mode IN ('interactive_fast', 'durable_queue', 'device_node')),
+        execution_mode          TEXT    NOT NULL CHECK (execution_mode IN ('fast_interactive', 'durable_queue', 'device')),
         status                  TEXT    NOT NULL CHECK (status IN ('queued', 'running', 'waiting_approval', 'retryable_failed', 'completed', 'failed', 'cancelled')),
         active_run_id           TEXT,
         lease_epoch             INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0 AND lease_epoch <= 9007199254740991),
@@ -918,7 +963,7 @@ class AgentHeadDOProbe {
             lease_epoch, lease_owner, lease_expires_at_ms,
             interactive_deadline_ms, deadline_at_ms, transcript_epoch,
             send_started_at_ms, attempt_count, next_action_at_ms, updated_at_ms
-          ) VALUES ('turn', ?, 'interactive_fast', 'running', ?, 1, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
+          ) VALUES ('turn', ?, 'fast_interactive', 'running', ?, 1, ?, ?, ?, ?, ?, NULL, 1, ?, ?)`,
         )
         .run(
           input.turnId,
@@ -1088,7 +1133,7 @@ class AgentHeadDOProbe {
         )
         .get(input.turnId) as
         | {
-            execution_mode: ExecutionMode;
+            execution_mode: TurnExecutionMode;
             status: BusinessStatus;
             active_run_id: string | null;
             lease_epoch: number;
@@ -1104,7 +1149,7 @@ class AgentHeadDOProbe {
 
       if (
         !row ||
-        row.execution_mode !== 'interactive_fast' ||
+        row.execution_mode !== 'fast_interactive' ||
         row.status !== 'running' ||
         row.active_run_id !== input.runId ||
         row.lease_epoch !== input.leaseEpoch ||
@@ -1186,7 +1231,7 @@ class AgentHeadDOProbe {
     };
   }
 
-  /** Fast Path commitTurn + atomic `budget_sync` outbox insertion (J5). */
+  /** Fast Path commitTurn + atomic `budget_sync` outbox insertion (0-based rev 0, J5). */
   commitFastTurn(input: {
     readonly turnId: string;
     readonly runId: string;
@@ -1196,7 +1241,7 @@ class AgentHeadDOProbe {
     readonly amountMicroUsd?: number;
   }): void {
     const nowMs = this.clock.nowMs;
-    let budgetSyncItem: { outboxId: string; payload: BudgetSyncPayload } | null = null;
+    let budgetSyncItem: { outboxId: string; payload: BudgetSyncOutboxPayload } | null = null;
 
     this.transactionSync(() => {
       const row = this.db
@@ -1252,22 +1297,30 @@ class AgentHeadDOProbe {
         .run(nowMs, input.turnId);
 
       if (input.operationId !== undefined) {
-        const payload: BudgetSyncPayload = {
-          kind: 'budget_sync',
-          op: 'settle',
-          subjectType: 'turn',
-          subjectId: input.turnId,
+        const charge = input.amountMicroUsd ?? 100;
+        const payload: BudgetSyncOutboxPayload = {
+          schemaVersion: 1,
+          tenantId: this.tenantId,
+          principalId: 'principal-1',
+          agentId: this.agentId,
+          utcDay: '2026-11-19',
+          globalGrantId: `grant:${input.operationId}`,
           operationId: input.operationId,
-          revision: 1,
-          amountMicroUsd: input.amountMicroUsd ?? 100,
+          settlementRevision: 0,
+          state: 'settled',
+          reservedMicroUsd: Math.max(charge, 500),
+          chargeMicroUsd: charge,
+          observedCostMicroUsd: charge,
+          overageMicroUsd: 0,
+          openIncidentReason: null,
         };
-        const outboxId = `budget_sync:${input.operationId}:rev:1`;
+        const outboxId = `budget_sync:${input.operationId}:rev:0`;
         this.db
           .prepare(
             `INSERT INTO v2_dispatch_outbox (
               outbox_id, entity_kind, entity_id, queue_name, payload_json,
               operation_id, revision, state, next_attempt_at_ms, fence_epoch, created_at_ms, updated_at_ms
-            ) VALUES (?, 'budget_sync', ?, NULL, ?, ?, 1, 'pending', ?, 0, ?, ?)`,
+            ) VALUES (?, 'budget_sync', ?, NULL, ?, ?, 0, 'pending', ?, 0, ?, ?)`,
           )
           .run(
             outboxId,
@@ -1289,25 +1342,32 @@ class AgentHeadDOProbe {
     }
   }
 
-  /** J5: Enqueue immutable late settlement revision (operationId, revision >= 2). */
+  /** J5: Enqueue immutable late settlement revision (operationId, settlementRevision >= 1, cumulative charge). */
   enqueueLateBudgetCorrection(input: {
     readonly operationId: string;
     readonly revision: number;
-    readonly subjectId: string;
-    readonly correctedMicroUsd: number;
+    readonly correctedCumulativeMicroUsd: number;
+    readonly observedCostMicroUsd?: number;
   }): string {
     const nowMs = this.clock.nowMs;
     this.ensureCoverageBeforeCommit(nowMs + D1_RECOVERY_GRACE_MS);
 
     const outboxId = `budget_sync:${input.operationId}:rev:${input.revision}`;
-    const payload: BudgetSyncPayload = {
-      kind: 'budget_sync',
-      op: 'settle',
-      subjectType: 'turn',
-      subjectId: input.subjectId,
+    const payload: BudgetSyncOutboxPayload = {
+      schemaVersion: 1,
+      tenantId: this.tenantId,
+      principalId: 'principal-1',
+      agentId: this.agentId,
+      utcDay: '2026-11-19',
+      globalGrantId: `grant:${input.operationId}`,
       operationId: input.operationId,
-      revision: input.revision,
-      amountMicroUsd: input.correctedMicroUsd,
+      settlementRevision: input.revision,
+      state: 'settled',
+      reservedMicroUsd: 500,
+      chargeMicroUsd: input.correctedCumulativeMicroUsd,
+      observedCostMicroUsd: input.observedCostMicroUsd ?? input.correctedCumulativeMicroUsd,
+      overageMicroUsd: Math.max(0, input.correctedCumulativeMicroUsd - 500),
+      openIncidentReason: null,
     };
 
     this.transactionSync(() => {
@@ -1335,14 +1395,23 @@ class AgentHeadDOProbe {
     return outboxId;
   }
 
-  private tryRelayBudgetSync(item: { outboxId: string; payload: BudgetSyncPayload }): void {
+  private tryRelayBudgetSync(item: { outboxId: string; payload: BudgetSyncOutboxPayload }): void {
     try {
       const res = this.globalBudget.settleGlobal(item.payload);
-      if (res.acked) {
+      if (res.applied || res.alreadySettled) {
         this.transactionSync(() => {
           this.db
             .prepare(
               "UPDATE v2_dispatch_outbox SET state = 'acked', updated_at_ms = ? WHERE outbox_id = ?",
+            )
+            .run(this.clock.nowMs, item.outboxId);
+          this.recomputeAlarmSync();
+        });
+      } else if (res.conflict) {
+        this.transactionSync(() => {
+          this.db
+            .prepare(
+              "UPDATE v2_dispatch_outbox SET last_error_code = 'SETTLEMENT_REVISION_CONFLICT', state = 'dead_lettered', updated_at_ms = ? WHERE outbox_id = ?",
             )
             .run(this.clock.nowMs, item.outboxId);
           this.recomputeAlarmSync();
@@ -1516,18 +1585,32 @@ class AgentHeadDOProbe {
         return;
       }
       this.transactionSync(() => {
-        const nextAt = cappedReenqueueAtMs(this.clock.nowMs, deadlineAtMs);
-        this.db
-          .prepare(
-            `UPDATE v2_dispatch_outbox
-             SET state = 'enqueued',
-                 publish_attempts = publish_attempts + 1,
-                 last_enqueued_at_ms = ?,
-                 next_attempt_at_ms = ?,
-                 updated_at_ms = ?
-             WHERE outbox_id = ? AND state = 'pending'`,
-          )
-          .run(this.clock.nowMs, nextAt, this.clock.nowMs, outboxId);
+        const retryPlan = computeNextRetryAttemptAtMs(this.clock.nowMs, deadlineAtMs);
+        if (retryPlan.shouldRetry) {
+          this.db
+            .prepare(
+              `UPDATE v2_dispatch_outbox
+               SET state = 'enqueued',
+                   publish_attempts = publish_attempts + 1,
+                   last_enqueued_at_ms = ?,
+                   next_attempt_at_ms = ?,
+                   updated_at_ms = ?
+               WHERE outbox_id = ? AND state = 'pending'`,
+            )
+            .run(this.clock.nowMs, retryPlan.nextAttemptAtMs, this.clock.nowMs, outboxId);
+        } else {
+          // Remaining <= 1s: no new queue retry; arm deadline for expiry convergence!
+          this.db
+            .prepare(
+              `UPDATE v2_dispatch_outbox
+               SET state = 'acked',
+                   publish_attempts = publish_attempts + 1,
+                   last_enqueued_at_ms = ?,
+                   updated_at_ms = ?
+               WHERE outbox_id = ? AND state = 'pending'`,
+            )
+            .run(this.clock.nowMs, this.clock.nowMs, outboxId);
+        }
         this.recomputeAlarmSync();
       });
     } catch {
@@ -1779,7 +1862,7 @@ class AgentHeadDOProbe {
     for (const bs of budgetSyncs) {
       this.tryRelayBudgetSync({
         outboxId: bs.outbox_id,
-        payload: JSON.parse(bs.payload_json) as BudgetSyncPayload,
+        payload: JSON.parse(bs.payload_json) as BudgetSyncOutboxPayload,
       });
     }
 
@@ -1789,18 +1872,31 @@ class AgentHeadDOProbe {
       try {
         this.queue.send(env, nowMs);
         this.transactionSync(() => {
-          const nextAt = cappedReenqueueAtMs(nowMs, deadlineAtMs);
-          this.db
-            .prepare(
-              `UPDATE v2_dispatch_outbox
-               SET state = 'enqueued',
-                   publish_attempts = publish_attempts + 1,
-                   last_enqueued_at_ms = ?,
-                   next_attempt_at_ms = ?,
-                   updated_at_ms = ?
-               WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
-            )
-            .run(nowMs, nextAt, nowMs, row.outbox_id);
+          const retryPlan = computeNextRetryAttemptAtMs(nowMs, deadlineAtMs);
+          if (retryPlan.shouldRetry) {
+            this.db
+              .prepare(
+                `UPDATE v2_dispatch_outbox
+                 SET state = 'enqueued',
+                     publish_attempts = publish_attempts + 1,
+                     last_enqueued_at_ms = ?,
+                     next_attempt_at_ms = ?,
+                     updated_at_ms = ?
+                 WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
+              )
+              .run(nowMs, retryPlan.nextAttemptAtMs, nowMs, row.outbox_id);
+          } else {
+            this.db
+              .prepare(
+                `UPDATE v2_dispatch_outbox
+                 SET state = 'acked',
+                     publish_attempts = publish_attempts + 1,
+                     last_enqueued_at_ms = ?,
+                     updated_at_ms = ?
+                 WHERE outbox_id = ? AND state IN ('pending', 'enqueued', 'dead_lettered')`,
+              )
+              .run(nowMs, nowMs, row.outbox_id);
+          }
           this.recomputeAlarmSync();
         });
       } catch {
@@ -1821,9 +1917,9 @@ class AgentHeadDOProbe {
 
     // J2: If local DO had an unconfirmed/crashed pending plan, read actual D1 first to repair safely!
     const preCov = this.transactionSync(() => this.getCoverage());
-    let actualD1: ReturnType<D1RecoveryRegistry['readCoverage']> | null = null;
+    let actualD1: ReturnType<D1RecoveryRegistry['getCoverage']> | null = null;
     if (preCov.pending_kind !== null || preCov.coverage_state === 'registering') {
-      actualD1 = this.registry.readCoverage({ tenantId: this.tenantId, agentId: this.agentId });
+      actualD1 = this.registry.getCoverage({ tenantId: this.tenantId, agentId: this.agentId });
     }
 
     const plan = this.transactionSync(() => {
@@ -2816,7 +2912,7 @@ describe('V2-M0-B Event Runtime & Recovery Protocol Probe (J1–J5)', () => {
         .get(),
     ).toEqual({ status: 'queued', lease_epoch: 0 });
 
-    // 2. budget_sync survives cancelTurn & clearTranscript, blocks retirement until global ACK, supports rev 1 + rev 2!
+    // 2. budget_sync survives cancelTurn & clearTranscript, blocks retirement until global ACK, supports rev 0 + rev 1 cumulative delta!
     globalBudget.failNextSettles = 2; // force budget_sync outbox to stay pending across clearTranscript & sweep!
     const tFast = agent.prepareFastTurn({ turnId: 'turn-budget', ownerId: 'edge-1' });
     agent.commitFastTurn({
@@ -2829,9 +2925,8 @@ describe('V2-M0-B Event Runtime & Recovery Protocol Probe (J1–J5)', () => {
     });
     agent.enqueueLateBudgetCorrection({
       operationId: 'op-123',
-      revision: 2,
-      subjectId: 'turn-budget',
-      correctedMicroUsd: 310,
+      revision: 1,
+      correctedCumulativeMicroUsd: 310,
     });
 
     // Clear transcript + cancel -> budget_sync MUST remain pending and MUST NOT be cancelled or retired!
@@ -2844,7 +2939,7 @@ describe('V2-M0-B Event Runtime & Recovery Protocol Probe (J1–J5)', () => {
       .get();
     expect(pendingBudget).toEqual({ c: 2 });
 
-    // Sweeper wakes DO while globalBudget is healthy again -> relays rev 1 & rev 2, then next sweep retires!
+    // Sweeper wakes DO while globalBudget is healthy again -> relays rev 0 (250) & rev 1 (cumulative 310 -> delta +60)!
     clock.advanceBy(60_000);
     const dueBs = registry.claimDueMarkers({
       sweeperId: 'sweep-bs',
@@ -2854,15 +2949,17 @@ describe('V2-M0-B Event Runtime & Recovery Protocol Probe (J1–J5)', () => {
     expect(dueBs).toHaveLength(1);
     await agent.reconcileFromRegistry(dueBs[0]!.generation);
 
-    expect(globalBudget.settled.get('op-123:1')?.amountMicroUsd).toBe(250);
-    expect(globalBudget.settled.get('op-123:2')?.amountMicroUsd).toBe(310);
+    expect(globalBudget.revisions.get('op-123:0')?.chargeMicroUsd).toBe(250);
+    expect(globalBudget.revisions.get('op-123:1')?.chargeMicroUsd).toBe(310);
+    // Cumulative total charged is 310, NOT 250 + 310 = 560!
+    expect(globalBudget.cumulativeChargedByOp.get('op-123')).toBe(310);
 
     // Reject trying to inject budget_sync over external Queue!
     expect(
       agent.consumeQueueDelivery(
         {
           schemaVersion: 2,
-          eventId: 'budget_sync:op-123:rev:1',
+          eventId: 'budget_sync:op-123:rev:0',
           tenantId: 'tenant-1',
           agentId: 'agent-1',
           entityKind: 'task',
@@ -3047,5 +3144,180 @@ describe('V2-M0-B Event Runtime & Recovery Protocol Probe (J1–J5)', () => {
     expect(
       agent.db.prepare('SELECT coverage_state FROM v2_recovery_coverage WHERE id = 1').get(),
     ).toEqual({ coverage_state: 'registering' });
+  });
+
+  it('P2 alignment: enforces deadline retry boundaries (0/500/1000/1001ms), rejects ordinary queue_name IS NULL, validates cumulative rev0/rev1 vs same-revision conflict, and handles all 4 entityKinds', () => {
+    const clock = new VirtualClock(1_700_000_000_000);
+    const registry = new D1RecoveryRegistry();
+    const queue = new SimulatedQueueBus();
+    const globalBudget = new FakeGlobalBudgetAuthority();
+    const agent = new AgentHeadDOProbe({
+      tenantId: 'tenant-1',
+      agentId: 'agent-1',
+      clock,
+      registry,
+      queue,
+      globalBudget,
+    });
+
+    // 1. Deadline retry boundary tests at remaining = 0 / 500 / 1000 / 1001 ms
+    expect(computeNextRetryAttemptAtMs(clock.nowMs, clock.nowMs + 0)).toEqual({
+      shouldRetry: false,
+      nextAttemptAtMs: clock.nowMs,
+    });
+    expect(computeNextRetryAttemptAtMs(clock.nowMs, clock.nowMs + 500)).toEqual({
+      shouldRetry: false,
+      nextAttemptAtMs: clock.nowMs + 500,
+    });
+    expect(computeNextRetryAttemptAtMs(clock.nowMs, clock.nowMs + 1_000)).toEqual({
+      shouldRetry: false,
+      nextAttemptAtMs: clock.nowMs + 1_000,
+    });
+    const at1001 = computeNextRetryAttemptAtMs(clock.nowMs, clock.nowMs + 1_001);
+    expect(at1001.shouldRetry).toBe(true);
+    expect(at1001.nextAttemptAtMs).toBe(clock.nowMs + 1_000);
+    expect(at1001.nextAttemptAtMs).toBeLessThan(clock.nowMs + 1_001);
+
+    // Ordinary deadline expiry converges task to failed, marks task outbox acked, but NEVER cancels budget_sync!
+    globalBudget.failNextSettles = 1;
+    const tWithBs = agent.prepareFastTurn({ turnId: 'turn-bs-keep', ownerId: 'edge-1' });
+    agent.commitFastTurn({
+      turnId: 'turn-bs-keep',
+      runId: tWithBs.runId,
+      leaseEpoch: 1,
+      resultText: 'ok',
+      operationId: 'op-deadline-keep',
+      amountMicroUsd: 120,
+    });
+    const { outboxId: shortOutboxId, deadlineAtMs: shortDeadline } = agent.acceptDurableTask({
+      taskId: 'task-short-500',
+      deadlineMs: 500, // remaining <= 1_000 ms -> tryImmediatePublish marks outbox acked (no retry) & arms deadlineAtMs!
+    });
+    expect(
+      agent.db
+        .prepare('SELECT state FROM v2_dispatch_outbox WHERE outbox_id = ?')
+        .get(shortOutboxId),
+    ).toEqual({ state: 'acked' });
+
+    clock.nowMs = shortDeadline;
+    agent.tickAlarmIfDue();
+    expect(
+      agent.db
+        .prepare("SELECT status FROM probe_turns_and_tasks WHERE target_id = 'task-short-500'")
+        .get(),
+    ).toEqual({ status: 'failed' });
+    // Ordinary deadline expiry MUST NOT cancel budget_sync; it remains pending & armed for +5s relay!
+    expect(
+      agent.db
+        .prepare(
+          "SELECT state FROM v2_dispatch_outbox WHERE outbox_id = 'budget_sync:op-deadline-keep:rev:0'",
+        )
+        .get(),
+    ).toEqual({ state: 'pending' });
+    clock.advanceBy(5_000);
+    agent.tickAlarmIfDue();
+    expect(
+      agent.db
+        .prepare(
+          "SELECT state FROM v2_dispatch_outbox WHERE outbox_id = 'budget_sync:op-deadline-keep:rev:0'",
+        )
+        .get(),
+    ).toEqual({ state: 'acked' });
+
+    // 2. Ordinary envelope with queue_name IS NULL MUST be rejected by SQLite CHECK constraint!
+    expect(() =>
+      agent.db
+        .prepare(
+          `INSERT INTO v2_dispatch_outbox (
+            outbox_id, entity_kind, entity_id, queue_name, payload_json,
+            state, next_attempt_at_ms, fence_epoch, created_at_ms, updated_at_ms
+          ) VALUES ('bad-null-q', 'task', 'task-1', NULL, '{}', 'pending', 1, 0, 1, 1)`,
+        )
+        .run(),
+    ).toThrow(/CHECK constraint failed/i);
+
+    // 3. Cumulative rev0 / rev1 + same-revision idempotent replay vs conflict rejection
+    const rev0Payload: BudgetSyncOutboxPayload = {
+      schemaVersion: 1,
+      tenantId: 'tenant-1',
+      principalId: 'principal-1',
+      agentId: 'agent-1',
+      utcDay: '2026-11-19',
+      globalGrantId: 'grant-rev-test',
+      operationId: 'op-rev-test',
+      settlementRevision: 0,
+      state: 'settled',
+      reservedMicroUsd: 500,
+      chargeMicroUsd: 200,
+      observedCostMicroUsd: 200,
+      overageMicroUsd: 0,
+      openIncidentReason: null,
+    };
+    expect(globalBudget.settleGlobal(rev0Payload)).toEqual({
+      applied: true,
+      alreadySettled: false,
+      conflict: false,
+    });
+    // Same revision identical replay -> idempotent alreadySettled
+    expect(globalBudget.settleGlobal(rev0Payload)).toEqual({
+      applied: false,
+      alreadySettled: true,
+      conflict: false,
+    });
+    // Same revision different payload -> conflict rejected, ledger unchanged!
+    expect(globalBudget.settleGlobal({ ...rev0Payload, chargeMicroUsd: 250 })).toEqual({
+      applied: false,
+      alreadySettled: false,
+      conflict: true,
+    });
+    expect(globalBudget.cumulativeChargedByOp.get('op-rev-test')).toBe(200);
+    // Late rev 1 cumulative 275 -> delta +75 -> cumulative total = 275 (not 200+275)
+    expect(
+      globalBudget.settleGlobal({
+        ...rev0Payload,
+        settlementRevision: 1,
+        chargeMicroUsd: 275,
+        observedCostMicroUsd: 275,
+      }),
+    ).toEqual({ applied: true, alreadySettled: false, conflict: false });
+    expect(globalBudget.cumulativeChargedByOp.get('op-rev-test')).toBe(275);
+
+    // 4. Direct 'turn' durable queue envelope also succeeds via consumeQueueDelivery
+    const directTurnEnv: V2DispatchEnvelope = {
+      schemaVersion: 2,
+      eventId: 'turn:direct-turn-1:ep:0',
+      tenantId: 'tenant-1',
+      agentId: 'agent-1',
+      entityKind: 'turn',
+      entityId: 'direct-turn-1',
+      queueName: 'durable_turn',
+      fenceEpoch: 0,
+    };
+    agent.db
+      .prepare(
+        `INSERT INTO probe_turns_and_tasks (
+          target_kind, target_id, execution_mode, status, lease_epoch,
+          deadline_at_ms, transcript_epoch, attempt_count, next_action_at_ms, updated_at_ms
+        ) VALUES ('turn', 'direct-turn-1', 'durable_queue', 'queued', 0, ?, 0, 0, ?, ?)`,
+      )
+      .run(clock.nowMs + 60_000, clock.nowMs + 60_000, clock.nowMs);
+    agent.db
+      .prepare(
+        `INSERT INTO v2_dispatch_outbox (
+          outbox_id, entity_kind, entity_id, queue_name, payload_json,
+          state, next_attempt_at_ms, fence_epoch, created_at_ms, updated_at_ms
+        ) VALUES (?, 'turn', 'direct-turn-1', 'durable_turn', ?, 'enqueued', ?, 0, ?, ?)`,
+      )
+      .run(
+        directTurnEnv.eventId,
+        JSON.stringify(directTurnEnv),
+        clock.nowMs + 55_000,
+        clock.nowMs,
+        clock.nowMs,
+      );
+    expect(agent.consumeQueueDelivery(directTurnEnv, 'durable_turn', 'exec-turn')).toBe('acked');
+    expect(agent.committedResults().find((r) => r.target_id === 'direct-turn-1')?.result_text).toBe(
+      'executed:direct-turn-1',
+    );
   });
 });

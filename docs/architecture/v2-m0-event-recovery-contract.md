@@ -38,12 +38,12 @@
 
 按 Joint Review **J1** 裁决：**绝不允许存在第二套可写的 Lease 状态机**。Agent A 持有全部业务实体与租约 Fencing 权威；Agent B 是 `v2_schedules`、`v2_dispatch_outbox`、`v2_recovery_coverage` 与 D1 `v2_recovery_registry` 的**规范 DDL 唯一所有者**（Agent A 规范直接引用或字节级复用以下 DDL）。
 
-| 存储域                                   | 规范 Owner              | 持有表 / 实体                                                                                                                                                                                                                                            | 核心职责与唯一权威边界                                                                                                                                                                                                                                                                                                                                                                                             |
-| ---------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **DO SQLite（业务、执行与租约权威）**    | **Agent A**             | `agent_head_meta`, `conversations`, `conversation_messages`, `assistant_turns`, `tasks`, `runs`, `task_events`, `task_results`, `approvals`, `model_attempts`, `agent_spend_days`, `agent_budget_incidents`, `workspace_manifests`, `artifacts`, `notes` | 唯一拥有 Turn/Task/Run 业务状态机、`execution_mode`（`'interactive_fast' \| 'durable_queue' \| 'device_node'`）、`lease_epoch`、`lease_owner`、`lease_expires_at_ms`、`interactive_deadline_ms`、`deadline_at_ms`、`cancel_requested_at_ms`、`provider_job_handle` 与 `model_attempts` 预算账本。**不设 `v2_execution_leases` 可写表**；B 如需只读到期视图，仅可从 A 的 `assistant_turns` / `tasks` 派生只读投影。 |
-| **DO SQLite（调度、Outbox 与覆盖记录）** | **Agent B**（共享迁移） | `v2_schedules`, `v2_dispatch_outbox`, `v2_recovery_coverage`                                                                                                                                                                                             | 唯一拥有单 Alarm 时间多路复用、外部 Queue 派发、内部 `budget_sync` 中继及本地 Generation/Fencing 覆盖记录。                                                                                                                                                                                                                                                                                                        |
-| **D1（全局独立恢复索引）**               | **Agent B**             | `v2_recovery_registry`                                                                                                                                                                                                                                   | 独立于 DO Alarm 故障域；**严格零业务数据**（禁止存放 Prompt、正文、结果摘要、凭据或 Token）。                                                                                                                                                                                                                                                                                                                      |
-| **全局预算权威**                         | **Agent A**（依赖）     | `GlobalBudgetAuthority`（`reserveGlobal` / `authorizeSend` / `settleGlobal` / `global_halt`）                                                                                                                                                            | A 拥有全局预算授权、Grant 过期与 Halt 语义；B 仅在本地 `budget_sync` Outbox 故障/未决时负责唤醒与中继重试，**绝不**独立发起退款或绕过 Halt。                                                                                                                                                                                                                                                                       |
+| 存储域                                   | 规范 Owner              | 持有表 / 实体                                                                                                                                                                                                                                            | 核心职责与唯一权威边界                                                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **DO SQLite（业务、执行与租约权威）**    | **Agent A**             | `agent_head_meta`, `conversations`, `conversation_messages`, `assistant_turns`, `tasks`, `runs`, `task_events`, `task_results`, `approvals`, `model_attempts`, `agent_spend_days`, `agent_budget_incidents`, `workspace_manifests`, `artifacts`, `notes` | 唯一拥有 Turn/Task/Run 业务状态机、`TurnExecutionMode`（`'fast_interactive' \| 'durable_queue' \| 'device'`）、`lease_epoch`、`lease_owner`、`lease_expires_at_ms`、`interactive_deadline_ms`、`deadline_at_ms`、`cancel_requested_at_ms`、`provider_job_handle` 与 `model_attempts` 预算账本。**不设 `v2_execution_leases` 可写表**；B 如需只读到期视图，仅可从 A 的 `assistant_turns` / `tasks` 派生只读投影。 |
+| **DO SQLite（调度、Outbox 与覆盖记录）** | **Agent B**（共享迁移） | `v2_schedules`, `v2_dispatch_outbox`, `v2_recovery_coverage`                                                                                                                                                                                             | 唯一拥有单 Alarm 时间多路复用、外部 Queue 派发、内部 `budget_sync` 中继及本地 Generation/Fencing 覆盖记录。                                                                                                                                                                                                                                                                                                      |
+| **D1（全局独立恢复索引）**               | **Agent B**             | `v2_recovery_registry`                                                                                                                                                                                                                                   | 独立于 DO Alarm 故障域；**严格零业务数据**（禁止存放 Prompt、正文、结果摘要、凭据或 Token）。                                                                                                                                                                                                                                                                                                                    |
+| **全局预算权威**                         | **Agent A**（依赖）     | `GlobalBudgetAuthority`（`reserveGlobal` / `authorizeSend` / `settleGlobal` / `global_halt`）                                                                                                                                                            | A 拥有全局预算授权、Grant 过期与 Halt 语义；B 仅在本地 `budget_sync` Outbox 故障/未决时负责唤醒与中继重试，**绝不**独立发起退款或绕过 Halt。                                                                                                                                                                                                                                                                     |
 
 ### 2.2 Agent B 规范共享 DDL（Canonical Shared DDL）
 
@@ -100,7 +100,7 @@ CREATE TABLE IF NOT EXISTS v2_dispatch_outbox (
   queue_name           TEXT    CHECK (queue_name IS NULL OR queue_name IN ('durable_turn', 'agent_task')),
   payload_json         TEXT    NOT NULL, -- Queue 唤醒信封或 budget_sync 确定性载荷（无 Prompt/凭据）
   operation_id         TEXT,             -- budget_sync 必填：不可变操作 ID
-  revision             INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), -- budget_sync 不可变修订号（初始结算=1，迟到修正>=2）
+  revision             INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0), -- 0 = 初始结算/释放；>= 1 = 迟到修正（匹配 A model_attempts.settlement_revision）
   state                TEXT    NOT NULL CHECK (state IN ('pending', 'enqueued', 'acked', 'dead_lettered', 'cancelled')),
   next_attempt_at_ms   INTEGER NOT NULL,
   last_enqueued_at_ms  INTEGER,
@@ -110,11 +110,11 @@ CREATE TABLE IF NOT EXISTS v2_dispatch_outbox (
   last_error_code      TEXT,
   created_at_ms        INTEGER NOT NULL,
   updated_at_ms        INTEGER NOT NULL,
-  -- J1/J5 条件约束：普通派发必须携带目标 Queue 名；budget_sync 严禁进入外部通用 Queue
+  -- J1/J5/Final Alignment 条件约束：普通派发必须显式 `queue_name IS NOT NULL`；budget_sync 严禁进入外部通用 Queue
   CHECK (
     (entity_kind = 'budget_sync' AND queue_name IS NULL AND operation_id IS NOT NULL)
     OR
-    (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IN ('durable_turn', 'agent_task'))
+    (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IS NOT NULL AND queue_name IN ('durable_turn', 'agent_task'))
   )
 );
 
@@ -194,21 +194,25 @@ CREATE INDEX IF NOT EXISTS idx_v2_recovery_due
 以下端口定义在 Agent B 契约中冻结，Agent A（PR #170 §8.2）直接引用，所有同步方法均在 `AgentHeadDO` 的同一 `storage.transactionSync()` 内执行：
 
 ```ts
-export type V2ExecutionMode = 'interactive_fast' | 'durable_queue' | 'device_node';
+export type TurnExecutionMode = 'fast_interactive' | 'durable_queue' | 'device';
 
-export interface BudgetSyncPayload {
-  readonly kind: 'budget_sync';
-  readonly op: 'settle' | 'release';
-  readonly subjectType: 'turn' | 'task';
-  readonly subjectId: string;
-  readonly attemptNo: number;
+/** 写入 v2_dispatch_outbox(entity_kind = 'budget_sync', queue_name = NULL) 的不可变权威结算载荷（A 拥有语义，B 仅原样中继） */
+export interface BudgetSyncOutboxPayload {
+  readonly schemaVersion: 1;
+  readonly tenantId: string;
+  readonly principalId: string;
+  readonly agentId: string;
+  readonly utcDay: string;
+  readonly globalGrantId: string;
   readonly operationId: string;
-  readonly revision: number; // 1 = 初始结算/释放; >= 2 = 迟到修正
-  readonly globalGrantId: string | null;
-  readonly settlementState: 'settled' | 'conservative_billed' | 'unknown_billed' | 'released';
-  readonly outcomeCode: string;
-  readonly appliedCostMicroUsd: number;
+  readonly settlementRevision: number; // 0 = 初始结算/释放；>= 1 = 迟到修正（对应 outbox.revision）
+  readonly state: 'settled' | 'conservative_billed' | 'unknown_billed' | 'released';
+  readonly reservedMicroUsd: number;
+  readonly chargeMicroUsd: number; // 累计修正后总额；Global 与本地账本按 delta = newCumulative - previouslyApplied 增量记账
+  readonly observedCostMicroUsd: number | null;
   readonly overageMicroUsd: number;
+  readonly openIncidentReason:
+    'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing' | null;
 }
 
 /** Agent B 提供的外部 D1 `v2_recovery_registry` CAS 端口（返回 D1 权威实际值，绝不回显请求参数） */
@@ -244,12 +248,13 @@ export interface RecoveryRegistryPort {
     readonly retireUpToGen: number;
   }): Promise<{ readonly retired: boolean }>;
 
-  /** J2: D1 CAS 后 ACK 丢失或 DO 崩溃修复时，读取权威 D1 实际标记 */
-  readCoverage(cmd: { readonly tenantId: string; readonly agentId: string }): Promise<{
+  /** 标准化主读接口（无别名）：D1 行不存在时返回 exists: false 与全部可空权威字段 */
+  getCoverage(cmd: { readonly tenantId: string; readonly agentId: string }): Promise<{
     readonly exists: boolean;
     readonly currentGeneration: number | null;
     readonly actualRecoveryAtMs: number | null;
     readonly status: 'armed' | 'backoff' | 'quarantined' | null;
+    readonly retryNotBeforeMs: number | null;
   }>;
 }
 
@@ -292,7 +297,7 @@ export interface EventRuntimeCoordinatorPort {
     readonly queueName: 'durable_turn' | 'agent_task' | null;
     readonly payloadJson: string;
     readonly operationId?: string;
-    readonly revision?: number;
+    readonly revision?: number; // 0-based: 初始=0，迟到修正>=1
     readonly fenceEpoch: number;
     readonly nextAttemptAtMs: number;
   }): void;
@@ -320,12 +325,12 @@ export interface EventRuntimeCoordinatorPort {
   recomputeAlarmSync(nowMs: number): number | null;
 }
 
-/** Agent A 向 Agent B 暴露的同步业务状态读/收敛端口（B 在 alarm/reconcile 的 transactionSync 内调用） */
+/** Agent A 向 Agent B 暴露的同步业务状态读/收敛端口（B 在 alarm()/reconcile/queue 的 transactionSync 内调用） */
 export interface AuthoritativeBusinessPort {
   /** 返回所有已接受业务义务（Turn/Task/Schedule）及未决 budget_sync 的最早需发现时间戳 D(O)；无则 null */
   earliestRequiredDiscoveryAtMsSync(nowMs: number): number | null;
 
-  /** 返回所有到期且需 Alarm 处理的业务动作（到期租约、Pre-claim 超时、待重试） */
+  /** 返回所有到期且需 Alarm 处理的业务动作（到期租约、Pre-claim 超时、取消/重试到期） */
   listDueBusinessActionsSync(
     nowMs: number,
     limit: number,
@@ -336,25 +341,30 @@ export interface AuthoritativeBusinessPort {
     readonly deadlineAtMs: number;
   }>;
 
-  /** 使用 A 的权威 Turn/Task/Run FSM 收敛到期业务项，并返回可选的补发 Outbox 指令 */
+  /** 使用 A 的权威 Turn/Task/Run FSM 收敛到期业务项（绝不取消 budget_sync Outbox） */
   convergeDueBusinessItemSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void;
 
-  /** 返回当前业务实体的权威 fenceEpoch 与 deadlineAtMs（供 Queue 严格校验与优雅期封顶） */
+  /** 返回当前业务实体的权威 targetKind/targetId、currentLeaseEpoch 与 deadlineAtMs（供 Queue 严格校验与期限计算） */
   inspectOutboxTargetSync(
     entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff',
     entityId: string,
   ): {
     readonly exists: boolean;
+    readonly targetKind: 'turn' | 'task' | null;
+    readonly targetId: string | null;
     readonly currentLeaseEpoch: number;
     readonly deadlineAtMs: number;
     readonly isTerminal: boolean;
     readonly cancelRequested: boolean;
   };
 
-  /** 物化到期 Schedule，在 A 的业务表中创建受约束 Task/Occurrence 并写入 Outbox */
+  /** 在同一 transactionSync 内将到期 schedule_occurrence 解析来源并在 A 业务表中创建受约束 Task/Turn 及 Outbox */
   materializeScheduleOccurrenceSync(scheduleId: string, occurrenceSeq: number, nowMs: number): void;
 }
 ```
+
+> [!NOTE]
+> Durable Execution Worker 调用 Agent A 暴露的 `AgentHeadRecoveryPort.claimDurableWork({ envelope: V2DispatchEnvelope, workerId, leaseMs })`（见 M0-A §8.2），须原样传递封闭 `V2DispatchEnvelope`（覆盖 `'turn' | 'task' | 'schedule_occurrence' | 'handoff'` 全部 4 种普通持久化 `entityKind`），并在同一个 `transactionSync` 内完成 Outbox 五元组校验及底层 `(targetKind, targetId)` 解析。
 
 ---
 
@@ -389,22 +399,26 @@ Queue 投递（包括延迟投递、重放、乱序及 DLQ）**不具任何状�
    - 从 `AuthoritativeBusinessPort.inspectOutboxTargetSync` 读取当前业务 `currentLeaseEpoch`：必须满足 **`envelope.fenceEpoch === currentLeaseEpoch`**（**同时拒绝 `<` 陈旧信封与 `>` 未来/伪造信封！**）。
 4. **Outbox 状态前置检查**：仅当 `outbox.state IN ('pending', 'enqueued', 'dead_lettered')` 时允许进入 `claimDurableWork`；若已为 `'acked'` 或 `'cancelled'`，直接幂等返回 ACK，不做任何修改。
 
-### 3.3 B1 期限内 Re-enqueue 优雅期封顶（J5）
+### 3.3 期限边界与 Re-enqueue 优雅期封顶（J5 & P2 机械对齐）
 
-在 B1 `60_000 ms` 总期限场景下，若将 `next_attempt_at_ms` 无条件推迟 `60_000 ms`，会直接错过期限前的合法重试窗口。因此 Re-enqueue 延后必须受剩余合格时间封顶，同时设置下限防忙循环：
+设剩余合格时间窗口为 $\text{remaining} = \text{deadlineAtMs} - \text{nowMs}$，共同冻结**重试下限 `1_000 ms`（1 s）与安全边际 `5_000 ms`（5 s）**：
+
+- 若 `remaining <= 1_000`：**不再安排新的队列重试**，仅武装 DO Alarm 至 `deadlineAtMs` 执行正常超时收敛（普通期限到期绝不取消 `budget_sync` Outbox）。
+- 若 `remaining > 1_000`：
 
 $$
-\text{reenqueueAtMs} = \min\Big(\text{nowMs} + 60\_000,\; \max\big(\text{nowMs} + 5\_000,\; \text{deadlineAtMs} - 5\_000\big)\Big)
+\text{nextAttemptAtMs} = \min\Big(\text{nowMs} + 60\_000,\; \max\big(\text{nowMs} + 1\_000,\; \text{deadlineAtMs} - 5\_000\big)\Big)
 $$
 
-（若 `nowMs >= deadlineAtMs`，不再重投，直接由 DO `transactionSync()` 按 ADR-0002 收敛终态并标记 Outbox `'acked'`。）
+保证严格满足 $\text{nowMs} < \text{nextAttemptAtMs} < \text{deadlineAtMs}$（例如 `remaining = 1_001 ms` 时取 `nowMs + 1_000 < deadlineAtMs`，既防忙循环又不排到期限之后）。
 
 ### 3.4 `budget_sync` 内部中继协议（J5）
 
-- **同事务落盘**：Agent A 提交 `model_attempts` 结算/释放与 `agent_spend_days` 变更时，在同一 `transactionSync()` 调用 `enqueueDurableOutboxSync` 写入 `entity_kind = 'budget_sync'`、`queue_name = NULL`、`operation_id`、`revision`（初始结算为 `1`，迟到费用修正为 `2, 3...`）。
-- **永不随业务取消**：`cancelTurn`、`cancelTask`、`clearTranscript` 只能调用 `cancelEntityOutboxSync('turn'|'task', ...)`，**绝对禁止取消 `budget_sync` 行**。
+- **同事务落盘**：Agent A 提交 `model_attempts` 结算/释放与 `agent_spend_days` 变更时，在同一 `transactionSync()` 调用 `enqueueDurableOutboxSync` 写入 `entity_kind = 'budget_sync'`、`queue_name = NULL`、`operation_id`、`revision`（**`0` 基：初始结算/释放为 `0`，迟到修正为 `>= 1`**），载荷为不可变 `BudgetSyncOutboxPayload`。
+- **累计总额 vs 增量记账**：`chargeMicroUsd` 与 `observedCostMicroUsd` 始终代表该 `operationId` 的**累计修正后总额**，Global 与本地账本仅按 `delta = newCumulativeCharge - previouslyAppliedCharge` 增量记账，绝不重复扣费。Agent B 仅负责原样中继，绝不自行决定预算扣减或发起独立退款。
+- **永不随业务取消**：`cancelTurn`、`cancelTask`、`clearTranscript` 及普通期限到期收敛只能调用 `cancelEntityOutboxSync('turn'|'task'|..., ...)`，**绝对禁止取消 `budget_sync` 行**。
 - **独立恢复覆盖保留**：`budget_sync` 未到达 `'acked'` 前计入 `earliestRequiredDiscoveryAtMsSync()`，因此 D1 覆盖**绝不能被退休或延后到 `budget_sync.next_attempt_at_ms + 45_000` 之后**。
-- **幂等键**：`GlobalBudgetAuthority.settleGlobal` 与 `v2_dispatch_outbox` 共同以不可变 `(operation_id, revision)` 作为唯一幂等键；仅在收到全局权威 `settleGlobal` 明确确认后才将 Outbox 置为 `'acked'`。
+- **幂等键与同修订冲突拒绝**：`GlobalBudgetAuthority.settleGlobal` 与 `v2_dispatch_outbox` 共同以不可变 `(operation_id, revision)` 作为唯一幂等键；同修订相同载荷幂等返回 `alreadySettled: true`，同修订不同载荷拒绝并返回 `conflict: true`，仅在收到全局权威 `settleGlobal` 明确确认后才将 Outbox 置为 `'acked'`。
 
 ### 3.5 发布前后崩溃与状态流转图
 
@@ -489,8 +503,8 @@ stateDiagram-v2
    - D1 中原有旧到期标记触发 Sweeper 调用 `reconcileFromRegistry(expectedGen)`。
    - **禁止无条件返回 `noop_stale`**：即使 `expectedGen < cov.generation`（因本地崩溃前已推进 `gen` 并写下 `pending_kind`），只要 `cov.pending_kind !== null` 或 `earliestRequiredDiscoveryAtMsSync() !== null`，DO **必须**分配更高世代并执行 `repair_ensure`（目标取 `MIN(pending_target_at_ms, earliestOpenD)`）或重放 `postpone` / `retire`！
 3. **D1 CAS 已成功、ACK 丢失 / DO 在 `confirmCoverageSync` 前崩溃**：
-   - D1 标记随后到期触发 Sweeper（或 DO 在修复路径调用 `readCoverage`）：
-   - 读回 D1 权威 `(exists, currentGeneration, actualRecoveryAtMs)`：
+   - D1 标记随后到期触发 Sweeper（或 DO 在修复路径调用标准化主读 `getCoverage`）：
+   - 读回 D1 权威 `(exists, currentGeneration, actualRecoveryAtMs, status, retryNotBeforeMs)`：
      - 若 `exists` 且 `actualRecoveryAtMs <= earliestOpenD`（且当前未处于需要更早时间的冲突）：以当前（或推进后）世代安全确认覆盖，并继续派发/重装 Alarm；
      - 若 `!exists`（`retire` 已远程成功）且本地确实零义务：清除 `pending_kind = NULL` 保持 `'uncovered'`；
      - 若 `!exists` 但本地仍有未决义务或 `actualRecoveryAtMs > earliestOpenD`：立即以更高世代执行 `repair_ensure`！
@@ -550,7 +564,7 @@ sequenceDiagram
 ### 7.2 移交准入、Fencing 与不确定结果防护（Agent A 主责执行，B 消费移交）
 
 1. **Agent A 移交校验（禁止洗白过期租约或超期任务）**：`handoffTurnToDurable` 在 `transactionSync()` 内以当前服务器时间 `nowMs` 严格核验：
-   - `status === 'running' && execution_mode === 'interactive_fast'`
+   - `status === 'running' && execution_mode === 'fast_interactive'`
    - `active_run_id === req.runId && lease_epoch === req.leaseEpoch && lease_owner === req.leaseOwner`
    - `lease_expires_at_ms > nowMs`（**已过期租约必须拒绝！**）
    - `nowMs < interactive_deadline_ms` 且 `nowMs < deadline_at_ms`（**超过交互/总期限必须拒绝！**）
@@ -588,24 +602,24 @@ sequenceDiagram
 
 ## 9. 确定性故障注入测试矩阵（覆盖 J1–J5）
 
-| 用例 ID   | 注入故障 / 竞态场景                                                                                                                         | 预期状态转换与恢复结果                                                                                                                                                   | 强制断言                                                   |
-| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
-| **FI-01** | **DO 写 `pending` 后、D1 CAS 前崩溃（含 `ensure`/`postpone`/`retire`）**                                                                    | 原 D1 到期标记触发 Sweeper，DO 读 `pending_kind` 与实际义务后即使 `observedGen` 落后仍升代 `repair_ensure` / 重放。                                                      | 禁止无条件 `noop_stale`；无用户流量完成修复。              |
-| **FI-02** | **D1 CAS 成功后、ACK 丢失 / `confirmCoverageSync` 前崩溃**                                                                                  | 读回 D1 权威 `readCoverage`；覆盖足够则确认，否则或已误删则升代 `repair_ensure`。                                                                                        | 不丢已接受义务或未来 Schedule。                            |
-| **FI-03** | **D1 拒绝 / 陈旧 `upsertCoverage`（并发更高代抢占）**                                                                                       | 返回 `{ accepted: false, currentGeneration, actualRecoveryAtMs }`；DO 不得按请求参数确认，必须重验或升代重试/Fail Closed。                                               | 绝不虚报 `'covered'`。                                     |
-| **FI-04** | **DO 提交后 `Queue.send()` 前崩溃 / `send()` 后更新 Outbox 前崩溃**                                                                         | 2s Alarm 补发；重复消息由 Outbox 精确五元组校验 + `fenceEpoch === currentLeaseEpoch` 判重 ACK。                                                                          | `duplicate_commit_count = 0`。                             |
-| **FI-05** | **伪造/篡改 Queue 信封（错误 `outbox_id` / `queue_name` / `entity_kind` / 跨租户 / 未来 `fenceEpoch > current` / 试图投递 `budget_sync`）** | DO 在写任何状态前全字段校验失败并拒绝，零表行修改。                                                                                                                      | 未来/陈旧/不匹配信封全部被拒。                             |
-| **FI-06** | **B1 60s 期限内 Re-enqueue 优雅期封顶**                                                                                                     | `next_attempt_at_ms` 被剩余 `deadline_at_ms - 5s` 封顶（下限 `5s` 防忙循环），期限前允许合规重试，超期按 ADR-0002 收敛。                                                 | 不因固定 60s 优雅期错过 B1 期限前重试。                    |
-| **FI-07** | **Queue 5 次重试耗尽进 DLQ**                                                                                                                | `applyOutboxDeadLetterSync` 仅更新匹配 `outbox_id + fenceEpoch`，重装退避 Alarm 或超期终态收敛。                                                                         | 零静默丢弃。                                               |
-| **FI-08** | **初次 Alarm + 全部 6 次重试失败（全客户端离线，含 Pending + 未来 Schedule）**                                                              | D1 保留未改写的 `next_recovery_at_ms`，Sweeper 检出并调用 `reconcileFromRegistry` 派发 Pending 并重装未来 Schedule Alarm。                                               | 发现 `<= 2 min`，恢复 `<= 5 min`，未来 Schedule 准时触发。 |
-| **FI-09** | **Sweeper RPC 失败进入 `backoff` / `quarantined` + 过期 Sweeper 回调**                                                                      | `next_recovery_at_ms` 保持不变，仅更新 `retry_not_before_ms`；`quarantined` 仍在索引中降频扫描；过期 `sweep_lease_owner` 回调被 CAS 拒绝；已覆盖对话照常零 D1 I/O 成功。 | 退避/隔离不破坏准入覆盖，依赖恢复后无需 App 自动自愈。     |
-| **FI-10** | **并发 Sweeper 退役 vs 已覆盖新对话 / 并发延后 vs 更早截止义务**                                                                            | 退役前 DO 先置 `'uncovered'` + `gen+1`，旧 `DELETE` 匹配 0 行；更早义务抢占 `gen+2` 与 `MIN(...)`，旧 `postpone` 匹配 0 行。                                             | 新对话与更早时间窗绝不被抹除。                             |
-| **FI-11** | **延后 `UPDATE` 遇 D1 不明确超时**                                                                                                          | DO 保留 `'registering'`（**不回退**旧 `'covered'`），后续重同步。                                                                                                        | 绝不误认为旧覆盖仍有效。                                   |
-| **FI-12** | **D1 不可用（Direct / 已覆盖 / 未覆盖 / Unknown-ACK）**                                                                                     | Direct 与已覆盖继续；未覆盖 Fail Closed 返回 `503 DB_UNAVAILABLE`；Unknown-ACK 经 B1 N-2 对账。                                                                          | B1 兼容，未覆盖零提交。                                    |
-| **FI-13** | **Fast Path `120s` 持续 15s 续租后移交（`105–115s`）vs 过期租约/超期/取消/错误 Owner 尝试移交**                                             | 持续续租下移交成功且 **`deadline_at_ms` 保持原 600s 不变**；过期（未续租 `>45s`）、超总期限、已取消或错误 Owner 的移交全部被拒绝。                                       | 移交绝不洗白过期租约或延长总期限。                         |
-| **FI-14** | **Fast Path 移交携带 `provider_job_handle` vs 缺失句柄不确定结果 + 静默失联 (`<= 60s`)**                                                    | 有句柄仅查询/轮询不重算；无句柄且已发出请求进入对账不盲重放；静默失联 45s 过期后 `<= 60s` 进入对账。                                                                     | 仅 1 次推理计费，仅 1 条终态结果。                         |
-| **FI-15** | **`budget_sync` 跨 `cancelTurn` / `clearTranscript` 存活 + `(operation_id, revision)` 迟到修正**                                            | Transcript 清空或 Turn 取消后 `budget_sync` 仍保持待中继且覆盖不被退休；`rev=1` 与迟到 `rev=2` 均幂等到达全局确认后才 `'acked'`。                                        | 会计义务绝不随会话删除丢失。                               |
-| **FI-16** | **DST Spring-Forward / Fall-Back 与 ADR-0001/0002**                                                                                         | Spring-forward 跳变后首有效时刻触发；Fall-back 不双倍触发；取消优先于重试；Pre-claim 超时不虚构 Run。                                                                    | 调度准确、取消绝对优先。                                   |
+| 用例 ID   | 注入故障 / 竞态场景                                                                                                                                                                                     | 预期状态转换与恢复结果                                                                                                                                                   | 强制断言                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| **FI-01** | **DO 写 `pending` 后、D1 CAS 前崩溃（含 `ensure`/`postpone`/`retire`）**                                                                                                                                | 原 D1 到期标记触发 Sweeper，DO 读 `pending_kind` 与实际义务后即使 `observedGen` 落后仍升代 `repair_ensure` / 重放。                                                      | 禁止无条件 `noop_stale`；无用户流量完成修复。              |
+| **FI-02** | **D1 CAS 成功后、ACK 丢失 / `confirmCoverageSync` 前崩溃**                                                                                                                                              | 读回 D1 权威 `getCoverage`；覆盖足够则确认，否则或已误删则升代 `repair_ensure`。                                                                                         | 不丢已接受义务或未来 Schedule。                            |
+| **FI-03** | **D1 拒绝 / 陈旧 `upsertCoverage`（并发更高代抢占）**                                                                                                                                                   | 返回 `{ accepted: false, currentGeneration, actualRecoveryAtMs }`；DO 不得按请求参数确认，必须重验或升代重试/Fail Closed。                                               | 绝不虚报 `'covered'`。                                     |
+| **FI-04** | **DO 提交后 `Queue.send()` 前崩溃 / `send()` 后更新 Outbox 前崩溃**                                                                                                                                     | 2s Alarm 补发；重复消息由 Outbox 精确五元组校验 + `fenceEpoch === currentLeaseEpoch` 判重 ACK。                                                                          | `duplicate_commit_count = 0`。                             |
+| **FI-05** | **伪造/篡改 Queue 信封与 `queue_name IS NULL` 越界（错误 `outbox_id` / `queue_name` / `entity_kind` / 跨租户 / 未来 `fenceEpoch > current` / 试图投递 `budget_sync` / 普通信封 `queue_name IS NULL`）** | SQLite CHECK 禁止普通信封 `queue_name IS NULL`；DO 在写任何状态前全字段校验失败并拒绝，零表行修改。                                                                      | 未来/陈旧/不匹配信封全部被拒。                             |
+| **FI-06** | **B1 60s 期限边界（`remaining = 0 / 500 / 1000 / 1001 ms`）Re-enqueue 封顶**                                                                                                                            | `remaining <= 1_000` 不再排重试而直接武装 `deadlineAtMs`；`remaining > 1_000` 取 `min(now+60s, max(now+1s, deadline-5s))`；期限到期不取消 `budget_sync`。                | 严禁安排到 `deadlineAtMs` 之后或漏掉合规重试。             |
+| **FI-07** | **Queue 5 次重试耗尽进 DLQ**                                                                                                                                                                            | `applyOutboxDeadLetterSync` 仅更新匹配 `outbox_id + fenceEpoch`，重装退避 Alarm 或超期终态收敛。                                                                         | 零静默丢弃。                                               |
+| **FI-08** | **初次 Alarm + 全部 6 次重试失败（全客户端离线，含 Pending + 未来 Schedule）**                                                                                                                          | D1 保留未改写的 `next_recovery_at_ms`，Sweeper 检出并调用 `reconcileFromRegistry` 派发 Pending 并重装未来 Schedule Alarm。                                               | 发现 `<= 2 min`，恢复 `<= 5 min`，未来 Schedule 准时触发。 |
+| **FI-09** | **Sweeper RPC 失败进入 `backoff` / `quarantined` + 过期 Sweeper 回调**                                                                                                                                  | `next_recovery_at_ms` 保持不变，仅更新 `retry_not_before_ms`；`quarantined` 仍在索引中降频扫描；过期 `sweep_lease_owner` 回调被 CAS 拒绝；已覆盖对话照常零 D1 I/O 成功。 | 退避/隔离不破坏准入覆盖，依赖恢复后无需 App 自动自愈。     |
+| **FI-10** | **并发 Sweeper 退役 vs 已覆盖新对话 / 并发延后 vs 更早截止义务**                                                                                                                                        | 退役前 DO 先置 `'uncovered'` + `gen+1`，旧 `DELETE` 匹配 0 行；更早义务抢占 `gen+2` 与 `MIN(...)`，旧 `postpone` 匹配 0 行。                                             | 新对话与更早时间窗绝不被抹除。                             |
+| **FI-11** | **延后 `UPDATE` 遇 D1 不明确超时**                                                                                                                                                                      | DO 保留 `'registering'`（**不回退**旧 `'covered'`），后续重同步。                                                                                                        | 绝不误认为旧覆盖仍有效。                                   |
+| **FI-12** | **D1 不可用（Direct / 已覆盖 / 未覆盖 / Unknown-ACK）**                                                                                                                                                 | Direct 与已覆盖继续；未覆盖 Fail Closed 返回 `503 DB_UNAVAILABLE`；Unknown-ACK 经 B1 N-2 对账。                                                                          | B1 兼容，未覆盖零提交。                                    |
+| **FI-13** | **Fast Path `120s` 持续 15s 续租后移交（`105–115s`）vs 过期租约/超期/取消/错误 Owner 尝试移交**                                                                                                         | 持续续租下移交成功且 **`deadline_at_ms` 保持原 600s 不变**；过期（未续租 `>45s`）、超总期限、已取消或错误 Owner 的移交全部被拒绝。                                       | 移交绝不洗白过期租约或延长总期限。                         |
+| **FI-14** | **Fast Path 移交携带 `provider_job_handle` vs 缺失句柄不确定结果 + 静默失联 (`<= 60s`)**                                                                                                                | 有句柄仅查询/轮询不重算；无句柄且已发出请求进入对账不盲重放；静默失联 45s 过期后 `<= 60s` 进入对账。                                                                     | 仅 1 次推理计费，仅 1 条终态结果。                         |
+| **FI-15** | **`budget_sync` 跨 `cancelTurn` / `clearTranscript` / 期限到期存活 + `(operation_id, revision)` 累计修正与冲突拒绝**                                                                                    | Transcript 清空、取消或普通期限到期后 `budget_sync` 仍保持待中继且覆盖不被退休；`rev=0`（初始）与迟到 `rev=1`（累计总额）按增量 delta 记账，同修订冲突载荷被拒绝。       | 会计义务绝不丢失且绝不双倍扣费。                           |
+| **FI-16** | **DST Spring-Forward / Fall-Back 与 ADR-0001/0002**                                                                                                                                                     | Spring-forward 跳变后首有效时刻触发；Fall-back 不双倍触发；取消优先于重试；Pre-claim 超时不虚构 Run。                                                                    | 调度准确、取消绝对优先。                                   |
 
 ---
 

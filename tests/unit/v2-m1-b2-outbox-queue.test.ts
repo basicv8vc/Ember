@@ -683,7 +683,9 @@ describe('V2-M1-B2 Outbox, Queue Fencing, DLQ, Budget Relay, and Schedule Materi
     });
 
     // Persisted invalid interval configuration is isolated before occurrence writes.
-    db.exec("UPDATE v2_schedules SET schedule_kind = 'interval' WHERE schedule_id = 'sched-corrupt'");
+    db.exec(
+      "UPDATE v2_schedules SET schedule_kind = 'interval' WHERE schedule_id = 'sched-corrupt'",
+    );
     const batchRes = storage.transactionSync(() =>
       repo.processDueSchedulesSync(business, 150_000, 10),
     );

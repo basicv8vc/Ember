@@ -900,13 +900,23 @@ export class AlarmMultiplexer {
   }
 
   /**
-   * Synchronizes the platform DO Alarm on-demand only when target !== persisted `armed_alarm_at_ms`.
+   * Synchronizes the platform DO Alarm on-demand when target changes or when an active alarm
+   * at/before `nowMs` was just consumed during `runAlarmCycle`.
    */
-  async syncPlatformAlarm(targetAlarmAtMs: number | null, nowMs: number): Promise<boolean> {
+  async syncPlatformAlarm(
+    targetAlarmAtMs: number | null,
+    nowMs: number,
+    options?: { readonly forceRearmConsumed?: boolean },
+  ): Promise<boolean> {
     const current = this.#storage.transactionSync(
       () => this.#coverage.getCoverageRowSync()?.armed_alarm_at_ms ?? null,
     );
-    if (current === targetAlarmAtMs) {
+    const consumedCurrentAlarm =
+      options?.forceRearmConsumed === true &&
+      targetAlarmAtMs !== null &&
+      current !== null &&
+      current <= nowMs;
+    if (current === targetAlarmAtMs && !consumedCurrentAlarm) {
       return false;
     }
     if (targetAlarmAtMs === null) {
@@ -986,7 +996,7 @@ export class AlarmMultiplexer {
     const nextAlarmAtMs = this.#storage.transactionSync(() =>
       this.#coordinator.recomputeAlarmSync(cmd.nowMs),
     );
-    await this.syncPlatformAlarm(nextAlarmAtMs, cmd.nowMs);
+    await this.syncPlatformAlarm(nextAlarmAtMs, cmd.nowMs, { forceRearmConsumed: true });
 
     if (cmd.registry !== undefined) {
       await this.#coverage.syncPostCycleCoverage({

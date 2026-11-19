@@ -544,4 +544,57 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
     doHarness.db.close();
     d1Harness.db.close();
   });
+
+  it('re-arms consumed alarm when target <= nowMs and schedules cancel_converge immediately', async () => {
+    const doHarness = createNodeDoHarness();
+    const business = new MockBusinessState();
+    const coverage = new RecoveryCoverageCoordinator({
+      storage: doHarness.storage,
+      tenantId: 't1',
+      agentId: 'a1',
+      business,
+    });
+    const coordinator = new OutboxCoordinator(doHarness.storage.sql, {
+      storage: doHarness.storage,
+      business,
+    });
+    const schedules = new ScheduleRepository(doHarness.storage.sql);
+    const multiplexer = new AlarmMultiplexer({
+      storage: doHarness.storage,
+      business,
+      coordinator,
+      schedules,
+      coverage,
+    });
+
+    // Ensure coverage row exists and arm initial alarm at T=10_000
+    coverage.inspectCoverageSync(55_000, 1_000);
+    await multiplexer.syncPlatformAlarm(10_000, 1_000);
+    const initialCalls = doHarness.getMetrics().setAlarmCalls;
+
+    // Schedule two items still targeting <= 10_000 (one converges in cycle, one cancel_converge remains/or >10 items)
+    for (let i = 0; i < 11; i += 1) {
+      business.dueItems.push({
+        targetKind: 'turn',
+        targetId: `turn-batch-${i}`,
+        actionKind: i === 10 ? 'cancel_converge' : 'preclaim_deadline',
+        deadlineAtMs: i === 10 ? 90_000 : 10_000,
+      });
+    }
+
+    // runAlarmCycle processes batch limit=10 at T=10_000; 11th item is cancel_converge (deadline 90_000) -> MUST re-arm at nowMs=10_000!
+    const cycleRes = await multiplexer.runAlarmCycle({
+      nowMs: 10_000,
+      queues: {
+        durable_turn: { send: async () => Promise.resolve() },
+        agent_task: { send: async () => Promise.resolve() },
+      },
+      globalBudget: { settleGlobal: async () => Promise.resolve({ accepted: true }) },
+      batchLimit: 10,
+    });
+
+    expect(cycleRes.nextAlarmAtMs).toBe(10_000);
+    expect(doHarness.getMetrics().setAlarmCalls).toBe(initialCalls + 1);
+    doHarness.db.close();
+  });
 });

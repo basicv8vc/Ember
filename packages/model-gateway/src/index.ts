@@ -136,3 +136,12 @@ export {
   type OpenRouterModelGatewayOptions,
 } from './providers/openrouter.js';
 export { createModelGateway, type CreateModelGatewayOptions } from './gateway.js';
+export {
+  FakeStreamingModelGateway,
+  FAKE_STREAM_MAX_REPLY_CHARS,
+  type FakeConversationJob,
+  type FakeConversationJobStatus,
+  type FakeConversationJobStore,
+  type FakeConversationStreamEvent,
+  type FakeConversationStreamRequest,
+} from './fake-stream.js';

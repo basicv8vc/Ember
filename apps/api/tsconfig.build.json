@@ -10,6 +10,7 @@
   "references": [
     { "path": "../../packages/domain/tsconfig.build.json" },
     { "path": "../../packages/contracts/tsconfig.build.json" },
+    { "path": "../../packages/model-gateway/tsconfig.build.json" },
     { "path": "../../packages/postgres/tsconfig.build.json" }
   ],
   "include": ["src/**/*.ts"]

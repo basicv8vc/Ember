@@ -1,8 +1,9 @@
 {
   "scenarioId": "ember-v2-m0-model-routing",
   "evidenceKind": "simulated_synthetic",
-  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
-  "timestamp": "2026-11-19T12:02:16.192Z",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:39:22.592Z",
+  "evaluationDateUtc": "2026-11-19",
   "evalCaseCount": 8,
   "candidates": [
     {
@@ -10,7 +11,9 @@
       "providerId": "openrouter",
       "modelId": "nvidia/nemotron-3.5-lightning",
       "placement": "cloud",
-      "approvalStatus": "approved_smoke_staging",
+      "approvalStatus": "smoke_expired_internal_staging_only",
+      "approvalDetail": "Smoke grant L4C3-B2-OPENROUTER-DEEPINFRA-2026-11-11 (expired); internal stagingAlpha EMBER-CLOUD-INTERNAL-MULTI-TURN effective",
+      "authorizationEligible": true,
       "rateProvenance": "official_price_verified",
       "inputUsdPerMillion": 0.06,
       "outputUsdPerMillion": 0.16,
@@ -18,13 +21,15 @@
       "simulatedTtftP95Ms": 950,
       "simulatedCompletionP50Ms": 1350,
       "simulatedCompletionP95Ms": 2600,
-      "accuracyPercent": 76,
-      "taskSuccessRatePercent": 87.5,
+      "assumedAccuracyPercent": 86,
+      "capabilityEligibleCount": 7,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 75,
       "retryRatePercent": 4.5,
       "avgInputTokensPerTask": 2773,
       "avgOutputTokensPerTask": 241,
       "conservativeReservedMicroUsd": 249,
-      "costPerSuccessfulTaskUsd": 0.000245,
+      "costPerSuccessfulTaskUsd": 0.000286,
       "capabilities": {
         "toolCalling": true,
         "strictJson": true,
@@ -35,7 +40,7 @@
         "zdr": true,
         "dataCollectionDeny": true,
         "localOnly": false,
-        "summary": "OpenRouter pinned DeepInfra ZDR (dataCollection=deny)"
+        "summary": "OpenRouter pinned [deepinfra] ZDR (dataCollection=deny)"
       }
     },
     {
@@ -43,7 +48,9 @@
       "providerId": "openrouter",
       "modelId": "deepseek/deepseek-v4.1-flash-1017",
       "placement": "cloud",
-      "approvalStatus": "approved_smoke_staging",
+      "approvalStatus": "smoke_expired_internal_staging_only",
+      "approvalDetail": "Smoke grant L4C4-B2-OPENROUTER-DEEPINFRA-VISION-2026-11-17 (expired); internal stagingAlpha EMBER-CLOUD-INTERNAL-VISION-MULTI-TURN effective",
+      "authorizationEligible": true,
       "rateProvenance": "official_price_verified",
       "inputUsdPerMillion": 0.098,
       "outputUsdPerMillion": 0.294,
@@ -51,13 +58,15 @@
       "simulatedTtftP95Ms": 1350,
       "simulatedCompletionP50Ms": 2100,
       "simulatedCompletionP95Ms": 4100,
-      "accuracyPercent": 92.9,
-      "taskSuccessRatePercent": 100,
+      "assumedAccuracyPercent": 92.7,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
       "retryRatePercent": 3,
       "avgInputTokensPerTask": 2773,
       "avgOutputTokensPerTask": 241,
       "conservativeReservedMicroUsd": 423,
-      "costPerSuccessfulTaskUsd": 0.000353,
+      "costPerSuccessfulTaskUsd": 0.000403,
       "capabilities": {
         "toolCalling": true,
         "strictJson": true,
@@ -68,7 +77,7 @@
         "zdr": true,
         "dataCollectionDeny": true,
         "localOnly": false,
-        "summary": "OpenRouter pinned DeepInfra fp8 ZDR (vision + tools, dataCollection=deny)"
+        "summary": "OpenRouter pinned [deepinfra] ZDR (dataCollection=deny)"
       }
     },
     {
@@ -77,6 +86,8 @@
       "modelId": "gpt-5.6-luna",
       "placement": "cloud",
       "approvalStatus": "pending_cto_approval",
+      "approvalDetail": "Pending CTO approval: direct OpenAI routing has not been approved; the current approval is OpenRouter-only",
+      "authorizationEligible": false,
       "rateProvenance": "unverified",
       "inputUsdPerMillion": 0.2,
       "outputUsdPerMillion": 1.2,
@@ -84,13 +95,15 @@
       "simulatedTtftP95Ms": 1500,
       "simulatedCompletionP50Ms": 2400,
       "simulatedCompletionP95Ms": 4800,
-      "accuracyPercent": 96.4,
-      "taskSuccessRatePercent": 100,
+      "assumedAccuracyPercent": 96.4,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
       "retryRatePercent": 1.5,
       "avgInputTokensPerTask": 2773,
       "avgOutputTokensPerTask": 241,
       "conservativeReservedMicroUsd": 1170,
-      "costPerSuccessfulTaskUsd": 0.000856,
+      "costPerSuccessfulTaskUsd": 0.000979,
       "capabilities": {
         "toolCalling": true,
         "strictJson": true,
@@ -101,7 +114,7 @@
         "zdr": false,
         "dataCollectionDeny": false,
         "localOnly": false,
-        "summary": "Direct OpenAI candidate (pending CTO approval & privacy/ZDR review)"
+        "summary": "Cloud endpoint without repo-pinned ZDR/dataCollection=deny policy"
       }
     },
     {
@@ -109,7 +122,9 @@
       "providerId": "illustrative-provider",
       "modelId": "adr0006-budget-reference-model",
       "placement": "cloud",
-      "approvalStatus": "research_profile",
+      "approvalStatus": "research_only",
+      "approvalDetail": "Illustrative cost benchmark quote from ADR-0006; not a real model pin",
+      "authorizationEligible": false,
       "rateProvenance": "illustrative",
       "inputUsdPerMillion": 0.5,
       "outputUsdPerMillion": 2,
@@ -117,13 +132,15 @@
       "simulatedTtftP95Ms": 1800,
       "simulatedCompletionP50Ms": 2800,
       "simulatedCompletionP95Ms": 5500,
-      "accuracyPercent": 94.9,
-      "taskSuccessRatePercent": 100,
+      "assumedAccuracyPercent": 94.9,
+      "capabilityEligibleCount": 8,
+      "privacyEligibleCount": 7,
+      "fullyEligibleSuccessRatePercent": 87.5,
       "retryRatePercent": 2,
       "avgInputTokensPerTask": 2773,
       "avgOutputTokensPerTask": 241,
       "conservativeReservedMicroUsd": 2411,
-      "costPerSuccessfulTaskUsd": 0.001906,
+      "costPerSuccessfulTaskUsd": 0.002178,
       "capabilities": {
         "toolCalling": true,
         "strictJson": true,
@@ -134,7 +151,7 @@
         "zdr": false,
         "dataCollectionDeny": false,
         "localOnly": false,
-        "summary": "ADR-0006 cost envelope illustrative pricing ($0.50/$2.00 per 1M)"
+        "summary": "Illustrative cloud quote only (no ZDR or approval)"
       }
     },
     {
@@ -142,7 +159,9 @@
       "providerId": "apple-device-local",
       "modelId": "local-4bit-instruct-research",
       "placement": "device_local",
-      "approvalStatus": "research_profile",
+      "approvalStatus": "research_only",
+      "approvalDetail": "M2+ on-device research profile; requires device runtime implementation & quality gate",
+      "authorizationEligible": false,
       "rateProvenance": "zero_egress_local",
       "inputUsdPerMillion": 0,
       "outputUsdPerMillion": 0,
@@ -150,8 +169,10 @@
       "simulatedTtftP95Ms": 420,
       "simulatedCompletionP50Ms": 1100,
       "simulatedCompletionP95Ms": 2400,
-      "accuracyPercent": 50.9,
-      "taskSuccessRatePercent": 37.5,
+      "assumedAccuracyPercent": 81.4,
+      "capabilityEligibleCount": 5,
+      "privacyEligibleCount": 8,
+      "fullyEligibleSuccessRatePercent": 37.5,
       "retryRatePercent": 8,
       "avgInputTokensPerTask": 2773,
       "avgOutputTokensPerTask": 241,
@@ -176,30 +197,35 @@
       "workloadClass": "simple_low_latency_chat",
       "primaryRouteId": "cloud-fast-zdr-nemotron",
       "fallbackRouteId": "cloud-vision-tools-deepseek",
-      "rationale": "Lowest verified ZDR cost ($0.06/$0.16 per 1M), reasoningEffort=none, fast simulated TTFT."
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Lowest repo-verified ZDR rate ($0.06/$0.16 per 1M, reasoningEffort=none); authorized for internal stagingAlpha only (smoke grant expired)."
     },
     {
       "workloadClass": "tool_calling_and_multimodal",
       "primaryRouteId": "cloud-vision-tools-deepseek",
-      "fallbackRouteId": "cloud-reasoning-gpt56-luna",
-      "rationale": "Supports image input + tools + tool_choice on pinned DeepInfra fp8 ZDR endpoint ($0.098/$0.294 per 1M)."
+      "fallbackRouteId": null,
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Supports image input + tools + tool_choice on pinned DeepInfra fp8 ZDR ($0.098/$0.294 per 1M); no pending/unapproved fallback emitted."
     },
     {
-      "workloadClass": "privacy_sensitive_or_offline_device",
+      "workloadClass": "privacy_sensitive_local_only",
       "primaryRouteId": "device-local-mlx-small",
-      "fallbackRouteId": "cloud-fast-zdr-nemotron",
-      "rationale": "Zero cloud egress for authorized Mac/iPhone local execution; fallback to cloud ZDR only with user/policy authorization."
+      "fallbackRouteId": null,
+      "authorizationScope": "research_only_requires_device_m2_and_user_consent",
+      "rationale": "Private local inputs remain restricted to approved local-only processing absent explicit user/policy cloud consent."
     },
     {
       "workloadClass": "complex_high_accuracy_reasoning",
       "primaryRouteId": "cloud-vision-tools-deepseek",
-      "fallbackRouteId": "cloud-reasoning-gpt56-luna",
-      "rationale": "Use approved ZDR DeepSeek until gpt-5.6-luna receives explicit CTO approval and ZDR/privacy signoff."
+      "fallbackRouteId": null,
+      "authorizationScope": "smoke_expired_internal_staging_only",
+      "rationale": "Pending candidate gpt-5.6-luna is NOT authorization-eligible and is excluded from operational fallbacks until CTO approval + ZDR review."
     }
   ],
   "caveats": [
-    "NO live LLM API calls were made. Latency, accuracy, and retry rates are deterministic M0 evaluation profiles.",
-    "Token pricing uses verified MODEL_RATE_ROWS from @ember/model-gateway where marked official_price_verified.",
-    "M4 rollout requires live provider canary measurements per ADR-0006 before revising budgets or model pins."
+    "NO live LLM API calls were made. Latency, assumedAccuracyPercent, and retryRatePercent are synthetic M0 profiles; real quality/latency require separately approved M4 provider canaries.",
+    "Rates, rateProvenance, reasoningEffort, ZDR settings, and approvalStatus are derived directly from @ember/model-gateway at evaluationDateUtc.",
+    "Hypothetical synthetic scores never constitute live routing authorization; unavailable/pending models are research-only and excluded from operational fallbacks.",
+    "Privacy-sensitive benchmark tasks are scored ineligible (0) on cloud routes absent explicit user consent."
   ]
 }

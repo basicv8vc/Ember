@@ -7,6 +7,14 @@ import type { LatencyDistribution, MachineSpecs } from './types.js';
 export type EvidenceSourceKind =
   'measured_local_pg' | 'measured_local_workerd' | 'simulated_synthetic' | 'estimated_adr0006';
 
+export interface M1MeasurementGap {
+  readonly scope: string;
+  readonly implementedInM0Probe: readonly string[];
+  readonly missingInM0Probe: readonly string[];
+  readonly requiredInM1AndM4: readonly string[];
+  readonly provisionalTargetsNotice: string;
+}
+
 export interface EndpointLatencySummary {
   readonly operation: string;
   readonly method: string;
@@ -32,9 +40,16 @@ export interface PostgresTableStatDelta {
 export interface V1BaselineWorkloadStats {
   readonly workloadName: string;
   readonly concurrency: number;
-  readonly operationsCompleted: number;
-  readonly totalLogicalMutations: number;
-  readonly mutationsPerOperation: number;
+  readonly sampleCount: number;
+  readonly successCount: number;
+  readonly errorCount: number;
+  readonly exactTableRowDeltas: Readonly<Record<string, number>>;
+  readonly exactNetRowsInserted: number;
+  readonly exactNetRowsPerOperation: number;
+  readonly pgStatTupleMutations: number;
+  readonly pgStatMutationsPerOperation: number;
+  readonly pgStatAttributionComplete: boolean;
+  readonly pgStatAttributionNote: string;
   readonly totalSchemaBytesAfter: number;
   readonly peakActiveConnections: number;
   readonly peakTotalConnections: number;
@@ -53,10 +68,14 @@ export interface V1BaselineReport {
   readonly statusReadBenchmarks: readonly EndpointLatencySummary[];
   readonly concurrencySweep: readonly {
     readonly concurrency: number;
+    readonly chatSampleCount: number;
+    readonly chatSuccessCount: number;
     readonly chatAckP50Ms: number;
     readonly chatAckP95Ms: number;
     readonly chatCompletionP50Ms: number;
     readonly chatCompletionP95Ms: number;
+    readonly taskSampleCount: number;
+    readonly taskSuccessCount: number;
     readonly taskAckP50Ms: number;
     readonly taskAckP95Ms: number;
     readonly taskCompletionP50Ms: number;
@@ -70,7 +89,7 @@ export interface V1BaselineReport {
 }
 
 export interface SqlOperationProbeMetrics {
-  readonly engine: 'do_sqlite' | 'd1_local';
+  readonly engine: 'do_sqlite' | 'd1_local' | 'global_budget_do';
   readonly operation: string;
   readonly iterations: number;
   readonly logicalStatementsPerOp: number;
@@ -114,6 +133,15 @@ export interface SqliteProbeReport {
     readonly d1LatencyP95Ms: number;
     readonly doSetAlarmCalls: number;
   }[];
+  readonly jointAbSeamOps: readonly {
+    readonly engine: 'do_sqlite' | 'd1_local' | 'global_budget_do';
+    readonly operation: string;
+    readonly rowsReadMean: number;
+    readonly rowsWrittenMean: number;
+    readonly setAlarmCallsPerOp: number;
+    readonly latencyP50Ms: number;
+    readonly latencyP95Ms: number;
+  }[];
   readonly alarmRealFireVerified: boolean;
   readonly alarmRealFireDelayMs: number | null;
   readonly storageGrowth: {
@@ -123,6 +151,7 @@ export interface SqliteProbeReport {
     readonly d1StartingBytes: number;
     readonly d1NetBytesPerTurn: number;
   };
+  readonly m1MeasurementGap: M1MeasurementGap;
   readonly caveats: readonly string[];
 }
 
@@ -138,11 +167,13 @@ export interface StreamingCpuSample {
 }
 
 export interface BudgetCheckTimingResult {
+  readonly targetAuthority: 'd1_control_row' | 'global_budget_do';
   readonly mode: 'sequential_warm' | 'concurrent_contention' | 'exhaustion_fail_closed';
   readonly concurrency: number;
-  readonly attempts: number;
+  readonly sampleCount: number;
   readonly approvedCount: number;
-  readonly rejectedCount: number;
+  readonly deniedExpectedCount: number;
+  readonly errorCount: number;
   readonly overCommitted: boolean;
   readonly latencyMs: LatencyDistribution;
 }
@@ -158,23 +189,47 @@ export interface TimingMethodologyReport {
     readonly targetDescription: string;
     readonly includesModelIo: boolean;
   }[];
-  readonly localTurnTiming: {
+  readonly simplified2RpcMicrobenchmark: {
     readonly evidenceKind: 'measured_local_workerd';
-    readonly iterations: number;
+    readonly label: string;
+    readonly sampleCount: number;
+    readonly successCount: number;
+    readonly errorCount: number;
     readonly ackMs: LatencyDistribution;
-    readonly globalBudgetCheckMs: LatencyDistribution;
+    readonly d1CounterUpdateMs: LatencyDistribution;
     readonly doPrepareMs: LatencyDistribution;
     readonly doCommitMs: LatencyDistribution;
     readonly runtimeOverheadMs: LatencyDistribution;
   };
+  readonly jointAbSeamTiming: {
+    readonly evidenceKind: 'measured_local_workerd';
+    readonly label: string;
+    readonly sampleCount: number;
+    readonly successCount: number;
+    readonly deniedCount: number;
+    readonly errorCount: number;
+    readonly ackCoveredMs: LatencyDistribution;
+    readonly ackUncoveredMs: LatencyDistribution;
+    readonly globalBudgetReserveMs: LatencyDistribution;
+    readonly globalBudgetAuthorizeMs: LatencyDistribution;
+    readonly doPrepareMs: LatencyDistribution;
+    readonly doMarkAttemptSentMs: LatencyDistribution;
+    readonly doCommitWithBudgetSyncMs: LatencyDistribution;
+    readonly globalBudgetSettleMs: LatencyDistribution;
+    readonly d1UncoveredRegisterAndConfirmMs: LatencyDistribution;
+    readonly runtimeOverheadCoveredMs: LatencyDistribution;
+    readonly runtimeOverheadUncoveredMs: LatencyDistribution;
+  };
   readonly streamingCpu: {
     readonly evidenceKind: 'simulated_synthetic';
+    readonly runtimeNotice: string;
     readonly samples: readonly StreamingCpuSample[];
   };
   readonly budgetCheckContention: {
     readonly evidenceKind: 'measured_local_workerd';
     readonly results: readonly BudgetCheckTimingResult[];
   };
+  readonly m1MeasurementGap: M1MeasurementGap;
 }
 
 export interface RegionalRttProfile {
@@ -188,20 +243,27 @@ export interface RegionalRttProfile {
   readonly doToGlobalControlJitterMs: number;
 }
 
+export type RttArchitectureMode =
+  | 'simplified_2_rpc_local_check'
+  | 'm0_covered_joint_seam_colocated'
+  | 'm0_covered_joint_seam_cross_region_budget'
+  | 'm0_uncovered_joint_seam_with_d1_registration';
+
 export interface RegionalRttScenarioResult {
   readonly regionId: string;
   readonly regionLabel: string;
-  readonly architectureMode:
-    | 'covered_preallocated_grant'
-    | 'covered_sync_global_budget'
-    | 'uncovered_registry_plus_sync_budget';
+  readonly architectureMode: RttArchitectureMode;
+  readonly isApprovedM0Contract: boolean;
   readonly sampleCount: number;
+  readonly successCount: number;
+  readonly deniedCount: number;
+  readonly errorCount: number;
   readonly ackMs: LatencyDistribution;
   readonly runtimeOverheadMs: LatencyDistribution;
   readonly budgetCheckMs: LatencyDistribution;
-  readonly meetsAck250msP95: boolean;
-  readonly meetsRuntime200msP95: boolean;
-  readonly meetsBudget50msP95: boolean;
+  readonly withinTargetAck250msP95: boolean;
+  readonly withinTargetRuntime200msP95: boolean;
+  readonly withinTargetBudget50msP95: boolean;
 }
 
 export interface RttSimulationReport {
@@ -212,6 +274,7 @@ export interface RttSimulationReport {
   readonly seed: number;
   readonly profiles: readonly RegionalRttProfile[];
   readonly results: readonly RegionalRttScenarioResult[];
+  readonly m1MeasurementGap: M1MeasurementGap;
   readonly caveats: readonly string[];
 }
 
@@ -392,22 +455,34 @@ export interface ModelRoutingCandidateRow {
   readonly providerId: string;
   readonly modelId: string;
   readonly placement: 'cloud' | 'device_local';
-  readonly approvalStatus: 'approved_smoke_staging' | 'pending_cto_approval' | 'research_profile';
+  readonly approvalStatus:
+    | 'internal_staging_only'
+    | 'smoke_expired_internal_staging_only'
+    | 'pending_cto_approval'
+    | 'research_only';
+  readonly approvalDetail: string;
+  readonly authorizationEligible: boolean;
   readonly rateProvenance:
-    'official_price_verified' | 'unverified' | 'illustrative' | 'zero_egress_local';
+    | 'official_price_verified'
+    | 'invoice_verified'
+    | 'unverified'
+    | 'illustrative'
+    | 'zero_egress_local';
   readonly inputUsdPerMillion: number;
   readonly outputUsdPerMillion: number;
   readonly simulatedTtftP50Ms: number;
   readonly simulatedTtftP95Ms: number;
   readonly simulatedCompletionP50Ms: number;
   readonly simulatedCompletionP95Ms: number;
-  readonly accuracyPercent: number;
-  readonly taskSuccessRatePercent: number;
+  readonly assumedAccuracyPercent: number;
+  readonly capabilityEligibleCount: number;
+  readonly privacyEligibleCount: number;
+  readonly fullyEligibleSuccessRatePercent: number;
   readonly retryRatePercent: number;
   readonly avgInputTokensPerTask: number;
   readonly avgOutputTokensPerTask: number;
   readonly conservativeReservedMicroUsd: number;
-  readonly costPerSuccessfulTaskUsd: number;
+  readonly costPerSuccessfulTaskUsd: number | null;
   readonly capabilities: {
     readonly toolCalling: boolean;
     readonly strictJson: boolean;
@@ -427,12 +502,14 @@ export interface ModelRoutingMatrixReport {
   readonly evidenceKind: 'simulated_synthetic';
   readonly gitSha: string;
   readonly timestamp: string;
+  readonly evaluationDateUtc: string;
   readonly evalCaseCount: number;
   readonly candidates: readonly ModelRoutingCandidateRow[];
   readonly routingPolicySummary: readonly {
     readonly workloadClass: string;
     readonly primaryRouteId: string;
-    readonly fallbackRouteId: string;
+    readonly fallbackRouteId: string | null;
+    readonly authorizationScope: string;
     readonly rationale: string;
   }[];
   readonly caveats: readonly string[];

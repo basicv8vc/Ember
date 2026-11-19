@@ -1,3 +1,4 @@
+import { assertValidConcurrencyLevels } from './local-guard.js';
 import { printConsoleSummary } from './report.js';
 import { runBenchmark } from './runner.js';
 import type { BenchmarkOptions } from './types.js';
@@ -138,9 +139,16 @@ function parseCliArgs(args: readonly string[]): ParsedCli {
     } else if (arg === '--api-url') {
       legacy.apiUrl = args[++i]!;
     } else if (arg === '--concurrency-levels') {
-      v2.concurrencyLevels = args[++i]!.split(',')
-        .map((s) => parseInt(s.trim(), 10))
-        .filter((n) => Number.isFinite(n) && n > 0);
+      const raw = args[++i]!;
+      const levels = raw.split(',').map((s) => {
+        const trimmed = s.trim();
+        if (!/^\d+$/.test(trimmed)) {
+          throw new Error(`invalid --concurrency-levels entry "${trimmed}"`);
+        }
+        return Number(trimmed);
+      });
+      assertValidConcurrencyLevels(levels, 100);
+      v2.concurrencyLevels = levels;
     } else if (arg === '--requests-per-level') {
       v2.requestsPerLevel = parseInt(args[++i]!, 10);
     } else if (arg === '--probe-iterations') {

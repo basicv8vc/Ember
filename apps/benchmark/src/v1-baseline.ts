@@ -2,6 +2,11 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import type { Id } from '@ember/domain';
 import { resolveBenchmarkGitSha } from './evidence.js';
 import { createBenchmarkHarness, type BenchmarkHarness } from './harness.js';
+import {
+  assertPositiveSafeInt,
+  assertValidConcurrencyLevels,
+  resolveSafeLocalDatabaseUrl,
+} from './local-guard.js';
 import { calculateDistribution } from './metrics.js';
 import { collectMachineSpecs, TelemetryCollector } from './telemetry.js';
 import type {
@@ -13,6 +18,7 @@ import type {
 
 export interface V1BaselineOptions {
   readonly databaseUrl?: string;
+  readonly env?: NodeJS.ProcessEnv;
   readonly concurrencyLevels?: readonly number[];
   readonly requestsPerLevel?: number;
   readonly workerConcurrency?: number;
@@ -36,11 +42,57 @@ interface PgStatRow {
   readonly total_bytes: string;
 }
 
+const TRACKED_BUSINESS_TABLES = [
+  'conversation_messages',
+  'assistant_turns',
+  'conversations',
+  'tasks',
+  'runs',
+  'task_events',
+  'budget_operations',
+  'staged_blobs',
+  'artifacts',
+  'blobs',
+  'step_checkpoints',
+  'workspace_versions',
+  'task_results',
+  'operation_receipts',
+] as const;
+
+async function readExactTableRowCounts(
+  harness: BenchmarkHarness,
+): Promise<Readonly<Record<string, number>>> {
+  const counts: Record<string, number> = {};
+  for (const table of TRACKED_BUSINESS_TABLES) {
+    const res = await harness.pool.query<{ count: string }>(
+      `SELECT COUNT(*)::text AS count FROM "${table}"`,
+    );
+    counts[table] = parseInt(res.rows[0]?.count ?? '0', 10) || 0;
+  }
+  return counts;
+}
+
+function diffExactTableRowCounts(
+  before: Readonly<Record<string, number>>,
+  after: Readonly<Record<string, number>>,
+): { readonly deltas: Readonly<Record<string, number>>; readonly totalInserted: number } {
+  const deltas: Record<string, number> = {};
+  let totalInserted = 0;
+  for (const table of TRACKED_BUSINESS_TABLES) {
+    const delta = (after[table] ?? 0) - (before[table] ?? 0);
+    if (delta !== 0) {
+      deltas[table] = delta;
+      if (delta > 0) totalInserted += delta;
+    }
+  }
+  return { deltas, totalInserted };
+}
+
 async function readPgSchemaStats(
   harness: BenchmarkHarness,
 ): Promise<ReadonlyMap<string, PostgresTableStatDelta>> {
-  // PG17 backends flush cumulative stats to pgstat at PGSTAT_STAT_INTERVAL (~500ms) or session idle.
-  // Waiting 650ms and clearing the snapshot ensures deterministic per-workload attribution.
+  // Force stats flush visibility on the querying session; note that pooled idle connections
+  // in PG17 may still retain buffered deltas until their backend cycles or stats interval fires.
   await new Promise((resolve) => setTimeout(resolve, 650));
   await harness.pool.query('SELECT pg_stat_clear_snapshot()').catch(() => undefined);
 
@@ -183,22 +235,28 @@ function toEndpointSummary(params: {
 export async function runV1BaselineBenchmark(
   options: V1BaselineOptions = {},
 ): Promise<V1BaselineReport> {
-  const databaseUrl =
-    options.databaseUrl ||
-    process.env.TEST_DATABASE_URL ||
-    process.env.DATABASE_URL ||
-    'postgres://ember:ember_local_dev_only@127.0.0.1:5432/ember_test';
+  const env = options.env ?? process.env;
   const concurrencyLevels = options.concurrencyLevels ?? [1, 10, 25, 50];
-  const maxConcurrency = Math.max(...concurrencyLevels);
-  const requestsPerLevel = options.requestsPerLevel ?? 40;
-  const workerConcurrency = options.workerConcurrency ?? Math.max(25, maxConcurrency);
-  const log = options.log ?? ((msg: string) => console.log(msg));
+  assertValidConcurrencyLevels(concurrencyLevels, 100);
 
-  if (maxConcurrency > 20 && options.enableLocalLoad !== true) {
+  const requestsPerLevel = options.requestsPerLevel ?? 40;
+  assertPositiveSafeInt('requestsPerLevel', requestsPerLevel, 10_000);
+
+  const maxConcurrency = Math.max(...concurrencyLevels);
+  const workerConcurrency = options.workerConcurrency ?? Math.max(25, maxConcurrency);
+  assertPositiveSafeInt('workerConcurrency', workerConcurrency, 200);
+
+  const enableLocalLoad =
+    options.enableLocalLoad === true || env.EMBER_BENCH_ENABLE_LOCAL_LOAD === 'true';
+  if (maxConcurrency > 20 && !enableLocalLoad) {
     throw new Error(
       `Safety guard: V1 baseline concurrency=${maxConcurrency} requires enableLocalLoad=true (or --enable-local-load).`,
     );
   }
+
+  // Strictly validate local loopback test database URL BEFORE opening any pool.
+  const databaseUrl = resolveSafeLocalDatabaseUrl(options.databaseUrl, env);
+  const log = options.log ?? ((msg: string) => console.log(msg));
 
   const telemetry = new TelemetryCollector({
     targetWorkerConcurrency: workerConcurrency,
@@ -222,7 +280,6 @@ export async function runV1BaselineBenchmark(
   try {
     const machine = await collectMachineSpecs(harness.adminPool);
 
-    // Provision one agent per concurrency slot (for /v1/tasks) and one consumer session per slot (for B1 chat)
     const userCount = Math.max(10, maxConcurrency);
     log(
       `[V1 Baseline] Provisioning ${userCount} V1 agents and ${userCount} B1 consumer conversations...`,
@@ -277,7 +334,7 @@ export async function runV1BaselineBenchmark(
       });
     }
 
-    // Warmup 5 requests on chat & tasks
+    // Warmup 5 requests on chat & tasks, then drain before measurement
     for (let i = 0; i < 5; i++) {
       const s = sessions[i % sessions.length]!;
       await fetch(`${harness.apiUrl}/v1/conversations/${s.conversationId}/messages`, {
@@ -307,7 +364,6 @@ export async function runV1BaselineBenchmark(
       });
     }
 
-    // Wait briefly for warmup turns/tasks to drain and flush PG stats before measurement
     await new Promise((resolve) => setTimeout(resolve, 1_000));
 
     const conversationBenchmarks: EndpointLatencySummary[] = [];
@@ -324,16 +380,15 @@ export async function runV1BaselineBenchmark(
       const chatAckLatencies: number[] = [];
       const chatCompletionLatencies: number[] = [];
       const createdTurnRefs: { session: ConsumerSessionContext; turnId: string }[] = [];
-
-      // Per-session mutex queue so each conversation only has 1 in-flight turn at a time
       const sessionLocks = sessions.map(() => Promise.resolve());
+
+      const chatExactBefore = await readExactTableRowCounts(harness);
       const chatStatsBefore = await readPgSchemaStats(harness);
 
       const chatRun = await runConcurrentOperations(concurrency, totalOps, async (idx) => {
         const slot = idx % sessions.length;
         const session = sessions[slot]!;
 
-        // Serialize per conversation to respect B1 single-active-turn invariant while running across `concurrency` users
         let release!: () => void;
         const prev = sessionLocks[slot]!;
         sessionLocks[slot] = new Promise<void>((resolve) => {
@@ -390,19 +445,45 @@ export async function runV1BaselineBenchmark(
         }
       });
 
+      const chatExactAfter = await readExactTableRowCounts(harness);
+      const chatExactDiff = diffExactTableRowCounts(chatExactBefore, chatExactAfter);
       const chatStatsAfter = await readPgSchemaStats(harness);
       const chatDiff = diffPgSchemaStats(chatStatsBefore, chatStatsAfter);
       const chatTelemetry = telemetry.getSummary();
 
+      const minExpectedMessages = chatRun.successCount * 2;
+      const observedExactMsgs = chatExactDiff.deltas.conversation_messages ?? 0;
+      if (observedExactMsgs < minExpectedMessages) {
+        throw new Error(
+          `Sanity check failed at c=${concurrency}: expected >= ${minExpectedMessages} conversation_messages inserts, got ${observedExactMsgs}`,
+        );
+      }
+
+      const pgChatMsgInserts =
+        chatDiff.tables.find((t) => t.tableName === 'conversation_messages')?.inserts ?? 0;
+      const chatPgStatComplete = pgChatMsgInserts >= minExpectedMessages;
+
       dbMutationStats.push({
         workloadName: 'v1_b1_conversation_turn',
         concurrency,
-        operationsCompleted: chatRun.successCount,
-        totalLogicalMutations: chatDiff.totalLogicalMutations,
-        mutationsPerOperation:
+        sampleCount: totalOps,
+        successCount: chatRun.successCount,
+        errorCount: chatRun.errorCount,
+        exactTableRowDeltas: chatExactDiff.deltas,
+        exactNetRowsInserted: chatExactDiff.totalInserted,
+        exactNetRowsPerOperation:
+          chatRun.successCount > 0
+            ? Number((chatExactDiff.totalInserted / chatRun.successCount).toFixed(2))
+            : 0,
+        pgStatTupleMutations: chatDiff.totalLogicalMutations,
+        pgStatMutationsPerOperation:
           chatRun.successCount > 0
             ? Number((chatDiff.totalLogicalMutations / chatRun.successCount).toFixed(2))
             : 0,
+        pgStatAttributionComplete: chatPgStatComplete,
+        pgStatAttributionNote: chatPgStatComplete
+          ? 'pg_stat_user_tables captured >= expected minimum message inserts.'
+          : `INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only ${pgChatMsgInserts} conversation_messages inserts vs ${minExpectedMessages} verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.`,
         totalSchemaBytesAfter: chatDiff.totalSchemaBytesAfter,
         peakActiveConnections: chatTelemetry.peakPostgresActiveConnections,
         peakTotalConnections: chatTelemetry.peakPostgresTotalConnections,
@@ -422,9 +503,9 @@ export async function runV1BaselineBenchmark(
         method: 'POST',
         path: '/v1/conversations/:id/messages',
         concurrency,
-        sampleCount: chatAckLatencies.length,
+        sampleCount: totalOps,
         successCount: chatAckLatencies.length,
-        errorCount: chatRun.errorCount,
+        errorCount: totalOps - chatAckLatencies.length,
         throughputReqPerSec: chatThroughput,
         latency: chatAckDist,
       });
@@ -433,7 +514,7 @@ export async function runV1BaselineBenchmark(
         method: 'POST+POLL',
         path: '/v1/conversations/:id/turns/:turn_id',
         concurrency,
-        sampleCount: chatCompletionLatencies.length,
+        sampleCount: totalOps,
         successCount: chatRun.successCount,
         errorCount: chatRun.errorCount,
         throughputReqPerSec: chatThroughput,
@@ -444,6 +525,8 @@ export async function runV1BaselineBenchmark(
       const taskAckLatencies: number[] = [];
       const taskCompletionLatencies: number[] = [];
       const createdTaskIds: Id[] = [];
+
+      const taskExactBefore = await readExactTableRowCounts(harness);
       const taskStatsBefore = await readPgSchemaStats(harness);
 
       const taskRun = await runConcurrentOperations(concurrency, totalOps, async (idx) => {
@@ -492,19 +575,43 @@ export async function runV1BaselineBenchmark(
         return false;
       });
 
+      const taskExactAfter = await readExactTableRowCounts(harness);
+      const taskExactDiff = diffExactTableRowCounts(taskExactBefore, taskExactAfter);
       const taskStatsAfter = await readPgSchemaStats(harness);
       const taskDiff = diffPgSchemaStats(taskStatsBefore, taskStatsAfter);
       const taskTelemetry = telemetry.getSummary();
 
+      const observedExactTasks = taskExactDiff.deltas.tasks ?? 0;
+      if (observedExactTasks < taskRun.successCount) {
+        throw new Error(
+          `Sanity check failed at c=${concurrency}: expected >= ${taskRun.successCount} tasks inserts, got ${observedExactTasks}`,
+        );
+      }
+
+      const pgTaskInserts = taskDiff.tables.find((t) => t.tableName === 'tasks')?.inserts ?? 0;
+      const taskPgStatComplete = pgTaskInserts >= taskRun.successCount;
+
       dbMutationStats.push({
         workloadName: 'v1_durable_task_lifecycle',
         concurrency,
-        operationsCompleted: taskRun.successCount,
-        totalLogicalMutations: taskDiff.totalLogicalMutations,
-        mutationsPerOperation:
+        sampleCount: totalOps,
+        successCount: taskRun.successCount,
+        errorCount: taskRun.errorCount,
+        exactTableRowDeltas: taskExactDiff.deltas,
+        exactNetRowsInserted: taskExactDiff.totalInserted,
+        exactNetRowsPerOperation:
+          taskRun.successCount > 0
+            ? Number((taskExactDiff.totalInserted / taskRun.successCount).toFixed(2))
+            : 0,
+        pgStatTupleMutations: taskDiff.totalLogicalMutations,
+        pgStatMutationsPerOperation:
           taskRun.successCount > 0
             ? Number((taskDiff.totalLogicalMutations / taskRun.successCount).toFixed(2))
             : 0,
+        pgStatAttributionComplete: taskPgStatComplete,
+        pgStatAttributionNote: taskPgStatComplete
+          ? 'pg_stat_user_tables captured >= expected minimum task inserts.'
+          : `INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only ${pgTaskInserts} task inserts vs ${taskRun.successCount} verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.`,
         totalSchemaBytesAfter: taskDiff.totalSchemaBytesAfter,
         peakActiveConnections: taskTelemetry.peakPostgresActiveConnections,
         peakTotalConnections: taskTelemetry.peakPostgresTotalConnections,
@@ -524,9 +631,9 @@ export async function runV1BaselineBenchmark(
         method: 'POST',
         path: '/v1/tasks',
         concurrency,
-        sampleCount: taskAckLatencies.length,
+        sampleCount: totalOps,
         successCount: taskAckLatencies.length,
-        errorCount: taskRun.errorCount,
+        errorCount: totalOps - taskAckLatencies.length,
         throughputReqPerSec: taskThroughput,
         latency: taskAckDist,
       });
@@ -535,7 +642,7 @@ export async function runV1BaselineBenchmark(
         method: 'POST+POLL',
         path: '/v1/tasks/:id',
         concurrency,
-        sampleCount: taskCompletionLatencies.length,
+        sampleCount: totalOps,
         successCount: taskRun.successCount,
         errorCount: taskRun.errorCount,
         throughputReqPerSec: taskThroughput,
@@ -614,10 +721,14 @@ export async function runV1BaselineBenchmark(
 
       concurrencySweep.push({
         concurrency,
+        chatSampleCount: totalOps,
+        chatSuccessCount: chatRun.successCount,
         chatAckP50Ms: chatAckDist.p50Ms,
         chatAckP95Ms: chatAckDist.p95Ms,
         chatCompletionP50Ms: chatCompDist.p50Ms,
         chatCompletionP95Ms: chatCompDist.p95Ms,
+        taskSampleCount: totalOps,
+        taskSuccessCount: taskRun.successCount,
         taskAckP50Ms: taskAckDist.p50Ms,
         taskAckP95Ms: taskAckDist.p95Ms,
         taskCompletionP50Ms: taskCompDist.p50Ms,
@@ -640,10 +751,10 @@ export async function runV1BaselineBenchmark(
       concurrencySweep,
       dbMutationStats,
       notes: [
-        'All measurements collected locally against PostgreSQL 17 over 127.0.0.1 loopback.',
+        'All measurements collected locally against isolated loopback PostgreSQL 17 schemas only; remote/production URLs and general DATABASE_URL fallback are blocked.',
         'B1 conversation turns use FakeTurnResponder (FakeLlm, zero external LLM calls) with 25ms poll interval.',
         'Task submissions use DeterministicExecutor (mock.chat / mock.compute) with 25ms poll loop.',
-        'pg_stat_user_tables captures logical tuple inserts/updates/deletes in PostgreSQL, NOT Cloudflare SQLite billed row counts.',
+        'exactTableRowDeltas uses deterministic SELECT COUNT(*) deltas before/after each workload; pg_stat_user_tables can lag across pooled idle backends and is explicitly flagged pgStatAttributionComplete=false whenever inserts fall below sanity thresholds.',
       ],
     };
   } finally {

@@ -1,8 +1,8 @@
 {
   "scenarioId": "ember-v2-m0-v1-baseline",
   "evidenceKind": "measured_local_pg",
-  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
-  "timestamp": "2026-11-19T12:05:13.959Z",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:38:25.149Z",
   "machine": {
     "osPlatform": "darwin",
     "osRelease": "27.2.0",
@@ -24,17 +24,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 26,
+      "throughputReqPerSec": 31.12,
       "latency": {
         "count": 50,
-        "minMs": 7.07,
-        "meanMs": 9.79,
-        "p50Ms": 8.95,
-        "p90Ms": 11.58,
-        "p95Ms": 12.11,
-        "p99Ms": 22.99,
-        "maxMs": 27.82,
-        "stdDevMs": 3.13
+        "minMs": 4.09,
+        "meanMs": 6.44,
+        "p50Ms": 5.83,
+        "p90Ms": 9.43,
+        "p95Ms": 9.88,
+        "p99Ms": 13.77,
+        "maxMs": 14.08,
+        "stdDevMs": 1.96
       }
     },
     {
@@ -45,17 +45,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 26,
+      "throughputReqPerSec": 31.12,
       "latency": {
         "count": 50,
-        "minMs": 15.78,
-        "meanMs": 38.43,
-        "p50Ms": 38.88,
-        "p90Ms": 44.01,
-        "p95Ms": 46.76,
-        "p99Ms": 69.39,
-        "maxMs": 78.17,
-        "stdDevMs": 9.13
+        "minMs": 12.25,
+        "meanMs": 32.12,
+        "p50Ms": 31.14,
+        "p90Ms": 36.23,
+        "p95Ms": 47.77,
+        "p99Ms": 52.92,
+        "maxMs": 54.09,
+        "stdDevMs": 6.94
       }
     },
     {
@@ -66,17 +66,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 161.91,
+      "throughputReqPerSec": 149.84,
       "latency": {
         "count": 50,
-        "minMs": 2.77,
-        "meanMs": 14.89,
-        "p50Ms": 6.39,
-        "p90Ms": 50.14,
-        "p95Ms": 52.67,
-        "p99Ms": 56,
-        "maxMs": 57.15,
-        "stdDevMs": 17.64
+        "minMs": 3.01,
+        "meanMs": 14.88,
+        "p50Ms": 4.63,
+        "p90Ms": 56.75,
+        "p95Ms": 60.56,
+        "p99Ms": 63.86,
+        "maxMs": 64.25,
+        "stdDevMs": 20.81
       }
     },
     {
@@ -87,17 +87,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 161.91,
+      "throughputReqPerSec": 149.84,
       "latency": {
         "count": 50,
-        "minMs": 32.36,
-        "meanMs": 60.03,
-        "p50Ms": 50.74,
-        "p90Ms": 101.67,
-        "p95Ms": 104.26,
-        "p99Ms": 124.44,
-        "maxMs": 124.74,
-        "stdDevMs": 23.35
+        "minMs": 38.88,
+        "meanMs": 62.41,
+        "p50Ms": 57.1,
+        "p90Ms": 91.02,
+        "p95Ms": 116.56,
+        "p99Ms": 134.98,
+        "maxMs": 143.32,
+        "stdDevMs": 23.56
       }
     },
     {
@@ -108,17 +108,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 118.68,
+      "throughputReqPerSec": 171.97,
       "latency": {
         "count": 50,
-        "minMs": 3.59,
-        "meanMs": 46.36,
-        "p50Ms": 30.47,
-        "p90Ms": 112.71,
-        "p95Ms": 114.11,
-        "p99Ms": 120.73,
-        "maxMs": 122.04,
-        "stdDevMs": 42.41
+        "minMs": 2.71,
+        "meanMs": 34.44,
+        "p50Ms": 29.39,
+        "p90Ms": 73.38,
+        "p95Ms": 74.56,
+        "p99Ms": 75.97,
+        "maxMs": 76.37,
+        "stdDevMs": 29.67
       }
     },
     {
@@ -129,17 +129,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 118.68,
+      "throughputReqPerSec": 171.97,
       "latency": {
         "count": 50,
-        "minMs": 106.67,
-        "meanMs": 191.14,
-        "p50Ms": 176.32,
-        "p90Ms": 293.15,
-        "p95Ms": 301.87,
-        "p99Ms": 312.31,
-        "maxMs": 313.9,
-        "stdDevMs": 62.14
+        "minMs": 74.64,
+        "meanMs": 126.93,
+        "p50Ms": 116.24,
+        "p90Ms": 178.68,
+        "p95Ms": 195.2,
+        "p99Ms": 203.87,
+        "maxMs": 211.47,
+        "stdDevMs": 35.11
       }
     },
     {
@@ -150,17 +150,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 196.89,
+      "throughputReqPerSec": 145.57,
       "latency": {
         "count": 50,
-        "minMs": 53.12,
-        "meanMs": 72.06,
-        "p50Ms": 72.69,
-        "p90Ms": 85.43,
-        "p95Ms": 85.86,
-        "p99Ms": 88.03,
-        "maxMs": 88.59,
-        "stdDevMs": 9.84
+        "minMs": 51.61,
+        "meanMs": 64.65,
+        "p50Ms": 64.02,
+        "p90Ms": 76.8,
+        "p95Ms": 78.8,
+        "p99Ms": 79.63,
+        "maxMs": 80.09,
+        "stdDevMs": 7.5
       }
     },
     {
@@ -171,17 +171,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 196.89,
+      "throughputReqPerSec": 145.57,
       "latency": {
         "count": 50,
-        "minMs": 98.93,
-        "meanMs": 189.59,
-        "p50Ms": 203.55,
-        "p90Ms": 249.81,
-        "p95Ms": 249.94,
-        "p99Ms": 250.06,
-        "maxMs": 250.12,
-        "stdDevMs": 49.34
+        "minMs": 130.06,
+        "meanMs": 252,
+        "p50Ms": 257.51,
+        "p90Ms": 329.2,
+        "p95Ms": 339.99,
+        "p99Ms": 340.41,
+        "maxMs": 340.42,
+        "stdDevMs": 58.38
       }
     }
   ],
@@ -194,17 +194,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 11.54,
+      "throughputReqPerSec": 9.53,
       "latency": {
         "count": 50,
-        "minMs": 2.54,
-        "meanMs": 4.39,
-        "p50Ms": 3.98,
-        "p90Ms": 5.85,
-        "p95Ms": 6.52,
-        "p99Ms": 12.11,
-        "maxMs": 13.62,
-        "stdDevMs": 1.85
+        "minMs": 2.48,
+        "meanMs": 6.41,
+        "p50Ms": 5.08,
+        "p90Ms": 9.06,
+        "p95Ms": 12.75,
+        "p99Ms": 23.32,
+        "maxMs": 26.78,
+        "stdDevMs": 4.18
       }
     },
     {
@@ -215,17 +215,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 11.54,
+      "throughputReqPerSec": 9.53,
       "latency": {
         "count": 50,
-        "minMs": 67.42,
-        "meanMs": 86.61,
-        "p50Ms": 88.95,
-        "p90Ms": 108.77,
-        "p95Ms": 112.07,
-        "p99Ms": 118.98,
-        "maxMs": 123.39,
-        "stdDevMs": 13.6
+        "minMs": 67.49,
+        "meanMs": 104.89,
+        "p50Ms": 109.28,
+        "p90Ms": 123.78,
+        "p95Ms": 133.66,
+        "p99Ms": 140.09,
+        "maxMs": 140.67,
+        "stdDevMs": 19.01
       }
     },
     {
@@ -236,17 +236,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 103.78,
+      "throughputReqPerSec": 99.09,
       "latency": {
         "count": 50,
-        "minMs": 1.73,
-        "meanMs": 6.84,
-        "p50Ms": 3.83,
-        "p90Ms": 18.61,
-        "p95Ms": 19.63,
-        "p99Ms": 20.18,
-        "maxMs": 20.19,
-        "stdDevMs": 6.03
+        "minMs": 1.16,
+        "meanMs": 10.29,
+        "p50Ms": 4.3,
+        "p90Ms": 34.55,
+        "p95Ms": 36.42,
+        "p99Ms": 41.15,
+        "maxMs": 41.81,
+        "stdDevMs": 12.19
       }
     },
     {
@@ -257,17 +257,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 103.78,
+      "throughputReqPerSec": 99.09,
       "latency": {
         "count": 50,
-        "minMs": 51.76,
-        "meanMs": 91.04,
-        "p50Ms": 88.04,
-        "p90Ms": 126.65,
-        "p95Ms": 138.55,
-        "p99Ms": 156.18,
-        "maxMs": 164.22,
-        "stdDevMs": 24.18
+        "minMs": 52.43,
+        "meanMs": 97.21,
+        "p50Ms": 85.11,
+        "p90Ms": 163.01,
+        "p95Ms": 185.88,
+        "p99Ms": 196.98,
+        "maxMs": 200.04,
+        "stdDevMs": 38.79
       }
     },
     {
@@ -278,17 +278,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 101.05,
+      "throughputReqPerSec": 98.27,
       "latency": {
         "count": 50,
-        "minMs": 1.69,
-        "meanMs": 25.31,
-        "p50Ms": 18.68,
-        "p90Ms": 52.14,
-        "p95Ms": 53.82,
-        "p99Ms": 54.15,
-        "maxMs": 54.34,
-        "stdDevMs": 22.14
+        "minMs": 1.31,
+        "meanMs": 24.65,
+        "p50Ms": 22.62,
+        "p90Ms": 48.81,
+        "p95Ms": 49.66,
+        "p99Ms": 51.6,
+        "maxMs": 52.59,
+        "stdDevMs": 20.89
       }
     },
     {
@@ -299,17 +299,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 101.05,
+      "throughputReqPerSec": 98.27,
       "latency": {
         "count": 50,
-        "minMs": 96.46,
-        "meanMs": 228.5,
-        "p50Ms": 212.56,
-        "p90Ms": 342.44,
-        "p95Ms": 376.39,
-        "p99Ms": 392.75,
-        "maxMs": 402.38,
-        "stdDevMs": 76.12
+        "minMs": 114.48,
+        "meanMs": 232.84,
+        "p50Ms": 233.4,
+        "p90Ms": 318.57,
+        "p95Ms": 356.03,
+        "p99Ms": 382.52,
+        "maxMs": 387.43,
+        "stdDevMs": 63.63
       }
     },
     {
@@ -320,17 +320,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 99.08,
+      "throughputReqPerSec": 88.88,
       "latency": {
         "count": 50,
-        "minMs": 29.7,
-        "meanMs": 46.72,
-        "p50Ms": 46.72,
-        "p90Ms": 58.04,
-        "p95Ms": 58.84,
-        "p99Ms": 59.31,
-        "maxMs": 59.37,
-        "stdDevMs": 8.55
+        "minMs": 36.95,
+        "meanMs": 49.43,
+        "p50Ms": 48,
+        "p90Ms": 61.96,
+        "p95Ms": 62.07,
+        "p99Ms": 62.12,
+        "maxMs": 62.16,
+        "stdDevMs": 8.17
       }
     },
     {
@@ -341,17 +341,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 99.08,
+      "throughputReqPerSec": 88.88,
       "latency": {
         "count": 50,
-        "minMs": 176.48,
-        "meanMs": 387.42,
-        "p50Ms": 422.72,
-        "p90Ms": 490.76,
-        "p95Ms": 500.81,
-        "p99Ms": 500.97,
-        "maxMs": 501.04,
-        "stdDevMs": 104.5
+        "minMs": 147.6,
+        "meanMs": 423.29,
+        "p50Ms": 470.22,
+        "p90Ms": 543.07,
+        "p95Ms": 547.11,
+        "p99Ms": 552.54,
+        "maxMs": 556.83,
+        "stdDevMs": 119.65
       }
     }
   ],
@@ -364,17 +364,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 738.93,
+      "throughputReqPerSec": 586.37,
       "latency": {
         "count": 50,
-        "minMs": 0.8,
-        "meanMs": 1.35,
-        "p50Ms": 1.26,
-        "p90Ms": 1.81,
-        "p95Ms": 2.06,
-        "p99Ms": 2.76,
-        "maxMs": 3.14,
-        "stdDevMs": 0.44
+        "minMs": 0.84,
+        "meanMs": 1.7,
+        "p50Ms": 1.56,
+        "p90Ms": 2.47,
+        "p95Ms": 3.21,
+        "p99Ms": 4.41,
+        "maxMs": 4.96,
+        "stdDevMs": 0.78
       }
     },
     {
@@ -385,17 +385,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 192.49,
+      "throughputReqPerSec": 142.86,
       "latency": {
         "count": 50,
-        "minMs": 3.39,
-        "meanMs": 5.19,
-        "p50Ms": 4.74,
-        "p90Ms": 6.46,
-        "p95Ms": 9.81,
-        "p99Ms": 13.91,
-        "maxMs": 14.56,
-        "stdDevMs": 2.27
+        "minMs": 4.31,
+        "meanMs": 7,
+        "p50Ms": 6.85,
+        "p90Ms": 8.66,
+        "p95Ms": 8.95,
+        "p99Ms": 14.39,
+        "maxMs": 17.51,
+        "stdDevMs": 2.11
       }
     },
     {
@@ -406,17 +406,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 253.26,
+      "throughputReqPerSec": 135.77,
       "latency": {
         "count": 50,
-        "minMs": 3.45,
-        "meanMs": 3.95,
-        "p50Ms": 3.91,
-        "p90Ms": 4.54,
-        "p95Ms": 4.58,
-        "p99Ms": 4.97,
-        "maxMs": 5.11,
-        "stdDevMs": 0.36
+        "minMs": 4.8,
+        "meanMs": 7.36,
+        "p50Ms": 7.35,
+        "p90Ms": 9.07,
+        "p95Ms": 9.73,
+        "p99Ms": 10.02,
+        "maxMs": 10.19,
+        "stdDevMs": 1.41
       }
     },
     {
@@ -427,17 +427,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1567.53,
+      "throughputReqPerSec": 1413.15,
       "latency": {
         "count": 50,
-        "minMs": 2.68,
-        "meanMs": 6.04,
-        "p50Ms": 5.91,
-        "p90Ms": 8.02,
-        "p95Ms": 8.2,
-        "p99Ms": 10.29,
-        "maxMs": 10.79,
-        "stdDevMs": 1.77
+        "minMs": 2.3,
+        "meanMs": 6.76,
+        "p50Ms": 6.2,
+        "p90Ms": 10.11,
+        "p95Ms": 10.49,
+        "p99Ms": 11.39,
+        "maxMs": 11.96,
+        "stdDevMs": 2.18
       }
     },
     {
@@ -448,17 +448,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1266,
+      "throughputReqPerSec": 1101.73,
       "latency": {
         "count": 50,
-        "minMs": 5.25,
-        "meanMs": 7.74,
-        "p50Ms": 7.6,
-        "p90Ms": 9.87,
-        "p95Ms": 10.44,
-        "p99Ms": 10.95,
-        "maxMs": 11.06,
-        "stdDevMs": 1.39
+        "minMs": 4.92,
+        "meanMs": 8.72,
+        "p50Ms": 8.51,
+        "p90Ms": 11.69,
+        "p95Ms": 12.12,
+        "p99Ms": 12.9,
+        "maxMs": 13.24,
+        "stdDevMs": 2.38
       }
     },
     {
@@ -469,17 +469,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 2151.61,
+      "throughputReqPerSec": 1653.23,
       "latency": {
         "count": 50,
-        "minMs": 3.46,
-        "meanMs": 4.53,
-        "p50Ms": 4.44,
-        "p90Ms": 5.19,
-        "p95Ms": 5.37,
-        "p99Ms": 5.77,
-        "maxMs": 5.98,
-        "stdDevMs": 0.53
+        "minMs": 3.28,
+        "meanMs": 5.92,
+        "p50Ms": 5.82,
+        "p90Ms": 8.42,
+        "p95Ms": 8.85,
+        "p99Ms": 9.73,
+        "maxMs": 10.1,
+        "stdDevMs": 1.7
       }
     },
     {
@@ -490,17 +490,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1654.57,
+      "throughputReqPerSec": 1548.76,
       "latency": {
         "count": 50,
-        "minMs": 3.98,
-        "meanMs": 12.68,
-        "p50Ms": 12.47,
-        "p90Ms": 15.79,
-        "p95Ms": 16.76,
-        "p99Ms": 17.33,
-        "maxMs": 17.69,
-        "stdDevMs": 2.89
+        "minMs": 8.9,
+        "meanMs": 14.53,
+        "p50Ms": 15.07,
+        "p90Ms": 18.24,
+        "p95Ms": 19.18,
+        "p99Ms": 19.53,
+        "maxMs": 19.71,
+        "stdDevMs": 2.83
       }
     },
     {
@@ -511,17 +511,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1047.92,
+      "throughputReqPerSec": 1026.57,
       "latency": {
         "count": 50,
-        "minMs": 16.16,
-        "meanMs": 22.52,
-        "p50Ms": 21.61,
-        "p90Ms": 28.35,
-        "p95Ms": 29.24,
-        "p99Ms": 30.11,
-        "maxMs": 30.59,
-        "stdDevMs": 4.29
+        "minMs": 16.49,
+        "meanMs": 22.65,
+        "p50Ms": 22.79,
+        "p90Ms": 26.66,
+        "p95Ms": 28.23,
+        "p99Ms": 29.12,
+        "maxMs": 29.33,
+        "stdDevMs": 3.04
       }
     },
     {
@@ -532,17 +532,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1657.48,
+      "throughputReqPerSec": 1332.08,
       "latency": {
         "count": 50,
-        "minMs": 10.16,
-        "meanMs": 14.23,
-        "p50Ms": 13.92,
-        "p90Ms": 17.96,
-        "p95Ms": 18.66,
-        "p99Ms": 19.07,
-        "maxMs": 19.11,
-        "stdDevMs": 2.65
+        "minMs": 9.18,
+        "meanMs": 17.92,
+        "p50Ms": 17.46,
+        "p90Ms": 25.96,
+        "p95Ms": 26.42,
+        "p99Ms": 26.98,
+        "maxMs": 27.31,
+        "stdDevMs": 6.03
       }
     },
     {
@@ -553,17 +553,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 2234.72,
+      "throughputReqPerSec": 1948.08,
       "latency": {
         "count": 50,
-        "minMs": 15.55,
-        "meanMs": 17.34,
-        "p50Ms": 17.17,
-        "p90Ms": 18.88,
-        "p95Ms": 18.92,
-        "p99Ms": 18.95,
-        "maxMs": 18.95,
-        "stdDevMs": 1.21
+        "minMs": 17.23,
+        "meanMs": 21.43,
+        "p50Ms": 22.31,
+        "p90Ms": 22.52,
+        "p95Ms": 22.53,
+        "p99Ms": 22.53,
+        "maxMs": 22.53,
+        "stdDevMs": 1.75
       }
     },
     {
@@ -574,17 +574,17 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1081.16,
+      "throughputReqPerSec": 1092.77,
       "latency": {
         "count": 50,
-        "minMs": 30.65,
-        "meanMs": 40.94,
-        "p50Ms": 42.66,
-        "p90Ms": 43.5,
-        "p95Ms": 43.58,
-        "p99Ms": 43.84,
-        "maxMs": 43.88,
-        "stdDevMs": 3.14
+        "minMs": 36.81,
+        "meanMs": 42.7,
+        "p50Ms": 43.1,
+        "p90Ms": 44,
+        "p95Ms": 44.2,
+        "p99Ms": 44.7,
+        "maxMs": 44.75,
+        "stdDevMs": 1.63
       }
     },
     {
@@ -595,114 +595,248 @@
       "sampleCount": 50,
       "successCount": 50,
       "errorCount": 0,
-      "throughputReqPerSec": 1972.43,
+      "throughputReqPerSec": 1573.81,
       "latency": {
         "count": 50,
-        "minMs": 18.8,
-        "meanMs": 22.16,
-        "p50Ms": 22.52,
-        "p90Ms": 23.69,
-        "p95Ms": 23.75,
-        "p99Ms": 23.89,
-        "maxMs": 24,
-        "stdDevMs": 1.4
+        "minMs": 23.97,
+        "meanMs": 27.91,
+        "p50Ms": 28.31,
+        "p90Ms": 29.8,
+        "p95Ms": 29.87,
+        "p99Ms": 30.12,
+        "maxMs": 30.17,
+        "stdDevMs": 1.69
       }
     }
   ],
   "concurrencySweep": [
     {
       "concurrency": 1,
-      "chatAckP50Ms": 8.95,
-      "chatAckP95Ms": 12.11,
-      "chatCompletionP50Ms": 38.88,
-      "chatCompletionP95Ms": 46.76,
-      "taskAckP50Ms": 3.98,
-      "taskAckP95Ms": 6.52,
-      "taskCompletionP50Ms": 88.95,
-      "taskCompletionP95Ms": 112.07,
-      "statusReadP95Ms": 2.06,
-      "chatThroughputPerSec": 26,
-      "taskThroughputPerSec": 11.54
+      "chatSampleCount": 50,
+      "chatSuccessCount": 50,
+      "chatAckP50Ms": 5.83,
+      "chatAckP95Ms": 9.88,
+      "chatCompletionP50Ms": 31.14,
+      "chatCompletionP95Ms": 47.77,
+      "taskSampleCount": 50,
+      "taskSuccessCount": 50,
+      "taskAckP50Ms": 5.08,
+      "taskAckP95Ms": 12.75,
+      "taskCompletionP50Ms": 109.28,
+      "taskCompletionP95Ms": 133.66,
+      "statusReadP95Ms": 3.21,
+      "chatThroughputPerSec": 31.12,
+      "taskThroughputPerSec": 9.53
     },
     {
       "concurrency": 10,
-      "chatAckP50Ms": 6.39,
-      "chatAckP95Ms": 52.67,
-      "chatCompletionP50Ms": 50.74,
-      "chatCompletionP95Ms": 104.26,
-      "taskAckP50Ms": 3.83,
-      "taskAckP95Ms": 19.63,
-      "taskCompletionP50Ms": 88.04,
-      "taskCompletionP95Ms": 138.55,
-      "statusReadP95Ms": 8.2,
-      "chatThroughputPerSec": 161.91,
-      "taskThroughputPerSec": 103.78
+      "chatSampleCount": 50,
+      "chatSuccessCount": 50,
+      "chatAckP50Ms": 4.63,
+      "chatAckP95Ms": 60.56,
+      "chatCompletionP50Ms": 57.1,
+      "chatCompletionP95Ms": 116.56,
+      "taskSampleCount": 50,
+      "taskSuccessCount": 50,
+      "taskAckP50Ms": 4.3,
+      "taskAckP95Ms": 36.42,
+      "taskCompletionP50Ms": 85.11,
+      "taskCompletionP95Ms": 185.88,
+      "statusReadP95Ms": 10.49,
+      "chatThroughputPerSec": 149.84,
+      "taskThroughputPerSec": 99.09
     },
     {
       "concurrency": 25,
-      "chatAckP50Ms": 30.47,
-      "chatAckP95Ms": 114.11,
-      "chatCompletionP50Ms": 176.32,
-      "chatCompletionP95Ms": 301.87,
-      "taskAckP50Ms": 18.68,
-      "taskAckP95Ms": 53.82,
-      "taskCompletionP50Ms": 212.56,
-      "taskCompletionP95Ms": 376.39,
-      "statusReadP95Ms": 16.76,
-      "chatThroughputPerSec": 118.68,
-      "taskThroughputPerSec": 101.05
+      "chatSampleCount": 50,
+      "chatSuccessCount": 50,
+      "chatAckP50Ms": 29.39,
+      "chatAckP95Ms": 74.56,
+      "chatCompletionP50Ms": 116.24,
+      "chatCompletionP95Ms": 195.2,
+      "taskSampleCount": 50,
+      "taskSuccessCount": 50,
+      "taskAckP50Ms": 22.62,
+      "taskAckP95Ms": 49.66,
+      "taskCompletionP50Ms": 233.4,
+      "taskCompletionP95Ms": 356.03,
+      "statusReadP95Ms": 19.18,
+      "chatThroughputPerSec": 171.97,
+      "taskThroughputPerSec": 98.27
     },
     {
       "concurrency": 50,
-      "chatAckP50Ms": 72.69,
-      "chatAckP95Ms": 85.86,
-      "chatCompletionP50Ms": 203.55,
-      "chatCompletionP95Ms": 249.94,
-      "taskAckP50Ms": 46.72,
-      "taskAckP95Ms": 58.84,
-      "taskCompletionP50Ms": 422.72,
-      "taskCompletionP95Ms": 500.81,
-      "statusReadP95Ms": 18.92,
-      "chatThroughputPerSec": 196.89,
-      "taskThroughputPerSec": 99.08
+      "chatSampleCount": 50,
+      "chatSuccessCount": 50,
+      "chatAckP50Ms": 64.02,
+      "chatAckP95Ms": 78.8,
+      "chatCompletionP50Ms": 257.51,
+      "chatCompletionP95Ms": 339.99,
+      "taskSampleCount": 50,
+      "taskSuccessCount": 50,
+      "taskAckP50Ms": 48,
+      "taskAckP95Ms": 62.07,
+      "taskCompletionP50Ms": 470.22,
+      "taskCompletionP95Ms": 547.11,
+      "statusReadP95Ms": 22.53,
+      "chatThroughputPerSec": 145.57,
+      "taskThroughputPerSec": 88.88
     }
   ],
   "dbMutationStats": [
     {
       "workloadName": "v1_b1_conversation_turn",
       "concurrency": 1,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 300,
-      "mutationsPerOperation": 6,
-      "totalSchemaBytesAfter": 2703360,
-      "peakActiveConnections": 7,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "conversation_messages": 100,
+        "assistant_turns": 50
+      },
+      "exactNetRowsInserted": 150,
+      "exactNetRowsPerOperation": 3,
+      "pgStatTupleMutations": 254,
+      "pgStatMutationsPerOperation": 5.08,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 79 conversation_messages inserts vs 100 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 2744320,
+      "peakActiveConnections": 3,
       "peakTotalConnections": 9,
-      "peakRssMb": 221.3,
+      "peakRssMb": 227.8,
       "tables": [
         {
           "tableName": "assistant_turns",
-          "inserts": 50,
-          "updates": 50,
+          "inserts": 40,
+          "updates": 39,
           "deletes": 0,
-          "totalMutations": 100,
-          "liveRowsAfter": 55,
+          "totalMutations": 79,
+          "liveRowsAfter": 45,
           "totalBytesAfter": 147456
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 100,
+          "inserts": 79,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 100,
-          "liveRowsAfter": 108,
+          "totalMutations": 79,
+          "liveRowsAfter": 84,
           "totalBytesAfter": 221184
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 100,
+          "updates": 79,
           "deletes": 0,
-          "totalMutations": 100,
+          "totalMutations": 79,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 1,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 3,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 114688
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 4,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 4,
+          "totalBytesAfter": 139264
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 9,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 1,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 139264
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 1,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "runs",
+          "inserts": 0,
+          "updates": 1,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 0,
+          "totalBytesAfter": 131072
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 0,
+          "updates": 1,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 0,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 1,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 1,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 5,
+          "totalBytesAfter": 180224
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 1,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 1,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 1,
+          "deletes": 0,
+          "totalMutations": 1,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
@@ -714,33 +848,6 @@
           "totalMutations": 0,
           "liveRowsAfter": 100,
           "totalBytesAfter": 98304
-        },
-        {
-          "tableName": "artifacts",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 2,
-          "totalBytesAfter": 139264
-        },
-        {
-          "tableName": "blobs",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 2,
-          "totalBytesAfter": 49152
-        },
-        {
-          "tableName": "budget_operations",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 3,
-          "totalBytesAfter": 114688
         },
         {
           "tableName": "consumer_identities",
@@ -770,15 +877,6 @@
           "totalBytesAfter": 73728
         },
         {
-          "tableName": "operation_receipts",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 4,
-          "totalBytesAfter": 49152
-        },
-        {
           "tableName": "platform_metadata",
           "inserts": 0,
           "updates": 0,
@@ -797,15 +895,6 @@
           "totalBytesAfter": 65536
         },
         {
-          "tableName": "runs",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 1,
-          "totalBytesAfter": 131072
-        },
-        {
           "tableName": "schema_migrations",
           "inserts": 0,
           "updates": 0,
@@ -815,42 +904,6 @@
           "totalBytesAfter": 49152
         },
         {
-          "tableName": "step_checkpoints",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 4,
-          "totalBytesAfter": 98304
-        },
-        {
-          "tableName": "task_events",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 11,
-          "totalBytesAfter": 81920
-        },
-        {
-          "tableName": "task_results",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 2,
-          "totalBytesAfter": 81920
-        },
-        {
-          "tableName": "tasks",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 5,
-          "totalBytesAfter": 180224
-        },
-        {
           "tableName": "tenants",
           "inserts": 0,
           "updates": 0,
@@ -858,170 +911,171 @@
           "totalMutations": 0,
           "liveRowsAfter": 51,
           "totalBytesAfter": 32768
-        },
-        {
-          "tableName": "workspace_versions",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 2,
-          "totalBytesAfter": 49152
-        },
-        {
-          "tableName": "workspaces",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 50,
-          "totalBytesAfter": 65536
         }
       ]
     },
     {
       "workloadName": "v1_durable_task_lifecycle",
       "concurrency": 1,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 1348,
-      "mutationsPerOperation": 26.96,
-      "totalSchemaBytesAfter": 3440640,
-      "peakActiveConnections": 7,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "tasks": 50,
+        "runs": 50,
+        "task_events": 250,
+        "budget_operations": 100,
+        "staged_blobs": 50,
+        "artifacts": 50,
+        "blobs": 50,
+        "step_checkpoints": 100,
+        "workspace_versions": 50,
+        "task_results": 50,
+        "operation_receipts": 100
+      },
+      "exactNetRowsInserted": 900,
+      "exactNetRowsPerOperation": 18,
+      "pgStatTupleMutations": 1397,
+      "pgStatMutationsPerOperation": 27.94,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 49 task inserts vs 50 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 3473408,
+      "peakActiveConnections": 3,
       "peakTotalConnections": 9,
-      "peakRssMb": 230.8,
+      "peakRssMb": 255,
       "tables": [
         {
           "tableName": "task_events",
-          "inserts": 256,
+          "inserts": 265,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 256,
-          "liveRowsAfter": 267,
+          "totalMutations": 265,
+          "liveRowsAfter": 274,
           "totalBytesAfter": 237568
         },
         {
           "tableName": "budget_operations",
-          "inserts": 103,
-          "updates": 104,
+          "inserts": 107,
+          "updates": 106,
           "deletes": 0,
-          "totalMutations": 207,
-          "liveRowsAfter": 106,
+          "totalMutations": 213,
+          "liveRowsAfter": 109,
           "totalBytesAfter": 188416
         },
         {
           "tableName": "runs",
-          "inserts": 51,
-          "updates": 103,
+          "inserts": 55,
+          "updates": 108,
           "deletes": 0,
-          "totalMutations": 154,
-          "liveRowsAfter": 52,
-          "totalBytesAfter": 172032
+          "totalMutations": 163,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 180224
         },
         {
           "tableName": "tasks",
-          "inserts": 50,
-          "updates": 103,
+          "inserts": 49,
+          "updates": 108,
           "deletes": 0,
-          "totalMutations": 153,
-          "liveRowsAfter": 55,
-          "totalBytesAfter": 278528
-        },
-        {
-          "tableName": "operation_receipts",
-          "inserts": 104,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 104,
-          "liveRowsAfter": 108,
-          "totalBytesAfter": 163840
+          "totalMutations": 157,
+          "liveRowsAfter": 54,
+          "totalBytesAfter": 270336
         },
         {
           "tableName": "staged_blobs",
-          "inserts": 52,
-          "updates": 52,
+          "inserts": 54,
+          "updates": 53,
           "deletes": 0,
-          "totalMutations": 104,
-          "liveRowsAfter": 52,
+          "totalMutations": 107,
+          "liveRowsAfter": 54,
           "totalBytesAfter": 131072
         },
         {
-          "tableName": "step_checkpoints",
-          "inserts": 104,
+          "tableName": "operation_receipts",
+          "inserts": 106,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 104,
-          "liveRowsAfter": 108,
+          "totalMutations": 106,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 106,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 106,
+          "liveRowsAfter": 110,
           "totalBytesAfter": 212992
         },
         {
           "tableName": "artifacts",
-          "inserts": 52,
+          "inserts": 53,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 52,
-          "liveRowsAfter": 54,
-          "totalBytesAfter": 139264
+          "totalMutations": 53,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 163840
         },
         {
           "tableName": "blobs",
-          "inserts": 52,
+          "inserts": 53,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 52,
-          "liveRowsAfter": 54,
-          "totalBytesAfter": 90112
+          "totalMutations": 53,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 98304
         },
         {
           "tableName": "task_results",
-          "inserts": 52,
+          "inserts": 53,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 52,
-          "liveRowsAfter": 54,
+          "totalMutations": 53,
+          "liveRowsAfter": 55,
           "totalBytesAfter": 81920
         },
         {
           "tableName": "workspace_versions",
-          "inserts": 52,
+          "inserts": 53,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 52,
-          "liveRowsAfter": 54,
+          "totalMutations": 53,
+          "liveRowsAfter": 55,
           "totalBytesAfter": 98304
         },
         {
           "tableName": "workspaces",
           "inserts": 0,
-          "updates": 52,
+          "updates": 53,
           "deletes": 0,
-          "totalMutations": 52,
+          "totalMutations": 53,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
         {
           "tableName": "assistant_turns",
           "inserts": 0,
-          "updates": 2,
+          "updates": 5,
           "deletes": 0,
-          "totalMutations": 2,
+          "totalMutations": 5,
           "liveRowsAfter": 55,
           "totalBytesAfter": 147456
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 2,
+          "inserts": 5,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 2,
+          "totalMutations": 5,
           "liveRowsAfter": 110,
           "totalBytesAfter": 221184
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 2,
+          "updates": 5,
           "deletes": 0,
-          "totalMutations": 2,
+          "totalMutations": 5,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
@@ -1102,58 +1156,50 @@
     {
       "workloadName": "v1_b1_conversation_turn",
       "concurrency": 10,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 14,
-      "mutationsPerOperation": 0.28,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "conversation_messages": 100,
+        "assistant_turns": 50
+      },
+      "exactNetRowsInserted": 150,
+      "exactNetRowsPerOperation": 3,
+      "pgStatTupleMutations": 120,
+      "pgStatMutationsPerOperation": 2.4,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 40 conversation_messages inserts vs 100 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
       "totalSchemaBytesAfter": 3710976,
-      "peakActiveConnections": 7,
+      "peakActiveConnections": 5,
       "peakTotalConnections": 18,
-      "peakRssMb": 261.5,
+      "peakRssMb": 285.1,
       "tables": [
         {
-          "tableName": "runs",
-          "inserts": 2,
-          "updates": 2,
+          "tableName": "assistant_turns",
+          "inserts": 0,
+          "updates": 40,
           "deletes": 0,
-          "totalMutations": 4,
+          "totalMutations": 40,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 172032
-        },
-        {
-          "tableName": "task_events",
-          "inserts": 4,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 4,
-          "liveRowsAfter": 275,
-          "totalBytesAfter": 237568
-        },
-        {
-          "tableName": "budget_operations",
-          "inserts": 2,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 2,
-          "liveRowsAfter": 110,
           "totalBytesAfter": 188416
         },
         {
-          "tableName": "staged_blobs",
-          "inserts": 2,
+          "tableName": "conversation_messages",
+          "inserts": 40,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 2,
-          "liveRowsAfter": 55,
-          "totalBytesAfter": 131072
+          "totalMutations": 40,
+          "liveRowsAfter": 150,
+          "totalBytesAfter": 417792
         },
         {
-          "tableName": "tasks",
+          "tableName": "conversations",
           "inserts": 0,
-          "updates": 2,
+          "updates": 40,
           "deletes": 0,
-          "totalMutations": 2,
-          "liveRowsAfter": 55,
-          "totalBytesAfter": 278528
+          "totalMutations": 40,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
         },
         {
           "tableName": "agents",
@@ -1171,16 +1217,7 @@
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 139264
-        },
-        {
-          "tableName": "assistant_turns",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 55,
-          "totalBytesAfter": 229376
+          "totalBytesAfter": 163840
         },
         {
           "tableName": "blobs",
@@ -1189,7 +1226,16 @@
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 188416
         },
         {
           "tableName": "consumer_identities",
@@ -1217,24 +1263,6 @@
           "totalMutations": 0,
           "liveRowsAfter": 50,
           "totalBytesAfter": 73728
-        },
-        {
-          "tableName": "conversation_messages",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 110,
-          "totalBytesAfter": 409600
-        },
-        {
-          "tableName": "conversations",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 50,
-          "totalBytesAfter": 65536
         },
         {
           "tableName": "operation_receipts",
@@ -1264,6 +1292,15 @@
           "totalBytesAfter": 65536
         },
         {
+          "tableName": "runs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 180224
+        },
+        {
           "tableName": "schema_migrations",
           "inserts": 0,
           "updates": 0,
@@ -1271,6 +1308,15 @@
           "totalMutations": 0,
           "liveRowsAfter": 23,
           "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 131072
         },
         {
           "tableName": "step_checkpoints",
@@ -1282,6 +1328,15 @@
           "totalBytesAfter": 212992
         },
         {
+          "tableName": "task_events",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 275,
+          "totalBytesAfter": 237568
+        },
+        {
           "tableName": "task_results",
           "inserts": 0,
           "updates": 0,
@@ -1289,6 +1344,15 @@
           "totalMutations": 0,
           "liveRowsAfter": 55,
           "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 270336
         },
         {
           "tableName": "tenants",
@@ -1322,137 +1386,155 @@
     {
       "workloadName": "v1_durable_task_lifecycle",
       "concurrency": 10,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 514,
-      "mutationsPerOperation": 10.28,
-      "totalSchemaBytesAfter": 4743168,
-      "peakActiveConnections": 7,
-      "peakTotalConnections": 24,
-      "peakRssMb": 283.4,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "tasks": 50,
+        "runs": 50,
+        "task_events": 250,
+        "budget_operations": 100,
+        "staged_blobs": 50,
+        "artifacts": 50,
+        "step_checkpoints": 100,
+        "workspace_versions": 50,
+        "task_results": 50,
+        "operation_receipts": 100
+      },
+      "exactNetRowsInserted": 850,
+      "exactNetRowsPerOperation": 17,
+      "pgStatTupleMutations": 350,
+      "pgStatMutationsPerOperation": 7,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 13 task inserts vs 50 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 4669440,
+      "peakActiveConnections": 6,
+      "peakTotalConnections": 22,
+      "peakRssMb": 295.3,
       "tables": [
         {
           "tableName": "task_events",
-          "inserts": 76,
+          "inserts": 47,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 76,
-          "liveRowsAfter": 351,
-          "totalBytesAfter": 442368
+          "totalMutations": 47,
+          "liveRowsAfter": 322,
+          "totalBytesAfter": 434176
         },
         {
           "tableName": "assistant_turns",
-          "inserts": 41,
-          "updates": 21,
+          "inserts": 44,
+          "updates": 0,
           "deletes": 0,
-          "totalMutations": 62,
+          "totalMutations": 44,
           "liveRowsAfter": 105,
-          "totalBytesAfter": 229376
+          "totalBytesAfter": 188416
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 62,
+          "inserts": 44,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 62,
+          "totalMutations": 44,
           "liveRowsAfter": 210,
-          "totalBytesAfter": 409600
+          "totalBytesAfter": 417792
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 62,
+          "updates": 44,
           "deletes": 0,
-          "totalMutations": 62,
+          "totalMutations": 44,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
         {
-          "tableName": "runs",
-          "inserts": 20,
-          "updates": 30,
-          "deletes": 0,
-          "totalMutations": 50,
-          "liveRowsAfter": 75,
-          "totalBytesAfter": 196608
-        },
-        {
           "tableName": "budget_operations",
-          "inserts": 29,
-          "updates": 20,
+          "inserts": 15,
+          "updates": 16,
           "deletes": 0,
-          "totalMutations": 49,
-          "liveRowsAfter": 139,
-          "totalBytesAfter": 327680
+          "totalMutations": 31,
+          "liveRowsAfter": 125,
+          "totalBytesAfter": 335872
         },
         {
           "tableName": "tasks",
-          "inserts": 16,
-          "updates": 30,
+          "inserts": 13,
+          "updates": 17,
           "deletes": 0,
-          "totalMutations": 46,
-          "liveRowsAfter": 71,
-          "totalBytesAfter": 385024
+          "totalMutations": 30,
+          "liveRowsAfter": 68,
+          "totalBytesAfter": 393216
+        },
+        {
+          "tableName": "runs",
+          "inserts": 9,
+          "updates": 17,
+          "deletes": 0,
+          "totalMutations": 26,
+          "liveRowsAfter": 64,
+          "totalBytesAfter": 204800
         },
         {
           "tableName": "staged_blobs",
-          "inserts": 16,
-          "updates": 11,
+          "inserts": 12,
+          "updates": 8,
           "deletes": 0,
-          "totalMutations": 27,
-          "liveRowsAfter": 71,
-          "totalBytesAfter": 196608
+          "totalMutations": 20,
+          "liveRowsAfter": 67,
+          "totalBytesAfter": 172032
         },
         {
           "tableName": "operation_receipts",
-          "inserts": 20,
+          "inserts": 16,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 20,
-          "liveRowsAfter": 130,
+          "totalMutations": 16,
+          "liveRowsAfter": 126,
           "totalBytesAfter": 278528
         },
         {
           "tableName": "step_checkpoints",
-          "inserts": 20,
+          "inserts": 16,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 20,
-          "liveRowsAfter": 130,
-          "totalBytesAfter": 385024
+          "totalMutations": 16,
+          "liveRowsAfter": 126,
+          "totalBytesAfter": 368640
         },
         {
           "tableName": "artifacts",
-          "inserts": 10,
+          "inserts": 8,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 10,
-          "liveRowsAfter": 65,
-          "totalBytesAfter": 196608
+          "totalMutations": 8,
+          "liveRowsAfter": 63,
+          "totalBytesAfter": 163840
         },
         {
           "tableName": "task_results",
-          "inserts": 10,
+          "inserts": 8,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 10,
-          "liveRowsAfter": 65,
-          "totalBytesAfter": 155648
+          "totalMutations": 8,
+          "liveRowsAfter": 63,
+          "totalBytesAfter": 163840
         },
         {
           "tableName": "workspace_versions",
-          "inserts": 10,
+          "inserts": 8,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 10,
-          "liveRowsAfter": 65,
+          "totalMutations": 8,
+          "liveRowsAfter": 63,
           "totalBytesAfter": 172032
         },
         {
           "tableName": "workspaces",
           "inserts": 0,
-          "updates": 10,
+          "updates": 8,
           "deletes": 0,
-          "totalMutations": 10,
+          "totalMutations": 8,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
@@ -1472,7 +1554,7 @@
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
+          "totalBytesAfter": 98304
         },
         {
           "tableName": "consumer_identities",
@@ -1542,137 +1624,48 @@
     {
       "workloadName": "v1_b1_conversation_turn",
       "concurrency": 25,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 314,
-      "mutationsPerOperation": 6.28,
-      "totalSchemaBytesAfter": 4931584,
-      "peakActiveConnections": 7,
-      "peakTotalConnections": 39,
-      "peakRssMb": 292.8,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "conversation_messages": 100,
+        "assistant_turns": 50
+      },
+      "exactNetRowsInserted": 150,
+      "exactNetRowsPerOperation": 3,
+      "pgStatTupleMutations": 114,
+      "pgStatMutationsPerOperation": 2.28,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 38 conversation_messages inserts vs 100 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 4915200,
+      "peakActiveConnections": 8,
+      "peakTotalConnections": 37,
+      "peakRssMb": 304.3,
       "tables": [
         {
           "tableName": "assistant_turns",
-          "inserts": 15,
-          "updates": 50,
+          "inserts": 1,
+          "updates": 37,
           "deletes": 0,
-          "totalMutations": 65,
-          "liveRowsAfter": 120,
-          "totalBytesAfter": 270336
+          "totalMutations": 38,
+          "liveRowsAfter": 106,
+          "totalBytesAfter": 262144
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 65,
+          "inserts": 38,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 65,
-          "liveRowsAfter": 275,
-          "totalBytesAfter": 557056
+          "totalMutations": 38,
+          "liveRowsAfter": 248,
+          "totalBytesAfter": 589824
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 65,
+          "updates": 38,
           "deletes": 0,
-          "totalMutations": 65,
-          "liveRowsAfter": 50,
-          "totalBytesAfter": 65536
-        },
-        {
-          "tableName": "budget_operations",
-          "inserts": 9,
-          "updates": 12,
-          "deletes": 0,
-          "totalMutations": 21,
-          "liveRowsAfter": 148,
-          "totalBytesAfter": 327680
-        },
-        {
-          "tableName": "task_events",
-          "inserts": 18,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 18,
-          "liveRowsAfter": 403,
-          "totalBytesAfter": 442368
-        },
-        {
-          "tableName": "operation_receipts",
-          "inserts": 12,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 12,
-          "liveRowsAfter": 142,
-          "totalBytesAfter": 278528
-        },
-        {
-          "tableName": "runs",
-          "inserts": 3,
-          "updates": 9,
-          "deletes": 0,
-          "totalMutations": 12,
-          "liveRowsAfter": 78,
-          "totalBytesAfter": 196608
-        },
-        {
-          "tableName": "step_checkpoints",
-          "inserts": 12,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 12,
-          "liveRowsAfter": 142,
-          "totalBytesAfter": 385024
-        },
-        {
-          "tableName": "staged_blobs",
-          "inserts": 5,
-          "updates": 6,
-          "deletes": 0,
-          "totalMutations": 11,
-          "liveRowsAfter": 76,
-          "totalBytesAfter": 196608
-        },
-        {
-          "tableName": "tasks",
-          "inserts": 0,
-          "updates": 9,
-          "deletes": 0,
-          "totalMutations": 9,
-          "liveRowsAfter": 105,
-          "totalBytesAfter": 385024
-        },
-        {
-          "tableName": "artifacts",
-          "inserts": 6,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 6,
-          "liveRowsAfter": 71,
-          "totalBytesAfter": 196608
-        },
-        {
-          "tableName": "task_results",
-          "inserts": 6,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 6,
-          "liveRowsAfter": 71,
-          "totalBytesAfter": 155648
-        },
-        {
-          "tableName": "workspace_versions",
-          "inserts": 6,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 6,
-          "liveRowsAfter": 71,
-          "totalBytesAfter": 172032
-        },
-        {
-          "tableName": "workspaces",
-          "inserts": 0,
-          "updates": 6,
-          "deletes": 0,
-          "totalMutations": 6,
+          "totalMutations": 38,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
@@ -1686,13 +1679,31 @@
           "totalBytesAfter": 98304
         },
         {
+          "tableName": "artifacts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 67,
+          "totalBytesAfter": 163840
+        },
+        {
           "tableName": "blobs",
           "inserts": 0,
           "updates": 0,
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 136,
+          "totalBytesAfter": 335872
         },
         {
           "tableName": "consumer_identities",
@@ -1722,6 +1733,15 @@
           "totalBytesAfter": 73728
         },
         {
+          "tableName": "operation_receipts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 134,
+          "totalBytesAfter": 278528
+        },
+        {
           "tableName": "platform_metadata",
           "inserts": 0,
           "updates": 0,
@@ -1740,6 +1760,15 @@
           "totalBytesAfter": 65536
         },
         {
+          "tableName": "runs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 204800
+        },
+        {
           "tableName": "schema_migrations",
           "inserts": 0,
           "updates": 0,
@@ -1749,6 +1778,51 @@
           "totalBytesAfter": 49152
         },
         {
+          "tableName": "staged_blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 73,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 134,
+          "totalBytesAfter": 368640
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 381,
+          "totalBytesAfter": 434176
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 67,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 105,
+          "totalBytesAfter": 393216
+        },
+        {
           "tableName": "tenants",
           "inserts": 0,
           "updates": 0,
@@ -1756,64 +1830,91 @@
           "totalMutations": 0,
           "liveRowsAfter": 51,
           "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 67,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
         }
       ]
     },
     {
       "workloadName": "v1_durable_task_lifecycle",
       "concurrency": 25,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 1094,
-      "mutationsPerOperation": 21.88,
-      "totalSchemaBytesAfter": 5808128,
-      "peakActiveConnections": 21,
-      "peakTotalConnections": 52,
-      "peakRssMb": 308.5,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "tasks": 50,
+        "runs": 50,
+        "task_events": 250,
+        "budget_operations": 100,
+        "staged_blobs": 50,
+        "artifacts": 50,
+        "step_checkpoints": 100,
+        "workspace_versions": 50,
+        "task_results": 50,
+        "operation_receipts": 100
+      },
+      "exactNetRowsInserted": 850,
+      "exactNetRowsPerOperation": 17,
+      "pgStatTupleMutations": 1080,
+      "pgStatMutationsPerOperation": 21.6,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 30 task inserts vs 50 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 6078464,
+      "peakActiveConnections": 18,
+      "peakTotalConnections": 50,
+      "peakRssMb": 319.4,
       "tables": [
         {
           "tableName": "task_events",
-          "inserts": 198,
+          "inserts": 185,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 198,
-          "liveRowsAfter": 601,
-          "totalBytesAfter": 606208
+          "totalMutations": 185,
+          "liveRowsAfter": 566,
+          "totalBytesAfter": 671744
         },
         {
           "tableName": "budget_operations",
-          "inserts": 83,
-          "updates": 77,
+          "inserts": 77,
+          "updates": 76,
           "deletes": 0,
-          "totalMutations": 160,
-          "liveRowsAfter": 231,
-          "totalBytesAfter": 442368
+          "totalMutations": 153,
+          "liveRowsAfter": 213,
+          "totalBytesAfter": 466944
         },
         {
           "tableName": "runs",
-          "inserts": 45,
-          "updates": 83,
+          "inserts": 39,
+          "updates": 77,
           "deletes": 0,
-          "totalMutations": 128,
-          "liveRowsAfter": 123,
-          "totalBytesAfter": 303104
+          "totalMutations": 116,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 294912
         },
         {
           "tableName": "tasks",
-          "inserts": 31,
-          "updates": 83,
+          "inserts": 30,
+          "updates": 77,
           "deletes": 0,
-          "totalMutations": 114,
-          "liveRowsAfter": 136,
-          "totalBytesAfter": 532480
-        },
-        {
-          "tableName": "staged_blobs",
-          "inserts": 40,
-          "updates": 42,
-          "deletes": 0,
-          "totalMutations": 82,
-          "liveRowsAfter": 116,
-          "totalBytesAfter": 270336
+          "totalMutations": 107,
+          "liveRowsAfter": 135,
+          "totalBytesAfter": 540672
         },
         {
           "tableName": "operation_receipts",
@@ -1821,8 +1922,17 @@
           "updates": 0,
           "deletes": 0,
           "totalMutations": 77,
-          "liveRowsAfter": 219,
-          "totalBytesAfter": 360448
+          "liveRowsAfter": 211,
+          "totalBytesAfter": 425984
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 36,
+          "updates": 41,
+          "deletes": 0,
+          "totalMutations": 77,
+          "liveRowsAfter": 109,
+          "totalBytesAfter": 278528
         },
         {
           "tableName": "step_checkpoints",
@@ -1830,8 +1940,35 @@
           "updates": 0,
           "deletes": 0,
           "totalMutations": 77,
-          "liveRowsAfter": 219,
-          "totalBytesAfter": 499712
+          "liveRowsAfter": 211,
+          "totalBytesAfter": 491520
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 45,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 45,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 262144
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 45,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 45,
+          "liveRowsAfter": 310,
+          "totalBytesAfter": 589824
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 45,
+          "deletes": 0,
+          "totalMutations": 45,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
         },
         {
           "tableName": "artifacts",
@@ -1839,8 +1976,8 @@
           "updates": 0,
           "deletes": 0,
           "totalMutations": 39,
-          "liveRowsAfter": 110,
-          "totalBytesAfter": 204800
+          "liveRowsAfter": 106,
+          "totalBytesAfter": 262144
         },
         {
           "tableName": "task_results",
@@ -1848,7 +1985,7 @@
           "updates": 0,
           "deletes": 0,
           "totalMutations": 38,
-          "liveRowsAfter": 109,
+          "liveRowsAfter": 105,
           "totalBytesAfter": 163840
         },
         {
@@ -1857,8 +1994,8 @@
           "updates": 0,
           "deletes": 0,
           "totalMutations": 38,
-          "liveRowsAfter": 109,
-          "totalBytesAfter": 229376
+          "liveRowsAfter": 105,
+          "totalBytesAfter": 253952
         },
         {
           "tableName": "workspaces",
@@ -1870,33 +2007,6 @@
           "totalBytesAfter": 65536
         },
         {
-          "tableName": "assistant_turns",
-          "inserts": 35,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 35,
-          "liveRowsAfter": 155,
-          "totalBytesAfter": 270336
-        },
-        {
-          "tableName": "conversation_messages",
-          "inserts": 35,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 35,
-          "liveRowsAfter": 310,
-          "totalBytesAfter": 557056
-        },
-        {
-          "tableName": "conversations",
-          "inserts": 0,
-          "updates": 35,
-          "deletes": 0,
-          "totalMutations": 35,
-          "liveRowsAfter": 50,
-          "totalBytesAfter": 65536
-        },
-        {
           "tableName": "agents",
           "inserts": 0,
           "updates": 0,
@@ -1912,7 +2022,7 @@
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
+          "totalBytesAfter": 98304
         },
         {
           "tableName": "consumer_identities",
@@ -1982,40 +2092,149 @@
     {
       "workloadName": "v1_b1_conversation_turn",
       "concurrency": 50,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 186,
-      "mutationsPerOperation": 3.72,
-      "totalSchemaBytesAfter": 6160384,
-      "peakActiveConnections": 23,
-      "peakTotalConnections": 52,
-      "peakRssMb": 320.5,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "conversation_messages": 100,
+        "assistant_turns": 50
+      },
+      "exactNetRowsInserted": 150,
+      "exactNetRowsPerOperation": 3,
+      "pgStatTupleMutations": 121,
+      "pgStatMutationsPerOperation": 2.42,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 25 conversation_messages inserts vs 100 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 6881280,
+      "peakActiveConnections": 18,
+      "peakTotalConnections": 50,
+      "peakRssMb": 325.5,
       "tables": [
         {
           "tableName": "assistant_turns",
-          "inserts": 18,
-          "updates": 44,
+          "inserts": 25,
+          "updates": 0,
           "deletes": 0,
-          "totalMutations": 62,
-          "liveRowsAfter": 173,
-          "totalBytesAfter": 368640
+          "totalMutations": 25,
+          "liveRowsAfter": 180,
+          "totalBytesAfter": 458752
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 62,
+          "inserts": 25,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 62,
-          "liveRowsAfter": 372,
-          "totalBytesAfter": 761856
+          "totalMutations": 25,
+          "liveRowsAfter": 335,
+          "totalBytesAfter": 786432
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 62,
+          "updates": 25,
           "deletes": 0,
-          "totalMutations": 62,
+          "totalMutations": 25,
           "liveRowsAfter": 50,
-          "totalBytesAfter": 114688
+          "totalBytesAfter": 475136
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 4,
+          "updates": 4,
+          "deletes": 0,
+          "totalMutations": 8,
+          "liveRowsAfter": 221,
+          "totalBytesAfter": 466944
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 8,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 8,
+          "liveRowsAfter": 602,
+          "totalBytesAfter": 671744
+        },
+        {
+          "tableName": "runs",
+          "inserts": 2,
+          "updates": 4,
+          "deletes": 0,
+          "totalMutations": 6,
+          "liveRowsAfter": 115,
+          "totalBytesAfter": 294912
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 4,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 217,
+          "totalBytesAfter": 425984
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 2,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 116,
+          "totalBytesAfter": 278528
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 4,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 217,
+          "totalBytesAfter": 491520
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 4,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 540672
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 109,
+          "totalBytesAfter": 262144
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 108,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 108,
+          "totalBytesAfter": 253952
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
         },
         {
           "tableName": "agents",
@@ -2027,31 +2246,13 @@
           "totalBytesAfter": 98304
         },
         {
-          "tableName": "artifacts",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 112,
-          "totalBytesAfter": 204800
-        },
-        {
           "tableName": "blobs",
           "inserts": 0,
           "updates": 0,
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
-        },
-        {
-          "tableName": "budget_operations",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 236,
-          "totalBytesAfter": 442368
+          "totalBytesAfter": 98304
         },
         {
           "tableName": "consumer_identities",
@@ -2081,15 +2282,6 @@
           "totalBytesAfter": 73728
         },
         {
-          "tableName": "operation_receipts",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 223,
-          "totalBytesAfter": 360448
-        },
-        {
           "tableName": "platform_metadata",
           "inserts": 0,
           "updates": 0,
@@ -2108,15 +2300,6 @@
           "totalBytesAfter": 65536
         },
         {
-          "tableName": "runs",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 125,
-          "totalBytesAfter": 303104
-        },
-        {
           "tableName": "schema_migrations",
           "inserts": 0,
           "updates": 0,
@@ -2126,51 +2309,6 @@
           "totalBytesAfter": 49152
         },
         {
-          "tableName": "staged_blobs",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 118,
-          "totalBytesAfter": 270336
-        },
-        {
-          "tableName": "step_checkpoints",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 223,
-          "totalBytesAfter": 499712
-        },
-        {
-          "tableName": "task_events",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 628,
-          "totalBytesAfter": 606208
-        },
-        {
-          "tableName": "task_results",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 111,
-          "totalBytesAfter": 163840
-        },
-        {
-          "tableName": "tasks",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 155,
-          "totalBytesAfter": 532480
-        },
-        {
           "tableName": "tenants",
           "inserts": 0,
           "updates": 0,
@@ -2178,163 +2316,163 @@
           "totalMutations": 0,
           "liveRowsAfter": 51,
           "totalBytesAfter": 32768
-        },
-        {
-          "tableName": "workspace_versions",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 111,
-          "totalBytesAfter": 229376
-        },
-        {
-          "tableName": "workspaces",
-          "inserts": 0,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 0,
-          "liveRowsAfter": 50,
-          "totalBytesAfter": 65536
         }
       ]
     },
     {
       "workloadName": "v1_durable_task_lifecycle",
       "concurrency": 50,
-      "operationsCompleted": 50,
-      "totalLogicalMutations": 1106,
-      "mutationsPerOperation": 22.12,
-      "totalSchemaBytesAfter": 7258112,
-      "peakActiveConnections": 23,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "exactTableRowDeltas": {
+        "tasks": 50,
+        "runs": 50,
+        "task_events": 250,
+        "budget_operations": 100,
+        "staged_blobs": 50,
+        "artifacts": 50,
+        "step_checkpoints": 100,
+        "workspace_versions": 50,
+        "task_results": 50,
+        "operation_receipts": 100
+      },
+      "exactNetRowsInserted": 850,
+      "exactNetRowsPerOperation": 17,
+      "pgStatTupleMutations": 1328,
+      "pgStatMutationsPerOperation": 26.56,
+      "pgStatAttributionComplete": false,
+      "pgStatAttributionNote": "INCOMPLETE_POOL_STATS_LAG: pg_stat_user_tables recorded only 25 task inserts vs 50 verified via COUNT(*). Use exactTableRowDeltas for row growth and c=1 isolated sample for tuple UPDATEs.",
+      "totalSchemaBytesAfter": 8019968,
+      "peakActiveConnections": 20,
       "peakTotalConnections": 52,
-      "peakRssMb": 338.1,
+      "peakRssMb": 326.3,
       "tables": [
         {
           "tableName": "task_events",
-          "inserts": 186,
+          "inserts": 233,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 186,
-          "liveRowsAfter": 814,
-          "totalBytesAfter": 770048
+          "totalMutations": 233,
+          "liveRowsAfter": 835,
+          "totalBytesAfter": 843776
         },
         {
           "tableName": "budget_operations",
-          "inserts": 74,
-          "updates": 87,
+          "inserts": 102,
+          "updates": 105,
           "deletes": 0,
-          "totalMutations": 161,
-          "liveRowsAfter": 310,
-          "totalBytesAfter": 516096
+          "totalMutations": 207,
+          "liveRowsAfter": 323,
+          "totalBytesAfter": 532480
         },
         {
           "tableName": "runs",
-          "inserts": 37,
-          "updates": 81,
+          "inserts": 52,
+          "updates": 104,
           "deletes": 0,
-          "totalMutations": 118,
-          "liveRowsAfter": 162,
-          "totalBytesAfter": 385024
+          "totalMutations": 156,
+          "liveRowsAfter": 167,
+          "totalBytesAfter": 401408
         },
         {
           "tableName": "tasks",
           "inserts": 25,
-          "updates": 81,
+          "updates": 104,
           "deletes": 0,
-          "totalMutations": 106,
+          "totalMutations": 129,
           "liveRowsAfter": 180,
           "totalBytesAfter": 745472
         },
         {
           "tableName": "staged_blobs",
-          "inserts": 43,
-          "updates": 47,
+          "inserts": 58,
+          "updates": 54,
           "deletes": 0,
-          "totalMutations": 90,
-          "liveRowsAfter": 161,
-          "totalBytesAfter": 360448
+          "totalMutations": 112,
+          "liveRowsAfter": 174,
+          "totalBytesAfter": 344064
         },
         {
           "tableName": "operation_receipts",
-          "inserts": 87,
+          "inserts": 104,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 87,
-          "liveRowsAfter": 310,
-          "totalBytesAfter": 458752
+          "totalMutations": 104,
+          "liveRowsAfter": 321,
+          "totalBytesAfter": 442368
         },
         {
           "tableName": "step_checkpoints",
-          "inserts": 87,
+          "inserts": 104,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 87,
-          "liveRowsAfter": 310,
-          "totalBytesAfter": 598016
+          "totalMutations": 104,
+          "liveRowsAfter": 321,
+          "totalBytesAfter": 630784
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 52,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 161,
+          "totalBytesAfter": 327680
         },
         {
           "tableName": "task_results",
-          "inserts": 44,
+          "inserts": 52,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 44,
-          "liveRowsAfter": 155,
-          "totalBytesAfter": 221184
+          "totalMutations": 52,
+          "liveRowsAfter": 160,
+          "totalBytesAfter": 352256
         },
         {
           "tableName": "workspace_versions",
-          "inserts": 44,
+          "inserts": 52,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 44,
-          "liveRowsAfter": 155,
-          "totalBytesAfter": 393216
+          "totalMutations": 52,
+          "liveRowsAfter": 160,
+          "totalBytesAfter": 368640
         },
         {
           "tableName": "workspaces",
           "inserts": 0,
-          "updates": 44,
+          "updates": 52,
           "deletes": 0,
-          "totalMutations": 44,
+          "totalMutations": 52,
           "liveRowsAfter": 50,
           "totalBytesAfter": 65536
         },
         {
-          "tableName": "artifacts",
-          "inserts": 43,
-          "updates": 0,
-          "deletes": 0,
-          "totalMutations": 43,
-          "liveRowsAfter": 155,
-          "totalBytesAfter": 262144
-        },
-        {
           "tableName": "assistant_turns",
-          "inserts": 32,
+          "inserts": 25,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 32,
+          "totalMutations": 25,
           "liveRowsAfter": 205,
-          "totalBytesAfter": 368640
+          "totalBytesAfter": 458752
         },
         {
           "tableName": "conversation_messages",
-          "inserts": 32,
+          "inserts": 25,
           "updates": 0,
           "deletes": 0,
-          "totalMutations": 32,
+          "totalMutations": 25,
           "liveRowsAfter": 410,
-          "totalBytesAfter": 761856
+          "totalBytesAfter": 786432
         },
         {
           "tableName": "conversations",
           "inserts": 0,
-          "updates": 32,
+          "updates": 25,
           "deletes": 0,
-          "totalMutations": 32,
+          "totalMutations": 25,
           "liveRowsAfter": 50,
-          "totalBytesAfter": 114688
+          "totalBytesAfter": 475136
         },
         {
           "tableName": "agents",
@@ -2352,7 +2490,7 @@
           "deletes": 0,
           "totalMutations": 0,
           "liveRowsAfter": 55,
-          "totalBytesAfter": 90112
+          "totalBytesAfter": 98304
         },
         {
           "tableName": "consumer_identities",
@@ -2421,9 +2559,9 @@
     }
   ],
   "notes": [
-    "All measurements collected locally against PostgreSQL 17 over 127.0.0.1 loopback.",
+    "All measurements collected locally against isolated loopback PostgreSQL 17 schemas only; remote/production URLs and general DATABASE_URL fallback are blocked.",
     "B1 conversation turns use FakeTurnResponder (FakeLlm, zero external LLM calls) with 25ms poll interval.",
     "Task submissions use DeterministicExecutor (mock.chat / mock.compute) with 25ms poll loop.",
-    "pg_stat_user_tables captures logical tuple inserts/updates/deletes in PostgreSQL, NOT Cloudflare SQLite billed row counts."
+    "exactTableRowDeltas uses deterministic SELECT COUNT(*) deltas before/after each workload; pg_stat_user_tables can lag across pooled idle backends and is explicitly flagged pgStatAttributionComplete=false whenever inserts fall below sanity thresholds."
   ]
 }

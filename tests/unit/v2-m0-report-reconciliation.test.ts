@@ -35,21 +35,36 @@ describe('V2-M0-D Benchmark Report Reconciliation (Unit)', () => {
       expect(report).toContain(`${row.taskAckP50Ms.toFixed(2)} / ${row.taskAckP95Ms.toFixed(2)}`);
     }
 
+    for (const stat of v1.dbMutationStats) {
+      expect(report).toContain(`${stat.exactNetRowsPerOperation.toFixed(2)}`);
+    }
+
     for (const cmp of probe.comparisonSummary) {
       expect(report).toContain(cmp.operation);
       expect(report).toContain(cmp.doRowsWrittenMean.toFixed(2));
       expect(report).toContain(cmp.d1RowsWrittenMean.toFixed(2));
     }
+    for (const jop of probe.jointAbSeamOps) {
+      expect(report).toContain(jop.operation);
+      expect(report).toContain(jop.rowsWrittenMean.toFixed(2));
+    }
     expect(report).toContain(`${probe.storageGrowth.doNetBytesPerTurn.toFixed(1)} bytes/turn`);
 
-    expect(report).toContain(`**${timing.localTurnTiming.ackMs.p95Ms.toFixed(2)}**`);
-    expect(report).toContain(`**${timing.localTurnTiming.runtimeOverheadMs.p95Ms.toFixed(2)}**`);
+    expect(report).toContain(`**${timing.simplified2RpcMicrobenchmark.ackMs.p95Ms.toFixed(2)}**`);
+    expect(report).toContain(`**${timing.jointAbSeamTiming.ackCoveredMs.p95Ms.toFixed(2)}**`);
+    expect(report).toContain(
+      `**${timing.jointAbSeamTiming.runtimeOverheadCoveredMs.p95Ms.toFixed(2)}**`,
+    );
+    expect(report).toContain(
+      `**${timing.jointAbSeamTiming.runtimeOverheadUncoveredMs.p95Ms.toFixed(2)}**`,
+    );
 
-    const nearCovered = rtt.results.find(
-      (r) => r.regionId === 'near-region' && r.architectureMode === 'covered_preallocated_grant',
+    const nearColocated = rtt.results.find(
+      (r) =>
+        r.regionId === 'near-region' && r.architectureMode === 'm0_covered_joint_seam_colocated',
     )!;
     expect(report).toContain(
-      `${nearCovered.ackMs.p50Ms.toFixed(2)} / ${nearCovered.ackMs.p95Ms.toFixed(2)}`,
+      `${nearColocated.ackMs.p50Ms.toFixed(2)} / ${nearColocated.ackMs.p95Ms.toFixed(2)}`,
     );
 
     const tier10k = cost.adr0006ReferenceMatrix.find((r) => r.mau === 10_000)!;
@@ -58,7 +73,9 @@ describe('V2-M0-D Benchmark Report Reconciliation (Unit)', () => {
 
     for (const cand of routing.candidates) {
       expect(report).toContain(cand.routeId);
-      expect(report).toContain(`$${cand.costPerSuccessfulTaskUsd.toFixed(6)}`);
+      if (cand.costPerSuccessfulTaskUsd !== null) {
+        expect(report).toContain(`$${cand.costPerSuccessfulTaskUsd.toFixed(6)}`);
+      }
     }
   });
 });

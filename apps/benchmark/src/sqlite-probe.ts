@@ -5,6 +5,7 @@ import path from 'node:path';
 import { resolveBenchmarkGitSha } from './evidence.js';
 import { calculateDistribution } from './metrics.js';
 import type {
+  M1MeasurementGap,
   SqliteProbeReport,
   SqlOperationProbeMetrics,
   StorageGrowthPoint,
@@ -31,6 +32,8 @@ interface ProbeOpRawResponse {
   readonly dbSizeAfterBytes: number;
   readonly approved?: boolean;
   readonly remainingMicroUsd?: number;
+  readonly registered?: boolean;
+  readonly confirmed?: boolean;
 }
 
 export interface LocalWorkerdProbeHandle {
@@ -38,6 +41,29 @@ export interface LocalWorkerdProbeHandle {
   fetch(pathname: string, body?: unknown): Promise<Response>;
   dispose(): Promise<void>;
 }
+
+export const M1_PROBE_MEASUREMENT_GAP: M1MeasurementGap = Object.freeze({
+  scope: 'M0-D calibration probe vs full M1 joint A/B runtime contract',
+  implementedInM0Probe: [
+    'Simplified 2-RPC turn microbenchmark (prepare + commit) with local workerd SqlStorageCursor rowsRead/rowsWritten',
+    'Representative 3-RPC joint A/B seam operations: AgentHeadDO prepare, markAttemptSent, budget_sync_commit',
+    'Representative GlobalBudgetDO SQLite operations: reserve, authorize, settle',
+    'Representative D1 uncovered recovery registration write (d1_recovery_registry) + confirmation lookup',
+    'Local workerd setAlarm() firing verification and 300-turn SQLite storage growth curve',
+  ],
+  missingInM0Probe: [
+    'Full M1 AgentHeadDO business fencing (transcript_epoch deletion race, CAS conflict recovery, run-epoch handoff)',
+    'Atomic DB + Alarm crash-fault injection and 6-retry Alarm exhaustion -> independent scheduled Worker recovery',
+    'Full GlobalBudgetDO lease-expiry reclamation, late-charge reconciliation, and Global Halt propagation window',
+    'Real Cloudflare production DO wall-clock duration billing, hibernation wakeup latency, and Workers isolate CPU',
+  ],
+  requiredInM1AndM4: [
+    'M1: Full fake-provider end-to-end tests exercising 3-RPC + GlobalBudgetDO + D1 uncovered crash/recovery matrix',
+    'M4: Live Cloudflare canary measurements replacing assumed 20 rows/event and validating invoice-grade billing',
+  ],
+  provisionalTargetsNotice:
+    'ADR-0006 50 ms Global Budget, 200 ms Runtime Overhead, and 250 ms Durable ACK thresholds are engineering targets, not certified M0 contract acceptance.',
+});
 
 const PROBE_WORKER_SOURCE = `
 import { DurableObject } from 'cloudflare:workers';
@@ -91,6 +117,8 @@ export class AgentHeadDO extends DurableObject {
         run_id TEXT NOT NULL,
         lease_expires_at INTEGER NOT NULL,
         attempt INTEGER NOT NULL DEFAULT 1,
+        attempt_sent_at INTEGER,
+        provider_attempt_id TEXT,
         updated_at INTEGER NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_turns_status_lease ON turns(status, lease_expires_at);
@@ -217,12 +245,32 @@ export class AgentHeadDO extends DurableObject {
       });
       await this.ctx.storage.setAlarm(now + 45000);
       setAlarmCalls += 1;
-    } else if (url.pathname === '/op/normal_turn_commit') {
+    } else if (url.pathname === '/op/mark_attempt_sent') {
+      const id = String(body.id ?? 'default');
+      const turnId = 't_' + id;
+      const attemptId = 'att_' + id;
+      this.ctx.storage.transactionSync(() => {
+        const cRead = this.ctx.storage.sql.exec(
+          "SELECT status, run_id, attempt_sent_at FROM turns WHERE id = ?",
+          turnId,
+        );
+        [...cRead];
+        sumCursor(acc, cRead);
+
+        const cUpd = this.ctx.storage.sql.exec(
+          "UPDATE turns SET attempt_sent_at = ?, provider_attempt_id = ?, updated_at = ? WHERE id = ? AND status = 'running'",
+          now, attemptId, now, turnId,
+        );
+        sumCursor(acc, cUpd);
+        logicalMutations += 1;
+      });
+    } else if (url.pathname === '/op/normal_turn_commit' || url.pathname === '/op/budget_sync_commit') {
       const id = String(body.id ?? 'default');
       const replyId = 'ma_' + id;
       const turnId = 't_' + id;
       const resId = 'u_' + id;
       const outId = 'o_' + id;
+      const emitBudgetSync = url.pathname === '/op/budget_sync_commit';
 
       this.ctx.storage.transactionSync(() => {
         const cState = this.ctx.storage.sql.exec("SELECT next_seq FROM agent_state WHERE agent_id = 'agent-1'");
@@ -260,6 +308,15 @@ export class AgentHeadDO extends DurableObject {
         const cDelOut = this.ctx.storage.sql.exec("DELETE FROM outbox WHERE id = ?", outId);
         sumCursor(acc, cDelOut);
         logicalMutations += 1;
+
+        if (emitBudgetSync) {
+          const cSync = this.ctx.storage.sql.exec(
+            "INSERT INTO outbox (id, kind, status, payload_json, next_due_at) VALUES (?, 'budget.sync', 'pending', ?, ?)",
+            'bs_' + id, JSON.stringify({ resId, settledMicroUsd: 1200 }), now,
+          );
+          sumCursor(acc, cSync);
+          logicalMutations += 1;
+        }
       });
     } else if (url.pathname === '/op/task_submit') {
       const id = String(body.id ?? crypto.randomUUID());
@@ -328,7 +385,6 @@ export class AgentHeadDO extends DurableObject {
       await this.ctx.storage.setAlarm(now + 45000);
       setAlarmCalls += 1;
     } else if (url.pathname === '/op/alarm_batch_dispatch') {
-      // Seed 5 due items then execute the exact alarm batch logic
       const batchPrefix = String(body.id ?? 'batch');
       for (let k = 0; k < 5; k++) {
         this.ctx.storage.sql.exec(
@@ -399,6 +455,201 @@ export class AgentHeadDO extends DurableObject {
       dbSizeBeforeBytes: sizeBefore,
       dbSizeAfterBytes: sizeAfter,
     });
+  }
+}
+
+export class GlobalBudgetDO extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    this.initialized = false;
+  }
+
+  ensureSchema() {
+    if (this.initialized) return;
+    this.ctx.storage.sql.exec(\`
+      CREATE TABLE IF NOT EXISTS global_budget_caps (
+        budget_key TEXT PRIMARY KEY,
+        cap_micro_usd INTEGER NOT NULL,
+        reserved_micro_usd INTEGER NOT NULL,
+        spent_micro_usd INTEGER NOT NULL,
+        halt INTEGER NOT NULL DEFAULT 0,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS global_budget_leases (
+        grant_id TEXT PRIMARY KEY,
+        budget_key TEXT NOT NULL,
+        reserved_micro_usd INTEGER NOT NULL,
+        settled_micro_usd INTEGER,
+        status TEXT NOT NULL,
+        expires_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_gb_leases_status ON global_budget_leases(budget_key, status);
+    \`);
+    this.ctx.storage.sql.exec(
+      "INSERT OR IGNORE INTO global_budget_caps (budget_key, cap_micro_usd, reserved_micro_usd, spent_micro_usd, halt, updated_at) VALUES ('global-default', 100000000, 0, 0, 0, 0)",
+    );
+    this.initialized = true;
+  }
+
+  async fetch(req) {
+    this.ensureSchema();
+    const url = new URL(req.url);
+    const body = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
+    const now = Date.now();
+    const sizeBefore = this.ctx.storage.sql.databaseSize;
+    const acc = { rowsRead: 0, rowsWritten: 0, statements: 0 };
+    let logicalMutations = 0;
+
+    if (url.pathname === '/op/reset') {
+      const key = String(body.budgetKey ?? 'global-default');
+      const cap = Number(body.capMicroUsd ?? 100000000);
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "INSERT OR REPLACE INTO global_budget_caps (budget_key, cap_micro_usd, reserved_micro_usd, spent_micro_usd, halt, updated_at) VALUES (?, ?, 0, 0, 0, ?)",
+          key, cap, now,
+        );
+        this.ctx.storage.sql.exec("DELETE FROM global_budget_leases WHERE budget_key = ?", key);
+      });
+      return Response.json({ ok: true });
+    }
+
+    if (url.pathname === '/op/reserve') {
+      const key = String(body.budgetKey ?? 'global-default');
+      const grantId = String(body.grantId ?? crypto.randomUUID());
+      const reserve = Number(body.reserveMicroUsd ?? 5000);
+      let approved = false;
+      let remaining = 0;
+
+      this.ctx.storage.transactionSync(() => {
+        const cRead = this.ctx.storage.sql.exec(
+          "SELECT cap_micro_usd, reserved_micro_usd, spent_micro_usd, halt FROM global_budget_caps WHERE budget_key = ?",
+          key,
+        );
+        const row = [...cRead][0];
+        sumCursor(acc, cRead);
+
+        if (row && Number(row.halt) === 0 && Number(row.reserved_micro_usd) + Number(row.spent_micro_usd) + reserve <= Number(row.cap_micro_usd)) {
+          const cUpd = this.ctx.storage.sql.exec(
+            "UPDATE global_budget_caps SET reserved_micro_usd = reserved_micro_usd + ?, updated_at = ? WHERE budget_key = ?",
+            reserve, now, key,
+          );
+          sumCursor(acc, cUpd);
+          logicalMutations += 1;
+
+          const cIns = this.ctx.storage.sql.exec(
+            "INSERT INTO global_budget_leases (grant_id, budget_key, reserved_micro_usd, status, expires_at, updated_at) VALUES (?, ?, ?, 'reserved', ?, ?)",
+            grantId, key, reserve, now + 120000, now,
+          );
+          sumCursor(acc, cIns);
+          logicalMutations += 1;
+          approved = true;
+          remaining = Number(row.cap_micro_usd) - (Number(row.reserved_micro_usd) + Number(row.spent_micro_usd) + reserve);
+        }
+      });
+
+      return Response.json({
+        approved,
+        remainingMicroUsd: remaining,
+        logicalStatements: acc.statements,
+        logicalMutations,
+        rowsRead: acc.rowsRead,
+        rowsWritten: acc.rowsWritten,
+        setAlarmCalls: 0,
+        dbSizeBeforeBytes: sizeBefore,
+        dbSizeAfterBytes: this.ctx.storage.sql.databaseSize,
+      });
+    }
+
+    if (url.pathname === '/op/authorize') {
+      const grantId = String(body.grantId ?? 'default');
+      const key = String(body.budgetKey ?? 'global-default');
+      let approved = false;
+
+      this.ctx.storage.transactionSync(() => {
+        const cCap = this.ctx.storage.sql.exec(
+          "SELECT halt FROM global_budget_caps WHERE budget_key = ?",
+          key,
+        );
+        const capRow = [...cCap][0];
+        sumCursor(acc, cCap);
+
+        const cLease = this.ctx.storage.sql.exec(
+          "SELECT status, expires_at FROM global_budget_leases WHERE grant_id = ?",
+          grantId,
+        );
+        const leaseRow = [...cLease][0];
+        sumCursor(acc, cLease);
+
+        if (capRow && Number(capRow.halt) === 0 && leaseRow && leaseRow.status === 'reserved' && Number(leaseRow.expires_at) > now) {
+          const cUpd = this.ctx.storage.sql.exec(
+            "UPDATE global_budget_leases SET status = 'authorized', updated_at = ? WHERE grant_id = ?",
+            now, grantId,
+          );
+          sumCursor(acc, cUpd);
+          logicalMutations += 1;
+          approved = true;
+        }
+      });
+
+      return Response.json({
+        approved,
+        logicalStatements: acc.statements,
+        logicalMutations,
+        rowsRead: acc.rowsRead,
+        rowsWritten: acc.rowsWritten,
+        setAlarmCalls: 0,
+        dbSizeBeforeBytes: sizeBefore,
+        dbSizeAfterBytes: this.ctx.storage.sql.databaseSize,
+      });
+    }
+
+    if (url.pathname === '/op/settle') {
+      const grantId = String(body.grantId ?? 'default');
+      const key = String(body.budgetKey ?? 'global-default');
+      const actualMicroUsd = Number(body.actualMicroUsd ?? 1200);
+      let settled = false;
+
+      this.ctx.storage.transactionSync(() => {
+        const cLease = this.ctx.storage.sql.exec(
+          "SELECT reserved_micro_usd, status FROM global_budget_leases WHERE grant_id = ?",
+          grantId,
+        );
+        const leaseRow = [...cLease][0];
+        sumCursor(acc, cLease);
+
+        if (leaseRow && (leaseRow.status === 'authorized' || leaseRow.status === 'reserved')) {
+          const reservedAmt = Number(leaseRow.reserved_micro_usd);
+          const cUpdCap = this.ctx.storage.sql.exec(
+            "UPDATE global_budget_caps SET reserved_micro_usd = MAX(0, reserved_micro_usd - ?), spent_micro_usd = spent_micro_usd + ?, updated_at = ? WHERE budget_key = ?",
+            reservedAmt, actualMicroUsd, now, key,
+          );
+          sumCursor(acc, cUpdCap);
+          logicalMutations += 1;
+
+          const cUpdLease = this.ctx.storage.sql.exec(
+            "UPDATE global_budget_leases SET status = 'settled', settled_micro_usd = ?, updated_at = ? WHERE grant_id = ?",
+            actualMicroUsd, now, grantId,
+          );
+          sumCursor(acc, cUpdLease);
+          logicalMutations += 1;
+          settled = true;
+        }
+      });
+
+      return Response.json({
+        approved: settled,
+        logicalStatements: acc.statements,
+        logicalMutations,
+        rowsRead: acc.rowsRead,
+        rowsWritten: acc.rowsWritten,
+        setAlarmCalls: 0,
+        dbSizeBeforeBytes: sizeBefore,
+        dbSizeAfterBytes: this.ctx.storage.sql.databaseSize,
+      });
+    }
+
+    return new Response('Unknown GlobalBudgetDO op: ' + url.pathname, { status: 404 });
   }
 }
 
@@ -503,6 +754,17 @@ export default {
       });
     }
 
+    if (url.pathname.startsWith('/budget-do/')) {
+      const opPath = url.pathname.slice('/budget-do'.length);
+      const budgetKey = String(body.budgetKey ?? 'global-default');
+      const stub = env.GLOBAL_BUDGET.get(env.GLOBAL_BUDGET.idFromName(budgetKey));
+      return stub.fetch('https://budget-do.local/op' + opPath, {
+        method: req.method,
+        headers: { 'content-type': 'application/json' },
+        body: req.method === 'POST' ? JSON.stringify(body) : undefined,
+      });
+    }
+
     if (url.pathname.startsWith('/d1/')) {
       await ensureD1Schema(env.D1_CONTROL);
       const now = Date.now();
@@ -544,7 +806,30 @@ export default {
         });
       }
 
-      if (url.pathname === '/d1/recovery_lookup') {
+      if (url.pathname === '/d1/recovery_register') {
+        const agentKey = String(body.agentKey ?? 'agent-1');
+        const generation = Number(body.generation ?? 1);
+        const nextDueAt = Number(body.nextRecoveryAt ?? now + 45000);
+        const res = await env.D1_CONTROL.prepare(
+          "INSERT OR REPLACE INTO d1_recovery_registry (agent_id, generation, next_recovery_at, updated_at) VALUES (?, ?, ?, ?)",
+        ).bind(agentKey, generation, nextDueAt, now).run();
+        sumD1(acc, res);
+        logicalMutations += 1;
+        sizeAfter = Number(res.meta?.size_after ?? 0);
+        return Response.json({
+          registered: true,
+          logicalStatements: acc.statements,
+          logicalMutations,
+          rowsRead: acc.rowsRead,
+          rowsWritten: acc.rowsWritten,
+          sqlDurationMs: acc.sqlDurationMs,
+          setAlarmCalls: 0,
+          dbSizeBeforeBytes: sizeAfter,
+          dbSizeAfterBytes: sizeAfter,
+        });
+      }
+
+      if (url.pathname === '/d1/recovery_confirm' || url.pathname === '/d1/recovery_lookup') {
         const agentKey = String(body.agentKey ?? 'agent-1');
         const res = await env.D1_CONTROL.prepare(
           "SELECT agent_id, generation, next_recovery_at FROM d1_recovery_registry WHERE agent_id = ?",
@@ -552,6 +837,7 @@ export default {
         sumD1(acc, res);
         sizeAfter = Number(res.meta?.size_after ?? 0);
         return Response.json({
+          confirmed: (res.results?.length ?? 0) === 1,
           logicalStatements: acc.statements,
           logicalMutations: 0,
           rowsRead: acc.rowsRead,
@@ -679,6 +965,8 @@ export default {
       } else if (url.pathname === '/d1/db_size') {
         const r = await env.D1_CONTROL.prepare("SELECT COUNT(*) AS cnt FROM d1_messages").all();
         return Response.json({ dbSizeBytes: Number(r.meta?.size_after ?? 0) });
+      } else {
+        return new Response('Unknown D1 probe operation: ' + url.pathname, { status: 404 });
       }
 
       return Response.json({
@@ -700,7 +988,7 @@ export default {
 
 /**
  * Boot an isolated local Cloudflare `workerd` instance via Wrangler containing
- * a SQLite-backed `AgentHeadDO` and a local D1 database (`D1_CONTROL`).
+ * SQLite-backed `AgentHeadDO` + `GlobalBudgetDO` and a local D1 database (`D1_CONTROL`).
  */
 export async function startLocalWorkerdProbe(): Promise<LocalWorkerdProbeHandle> {
   const apiPkgUrl = new URL('../../api/package.json', import.meta.url);
@@ -732,13 +1020,14 @@ export async function startLocalWorkerdProbe(): Promise<LocalWorkerdProbeHandle>
     },
     bindings: {
       AGENT: { type: 'durable_object_namespace', class_name: 'AgentHeadDO' },
+      GLOBAL_BUDGET: { type: 'durable_object_namespace', class_name: 'GlobalBudgetDO' },
       D1_CONTROL: {
         type: 'd1',
         database_id: '00000000-0000-0000-0000-000000000002',
         database_name: 'ember-v2-probe-d1',
       },
     },
-    migrations: [{ tag: 'v1', new_sqlite_classes: ['AgentHeadDO'] }],
+    migrations: [{ tag: 'v1', new_sqlite_classes: ['AgentHeadDO', 'GlobalBudgetDO'] }],
   });
 
   await worker.ready;
@@ -761,7 +1050,7 @@ export async function startLocalWorkerdProbe(): Promise<LocalWorkerdProbeHandle>
 
 async function runProbeIterations(
   probe: LocalWorkerdProbeHandle,
-  engine: 'do_sqlite' | 'd1_local',
+  engine: 'do_sqlite' | 'd1_local' | 'global_budget_do',
   operation: string,
   iterations: number,
   execFn: (iter: number) => Promise<ProbeOpRawResponse>,
@@ -840,22 +1129,25 @@ export interface SqliteProbeOptions {
 
 /**
  * Run the isolated local DO SQLite vs D1 comparison probe across V2 operations
- * (normal chat turn, task lifecycle, lease renewal, alarm batch dispatch, retry, and storage growth).
+ * (simplified 2-RPC microbenchmark, joint A/B 3-RPC + GlobalBudgetDO + D1 registration seam,
+ * task lifecycle, lease renewal, alarm dispatch, retry, and storage growth).
  */
 export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<SqliteProbeReport> {
   const iterations = options.iterations ?? 30;
   const storageTurnsMax = options.storageTurnsMax ?? 300;
   const log = options.log ?? ((msg: string) => console.log(msg));
 
-  log(`[SQLite Probe] Starting isolated local workerd DO SQLite + D1 probe...`);
+  log(`[SQLite Probe] Starting isolated local workerd DO SQLite + GlobalBudgetDO + D1 probe...`);
   const probe = await startLocalWorkerdProbe();
 
   try {
-    // Warmup both engines so schema initialization is excluded from steady-state measurements
+    // Warmup DO, GlobalBudgetDO, and D1
     await callProbeOp(probe, '/do/normal_turn_prepare', { agentKey: 'warmup', id: 'w0' });
-    await callProbeOp(probe, '/do/normal_turn_commit', { agentKey: 'warmup', id: 'w0' });
+    await callProbeOp(probe, '/do/mark_attempt_sent', { agentKey: 'warmup', id: 'w0' });
+    await callProbeOp(probe, '/do/budget_sync_commit', { agentKey: 'warmup', id: 'w0' });
     await callProbeOp(probe, '/d1/normal_turn_prepare', { id: 'w0' });
     await callProbeOp(probe, '/d1/normal_turn_commit', { id: 'w0' });
+    await probe.fetch('/budget-do/reset', { budgetKey: 'probe-global', capMicroUsd: 100_000_000 });
 
     const operations: SqlOperationProbeMetrics[] = [];
 
@@ -863,7 +1155,6 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
       const prefix = engine === 'do_sqlite' ? '/do' : '/d1';
       const agentKey = `agent-bench-${engine}`;
 
-      // 1. Normal conversation prepare + commit (paired on same turn IDs)
       operations.push(
         await runProbeIterations(probe, engine, 'normal_turn_prepare', iterations, (i) =>
           callProbeOp(probe, `${prefix}/normal_turn_prepare`, {
@@ -873,6 +1164,17 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
           }),
         ),
       );
+
+      if (engine === 'do_sqlite') {
+        operations.push(
+          await runProbeIterations(probe, engine, 'mark_attempt_sent', iterations, (i) =>
+            callProbeOp(probe, `/do/mark_attempt_sent`, {
+              agentKey,
+              id: `${engine}_turn_${i}`,
+            }),
+          ),
+        );
+      }
 
       operations.push(
         await runProbeIterations(probe, engine, 'lease_renewal', iterations, (i) =>
@@ -893,7 +1195,18 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
         ),
       );
 
-      // 2. Task submit -> retry -> claim & complete
+      if (engine === 'do_sqlite') {
+        operations.push(
+          await runProbeIterations(probe, engine, 'budget_sync_commit', iterations, (i) =>
+            callProbeOp(probe, `/do/budget_sync_commit`, {
+              agentKey,
+              id: `${engine}_sync_turn_${i}`,
+              reply: `Simulated assistant response with budget_sync #${i}.`,
+            }),
+          ),
+        );
+      }
+
       operations.push(
         await runProbeIterations(probe, engine, 'task_submit', iterations, (i) =>
           callProbeOp(probe, `${prefix}/task_submit`, {
@@ -921,7 +1234,6 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
         ),
       );
 
-      // 3. Alarm batch dispatch (5 due items per invocation)
       operations.push(
         await runProbeIterations(probe, engine, 'alarm_batch_dispatch', iterations, (i) =>
           callProbeOp(probe, `${prefix}/alarm_batch_dispatch`, {
@@ -935,7 +1247,60 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
     await runEngineSuite('do_sqlite');
     await runEngineSuite('d1_local');
 
-    // Verify real DO Alarm firing in workerd
+    // Measure GlobalBudgetDO reserve -> authorize -> settle + D1 uncovered registration write/confirm
+    operations.push(
+      await runProbeIterations(
+        probe,
+        'global_budget_do',
+        'global_budget_reserve',
+        iterations,
+        (i) =>
+          callProbeOp(probe, '/budget-do/reserve', {
+            budgetKey: 'probe-global',
+            grantId: `g_${i}`,
+            reserveMicroUsd: 5_000,
+          }),
+      ),
+    );
+    operations.push(
+      await runProbeIterations(
+        probe,
+        'global_budget_do',
+        'global_budget_authorize',
+        iterations,
+        (i) =>
+          callProbeOp(probe, '/budget-do/authorize', {
+            budgetKey: 'probe-global',
+            grantId: `g_${i}`,
+          }),
+      ),
+    );
+    operations.push(
+      await runProbeIterations(probe, 'global_budget_do', 'global_budget_settle', iterations, (i) =>
+        callProbeOp(probe, '/budget-do/settle', {
+          budgetKey: 'probe-global',
+          grantId: `g_${i}`,
+          actualMicroUsd: 1_200,
+        }),
+      ),
+    );
+    operations.push(
+      await runProbeIterations(probe, 'd1_local', 'd1_recovery_register', iterations, (i) =>
+        callProbeOp(probe, '/d1/recovery_register', {
+          agentKey: `uncovered-agent-${i % 10}`,
+          generation: i + 1,
+        }),
+      ),
+    );
+    operations.push(
+      await runProbeIterations(probe, 'd1_local', 'd1_recovery_confirm', iterations, (i) =>
+        callProbeOp(probe, '/d1/recovery_confirm', {
+          agentKey: `uncovered-agent-${i % 10}`,
+        }),
+      ),
+    );
+
+    // Verify real DO Alarm firing in local workerd
     const trigResp = await probe.fetch('/do/trigger_real_alarm', { agentKey: 'alarm-check' });
     const { scheduledAt } = (await trigResp.json()) as { scheduledAt: number };
     let alarmRealFireVerified = false;
@@ -952,7 +1317,7 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
       await new Promise((r) => setTimeout(r, 20));
     }
 
-    // Measure storage growth curve on fresh DO & D1 keys
+    // Measure storage growth curve
     const checkpoints = [
       0,
       Math.round(storageTurnsMax / 6),
@@ -962,7 +1327,6 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
     const growthPoints: StorageGrowthPoint[] = [];
     const doGrowthKey = 'growth-agent';
 
-    // Initialize growth DO
     await callProbeOp(probe, '/do/db_size', { agentKey: doGrowthKey });
     let executedTurns = 0;
 
@@ -1010,7 +1374,6 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
     const lastPt = growthPoints[growthPoints.length - 1]!;
     const spanTurns = Math.max(1, lastPt.turnCount - firstPt.turnCount);
 
-    // Build side-by-side comparison summary
     const opNames = [
       'normal_turn_prepare',
       'normal_turn_commit',
@@ -1037,6 +1400,28 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
       };
     });
 
+    const jointAbSeamOps = operations
+      .filter((o) =>
+        [
+          'mark_attempt_sent',
+          'budget_sync_commit',
+          'global_budget_reserve',
+          'global_budget_authorize',
+          'global_budget_settle',
+          'd1_recovery_register',
+          'd1_recovery_confirm',
+        ].includes(o.operation),
+      )
+      .map((o) => ({
+        engine: o.engine,
+        operation: o.operation,
+        rowsReadMean: o.observedRowsReadMean,
+        rowsWrittenMean: o.observedRowsWrittenMean,
+        setAlarmCallsPerOp: o.setAlarmCallsPerOp,
+        latencyP50Ms: o.latencyMs.p50Ms,
+        latencyP95Ms: o.latencyMs.p95Ms,
+      }));
+
     return {
       scenarioId: 'ember-v2-m0-sqlite-d1-probe',
       evidenceKind: 'measured_local_workerd',
@@ -1046,6 +1431,7 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
       probeIterations: iterations,
       operations,
       comparisonSummary,
+      jointAbSeamOps,
       alarmRealFireVerified,
       alarmRealFireDelayMs,
       storageGrowth: {
@@ -1057,11 +1443,13 @@ export async function runSqliteProbe(options: SqliteProbeOptions = {}): Promise<
         d1StartingBytes: firstPt.d1Bytes,
         d1NetBytesPerTurn: Number(((lastPt.d1Bytes - firstPt.d1Bytes) / spanTurns).toFixed(1)),
       },
+      m1MeasurementGap: M1_PROBE_MEASUREMENT_GAP,
       caveats: [
         'Measured in local Wrangler/workerd Miniflare SQLite runtime, NOT Cloudflare production billing invoices.',
-        'SqlStorageCursor.rowsWritten / D1.meta.rows_written reflect physical SQLite B-tree row/index writes (1 logical INSERT with 1 PK + 2 secondary indexes writes up to 3-4 rows).',
-        'setAlarm() calls incur an additional DO request / storage operation in Cloudflare billing that is tracked separately in setAlarmCallsPerOp.',
-        'SQLite databaseSize grows in 4 KiB page increments; small turn deltas show step changes until a page boundary fills.',
+        'SqlStorageCursor.rowsRead/rowsWritten and D1.meta.rows_read/rows_written are local runtime cursor counters reflecting SQLite B-tree/index operations.',
+        'In this probe, setAlarm() is invoked asynchronously AFTER transactionSync(), and normal_turn_commit does not implement full run/epoch/deletion fencing.',
+        'Local alarmRealFireVerified (2 ms) only confirms local workerd alarm invocation; it does NOT prove atomic DB+Alarm durability, 6-retry exhaustion fallback, or full V2 recovery semantics.',
+        'The simplified 2-RPC turn (22 rowsWritten) excludes mark_attempt_sent, budget_sync_commit, GlobalBudgetDO reserve/authorize/settle, and D1 recovery_register/confirm; ADR-0006 20 rows/event is a cost-modeling assumption, not a pass/fail gate.',
       ],
     };
   } finally {

@@ -1,95 +1,228 @@
 {
   "scenarioId": "ember-v2-m0-timing-methodology",
   "evidenceKind": "measured_local_workerd",
-  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
-  "timestamp": "2026-11-19T12:03:32.919Z",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:38:38.026Z",
   "definitions": [
     {
       "metric": "ack",
-      "formula": "T_ack = t_http_ack - t_req_start = T_edge_auth + T_budget_check + T_do_prepare",
-      "targetDescription": "ADR-0006 near-region Durable ACK P95 <= 250 ms",
+      "formula": "T_ack = t_http_ack - t_req_start = T_edge_auth + T_budget_reserve + T_do_prepare (+ T_d1_register_confirm if uncovered)",
+      "targetDescription": "ADR-0006 provisional near-region Durable ACK P95 target <= 250 ms",
       "includesModelIo": false
     },
     {
       "metric": "runtime_overhead",
-      "formula": "T_runtime = T_edge_auth + T_budget_check + T_do_prepare + T_do_commit + T_stream_cpu",
-      "targetDescription": "ADR-0006 near-region Runtime Overhead P95 <= 200 ms (excl. model/provider)",
+      "formula": "T_runtime = T_edge_auth + T_budget_reserve + T_do_prepare (+ T_d1_reg if uncovered) + T_budget_authorize + T_do_mark_attempt_sent + T_do_commit_sync + T_budget_settle + T_stream_cpu",
+      "targetDescription": "ADR-0006 provisional near-region Runtime Overhead P95 target <= 200 ms (excl. model/provider)",
       "includesModelIo": false
     },
     {
       "metric": "streaming_cpu",
-      "formula": "C_stream = (cpuUsage_after.user + cpuUsage_after.system - cpuUsage_before) / 1000 ms",
-      "targetDescription": "Workers Standard bills active CPU ms ($0.02/M ms), not network wait wall time",
+      "formula": "C_stream = (process.cpuUsage().user + process.cpuUsage().system) delta in ms (Node/V8 synthetic proxy)",
+      "targetDescription": "Workers Standard bills active CPU ms ($0.02/M ms), not idle network wait wall time",
       "includesModelIo": false
     },
     {
       "metric": "global_budget_check",
-      "formula": "T_budget = t_atomic_reserve_ack - t_budget_rpc_start (subset of T_runtime)",
-      "targetDescription": "ADR-0006 M1 gate <= 50 ms near-region P95 inside <= 200 ms Runtime Overhead",
+      "formula": "T_budget = T_global_budget_reserve + T_global_budget_authorize (subset of T_runtime)",
+      "targetDescription": "ADR-0006 provisional M1 target <= 50 ms near-region P95 inside <= 200 ms Runtime Overhead",
       "includesModelIo": false
     }
   ],
-  "localTurnTiming": {
+  "simplified2RpcMicrobenchmark": {
     "evidenceKind": "measured_local_workerd",
-    "iterations": 40,
+    "label": "Simplified 2-RPC microbenchmark (1 D1 update + DO prepare + DO commit; excludes joint A/B seam)",
+    "sampleCount": 40,
+    "successCount": 40,
+    "errorCount": 0,
     "ackMs": {
       "count": 40,
-      "minMs": 5.04,
-      "meanMs": 6.49,
-      "p50Ms": 6.21,
-      "p90Ms": 7.67,
-      "p95Ms": 8.32,
-      "p99Ms": 10.59,
-      "maxMs": 11.97,
-      "stdDevMs": 1.21
+      "minMs": 6.82,
+      "meanMs": 8.37,
+      "p50Ms": 8.13,
+      "p90Ms": 9.57,
+      "p95Ms": 10.2,
+      "p99Ms": 11.21,
+      "maxMs": 11.58,
+      "stdDevMs": 1.07
     },
-    "globalBudgetCheckMs": {
+    "d1CounterUpdateMs": {
       "count": 40,
-      "minMs": 2.2,
-      "meanMs": 2.99,
-      "p50Ms": 2.68,
-      "p90Ms": 3.97,
-      "p95Ms": 4.53,
-      "p99Ms": 6.66,
-      "maxMs": 7.95,
-      "stdDevMs": 0.97
+      "minMs": 3.04,
+      "meanMs": 3.71,
+      "p50Ms": 3.6,
+      "p90Ms": 4.47,
+      "p95Ms": 4.97,
+      "p99Ms": 5.36,
+      "maxMs": 5.41,
+      "stdDevMs": 0.58
     },
     "doPrepareMs": {
       "count": 40,
-      "minMs": 2.79,
-      "meanMs": 3.5,
-      "p50Ms": 3.31,
-      "p90Ms": 4.14,
-      "p95Ms": 4.24,
-      "p99Ms": 5.21,
-      "maxMs": 5.55,
-      "stdDevMs": 0.54
+      "minMs": 3.74,
+      "meanMs": 4.66,
+      "p50Ms": 4.39,
+      "p90Ms": 5.62,
+      "p95Ms": 6.58,
+      "p99Ms": 7.18,
+      "maxMs": 7.22,
+      "stdDevMs": 0.84
     },
     "doCommitMs": {
       "count": 40,
-      "minMs": 2.74,
-      "meanMs": 3.25,
-      "p50Ms": 3.16,
-      "p90Ms": 3.71,
-      "p95Ms": 3.84,
-      "p99Ms": 3.92,
-      "maxMs": 3.98,
-      "stdDevMs": 0.33
+      "minMs": 3.47,
+      "meanMs": 4.64,
+      "p50Ms": 4.41,
+      "p90Ms": 6.19,
+      "p95Ms": 6.54,
+      "p99Ms": 7.26,
+      "maxMs": 7.58,
+      "stdDevMs": 0.96
     },
     "runtimeOverheadMs": {
       "count": 40,
-      "minMs": 7.8,
-      "meanMs": 9.75,
-      "p50Ms": 9.48,
-      "p90Ms": 11.27,
-      "p95Ms": 11.46,
-      "p99Ms": 13.78,
-      "maxMs": 15.06,
-      "stdDevMs": 1.29
+      "minMs": 10.65,
+      "meanMs": 13.01,
+      "p50Ms": 12.99,
+      "p90Ms": 15.19,
+      "p95Ms": 16.36,
+      "p99Ms": 16.68,
+      "maxMs": 16.68,
+      "stdDevMs": 1.63
+    }
+  },
+  "jointAbSeamTiming": {
+    "evidenceKind": "measured_local_workerd",
+    "label": "Representative M1 joint A/B 3-RPC + GlobalBudgetDO + D1 uncovered registration seam",
+    "sampleCount": 40,
+    "successCount": 40,
+    "deniedCount": 0,
+    "errorCount": 0,
+    "ackCoveredMs": {
+      "count": 40,
+      "minMs": 6.7,
+      "meanMs": 8.5,
+      "p50Ms": 8.01,
+      "p90Ms": 9.85,
+      "p95Ms": 10.59,
+      "p99Ms": 14.97,
+      "maxMs": 16.96,
+      "stdDevMs": 1.76
+    },
+    "ackUncoveredMs": {
+      "count": 40,
+      "minMs": 12.49,
+      "meanMs": 15.32,
+      "p50Ms": 14.81,
+      "p90Ms": 17.33,
+      "p95Ms": 17.66,
+      "p99Ms": 22.3,
+      "maxMs": 24.56,
+      "stdDevMs": 2.14
+    },
+    "globalBudgetReserveMs": {
+      "count": 40,
+      "minMs": 3,
+      "meanMs": 4.02,
+      "p50Ms": 3.65,
+      "p90Ms": 4.92,
+      "p95Ms": 5.84,
+      "p99Ms": 8.86,
+      "maxMs": 10.6,
+      "stdDevMs": 1.26
+    },
+    "globalBudgetAuthorizeMs": {
+      "count": 40,
+      "minMs": 3.04,
+      "meanMs": 3.94,
+      "p50Ms": 3.75,
+      "p90Ms": 4.6,
+      "p95Ms": 5.65,
+      "p99Ms": 6.72,
+      "maxMs": 7.23,
+      "stdDevMs": 0.8
+    },
+    "doPrepareMs": {
+      "count": 40,
+      "minMs": 3.53,
+      "meanMs": 4.48,
+      "p50Ms": 4.04,
+      "p90Ms": 5.96,
+      "p95Ms": 6.25,
+      "p99Ms": 6.32,
+      "maxMs": 6.36,
+      "stdDevMs": 0.84
+    },
+    "doMarkAttemptSentMs": {
+      "count": 40,
+      "minMs": 3.07,
+      "meanMs": 3.81,
+      "p50Ms": 3.57,
+      "p90Ms": 4.74,
+      "p95Ms": 4.93,
+      "p99Ms": 5.64,
+      "maxMs": 5.9,
+      "stdDevMs": 0.63
+    },
+    "doCommitWithBudgetSyncMs": {
+      "count": 40,
+      "minMs": 3.41,
+      "meanMs": 4.3,
+      "p50Ms": 4.01,
+      "p90Ms": 4.89,
+      "p95Ms": 5.39,
+      "p99Ms": 7.83,
+      "maxMs": 8.69,
+      "stdDevMs": 0.94
+    },
+    "globalBudgetSettleMs": {
+      "count": 40,
+      "minMs": 3.11,
+      "meanMs": 4.25,
+      "p50Ms": 4,
+      "p90Ms": 4.88,
+      "p95Ms": 5.31,
+      "p99Ms": 10.74,
+      "maxMs": 13.55,
+      "stdDevMs": 1.63
+    },
+    "d1UncoveredRegisterAndConfirmMs": {
+      "count": 40,
+      "minMs": 5.49,
+      "meanMs": 6.83,
+      "p50Ms": 6.56,
+      "p90Ms": 8.29,
+      "p95Ms": 8.68,
+      "p99Ms": 9.57,
+      "maxMs": 9.93,
+      "stdDevMs": 1
+    },
+    "runtimeOverheadCoveredMs": {
+      "count": 40,
+      "minMs": 21.2,
+      "meanMs": 24.79,
+      "p50Ms": 24.19,
+      "p90Ms": 27.78,
+      "p95Ms": 31.44,
+      "p99Ms": 32.45,
+      "maxMs": 32.5,
+      "stdDevMs": 2.71
+    },
+    "runtimeOverheadUncoveredMs": {
+      "count": 40,
+      "minMs": 27.28,
+      "meanMs": 31.62,
+      "p50Ms": 30.78,
+      "p90Ms": 35.24,
+      "p95Ms": 38.45,
+      "p99Ms": 39.93,
+      "maxMs": 40.1,
+      "stdDevMs": 2.97
     }
   },
   "streamingCpu": {
     "evidenceKind": "simulated_synthetic",
+    "runtimeNotice": "Measured via Node.js/V8 process.cpuUsage() over synthetic Web ReadableStream; NOT Cloudflare Workers isolate CPU.",
     "samples": [
       {
         "label": "burst_50_chunks_24B",
@@ -99,25 +232,25 @@
         "iterations": 8,
         "wallMs": {
           "count": 8,
-          "minMs": 0.06,
-          "meanMs": 0.09,
-          "p50Ms": 0.07,
-          "p90Ms": 0.13,
-          "p95Ms": 0.17,
+          "minMs": 0.05,
+          "meanMs": 0.08,
+          "p50Ms": 0.06,
+          "p90Ms": 0.11,
+          "p95Ms": 0.16,
           "p99Ms": 0.2,
-          "maxMs": 0.2,
+          "maxMs": 0.21,
           "stdDevMs": 0.05
         },
         "activeCpuMs": {
           "count": 8,
-          "minMs": 0.07,
-          "meanMs": 0.2,
-          "p50Ms": 0.22,
-          "p90Ms": 0.31,
-          "p95Ms": 0.32,
-          "p99Ms": 0.32,
-          "maxMs": 0.32,
-          "stdDevMs": 0.1
+          "minMs": 0.05,
+          "meanMs": 0.12,
+          "p50Ms": 0.06,
+          "p90Ms": 0.28,
+          "p95Ms": 0.33,
+          "p99Ms": 0.37,
+          "maxMs": 0.38,
+          "stdDevMs": 0.11
         },
         "waitWallRatioPercent": 0
       },
@@ -130,24 +263,24 @@
         "wallMs": {
           "count": 8,
           "minMs": 0.14,
-          "meanMs": 0.17,
-          "p50Ms": 0.17,
-          "p90Ms": 0.19,
-          "p95Ms": 0.2,
-          "p99Ms": 0.2,
-          "maxMs": 0.21,
+          "meanMs": 0.19,
+          "p50Ms": 0.19,
+          "p90Ms": 0.21,
+          "p95Ms": 0.22,
+          "p99Ms": 0.22,
+          "maxMs": 0.22,
           "stdDevMs": 0.02
         },
         "activeCpuMs": {
           "count": 8,
           "minMs": 0.14,
-          "meanMs": 0.27,
-          "p50Ms": 0.23,
-          "p90Ms": 0.48,
-          "p95Ms": 0.5,
-          "p99Ms": 0.52,
-          "maxMs": 0.53,
-          "stdDevMs": 0.14
+          "meanMs": 0.47,
+          "p50Ms": 0.38,
+          "p90Ms": 0.9,
+          "p95Ms": 0.94,
+          "p99Ms": 0.98,
+          "maxMs": 0.98,
+          "stdDevMs": 0.3
         },
         "waitWallRatioPercent": 0
       },
@@ -159,27 +292,27 @@
         "iterations": 4,
         "wallMs": {
           "count": 4,
-          "minMs": 280.12,
-          "meanMs": 282.69,
-          "p50Ms": 282.32,
-          "p90Ms": 285.33,
-          "p95Ms": 285.67,
-          "p99Ms": 285.94,
-          "maxMs": 286.01,
-          "stdDevMs": 2.35
+          "minMs": 278.56,
+          "meanMs": 280.49,
+          "p50Ms": 280.81,
+          "p90Ms": 281.75,
+          "p95Ms": 281.77,
+          "p99Ms": 281.79,
+          "maxMs": 281.8,
+          "stdDevMs": 1.32
         },
         "activeCpuMs": {
           "count": 4,
-          "minMs": 4.22,
-          "meanMs": 7.58,
-          "p50Ms": 7.73,
-          "p90Ms": 10.11,
-          "p95Ms": 10.38,
-          "p99Ms": 10.6,
-          "maxMs": 10.65,
-          "stdDevMs": 2.41
+          "minMs": 3.28,
+          "meanMs": 3.56,
+          "p50Ms": 3.57,
+          "p90Ms": 3.76,
+          "p95Ms": 3.78,
+          "p99Ms": 3.8,
+          "maxMs": 3.81,
+          "stdDevMs": 0.19
         },
-        "waitWallRatioPercent": 97.32
+        "waitWallRatioPercent": 98.73
       }
     ]
   },
@@ -187,62 +320,152 @@
     "evidenceKind": "measured_local_workerd",
     "results": [
       {
+        "targetAuthority": "global_budget_do",
         "mode": "sequential_warm",
         "concurrency": 1,
-        "attempts": 30,
+        "sampleCount": 30,
         "approvedCount": 30,
-        "rejectedCount": 0,
+        "deniedExpectedCount": 0,
+        "errorCount": 0,
         "overCommitted": false,
         "latencyMs": {
           "count": 30,
-          "minMs": 2.24,
+          "minMs": 2.97,
           "meanMs": 3.79,
-          "p50Ms": 3.29,
-          "p90Ms": 4.49,
-          "p95Ms": 5.41,
-          "p99Ms": 14.77,
-          "maxMs": 18.37,
-          "stdDevMs": 2.84
+          "p50Ms": 3.63,
+          "p90Ms": 4.51,
+          "p95Ms": 4.66,
+          "p99Ms": 4.94,
+          "maxMs": 5.05,
+          "stdDevMs": 0.55
         }
       },
       {
+        "targetAuthority": "global_budget_do",
         "mode": "concurrent_contention",
         "concurrency": 20,
-        "attempts": 40,
+        "sampleCount": 40,
         "approvedCount": 40,
-        "rejectedCount": 0,
+        "deniedExpectedCount": 0,
+        "errorCount": 0,
         "overCommitted": false,
         "latencyMs": {
           "count": 40,
-          "minMs": 14.07,
-          "meanMs": 32.83,
-          "p50Ms": 28.58,
-          "p90Ms": 48.09,
-          "p95Ms": 48.39,
-          "p99Ms": 48.73,
-          "maxMs": 48.81,
-          "stdDevMs": 10.08
+          "minMs": 12.63,
+          "meanMs": 31.48,
+          "p50Ms": 27.69,
+          "p90Ms": 46.33,
+          "p95Ms": 46.49,
+          "p99Ms": 46.95,
+          "maxMs": 47.2,
+          "stdDevMs": 12.66
         }
       },
       {
+        "targetAuthority": "global_budget_do",
         "mode": "exhaustion_fail_closed",
         "concurrency": 20,
-        "attempts": 20,
+        "sampleCount": 20,
         "approvedCount": 10,
-        "rejectedCount": 10,
+        "deniedExpectedCount": 10,
+        "errorCount": 0,
         "overCommitted": false,
         "latencyMs": {
           "count": 20,
-          "minMs": 10.95,
-          "meanMs": 21.28,
-          "p50Ms": 24.59,
-          "p90Ms": 24.92,
-          "p95Ms": 24.93,
-          "p99Ms": 24.94,
-          "maxMs": 24.95,
-          "stdDevMs": 5.95
+          "minMs": 10.75,
+          "meanMs": 23.82,
+          "p50Ms": 27.42,
+          "p90Ms": 27.48,
+          "p95Ms": 27.5,
+          "p99Ms": 27.51,
+          "maxMs": 27.51,
+          "stdDevMs": 6.06
+        }
+      },
+      {
+        "targetAuthority": "d1_control_row",
+        "mode": "sequential_warm",
+        "concurrency": 1,
+        "sampleCount": 30,
+        "approvedCount": 30,
+        "deniedExpectedCount": 0,
+        "errorCount": 0,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 30,
+          "minMs": 2.04,
+          "meanMs": 2.84,
+          "p50Ms": 2.66,
+          "p90Ms": 3.83,
+          "p95Ms": 3.85,
+          "p99Ms": 4.23,
+          "maxMs": 4.38,
+          "stdDevMs": 0.62
+        }
+      },
+      {
+        "targetAuthority": "d1_control_row",
+        "mode": "concurrent_contention",
+        "concurrency": 20,
+        "sampleCount": 40,
+        "approvedCount": 40,
+        "deniedExpectedCount": 0,
+        "errorCount": 0,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 40,
+          "minMs": 11.09,
+          "meanMs": 21.58,
+          "p50Ms": 22.9,
+          "p90Ms": 27.06,
+          "p95Ms": 27.4,
+          "p99Ms": 27.94,
+          "maxMs": 27.99,
+          "stdDevMs": 4.79
+        }
+      },
+      {
+        "targetAuthority": "d1_control_row",
+        "mode": "exhaustion_fail_closed",
+        "concurrency": 20,
+        "sampleCount": 20,
+        "approvedCount": 10,
+        "deniedExpectedCount": 10,
+        "errorCount": 0,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 20,
+          "minMs": 10.84,
+          "meanMs": 22.84,
+          "p50Ms": 24.9,
+          "p90Ms": 25.5,
+          "p95Ms": 25.51,
+          "p99Ms": 25.51,
+          "maxMs": 25.51,
+          "stdDevMs": 5.06
         }
       }
     ]
+  },
+  "m1MeasurementGap": {
+    "scope": "M0-D calibration probe vs full M1 joint A/B runtime contract",
+    "implementedInM0Probe": [
+      "Simplified 2-RPC turn microbenchmark (prepare + commit) with local workerd SqlStorageCursor rowsRead/rowsWritten",
+      "Representative 3-RPC joint A/B seam operations: AgentHeadDO prepare, markAttemptSent, budget_sync_commit",
+      "Representative GlobalBudgetDO SQLite operations: reserve, authorize, settle",
+      "Representative D1 uncovered recovery registration write (d1_recovery_registry) + confirmation lookup",
+      "Local workerd setAlarm() firing verification and 300-turn SQLite storage growth curve"
+    ],
+    "missingInM0Probe": [
+      "Full M1 AgentHeadDO business fencing (transcript_epoch deletion race, CAS conflict recovery, run-epoch handoff)",
+      "Atomic DB + Alarm crash-fault injection and 6-retry Alarm exhaustion -> independent scheduled Worker recovery",
+      "Full GlobalBudgetDO lease-expiry reclamation, late-charge reconciliation, and Global Halt propagation window",
+      "Real Cloudflare production DO wall-clock duration billing, hibernation wakeup latency, and Workers isolate CPU"
+    ],
+    "requiredInM1AndM4": [
+      "M1: Full fake-provider end-to-end tests exercising 3-RPC + GlobalBudgetDO + D1 uncovered crash/recovery matrix",
+      "M4: Live Cloudflare canary measurements replacing assumed 20 rows/event and validating invoice-grade billing"
+    ],
+    "provisionalTargetsNotice": "ADR-0006 50 ms Global Budget, 200 ms Runtime Overhead, and 250 ms Durable ACK thresholds are engineering targets, not certified M0 contract acceptance."
   }
 }

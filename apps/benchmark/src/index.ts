@@ -5,6 +5,7 @@ export * from './harness.js';
 export * from './runner.js';
 export * from './report.js';
 export * from './v2-types.js';
+export * from './local-guard.js';
 export * from './v1-baseline.js';
 export * from './sqlite-probe.js';
 export * from './timing-methodology.js';

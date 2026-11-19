@@ -1,37 +1,35 @@
 # Ember V2-M0-D — Benchmark & Cost Baseline Report
 
-- **Status**: M0 Evidence Deliverable (`feat/v2-m0-benchmark-baseline`)
+- **Status**: M0 Evidence Deliverable (`feat/v2-m0-benchmark-baseline`, Architect Review Revised)
 - **Date**: 2026-11-19
 - **Role**: Performance and Reliability Engineer
-- **Git Baseline SHA**: `ee660f52f02cad196cf724f0f818df3789fe3e8c`
+- **V1 Reference Baseline SHA**: `ee660f52f02cad196cf724f0f818df3789fe3e8c` (`main`, P0B-09c 1,000-agent load)
+- **Probe / Harness Implementation SHA**: `14812da44197a365a4e08d4148c034e23f8a4c1e` + current PR revision (clean worktree after commit)
 - **Related**: [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [P0B-09c Local Benchmark](../P0B-09C-BENCHMARK.md), [V1 Architecture Baseline](v1-architecture-baseline.md)
 
 ---
 
-## 0. Evidence Classification & Guardrails
+## 0. Evidence Classification, Guardrails & Provenance
 
-Per ADR-0006 and V2-M0-D requirements, this report strictly separates four evidence classes. **Local loopback or `workerd` latencies are never presented as global production SLAs, and local SQLite cursor counts are never claimed as verified Cloudflare billing invoices.**
+Per ADR-0006 and V2-M0-D requirements, this report strictly separates four evidence classes. **Local loopback or `workerd` latencies are never presented as global production SLAs, local SQLite cursor counts are never claimed as verified Cloudflare billing invoices, and ADR-0006 `50 ms / 200 ms / 250 ms` numbers are engineering targets—not certified M0 acceptance results.**
 
-| Label                                     | Meaning                                                                                                                                           | Source in this Deliverable                                                                                                       |
-| :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------- |
-| **`[Measured: Local V1 PG]`**             | Real HTTP + Hono + Worker + PostgreSQL 17 execution over `127.0.0.1` loopback (`FakeLlm` / `DeterministicExecutor`, zero external network calls). | `benchmarks/v2-m0/v1-baseline.json`, `benchmarks/v2-m0/v1-load-1000/`                                                            |
-| **`[Measured: Local V2 workerd Probe]`**  | Real local Cloudflare `workerd` runtime via Wrangler `4.158.0` executing SQLite-backed `AgentHeadDO` + local D1 (`D1_CONTROL`).                   | `benchmarks/v2-m0/sqlite-probe.json`, `benchmarks/v2-m0/timing-methodology.json`                                                 |
-| **`[Simulated: Synthetic]`**              | Deterministic jittered RTT injection, synthetic SSE CPU micro-benchmark, and offline model-routing evaluation profiles.                           | `benchmarks/v2-m0/rtt-simulation.json`, `benchmarks/v2-m0/timing-methodology.json`, `benchmarks/v2-m0/model-routing-matrix.json` |
-| **`[Estimated: ADR-0006 Cloud Formula]`** | Reproducible cost & sensitivity model using ADR-0006 official published rates (verified 2026-11-19) and modeled workload/probe vectors.           | `benchmarks/v2-m0/cost-model.json`                                                                                               |
+| Label                                     | Meaning                                                                                                                                            | Source in this Deliverable                                                                                                       |
+| :---------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------- |
+| **`[Measured: Local V1 PG]`**             | Real HTTP + Hono + Worker + PostgreSQL 17 execution over `127.0.0.1` loopback (`FakeLlm` / `DeterministicExecutor`, zero external network calls).  | `benchmarks/v2-m0/v1-baseline.json`, `benchmarks/v2-m0/v1-load-1000/`                                                            |
+| **`[Measured: Local V2 workerd Probe]`**  | Real local Cloudflare `workerd` runtime via Wrangler `4.158.0` executing SQLite-backed `AgentHeadDO` + `GlobalBudgetDO` + local D1 (`D1_CONTROL`). | `benchmarks/v2-m0/sqlite-probe.json`, `benchmarks/v2-m0/timing-methodology.json`                                                 |
+| **`[Simulated: Synthetic]`**              | Deterministic jittered RTT injection, Node/V8 synthetic SSE CPU proxy, and offline model-routing profiles.                                         | `benchmarks/v2-m0/rtt-simulation.json`, `benchmarks/v2-m0/timing-methodology.json`, `benchmarks/v2-m0/model-routing-matrix.json` |
+| **`[Estimated: ADR-0006 Cloud Formula]`** | Reproducible cost & sensitivity model using ADR-0006 official published rates (verified 2026-11-19) and modeled/repo-verified vectors.             | `benchmarks/v2-m0/cost-model.json`                                                                                               |
 
-### Machine & Runtime Environment
+### Machine & Local-Only Safety Guardrails
 
 - **Host OS**: `Darwin 27.2.0` (`arm64` / `Apple M1`, 8 cores, 16 GB RAM)
-- **Node.js**: `v24.11.0`
-- **PostgreSQL**: `PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0`
-- **Wrangler / workerd**: `wrangler@4.158.0` (`@cloudflare/workerd-darwin-arm64@1.20261104.1`)
-- **External LLM / Daytona / Cloud Deploy**: **Disabled (0 real calls)**
+- **Node.js / PG / Wrangler**: `v24.11.0`, `PostgreSQL 17.11 (Homebrew)`, `wrangler@4.158.0` (`workerd 1.20261104.1`)
+- **Local-Only Guard** ([local-guard.ts](../../apps/benchmark/src/local-guard.ts)): V2 local benchmark refuses remote/cloud DB hosts, production/staging DB names, `EMBER_ENV=production|staging`, `NODE_ENV=production`, invalid concurrency values, and ignores general `DATABASE_URL` fallback—even when `--enable-local-load` is set.
+- **External LLM / Daytona / Cloud Deploy / CI**: **Disabled (0 real calls, 0 cloud resources, 0 GitHub Actions runs requested)**.
 
 ---
 
 ## 1. Reproducible Commands & Raw Artifacts
-
-All benchmarks reuse `apps/benchmark` and `pnpm bench:local` (preserving 100% backward compatibility with P0B-09c flags).
 
 ```bash
 # 1. Run all V2-M0-D suites in one command
@@ -47,7 +45,7 @@ TEST_DATABASE_URL="postgres://ember:ember_local_dev_only@127.0.0.1:5432/ember_te
   --total-requests 1000 --task-mix "fast:70,standard:30" --seed 42 \
   --enable-local-load --out-dir benchmarks/v2-m0/v1-load-1000
 
-# 3. Run individual V2-M0-D suites or custom ADR-0006 cost scenario
+# 3. Run individual suites or custom ADR-0006 cost sensitivity calculation
 pnpm bench:local --suite sqlite-probe --probe-iterations 40 --out-dir benchmarks/v2-m0
 pnpm bench:local --suite timing --probe-iterations 40 --out-dir benchmarks/v2-m0
 pnpm bench:local --suite rtt-sim --rtt-samples 20 --seed 42 --out-dir benchmarks/v2-m0
@@ -55,15 +53,15 @@ pnpm bench:local --suite cost-model --mau 10000 --allowance-ratio 0.5 --do-write
 pnpm bench:local --suite model-routing --out-dir benchmarks/v2-m0
 ```
 
-| Raw Artifact                                                                                                                     | Suite / Scope                                                                    | Provenance                                                      |
-| :------------------------------------------------------------------------------------------------------------------------------- | :------------------------------------------------------------------------------- | :-------------------------------------------------------------- |
-| [v1-baseline.json](../../benchmarks/v2-m0/v1-baseline.json)                                                                      | V1 B1 Chat + Task Submit + Status Reads + Concurrency Sweep + PG Tuple Mutations | `[Measured: Local V1 PG]`                                       |
-| [load-benchmark-2026-11-19T12-02-37-470Z.json](../../benchmarks/v2-m0/v1-load-1000/load-benchmark-2026-11-19T12-02-37-470Z.json) | Canonical 1,000-agent / 100-concurrency V1 Task Load Baseline                    | `[Measured: Local V1 PG]`                                       |
-| [sqlite-probe.json](../../benchmarks/v2-m0/sqlite-probe.json)                                                                    | Local `workerd` DO SQLite vs Local D1 Probe + Alarm + Storage Growth             | `[Measured: Local V2 workerd Probe]`                            |
-| [timing-methodology.json](../../benchmarks/v2-m0/timing-methodology.json)                                                        | ACK, Runtime Overhead, Streaming CPU, Global Budget Check Contention             | `[Measured: Local V2 workerd Probe]` + `[Simulated: Synthetic]` |
-| [rtt-simulation.json](../../benchmarks/v2-m0/rtt-simulation.json)                                                                | 5-Region RTT Simulation across 3 V2 Architecture Modes                           | `[Simulated: Synthetic]`                                        |
-| [cost-model.json](../../benchmarks/v2-m0/cost-model.json)                                                                        | ADR-0006 Reference Cost Matrix & Multi-Parameter Sensitivity Sweeps              | `[Estimated: ADR-0006 Cloud Formula]`                           |
-| [model-routing-matrix.json](../../benchmarks/v2-m0/model-routing-matrix.json)                                                    | Candidate Model Routing Evaluation Matrix                                        | `[Simulated: Synthetic]` + Repo Verified Rates                  |
+| Raw Artifact                                                                                                                     | Suite / Scope                                                                            | Provenance                                                      |
+| :------------------------------------------------------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------- | :-------------------------------------------------------------- |
+| [v1-baseline.json](../../benchmarks/v2-m0/v1-baseline.json)                                                                      | V1 B1 Chat + Task Submit + Status Reads + Concurrency Sweep + Exact Row Deltas           | `[Measured: Local V1 PG]`                                       |
+| [load-benchmark-2026-11-19T12-02-37-470Z.json](../../benchmarks/v2-m0/v1-load-1000/load-benchmark-2026-11-19T12-02-37-470Z.json) | Canonical 1,000-agent / 100-concurrency V1 Task Load Baseline (`main @ ee660f5`)         | `[Measured: Local V1 PG]`                                       |
+| [sqlite-probe.json](../../benchmarks/v2-m0/sqlite-probe.json)                                                                    | Local `workerd` `AgentHeadDO` + `GlobalBudgetDO` + `D1_CONTROL` Probe & Storage Growth   | `[Measured: Local V2 workerd Probe]`                            |
+| [timing-methodology.json](../../benchmarks/v2-m0/timing-methodology.json)                                                        | Simplified 2-RPC vs Joint A/B 3-RPC Seam Timing, Synthetic Stream CPU, Budget Contention | `[Measured: Local V2 workerd Probe]` + `[Simulated: Synthetic]` |
+| [rtt-simulation.json](../../benchmarks/v2-m0/rtt-simulation.json)                                                                | 5-Region RTT Simulation across Simplified & Joint A/B Seam Modes                         | `[Simulated: Synthetic]`                                        |
+| [cost-model.json](../../benchmarks/v2-m0/cost-model.json)                                                                        | ADR-0006 Reference Cost Matrix & Multi-Parameter Sensitivity Sweeps                      | `[Estimated: ADR-0006 Cloud Formula]`                           |
+| [model-routing-matrix.json](../../benchmarks/v2-m0/model-routing-matrix.json)                                                    | Repo-Derived Model Routing Evaluation Matrix (Privacy & Approval Gated)                  | `[Simulated: Synthetic]` + Repo Verified Rates                  |
 
 ---
 
@@ -71,71 +69,86 @@ pnpm bench:local --suite model-routing --out-dir benchmarks/v2-m0
 
 ### 2.1 Concurrency Sweep: B1 Conversation vs Task Submission vs Status Reads
 
-Measured against isolated PostgreSQL 17 schemas (`50` operations per workload per concurrency level; B1 conversation turns processed by `FakeTurnResponder` at `25 ms` poll interval; tasks processed by `DeterministicExecutor` at `25 ms` poll interval).
+Measured against isolated PostgreSQL 17 schemas (`50` operations per workload per concurrency level; B1 turns processed by `FakeTurnResponder` at `25 ms` poll interval; tasks processed by `DeterministicExecutor` at `25 ms` poll loop; all `50/50` succeeded at every level).
 
-| Concurrency | Chat ACK P50 / P95 (ms) | Chat E2E P50 / P95 (ms) | Chat Throughput (turn/s) | Task ACK P50 / P95 (ms) | Task E2E P50 / P95 (ms) | Task Throughput (task/s) | Task Status Read P95 (ms) |
-| ----------: | ----------------------: | ----------------------: | -----------------------: | ----------------------: | ----------------------: | -----------------------: | ------------------------: |
-|       **1** |            8.95 / 12.11 |           38.88 / 46.76 |                    26.00 |             3.98 / 6.52 |          88.95 / 112.07 |                    11.54 |                      2.06 |
-|      **10** |            6.39 / 52.67 |          50.74 / 104.26 |                   161.91 |            3.83 / 19.63 |          88.04 / 138.55 |                   103.78 |                      8.20 |
-|      **25** |          30.47 / 114.11 |         176.32 / 301.87 |                   118.68 |           18.68 / 53.82 |         212.56 / 376.39 |                   101.05 |                     16.76 |
-|      **50** |           72.69 / 85.86 |         203.55 / 249.94 |                   196.89 |           46.72 / 58.84 |         422.72 / 500.81 |                    99.08 |                     18.92 |
+| Concurrency | Chat `N`/`OK` | Chat ACK P50 / P95 (ms) | Chat E2E P50 / P95 (ms) | Chat Throughput (turn/s) | Task `N`/`OK` | Task ACK P50 / P95 (ms) | Task E2E P50 / P95 (ms) | Task Throughput (task/s) | Status Read P95 (ms) |
+| ----------: | :-----------: | ----------------------: | ----------------------: | -----------------------: | :-----------: | ----------------------: | ----------------------: | -----------------------: | -------------------: |
+|       **1** |    50 / 50    |             5.83 / 9.88 |           31.14 / 47.77 |                    31.12 |    50 / 50    |            5.08 / 12.75 |         109.28 / 133.66 |                     9.53 |                 3.21 |
+|      **10** |    50 / 50    |            4.63 / 60.56 |          57.10 / 116.56 |                   149.84 |    50 / 50    |            4.30 / 36.42 |          85.11 / 185.88 |                    99.09 |                10.49 |
+|      **25** |    50 / 50    |           29.39 / 74.56 |         116.24 / 195.20 |                   171.97 |    50 / 50    |           22.62 / 49.66 |         233.40 / 356.03 |                    98.27 |                19.18 |
+|      **50** |    50 / 50    |           64.02 / 78.80 |         257.51 / 339.99 |                   145.57 |    50 / 50    |           48.00 / 62.07 |         470.22 / 547.11 |                    88.88 |                22.53 |
 
 ### 2.2 Status & History Read Scaling (`GET`)
 
-| Endpoint                                   | Concurrency = 1 (P50 / P95, req/s) | Concurrency = 10 (P50 / P95, req/s) | Concurrency = 25 (P50 / P95, req/s) | Concurrency = 50 (P50 / P95, req/s) |
-| :----------------------------------------- | :--------------------------------- | :---------------------------------- | :---------------------------------- | :---------------------------------- |
-| `GET /v1/tasks/:id`                        | 1.26 / 2.06 ms (`738.93/s`)        | 5.91 / 8.20 ms (`1,567.53/s`)       | 12.47 / 16.76 ms (`1,654.57/s`)     | 17.17 / 18.92 ms (`2,234.72/s`)     |
-| `GET /v1/conversations/:id/messages`       | 4.74 / 9.81 ms (`192.49/s`)        | 7.60 / 10.44 ms (`1,266.00/s`)      | 21.61 / 29.24 ms (`1,047.92/s`)     | 42.66 / 43.58 ms (`1,081.16/s`)     |
-| `GET /v1/conversations/:id/turns/:turn_id` | 3.91 / 4.58 ms (`253.26/s`)        | 4.44 / 5.37 ms (`2,151.61/s`)       | 13.92 / 18.66 ms (`1,657.48/s`)     | 22.52 / 23.75 ms (`1,972.43/s`)     |
+| Endpoint                                   | `c=1` P50 / P95 (req/s)     | `c=10` P50 / P95 (req/s)       | `c=25` P50 / P95 (req/s)        | `c=50` P50 / P95 (req/s)        |
+| :----------------------------------------- | :-------------------------- | :----------------------------- | :------------------------------ | :------------------------------ |
+| `GET /v1/tasks/:id`                        | 1.56 / 3.21 ms (`586.37/s`) | 6.20 / 10.49 ms (`1,413.15/s`) | 15.07 / 19.18 ms (`1,548.76/s`) | 22.31 / 22.53 ms (`1,948.08/s`) |
+| `GET /v1/conversations/:id/messages`       | 6.85 / 8.95 ms (`142.86/s`) | 8.51 / 12.12 ms (`1,101.73/s`) | 22.79 / 28.23 ms (`1,026.57/s`) | 43.10 / 44.20 ms (`1,092.77/s`) |
+| `GET /v1/conversations/:id/turns/:turn_id` | 7.35 / 9.73 ms (`135.77/s`) | 5.82 / 8.85 ms (`1,653.23/s`)  | 17.46 / 26.42 ms (`1,332.08/s`) | 28.31 / 29.87 ms (`1,573.81/s`) |
 
-### 2.3 Canonical 1,000-Agent / 100-Concurrency Task Load Baseline
+### 2.3 Canonical 1,000-Agent / 100-Concurrency Task Load Baseline (`main @ ee660f5`)
 
-- **Provisioning**: `1,000` agents + `1,000` version-0 workspaces created in `478 ms` (`2,091.9 agents/s`, creation P95 = `19.55 ms`, `0` resident processes/sandboxes).
-- **Task Closed Loop (`N = 1,000`, `70%` `mock.chat` / `30%` `mock.compute`, `100` concurrent HTTP)**:
-  - **Success / Loss**: `1,000 / 1,000` (`100%`), `0` lost tasks.
-  - **Durable Ack**: P50 = `4.45 ms`, P95 = `39.23 ms`, P99 = `50.95 ms`.
-  - **Queue Wait**: P50 = `731.00 ms`, P95 = `1,013.40 ms`, P99 = `1,277.05 ms` (worker poll-loop contention at 100 concurrency).
-  - **Task Completion**: P50 = `1,151.39 ms`, P95 = `1,556.55 ms`, P99 = `1,864.44 ms`.
-  - **Resources**: Peak RSS `393.0 MB`, Peak V8 Heap `176.7 MB`, Peak PG active connections `51` (out of 52 total), Worker peak in-flight `40 / 100`, Peak live Fake Sandboxes `2` (`0` idle).
+- **Provisioning**: `1,000` agents + `1,000` version-0 workspaces in `478 ms` (`2,091.9 agents/s`, P95 = `19.55 ms`, `0` resident processes/sandboxes).
+- **Closed Loop (`N = 1,000`, `70%` `mock.chat` / `30%` `mock.compute`, `100` concurrent HTTP)**:
+  - `1,000 / 1,000` succeeded (`0` lost); Durable Ack P50 = `4.45 ms`, P95 = `39.23 ms`, P99 = `50.95 ms`.
+  - Queue Wait P50 = `731.00 ms`, P95 = `1,013.40 ms`; Task Completion P50 = `1,151.39 ms`, P95 = `1,556.55 ms`.
+  - Peak RSS `393.0 MB`, Peak PG active connections `51`, Worker peak in-flight `40 / 100`, Peak live Fake Sandboxes `2` (`0` idle).
 
-### 2.4 V1 PostgreSQL Logical Database Mutations & Retained Bytes
+### 2.4 V1 PostgreSQL Exact Row Deltas & `pg_stat_user_tables` Attribution Caveat
 
-Measured via `pg_stat_user_tables` (`n_tup_ins + n_tup_upd + n_tup_del`) and `pg_total_relation_size` across the isolated schema:
+Because PG17 `pg_stat_user_tables` buffers per-backend tuple statistics across idle `pg.Pool` connections (so pooled runs like `c=10` can under-report collector deltas—explicitly flagged `pgStatAttributionComplete: false`), we measure **deterministic `SELECT COUNT(*)` deltas** (`exactNetRowsInserted`) alongside raw `pg_stat_user_tables` observations:
 
-- **V1 B1 Conversation Turn (`200` total turns across 4 concurrency levels)**:
-  - Cumulative logical PG tuple mutations: **`814` mutations / `200` turns = `4.07` logical mutations/turn** (primarily `conversation_messages` user+assistant inserts, `assistant_turns` insert+update, `conversations` epoch/sequence update; at `c=1` isolated without async flush lag: `6.0` mutations/turn).
-  - Schema relation+index size after `200` turns + `50` provisioned users/agents: `2.70 MB` -> `6.16 MB` across sweep.
-- **V1 Durable Task Lifecycle (`200` total tasks across 4 concurrency levels)**:
-  - Cumulative logical PG tuple mutations: **`4,062` mutations / `200` tasks = `20.31` logical mutations/task** (at `c=1`: `26.96` mutations/task across `task_events`, `budget_operations`, `tasks`, `runs`, `staged_blobs`, `operation_receipts`, `artifacts`, `blobs`, `step_checkpoints`, `workspace_versions`, `workspaces`, `task_results`).
-  - **Architectural Insight**: V1's relational decomposition across 12+ tables creates high per-task mutation fan-out and pool contention (`51` active PG connections at 100 concurrency), whereas V1's poll-loop architecture (`Queue Wait P95 = 1,013 ms` at `c=100`) also drives tail latency and Neon idle-compute sensitivity.
+| Workload                    | `c` | `N` / `OK` | Exact Net Rows Inserted (`COUNT(*)`) | Exact Rows / Op | `pg_stat` Tuple Mutations (`ins+upd+del`) | `pg_stat` Attribution Complete?       |
+| :-------------------------- | --: | :--------: | -----------------------------------: | --------------: | ----------------------------------------: | :------------------------------------ |
+| `v1_b1_conversation_turn`   |   1 |  50 / 50   |    **150** (`100` msgs + `50` turns) |        **3.00** |          254 (`5.08`/op; observed sample) | `false` (pool collector lag on msgs)  |
+| `v1_b1_conversation_turn`   |  10 |  50 / 50   |                              **150** |        **3.00** |                           120 (`2.40`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+| `v1_b1_conversation_turn`   |  25 |  50 / 50   |                              **150** |        **3.00** |                           114 (`2.28`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+| `v1_b1_conversation_turn`   |  50 |  50 / 50   |                              **150** |        **3.00** |                           121 (`2.42`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+| `v1_durable_task_lifecycle` |   1 |  50 / 50   |                  **900** (12 tables) |       **18.00** |       1,397 (`27.94`/op; observed sample) | `false` (pool collector lag)          |
+| `v1_durable_task_lifecycle` |  10 |  50 / 50   |                              **850** |       **17.00** |                           350 (`7.00`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+| `v1_durable_task_lifecycle` |  25 |  50 / 50   |                              **850** |       **17.00** |                        1,080 (`21.60`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+| `v1_durable_task_lifecycle` |  50 |  50 / 50   |                              **850** |       **17.00** |                        1,328 (`26.56`/op) | `false` (`INCOMPLETE_POOL_STATS_LAG`) |
+
+**Takeaway**: Deterministic `COUNT(*)` confirms every B1 conversation turn inserts **3** net rows (`2` `conversation_messages` + `1` `assistant_turns`, plus `UPDATE`s on `conversations` and `assistant_turns`), while every V1 durable task inserts **17–18** net rows across 10+ tables (`tasks`, `runs`, `task_events`, `budget_operations`, `staged_blobs`, `artifacts`, `blobs`, `step_checkpoints`, `workspace_versions`, `task_results`, `operation_receipts`).
 
 ---
 
-## 3. Isolated Local DO SQLite vs D1 Probe `[Measured: Local V2 workerd Probe]`
+## 3. Isolated Local DO SQLite, GlobalBudgetDO & D1 Probe `[Measured: Local V2 workerd Probe]`
 
-Executed inside local `workerd` (`wrangler@4.158.0`) comparing `AgentHeadDO` (SQLite-backed Durable Object with `transactionSync()` + `setAlarm()`) against `D1_CONTROL` (local Miniflare D1 database) across `40` iterations per operation.
+Executed in local `workerd` (`wrangler@4.158.0`, `40` iterations/op) comparing `AgentHeadDO` (SQLite), `GlobalBudgetDO` (SQLite), and `D1_CONTROL` (local Miniflare D1).
 
-### 3.1 Logical DB Operations, Physical Row Amplification & Latency Comparison
+### 3.1 Simplified 2-RPC & Lifecycle Operations (DO SQLite vs Local D1)
 
-| Operation                        | DO Logical Stmts / Mut | DO `rowsRead` (Mean) | DO `rowsWritten` (Mean) | DO `setAlarm` Calls | DO Latency P50 / P95 (ms) | D1 `rowsRead` (Mean) | D1 `rowsWritten` (Mean) | D1 Latency P50 / P95 (ms) |
-| :------------------------------- | :--------------------: | -------------------: | ----------------------: | :-----------------: | :-----------------------: | -------------------: | ----------------------: | :-----------------------: |
-| `normal_turn_prepare`            |         7 / 5          |                 9.10 |               **13.00** |        **1**        |        3.92 / 4.82        |                10.45 |               **16.00** |        3.41 / 4.42        |
-| `normal_turn_commit`             |         6 / 5          |                 5.00 |                **9.00** |          0          |        3.54 / 4.72        |                 5.03 |                **9.03** |        2.64 / 3.99        |
-| `task_submit`                    |         2 / 2          |                 0.00 |                **6.00** |        **1**        |        3.15 / 4.02        |                 0.97 |                **9.00** |        2.09 / 2.67        |
-| `task_claim_complete`            |         4 / 3          |                 4.00 |                **5.00** |          0          |        2.67 / 3.67        |                 4.00 |                **5.00** |        2.62 / 3.98        |
-| `lease_renewal`                  |         2 / 1          |                 2.00 |                **2.00** |        **1**        |        2.94 / 3.72        |                 2.00 |                **2.00** |        2.56 / 3.61        |
-| `alarm_batch_dispatch` (5 items) |         7 / 5          |                11.00 |               **10.00** |        **1**        |        2.88 / 3.82        |                10.00 |               **10.00** |        2.96 / 4.05        |
-| `retry_schedule`                 |         2 / 1          |                 2.00 |                **2.00** |        **1**        |        2.65 / 3.47        |                 3.00 |                **5.00** |        2.51 / 3.53        |
+| Operation                        | DO Logical Stmts / Mut | DO `rowsRead` (Mean) | DO `rowsWritten` (Mean) | DO `setAlarm` | DO Latency P50 / P95 (ms) | D1 `rowsRead` (Mean) | D1 `rowsWritten` (Mean) | D1 Latency P50 / P95 (ms) |
+| :------------------------------- | :--------------------: | -------------------: | ----------------------: | :-----------: | :-----------------------: | -------------------: | ----------------------: | :-----------------------: |
+| `normal_turn_prepare`            |         7 / 5          |                 9.10 |               **13.00** |     **1**     |        4.30 / 5.79        |                10.45 |               **16.00** |        4.01 / 5.45        |
+| `normal_turn_commit`             |         6 / 5          |                 5.00 |                **9.00** |       0       |        3.34 / 5.04        |                 5.03 |                **9.03** |        3.25 / 4.92        |
+| `task_submit`                    |         2 / 2          |                 0.00 |                **6.00** |     **1**     |        3.19 / 4.20        |                 0.97 |                **9.00** |        2.88 / 4.40        |
+| `task_claim_complete`            |         4 / 3          |                 4.00 |                **5.00** |       0       |        3.09 / 4.66        |                 4.00 |                **5.00** |        2.88 / 4.31        |
+| `lease_renewal`                  |         2 / 1          |                 2.00 |                **2.00** |     **1**     |        3.48 / 4.44        |                 2.00 |                **2.00** |        3.00 / 4.19        |
+| `alarm_batch_dispatch` (5 items) |         7 / 5          |                11.00 |               **10.00** |     **1**     |        3.54 / 4.96        |                10.00 |               **10.00** |        3.76 / 5.21        |
+| `retry_schedule`                 |         2 / 1          |                 2.00 |                **2.00** |     **1**     |        3.27 / 4.17        |                 3.00 |                **5.00** |        3.17 / 4.19        |
 
-> [!IMPORTANT]
-> **Key Empirical Finding — Index Write Amplification & ADR-0006 Calibration**:
+### 3.2 Representative Joint A/B M1 Seam Operations (`3` DO RPCs + `GlobalBudgetDO` + Uncovered D1)
+
+| Engine             | Operation                 | `rowsRead` (Mean) | `rowsWritten` (Mean) | `setAlarm` | Latency P50 / P95 (ms) |
+| :----------------- | :------------------------ | ----------------: | -------------------: | :--------: | :--------------------: |
+| `do_sqlite`        | `mark_attempt_sent`       |              2.00 |             **1.00** |     0      |      3.33 / 4.06       |
+| `do_sqlite`        | `budget_sync_commit`      |              2.00 |             **8.00** |     0      |      3.26 / 4.91       |
+| `global_budget_do` | `global_budget_reserve`   |              2.00 |             **4.00** |     0      |      2.68 / 4.33       |
+| `global_budget_do` | `global_budget_authorize` |              3.00 |             **2.00** |     0      |      2.65 / 3.70       |
+| `global_budget_do` | `global_budget_settle`    |              3.00 |             **3.00** |     0      |      2.94 / 5.00       |
+| `d1_local`         | `d1_recovery_register`    |              0.75 |             **3.00** |     0      |      2.33 / 3.04       |
+| `d1_local`         | `d1_recovery_confirm`     |              1.00 |             **0.00** |     0      |      2.24 / 3.72       |
+
+> [!NOTE]
+> **Probe Limitations & Calibration Caveats**:
 >
-> 1. A complete Fast Path conversation turn (`normal_turn_prepare` + `normal_turn_commit`) executes **10 logical SQL mutations** across 5 tables, which causes **`22` physical `rowsWritten` (`2.2x` amplification)** and `14.1` `rowsRead` in DO SQLite—already slightly above ADR-0006's baseline assumption of `20` DO rows written/event _before_ adding `setAlarm()` calls (`1` per turn), lease renewals (`2` rows/renewal), or retries.
-> 2. Why `2.2x–3.0x` amplification occurs: `TEXT PRIMARY KEY` (without `WITHOUT ROWID`) creates an implicit unique index B-tree, and each secondary index (`idx_messages_conv_seq`, `idx_messages_sub`, `idx_turns_status_lease`, `idx_outbox_status_due`) adds an extra physical row write on every `INSERT` and `DELETE`.
-> 3. **Real Alarm Verification**: `alarmRealFireVerified = true` (`alarmRealFireDelayMs = 2 ms` over local `workerd` scheduler).
-> 4. **DO-local vs D1-centric**: D1-centric adds `+3` `rowsWritten` on `normal_turn_prepare` (`16` vs `13`), `+3` on `task_submit` (`9` vs `6`), and `+3` on `retry_schedule` (`5` vs `2`) due to the recovery/routing index rows, while lacking co-located `transactionSync()` + `setAlarm()` atomicity per agent.
+> 1. Observed `SqlStorageCursor.rowsRead`/`rowsWritten` and `D1.meta.rows_read`/`rows_written` are **local `workerd` runtime cursor counters**, NOT verified Cloudflare production billing invoices.
+> 2. In this probe, `await this.ctx.storage.setAlarm(...)` is called _after_ `transactionSync()`, and `normal_turn_commit` does not implement full business fencing (run/epoch/deletion checks). Local `alarmRealFireVerified = true` (`alarmRealFireDelayMs = 3 ms`) only demonstrates local `workerd` alarm invocation—it does **not** prove atomic DB+Alarm durability, 6-retry exhaustion recovery, or full V2 semantics.
+> 3. The simplified 2-RPC turn (`13 + 9 = 22` DO `rowsWritten`) excludes `mark_attempt_sent` (`+1` DO write), `budget_sync` outbox writes, `GlobalBudgetDO` (`4 + 2 + 3 = 9` DO writes on the global authority), and uncovered D1 `d1_recovery_register` (`+3` D1 writes). ADR-0006's `20` DO rows written/event is a **cost-modeling assumption**, not a pass/fail gate.
 
-### 3.2 Storage Growth Curve (`0` to `300` Turns)
+### 3.3 Storage Growth Curve (`0` to `300` Turns)
 
 |                    Turn Count | DO SQLite `databaseSize` (Bytes) | Local D1 `size_after` (Bytes) |
 | ----------------------------: | -------------------------------: | ----------------------------: |
@@ -145,87 +158,84 @@ Executed inside local `workerd` (`wrangler@4.158.0`) comparing `AgentHeadDO` (SQ
 |                       **300** |                          286,720 |                       380,928 |
 | **Derived Net Growth / Turn** |           **`669.0 bytes/turn`** |        **`750.9 bytes/turn`** |
 
-_(Caveat: SQLite allocates space in 4 KiB pages; at `684` events/month weighted average, `669 bytes/turn` equates to `~0.46 MB/month/active agent` of raw SQLite row+index growth excluding large R2 payloads and periodic `VACUUM` effects.)_
-
 ---
 
-## 4. Timing Methodology: ACK, Runtime Overhead, Streaming CPU & Global Budget Check
+## 4. Timing Methodology: Simplified vs Joint A/B Seam, Streaming CPU & Budget Contention
 
-### 4.1 Formal Measurement Definitions
+### 4.1 Local `workerd` Timing Breakdown (`N = 40`, all `40/40` succeeded, `0` errors) `[Measured: Local V2 workerd Probe]`
 
-1. **Durable ACK (`T_ack`)**: `t_http_ack - t_req_start = T_edge_auth + T_budget_check + T_do_prepare` (excludes model/provider I/O; ADR-0006 near-region P95 target: `<= 250 ms`).
-2. **Runtime Overhead (`T_runtime`)**: `T_edge_auth + T_budget_check + T_do_prepare + T_do_commit + T_stream_cpu` (all non-model coordination; ADR-0006 near-region P95 target: `<= 200 ms`).
-3. **Streaming CPU (`C_stream`)**: `(process.cpuUsage().user + system)` delta in milliseconds across SSE token emission (Workers Standard bills active CPU ms, not idle network wait wall time).
-4. **Global Budget Check (`T_budget`)**: `t_atomic_reserve_ack - t_budget_rpc_start` measured both in isolation under contention and inside `T_runtime` (ADR-0006 M1 gate: `<= 50 ms` near-region P95 within `<= 200 ms` `T_runtime`).
+1. **Simplified 2-RPC Microbenchmark (`1` D1 update + DO `prepare` + DO `commit`)**:
+   - `d1CounterUpdateMs` P95: `4.97 ms`, `doPrepareMs` P95: `6.58 ms`, `doCommitMs` P95: `6.54 ms`.
+   - **`ackMs`**: P50 = `8.13 ms`, P95 = **10.20** ms.
+   - **`runtimeOverheadMs`**: P50 = `12.99 ms`, P95 = **16.36** ms.
 
-### 4.2 Local `workerd` Turn Timing Breakdown (`N = 40`) `[Measured: Local V2 workerd Probe]`
+2. **Representative M1 Joint A/B Seam (`GlobalBudgetDO reserve -> AgentHeadDO prepare -> [D1 reg+confirm if uncovered] -> GlobalBudgetDO authorize -> AgentHeadDO markAttemptSent -> AgentHeadDO commit+budget_sync -> GlobalBudgetDO settle`)**:
+   - Component P95s: `globalBudgetReserve` = `5.84 ms`, `doPrepare` = `6.25 ms`, `d1UncoveredRegisterAndConfirm` = `8.68 ms`, `globalBudgetAuthorize` = `5.65 ms`, `doMarkAttemptSent` = `4.93 ms`, `doCommitWithBudgetSync` = `5.39 ms`, `globalBudgetSettle` = `5.31 ms`.
+   - **`ackCoveredMs`**: P50 = `8.01 ms`, P95 = **10.59** ms (`ackUncoveredMs` P50 = `14.81 ms`, P95 = **17.66** ms).
+   - **`runtimeOverheadCoveredMs`**: P50 = `24.19 ms`, P95 = **31.44** ms (roughly `2x` the simplified 2-RPC microbenchmark due to 3 DO RPCs + `GlobalBudgetDO` round-trips).
+   - **`runtimeOverheadUncoveredMs`**: P50 = `30.78 ms`, P95 = **38.45** ms.
 
-| Interval                                        | Min (ms) | Mean (ms) | P50 (ms) |  P95 (ms) | P99 (ms) | Max (ms) |
-| :---------------------------------------------- | -------: | --------: | -------: | --------: | -------: | -------: |
-| `globalBudgetCheckMs` (D1 atomic reserve)       |     2.20 |      2.99 |     2.68 |  **4.53** |     6.66 |     7.95 |
-| `doPrepareMs` (DO Fast Path prepare + alarm)    |     2.79 |      3.50 |     3.31 |  **4.24** |     5.21 |     5.55 |
-| **`ackMs` (`T_budget + T_do_prepare`)**         |     5.04 |      6.49 |     6.21 |  **8.32** |    10.59 |    11.97 |
-| `doCommitMs` (DO fenced commit)                 |     2.74 |      3.25 |     3.16 |  **3.84** |     3.92 |     3.98 |
-| **`runtimeOverheadMs` (`T_ack + T_do_commit`)** |     7.80 |      9.75 |     9.48 | **11.46** |    13.78 |    15.06 |
+### 4.2 Synthetic Streaming CPU vs Wall Time `[Simulated: Synthetic]`
 
-### 4.3 Streaming CPU vs Wall Time `[Simulated: Synthetic]`
+_(Measured via Node.js/V8 `process.cpuUsage()` over synthetic Web `ReadableStream`; NOT Cloudflare Workers isolate CPU.)_
 
 | Stream Scenario            | Chunks x Bytes | Token Wait (ms/chunk) | Wall Time Mean / P95 (ms) | Active CPU Mean / P95 (ms) | Wait-Wall Share (%) |
 | :------------------------- | :------------: | --------------------: | ------------------------: | -------------------------: | ------------------: |
-| `burst_50_chunks_24B`      |   50 x 24 B    |                     0 |               0.09 / 0.17 |                0.20 / 0.32 |               0.00% |
-| `burst_200_chunks_24B`     |   200 x 24 B   |                     0 |               0.17 / 0.20 |                0.27 / 0.50 |               0.00% |
-| `paced_50_chunks_5ms_wait` |   50 x 24 B    |                     5 |           282.69 / 285.67 |               7.58 / 10.38 |          **97.32%** |
+| `burst_50_chunks_24B`      |   50 x 24 B    |                     0 |               0.08 / 0.16 |                0.12 / 0.33 |               0.00% |
+| `burst_200_chunks_24B`     |   200 x 24 B   |                     0 |               0.19 / 0.22 |                0.47 / 0.94 |               0.00% |
+| `paced_50_chunks_5ms_wait` |   50 x 24 B    |                     5 |           280.49 / 281.77 |                3.56 / 3.78 |          **98.73%** |
 
-> Validates ADR-0006's Workers Standard cost model: `97.32%` of paced streaming wall time is async I/O wait (`$0` Workers duration charge), while active JSON/SSE serialization consumes bounded CPU (`~0.2–10 ms`).
+### 4.3 Global Budget Check Contention & Fail-Closed Invariant `[Measured: Local V2 workerd Probe]`
 
-### 4.4 Global Budget Check Contention & Fail-Closed Invariant `[Measured: Local V2 workerd Probe]`
-
-| Mode                                         | Concurrency | Attempts | Approved / Rejected | Over-Committed? | Latency P50 / P95 (ms) |
-| :------------------------------------------- | ----------: | -------: | :-----------------: | :-------------: | ---------------------: |
-| `sequential_warm`                            |           1 |       30 |       30 / 0        |     `false`     |            3.29 / 5.41 |
-| `concurrent_contention`                      |          20 |       40 |       40 / 0        |     `false`     |      28.58 / **48.39** |
-| `exhaustion_fail_closed` (`cap=50k, req=5k`) |          20 |       20 |     **10 / 10**     |   **`false`**   |          24.59 / 24.93 |
+| Target Authority   | Mode                                 | Concurrency | `N` | Approved / Denied Expected / Errors | Over-Committed? | Latency P50 / P95 (ms) |
+| :----------------- | :----------------------------------- | ----------: | --: | :---------------------------------: | :-------------: | ---------------------: |
+| `global_budget_do` | `sequential_warm`                    |           1 |  30 |             30 / 0 / 0              |     `false`     |            3.63 / 4.66 |
+| `global_budget_do` | `concurrent_contention`              |          20 |  40 |             40 / 0 / 0              |     `false`     |      27.69 / **46.49** |
+| `global_budget_do` | `exhaustion_fail_closed` (`cap=50k`) |          20 |  20 |           **10 / 10 / 0**           |   **`false`**   |          27.42 / 27.50 |
+| `d1_control_row`   | `sequential_warm`                    |           1 |  30 |             30 / 0 / 0              |     `false`     |            2.66 / 3.85 |
+| `d1_control_row`   | `concurrent_contention`              |          20 |  40 |             40 / 0 / 0              |     `false`     |          22.90 / 27.40 |
+| `d1_control_row`   | `exhaustion_fail_closed` (`cap=50k`) |          20 |  20 |           **10 / 10 / 0**           |   **`false`**   |          24.90 / 25.51 |
 
 > [!WARNING]
-> Even in local `workerd` without cross-region WAN RTT, `20`-way concurrent contention on a single global D1 budget row reached **P95 = `48.39 ms`** (right at the `50 ms` M1 gate). Single-row global D1 serialization will fail `<= 50 ms` under higher concurrency or cross-region RTT unless sharded/batched or backed by bounded preallocated grants.
+> Even locally with zero WAN latency, `20`-way concurrent contention on a single `GlobalBudgetDO` reached **P95 = `46.49 ms`** (approaching ADR-0006's `50 ms` M1 target).
 
 ---
 
 ## 5. Regional RTT Simulation `[Simulated: Synthetic]`
 
-Injected deterministic jittered network delays (`seed = 42`, `20` samples per scenario) around real local `workerd` DO/D1 execution across 5 regional profiles and 3 architecture modes:
+Injected synthetic jittered RTTs (`seed = 42`, `20/20` succeeded, `0` errors) across 4 modes:
 
-1. `covered_preallocated_grant`: Edge -> DO prepare + DO commit (`0` sync D1 registry I/O, `0` sync global budget RPC).
-2. `covered_sync_global_budget`: Edge -> Sync Global Budget D1 -> DO prepare + DO commit (`0` sync D1 registry I/O, `+1` global budget RPC).
-3. `uncovered_registry_plus_sync_budget`: Edge -> Sync D1 Registry Lookup -> Sync Global Budget D1 -> DO prepare + DO commit.
+- `simplified_2_rpc_local_check` _(unapproved M0 hypothesis/microbenchmark only)_
+- `m0_covered_joint_seam_colocated` _(M0 A/B contract: 3 DO RPCs + colocated `GlobalBudgetDO` reserve/authorize/settle)_
+- `m0_covered_joint_seam_cross_region_budget` _(M0 A/B contract: 3 DO RPCs + cross-region `GlobalBudgetDO`)_
+- `m0_uncovered_joint_seam_with_d1_registration` _(M0 A/B contract + D1 `recovery_register` + `recovery_confirm`)_
 
-| Region (Simulated RTT: Client / Edge->DO / Control) | Architecture Mode                     |  ACK P50 / P95 (ms) | Runtime P50 / P95 (ms) | Budget P95 (ms) | Gates Met (`ACK<=250` / `RT<=200` / `B<=50`) |
-| :-------------------------------------------------- | :------------------------------------ | ------------------: | ---------------------: | --------------: | :------------------------------------------: |
-| **near-region** (`12 / 4 / 8 ms`)                   | `covered_preallocated_grant`          |       23.88 / 33.97 |          20.72 / 34.54 |            0.00 |            **PASS / PASS / PASS**            |
-| **near-region** (`12 / 4 / 8 ms`)                   | `covered_sync_global_budget`          |       36.59 / 48.29 |          33.01 / 47.11 |           18.72 |            **PASS / PASS / PASS**            |
-| **near-region** (`12 / 4 / 8 ms`)                   | `uncovered_registry_plus_sync_budget` |       49.18 / 59.14 |          48.38 / 56.99 |           17.72 |            **PASS / PASS / PASS**            |
-| **apac-intra** (`20 / 38 / 42 ms`)                  | `covered_preallocated_grant`          |       67.11 / 73.45 |          91.03 / 98.34 |            0.00 |            **PASS / PASS / PASS**            |
-| **apac-intra** (`20 / 38 / 42 ms`)                  | `covered_sync_global_budget`          |     116.23 / 123.78 |        137.39 / 147.77 |       **53.36** |            PASS / PASS / **FAIL**            |
-| **apac-intra** (`20 / 38 / 42 ms`)                  | `uncovered_registry_plus_sync_budget` |     169.46 / 181.75 |    192.08 / **211.77** |       **57.22** |          PASS / **FAIL** / **FAIL**          |
-| **eu-us-east** (`18 / 78 / 78 ms`)                  | `covered_preallocated_grant`          |     110.94 / 123.04 |    183.44 / **206.06** |            0.00 |            PASS / **FAIL** / PASS            |
-| **eu-us-east** (`18 / 78 / 78 ms`)                  | `covered_sync_global_budget`          |     194.94 / 209.57 |    267.41 / **293.48** |       **95.49** |          PASS / **FAIL** / **FAIL**          |
-| **eu-us-east** (`18 / 78 / 78 ms`)                  | `uncovered_registry_plus_sync_budget` | 291.36 / **307.25** |    359.77 / **380.89** |       **99.36** |            **FAIL / FAIL / FAIL**            |
-| **apac-us-west** (`22 / 120 / 120 ms`)              | `covered_preallocated_grant`          |     160.53 / 171.15 |    271.96 / **288.67** |            0.00 |            PASS / **FAIL** / PASS            |
-| **apac-us-west** (`22 / 120 / 120 ms`)              | `covered_sync_global_budget`          | 299.24 / **313.35** |    413.55 / **436.15** |      **142.92** |            **FAIL / FAIL / FAIL**            |
-| **cross-global** (`25 / 185 / 185 ms`)              | `covered_preallocated_grant`          |     224.81 / 239.29 |    399.42 / **416.82** |            0.00 |            PASS / **FAIL** / PASS            |
-| **cross-global** (`25 / 185 / 185 ms`)              | `covered_sync_global_budget`          | 429.28 / **442.93** |    607.50 / **623.12** |      **209.11** |            **FAIL / FAIL / FAIL**            |
-| **cross-global** (`25 / 185 / 185 ms`)              | `uncovered_registry_plus_sync_budget` | 616.47 / **654.03** |    787.74 / **832.83** |      **214.53** |            **FAIL / FAIL / FAIL**            |
+| Region (Client / Edge->DO / Control RTT) | Mode (`M0 Contract?`)                                   |  ACK P50 / P95 (ms) |  Runtime P50 / P95 (ms) | Budget P95 (ms) | Provisional Targets (`ACK<=250` / `RT<=200` / `B<=50`) |
+| :--------------------------------------- | :------------------------------------------------------ | ------------------: | ----------------------: | --------------: | :----------------------------------------------------: |
+| **near-region** (`12 / 4 / 8 ms`)        | `simplified_2_rpc_local_check` (`false`)                |       22.63 / 32.18 |           23.18 / 33.50 |            3.63 |                   PASS / PASS / PASS                   |
+| **near-region** (`12 / 4 / 8 ms`)        | `m0_covered_joint_seam_colocated` (`true`)              |       35.73 / 45.97 |           62.38 / 70.69 |           26.69 |                 **PASS / PASS / PASS**                 |
+| **near-region** (`12 / 4 / 8 ms`)        | `m0_covered_joint_seam_cross_region_budget` (`true`)    |       38.89 / 43.13 |           74.72 / 81.02 |           33.55 |                 **PASS / PASS / PASS**                 |
+| **near-region** (`12 / 4 / 8 ms`)        | `m0_uncovered_joint_seam_with_d1_registration` (`true`) |       64.11 / 77.41 |          97.73 / 108.74 |           37.24 |                 **PASS / PASS / PASS**                 |
+| **apac-intra** (`20 / 38 / 42 ms`)       | `simplified_2_rpc_local_check` (`false`)                |       66.75 / 71.92 |           90.35 / 97.64 |            2.56 |                   PASS / PASS / PASS                   |
+| **apac-intra** (`20 / 38 / 42 ms`)       | `m0_covered_joint_seam_colocated` (`true`)              |     111.08 / 118.61 |     268.70 / **275.43** |       **93.94** |                   PASS / FAIL / FAIL                   |
+| **apac-intra** (`20 / 38 / 42 ms`)       | `m0_covered_joint_seam_cross_region_budget` (`true`)    |     119.02 / 122.75 |     283.42 / **305.19** |      **104.77** |                   PASS / FAIL / FAIL                   |
+| **apac-intra** (`20 / 38 / 42 ms`)       | `m0_uncovered_joint_seam_with_d1_registration` (`true`) |     209.35 / 227.32 |     372.32 / **386.82** |      **105.03** |                   PASS / FAIL / FAIL                   |
+| **eu-us-east** (`18 / 78 / 78 ms`)       | `simplified_2_rpc_local_check` (`false`)                |     108.51 / 117.88 |         179.46 / 192.35 |            4.25 |                   PASS / PASS / PASS                   |
+| **eu-us-east** (`18 / 78 / 78 ms`)       | `m0_covered_joint_seam_colocated` (`true`)              |     199.06 / 217.93 |     536.12 / **555.46** |      **191.67** |                   PASS / FAIL / FAIL                   |
+| **eu-us-east** (`18 / 78 / 78 ms`)       | `m0_covered_joint_seam_cross_region_budget` (`true`)    |     199.61 / 214.97 |     535.95 / **547.82** |      **192.53** |                   PASS / FAIL / FAIL                   |
+| **eu-us-east** (`18 / 78 / 78 ms`)       | `m0_uncovered_joint_seam_with_d1_registration` (`true`) | 355.36 / **368.47** |     684.93 / **697.12** |      **183.30** |                   FAIL / FAIL / FAIL                   |
+| **apac-us-west** (`22 / 120 / 120 ms`)   | `m0_covered_joint_seam_colocated` (`true`)              | 297.36 / **313.75** |     809.13 / **834.90** |      **295.10** |                   FAIL / FAIL / FAIL                   |
+| **apac-us-west** (`22 / 120 / 120 ms`)   | `m0_uncovered_joint_seam_with_d1_registration` (`true`) | 565.75 / **588.95** | 1,094.63 / **1,113.15** |      **293.48** |                   FAIL / FAIL / FAIL                   |
+| **cross-global** (`25 / 185 / 185 ms`)   | `m0_covered_joint_seam_colocated` (`true`)              | 423.54 / **444.17** | 1,201.83 / **1,239.03** |      **412.74** |                   FAIL / FAIL / FAIL                   |
+| **cross-global** (`25 / 185 / 185 ms`)   | `m0_uncovered_joint_seam_with_d1_registration` (`true`) | 815.87 / **834.37** | 1,587.93 / **1,628.43** |      **414.97** |                   FAIL / FAIL / FAIL                   |
 
-**Regional Conclusion**:
-
-- Near-region colocated placement easily clears all ADR-0006 targets (`ACK <= 250 ms`, `Runtime <= 200 ms`, `Budget <= 50 ms`).
-- Once `edge <-> DO` or `DO <-> Global Control` crosses regions (`>= 40 ms` RTT), synchronous per-turn D1 lookups or uncolocated global budget RPCs immediately breach `50 ms` Budget / `200 ms` Runtime Overhead gates. Using `locationHint` near the user + keeping covered turns free of sync registry I/O + evaluating bounded preallocated grants is essential.
+**Regional Takeaway**: Under the full M0 3-RPC + `GlobalBudgetDO` (`reserve + authorize + settle`) joint seam, **only `near-region` meets the `200 ms` Runtime Overhead and `50 ms` Budget Check targets** (`70.69 ms` Runtime, `26.69 ms` Budget). Across `>= 38 ms` intra-region WAN hops (`apac-intra` and beyond), multiplying sequential round-trips (`reserve + prepare + authorize + markAttemptSent + commit + settle`) exceeds `200 ms` (`275–1,628 ms`). No preallocated grant mechanism is approved or implemented in M0; if M1 misses targets in multi-region testing, bounded grants with proven global caps or co-located batching should be evaluated separately.
 
 ---
 
 ## 6. ADR-0006 Cost Model & Sensitivity Analysis `[Estimated: ADR-0006 Cloud Formula]`
 
-Implemented in [cost-model.ts](../../apps/benchmark/src/cost-model.ts), reproducing all ADR-0006 rounding rules (`ceil` for DO requests/duration and R2 operations/storage; prorated for DO SQLite rows/storage, D1, Workers, Queues, Observability).
+Implemented in [cost-model.ts](../../apps/benchmark/src/cost-model.ts), retaining the exact ADR-0006 15-cell reference matrix alongside near-term model cost estimates and parameter sensitivity sweeps.
 
 ### 6.1 Verified ADR-0006 Cloud Runtime Reference Matrix (USD/month)
 
@@ -237,68 +247,41 @@ Implemented in [cost-model.ts](../../apps/benchmark/src/cost-model.ts), reproduc
 | **10,000** (Growth) |                      6,840,000 |           **$176.07** |             **$208.14** |         **$245.01** |                     $300 |
 | **100,000** (Scale) |                     68,400,000 |         **$2,204.80** |           **$2,261.13** |       **$2,326.00** |                   $3,500 |
 
-### 6.2 Parameter Sensitivity Analysis (Full Account Allowance Baseline)
+### 6.2 Parameter Sensitivity Highlights (Full Account Allowance Baseline)
 
-1. **DO SQLite Write Amplification (`doRowsWrittenPerEvent`)**:
-   - At `1,000 MAU`: `10`–`60` rows/event stays inside the `50M` included allowance (`$9.33` cloud total).
-   - At `10,000 MAU`: `10 -> 20 -> 30 -> 40 -> 60` rows/event yields **`$107.67 -> $176.07 -> $244.47 -> $312.87 -> $449.67`** (`+$68.40/mo` per `+10` writes/event).
-   - At `100,000 MAU`: `10 -> 20 -> 30 -> 40 -> 60` rows/event yields **`$1,520.80 -> $2,204.80 -> $2,888.80 -> $3,572.80 -> $4,940.80`** (`+$684.00/mo` per `+10` writes/event).
-   - **Probe Calibration Note**: Our probe measured **`22` `rowsWritten`** per normal turn (`prepare + commit`). Adding `+1` `setAlarm()` and periodic renewals/retries easily pushes real mixed workloads to `25–30` rows/event (`~$2,547–$2,889/mo` at `100k MAU`), making secondary-index discipline critical.
+1. **DO SQLite Write Amplification (`doRowsWrittenPerEvent`)**: At `10,000 MAU`, `10 -> 20 -> 30 -> 40 -> 60` rows/event = `$107.67 -> $176.07 -> $244.47 -> $312.87 -> $449.67`. At `100,000 MAU`, = `$1,520.80 -> $2,204.80 -> $2,888.80 -> $3,572.80 -> $4,940.80` (`+$684.00/mo` per `+10` writes/event). Under the joint A/B seam (`13 + 8 + 1 + 9 = 31` total DO writes across `AgentHeadDO` + `GlobalBudgetDO` per turn), steady-state `100k MAU` DO write charges would exceed ADR-0006's `20`-row assumption unless coalesced or audited in M4.
+2. **DO Billable Active Duration (`0.128 GB`)**: At `10,000 MAU`, `0.5 s -> 2 s -> 5 s -> 10 s` = `$176.07 -> $188.57 -> $213.57 -> $276.07`; at `100,000 MAU`, = `$2,204.80 -> $2,379.80 -> $2,704.80 -> $3,254.80`.
+3. **Worker Streaming & Processing CPU**: At `100,000 MAU`, `30 ms -> 40 ms -> 70 ms -> 110 ms` = `$2,191.12 -> $2,204.80 -> $2,245.84 -> $2,300.56` (`+$13.68/mo` per `+10 ms`/event).
+4. **Storage Growth Stock + Dormancy (`3,500 B/event`, `2.0x` dormant at `5 MB/dormant`)**: At `10,000 MAU` (`1 -> 12` months), DO storage grows from `128.94 GB` (`$157.18` cloud) to `392.28 GB` (`$218.88` cloud); at `100,000 MAU` month 12, `3,922.80 GB` adds `$783.56` DO storage overage (`$2,632.87` cloud).
+5. **Independent Recovery Overhead (`43,200` cron/mo + D1 writes/event)**: At `100,000 MAU`, `1` D1 write/event adds `+$32.93/mo` (`$2,237.73`); `2` D1 writes/event adds `+$101.33/mo` (`$2,306.13`).
 
-2. **DO Billable Active Duration (`doDurationSecPerEvent` at `0.128 GB`)**:
-   - At `10,000 MAU`: `0.5 s` -> `$176.07` (`$12.50` overage); `2.0 s` -> `$188.57` (`+$12.50`); `5.0 s` -> `$213.57` (`+$37.50`); `10.0 s` -> `$276.07` (`+$100.00`).
-   - At `100,000 MAU`: `0.5 s` -> `$2,204.80` (`$50.00` overage); `2.0 s` -> `$2,379.80` (`+$175.00`); `5.0 s` -> `$2,704.80` (`+$500.00`); `10.0 s` -> `$3,254.80` (`+$1,050.00`). Holding a DO open during external LLM/Sandbox waits destroys unit economics.
+### 6.3 Near-Term Model & Daytona Sandbox Estimates `[Estimated: ADR-0006 Cloud Formula + Repo Rates]`
 
-3. **Worker Streaming & Processing CPU (`workerCpuMsPerEvent`)**:
-   - At `100,000 MAU`: `30 ms` (`0 ms` stream) = `$2,191.12`; `40 ms` (`10 ms` stream) = `$2,204.80`; `70 ms` (`40 ms` stream) = `$2,245.84` (`+$13.68/mo` per `+10 ms` CPU/event).
-
-4. **Storage Growth Stock + Dormant Retained Accounts (`3,500 B/event` DO growth, `2.0x` dormant ratio at `5 MB/dormant`)**:
-   - At `10,000 MAU`, `months = 1` (`2x` dormant): `2.89 MB/active`, `128.94 GB` total DO storage (`$24.79` DO storage overage, `$157.18` cloud total). At `months = 12` (`2x` dormant): `29.23 MB/active`, `392.28 GB` total DO storage (`$77.46` DO storage overage, `$218.88` cloud total).
-   - At `100,000 MAU`, `months = 12` (`2x` dormant): `3,922.80 GB` total DO storage (`$783.56` DO storage overage, `$2,632.87` cloud total).
-
-5. **Independent Recovery Overhead (`43,200` cron invocations/mo + D1 recovery registry writes)**:
-   - At `1,000 MAU` (full allowance): `+$0.00` (inside `50M` D1 write allowance); at `0%` allowance remaining with `2` D1 writes/event: `+$1.37/mo` (`$44.62 -> $45.99`).
-   - At `100,000 MAU` (full allowance): `1` D1 write/event adds **`+$32.93/mo`** (`$2,237.73`); `2` D1 writes/event adds **`+$101.33/mo`** (`$2,306.13`).
-
-6. **Variable LLM & Daytona Sandbox + Device Offload (`1,000` / `10,000` MAU)**:
-
-|        MAU | LLM Profile (`5k` in / `1k` out per event) | Device Offload | Cloud Runtime |  LLM Spend | Sandbox Net | Combined Monthly |
-| ---------: | :----------------------------------------- | -------------: | ------------: | ---------: | ----------: | ---------------: |
-|  **1,000** | `Nemotron-3.5-Lightning ZDR ($0.06/$0.16)` |             0% |         $9.33 |    $314.64 |     $166.50 |      **$490.47** |
-|  **1,000** | `Nemotron-3.5-Lightning ZDR ($0.06/$0.16)` |            50% |         $9.33 |    $314.64 |      $83.25 |      **$407.22** |
-|  **1,000** | `DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)`  |             0% |         $9.33 |    $536.26 |     $166.50 |      **$712.09** |
-|  **1,000** | `DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)`  |            50% |         $9.33 |    $536.26 |      $83.25 |      **$628.84** |
-|  **1,000** | `ADR-0006 Illustrative ($0.50/$2.00)`      |             0% |         $9.33 |  $3,078.00 |     $166.50 |    **$3,253.83** |
-|  **1,000** | `ADR-0006 Illustrative ($0.50/$2.00)`      |            50% |         $9.33 |  $3,078.00 |      $83.25 |    **$3,170.58** |
-| **10,000** | `DeepSeek-V4.1-Flash ZDR ($0.098/$0.294)`  |            50% |       $176.07 |  $5,362.56 |     $832.50 |    **$6,371.13** |
-| **10,000** | `ADR-0006 Illustrative ($0.50/$2.00)`      |             0% |       $176.07 | $30,780.00 |   $1,665.00 |   **$32,621.07** |
+|        MAU | LLM Cost Estimate (`5k` in / `1k` out per event)                      | Device Offload | Cloud Runtime |  LLM Spend |      Sandbox Net |          Combined Monthly |
+| ---------: | :-------------------------------------------------------------------- | -------------: | ------------: | ---------: | ---------------: | ------------------------: |
+|  **1,000** | `Nemotron-3.5-Lightning ZDR` (`$0.06/$0.16`, `internal stagingAlpha`) |       0% / 50% |         $9.33 |    $314.64 | $166.50 / $83.25 |     **$490.47 / $407.22** |
+|  **1,000** | `DeepSeek-V4.1-Flash ZDR` (`$0.098/$0.294`, `internal stagingAlpha`)  |       0% / 50% |         $9.33 |    $536.26 | $166.50 / $83.25 |     **$712.09 / $628.84** |
+|  **1,000** | `ADR-0006 Illustrative` (`$0.50/$2.00`, unapproved quote)             |       0% / 50% |         $9.33 |  $3,078.00 | $166.50 / $83.25 | **$3,253.83 / $3,170.58** |
+| **10,000** | `DeepSeek-V4.1-Flash ZDR` (`$0.098/$0.294`, `internal stagingAlpha`)  |            50% |       $176.07 |  $5,362.56 |          $832.50 |             **$6,371.13** |
+| **10,000** | `ADR-0006 Illustrative` (`$0.50/$2.00`, unapproved quote)             |             0% |       $176.07 | $30,780.00 |        $1,665.00 |            **$32,621.07** |
 
 ---
 
 ## 7. Model Routing Evaluation Matrix `[Simulated: Synthetic]`
 
-Evaluated across `8` synthetic personal-agent benchmark tasks (`simple_chat`, `json_extraction`, `tool_use`, `vision_multimodal`, `private_local`) using conservative token estimation (`MODEL_LIMITS` / `estimateTokensConservative`) and repo pricing rows (`MODEL_RATE_ROWS` in `@ember/model-gateway`). **Zero live LLM calls were made; latency/accuracy/retry figures are M0 simulation profiles requiring M4 provider canary calibration.**
+All rates, provenance, `reasoningEffort`, ZDR/data-collection flags, and approval states are derived directly from `@ember/model-gateway` (`evaluationDateUtc = 2026-11-19`, `evalCaseCount = 8`, **0 real LLM calls**). Privacy-sensitive cases (`eval-private-1`) are ineligible (`privacyEligible = false`) on all cloud routes absent explicit consent.
 
-| Route ID (`provider / model`)                                                    | Approval & Rate Provenance                                           | Sim. TTFT P50 / P95 (ms) | Sim. Comp. P50 / P95 (ms) | Eval Accuracy / Success | Cost / Success Task | Tools / JSON / Vision | Privacy / ZDR                                   |
-| :------------------------------------------------------------------------------- | :------------------------------------------------------------------- | -----------------------: | ------------------------: | :---------------------: | ------------------: | :-------------------: | :---------------------------------------------- |
-| `cloud-fast-zdr-nemotron` (`openrouter / nvidia/nemotron-3.5-lightning`)         | `approved_smoke_staging` (`official_price_verified` `$0.06/$0.16`)   |                420 / 950 |             1,350 / 2,600 |      76.0% / 87.5%      |       **$0.000245** |    Yes / Yes / No     | **ZDR + `dataCollection=deny`** (DeepInfra)     |
-| `cloud-vision-tools-deepseek` (`openrouter / deepseek/deepseek-v4.1-flash-1017`) | `approved_smoke_staging` (`official_price_verified` `$0.098/$0.294`) |              580 / 1,350 |             2,100 / 4,100 |     92.9% / 100.0%      |       **$0.000353** |  **Yes / Yes / Yes**  | **ZDR + `dataCollection=deny`** (DeepInfra fp8) |
-| `cloud-reasoning-gpt56-luna` (`openai / gpt-5.6-luna`)                           | `pending_cto_approval` (`unverified` `$0.20/$1.20`)                  |              650 / 1,500 |             2,400 / 4,800 |     96.4% / 100.0%      |           $0.000856 |    Yes / Yes / Yes    | Non-ZDR / Pending review                        |
-| `cloud-adr0006-illustrative` (`adr0006-budget-reference-model`)                  | `research_profile` (`illustrative` `$0.50/$2.00`)                    |              750 / 1,800 |             2,800 / 5,500 |     94.9% / 100.0%      |           $0.001906 |    Yes / Yes / Yes    | Illustrative only                               |
-| `device-local-mlx-small` (`apple-device-local`)                                  | `research_profile` (`zero_egress_local` `$0/$0`)                     |                180 / 420 |             1,100 / 2,400 |      50.9% / 37.5%      |       **$0.000000** |     No / No / No      | **On-device, zero cloud egress**                |
+| Route ID (`provider / model`)                                                    | Repo Approval & Rate Provenance                                                   |        Auth Eligible?        | Assumed Accuracy (Eligible) | Cap. / Priv. Eligible | Full Eligible Success | Cost / Success Task | Privacy / ZDR                               |
+| :------------------------------------------------------------------------------- | :-------------------------------------------------------------------------------- | :--------------------------: | --------------------------: | :-------------------: | --------------------: | ------------------: | :------------------------------------------ |
+| `cloud-fast-zdr-nemotron` (`openrouter / nvidia/nemotron-3.5-lightning`)         | `smoke_expired_internal_staging_only` (`official_price_verified` `$0.06/$0.16`)   | **Yes** _(internal staging)_ |                       86.0% |       7/8 / 7/8       |                 75.0% |       **$0.000286** | ZDR + `dataCollection=deny` (DeepInfra)     |
+| `cloud-vision-tools-deepseek` (`openrouter / deepseek/deepseek-v4.1-flash-1017`) | `smoke_expired_internal_staging_only` (`official_price_verified` `$0.098/$0.294`) | **Yes** _(internal staging)_ |                       92.7% |       8/8 / 7/8       |                 87.5% |       **$0.000403** | ZDR + `dataCollection=deny` (DeepInfra fp8) |
+| `cloud-reasoning-gpt56-luna` (`openai / gpt-5.6-luna`)                           | `pending_cto_approval` (`unverified` `$0.20/$1.20`)                               |            **No**            |                       96.4% |       8/8 / 7/8       |                 87.5% |           $0.000979 | Non-ZDR / Pending review                    |
+| `cloud-adr0006-illustrative` (`adr0006-budget-reference-model`)                  | `research_only` (`illustrative` `$0.50/$2.00`)                                    |            **No**            |                       94.9% |       8/8 / 7/8       |                 87.5% |           $0.002178 | Illustrative quote only                     |
+| `device-local-mlx-small` (`apple-device-local`)                                  | `research_only` (`zero_egress_local` `$0/$0`)                                     |        **No** _(M2+)_        |                       81.4% |     5/8 / **8/8**     |                 37.5% |       **$0.000000** | On-device, zero cloud egress                |
 
-### Deterministic M0/M1 Routing Policy Recommendations
+### Authorization-Gated Routing Policy Summary
 
-1. **Simple / Low-Latency Chat**: Route to `cloud-fast-zdr-nemotron` (`$0.000245`/success, ZDR) with fallback to `cloud-vision-tools-deepseek`.
-2. **Tool Calling & Multimodal Vision**: Route to `cloud-vision-tools-deepseek` (`$0.000353`/success, 100% synthetic capability coverage, ZDR + `tool_choice`).
-3. **Privacy-Sensitive / Offline Device Node**: Route to `device-local-mlx-small` when authorized & locally feasible (zero raw prompt egress), falling back to ZDR cloud routes only with policy/user consent.
-4. **Complex Reasoning**: Keep pinned on `cloud-vision-tools-deepseek` until `gpt-5.6-luna` (or another reasoning candidate) passes CTO approval, ZDR review, and M4 live canary testing.
-
----
-
-## 8. Architectural Conclusions & M1/M4 Gates
-
-1. **V2 Thin DO SQLite vs V1 PG**: V1 durable tasks touch `20–27` PG tuple mutations across 12+ tables and hit `51` active PG connections at 100 concurrency (`Queue Wait P95 = 1,013 ms`). Co-locating per-agent turn/task state in `AgentHeadDO` SQLite with `setAlarm()` eliminates poll-loop wait and pool exhaustion, keeping local Prepare/Commit P95 under `5 ms`.
-2. **Index Write Amplification Must Be Managed**: Normal Fast Path turn already writes `22` physical SQLite rows (`10` logical mutations). Keep secondary indexes minimal, avoid unnecessary per-token/per-heartbeat writes, and reconcile observed Cloudflare invoice `rows_written` in M4.
-3. **Regional Placement & Global Budget Gate**: Synchronous cross-region D1 RPCs break the `50 ms` Budget / `200 ms` Runtime Overhead gates once RTT exceeds `~40 ms`, and `20`-way single-row D1 contention hits `48.39 ms` locally. Use `locationHint` for Agent DOs, ensure covered turns perform `0` sync registry lookups, and evaluate bounded preallocated grants in M1.
-4. **Inference & Offload Dominate Total Cost**: Cloud Runtime is `1%–15%` of total spend at scale depending on model choice. Adopting verified ZDR OpenRouter models (`$0.06–$0.098/M` input) cuts projected LLM spend by `~6x–10x` versus ADR-0006's illustrative `$0.50/$2.00` quote, and 50% device offload halves Daytona compute spend.
+- **`simple_low_latency_chat`**: Primary `cloud-fast-zdr-nemotron`, Fallback `cloud-vision-tools-deepseek` _(internal stagingAlpha scope only; smoke grants expired)_.
+- **`tool_calling_and_multimodal`**: Primary `cloud-vision-tools-deepseek`, Fallback `null` _(no second approved vision+tool route)_.
+- **`privacy_sensitive_local_only`**: Primary `device-local-mlx-small` _(research-only pending M2+ device runtime)_, Fallback `null` _(private inputs remain local-only absent explicit user consent)_.
+- **`complex_high_accuracy_reasoning`**: Primary `cloud-vision-tools-deepseek`, Fallback `null` _(`gpt-5.6-luna` is `pending_cto_approval` and excluded from fallbacks)_.

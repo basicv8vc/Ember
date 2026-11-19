@@ -1,8 +1,8 @@
 {
   "scenarioId": "ember-v2-m0-cost-model",
   "evidenceKind": "estimated_adr0006",
-  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
-  "timestamp": "2026-11-19T12:02:16.182Z",
+  "gitSha": "14812da44197a365a4e08d4148c034e23f8a4c1e",
+  "timestamp": "2026-11-19T12:39:22.583Z",
   "adr0006ReferenceMatrix": [
     {
       "mau": 10,

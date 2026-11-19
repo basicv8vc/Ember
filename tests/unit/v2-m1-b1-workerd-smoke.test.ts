@@ -26,7 +26,14 @@ function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: st
 
   const modules: Record<string, { type: 'esm'; contents: string }> = {};
   for (const relPath of files) {
-    const source = readFileSync(resolve(REPO_ROOT, 'packages/runtime-v2/src', relPath), 'utf8');
+    let source = readFileSync(resolve(REPO_ROOT, 'packages/runtime-v2/src', relPath), 'utf8');
+    if (relPath === 'index.ts') {
+      // Keep only recovery/storage/migration exports so merged A+B+E index entries don't pull unbundled workspace packages into Miniflare.
+      source = source
+        .split('\n')
+        .filter((line) => /from\s+['"]\.\/(?:storage|migrations|recovery\/)/.test(line))
+        .join('\n');
+    }
     const transpiled = ts.transpileModule(source, {
       fileName: relPath,
       compilerOptions: {

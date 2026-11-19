@@ -10,3 +10,4 @@ export * from './recovery/budget-sync.js';
 export * from './recovery/queue-worker.js';
 export * from './recovery/registry.js';
 export * from './recovery/sweeper.js';
+export * from './recovery/durable-integration.js';

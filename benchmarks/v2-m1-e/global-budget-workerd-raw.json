@@ -1,0 +1,702 @@
+{
+  "evidence": "local workerd Worker fetch to SQLite DO RPC, per request, milliseconds",
+  "measuredAt": "2026-11-19T13:43:27.098Z",
+  "node": "v24.11.0",
+  "platform": "darwin",
+  "arch": "arm64",
+  "wrangler": "4.158.0",
+  "scenarios": [
+    {
+      "scenario": "different-operations",
+      "samples": {
+        "reserveAndAuthorize": [
+          {
+            "operationId": "concurrent-0",
+            "kind": "reserved",
+            "reserveMs": 48.062374999999975,
+            "authorized": true,
+            "authorizeMs": 38.29575,
+            "reserveAndAuthorizeMs": 86.39954200000011
+          },
+          {
+            "operationId": "concurrent-1",
+            "kind": "reserved",
+            "reserveMs": 83.72183300000006,
+            "authorized": true,
+            "authorizeMs": 11.488790999999992,
+            "reserveAndAuthorizeMs": 95.21437500000002
+          },
+          {
+            "operationId": "concurrent-2",
+            "kind": "reserved",
+            "reserveMs": 83.95191699999987,
+            "authorized": true,
+            "authorizeMs": 19.974958000000015,
+            "reserveAndAuthorizeMs": 103.93062500000019
+          },
+          {
+            "operationId": "concurrent-3",
+            "kind": "reserved",
+            "reserveMs": 84.15787499999988,
+            "authorized": true,
+            "authorizeMs": 19.783292000000074,
+            "reserveAndAuthorizeMs": 103.94508300000007
+          },
+          {
+            "operationId": "concurrent-4",
+            "kind": "reserved",
+            "reserveMs": 84.35983299999998,
+            "authorized": true,
+            "authorizeMs": 19.424207999999908,
+            "reserveAndAuthorizeMs": 103.79358300000013
+          },
+          {
+            "operationId": "concurrent-5",
+            "kind": "reserved",
+            "reserveMs": 84.58833300000015,
+            "authorized": true,
+            "authorizeMs": 19.22629199999983,
+            "reserveAndAuthorizeMs": 103.81954099999984
+          },
+          {
+            "operationId": "concurrent-6",
+            "kind": "reserved",
+            "reserveMs": 84.86166700000012,
+            "authorized": true,
+            "authorizeMs": 18.966750000000047,
+            "reserveAndAuthorizeMs": 103.83241699999985
+          },
+          {
+            "operationId": "concurrent-7",
+            "kind": "reserved",
+            "reserveMs": 85.100459,
+            "authorized": true,
+            "authorizeMs": 18.84412499999985,
+            "reserveAndAuthorizeMs": 103.94854200000009
+          },
+          {
+            "operationId": "concurrent-8",
+            "kind": "reserved",
+            "reserveMs": 85.32125000000019,
+            "authorized": true,
+            "authorizeMs": 18.63387499999999,
+            "reserveAndAuthorizeMs": 103.95883300000014
+          },
+          {
+            "operationId": "concurrent-9",
+            "kind": "reserved",
+            "reserveMs": 83.19412499999999,
+            "authorized": true,
+            "authorizeMs": 11.941291999999976,
+            "reserveAndAuthorizeMs": 95.14058399999999
+          },
+          {
+            "operationId": "concurrent-10",
+            "kind": "reserved",
+            "reserveMs": 83.48912500000006,
+            "authorized": true,
+            "authorizeMs": 11.680041999999958,
+            "reserveAndAuthorizeMs": 95.1730829999999
+          },
+          {
+            "operationId": "concurrent-11",
+            "kind": "reserved",
+            "reserveMs": 82.075875,
+            "authorized": true,
+            "authorizeMs": 8.789999999999964,
+            "reserveAndAuthorizeMs": 90.87491699999987
+          },
+          {
+            "operationId": "concurrent-12",
+            "kind": "budget_exceeded",
+            "reserveMs": 81.99258299999997
+          },
+          {
+            "operationId": "concurrent-13",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.04004199999986
+          },
+          {
+            "operationId": "concurrent-14",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.65870799999993
+          },
+          {
+            "operationId": "concurrent-15",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.61500000000001
+          },
+          {
+            "operationId": "concurrent-16",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.7041670000001
+          },
+          {
+            "operationId": "concurrent-17",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.732125
+          },
+          {
+            "operationId": "concurrent-18",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.76433300000008
+          },
+          {
+            "operationId": "concurrent-19",
+            "kind": "budget_exceeded",
+            "reserveMs": 82.796333
+          },
+          {
+            "operationId": "concurrent-20",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.0458329999999
+          },
+          {
+            "operationId": "concurrent-21",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.0713330000001
+          },
+          {
+            "operationId": "concurrent-22",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.21708399999989
+          },
+          {
+            "operationId": "concurrent-23",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.08725000000004
+          },
+          {
+            "operationId": "concurrent-24",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.10325000000012
+          },
+          {
+            "operationId": "concurrent-25",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.11991699999999
+          },
+          {
+            "operationId": "concurrent-26",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.13524999999981
+          },
+          {
+            "operationId": "concurrent-27",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.15025000000014
+          },
+          {
+            "operationId": "concurrent-28",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.16558299999997
+          },
+          {
+            "operationId": "concurrent-29",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.18025000000011
+          },
+          {
+            "operationId": "concurrent-30",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.222125
+          },
+          {
+            "operationId": "concurrent-31",
+            "kind": "budget_exceeded",
+            "reserveMs": 86.24037500000009
+          }
+        ],
+        "settles": [
+          {
+            "operationId": "concurrent-0",
+            "applied": true,
+            "ms": 7.354916000000003
+          },
+          {
+            "operationId": "concurrent-1",
+            "applied": true,
+            "ms": 10.815458000000035
+          },
+          {
+            "operationId": "concurrent-2",
+            "applied": true,
+            "ms": 10.855166999999938
+          },
+          {
+            "operationId": "concurrent-3",
+            "applied": true,
+            "ms": 25.267917000000125
+          },
+          {
+            "operationId": "concurrent-4",
+            "applied": true,
+            "ms": 25.194666000000097
+          },
+          {
+            "operationId": "concurrent-5",
+            "applied": true,
+            "ms": 25.228250000000116
+          },
+          {
+            "operationId": "concurrent-6",
+            "applied": true,
+            "ms": 25.24375000000009
+          },
+          {
+            "operationId": "concurrent-7",
+            "applied": true,
+            "ms": 25.378375000000005
+          },
+          {
+            "operationId": "concurrent-8",
+            "applied": true,
+            "ms": 25.391415999999936
+          },
+          {
+            "operationId": "concurrent-9",
+            "applied": true,
+            "ms": 25.327999999999975
+          },
+          {
+            "operationId": "concurrent-10",
+            "applied": true,
+            "ms": 25.34054200000014
+          },
+          {
+            "operationId": "concurrent-11",
+            "applied": true,
+            "ms": 25.357500000000073
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "same-operation",
+      "samples": {
+        "reserves": [
+          {
+            "kind": "reserved",
+            "ms": 17.700000000000045
+          },
+          {
+            "kind": "reserved",
+            "ms": 17.716583000000128
+          },
+          {
+            "kind": "reserved",
+            "ms": 17.731249999999818
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.20266700000002
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.25041699999997
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.73979199999985
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.75087499999995
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.655874999999924
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.685249999999996
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.699375000000146
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.71224999999981
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.722958999999946
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.662791999999854
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.519916000000194
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.533916999999974
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.54537499999992
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.55729199999996
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.56820800000014
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.57899999999995
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.589333000000124
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.59987500000011
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.61066699999992
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.62112499999989
+          },
+          {
+            "kind": "reserved",
+            "ms": 33.63104199999998
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.68654199999992
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.64716599999997
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.55945799999995
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.6193330000001
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.58850000000007
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.605375000000095
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.631665999999996
+          },
+          {
+            "kind": "reserved",
+            "ms": 39.695209000000204
+          }
+        ],
+        "authorizations": [
+          {
+            "authorized": true,
+            "ms": 15.20108399999981
+          },
+          {
+            "authorized": false,
+            "ms": 15.226209000000154
+          },
+          {
+            "authorized": false,
+            "ms": 15.239541999999801
+          },
+          {
+            "authorized": false,
+            "ms": 15.251666999999998
+          },
+          {
+            "authorized": false,
+            "ms": 24.953000000000202
+          },
+          {
+            "authorized": false,
+            "ms": 25.81925000000001
+          },
+          {
+            "authorized": false,
+            "ms": 25.838707999999997
+          },
+          {
+            "authorized": false,
+            "ms": 26.402333
+          },
+          {
+            "authorized": false,
+            "ms": 36.04804200000012
+          },
+          {
+            "authorized": false,
+            "ms": 36.092124999999896
+          },
+          {
+            "authorized": false,
+            "ms": 36.10891700000002
+          },
+          {
+            "authorized": false,
+            "ms": 37.91612500000019
+          },
+          {
+            "authorized": false,
+            "ms": 37.93670800000018
+          },
+          {
+            "authorized": false,
+            "ms": 37.95049999999992
+          },
+          {
+            "authorized": false,
+            "ms": 37.96529099999998
+          },
+          {
+            "authorized": false,
+            "ms": 37.97833400000013
+          },
+          {
+            "authorized": false,
+            "ms": 37.99008300000014
+          },
+          {
+            "authorized": false,
+            "ms": 39.48766600000022
+          },
+          {
+            "authorized": false,
+            "ms": 39.49845800000003
+          },
+          {
+            "authorized": false,
+            "ms": 39.51033400000006
+          },
+          {
+            "authorized": false,
+            "ms": 39.27287500000011
+          },
+          {
+            "authorized": false,
+            "ms": 39.301791000000094
+          },
+          {
+            "authorized": false,
+            "ms": 39.05158400000005
+          },
+          {
+            "authorized": false,
+            "ms": 39.06583300000011
+          },
+          {
+            "authorized": false,
+            "ms": 39.436709000000064
+          },
+          {
+            "authorized": false,
+            "ms": 39.44966700000009
+          },
+          {
+            "authorized": false,
+            "ms": 39.4692500000001
+          },
+          {
+            "authorized": false,
+            "ms": 39.5162499999999
+          },
+          {
+            "authorized": false,
+            "ms": 39.526582999999846
+          },
+          {
+            "authorized": false,
+            "ms": 39.53845799999999
+          },
+          {
+            "authorized": false,
+            "ms": 39.5490420000001
+          },
+          {
+            "authorized": false,
+            "ms": 39.55904099999998
+          }
+        ],
+        "settles": [
+          {
+            "applied": true,
+            "alreadySettled": false,
+            "ms": 18.22524999999996
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 18.260582999999997
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 18.246167000000014
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 25.385874999999942
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 26.4513750000001
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.11250000000018
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.14758299999994
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.165416999999934
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.178083000000015
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.18879100000004
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.649625000000015
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.93204199999991
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.90091600000005
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 38.91379200000006
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.76091599999995
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.77241700000013
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.78204200000005
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.700166999999965
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.71170899999993
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.72179200000005
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.734040999999934
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.74458400000003
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.64583299999981
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.65808300000003
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.788332999999966
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.539084
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.56716699999993
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.63062500000001
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.579792
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.593875000000025
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.60454200000004
+          },
+          {
+            "applied": false,
+            "alreadySettled": true,
+            "ms": 41.61633400000005
+          }
+        ]
+      }
+    }
+  ]
+}

@@ -21,13 +21,13 @@ Ember 选择 Neon 并不是因为 Supabase 不支持所需的 PostgreSQL 能力�
 
 ## 1. 决策背景与时间线
 
-| 日期 | 事件 |
-| --- | --- |
-| 2026-11-07 | Issue #132 启动 Neon/Supabase 对照验证；授权各创建一个 Free 测试项目，仅使用合成数据。要求保留现有 PostgreSQL 业务和事务契约，不迁移 D1。 |
-| 2026-11-08 | PR #135 汇总 P0–P4 实测，推荐 Neon 作为 Alpha PostgreSQL。PR #139 记录 Neon 作为 CTO-approved provider，并保留后续诊断任务。 |
-| 2026-11（后续） | Neon 进入 Ember Cloud 共享环境，通过 Hyperdrive 服务 API 与 Async Runtime；具体部署路径见 [Ember Cloud](../cloud-staging.md)。 |
-| 2026-11-18 | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) 记录 Neon compute 预警及 Cloudflare-native V2 方向；要求先测量和缓解 V1 的非必要数据库唤醒。 |
-| 2026-11-19 | 用户提供 Supabase Free 实验项目低活动即将暂停的邮件；这不是 Ember Cloud 的数据库故障通知。 |
+| 日期            | 事件                                                                                                                                                 |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 2026-11-07      | Issue #132 启动 Neon/Supabase 对照验证；授权各创建一个 Free 测试项目，仅使用合成数据。要求保留现有 PostgreSQL 业务和事务契约，不迁移 D1。            |
+| 2026-11-08      | PR #135 汇总 P0–P4 实测，推荐 Neon 作为 Alpha PostgreSQL。PR #139 记录 Neon 作为 CTO-approved provider，并保留后续诊断任务。                         |
+| 2026-11（后续） | Neon 进入 Ember Cloud 共享环境，通过 Hyperdrive 服务 API 与 Async Runtime；具体部署路径见 [Ember Cloud](../cloud-staging.md)。                       |
+| 2026-11-18      | [ADR-0005](../adr/0005-cloudflare-native-runtime-v2.md) 记录 Neon compute 预警及 Cloudflare-native V2 方向；要求先测量和缓解 V1 的非必要数据库唤醒。 |
+| 2026-11-19      | 用户提供 Supabase Free 实验项目低活动即将暂停的邮件；这不是 Ember Cloud 的数据库故障通知。                                                           |
 
 原始对照报告仍为 Draft，不应将其全部未解决事项视为已完成。实际选型与当前部署由 main 上的部署说明及 ADR-0005 佐证。
 
@@ -35,15 +35,15 @@ Ember 选择 Neon 并不是因为 Supabase 不支持所需的 PostgreSQL 能力�
 
 当时已经确定 Cloudflare-first、按实际需求逐步付费（pay-as-you-grow）的路线。托管 PostgreSQL 需要保持 Ember 已实现的持久化、租户隔离、事务、幂等以及 worker lease 语义。
 
-| Supabase 能力 | Ember 的现行方案 |
-| --- | --- |
-| Auth | Apple Sign-in + Ember 自有认证与租户身份 |
-| Data API | Hono API + PostgreSQL repositories |
-| Edge Functions | Cloudflare Workers |
-| 异步任务 | Cloudflare Queues + Async Runtime |
-| Storage | Cloudflare R2（对象）+ PostgreSQL（业务状态及元数据） |
-| Realtime | Ember 自有 API/客户端状态同步；不是当前 Supabase 依赖 |
-| PostgreSQL | Neon + Hyperdrive |
+| Supabase 能力  | Ember 的现行方案                                      |
+| -------------- | ----------------------------------------------------- |
+| Auth           | Apple Sign-in + Ember 自有认证与租户身份              |
+| Data API       | Hono API + PostgreSQL repositories                    |
+| Edge Functions | Cloudflare Workers                                    |
+| 异步任务       | Cloudflare Queues + Async Runtime                     |
+| Storage        | Cloudflare R2（对象）+ PostgreSQL（业务状态及元数据） |
+| Realtime       | Ember 自有 API/客户端状态同步；不是当前 Supabase 依赖 |
+| PostgreSQL     | Neon + Hyperdrive                                     |
 
 因此数据库服务首先按照 PostgreSQL 兼容性、连接语义、可用性、成本和恢复能力选择，不为尚无需求的 BaaS 功能支付固定平台成本，也不引入 iOS 对数据库 API 的直接依赖。
 
@@ -51,17 +51,17 @@ Ember 选择 Neon 并不是因为 Supabase 不支持所需的 PostgreSQL 能力�
 
 两家实验数据库均位于 Singapore，仅用于相同区域对比，并不构成生产区域选择或全球延迟基准。以下是 PR #135 的历史证据（非本次重新运行）。
 
-| 项目 | Neon Free | Supabase Free |
-| --- | --- | --- |
-| PostgreSQL 版本 | 17.11 | 17.11 |
-| Migrations 0001–0017（PR #138 基线） | 全部应用，二次运行全部已应用；checksum/规范化 schema 与本地一致 | 同左 |
-| 核心持久化、租户隔离、幂等、回滚 | 针对性验证通过 | 针对性验证通过 |
-| Advisory lock | 直接连接的迁移锁通过；Hyperdrive 事务锁通过 | 直接连接的迁移锁通过；Hyperdrive 事务锁通过 |
-| Hyperdrive Worker | 真实调用通过 | 真实调用通过 |
-| 连接故障恢复 | 终止后端连接后恢复，约 2.2–2.7 s | 直接连接约 2.567 s；Hyperdrive 下一请求约 409 ms |
-| 空闲/恢复 | 两次受控空闲观察进入 Idle，下一请求自动唤醒 | 11m18s 后仍观察到 5 个闲置 origin session，未验证项目暂停/恢复 |
-| 合成数据逻辑导出/恢复 | 通过 | 通过 |
-| Hosted 压测 | 部分并发场景未解决 | 针对性场景通过；未完成生产级负载测试 |
+| 项目                                 | Neon Free                                                       | Supabase Free                                                  |
+| ------------------------------------ | --------------------------------------------------------------- | -------------------------------------------------------------- |
+| PostgreSQL 版本                      | 17.11                                                           | 17.11                                                          |
+| Migrations 0001–0017（PR #138 基线） | 全部应用，二次运行全部已应用；checksum/规范化 schema 与本地一致 | 同左                                                           |
+| 核心持久化、租户隔离、幂等、回滚     | 针对性验证通过                                                  | 针对性验证通过                                                 |
+| Advisory lock                        | 直接连接的迁移锁通过；Hyperdrive 事务锁通过                     | 直接连接的迁移锁通过；Hyperdrive 事务锁通过                    |
+| Hyperdrive Worker                    | 真实调用通过                                                    | 真实调用通过                                                   |
+| 连接故障恢复                         | 终止后端连接后恢复，约 2.2–2.7 s                                | 直接连接约 2.567 s；Hyperdrive 下一请求约 409 ms               |
+| 空闲/恢复                            | 两次受控空闲观察进入 Idle，下一请求自动唤醒                     | 11m18s 后仍观察到 5 个闲置 origin session，未验证项目暂停/恢复 |
+| 合成数据逻辑导出/恢复                | 通过                                                            | 通过                                                           |
+| Hosted 压测                          | 部分并发场景未解决                                              | 针对性场景通过；未完成生产级负载测试                           |
 
 ### 关键胜出证据：Scale-to-zero
 
@@ -89,13 +89,13 @@ Supabase 的七天低活动项目级暂停与 Neon 的短时 compute suspension 
 
 以下配额和价格来自 2026-11-08 原始报告；不是本次实时核价，也不是未来套餐承诺。
 
-| 项目 | Neon | Supabase |
-| --- | --- | --- |
-| Free 数据库容量 | 1 GB | 500 MB |
-| Free compute | 100 CU-hours/月 | 实例模式，低活跃可能暂停 |
-| Free transfer | 5 GB public transfer | 5 GB uncached + 5 GB cached egress |
-| Free 恢复 | 6 小时/1 GB history；一个手动 snapshot | 无自动项目备份 |
-| Paid 起步 | Launch 按使用量：当时 $0.106/CU-hour、$0.35/GB-month | Pro 当时 $25/月起 |
+| 项目            | Neon                                                 | Supabase                           |
+| --------------- | ---------------------------------------------------- | ---------------------------------- |
+| Free 数据库容量 | 1 GB                                                 | 500 MB                             |
+| Free compute    | 100 CU-hours/月                                      | 实例模式，低活跃可能暂停           |
+| Free transfer   | 5 GB public transfer                                 | 5 GB uncached + 5 GB cached egress |
+| Free 恢复       | 6 小时/1 GB history；一个手动 snapshot               | 无自动项目备份                     |
+| Paid 起步       | Launch 按使用量：当时 $0.106/CU-hour、$0.35/GB-month | Pro 当时 $25/月起                  |
 
 当时 Neon Launch 的示例：若 0.25 CU 每天运行 8 小时，每月约 60 CU-hours，计算费用约 $6.36（另计存储、历史恢复与超额流量）。如果持续 24 小时运行，则为约 180 CU-hours、$19.08，仅计算费用就明显增加。以上均为模型估算，而非账单。
 

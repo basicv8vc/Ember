@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -15,18 +15,16 @@ interface MiniflareInstance {
 type MiniflareConstructor = new (options: Record<string, unknown>) => MiniflareInstance;
 
 function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: string }> {
-  const files = [
-    'index.ts',
-    'storage.ts',
-    'migrations.ts',
-    'recovery/schema.ts',
-    'recovery/envelope.ts',
-    'recovery/ports.ts',
-  ] as const;
-
+  const srcRoot = resolve(REPO_ROOT, 'packages/runtime-v2/src');
+  const entries = readdirSync(srcRoot, { recursive: true, withFileTypes: true });
   const modules: Record<string, { type: 'esm'; contents: string }> = {};
-  for (const relPath of files) {
-    const source = readFileSync(resolve(REPO_ROOT, 'packages/runtime-v2/src', relPath), 'utf8');
+  for (const entry of entries) {
+    if (!entry.isFile() || !entry.name.endsWith('.ts')) {
+      continue;
+    }
+    const fullPath = resolve(entry.parentPath, entry.name);
+    const relPath = fullPath.slice(srcRoot.length + 1).replace(/\\/g, '/');
+    const source = readFileSync(fullPath, 'utf8');
     const transpiled = ts.transpileModule(source, {
       fileName: relPath,
       compilerOptions: {

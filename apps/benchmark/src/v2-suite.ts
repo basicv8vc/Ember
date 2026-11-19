@@ -7,6 +7,12 @@ import { runRttSimulation } from './rtt-simulation.js';
 import { runSqliteProbe } from './sqlite-probe.js';
 import { runTimingMethodology } from './timing-methodology.js';
 import { runV1BaselineBenchmark } from './v1-baseline.js';
+import {
+  runV2M1CostReestimation,
+  runV2M1HarnessSmokeBenchmark,
+  type V2M1CostReestimationReport,
+  type V2M1HarnessSmokeBenchmarkReport,
+} from './v2-m1/m1-benchmark.js';
 import type {
   CostModelOutput,
   CostSensitivityReport,
@@ -18,7 +24,15 @@ import type {
 } from './v2-types.js';
 
 export type V2BenchmarkSuiteName =
-  'v1-baseline' | 'sqlite-probe' | 'timing' | 'rtt-sim' | 'cost-model' | 'model-routing' | 'all';
+  | 'v1-baseline'
+  | 'sqlite-probe'
+  | 'timing'
+  | 'rtt-sim'
+  | 'cost-model'
+  | 'model-routing'
+  | 'm1-harness-smoke'
+  | 'm1-cost-reestimate'
+  | 'all';
 
 export interface V2SuiteRunOptions {
   readonly suite: V2BenchmarkSuiteName;
@@ -50,6 +64,8 @@ export interface V2SuiteBundleResult {
   readonly costModel?: CostSensitivityReport;
   readonly customCostCalculation?: CostModelOutput;
   readonly modelRoutingMatrix?: ModelRoutingMatrixReport;
+  readonly m1HarnessSmoke?: V2M1HarnessSmokeBenchmarkReport;
+  readonly m1CostReestimation?: V2M1CostReestimationReport;
 }
 
 /**
@@ -59,11 +75,13 @@ export async function runV2BenchmarkSuite(
   options: V2SuiteRunOptions,
 ): Promise<V2SuiteBundleResult> {
   const log = options.log ?? ((msg: string) => console.log(msg));
-  const outDir = options.outDir ?? 'benchmarks/v2-m0';
+  const isM1Suite = options.suite === 'm1-harness-smoke' || options.suite === 'm1-cost-reestimate';
+  const outDir = options.outDir ?? (isM1Suite ? 'benchmarks/v2-m1' : 'benchmarks/v2-m0');
   mkdirSync(outDir, { recursive: true });
 
-  const shouldRun = (name: Exclude<V2BenchmarkSuiteName, 'all'>): boolean =>
-    options.suite === 'all' || options.suite === name;
+  const shouldRunM0 = (
+    name: Exclude<V2BenchmarkSuiteName, 'all' | 'm1-harness-smoke' | 'm1-cost-reestimate'>,
+  ): boolean => options.suite === 'all' || options.suite === name;
 
   let v1Baseline: V1BaselineReport | undefined;
   let sqliteProbe: SqliteProbeReport | undefined;
@@ -72,8 +90,10 @@ export async function runV2BenchmarkSuite(
   let costModel: CostSensitivityReport | undefined;
   let customCostCalculation: CostModelOutput | undefined;
   let modelRoutingMatrix: ModelRoutingMatrixReport | undefined;
+  let m1HarnessSmoke: V2M1HarnessSmokeBenchmarkReport | undefined;
+  let m1CostReestimation: V2M1CostReestimationReport | undefined;
 
-  if (shouldRun('v1-baseline')) {
+  if (shouldRunM0('v1-baseline')) {
     v1Baseline = await runV1BaselineBenchmark({
       ...(options.databaseUrl !== undefined ? { databaseUrl: options.databaseUrl } : {}),
       ...(options.enableLocalLoad !== undefined
@@ -94,7 +114,7 @@ export async function runV2BenchmarkSuite(
     );
   }
 
-  if (shouldRun('sqlite-probe')) {
+  if (shouldRunM0('sqlite-probe')) {
     sqliteProbe = await runSqliteProbe({
       ...(options.probeIterations !== undefined ? { iterations: options.probeIterations } : {}),
       log,
@@ -106,7 +126,7 @@ export async function runV2BenchmarkSuite(
     );
   }
 
-  if (shouldRun('timing')) {
+  if (shouldRunM0('timing')) {
     timingMethodology = await runTimingMethodology({
       ...(options.probeIterations !== undefined ? { turnIterations: options.probeIterations } : {}),
       log,
@@ -118,7 +138,7 @@ export async function runV2BenchmarkSuite(
     );
   }
 
-  if (shouldRun('rtt-sim')) {
+  if (shouldRunM0('rtt-sim')) {
     rttSimulation = await runRttSimulation({
       ...(options.rttSamples !== undefined ? { samplesPerScenario: options.rttSamples } : {}),
       ...(options.seed !== undefined ? { seed: options.seed } : {}),
@@ -131,7 +151,7 @@ export async function runV2BenchmarkSuite(
     );
   }
 
-  if (shouldRun('cost-model')) {
+  if (shouldRunM0('cost-model')) {
     costModel = runCostModelAnalysis();
     writeFileSync(path.join(outDir, 'cost-model.json'), JSON.stringify(costModel, null, 2), 'utf8');
 
@@ -172,11 +192,29 @@ export async function runV2BenchmarkSuite(
     }
   }
 
-  if (shouldRun('model-routing')) {
+  if (shouldRunM0('model-routing')) {
     modelRoutingMatrix = runModelRoutingMatrix();
     writeFileSync(
       path.join(outDir, 'model-routing-matrix.json'),
       JSON.stringify(modelRoutingMatrix, null, 2),
+      'utf8',
+    );
+  }
+
+  if (options.suite === 'm1-harness-smoke') {
+    m1HarnessSmoke = await runV2M1HarnessSmokeBenchmark(options.probeIterations ?? 15);
+    writeFileSync(
+      path.join(outDir, 'm1-harness-smoke.json'),
+      JSON.stringify(m1HarnessSmoke, null, 2),
+      'utf8',
+    );
+  }
+
+  if (options.suite === 'm1-cost-reestimate') {
+    m1CostReestimation = runV2M1CostReestimation();
+    writeFileSync(
+      path.join(outDir, 'm1-cost-reestimation.json'),
+      JSON.stringify(m1CostReestimation, null, 2),
       'utf8',
     );
   }
@@ -193,10 +231,12 @@ export async function runV2BenchmarkSuite(
     ...(costModel !== undefined ? { costModel } : {}),
     ...(customCostCalculation !== undefined ? { customCostCalculation } : {}),
     ...(modelRoutingMatrix !== undefined ? { modelRoutingMatrix } : {}),
+    ...(m1HarnessSmoke !== undefined ? { m1HarnessSmoke } : {}),
+    ...(m1CostReestimation !== undefined ? { m1CostReestimation } : {}),
   };
 
   writeFileSync(
-    path.join(outDir, `v2-m0-${options.suite}.json`),
+    path.join(outDir, isM1Suite ? `${options.suite}-bundle.json` : `v2-m0-${options.suite}.json`),
     JSON.stringify(bundle, null, 2),
     'utf8',
   );

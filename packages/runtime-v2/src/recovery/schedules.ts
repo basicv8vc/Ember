@@ -187,7 +187,8 @@ export class ScheduleRepository {
   /**
    * Atomically materializes up to `limit` due schedules in `(next_fire_at_ms ASC, schedule_id ASC)`
    * order inside the caller's active `transactionSync()`.
-   * Per M0-B §2.2: isolates invalid schedules (pausing them) so healthy schedules in the batch proceed.
+   * Isolates invalid schedule calculations before mutation. Business materialization errors
+   * propagate to the caller so the transaction rolls back both schedule and business writes.
    */
   processDueSchedulesSync(
     business: AuthoritativeBusinessPort,
@@ -216,9 +217,10 @@ export class ScheduleRepository {
       [];
 
     for (const row of dueRows) {
+      const nextOccurrenceSeq = row.occurrence_seq + 1;
+      let computed: ReturnType<typeof computeNextScheduleFireAtMs>;
       try {
-        const nextOccurrenceSeq = row.occurrence_seq + 1;
-        const computed = computeNextScheduleFireAtMs({
+        computed = computeNextScheduleFireAtMs({
           scheduleKind: row.schedule_kind,
           intervalSeconds: row.interval_seconds,
           cronExpr: row.cron_expr,
@@ -226,35 +228,6 @@ export class ScheduleRepository {
           currentNextFireAtMs: row.next_fire_at_ms,
           misfirePolicy: row.misfire_policy,
           nowMs,
-        });
-
-        // Advance schedule state first inside same transactionSync, then materialize business work
-        const persistedNextFire = computed.nextFireAtMs ?? row.next_fire_at_ms;
-        this.#sql.exec(
-          `UPDATE v2_schedules
-           SET last_fired_at_ms = ?,
-               occurrence_seq = ?,
-               next_fire_at_ms = ?,
-               status = ?,
-               version = version + 1,
-               updated_at_ms = ?
-           WHERE schedule_id = ? AND version = ?`,
-          nowMs,
-          nextOccurrenceSeq,
-          persistedNextFire,
-          computed.newStatus,
-          nowMs,
-          row.schedule_id,
-          row.version,
-        );
-
-        business.materializeScheduleOccurrenceSync(row.schedule_id, nextOccurrenceSeq, nowMs);
-
-        materialized.push({
-          scheduleId: row.schedule_id,
-          occurrenceSeq: nextOccurrenceSeq,
-          nextFireAtMs: computed.nextFireAtMs,
-          status: computed.newStatus,
         });
       } catch (error) {
         const errorMessage = error instanceof Error ? error.message : 'Unknown schedule error';
@@ -266,7 +239,38 @@ export class ScheduleRepository {
           row.schedule_id,
         );
         isolatedErrors.push({ scheduleId: row.schedule_id, errorMessage });
+        continue;
       }
+
+      // Both writes belong to the caller's transaction. A materialization error must
+      // escape so schedule progress and any partial business writes roll back together.
+      const persistedNextFire = computed.nextFireAtMs ?? row.next_fire_at_ms;
+      this.#sql.exec(
+        `UPDATE v2_schedules
+         SET last_fired_at_ms = ?,
+             occurrence_seq = ?,
+             next_fire_at_ms = ?,
+             status = ?,
+             version = version + 1,
+             updated_at_ms = ?
+         WHERE schedule_id = ? AND version = ?`,
+        nowMs,
+        nextOccurrenceSeq,
+        persistedNextFire,
+        computed.newStatus,
+        nowMs,
+        row.schedule_id,
+        row.version,
+      );
+
+      business.materializeScheduleOccurrenceSync(row.schedule_id, nextOccurrenceSeq, nowMs);
+
+      materialized.push({
+        scheduleId: row.schedule_id,
+        occurrenceSeq: nextOccurrenceSeq,
+        nextFireAtMs: computed.nextFireAtMs,
+        status: computed.newStatus,
+      });
     }
 
     return {

@@ -1,6 +1,6 @@
 # Ember V2-M0-B — Event Runtime & Recovery Contract
 
-- **Status:** M0 Contract Specification — Ready for Architect / CTO Review
+- **Status:** M0 Joint Contract Revision (aligned with Architect Joint Review J1–J5 & V2-M0-A; pending final Architect/CTO sign-off)
 - **Date:** 2026-11-19
 - **Branch:** `feat/v2-m0-event-recovery-contract`
 - **Owner:** V2 Work Package B (Event Runtime & Recovery)
@@ -12,130 +12,63 @@
   - [B1 Platform Contract (§6–§10, N-1–N-12)](../product/B1_PLATFORM_CONTRACT.md)
   - [V1 Architecture Baseline (§4–§10)](./v1-architecture-baseline.md)
   - [Durable Objects Migration Debt](./durable-objects-migration-debt.md)
+  - Companion M0-A Contract: `docs/architecture/v2-m0-runtime-contract.md` (PR #170)
 
 > [!IMPORTANT]
-> 本文档冻结 Ember V2 的事件驱动调度、DO Alarm + Queue 可靠派发、D1 独立恢复登记、Generation/Fencing 准入与退役、D1 降级边界、Fast Path 向 Durable Path 安全移交以及测量与故障注入验证契约。本文档**不授权**云资源创建、付费模型调用或生产数据迁移；M1 依赖性编码须待架构师/CTO 审核冻结本契约及 Agent A 公共契约后启动。
+> 本文档是 **Agent A（Agent Core / Fast Path）与 Agent B（Event Runtime & Recovery）共享的权威调度、Outbox 与独立恢复契约（含共享 DDL 与联合接口 Seam）**。本文档**不授权**云资源创建、付费模型调用或生产数据迁移；依赖性 M1 编码须待 Architect/CTO 对 PR #170 + #171 + M0-D 联合冻结后启动。
 
 ---
 
-## 1. 验收目标与不变量总览
+## 1. 验收目标与核心不变量
 
-| 验收目标                                          | 协议强制不变量                                                                                                                                                                                                                                            | 测量/验证指标                                                                                                   |
-| ------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| **不丢失已接受任务**                              | **Discoverability Invariant**: 任意义务 `O` 在 DO SQLite 提交前，D1 `v2_recovery_registry` 必须已存在 `next_recovery_at_ms <= D(O)` 且 `status IN ('armed', 'backoff')` 的有效记录；未覆盖路径遇 D1 不可用必须 Fail Closed（HTTP `503 DB_UNAVAILABLE`）。 | 故障注入矩阵 `FI-01..FI-16` 零丢失；客户端受保护 Outbox 保留原始 `client_submission_id` 与 `transcript_epoch`。 |
-| **不重复提交任务结果**                            | 单调安全整数 `lease_epoch`（`<= 9007199254740991`）+ `active_run_id` 双重 Fencing；旧执行者/重复 Queue 投递在提交前被条件写拒绝并返回 `STALE_LEASE`；外部付费操作受 `provider_op_id` / `provider_outcome_state` 保护，禁止盲目重放。                      | `duplicate_commit_count = 0`；重复 Queue/Alarm 投递与 `> 120s` 移交后仅生成一条权威终态结果与消息。             |
-| **不依赖用户重新打开 App**                        | 所有已接受工作（Fast Path 断连、Durable Path 派发、未来 Schedule）由 `AgentHeadDO` Alarm 与独立的 D1 + Scheduled Worker 驱动；客户端断连或离线不影响恢复闭环。                                                                                            | 离线故障注入测试中无任何客户端请求，仍完成派发与结果提交。                                                      |
-| **Alarm 重试耗尽后 <= 2 分钟发现、<= 5 分钟恢复** | `next_recovery_at_ms = earliest_due_alarm_ms + D1_RECOVERY_GRACE_MS`（`45_000 ms`），Scheduled Worker 以 `* * * * *`（`60_000 ms`）有界扫描到期标记；首次 Alarm + 全部 6 次自动重试耗尽后，下一或下两轮 Cron 触发独立恢复并重装后续调度。                 | `t_alarm_exhaust_to_detect_ms <= 120_000 ms`；`t_alarm_exhaust_to_recover_ms <= 300_000 ms`。                   |
-| **已获得恢复覆盖的对话零同步登记 I/O**            | **Zero-Sync-IO Covered Path**: 在同一次 `storage.transactionSync()` 提交内校验 `coverage_state === 'covered' AND covered_recovery_at_ms <= D(O)`；命中则跳过 D1 读写，仅靠两代 CAS 退役防止并发抹除。                                                     | 已覆盖轮次 `d1_reads = 0`、`d1_writes = 0`；10 轮连续会话突发写入摊销 `<= 0.2` D1 行写/事件。                   |
-| **无全量 Agent 轮询，无空闲心跳**                 | 休眠 Agent 在本地完全无工作后经两阶段退役删除 D1 标记并清除 DO Alarm；Scheduled Worker 仅通过部分索引 `idx_v2_recovery_due` 查询 `next_recovery_at_ms <= now` 的到期条目。                                                                                | 休眠 Agent 在 `v2_recovery_registry` 为 0 行、DO Alarm 为 `null`、零周期唤醒。                                  |
+| 验收目标                              | 协议强制不变量                                                                                                                                                                                                                                                                                                                                    | 测量/验证口径                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| **不丢失已接受任务**                  | **Discoverability Invariant**: 任一可提交义务 `O` 在 DO SQLite 提交前，D1 `v2_recovery_registry` 必须已确认存在 `next_recovery_at_ms <= D(O)` 且 `status IN ('armed', 'backoff', 'quarantined')` 的权威记录；未覆盖路径遇 D1 不可用必须 Fail Closed（HTTP `503 DB_UNAVAILABLE`）。                                                                | 故障注入矩阵 `FI-01..FI-16` 零丢失；客户端受保护 Outbox 保留原始 `client_submission_id` 与 `transcript_epoch`。 |
+| **不重复提交任务结果**                | 唯一业务与租约权威位于 Agent A 持有的 `assistant_turns` / `tasks` / `runs`（单调安全整数 `lease_epoch <= 9007199254740991` + `active_run_id`）；Queue 投递必须先精确校验持久 `v2_dispatch_outbox`（`outbox_id`、`entity_kind`、`entity_id`、`queue_name`、`tenant_id/agent_id`、`fence_epoch === current_epoch`），拒绝所有过期/未来/不匹配信封。 | `duplicate_commit_count = 0`；重复投递与超时移交仅提交一条终态消息/结果。                                       |
+| **不依赖用户重新打开 App**            | 所有已接受工作（Fast Path 断连、Durable Path 派发、内部 `budget_sync`、未来 `v2_schedules`）均由 `AgentHeadDO` 单 Alarm 与外部 D1 + Scheduled Worker 驱动闭环。                                                                                                                                                                                   | 全客户端离线故障注入下无用户流量仍完成派发与状态收敛。                                                          |
+| **Alarm 重试耗尽后条件恢复目标**      | `D(O) = earliest_due_action_ms + D1_RECOVERY_GRACE_MS`（`<= 45_000 ms`），`prepareTurn` 预准入保守边界 `nowMs + 45_000`；Scheduled Worker 以 `* * * * *` 扫描到期索引。**在文档记录的负载与依赖可用条件下**，初始 + 6 次 Alarm 重试耗尽后目标 `<= 2 分钟`发现、`<= 5 分钟`恢复（为工程实测目标，非 Cron/Queue 平台 SLA 保证）。                   | `t_alarm_exhaust_to_detect_ms <= 120_000 ms`；`t_alarm_exhaust_to_recover_ms <= 300_000 ms`。                   |
+| **已获得恢复覆盖的对话零同步 D1 I/O** | **Zero-Sync-IO Covered Path**: 在 `transactionSync()` 内校验 `coverage_state === 'covered' AND covered_recovery_at_ms !== null AND covered_recovery_at_ms <= D(O)`；命中则全程 0 次 D1 读写，仅靠持久化 `pending_*` 计划与两阶段世代 CAS 防止并发抹除。                                                                                           | 已覆盖轮次 `d1_reads = 0`、`d1_writes = 0`。                                                                    |
+| **无全量 Agent 轮询，无空闲心跳**     | 休眠 Agent 确认无任何已接受义务（含 `budget_sync`）及可提交候选后，经两阶段退役条件删除 D1 标记并清除 DO Alarm；Cron 仅查 `idx_v2_recovery_due` 到期行。                                                                                                                                                                                          | 休眠 Agent 在 D1 占 0 行、Alarm 为 `null`、零周期唤醒。                                                         |
 
 ---
 
-## 2. 最小数据结构与 Agent A Schema 所有权协调
+## 2. 唯一权威 Schema 与跨包 Seam（J1 联合冻结）
 
-### 2.1 跨包所有权边界（Agent A × Agent B）
+### 2.1 所有权矩阵（单一状态机原则）
 
-V2 采用单一逻辑权威对象 `AgentHeadDO`（按服务端解析的 `(tenant_id, agent_id)` 路由，绝不信任客户端传入的租户或代理 ID）。为消除与 Work Package A（Agent Core / Fast Path）的契约冲突，双方在 DO SQLite 与全局控制面按表与职责严格分区：
+按 Joint Review **J1** 裁决：**绝不允许存在第二套可写的 Lease 状态机**。Agent A 持有全部业务实体与租约 Fencing 权威；Agent B 是 `v2_schedules`、`v2_dispatch_outbox`、`v2_recovery_coverage` 与 D1 `v2_recovery_registry` 的**规范 DDL 唯一所有者**（Agent A 规范直接引用或字节级复用以下 DDL）。
 
-| 存储域                                  | Owner                    | 持有表 / 实体                                                                                                                                                                                             | 核心职责与不可侵犯边界                                                                                                                         |
-| --------------------------------------- | ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| **DO SQLite（业务与执行权威）**         | **Agent A**              | `agent_head_meta`, `conversations`, `conversation_messages`, `assistant_turns`, `tasks`, `runs`, `task_events`, `task_results`, `approvals`, `turn_attempts`, `workspace_manifests`, `artifacts`, `notes` | 拥有 B1 会话序号 `sequence`、`transcript_epoch` 删除栅栏、`client_submission_id` 租户级幂等、Task/Run FSM、预算预留与结算、消息-任务原子关联。 |
-| **DO SQLite（调度、派发、租约与覆盖）** | **Agent B**              | `v2_schedules`, `v2_dispatch_outbox`, `v2_execution_leases`, `v2_recovery_coverage`                                                                                                                       | 拥有统一时间轮/Alarm 多路复用、Queue Outbox 状态机、Fast/Durable 统一租约/移交 Fencing、本地覆盖状态与 Generation 计数。                       |
-| **D1（全局恢复控制面）**                | **Agent B**              | `v2_recovery_registry`                                                                                                                                                                                    | 独立于 DO Alarm 故障域的到期恢复索引；**严格零业务数据**（禁止存放 Prompt、消息文本、结果摘要、凭据或 Token）。                                |
-| **全局预算 / 身份目录**                 | **Architect / 共享边界** | `GlobalBudgetAuthority`（V2 预算门禁）, D1 会话/设备路由目录                                                                                                                                              | 付费模型调用前必须取得权威预算预留；预算校验与认证边界不由 Agent B 单方面缓存绕过。                                                            |
+| 存储域                                   | 规范 Owner              | 持有表 / 实体                                                                                                                                                                                                                                            | 核心职责与唯一权威边界                                                                                                                                                                                                                                                                                                                                                                                             |
+| ---------------------------------------- | ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **DO SQLite（业务、执行与租约权威）**    | **Agent A**             | `agent_head_meta`, `conversations`, `conversation_messages`, `assistant_turns`, `tasks`, `runs`, `task_events`, `task_results`, `approvals`, `model_attempts`, `agent_spend_days`, `agent_budget_incidents`, `workspace_manifests`, `artifacts`, `notes` | 唯一拥有 Turn/Task/Run 业务状态机、`execution_mode`（`'interactive_fast' \| 'durable_queue' \| 'device_node'`）、`lease_epoch`、`lease_owner`、`lease_expires_at_ms`、`interactive_deadline_ms`、`deadline_at_ms`、`cancel_requested_at_ms`、`provider_job_handle` 与 `model_attempts` 预算账本。**不设 `v2_execution_leases` 可写表**；B 如需只读到期视图，仅可从 A 的 `assistant_turns` / `tasks` 派生只读投影。 |
+| **DO SQLite（调度、Outbox 与覆盖记录）** | **Agent B**（共享迁移） | `v2_schedules`, `v2_dispatch_outbox`, `v2_recovery_coverage`                                                                                                                                                                                             | 唯一拥有单 Alarm 时间多路复用、外部 Queue 派发、内部 `budget_sync` 中继及本地 Generation/Fencing 覆盖记录。                                                                                                                                                                                                                                                                                                        |
+| **D1（全局独立恢复索引）**               | **Agent B**             | `v2_recovery_registry`                                                                                                                                                                                                                                   | 独立于 DO Alarm 故障域；**严格零业务数据**（禁止存放 Prompt、正文、结果摘要、凭据或 Token）。                                                                                                                                                                                                                                                                                                                      |
+| **全局预算权威**                         | **Agent A**（依赖）     | `GlobalBudgetAuthority`（`reserveGlobal` / `authorizeSend` / `settleGlobal` / `global_halt`）                                                                                                                                                            | A 拥有全局预算授权、Grant 过期与 Halt 语义；B 仅在本地 `budget_sync` Outbox 故障/未决时负责唤醒与中继重试，**绝不**独立发起退款或绕过 Halt。                                                                                                                                                                                                                                                                       |
 
-#### 协同事务与端口契约（禁止双份状态机）
+### 2.2 Agent B 规范共享 DDL（Canonical Shared DDL）
 
-Agent A 与 Agent B **共享同一次 `AgentHeadDO` 的 `storage.transactionSync()` 事务**，绝不通过跨存储两阶段提交或异步事件补救本地一致性：
+> [!NOTE]
+> 以下四张表为 M1 共享迁移的唯一规范定义；所有时间列统一使用 UTC Epoch 毫秒整型（`INTEGER`），`generation` 与 `lease_epoch` 严格约束为 JavaScript 安全整数（`<= 9007199254740991`）。
 
-```ts
-/** Agent B 向 Agent A 暴露的同步事务内端口（运行在 AgentHeadDO 内部） */
-export interface RecoveryAdmissionPort {
-  /**
-   * 预检查当前义务所需的最早发现时间戳 requiredRecoveryAtMs 是否已被本地覆盖。
-   * 必须在所有外部异步 RPC（如 GlobalBudget）之前/之后与提交同事务复核。
-   */
-  inspectCoverageSync(requiredRecoveryAtMs: number):
-    | { readonly covered: true; readonly generation: number }
-    | {
-        readonly covered: false;
-        readonly nextGeneration: number;
-        readonly targetRecoveryAtMs: number;
-      };
-
-  /** 在 D1 确认写入后，若 generation 未被更新事务推进，则确认本地覆盖有效。 */
-  confirmCoverageSync(generation: number, coveredRecoveryAtMs: number): void;
-}
-
-export interface EventRuntimeCoordinatorPort {
-  /** 在 Agent A 的提交事务内原子登记 Lease / Outbox / Schedule 并重算最早 DO Alarm。 */
-  registerFastLeaseSync(input: {
-    readonly targetKind: 'turn' | 'task';
-    readonly targetId: string;
-    readonly runId: string;
-    readonly ownerId: string;
-    readonly leaseExpiresAtMs: number;
-    readonly executionDeadlineAtMs: number;
-  }): void;
-
-  enqueueDurableOutboxSync(input: {
-    readonly outboxId: string;
-    readonly entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff';
-    readonly entityId: string;
-    readonly queueName: 'durable_turn' | 'agent_task';
-    readonly fenceEpoch: number;
-    readonly nextAttemptAtMs: number;
-    readonly executionDeadlineAtMs: number;
-  }): void;
-
-  /** 取消请求提交时，按 ADR-0001 原子更新 Lease 并取消未完成 Outbox。 */
-  applyCancellationSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void;
-}
-
-/** Agent B 恢复与超时收敛时回调 Agent A 的业务状态收敛端口（运行在同一 transactionSync 内） */
-export interface AuthoritativeStateConvergencePort {
-  convergePreClaimExpiredSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void;
-  convergeCancelledSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void;
-  markRunLeaseExpiredForReconcileSync(
-    targetKind: 'turn' | 'task',
-    targetId: string,
-    expiredRunId: string,
-    bumpedEpoch: number,
-    nowMs: number,
-  ): void;
-  materializeScheduleOccurrenceSync(
-    scheduleId: string,
-    occurrenceSeq: number,
-    nowMs: number,
-  ): {
-    readonly entityKind: 'task';
-    readonly entityId: string;
-    readonly executionDeadlineAtMs: number;
-  };
-}
-```
-
-### 2.2 DO SQLite 表结构定义
-
-#### (1) `v2_schedules` — 持久化一次性与周期调度表
+#### (1) `v2_schedules`（DO SQLite）
 
 ```sql
 CREATE TABLE IF NOT EXISTS v2_schedules (
-  schedule_id       TEXT PRIMARY KEY,
-  tenant_id         TEXT NOT NULL,
-  agent_id          TEXT NOT NULL,
-  source_kind       TEXT NOT NULL CHECK (source_kind IN ('commitment', 'reminder', 'deferred_task', 'cleanup')),
-  source_id         TEXT NOT NULL,
-  schedule_kind     TEXT NOT NULL CHECK (schedule_kind IN ('once', 'interval', 'cron_tz')),
+  schedule_id       TEXT    PRIMARY KEY,
+  tenant_id         TEXT    NOT NULL,
+  agent_id          TEXT    NOT NULL,
+  source_kind       TEXT    NOT NULL CHECK (source_kind IN ('commitment', 'reminder', 'deferred_task', 'cleanup')),
+  source_id         TEXT    NOT NULL,
+  schedule_kind     TEXT    NOT NULL CHECK (schedule_kind IN ('once', 'interval', 'cron_tz')),
   interval_seconds  INTEGER CHECK (interval_seconds IS NULL OR (interval_seconds BETWEEN 60 AND 2592000)),
   cron_expr         TEXT,
-  timezone          TEXT NOT NULL DEFAULT 'UTC',
+  timezone          TEXT    NOT NULL DEFAULT 'UTC',
   next_fire_at_ms   INTEGER NOT NULL,
   last_fired_at_ms  INTEGER,
   occurrence_seq    INTEGER NOT NULL DEFAULT 0 CHECK (occurrence_seq >= 0),
-  misfire_policy    TEXT NOT NULL DEFAULT 'coalesce_latest'
+  misfire_policy    TEXT    NOT NULL DEFAULT 'coalesce_latest'
                     CHECK (misfire_policy IN ('coalesce_latest', 'fire_once', 'skip_missed')),
-  status            TEXT NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'cancelled')),
+  status            TEXT    NOT NULL CHECK (status IN ('active', 'paused', 'completed', 'cancelled')),
   version           INTEGER NOT NULL DEFAULT 1 CHECK (version >= 1),
   created_at_ms     INTEGER NOT NULL,
   updated_at_ms     INTEGER NOT NULL
@@ -149,116 +82,100 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_schedules_source
   ON v2_schedules (source_kind, source_id);
 ```
 
-**Timezone / DST 与 Misfire 确定性规则：**
+**Timezone / DST 与 Misfire 规则：**
 
-- **`interval`**：按固定 UTC 秒步进 `next_fire_at_ms + interval_seconds * 1000`，不受夏令时影响。
-- **`cron_tz`**：基于 IANA 时区表（Worker 内置 `Intl.DateTimeFormat`）按墙钟日历计算下一有效触发 UTC 毫秒值：
-  - **Spring-forward 跳变空洞**（例如 `02:30` 因 `02:00 -> 03:00` 不存在）：在跳变后的首个有效时刻（`03:00` 本地时间）触发一次，不静默跳过该日。
-  - **Fall-back 重叠时段**（例如 `01:30` 出现两次）：记录 `last_fired_at_ms` 对应的本地日历日期，在同一本地壁钟日历槽位**仅触发一次**（首次出现时），下次调度推进到次日墙钟槽位，绝不重复触发。
-- **Misfire 策略**：离线恢复或延迟跨越多个周期时，默认 `coalesce_latest` 仅补发**一次**当前实例，并将 `next_fire_at_ms` 严格推进至 `> now_ms` 的下一未来槽位，防止雪崩。
-- **确定性顺序与故障隔离**：严格按 `(next_fire_at_ms ASC, schedule_id ASC)` 批量读取；单个 Schedule 校验或物化异常仅隔离记录该 Schedule 的错误状态，不阻塞同批次其他 Schedule 或 Outbox。
+- **`interval`**：按固定 UTC 秒步进 `next_fire_at_ms + interval_seconds * 1000`，不受 DST 影响。
+- **`cron_tz`**：通过 IANA `timezone` 墙钟计算下次触发 UTC 毫秒：
+  - **Spring-forward 跳变空洞**（如 `02:30` 因 `02:00 -> 03:00` 跳过）：在跳变后首个有效墙钟时刻（`03:00`）触发一次，不静默漏日。
+  - **Fall-back 重叠时段**（如 `01:30` 出现两次）：按 `last_fired_at_ms` 对应的本地日历日期去重，同一本地墙钟槽位**仅触发一次**（首次出现时），下一槽位推进至次日，不双倍触发。
+- **Misfire 与故障隔离**：默认 `coalesce_latest` 对跨越多个周期的延迟仅补发 1 次当前实例并将 `next_fire_at_ms` 推进到 `> now_ms`；按 `(next_fire_at_ms ASC, schedule_id ASC)` 顺序处理，单项校验失败隔离记录，不阻断同批次其他调度。
 
-#### (2) `v2_dispatch_outbox` — 可靠 Queue 派发意向表
+#### (2) `v2_dispatch_outbox`（DO SQLite — 外部 Queue 与内部 `budget_sync` 共用）
 
 ```sql
 CREATE TABLE IF NOT EXISTS v2_dispatch_outbox (
-  outbox_id            TEXT PRIMARY KEY, -- e.g. turn:{turnId} | task:{taskId}:ep:{epoch} | sched:{scheduleId}:{seq}
-  entity_kind          TEXT NOT NULL CHECK (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff')),
-  entity_id            TEXT NOT NULL,
-  queue_name           TEXT NOT NULL CHECK (queue_name IN ('durable_turn', 'agent_task')),
-  payload_ref          TEXT NOT NULL, -- 封闭无 Prompt 的 JSON 信封
-  state                TEXT NOT NULL CHECK (state IN ('pending', 'enqueued', 'acked', 'dead_lettered', 'cancelled')),
+  outbox_id            TEXT    PRIMARY KEY,
+  entity_kind          TEXT    NOT NULL CHECK (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff', 'budget_sync')),
+  entity_id            TEXT    NOT NULL, -- turnId | taskId | occurrenceId | operationId
+  queue_name           TEXT    CHECK (queue_name IS NULL OR queue_name IN ('durable_turn', 'agent_task')),
+  payload_json         TEXT    NOT NULL, -- Queue 唤醒信封或 budget_sync 确定性载荷（无 Prompt/凭据）
+  operation_id         TEXT,             -- budget_sync 必填：不可变操作 ID
+  revision             INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 1), -- budget_sync 不可变修订号（初始结算=1，迟到修正>=2）
+  state                TEXT    NOT NULL CHECK (state IN ('pending', 'enqueued', 'acked', 'dead_lettered', 'cancelled')),
   next_attempt_at_ms   INTEGER NOT NULL,
-  publish_attempts     INTEGER NOT NULL DEFAULT 0 CHECK (publish_attempts >= 0),
   last_enqueued_at_ms  INTEGER,
+  publish_attempts     INTEGER NOT NULL DEFAULT 0 CHECK (publish_attempts >= 0),
   dlq_count            INTEGER NOT NULL DEFAULT 0 CHECK (dlq_count >= 0),
-  last_error_code      TEXT,
   fence_epoch          INTEGER NOT NULL DEFAULT 0 CHECK (fence_epoch >= 0 AND fence_epoch <= 9007199254740991),
+  last_error_code      TEXT,
   created_at_ms        INTEGER NOT NULL,
-  updated_at_ms        INTEGER NOT NULL
+  updated_at_ms        INTEGER NOT NULL,
+  -- J1/J5 条件约束：普通派发必须携带目标 Queue 名；budget_sync 严禁进入外部通用 Queue
+  CHECK (
+    (entity_kind = 'budget_sync' AND queue_name IS NULL AND operation_id IS NOT NULL)
+    OR
+    (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IN ('durable_turn', 'agent_task'))
+  )
 );
 
 CREATE INDEX IF NOT EXISTS idx_v2_outbox_due
   ON v2_dispatch_outbox (next_attempt_at_ms, outbox_id)
   WHERE state IN ('pending', 'enqueued', 'dead_lettered');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_outbox_budget_sync_op_rev
+  ON v2_dispatch_outbox (operation_id, revision)
+  WHERE entity_kind = 'budget_sync';
 ```
 
-**封闭 Queue 信封契约（`V2DispatchEnvelope`，严格无 Prompt/凭据）：**
+**封闭 Queue 信封契约（`V2DispatchEnvelope`，仅限普通派发，绝不承载 `budget_sync` 或 Prompt/凭据）：**
 
 ```ts
 export interface V2DispatchEnvelope {
   readonly schemaVersion: 2;
-  readonly eventId: string; // 等于 outbox_id
-  readonly tenantId: string; // 仅作路由提示；DO 必须按权威身份校验
+  readonly eventId: string; // 必须精确等于 v2_dispatch_outbox.outbox_id
+  readonly tenantId: string;
   readonly agentId: string;
   readonly entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff';
   readonly entityId: string;
-  readonly fenceEpoch: number; // 必须匹配当前 lease_epoch，过期信封直接 ACK 丢弃
+  readonly queueName: 'durable_turn' | 'agent_task';
+  readonly fenceEpoch: number; // 必须精确等于持久化 outbox.fence_epoch 与业务当前 lease_epoch
 }
 ```
 
-#### (3) `v2_execution_leases` — Fast/Durable 统一租约与移交 Fencing 表
-
-```sql
-CREATE TABLE IF NOT EXISTS v2_execution_leases (
-  target_kind             TEXT NOT NULL CHECK (target_kind IN ('turn', 'task')),
-  target_id               TEXT NOT NULL,
-  tenant_id               TEXT NOT NULL,
-  agent_id                TEXT NOT NULL,
-  execution_mode          TEXT NOT NULL CHECK (execution_mode IN ('fast_interactive', 'durable_cloud', 'durable_device')),
-  status                  TEXT NOT NULL CHECK (status IN ('queued', 'running', 'waiting_approval', 'retryable_failed', 'completed', 'failed', 'cancelled')),
-  active_run_id           TEXT,
-  lease_epoch             INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0 AND lease_epoch <= 9007199254740991),
-  lease_owner             TEXT,
-  lease_acquired_at_ms    INTEGER,
-  lease_expires_at_ms     INTEGER,
-  last_renewed_at_ms      INTEGER,
-  execution_deadline_at_ms INTEGER NOT NULL,
-  handoff_state           TEXT NOT NULL DEFAULT 'none' CHECK (handoff_state IN ('none', 'pending_handoff', 'handed_off', 'reconciling')),
-  provider_op_id          TEXT,
-  provider_outcome_state  TEXT NOT NULL DEFAULT 'none' CHECK (provider_outcome_state IN ('none', 'in_flight', 'uncertain', 'settled')),
-  cancel_requested_at_ms  INTEGER, -- 单调只写一次（ADR-0001）
-  attempt_count           INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
-  max_attempts            INTEGER NOT NULL DEFAULT 2 CHECK (max_attempts >= 1),
-  next_action_at_ms       INTEGER, -- min(lease_expires_at_ms, execution_deadline_at_ms, retry_at_ms)
-  updated_at_ms           INTEGER NOT NULL,
-  PRIMARY KEY (target_kind, target_id),
-  CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL)),
-  CHECK (status <> 'running' OR (active_run_id IS NOT NULL AND lease_owner IS NOT NULL))
-);
-
-CREATE INDEX IF NOT EXISTS idx_v2_leases_next_action
-  ON v2_execution_leases (next_action_at_ms, target_kind, target_id)
-  WHERE status IN ('queued', 'running', 'retryable_failed') AND next_action_at_ms IS NOT NULL;
-```
-
-#### (4) `v2_recovery_coverage` — DO 本地准入与 Alarm 单行状态
+#### (3) `v2_recovery_coverage`（DO SQLite — 单行覆盖与计划修复状态）
 
 ```sql
 CREATE TABLE IF NOT EXISTS v2_recovery_coverage (
   id                      INTEGER PRIMARY KEY CHECK (id = 1),
-  tenant_id               TEXT NOT NULL,
-  agent_id                TEXT NOT NULL,
+  tenant_id               TEXT    NOT NULL,
+  agent_id                TEXT    NOT NULL,
   generation              INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0 AND generation <= 9007199254740991),
-  coverage_state          TEXT NOT NULL CHECK (coverage_state IN ('uncovered', 'registering', 'covered')),
-  covered_recovery_at_ms  INTEGER, -- NULL when uncovered; valid D1 next_recovery_at_ms when covered
-  armed_alarm_at_ms       INTEGER, -- 缓存当前 setAlarm 时间，仅在更早或变化时重设以减少写入
-  alarm_fail_count        INTEGER NOT NULL DEFAULT 0,
+  coverage_state          TEXT    NOT NULL DEFAULT 'uncovered'
+                          CHECK (coverage_state IN ('uncovered', 'registering', 'covered')),
+  covered_recovery_at_ms  INTEGER, -- 仅在 D1 实际确认覆盖时为非 NULL
+  pending_kind            TEXT    CHECK (pending_kind IS NULL OR pending_kind IN ('ensure', 'postpone', 'retire')),
+  pending_prev_generation INTEGER CHECK (pending_prev_generation IS NULL OR pending_prev_generation >= 0),
+  pending_target_at_ms    INTEGER, -- pending_kind='retire' 时为 NULL；ensure/postpone 时为目标恢复时间
+  armed_alarm_at_ms       INTEGER,
+  alarm_fail_count        INTEGER NOT NULL DEFAULT 0 CHECK (alarm_fail_count >= 0),
   last_d1_sync_at_ms      INTEGER,
-  updated_at_ms           INTEGER NOT NULL
+  updated_at_ms           INTEGER NOT NULL,
+  CHECK (coverage_state <> 'covered' OR covered_recovery_at_ms IS NOT NULL),
+  CHECK ((pending_kind IS NULL) OR (pending_kind = 'retire' AND pending_target_at_ms IS NULL) OR (pending_kind IN ('ensure', 'postpone') AND pending_target_at_ms IS NOT NULL))
 );
 ```
 
-### 2.3 D1 控制面表结构（`v2_recovery_registry`）
+#### (4) `v2_recovery_registry`（D1 全局独立恢复索引）
 
 ```sql
 CREATE TABLE IF NOT EXISTS v2_recovery_registry (
-  agent_key                 TEXT PRIMARY KEY, -- "{tenant_id}:{agent_id}"
-  tenant_id                 TEXT NOT NULL,
-  agent_id                  TEXT NOT NULL,
+  agent_key                 TEXT    PRIMARY KEY, -- "{tenant_id}:{agent_id}"
+  tenant_id                 TEXT    NOT NULL,
+  agent_id                  TEXT    NOT NULL,
   generation                INTEGER NOT NULL CHECK (generation >= 0 AND generation <= 9007199254740991),
-  next_recovery_at_ms       INTEGER NOT NULL,
-  status                    TEXT NOT NULL CHECK (status IN ('armed', 'backoff', 'quarantined')),
+  next_recovery_at_ms       INTEGER NOT NULL,    -- 已确认的最早需发现时间；Sweeper 退避/隔离绝不可改写或延后本列！
+  retry_not_before_ms       INTEGER,             -- J3: 仅用于 Sweeper 自身 RPC 退避/降频，NULL 表示立即可扫
+  status                    TEXT    NOT NULL CHECK (status IN ('armed', 'backoff', 'quarantined')),
   sweep_lease_owner         TEXT,
   sweep_lease_expires_at_ms INTEGER,
   recovery_attempts         INTEGER NOT NULL DEFAULT 0 CHECK (recovery_attempts >= 0),
@@ -266,371 +183,438 @@ CREATE TABLE IF NOT EXISTS v2_recovery_registry (
   updated_at_ms             INTEGER NOT NULL
 );
 
+-- J3: 'quarantined' 仍保留在到期扫描索引中（降低频率重试+强告警），绝不永久静默丢弃已接受工作
 CREATE INDEX IF NOT EXISTS idx_v2_recovery_due
   ON v2_recovery_registry (next_recovery_at_ms, agent_key)
-  WHERE status IN ('armed', 'backoff');
+  WHERE status IN ('armed', 'backoff', 'quarantined');
 ```
 
-**DO SQLite 写放大控制（对齐 ADR-0006 每事件 20 行写预算）：**
+### 2.3 A ↔ B 联合端口契约（Canonical Shared Interfaces）
 
-- 已覆盖 Fast Path 轮次：
-  - `prepareFastTurn` 写 `v2_execution_leases`（1 行 + 1 索引 = 2）+ 必要时更新 `v2_recovery_coverage.armed_alarm_at_ms` & `setAlarm`（仅当新截止更早或无 Alarm 时写入，通常 0–2 行）。
-  - `commitFastTurn` 更新 `v2_execution_leases`（1 行 + 1 部分索引移除 = 2）+ 更新 `armed_alarm_at_ms`（0–1）。
-  - Agent B 在已覆盖普通对话上仅消耗 **~4–7 DO 行写**，为 Agent A 业务消息/Turn/Attempts 留足 ADR-0006 `<= 20` 行写预算余量。
+以下端口定义在 Agent B 契约中冻结，Agent A（PR #170 §8.2）直接引用，所有同步方法均在 `AgentHeadDO` 的同一 `storage.transactionSync()` 内执行：
+
+```ts
+export type V2ExecutionMode = 'interactive_fast' | 'durable_queue' | 'device_node';
+
+export interface BudgetSyncPayload {
+  readonly kind: 'budget_sync';
+  readonly op: 'settle' | 'release';
+  readonly subjectType: 'turn' | 'task';
+  readonly subjectId: string;
+  readonly attemptNo: number;
+  readonly operationId: string;
+  readonly revision: number; // 1 = 初始结算/释放; >= 2 = 迟到修正
+  readonly globalGrantId: string | null;
+  readonly settlementState: 'settled' | 'conservative_billed' | 'unknown_billed' | 'released';
+  readonly outcomeCode: string;
+  readonly appliedCostMicroUsd: number;
+  readonly overageMicroUsd: number;
+}
+
+/** Agent B 提供的外部 D1 `v2_recovery_registry` CAS 端口（返回 D1 权威实际值，绝不回显请求参数） */
+export interface RecoveryRegistryPort {
+  upsertCoverage(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly generation: number;
+    readonly recoveryAtMs: number;
+    readonly nowMs: number;
+  }): Promise<{
+    readonly accepted: boolean;
+    readonly currentGeneration: number;
+    readonly actualRecoveryAtMs: number | null;
+  }>;
+
+  postponeCoverage(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly expectedPrevGen: number;
+    readonly newGeneration: number;
+    readonly nextRecoveryAtMs: number;
+    readonly nowMs: number;
+  }): Promise<{
+    readonly updated: boolean;
+    readonly currentGeneration: number;
+    readonly actualRecoveryAtMs: number | null;
+  }>;
+
+  retireCoverage(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly retireUpToGen: number;
+  }): Promise<{ readonly retired: boolean }>;
+
+  /** J2: D1 CAS 后 ACK 丢失或 DO 崩溃修复时，读取权威 D1 实际标记 */
+  readCoverage(cmd: { readonly tenantId: string; readonly agentId: string }): Promise<{
+    readonly exists: boolean;
+    readonly currentGeneration: number | null;
+    readonly actualRecoveryAtMs: number | null;
+    readonly status: 'armed' | 'backoff' | 'quarantined' | null;
+  }>;
+}
+
+/** Agent B 向 Agent A 暴露的同步准入与确认端口（运行在 A 的 transactionSync 内） */
+export interface RecoveryAdmissionPort {
+  inspectCoverageSync(
+    requiredRecoveryAtMs: number,
+    nowMs: number,
+  ):
+    | {
+        readonly kind: 'covered';
+        readonly generation: number;
+        readonly coveredRecoveryAtMs: number;
+      }
+    | {
+        readonly kind: 'register';
+        readonly generation: number;
+        readonly targetAtMs: number;
+      };
+
+  /**
+   * 仅当 D1 权威回执匹配当前 generation/pending 计划且 actualRecoveryAtMs <= 所有已提交+候选义务的
+   * earliestRequiredRecoveryMs 时返回 true；否则返回 false 并要求调用方重规划或 Fail Closed。
+   */
+  confirmCoverageSync(cmd: {
+    readonly generation: number;
+    readonly actualRecoveryAtMs: number | null;
+    readonly applied: boolean;
+    readonly earliestRequiredRecoveryMs: number;
+    readonly nowMs: number;
+  }): boolean;
+}
+
+/** Agent B 向 Agent A 暴露的 Outbox 与 Alarm 协同端口（运行在 A 的 transactionSync 内） */
+export interface EventRuntimeCoordinatorPort {
+  enqueueDurableOutboxSync(cmd: {
+    readonly outboxId: string;
+    readonly entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff' | 'budget_sync';
+    readonly entityId: string;
+    readonly queueName: 'durable_turn' | 'agent_task' | null;
+    readonly payloadJson: string;
+    readonly operationId?: string;
+    readonly revision?: number;
+    readonly fenceEpoch: number;
+    readonly nextAttemptAtMs: number;
+  }): void;
+
+  /**
+   * 按 ADR-0001 取消普通实体未决 Outbox；
+   * J5 硬约束：严禁取消 `entity_kind = 'budget_sync'`！
+   */
+  cancelEntityOutboxSync(
+    entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff',
+    entityId: string,
+    nowMs: number,
+  ): void;
+
+  ackOutboxSync(outboxId: string, fenceEpoch: number, nowMs: number): void;
+
+  applyOutboxDeadLetterSync(cmd: {
+    readonly outboxId: string;
+    readonly fenceEpoch: number;
+    readonly errorCode: string;
+    readonly nextAttemptAtMs: number;
+    readonly nowMs: number;
+  }): boolean;
+
+  recomputeAlarmSync(nowMs: number): number | null;
+}
+
+/** Agent A 向 Agent B 暴露的同步业务状态读/收敛端口（B 在 alarm/reconcile 的 transactionSync 内调用） */
+export interface AuthoritativeBusinessPort {
+  /** 返回所有已接受业务义务（Turn/Task/Schedule）及未决 budget_sync 的最早需发现时间戳 D(O)；无则 null */
+  earliestRequiredDiscoveryAtMsSync(nowMs: number): number | null;
+
+  /** 返回所有到期且需 Alarm 处理的业务动作（到期租约、Pre-claim 超时、待重试） */
+  listDueBusinessActionsSync(
+    nowMs: number,
+    limit: number,
+  ): ReadonlyArray<{
+    readonly targetKind: 'turn' | 'task';
+    readonly targetId: string;
+    readonly actionKind: 'preclaim_deadline' | 'lease_expired' | 'cancel_converge' | 'retry_due';
+    readonly deadlineAtMs: number;
+  }>;
+
+  /** 使用 A 的权威 Turn/Task/Run FSM 收敛到期业务项，并返回可选的补发 Outbox 指令 */
+  convergeDueBusinessItemSync(targetKind: 'turn' | 'task', targetId: string, nowMs: number): void;
+
+  /** 返回当前业务实体的权威 fenceEpoch 与 deadlineAtMs（供 Queue 严格校验与优雅期封顶） */
+  inspectOutboxTargetSync(
+    entityKind: 'turn' | 'task' | 'schedule_occurrence' | 'handoff',
+    entityId: string,
+  ): {
+    readonly exists: boolean;
+    readonly currentLeaseEpoch: number;
+    readonly deadlineAtMs: number;
+    readonly isTerminal: boolean;
+    readonly cancelRequested: boolean;
+  };
+
+  /** 物化到期 Schedule，在 A 的业务表中创建受约束 Task/Occurrence 并写入 Outbox */
+  materializeScheduleOccurrenceSync(scheduleId: string, occurrenceSeq: number, nowMs: number): void;
+}
+```
 
 ---
 
-## 3. DO Alarm + Queue 可靠派发协议
+## 3. DO Alarm + Queue 可靠派发与严格信封校验（J5）
 
 ### 3.1 单 Alarm 最早截止时间多路复用器
 
-每个 `AgentHeadDO` 仅维护**唯一一个平台 Alarm**，指向本地三张表中的最早到期时间：
+`AgentHeadDO` 仅维护唯一平台 Alarm，指针计算包含 A 的业务到期动作、B 的 Outbox（含 `budget_sync`）与 B 的主动 Schedule：
 
 $$
 T_{\text{alarm}} = \min\big(
+  T_{\text{business\_due}},\;
   \min_{\text{outbox} \in \{\text{pending, enqueued, dead\_lettered}\}} \text{next\_attempt\_at\_ms},\;
-  \min_{\text{lease} \in \{\text{queued, running, retryable\_failed}\}} \text{next\_action\_at\_ms},\;
   \min_{\text{sched} \in \{\text{active}\}} \text{next\_fire\_at\_ms}
 \big)
 $$
 
-- **按需重设**：仅当 `T_alarm !== armed_alarm_at_ms`（新增更早截止时间，或当前到期事件处理完毕需指向下一截止时间）时调用 `storage.setAlarm(T_alarm)`；若 `T_alarm === null` 则调用 `deleteAlarm()`（或在 `alarm()` 退出时自然清空）。
-- **批处理上限与故障隔离**：单次 `alarm()` 执行有界批次（默认 `10` Leases + `10` Schedules + `10` Outbox 项）。先更新 DO SQLite 并重算/重装下一 `T_alarm`，再在事务外异步发布 Queue，防止某条消息 `Queue.send` 抛出异常导致整个批次中断或阻塞后续任务。
+- **按需写**：仅当 `T_alarm !== v2_recovery_coverage.armed_alarm_at_ms` 时调用 `storage.setAlarm(T_alarm)`（`null` 时调用 `deleteAlarm()`）并更新 `armed_alarm_at_ms`。
+- **有界批处理与隔离**：`alarm()` 单次最多处理 `10` 条到期业务项 + `10` 条到期 Schedule + `10` 条到期 Outbox（含外部 Queue 派发与内部 `budget_sync` 中继）。在 `transactionSync()` 内先推进状态并重算下一次 `T_alarm`，随后在事务外异步执行外部 `Queue.send()` 或 `GlobalBudgetAuthority.settleGlobal()`。
 
-### 3.2 发布前后崩溃与重复投递处理
+### 3.2 外部 Queue 消费端封闭校验（J5 强制规则）
 
-| 故障点                                              | 持久化状态                                                                                                                       | 恢复动作与安全保证                                                                                                                                                                                                                |
-| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **DO 事务提交后、`Queue.send()` 前崩溃 / 网络失败** | `v2_dispatch_outbox.state = 'pending'`，`next_attempt_at_ms = T_commit + 2_000 ms`，DO Alarm 已武装于 `<= T_commit + 2_000 ms`。 | 约 2 秒后 `alarm()` 触发，重新读取 `'pending'` 行并发布 Queue；零依赖外部定时轮询。                                                                                                                                               |
-| **`Queue.send()` 成功后、更新 `'enqueued'` 前崩溃** | Queue 中已有一条在途消息；Outbox 仍为 `'pending'`。                                                                              | 2 秒后 `alarm()` 可能再发一条重复消息。Execution Worker 消费时由 `claimDurableExecution()` 检查 `lease_epoch` 与 `status`：已领取则直接 ACK 跳过，已终态则标记 Outbox `'acked'`。                                                 |
-| **Queue 消息丢失或消费者静默崩溃**                  | Outbox 在成功发布时迁入 `state = 'enqueued'` 且 `next_attempt_at_ms = now + 60_000 ms`（Re-enqueue 宽限）。                      | 若 60 秒内消费者未认领/未完成，Alarm 到期重新投递；若消费者已认领但崩溃，45s/30s `lease_expires_at_ms` Alarm 先触发重领。                                                                                                         |
-| **Queue 5 次重试耗尽进入 DLQ**                      | DLQ Consumer 回调 `AgentHeadDO.onDispatchDeadLetter(outboxId, fenceEpoch, errorCode)`。                                          | 若 `fenceEpoch === current_epoch` 且任务仍未终态：Outbox 迁入 `'dead_lettered'` 并设退避 `next_attempt_at_ms = now + min(60s, 5s * dlq_count)`，同时重装 Alarm；若 `execution_deadline_at_ms` 已过则按 ADR-0002 收敛为 `failed`。 |
-| **恶意/损坏/跨租户 Queue 信封**                     | 信封仅为 hint；Worker 解析 `tenantId`/`agentId` 路由到 DO 后，DO 校验身份并比对 `outbox_id`。                                    | 不匹配直接记录安全日志并 ACK 丢弃，零状态读写。                                                                                                                                                                                   |
+Queue 投递（包括延迟投递、重放、乱序及 DLQ）**不具任何状态权威**。Execution Worker 收到 `V2DispatchEnvelope` 并路由至目标 `AgentHeadDO` 后，DO 必须在 `transactionSync()` 内对 `v2_dispatch_outbox` 执行**精确闭环校验**，任一字段不匹配即拒绝且**零状态变更**：
 
-### 3.3 DO Alarm + Queue 状态转换与时序图
+1. **按 `outbox_id` 精确查行**：`SELECT * FROM v2_dispatch_outbox WHERE outbox_id = envelope.eventId`（禁止仅按 `entity_id` 模糊查找）。
+2. **禁止 `budget_sync`**：`outbox.entity_kind !== 'budget_sync'` 且 `outbox.queue_name !== null`。
+3. **五元组全匹配**：
+   - `envelope.tenantId === DO.tenantId && envelope.agentId === DO.agentId`
+   - `outbox.entity_kind === envelope.entityKind && outbox.entity_id === envelope.entityId`
+   - `outbox.queue_name === envelope.queueName`（且等于消费者实际所属队列）
+   - `outbox.fence_epoch === envelope.fenceEpoch`
+   - 从 `AuthoritativeBusinessPort.inspectOutboxTargetSync` 读取当前业务 `currentLeaseEpoch`：必须满足 **`envelope.fenceEpoch === currentLeaseEpoch`**（**同时拒绝 `<` 陈旧信封与 `>` 未来/伪造信封！**）。
+4. **Outbox 状态前置检查**：仅当 `outbox.state IN ('pending', 'enqueued', 'dead_lettered')` 时允许进入 `claimDurableWork`；若已为 `'acked'` 或 `'cancelled'`，直接幂等返回 ACK，不做任何修改。
+
+### 3.3 B1 期限内 Re-enqueue 优雅期封顶（J5）
+
+在 B1 `60_000 ms` 总期限场景下，若将 `next_attempt_at_ms` 无条件推迟 `60_000 ms`，会直接错过期限前的合法重试窗口。因此 Re-enqueue 延后必须受剩余合格时间封顶，同时设置下限防忙循环：
+
+$$
+\text{reenqueueAtMs} = \min\Big(\text{nowMs} + 60\_000,\; \max\big(\text{nowMs} + 5\_000,\; \text{deadlineAtMs} - 5\_000\big)\Big)
+$$
+
+（若 `nowMs >= deadlineAtMs`，不再重投，直接由 DO `transactionSync()` 按 ADR-0002 收敛终态并标记 Outbox `'acked'`。）
+
+### 3.4 `budget_sync` 内部中继协议（J5）
+
+- **同事务落盘**：Agent A 提交 `model_attempts` 结算/释放与 `agent_spend_days` 变更时，在同一 `transactionSync()` 调用 `enqueueDurableOutboxSync` 写入 `entity_kind = 'budget_sync'`、`queue_name = NULL`、`operation_id`、`revision`（初始结算为 `1`，迟到费用修正为 `2, 3...`）。
+- **永不随业务取消**：`cancelTurn`、`cancelTask`、`clearTranscript` 只能调用 `cancelEntityOutboxSync('turn'|'task', ...)`，**绝对禁止取消 `budget_sync` 行**。
+- **独立恢复覆盖保留**：`budget_sync` 未到达 `'acked'` 前计入 `earliestRequiredDiscoveryAtMsSync()`，因此 D1 覆盖**绝不能被退休或延后到 `budget_sync.next_attempt_at_ms + 45_000` 之后**。
+- **幂等键**：`GlobalBudgetAuthority.settleGlobal` 与 `v2_dispatch_outbox` 共同以不可变 `(operation_id, revision)` 作为唯一幂等键；仅在收到全局权威 `settleGlobal` 明确确认后才将 Outbox 置为 `'acked'`。
+
+### 3.5 发布前后崩溃与状态流转图
 
 ```mermaid
 stateDiagram-v2
-    [*] --> pending: "transactionSync() 写入 Outbox + setAlarm(+2s)"
-    pending --> enqueued: "Queue.send() 成功 / next_attempt = +60s"
-    pending --> pending: "Queue.send() 失败或崩溃 -> Alarm 重试"
-    enqueued --> acked: "Worker claim 成功或实体已终态"
-    enqueued --> enqueued: "60s 未认领 -> Alarm 重发"
-    enqueued --> dead_lettered: "Queue 5次重试耗尽 -> DLQ回调"
+    [*] --> pending: "transactionSync(): 写 Outbox + setAlarm(+2s)"
+    pending --> enqueued: "Queue.send() 成功 / next_attempt = min(+60s, deadline-5s)"
+    pending --> pending: "Queue.send() 失败或发前崩溃 -> 2s Alarm 重试"
+    enqueued --> acked: "校验全通过且 Worker claim 成功 / 或实体已终态"
+    enqueued --> enqueued: "窗口到期未认领 -> Alarm 重发"
+    enqueued --> dead_lettered: "Queue 5次耗尽进 DLQ -> onDispatchDeadLetter"
     dead_lettered --> enqueued: "退避到期 -> Alarm / Sweeper 重发"
     dead_lettered --> acked: "超过 deadline -> ADR-0002 终态收敛"
-    pending --> cancelled: "ADR-0001 取消 / 转录删除"
-    enqueued --> cancelled: "ADR-0001 取消 / 转录删除"
-    dead_lettered --> cancelled: "ADR-0001 取消 / 转录删除"
+    pending --> cancelled: "仅限普通实体: ADR-0001 取消 / 转录删除 (budget_sync 豁免)"
+    enqueued --> cancelled: "仅限普通实体: ADR-0001 取消 / 转录删除 (budget_sync 豁免)"
+    dead_lettered --> cancelled: "仅限普通实体: ADR-0001 取消 / 转录删除 (budget_sync 豁免)"
     acked --> [*]
     cancelled --> [*]
 ```
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant API as "Edge API Worker"
-    participant DO as "AgentHeadDO (SQLite + Alarm)"
-    participant Q as "Cloudflare Queue"
-    participant EW as "Execution Worker"
+---
 
-    Client->>API: "请求异步任务 / 委托"
-    API->>DO: "acceptDurableTask()"
-    Note over DO: "transactionSync(): 写 Lease(queued) + Outbox(pending, +2s) + setAlarm(+2s)"
-    DO->>Q: "Post-commit Queue.send(V2DispatchEnvelope)"
-    alt "Queue.send 成功且未崩溃"
-        Q-->>DO: "OK"
-        DO->>DO: "transactionSync(): Outbox -> enqueued (+60s), 重设 Alarm"
-    else "Queue.send 失败或发后崩溃"
-        Note over DO: "2s 后 DO Alarm 触发补发"
-        DO->>Q: "alarm() 读取 pending -> Queue.send()"
-    end
-    Q->>EW: "Deliver V2DispatchEnvelope (at-least-once)"
-    EW->>DO: "claimDurableExecution(outboxId, fenceEpoch, workerId)"
-    Note over DO: "校验 cancel/deadline/epoch -> epoch+1, status=running, Outbox->acked"
-    DO-->>EW: "RunGrant (runId, leaseEpoch) + context"
-    EW->>EW: "外部执行 (LLM / Daytona / Device)"
-    EW->>DO: "commitFencedOutcome(runId, leaseEpoch, result)"
-    Note over DO: "校验 runId + leaseEpoch -> 唯一结果提交 + status=completed"
-```
+## 4. D1 Recovery Registry + Scheduled Worker 独立恢复机制（J3）
+
+### 4.1 无轮询、无心跳与 `retry_not_before_ms` 隔离原则
+
+Cloudflare DO Alarm 最多自动重试 **6 次**（含初次共 7 次）；耗尽后 Alarm 永久消失。独立恢复由外部 D1 `v2_recovery_registry` 与 Scheduled Worker（Cron `* * * * *`，`60_000 ms` 周期）承担：
+
+1. **严格保留 `next_recovery_at_ms` 不变（J3 硬约束）**：
+   - D1 `next_recovery_at_ms` **只代表已由 DO 确认的最早需发现时间**。
+   - 当 Sweeper 调用 DO `reconcileFromRegistry` 发生网络/RPC 失败时，Sweeper **严禁修改或延后 `next_recovery_at_ms`**，也**严禁**将条目从 `idx_v2_recovery_due` 中移除！
+   - 退避仅更新独立字段 `retry_not_before_ms = nowMs + min(300_000, 15_000 * nextAttempts)` 与 `status = 'backoff' | 'quarantined'`；达到阈值（如 `>= 10` 次失败）进入 `'quarantined'` 发出强告警并以较慢周期（如 `300_000 ms`）继续在索引内重试，直到 DO 恢复。
+2. **Sweeper CAS 租约**：
+   - 扫描查询：
+     ```sql
+     SELECT agent_key, tenant_id, agent_id, generation, next_recovery_at_ms
+     FROM v2_recovery_registry
+     WHERE status IN ('armed', 'backoff', 'quarantined')
+       AND next_recovery_at_ms <= ?now
+       AND (retry_not_before_ms IS NULL OR retry_not_before_ms <= ?now)
+       AND (sweep_lease_expires_at_ms IS NULL OR sweep_lease_expires_at_ms <= ?now)
+     ORDER BY next_recovery_at_ms ASC, agent_key ASC
+     LIMIT 50;
+     ```
+   - 抢占与失败更新必须携带 **`WHERE agent_key = ? AND generation = ? AND sweep_lease_owner = ?`**：过期的 Sweeper 回调绝不能覆盖更新世代的标记或清除新 Sweeper 的租约！
+3. **空闲零开销**：无到期条目时查询返回 0 行，不唤醒任何 DO。
 
 ---
 
-## 4. D1 Recovery Registry + Scheduled Worker 独立恢复机制
+## 5. Generation / Fencing 准入、确认与崩溃修复协议（J2 + J3）
 
-### 4.1 架构与无轮询/无心跳保障
+### 5.1 统一发现界限公式
 
-Cloudflare DO Alarm 最多自动重试 **6 次**（含初次执行共 7 次）；若因平台瞬时故障、隔离区异常或代码缺陷导致全部 6 次重试耗尽，平台将永久丢弃该 Alarm。因此，必须在 DO Alarm 故障域之外维护独立的恢复索引：
+对所有已接受义务及潜在即时补偿，统一定义发现时间界限：
 
-1. **D1 `v2_recovery_registry`**：全局仅存 `(agent_key, tenant_id, agent_id, generation, next_recovery_at_ms, status, sweep_lease_owner, sweep_lease_expires_at_ms)`。
-2. **Scheduled Worker（Cron Trigger `* * * * *`，每 60 秒）**：
-   - 仅执行一条索引查询：`WHERE status IN ('armed', 'backoff') AND next_recovery_at_ms <= ?now AND (sweep_lease_expires_at_ms IS NULL OR sweep_lease_expires_at_ms <= ?now) ORDER BY next_recovery_at_ms ASC, agent_key ASC LIMIT 50`。
-   - **空闲零开销**：当无活跃/待恢复 Agent 时，返回 0 行，**不唤醒任何 DO**。
-   - **有界 Sweeper Lease**：对选中的每条标记加 30 秒 `sweep_lease_expires_at_ms`，防止 Cron 重叠执行踩踏同一 Agent；若 Sweeper Worker 崩溃，30 秒后自动释放。
-3. **DO 侧统一恢复入口 `AgentHeadDO.reconcileFromRegistry(expectedGen)`**：
-   - 触发与 `alarm()` 完全相同的 `processDueWork('registry_recovery')`（收敛超时租约、物化到期调度、重发 Outbox、重装 DO Alarm）。
-   - 若恢复期间 DO RPC 临时不可用，Sweeper 将 D1 行标记为 `status = 'backoff'`、`recovery_attempts += 1`，`next_recovery_at_ms = now + min(60_000, 15_000 * attempts)`；若连续失败超阈值（例如 `>= 10` 次），进入 `'quarantined'` 并触发强告警（仍不静默删除，保留人工/修复后重扫能力）。
+$$
+D(O) = \text{earliest\_applicable\_due\_action\_ms}(O) + \text{D1\_RECOVERY\_GRACE\_MS} \quad (\text{D1\_RECOVERY\_GRACE\_MS} \le 45\_000\text{ ms})
+$$
 
-### 4.2 异常积压与延迟可观测指标
+- **保守预准入（`prepareTurn`）**：Fast Path 在 `prepareTurn` Stage 1 取 `requiredDiscoveryMs = min(nowMs + 45_000, nowMs + leaseMs + 45_000) = nowMs + 45_000`，确保即使 Turn 秒级完成、Stage 3 失败或立即生成 `budget_sync` 补偿行，均已提前落在当前恢复窗口内。
 
-- `v2_recovery_due_backlog_count`：每次 Cron 观测到的到期未处理条目数。
-- `v2_recovery_lag_ms`：`now_ms - MIN(next_recovery_at_ms)`（预警阈值 `> 60_000 ms`）。
-- `v2_alarm_exhaustion_suspected_total`：当 Sweeper 发现 DO 的 `armed_alarm_at_ms` 早于当前时间且明显超过 6 次重试窗口仍未推进时递增并告警。
-
----
-
-## 5. Generation / Fencing 准入与退役协议（零同步 D1 I/O）
-
-### 5.1 形式化不变量
-
-- **不变量 I-1（可发现性）**：任意时刻，若 `AgentHeadDO` 存在已提交的未终态义务 `O`（最早需发现时间 $D(O)$），则 D1 `v2_recovery_registry` 必存在该 `agent_key` 的有效行（`status IN ('armed', 'backoff')`）且满足 $\text{next\_recovery\_at\_ms} \le D(O)$。
-- **不变量 I-2（已覆盖零同步 D1 I/O）**：在 `storage.transactionSync()` 内，若 `v2_recovery_coverage` 满足 `coverage_state === 'covered' AND covered_recovery_at_ms <= D(O)`，则在接受义务 `O` 的整个请求路径上 **D1 读 = 0，D1 写 = 0**。
-- **不变量 I-3（单调 Generation CAS）**：`v2_recovery_coverage.generation` 严格单调递增；D1 中任何修改或删除必须携带世代条件（`WHERE generation < excluded.generation`、`WHERE generation = expectedPrevGen` 或 `WHERE generation <= retiredGen`）。
-
-### 5.2 覆盖状态机与准入/退役四场景规则
+### 5.2 持久化 Pending 计划与实际回执确认（J2 状态机）
 
 ```mermaid
 stateDiagram-v2
-    [*] --> uncovered: "新 Agent 初始化 (gen = 0)"
-    uncovered --> registering: "首个未覆盖义务: gen+1 (写前意向)"
-    registering --> covered: "D1 UPSERT 成功且 DO gen 未变"
-    registering --> registering: "并发更早截止: gen+1, min(D)"
-    registering --> uncovered: "D1 失败 -> Fail Closed (503)"
-    covered --> covered: "新义务 D >= covered_at: 零 D1 I/O!"
-    covered --> registering: "更早义务 D < covered_at 或 延后(Postpone): gen+1"
-    covered --> uncovered: "无未决义务 -> DO先置uncovered(gen+1), 再D1 DELETE(<=old_gen)"
+    [*] --> uncovered: "新 Agent (gen=0, pending_kind=NULL)"
+    uncovered --> registering: "transactionSync(): gen+1, pending_kind='ensure', pending_target=D"
+    registering --> covered: "D1 返回权威(gen, actual<=D) -> confirmCoverageSync()"
+    registering --> registering: "并发更早义务/修复重规划: gen+1, pending_target=MIN"
+    registering --> uncovered: "D1 不可用 -> 事务中止 (503) 或退休修复确认不存在"
+    covered --> covered: "新义务 D >= covered_recovery_at_ms: 0 D1 读写!"
+    covered --> registering: "更早义务 D < covered 或 延后(pending_kind='postpone', gen+1)"
+    covered --> uncovered: "无义务且无候选 -> gen+1, pending_kind='retire' -> D1 DELETE(<=old_gen)"
 ```
 
-#### 关键并发竞争证明
+#### 四大崩溃与竞态修复规则（无需用户流量）
 
-1. **竞争场景 A：Sweeper 退役（Retirement） vs 并发已覆盖新对话**
-   - Sweeper 调用 `AgentHeadDO.reconcileFromRegistry(expectedGen)`。
-   - **Phase 1（DO `transactionSync()` 本地先失效）**：DO 检查无任何未决 Lease/Outbox/Schedule（`earliestAlarm === null`），**在发送远程 D1 DELETE 之前**，原子将 `generation` 推进至 `gen_retire = max(cov.generation, expectedGen) + 1`，设 `coverage_state = 'uncovered'`、`covered_recovery_at_ms = NULL`，返回 `retireUpToGen = gen_retire - 1`。
-   - **Phase 2（远程 D1 条件删除）**：执行 `DELETE FROM v2_recovery_registry WHERE agent_key = ? AND generation <= :retireUpToGen`。
-   - **交错分析**：
-     - 若新对话在 Phase 1 **之前**提交：DO 在 Phase 1 会看到该新对话（`earliestAlarm !== null`），根本**不会进入退役**，而是保持或延后覆盖。
-     - 若新对话在 Phase 1 **之后**、Phase 2 **之前**到达：新对话在 `transactionSync()` 看到 `coverage_state = 'uncovered'`，**绝对不会跳过 D1**！它推进 `generation = gen_retire + 1` 并写入 D1（`UPSERT` 生效）。随后到达的 Phase 2 `DELETE WHERE generation <= retireUpToGen` 匹配 **0 行**，绝不会误删新对话标记！
-     - 若 Phase 2 D1 删除崩溃或超时：D1 保留旧标记，仅作为**无害陈旧标记**在下一轮 Sweeper 扫描时幂等清理。
+1. **D1 拒绝 / 陈旧 Upsert（Remote Rejected / Stale Upsert）**：
+   - `upsertCoverage` 返回 `{ accepted: false, currentGeneration, actualRecoveryAtMs }`（D1 已有更高世代）。
+   - `confirmCoverageSync` **拒绝直接标为 `'covered'`**；DO 在新 `transactionSync()` 内检查：若 `currentGeneration` 的 `actualRecoveryAtMs <= earliestRequired`，且不存在更紧本地 pending 冲突，仍分配**更高世代 `max(cov.generation, currentGeneration) + 1`**，设 `pending_target = MIN(actualRecoveryAtMs, earliestRequired)` 同步重试一次；若仍失败则 Fail Closed (`503`)，绝不靠“猜 D1 成功”提交业务！
+2. **DO 写入 `pending_kind` 后、D1 CAS 执行前崩溃**：
+   - D1 中原有旧到期标记触发 Sweeper 调用 `reconcileFromRegistry(expectedGen)`。
+   - **禁止无条件返回 `noop_stale`**：即使 `expectedGen < cov.generation`（因本地崩溃前已推进 `gen` 并写下 `pending_kind`），只要 `cov.pending_kind !== null` 或 `earliestRequiredDiscoveryAtMsSync() !== null`，DO **必须**分配更高世代并执行 `repair_ensure`（目标取 `MIN(pending_target_at_ms, earliestOpenD)`）或重放 `postpone` / `retire`！
+3. **D1 CAS 已成功、ACK 丢失 / DO 在 `confirmCoverageSync` 前崩溃**：
+   - D1 标记随后到期触发 Sweeper（或 DO 在修复路径调用 `readCoverage`）：
+   - 读回 D1 权威 `(exists, currentGeneration, actualRecoveryAtMs)`：
+     - 若 `exists` 且 `actualRecoveryAtMs <= earliestOpenD`（且当前未处于需要更早时间的冲突）：以当前（或推进后）世代安全确认覆盖，并继续派发/重装 Alarm；
+     - 若 `!exists`（`retire` 已远程成功）且本地确实零义务：清除 `pending_kind = NULL` 保持 `'uncovered'`；
+     - 若 `!exists` 但本地仍有未决义务或 `actualRecoveryAtMs > earliestOpenD`：立即以更高世代执行 `repair_ensure`！
+4. **退休严格前置条件与并发安全**：
+   - 仅当 `earliestRequiredDiscoveryAtMsSync(nowMs) === null`（包括普通 Turn/Task、主动 `v2_schedules`、未完成 `budget_sync` 以及任何仍在途未提交的 `prepareTurn` 候选）时才允许进入 `retire`。
+   - Phase 1 先在 DO `transactionSync()` 将 `coverage_state` 置 `'uncovered'`、`generation = max(cov.generation, expectedGen) + 1`、`pending_kind = 'retire'`；Phase 2 远程执行 `DELETE FROM v2_recovery_registry WHERE agent_key = ? AND generation <= retireUpToGen`。新到达请求见到 `'uncovered'` 必定升代写 D1，旧 `DELETE` 匹配 0 行，绝不误删！
 
-2. **竞争场景 B：Sweeper 延后（Postponement） vs 并发更早截止时间义务**
-   - 当 DO 仅剩远期 Schedule（如 `t + 600s`）时，Phase 1 将 `coverage_state` 置为 `'registering'`、`generation` 推进至 `nextGen = prevGen + 1`，然后执行 D1 条件更新：
-     `UPDATE v2_recovery_registry SET generation = :nextGen, next_recovery_at_ms = :laterMs ... WHERE agent_key = ? AND generation = :prevGen`。
-   - 若期间有更早截止时间的新 Turn 到达，新 Turn 看到 `'registering'`，推进 `gen = nextGen + 1` 并用 `ON CONFLICT ... DO UPDATE SET next_recovery_at_ms = MIN(...) WHERE generation < excluded.generation` 抢占写入。
-   - **结果**：若新 Turn 先写 D1，延后语句 `WHERE generation = :prevGen` 影响 0 行且无法把时间推迟；若延后先写 D1，新 Turn 随即以 `nextGen + 1` 覆盖为更早时间，且延后回调返回 DO 时因 `cov.generation !== nextGen` 不会误标记为 `'covered'`！
-
-3. **竞争场景 C：延迟不明确（Uncertain D1 Postponement Timeout）**
-   - 若延后 `UPDATE` 遇到网络超时/响应丢失（D1 可能已提交 `:laterMs`，也可能仍停留在 `:oldMs`），DO **严禁**回退 `coverage_state` 为旧 `'covered'`，必须保留 `'registering'` 状态，直至下一次明确成功的 D1 同步恢复 `'covered'`。
-
-4. **竞争场景 D：D1 写入后、DO 本地提交前崩溃**
-   - D1 已持有标记，DO 事务未提交。结果仅在 D1 留下一个无害陈旧标记，下轮 Sweeper 检查 DO 空闲后安全删除，绝无幽灵任务或漏恢复。
-
-5. **准入时序图（首次未覆盖 vs 已覆盖零 I/O）**
+### 5.3 准入与修复时序图
 
 ```mermaid
 sequenceDiagram
     participant API as "Edge API Worker"
-    participant Budget as "GlobalBudgetAuthority"
     participant DO as "AgentHeadDO"
     participant D1 as "D1 v2_recovery_registry"
+    participant SW as "Scheduled Worker (Sweeper)"
 
-    Note over API,D1: "场景 1：已覆盖对话（零同步 D1 I/O）"
-    API->>DO: "prepareFastTurn(submissionId, epoch)"
-    DO->>Budget: "reserveBudget() (<= 50ms P95)"
-    Note over DO: "transactionSync(): 复核 coverage_state=covered & covered_at <= D(turn)"
-    Note over DO: "提交 user_msg + turn + lease(epoch=1) + setAlarm(+45s) [0 D1 读写!]"
-    DO-->>API: "201 Receipt + RunGrant"
+    Note over API,D1: "正常未覆盖准入 + 崩溃 ACK 丢失修复"
+    API->>DO: "prepareTurn()"
+    Note over DO: "Stage 1 transactionSync(): gen=1, state='registering', pending_kind='ensure', target=T0+45s"
+    DO->>D1: "upsertCoverage(gen=1, T0+45s)"
+    D1-->>DO: "{ accepted: true, currentGeneration: 1, actualRecoveryAtMs: T0+45s }"
+    Note over DO: "Stage 3 transactionSync(): confirmCoverageSync(gen=1, actual=T0+45s) -> covered"
+    Note over DO: "后续 Covered Turn: inspectCoverageSync() -> covered (0 D1 I/O!)"
 
-    Note over API,D1: "场景 2：未覆盖对话或更早截止（先登记后提交）"
-    API->>DO: "prepareFastTurn(submissionId, epoch)"
-    DO->>Budget: "reserveBudget()"
-    Note over DO: "transactionSync(): 发现 uncovered/不足 -> gen+1, state=registering"
-    DO->>D1: "UPSERT (agent_key, gen, MIN(next_recovery_at_ms)) WHERE generation < gen"
-    alt "D1 成功"
-        D1-->>DO: "OK"
-        Note over DO: "transactionSync(): state=covered + 提交 turn/lease + setAlarm"
-        DO-->>API: "201 Receipt + RunGrant"
-    else "D1 不可用"
-        D1-->>DO: "Error / Timeout"
-        DO->>Budget: "releaseReservation()"
-        DO-->>API: "503 DB_UNAVAILABLE (Fail Closed, 0 DO 业务行写入)"
-    end
+    Note over DO,SW: "异常：DO 写入 pending(gen=2) 后崩溃（D1 仍为 gen=1）"
+    SW->>D1: "claimDueMarkers(now >= T0+45s)"
+    SW->>DO: "reconcileFromRegistry(expectedGen=1)"
+    Note over DO: "检测到 pending_kind='ensure' 或未决义务 -> 推进 gen=3, 返回 repair_ensure(gen=3, MIN)"
+    SW->>D1: "upsertCoverage(gen=3, MIN)"
+    D1-->>SW: "{ accepted: true, currentGeneration: 3, actualRecoveryAtMs }"
+    SW->>DO: "confirmRegistryPlan(gen=3, actualRecoveryAtMs, applied=true)"
 ```
 
 ---
 
-## 6. D1 不可用时的降级与 Fail-Closed 处理策略
+## 6. D1 不可用时的降级与 Fail-Closed 处理矩阵
 
-遵循 [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md) 与 [B1 Platform Contract §10.3](../product/B1_PLATFORM_CONTRACT.md)，D1 故障时不采取“全站阻断”，也不允许“静默接受未受保护义务”：
-
-| 操作类别                                                                                                                        | D1 不可用时的行为                                                                                                                     | HTTP / B1 契约映射                                                                                                                                   | 客户端与后台保障                                                                                                          |
-| ------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
-| **Direct Path 读写**（历史分页、`GET /v1/me`、状态查询、非异步设置）                                                            | **正常继续**（假设认证/会话校验仍有效；若认证本身强依赖失效 D1 且无有效有界本地凭证，则认证 Fail Closed 返回 `503 DB_UNAVAILABLE`）。 | `200 OK`（认证不可用时 `503 DB_UNAVAILABLE`）                                                                                                        | 本地缓存可继续渲染，不中断只读体验。                                                                                      |
-| **已覆盖 Fast Path 对话**（`coverage_state = 'covered'` 且 `covered_recovery_at_ms <= D(turn)`，且 Auth + GlobalBudget 均健康） | **正常接受并执行**（全程 0 次 D1 读写）。                                                                                             | `201 Created`（标准 B1 Receipt）                                                                                                                     | 现存 D1 标记已保证后续恢复可发现性；若后续超 120s 移交至 Durable Path，初始标记时间仍早于等于移交所需恢复点，不新增阻塞。 |
-| **未覆盖对话 / Durable 任务 / 新建 Schedule / 提前截止义务**                                                                    | **Commit 前 Fail Closed 拒绝**；释放已预留 `GlobalBudget`；DO SQLite **零写入**。                                                     | `503 DB_UNAVAILABLE`（严格沿用 B1 错误码与 `strictObject` 体，不新增字段）                                                                           | 客户端保留本地受保护 Outbox 中的原文、`client_submission_id` 与 `transcript_epoch`，按退避重试（B1 N-1, N-3）。           |
-| **登记/提交期间连接断开（Unknown-ACK）**                                                                                        | 客户端不可凭超时推定已拒绝或已接受。                                                                                                  | 调用 `GET /v1/message-submissions/{id}`（B1 N-2）：`200` 采用已有回执并清理 Outbox；`404` 校验 `transcript_epoch`（N-11/N-12）后以原 ID/Epoch 重试。 | 杜绝重复消息或静默丢消息。                                                                                                |
-| **已在途的 Fenced 执行与退役请求**                                                                                              | 在途 Fast/Durable Run **安全继续执行与提交**；D1 `DELETE/UPDATE` 失败时仅保留 D1 原记录（不视为退役成功）。                           | 内部降级记录 + 告警                                                                                                                                  | D1 恢复后由 Sweeper 自动清理陈旧标记或推进延后。                                                                          |
-| **Scheduled Worker 恢复扫描**                                                                                                   | 本轮跳过并发出 `recovery_registry_unavailable` 告警；**不修改**任何 DO 状态。                                                         | —                                                                                                                                                    | D1 恢复后下一分钟 Cron 按 `next_recovery_at_ms ASC` 自动补扫。                                                            |
+| 操作类别                                                                                                                      | D1 不可用时的行为                                                                                                                                                                | HTTP / B1 契约映射                                                                                                         | 客户端与后台保障                                                                                     |
+| ----------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| **Direct Path 读写**（历史分页、`GET /v1/me`、状态查询）                                                                      | **正常继续**（若会话认证强依赖失效 D1 且无有效有界凭据，认证 Fail Closed 返回 `503 DB_UNAVAILABLE`）。                                                                           | `200 OK` / `503 DB_UNAVAILABLE`                                                                                            | 不阻断本地缓存渲染与只读查询。                                                                       |
+| **已覆盖 Fast Path 对话**（`coverage_state = 'covered'` 且 `covered_recovery_at_ms <= D(turn)`，且 Auth + GlobalBudget 健康） | **正常接受并执行**（0 次 D1 读写）。                                                                                                                                             | `201 Created`（标准 B1 Receipt）                                                                                           | 现存 D1 标记已覆盖后续恢复；即使后续需进入 `budget_sync` 或移交，初始预准入时间仍有效。              |
+| **未覆盖对话 / Durable 任务 / Schedule / 提前截止义务**                                                                       | **Commit 前 Fail Closed**；若 Stage 2 已获取未提交 `GlobalBudget` Grant，按补偿规则安全释放（有覆盖则写 `budget_sync`，无覆盖仅尝试释放本身未提交 Operation）；DO 零业务行提交。 | `503 DB_UNAVAILABLE`（严格沿用 B1 错误体）                                                                                 | 客户端保留本地受保护 Outbox 原文、`client_submission_id` 与 `transcript_epoch` 重试（B1 N-1, N-3）。 |
+| **Unknown-ACK 对账**                                                                                                          | 不得凭超时推断成功或失败。                                                                                                                                                       | `GET /v1/message-submissions/{id}`（B1 N-2）：`200` 采用已有回执；`404` 校验 `transcript_epoch`（N-11/N-12）后原 ID 重试。 | 零重复、零丢失。                                                                                     |
+| **Sweeper 退避 / 隔离与 D1 恢复后**                                                                                           | D1 不可用期间 Sweeper 告警跳过；D1 恢复后按未变的 `next_recovery_at_ms ASC` 立即补扫（包括处于 `backoff`/`quarantined` 的行）。                                                  | —                                                                                                                          | 绝不遗漏。                                                                                           |
 
 ---
 
-## 7. Alarm 全部 6 次重试失败后的离线恢复验证方案
+## 7. Fast Path → Durable Path 安全移交与时间契约（J4）
 
-### 7.1 规范化时间常量表（M0 冻结测试 Profile）
+### 7.1 冻结时间配置（B1 兼容模式 vs V2 交互模式）
 
-| 常量名称                     | M0 默认值            | 说明与对齐依据                                                                           |
-| ---------------------------- | -------------------- | ---------------------------------------------------------------------------------------- |
-| `FAST_LEASE_MS`              | `45_000 ms` (45 s)   | Interactive Fast Path 租约长度（ADR-0006 §Interactive Executor）。                       |
-| `FAST_RENEW_INTERVAL_MS`     | `15_000 ms` (15 s)   | 仅在活跃执行期间每 15s 续租；观测断连后立即停止续租。                                    |
-| `FAST_DEADLINE_MS`           | `120_000 ms` (120 s) | Interactive Path 总体移交截止时间（保留 `B1_TURN_DEADLINE_SECONDS = 60` 兼容配置开关）。 |
-| `NORMAL_RECONCILE_TARGET_MS` | `60_000 ms` (60 s)   | 静默失联进入恢复对账目标（`45s 过期 + 15s 检测/派发宽限`）。                             |
-| `OUTBOX_IMMEDIATE_GRACE_MS`  | `2_000 ms` (2 s)     | 提交后立即尝试 `Queue.send()`；Alarm 兜底定于 `+2s`，避免正常路径竞态。                  |
-| `OUTBOX_REENQUEUE_GRACE_MS`  | `60_000 ms` (60 s)   | Queue 成功入队后的未认领重投窗口（对齐 V1 `TURN_OUTBOX_REENQUEUE_MS`）。                 |
-| `D1_RECOVERY_GRACE_MS`       | `45_000 ms` (45 s)   | `next_recovery_at_ms = earliest_due_alarm_ms + 45_000`。                                 |
-| `SWEEPER_CADENCE_MS`         | `60_000 ms` (60 s)   | Scheduled Worker Cron `* * * * *`。                                                      |
+| 模式                    | 总生命期上限 (`deadline_at_ms`)    | 交互阶段上限 (`interactive_deadline_ms`)                                | 交互租约与活跃续租                                                                               | 移交规则与 B1 兼容性                                                                                |
+| ----------------------- | ---------------------------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| **B1 兼容模式**         | **`60_000 ms` (60 s)**（冻结）     | 可选加速：`22_000 ms` 移交窗 / `25_000 ms` 租约（仅当剩余预算窗口足够） | 无足够残余窗口时直接走 Durable Path；绝不依赖 `waitUntil` 保证存活                               | 完全保持 B1 Wire 契约与 60s 超时语义，不延长总期限。                                                |
+| **V2 交互测试 Profile** | **`600_000 ms` (600 s)**（总上限） | **`120_000 ms` (120 s)**                                                | `45_000 ms` 租约，仅在活跃执行期间每 `15_000 ms` 真实续租；主动移交窗口 **`105_000–115_000 ms`** | **移交绝不延长 `deadline_at_ms`**；未持续续租导致租约过期的请求无法移交，仅能由 Alarm/Reaper 对账。 |
 
-### 7.2 6 次重试耗尽后“2 分钟发现、5 分钟恢复”定量推导
+### 7.2 移交准入、Fencing 与不确定结果防护（Agent A 主责执行，B 消费移交）
 
-设最早待处理 DO Alarm 触发时刻为 $T_{\text{due}}$，Cloudflare DO Alarm 初次执行及 6 次指数退避重试耗时为 $B_{\text{total}}$（实网约为 $2+4+8+16+32+64 = 126\text{ s}$，本地故障注入可为 $[0, 126\text{ s}]$ 任意值），全部 7 次调用失败并被平台丢弃的时刻为：
-
-$$
-T_{\text{exhaust}} = T_{\text{due}} + B_{\text{total}}
-$$
-
-D1 恢复时间点设在 $T_{\text{reg}} = T_{\text{due}} + 45\text{ s}$：
-
-1. **发现延迟（Detection Latency）**：
-   - 若 $B_{\text{total}} \ge 45\text{ s}$（如实网 ~126s）：$T_{\text{reg}} \le T_{\text{exhaust}}$，标记在耗尽时**已处于到期状态**，下一轮 60s Cron 必检出：
-     $$\Delta_{\text{detect}} \le 60\text{ s} < 120\text{ s (2 min)}$$
-   - 若 $B_{\text{total}} < 45\text{ s}$（如本地测试瞬间耗尽 $B_{\text{total}} = 0\text{ s}$）：标记在 $T_{\text{due}} + 45\text{ s}$ 到期，随后 60s Cron 检出：
-     $$\Delta_{\text{detect}} \le (45 - B_{\text{total}}) + 60 \le 105\text{ s} < 120\text{ s (2 min)}$$
-2. **恢复延迟（Dispatch & Re-arm Latency）**：
-   - 发现后同一次 Sweeper 调用 `reconcileFromRegistry` 完成 Queue 派发并重装未来 `v2_schedules` 的 DO Alarm：健康路径 $\Delta_{\text{recover}} = \Delta_{\text{detect}} + \text{RPC} \le 106\text{ s}$。
-   - 即便发生单次瞬时 RPC 故障退避（30s–60s 重扫），仍在 $\le 165\text{ s} \ll 300\text{ s (5 min)}$ 内完成。
-
-### 7.3 离线验证场景闭环
-
-在**所有客户端离线、无任何用户流量**条件下，同时预置：（1）一个即时入队失败且 Alarm 初次+6次均失败的 Pending Task；（2）一个未来 $T + 600\text{ s}$ 的 Schedule。验证断言：
-
-1. Alarm 第 7 次失败后，DO `armed_alarm_at_ms` 确已丢失；
-2. 无需客户端重连，Scheduled Worker 在 `<= 2 min` 内检出 D1 到期行，在 `<= 5 min` 内通过 `reconcileFromRegistry` 派发 Pending Task 至 Queue（产出**唯一**执行结果）并重新将 DO Alarm 武装至 $T + 600\text{ s}$；
-3. 到达 $T + 600\text{ s}$ 时，未来 Schedule 正常触发执行。
+1. **Agent A 移交校验（禁止洗白过期租约或超期任务）**：`handoffTurnToDurable` 在 `transactionSync()` 内以当前服务器时间 `nowMs` 严格核验：
+   - `status === 'running' && execution_mode === 'interactive_fast'`
+   - `active_run_id === req.runId && lease_epoch === req.leaseEpoch && lease_owner === req.leaseOwner`
+   - `lease_expires_at_ms > nowMs`（**已过期租约必须拒绝！**）
+   - `nowMs < interactive_deadline_ms` 且 `nowMs < deadline_at_ms`（**超过交互/总期限必须拒绝！**）
+   - `cancel_requested_at_ms === null` 且 `transcript_epoch === current_transcript_epoch`
+   - **保持原 `deadline_at_ms` 不变**（严禁在移交时重置或延后总截止时间！）。
+2. **原子递增 Epoch 与同一逻辑身份延续**：校验通过后，A 原子将 `lease_epoch += 1`、转换 `execution_mode = 'durable_queue'`、持久化 `provider_job_handle` 与 `operation_id`，并在同一事务调用 B 的 `enqueueDurableOutboxSync` 写入 `entity_kind = 'handoff'` Outbox。旧执行者若持原 `lease_epoch` 调用 `commitTurn`，立即被拒绝（`fenced` / `STALE_LEASE`）。
+3. **Execution Worker 严禁盲目重放**：B 的 Queue Worker 认领后读取同一逻辑 Turn/Task 与原 `provider_job_handle`：
+   - 若存在 `provider_job_handle`：仅查询/轮询原作业句柄直至终态；
+   - 若缺失句柄且 `send_started_at_ms !== null`（外部结果不确定）：进入显式对账/收敛（绝不静默重放未知付费请求）。
+4. **静默失联恢复**：若 Edge Worker 静默崩溃且停止 15s 续租，`45s` 租约过期后 DO Alarm（`45s + <= 15s = <= 60s`）将其转入对账。
 
 ---
 
-## 8. Fast Path 向 Durable Path 安全移交与重复执行防护
+## 8. 延迟、写入成本与异常恢复测量定义
 
-### 8.1 三类移交与恢复触发器
+所有 M1 本地基准与后续（另行批准的）云端 Canary 均须分 **Cold / Warm**、分 **首次未覆盖（first marker）vs 复用已覆盖（reused marker）** 独立采集并报告 **P50 / P95 / P99 / Max**：
 
-Interactive Executor 运行在 Edge API Worker 的 HTTP 响应流处理中，**绝不在 DO 内长时间阻塞或持久化逐 Token 流状态**。普通简单对话目标仅需 **2 次核心 DO RPC**（`prepareFastTurn` 与 `commitFastTurn`）；以下三类情况触发向 Durable Path 的安全移交：
+| 指标 ID                                                    | 定义与采集口径                                                                                   | 说明 / 目标                                                               |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| `t_reg_first_d1_ms`                                        | 首次未覆盖 / 更早截止请求 `upsertCoverage` 同步耗时（计入 ACK 与 Runtime 链路）。                | 区分记录，对比已覆盖路径延迟。                                            |
+| `t_reg_covered_d1_ms`                                      | 已覆盖请求在 `inspectCoverageSync` 中消耗的 D1 耗时。                                            | 严格 `= 0 ms`（0 D1 调用）。                                              |
+| `d1_billed_writes_per_event` / `d1_billed_reads_per_event` | 基于 D1 `meta.rows_written` / `meta.rows_read` 统计（含登记、延后、退役、Sweeper Lease）。       | 跟踪实际账单写入；作为 M0-D 联合基准输入。                                |
+| `do_sqlite_rows_written_per_event`                         | 单次事件在 `AgentHeadDO` 实际写入的 SQLite 行数（含 A 业务表、Outbox、Coverage 与 `setAlarm`）。 | 与 A/D 对齐实测；ADR-0006 中 `20` 行写/事件为规划模型假设，非硬编码门限。 |
+| `t_silent_loss_to_reconcile_ms`                            | 最后一次成功 `renewTurnLease` 至 DO Alarm 将过期 Run 转入对账/入队的时间。                       | `<= 60_000 ms`（45s 租约 + 15s 检测/派发）。                              |
+| `t_alarm_exhaust_to_detect_ms`                             | 第 6 次 Alarm 重试耗尽 $T_{\text{exhaust}}$ 至 Sweeper 认领 D1 到期行之差。                      | 条件实测目标 `<= 120_000 ms`（2 分钟）。                                  |
+| `t_alarm_exhaust_to_recover_ms`                            | $T_{\text{exhaust}}$ 至恢复派发入队并重装未来调度 Alarm 之差。                                   | 条件实测目标 `<= 300_000 ms`（5 分钟）。                                  |
+| `duplicate_commit_count`                                   | 同一 `turn_id` / `task_id` 提交超过 1 条权威终态结果或消息的次数。                               | 严格 `= 0`。                                                              |
 
-| 场景                      | 触发条件                                        | 移交协议与重复执行防护                                                                                                                                                                                        |
-| ------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1. 观测到客户端断连**   | SSE/HTTP 流关闭信号                             | 立即停止 15s 续租；若已有可恢复 `provider_op_id` 或尚未达到终态，调用 `handoffToDurablePath(runId, epoch, 'client_disconnect', providerOpId)`（必要时先请求 Provider 取消不可恢复流）。                       |
-| **2. 推理/执行超过 120s** | 接近 `FAST_DEADLINE_MS`（如 `115s` 软移交阈值） | 若 Provider 支持后台作业/响应句柄，持久化 `provider_op_id` 与检查点，调用 `handoffToDurablePath`；向流客户端发出受版本控制的状态事件（如 `continuing_in_background`），保持**同一逻辑 `turn_id`/`task_id`**。 |
-| **3. 执行者静默失联**     | Edge Worker Isolate 崩溃/OOM                    | 45s 租约到期后由 DO Alarm（`45s + <=15s = <=60s`）自动进入 `reconcileFromRegistry` / `processDueWork`，将旧 Run 标为 `lease_expired` 并经 Durable Outbox 触发对账。                                           |
-
-### 8.2 防重复执行与不确定结果对账硬规则
-
-1. **原子 Epoch 递增 Fencing**：`handoffToDurablePath` 与超时 Reaper 在 `transactionSync()` 内将 `lease_epoch` 严格加 1（如 `1 -> 2`），清除原 `lease_owner`。旧 Fast Path 进程即使随后恢复并尝试 `commitFastTurn(epoch = 1)`，必被拒绝并返回 `STALE_LEASE`（零写副作用）。
-2. **`provider_op_id` 与 `provider_outcome_state` 门控**：
-   - 在发起真实外部付费调用前，Agent A/B 必须先通过 Send-Start CAS 将 `provider_outcome_state` 设为 `'in_flight'`。
-   - Durable Execution Worker 在 `epoch = 2` 认领后：
-     - 若 `provider_op_id !== null`（Provider 支持结果轮询/恢复）：**只查询/轮询原 `provider_op_id`**，严禁发起第二次重复推理！
-     - 若 `provider_op_id === null` 且 `provider_outcome_state === 'uncertain'`（外部调用可能已发出但结果未知）：进入显式对账（查询 Provider 账单/请求幂等记录或按 B2 规则收敛为显式不确定/可重试提示），**绝不盲目重放非幂等副作用或伪造成功**。
-3. **客户端重连无重复**：流式输出在 `commitFastTurn` / `commitFencedOutcome` 前均为临时态；客户端重连后拉取 `GET /v1/conversations/{id}/messages` 与 `GET .../turns/{turnId}`，仅读取同一权威已提交消息。
-
-```mermaid
-sequenceDiagram
-    participant C as "Client (SSE)"
-    participant Edge as "Edge API Worker (Interactive Executor)"
-    participant DO as "AgentHeadDO"
-    participant Q as "Durable Queue"
-    participant EW as "Execution Worker"
-
-    Edge->>DO: "RPC #1: prepareFastTurn() -> lease_epoch=1, deadline=120s"
-    Edge->>C: "Streaming tokens (provisional)"
-    loop "每 15s 仅在活跃执行期间"
-        Edge->>DO: "renewLease(epoch=1)"
-    end
-    Note over Edge: "115s/120s 到达，任务未完成"
-    Edge->>DO: "handoffToDurablePath(epoch=1, provider_op_id)"
-    Note over DO: "transactionSync(): epoch 1->2, mode=durable_cloud, 写 Outbox(ep=2), setAlarm"
-    DO->>Q: "Queue.send(fenceEpoch=2)"
-    Edge-->>C: "Provisional continuing status (same turn_id)"
-    opt "迟到的旧 Fast Path 提交尝试"
-        Edge->>DO: "commitFastTurn(epoch=1)"
-        DO-->>Edge: "409 STALE_LEASE (0 side effects)"
-    end
-    Q->>EW: "Deliver(fenceEpoch=2)"
-    EW->>DO: "claimDurableExecution(epoch=2) -> epoch 2->3, status=running"
-    EW->>EW: "轮询 provider_op_id 或执行对账（禁止盲目重放）"
-    EW->>DO: "commitFencedOutcome(epoch=3) -> 唯一 ember 消息 + Turn completed"
-```
-
----
-
-## 9. 恢复登记延迟、写入成本与异常恢复测量定义
-
-为在 M1 本地压测与后续（另行批准的）云端 Canary 中形成可复现基准，冻结以下测量口径（所有延迟按 **Cold / Warm** 与区域 RTT 分组报告 **P50 / P95 / P99 / Max**）：
-
-| 指标 ID                            | 定义与采集点                                                                                   | M0/M1 验收门限                                                                  |
-| ---------------------------------- | ---------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `t_reg_d1_ms`                      | 未覆盖请求中 D1 `upsertCoverage` 往返耗时（区分 `ACK` 与 `Runtime` 链）。                      | 已覆盖对话强制 `= 0 ms`（零调用）；未覆盖仅发生于首轮或更早截止。               |
-| `d1_billed_writes_per_event`       | `SUM(D1 meta.rows_written) / total_events`（含初始登记、延后、退役、Sweeper Lease）。          | 10 轮会话突发场景下登记/退役均值 `<= 0.2` D1 写入/事件（不含 Sweeper 读检查）。 |
-| `d1_billed_reads_per_event`        | `SUM(D1 meta.rows_read) / total_events`（含空闲期 Cron 查询空结果基线）。                      | 已覆盖对话路径 `= 0`；全量空闲 Cron 不得随总用户数线性增长。                    |
-| `do_sqlite_rows_written_per_event` | `DO SQLite` 每事件写入行数（含索引维护与 `setAlarm`）。                                        | 与 Agent A 合计控制在 ADR-0006 `<= 20` 行写/事件规划模型内。                    |
-| `t_silent_loss_to_reconcile_ms`    | 从最后一次成功 `renewLease`（或无续租时 `prepareFastTurn`）至 DO 进入对账并入队的时间。        | 正常恢复 `<= 60_000 ms`（45s 租约 + 15s 检出/派发）。                           |
-| `t_alarm_exhaust_to_detect_ms`     | 从第 6 次（最后一次）Alarm 重试失败时刻 $T_{\text{exhaust}}$ 到 Sweeper 认领 D1 标记时刻之差。 | `<= 120_000 ms`（2 分钟）。                                                     |
-| `t_alarm_exhaust_to_recover_ms`    | 从 $T_{\text{exhaust}}$ 到 Pending Outbox 重新入队且未来 Schedule 重装 Alarm 完成之差。        | `<= 300_000 ms`（5 分钟）。                                                     |
-| `duplicate_commit_count`           | 同一 `turn_id`/`task_id` 写入终态结果或重复 `ember` 消息的次数。                               | 严格 `= 0`。                                                                    |
-
-### M0 本地隔离 Probe 实测结果（Fake / `node:sqlite`）
-
-在隔离本地 Probe（[v2-m0-event-recovery-probe.test.ts](../../tests/unit/v2-m0-event-recovery-probe.test.ts)）中，使用两套独立内存 SQLite 数据库分别模拟 `AgentHeadDO` 与 `D1 v2_recovery_registry` 并配合虚拟时钟执行确定性验证，结果如下：
-
-- **8 / 8 测试用例全部通过**（Vitest `34 ms`）。
-- **已覆盖零 D1 I/O**：Turn 2–10 在覆盖期内实测 `d1Reads = 0`、`d1Writes = 0`；加上 Turn 1 登记（1 写）与空闲后延迟退役（1 写），10 轮会话登记生命周期共 2 次 D1 写入（**0.2 D1 writes/turn**）。
-- **Alarm 6 次重试耗尽恢复**：7 次 Alarm 连续失败耗尽于 $T_{\text{exhaust}} = T_0 + 128\text{ s}$，Scheduled Worker 在 `52 s`（`<= 120 s`）后检出并在同轮完成 Queue 派发与未来 Schedule 重装，恢复延迟 `52 s`（`<= 300 s`），离线期间零客户端流量且仅提交 1 条终态结果。
-
----
-
-## 10. 确定性故障注入测试矩阵
-
-| 用例 ID   | 注入故障 / 竞态场景                                                                      | 预期状态转换与恢复结果                                                                                                                | 强制断言                                                   |
-| --------- | ---------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
-| **FI-01** | **D1 写入成功后、DO 提交前崩溃**                                                         | D1 保留陈旧标记，DO 无业务行；下轮 Sweeper 唤醒 DO 确认空闲后退役删除。                                                               | DO 业务表 0 残留行；D1 标记被安全回收。                    |
-| **FI-02** | **DO 提交后、`Queue.send()` 前崩溃**                                                     | Outbox 保留 `'pending'`；2s 后 DO Alarm 自动补发 Queue。                                                                              | 任务不丢失，正常完成后进入唯一终态。                       |
-| **FI-03** | **`Queue.send()` 成功后、Outbox 更新前崩溃**                                             | DO Alarm 补发重复消息；消费者凭 `lease_epoch` / 终态判重 ACK。                                                                        | `duplicate_commit_count = 0`。                             |
-| **FI-04** | **Queue 重复投递同一消息（并发/乱序）**                                                  | 首条认领 `epoch+1` 为 `running`；重复投递见活跃租约或终态直接 ACK。                                                                   | 仅 1 个 Run 执行，仅 1 条终态记录。                        |
-| **FI-05** | **Queue 消费失败 5 次进入 DLQ**                                                          | DLQ Consumer 回调 `onDispatchDeadLetter`，状态迁为 `'dead_lettered'` 并重装退避 Alarm（超时则收敛 `failed`）。                        | 零静默丢弃；恢复或明确终态收敛。                           |
-| **FI-06** | **初次 Alarm + 全部 6 次重试失败（全客户端离线，含 Pending + 未来 Schedule）**           | D1 到期行由 Scheduled Worker 检出，调用 `reconcileFromRegistry` 派发 Pending 并重装未来 Schedule Alarm。                              | 发现 `<= 2 min`，恢复 `<= 5 min`，未来 Schedule 准时触发。 |
-| **FI-07** | **并发 Sweeper 退役 vs 已覆盖新对话到达**                                                | DO 在删除 D1 前先将本地置为 `'uncovered'` + `gen+1`；新对话走 D1 `UPSERT(gen+2)`；旧 `DELETE WHERE gen <= old` 匹配 0 行。            | 新对话不被抹除；发现时间不丢失。                           |
-| **FI-08** | **并发 Sweeper 延后 vs 更早截止义务到达**                                                | 延后先置 `'registering'` 并带 `WHERE generation = prevGen` 更新；更早义务抢占 `gen+2` 与 `MIN(...)`。                                 | D1 `next_recovery_at_ms` 保持更早时间。                    |
-| **FI-09** | **延后 `UPDATE` 遇到 D1 不明确超时**                                                     | DO 保持 `'registering'`（**不回退**为旧 `'covered'`），待下次 D1 恢复后重同步。                                                       | 绝不误认为旧覆盖仍有效。                                   |
-| **FI-10** | **D1 完全不可用（已覆盖对话 / Direct Path / 未覆盖对话）**                               | Direct Path 与已覆盖 Fast Path 正常完成（0 D1 I/O）；未覆盖提交返回 `503 DB_UNAVAILABLE` 且 DO 零写入；Unknown-ACK 经 B1 N-2 对账。   | B1 错误码兼容；未覆盖义务零提交。                          |
-| **FI-11** | **Fast Path 观测到客户端断连**                                                           | 停止 15s 续租，安全移交 Durable Path（`epoch 1->2`），客户端重连可见单一终态回复。                                                    | 断连不撤销已接受工作。                                     |
-| **FI-12** | **Fast Path 执行者静默崩溃**                                                             | 45s 租约到期后 DO Alarm 触发，递增 `epoch` 并入队进入对账。                                                                           | 静默失联到进入对账 `<= 60 s`。                             |
-| **FI-13** | **Fast Path 推理超过 120s（含可恢复 `provider_op_id` 与不可恢复 `uncertain` 两子场景）** | `115s` 软移交：`epoch 1->2`，保留同一 `turn_id`；旧 `epoch=1` 迟到提交被 `STALE_LEASE` 拒绝；有句柄仅轮询不重算，无句柄进入显式对账。 | 仅 1 次推理计费，仅 1 条终态消息。                         |
-| **FI-14** | **DST Spring-Forward / Fall-Back 周期调度**                                              | Spring-forward 在跳变后首有效时刻触发；Fall-back 同一本地日历槽仅触发一次。                                                           | 不漏触发、不双倍触发。                                     |
-| **FI-15** | **ADR-0001 取消 vs 重试/认领竞争 & ADR-0002 未领超时**                                   | 已提交取消优先于重试与新 Run 创建；未认领已过期任务直接 `queued -> failed` 且 `attempt_count = 0`。                                   | 取消后零新 Run；不虚构 Run。                               |
-| **FI-16** | **跨租户信封伪造 / 篡改攻击**                                                            | 消费者以服务端解析身份路由 DO，DO 校验 `tenant_id`/`agent_id` 不匹配立即拒绝并 ACK 丢弃。                                             | 跨租户零信息泄露、零状态变更。                             |
-
----
-
-## 11. M1 实施计划（本地 Fake Provider 验证阶段）
+### M0 本地隔离 Probe 声明与实测范围
 
 > [!NOTE]
-> 以下步骤仅在 M0 公共契约（Agent A + Agent B + Architect）经评审冻结后启动；M1 全程使用本地 Wrangler/Miniflare 与 Fake Provider，不创建云资源、不触发付费模型调用。
+> [v2-m0-event-recovery-probe.test.ts](../../tests/unit/v2-m0-event-recovery-probe.test.ts) 是**简化、隔离的 M0 本地协议探针**（基于两套内存 `node:sqlite` 实例 + 虚拟时钟 + 标记为 `probe_turns` / `probe_tasks` / `probe_model_attempts` 的测试假业务表），仅用于确定性验证本契约中 SQLite/D1 CAS 与状态机逻辑，**不能**当作真实 Cloudflare DO/D1/Queues 或端到端生产证明。真实 Workers/Miniflare 与 Fake Provider 端到端验证属于 M1 与 M0-D 门禁。
 
-1. **M1-B1：DO SQLite 与 D1 迁移及 Repository 实现（包：`@ember/v2-runtime` / `@ember/contracts` 扩展）**
-   - 落地 `v2_schedules`、`v2_dispatch_outbox`、`v2_execution_leases`、`v2_recovery_coverage` 的版本化事务性 DO 迁移，与 Agent A 业务表共用 `AgentHeadDO` 初始化/升级管线。
-   - 落地 D1 `v2_recovery_registry` 迁移与强类型 CAS 存储适配器。
-2. **M1-B2：AgentHeadDO Alarm 多路复用器与 Outbox Relay**
-   - 实现 `RecoveryAdmissionPort`、`EventRuntimeCoordinatorPort`、`computeEarliestAlarmAtMs()` 及 `alarm()` 有界批处理。
-   - 集成 Queue 消费者与 DLQ 处理器（`V2DispatchEnvelope` 封闭校验 + 租约 Fencing）。
-3. **M1-B3：Scheduled Worker 独立恢复与 Generation/Fencing 集成**
-   - 实现 `* * * * *` Sweeper Worker，串联 `claimDueMarkers`、`reconcileFromRegistry` 两阶段退役/延后及结构化延迟/积压观测指标。
-4. **M1-B4：Fast Path ↔ Durable Path 移交与 B1 兼容适配**
-   - 实现 `handoffToDurablePath`、`15s/45s/120s` 续租与超时移交、B1 Unknown-ACK（`GET /v1/message-submissions/{id}`）及 `transcript_epoch` 删除围栏测试。
-5. **M1-B5：M1 确定性故障注入与基准门禁验收**
-   - 在本地隔离测试环境中完整运行 `FI-01..FI-16`，并按第 9 节指标定义输出冷/热延迟（P50/P95/P99）、D1 读写计数与 DO SQLite 行写报告；**全部门禁通过后方可申请云端 PoC 审批**。
+---
+
+## 9. 确定性故障注入测试矩阵（覆盖 J1–J5）
+
+| 用例 ID   | 注入故障 / 竞态场景                                                                                                                         | 预期状态转换与恢复结果                                                                                                                                                   | 强制断言                                                   |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------- |
+| **FI-01** | **DO 写 `pending` 后、D1 CAS 前崩溃（含 `ensure`/`postpone`/`retire`）**                                                                    | 原 D1 到期标记触发 Sweeper，DO 读 `pending_kind` 与实际义务后即使 `observedGen` 落后仍升代 `repair_ensure` / 重放。                                                      | 禁止无条件 `noop_stale`；无用户流量完成修复。              |
+| **FI-02** | **D1 CAS 成功后、ACK 丢失 / `confirmCoverageSync` 前崩溃**                                                                                  | 读回 D1 权威 `readCoverage`；覆盖足够则确认，否则或已误删则升代 `repair_ensure`。                                                                                        | 不丢已接受义务或未来 Schedule。                            |
+| **FI-03** | **D1 拒绝 / 陈旧 `upsertCoverage`（并发更高代抢占）**                                                                                       | 返回 `{ accepted: false, currentGeneration, actualRecoveryAtMs }`；DO 不得按请求参数确认，必须重验或升代重试/Fail Closed。                                               | 绝不虚报 `'covered'`。                                     |
+| **FI-04** | **DO 提交后 `Queue.send()` 前崩溃 / `send()` 后更新 Outbox 前崩溃**                                                                         | 2s Alarm 补发；重复消息由 Outbox 精确五元组校验 + `fenceEpoch === currentLeaseEpoch` 判重 ACK。                                                                          | `duplicate_commit_count = 0`。                             |
+| **FI-05** | **伪造/篡改 Queue 信封（错误 `outbox_id` / `queue_name` / `entity_kind` / 跨租户 / 未来 `fenceEpoch > current` / 试图投递 `budget_sync`）** | DO 在写任何状态前全字段校验失败并拒绝，零表行修改。                                                                                                                      | 未来/陈旧/不匹配信封全部被拒。                             |
+| **FI-06** | **B1 60s 期限内 Re-enqueue 优雅期封顶**                                                                                                     | `next_attempt_at_ms` 被剩余 `deadline_at_ms - 5s` 封顶（下限 `5s` 防忙循环），期限前允许合规重试，超期按 ADR-0002 收敛。                                                 | 不因固定 60s 优雅期错过 B1 期限前重试。                    |
+| **FI-07** | **Queue 5 次重试耗尽进 DLQ**                                                                                                                | `applyOutboxDeadLetterSync` 仅更新匹配 `outbox_id + fenceEpoch`，重装退避 Alarm 或超期终态收敛。                                                                         | 零静默丢弃。                                               |
+| **FI-08** | **初次 Alarm + 全部 6 次重试失败（全客户端离线，含 Pending + 未来 Schedule）**                                                              | D1 保留未改写的 `next_recovery_at_ms`，Sweeper 检出并调用 `reconcileFromRegistry` 派发 Pending 并重装未来 Schedule Alarm。                                               | 发现 `<= 2 min`，恢复 `<= 5 min`，未来 Schedule 准时触发。 |
+| **FI-09** | **Sweeper RPC 失败进入 `backoff` / `quarantined` + 过期 Sweeper 回调**                                                                      | `next_recovery_at_ms` 保持不变，仅更新 `retry_not_before_ms`；`quarantined` 仍在索引中降频扫描；过期 `sweep_lease_owner` 回调被 CAS 拒绝；已覆盖对话照常零 D1 I/O 成功。 | 退避/隔离不破坏准入覆盖，依赖恢复后无需 App 自动自愈。     |
+| **FI-10** | **并发 Sweeper 退役 vs 已覆盖新对话 / 并发延后 vs 更早截止义务**                                                                            | 退役前 DO 先置 `'uncovered'` + `gen+1`，旧 `DELETE` 匹配 0 行；更早义务抢占 `gen+2` 与 `MIN(...)`，旧 `postpone` 匹配 0 行。                                             | 新对话与更早时间窗绝不被抹除。                             |
+| **FI-11** | **延后 `UPDATE` 遇 D1 不明确超时**                                                                                                          | DO 保留 `'registering'`（**不回退**旧 `'covered'`），后续重同步。                                                                                                        | 绝不误认为旧覆盖仍有效。                                   |
+| **FI-12** | **D1 不可用（Direct / 已覆盖 / 未覆盖 / Unknown-ACK）**                                                                                     | Direct 与已覆盖继续；未覆盖 Fail Closed 返回 `503 DB_UNAVAILABLE`；Unknown-ACK 经 B1 N-2 对账。                                                                          | B1 兼容，未覆盖零提交。                                    |
+| **FI-13** | **Fast Path `120s` 持续 15s 续租后移交（`105–115s`）vs 过期租约/超期/取消/错误 Owner 尝试移交**                                             | 持续续租下移交成功且 **`deadline_at_ms` 保持原 600s 不变**；过期（未续租 `>45s`）、超总期限、已取消或错误 Owner 的移交全部被拒绝。                                       | 移交绝不洗白过期租约或延长总期限。                         |
+| **FI-14** | **Fast Path 移交携带 `provider_job_handle` vs 缺失句柄不确定结果 + 静默失联 (`<= 60s`)**                                                    | 有句柄仅查询/轮询不重算；无句柄且已发出请求进入对账不盲重放；静默失联 45s 过期后 `<= 60s` 进入对账。                                                                     | 仅 1 次推理计费，仅 1 条终态结果。                         |
+| **FI-15** | **`budget_sync` 跨 `cancelTurn` / `clearTranscript` 存活 + `(operation_id, revision)` 迟到修正**                                            | Transcript 清空或 Turn 取消后 `budget_sync` 仍保持待中继且覆盖不被退休；`rev=1` 与迟到 `rev=2` 均幂等到达全局确认后才 `'acked'`。                                        | 会计义务绝不随会话删除丢失。                               |
+| **FI-16** | **DST Spring-Forward / Fall-Back 与 ADR-0001/0002**                                                                                         | Spring-forward 跳变后首有效时刻触发；Fall-back 不双倍触发；取消优先于重试；Pre-claim 超时不虚构 Run。                                                                    | 调度准确、取消绝对优先。                                   |
+
+---
+
+## 10. M1 实施计划（联合冻结后启动，本地 Fake Provider）
+
+> [!NOTE]
+> 须待 PR #170 + PR #171 + M0-D 基准门禁完成 Architect/CTO 联合冻结后方可实施；M1 全程使用本地 Miniflare/Wrangler 与 Fake Provider，不创建云资源、不调用付费 API、不手动触发 GitHub Actions。
+
+1. **M1-B1（共享 DDL 与迁移实现）**：在 `@ember/v2-runtime`（或规划工作区包）落地 `v2_schedules`、`v2_dispatch_outbox`、`v2_recovery_coverage` DO SQLite 迁移与 D1 `v2_recovery_registry` 迁移，并与 Agent A 业务表共用 `AgentHeadDO` 迁移入口。
+2. **M1-B2（Seam 端口与 Queue 闭环实现）**：实现 `RecoveryAdmissionPort`、`EventRuntimeCoordinatorPort`、`RecoveryRegistryPort`、`V2DispatchEnvelope` 闭环校验、B1 期限封顶 Re-enqueue 及 `budget_sync` 内部中继。
+3. **M1-B3（Alarm 多路复用与独立 Sweeper Worker）**：实现单 Alarm 调度批处理、`* * * * *` Sweeper Worker（含 `retry_not_before_ms` 退避/告警隔离与结构化指标采集）。
+4. **M1-B4（联合端到端与故障注入验证）**：与 Agent A 的真实 `AgentHeadDO` 业务表、Fast Path 续租/移交、`GlobalBudgetAuthority`（含 Metered Fake、Send CAS、迟到修正与跨 Agent Halt 传播）联合运行 `FI-01..FI-16`，向 M0-D 提供实测读写放大与延迟基准。

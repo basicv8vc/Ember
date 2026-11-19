@@ -16,6 +16,8 @@
 
 - [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)（[中文版](../adr/0006-experience-first-device-powered-runtime-v2.zh-CN.md)，以英文原版为准）：经产品负责人/CTO 批准并合并后为 Accepted；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。仅授权 M0 契约/Benchmark 和本地隔离 M1 Fake Provider PoC；M0 公共契约经架构师/CTO 审核后方可实施依赖性改动。云资源创建/部署/Smoke、真实供应商 Canary 支出、M2 及后续实施与生产迁移均须分别取得明确批准。
 
+- [V2-M0-B：Event Runtime & Recovery Contract](./v2-m0-event-recovery-contract.md)：M0 契约规范（待架构师/CTO 审核冻结）；定义 `v2_schedules` / `v2_dispatch_outbox` / `v2_execution_leases` / `v2_recovery_coverage` / `v2_recovery_registry` Schema 所有权、DO Alarm + Queue 可靠派发、Generation/Fencing 零同步 D1 准入与退役、D1 不可用降级边界、Alarm 6 次重试耗尽恢复方案、Fast Path → Durable Path 安全移交、确定性故障注入矩阵及 M1 实施计划。
+
 ## 决策权威和阅读顺序
 
 1. 对具体事项，优先遵守 `docs/adr/` 中明确标记 **Accepted** 的决策：

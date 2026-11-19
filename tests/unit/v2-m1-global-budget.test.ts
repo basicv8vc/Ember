@@ -1,7 +1,6 @@
 import { DatabaseSync, type SQLInputValue } from 'node:sqlite';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { GlobalBudgetLedger } from '../../packages/runtime-v2/src/global-budget/ledger.js';
-
 import { GLOBAL_BUDGET_SCHEMA } from '../../packages/runtime-v2/src/global-budget/schema.js';
 
 const day = '2026-11-19';
@@ -15,15 +14,21 @@ describe('Global budget SQLite authority', () => {
   let now: number;
   let grantSequence: number;
 
-  function openLedger(): GlobalBudgetLedger {
+  function openLedger(ceiling = 1_000): GlobalBudgetLedger {
     const storage = {
       sql: {
-        exec<T>(query: string, ...bindings: SQLInputValue[]) {
+        exec<T>(query: string, ...bindings: (SQLInputValue | ArrayBuffer)[]) {
           if (query === GLOBAL_BUDGET_SCHEMA) {
             db.exec(query);
             return { toArray: () => [] };
           }
-          const rows = db.prepare(query).all(...bindings) as T[];
+          const rows = db
+            .prepare(query)
+            .all(
+              ...bindings.map((value) =>
+                value instanceof ArrayBuffer ? new Uint8Array(value) : value,
+              ),
+            ) as T[];
           return { toArray: () => rows };
         },
       },
@@ -44,6 +49,7 @@ describe('Global budget SQLite authority', () => {
       storage,
       () => now,
       () => `grant-${++grantSequence}`,
+      ceiling,
     );
   }
 
@@ -116,6 +122,68 @@ describe('Global budget SQLite authority', () => {
     }
 
     expect(dayTotals()).toEqual({ reserved: 1_000, consumed: 0, overage: '0' });
+  });
+
+  it('rejects high → low → high caller overrides across tenants and splits late charges at the fixed ceiling', () => {
+    ledger = openLedger(500);
+    const attempt = (tenantId: string, ceilingMicroUsd: number) =>
+      ledger.reserveGlobal(request(tenantId, { tenantId, ceilingMicroUsd }));
+
+    expect(attempt('tenant-high-first', 1_000)).toEqual({ kind: 'budget_exceeded' });
+    expect(dayTotals()).toBeUndefined();
+    const grant = reserve('accepted', { ceilingMicroUsd: 500 });
+    const other = reserve('other', { tenantId: 'tenant-b', ceilingMicroUsd: 500 });
+    expect(ledger.authorizeGlobalSend(grant)).toMatchObject({ authorized: true });
+    expect(attempt('tenant-too-low', 250)).toEqual({ kind: 'budget_exceeded' });
+    expect(attempt('tenant-high-again', 1_000)).toEqual({ kind: 'budget_exceeded' });
+    expect(dayTotals()).toEqual({ reserved: 500, consumed: 0, overage: '0' });
+
+    expect(
+      ledger.settleGlobal({
+        ...grant,
+        settlementRevision: 1,
+        state: 'settled',
+        reservedMicroUsd: 250,
+        chargeMicroUsd: 400,
+        observedCostMicroUsd: 400,
+      }),
+    ).toMatchObject({ applied: true, incidentOpened: true });
+    expect(dayTotals()).toEqual({ reserved: 250, consumed: 250, overage: '150' });
+    expect(ledger.authorizeGlobalSend(other)).toEqual({ authorized: false });
+    expect(attempt('tenant-after-halt', 500)).toEqual({
+      kind: 'budget_halted',
+      reason: 'day_ceiling_exceeded',
+    });
+  });
+
+  it('keeps a committed UTC bucket pinned across a trusted configuration restart', () => {
+    const grant = reserve('old-config', { expiresAtMs: midnight + 3_000 });
+    expect(
+      ledger.reserveGlobal(request('caller-lower', { tenantId: 'tenant-b', ceilingMicroUsd: 500 })),
+    ).toEqual({ kind: 'budget_exceeded' });
+    ledger = openLedger(500);
+    expect(
+      ledger.reserveGlobal(
+        request('configured-lower', { tenantId: 'tenant-b', ceilingMicroUsd: 500 }),
+      ),
+    ).toEqual({ kind: 'budget_exceeded' });
+    expect(ledger.reserveGlobal(request('caller-higher', { tenantId: 'tenant-c' }))).toEqual({
+      kind: 'budget_exceeded',
+    });
+    expect(
+      ledger.settleGlobal({
+        ...grant,
+        settlementRevision: 0,
+        state: 'settled',
+        reservedMicroUsd: 250,
+        chargeMicroUsd: 200,
+        observedCostMicroUsd: 200,
+      }),
+    ).toMatchObject({ applied: true, incidentOpened: false });
+    now = midnight;
+    reserve('new-day', { utcDay: '2026-11-20', expiresAtMs: now + 1_000, ceilingMicroUsd: 500 });
+    expect(dayTotals()).toEqual({ reserved: 0, consumed: 200, overage: '0' });
+    expect(dayTotals('2026-11-20')).toEqual({ reserved: 250, consumed: 0, overage: '0' });
   });
 
   it('rolls back the day reservation if grant insertion fails', () => {
@@ -307,6 +375,7 @@ describe('Global budget SQLite authority', () => {
   });
 
   it('charges an expired grant on its original UTC day, splitting ceiling overage and halting other tenants', () => {
+    ledger = openLedger(250);
     const grant = reserve('original', { ceilingMicroUsd: 250 });
     expect(ledger.reserveGlobal(request('wrong-day', { utcDay: '2026-11-20' }))).toEqual({
       kind: 'budget_exceeded',
@@ -314,6 +383,7 @@ describe('Global budget SQLite authority', () => {
     now = midnight;
     const tomorrow = reserve('tomorrow', {
       utcDay: '2026-11-20',
+      ceilingMicroUsd: 250,
       tenantId: 'tenant-b',
       expiresAtMs: now + 5_000,
     });

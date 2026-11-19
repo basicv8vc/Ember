@@ -1,6 +1,6 @@
 # M1-E Global budget authority evidence
 
-[Raw latency samples](./global-budget-workerd-raw.json) measure each request from the local Node test client through a Worker fetch and Durable Object RPC to the SQLite authority. The different-operation burst starts with a cold Object. Its successful requests measure reserve and authorize sequentially per operation while other operations are still in flight. The duplicate bursts each send 32 concurrent calls against one operation. P95 uses the nearest-rank sample.
+[Raw latency samples](./global-budget-workerd-raw.json) from the isolated implementation at `3432745` measure each request from the local Node test client through a Worker fetch and Durable Object RPC to the SQLite authority. The different-operation burst starts with a cold Object. Its successful requests measure reserve and authorize sequentially per operation while other operations are still in flight. The duplicate bursts each send 32 concurrent calls against one operation. P95 uses the nearest-rank sample.
 
 | Burst                | Operation           | Samples |       P95 |
 | -------------------- | ------------------- | ------: | --------: |
@@ -14,11 +14,18 @@
 
 The first burst admitted 12 of 32 operations against a 3,000 micro-USD daily ceiling at 250 micro-USD each. The duplicate bursts produced one grant, one send authorization and one applied settlement. An idle alarm test evicted the Object before expiry and inspected SQL after the alarm without sending another budget RPC.
 
-The isolated fixture mounts the M1-E implementation in workerd. Runtime package registration and Agent Head integration depend on the merged M1 shared interfaces. The latency samples include local harness contention and cannot establish the 50 ms near-region production target.
+These historical measurements include local harness contention. The integrated Cold/Warm benchmarks and the 50 ms target are tracked by Agent D.
+
+## Local runtime wiring
+
+Export `GlobalBudgetDO` from `@ember/runtime-v2/global-budget-do` in the Worker and bind it as `GLOBAL_BUDGET` with a SQLite class migration. Keep the binding on the hosting Worker so the DO can verify its canonical ID. Spread `createAgentHeadGlobalBudgetOptions(env)` from `@ember/runtime-v2` into every `AgentHeadCore` constructor, and give Agent B's relay the existing `agentHead.createGlobalBudgetSettlePort()` adapter. Worker bindings select the same platform instance across Agent identities.
+
+The DO and Agent Head share the trusted `GLOBAL_DAILY_CEILING_MICRO_USD` configuration, defaulting to the V1 global daily limit. A configuration change applies to new UTC buckets. A bucket opened with the previous setting preserves its original cap for existing obligations and declines new reserves until the next UTC day.
 
 Run from the repository root with the workspace dependencies installed.
 
 ```sh
+pnpm build
 pnpm exec vitest run --config vitest.unit.config.ts tests/unit/v2-m1-global-budget.test.ts
 WRANGLER_SEND_METRICS=false EMBER_GLOBAL_BUDGET_EVIDENCE=/tmp/global-budget-workerd-raw.json pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-m1-global-budget-workerd.test.ts
 ```

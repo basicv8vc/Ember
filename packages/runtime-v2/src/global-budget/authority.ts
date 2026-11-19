@@ -12,10 +12,11 @@ export class GlobalBudgetAuthorityCore {
 
   constructor(
     private readonly storage: AlarmStorage,
+    dailyCeilingMicroUsd: number,
     private readonly nowMs: () => number = Date.now,
     newGrantId: () => string = () => globalThis.crypto.randomUUID(),
   ) {
-    this.ledger = new GlobalBudgetLedger(storage, nowMs, newGrantId);
+    this.ledger = new GlobalBudgetLedger(storage, nowMs, newGrantId, dailyCeilingMicroUsd);
   }
 
   reserveGlobal(req: Parameters<GlobalBudgetLedger['reserveGlobal']>[0]) {

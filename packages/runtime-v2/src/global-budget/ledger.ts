@@ -1,52 +1,24 @@
 import { MODEL_BUDGET_ABSOLUTE_CEILINGS } from '@ember/model-gateway';
 import { GLOBAL_BUDGET_SCHEMA } from './schema.js';
 
-type Row = Record<string, string | number | null>;
-type Binding = Row[string];
+import type {
+  GlobalBudgetAuthorizeSendRequest,
+  GlobalBudgetAuthorizeSendResult,
+  GlobalBudgetGrantState,
+  GlobalBudgetRenewGrantRequest,
+  GlobalBudgetRenewGrantResult,
+  GlobalBudgetReserveRequest,
+  GlobalBudgetReserveResult,
+  GlobalBudgetSettleRequest,
+  GlobalBudgetSettleResult,
+} from '../contracts/global-budget.js';
+import type { BudgetSyncIncidentReason } from '../recovery/envelope.js';
+import type { DurableObjectStorageLike, SqlStorageRow } from '../storage.js';
 
-interface LedgerStorage {
-  sql: { exec<T extends Row>(query: string, ...bindings: Binding[]): { toArray(): T[] } };
-  transactionSync<T>(run: () => T): T;
-}
+type Binding = SqlStorageRow[string];
 
-type SettlementState = 'settled' | 'conservative_billed' | 'unknown_billed' | 'released';
-type GrantState = 'reserved' | 'expired_consumed' | SettlementState;
-type IncidentReason = 'day_ceiling_exceeded' | 'reservation_exceeded' | 'usage_missing';
-
-type Reserve = {
-  tenantId: string;
-  principalId: string;
-  agentId: string;
-  operationId: string;
-  leaseEpoch: number;
-  utcDay: string;
-  amountMicroUsd: number;
-  ceilingMicroUsd: number;
-  expiresAtMs: number;
-};
-
-type GrantKey = { tenantId: string; operationId: string; globalGrantId: string };
-
-type Settle = GrantKey & {
-  settlementRevision: number;
-  state: SettlementState;
-  observedCostMicroUsd?: number | null;
-  chargeMicroUsd: number;
-  reservedMicroUsd: number;
-  openIncidentReason?: IncidentReason;
-};
-
-type ReserveResult =
-  | { kind: 'reserved'; globalGrantId: string; replayed: boolean }
-  | { kind: 'budget_exceeded' }
-  | { kind: 'budget_halted'; reason: IncidentReason };
-
-type SettleResult = {
-  applied: boolean;
-  alreadySettled: boolean;
-  conflict: boolean;
-  effectiveState: Exclude<GrantState, 'reserved'>;
-  incidentOpened: boolean;
+type LedgerStorage = Pick<DurableObjectStorageLike, 'transactionSync'> & {
+  sql: { exec<T extends SqlStorageRow>(query: string, ...bindings: Binding[]): { toArray(): T[] } };
 };
 
 type Grant = {
@@ -62,7 +34,7 @@ type Grant = {
   initial_expires_at_ms: number;
   expires_at_ms: number;
   authorized_at_ms: number | null;
-  state: GrantState;
+  state: 'reserved' | GlobalBudgetGrantState;
   cumulative_charge_micro_usd: number;
 };
 
@@ -80,7 +52,7 @@ function isSafeInteger(value: number, min = 0, max = Number.MAX_SAFE_INTEGER): b
   return Number.isSafeInteger(value) && value >= min && value <= max;
 }
 
-function settlementResponse(grant: Grant | undefined, conflict: boolean): SettleResult {
+function settlementResponse(grant: Grant | undefined, conflict: boolean): GlobalBudgetSettleResult {
   return {
     applied: false,
     alreadySettled: !conflict,
@@ -97,11 +69,17 @@ export class GlobalBudgetLedger {
     private readonly storage: LedgerStorage,
     private readonly nowMs: () => number,
     private readonly newGrantId: () => string,
+    private readonly dailyCeilingMicroUsd: number,
   ) {
+    if (
+      !isSafeInteger(dailyCeilingMicroUsd, 0, MODEL_BUDGET_ABSOLUTE_CEILINGS.globalDailyMicroUsd)
+    ) {
+      throw new Error('Invalid global daily budget ceiling');
+    }
     storage.transactionSync(() => storage.sql.exec(GLOBAL_BUDGET_SCHEMA));
   }
 
-  private exec<T extends Row>(query: string, ...bindings: Binding[]): T[] {
+  private exec<T extends SqlStorageRow>(query: string, ...bindings: Binding[]): T[] {
     return this.storage.sql.exec<T>(query, ...bindings).toArray();
   }
 
@@ -112,7 +90,7 @@ export class GlobalBudgetLedger {
     )[0];
   }
 
-  private ownedGrant(req: GrantKey): Grant | undefined {
+  private ownedGrant(req: GlobalBudgetAuthorizeSendRequest): Grant | undefined {
     const grant = this.grant(req.operationId);
     if (grant?.tenant_id === req.tenantId && grant.global_grant_id === req.globalGrantId) {
       return grant;
@@ -123,17 +101,19 @@ export class GlobalBudgetLedger {
     return this.exec<Day>('SELECT * FROM global_spend_days WHERE utc_day = ?', utcDay)[0];
   }
 
-  private halt(): IncidentReason | undefined {
-    return this.exec<{ reason: IncidentReason }>(
+  private halt(): BudgetSyncIncidentReason | undefined {
+    return this.exec<{ reason: BudgetSyncIncidentReason }>(
       'SELECT reason FROM global_budget_incidents WHERE resolved_at_ms IS NULL ORDER BY incident_id LIMIT 1',
     )[0]?.reason;
   }
 
-  reserveGlobal(req: Reserve): ReserveResult {
+  reserveGlobal(req: GlobalBudgetReserveRequest): GlobalBudgetReserveResult {
     return this.storage.transactionSync(() => {
       const now = this.nowMs();
       const reason = this.halt();
       if (reason) return { kind: 'budget_halted', reason };
+
+      if (req.ceilingMicroUsd !== this.dailyCeilingMicroUsd) return DENIED;
 
       const existing = this.grant(req.operationId);
       if (existing) {
@@ -157,19 +137,20 @@ export class GlobalBudgetLedger {
         req.utcDay !== new Date(now).toISOString().slice(0, 10) ||
         !isSafeInteger(req.leaseEpoch) ||
         !isSafeInteger(req.expiresAtMs, now + 1) ||
-        !isSafeInteger(req.amountMicroUsd, 1, MODEL_BUDGET_ABSOLUTE_CEILINGS.perAttemptMicroUsd) ||
-        !isSafeInteger(req.ceilingMicroUsd, 0, MODEL_BUDGET_ABSOLUTE_CEILINGS.globalDailyMicroUsd)
+        !isSafeInteger(req.amountMicroUsd, 1, MODEL_BUDGET_ABSOLUTE_CEILINGS.perAttemptMicroUsd)
       ) {
         return DENIED;
       }
 
       const day = this.day(req.utcDay);
-      const ceiling = Math.min(day?.ceiling_micro_usd ?? req.ceilingMicroUsd, req.ceilingMicroUsd);
+      // A trusted configuration change takes effect with a fresh UTC bucket. Keep
+      // historical holds and late settlements on the ceiling recorded with their day.
+      if (day && day.ceiling_micro_usd !== this.dailyCeilingMicroUsd) return DENIED;
       const required =
         BigInt(
           (day?.reserved_micro_usd ?? 0) + (day?.consumed_micro_usd ?? 0) + req.amountMicroUsd,
         ) + BigInt(day?.overage_micro_usd ?? '0');
-      if (required > BigInt(ceiling)) return DENIED;
+      if (required > BigInt(this.dailyCeilingMicroUsd)) return DENIED;
 
       const grantId = this.newGrantId();
       this.exec(
@@ -178,7 +159,7 @@ export class GlobalBudgetLedger {
          ON CONFLICT (utc_day) DO UPDATE SET
            reserved_micro_usd = reserved_micro_usd + excluded.reserved_micro_usd`,
         req.utcDay,
-        ceiling,
+        this.dailyCeilingMicroUsd,
         req.amountMicroUsd,
       );
       this.exec(
@@ -203,9 +184,7 @@ export class GlobalBudgetLedger {
     });
   }
 
-  authorizeGlobalSend(
-    req: GrantKey,
-  ): { authorized: true; startBeforeMs: number } | { authorized: false } {
+  authorizeGlobalSend(req: GlobalBudgetAuthorizeSendRequest): GlobalBudgetAuthorizeSendResult {
     return this.storage.transactionSync(() => {
       const now = this.nowMs();
       const bound = this.ownedGrant(req);
@@ -223,10 +202,7 @@ export class GlobalBudgetLedger {
     });
   }
 
-  renewGlobalGrant(req: GrantKey & { newExpiresAtMs: number }): {
-    renewed: boolean;
-    state: string;
-  } {
+  renewGlobalGrant(req: GlobalBudgetRenewGrantRequest): GlobalBudgetRenewGrantResult {
     return this.storage.transactionSync(() => {
       const now = this.nowMs();
       const bound = this.ownedGrant(req);
@@ -250,7 +226,7 @@ export class GlobalBudgetLedger {
     });
   }
 
-  settleGlobal(req: Settle): SettleResult {
+  settleGlobal(req: GlobalBudgetSettleRequest): GlobalBudgetSettleResult {
     return this.storage.transactionSync(() => {
       const now = this.nowMs();
       const bound = this.ownedGrant(req);
@@ -332,7 +308,7 @@ export class GlobalBudgetLedger {
         now,
       );
 
-      const reasons = new Set<IncidentReason>();
+      const reasons = new Set<BudgetSyncIncidentReason>();
       if (reportedIncident) reasons.add(reportedIncident);
       if (req.state === 'conservative_billed') reasons.add('usage_missing');
       if (dayOverage > 0) reasons.add('day_ceiling_exceeded');

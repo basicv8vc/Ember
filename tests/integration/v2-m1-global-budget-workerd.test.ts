@@ -1,12 +1,14 @@
+import { randomUUID } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import type { GlobalBudgetAuthorityCore } from '../../packages/runtime-v2/src/global-budget/authority.js';
+import { afterAll, afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type { GlobalBudgetAuthority } from '../../packages/runtime-v2/src/contracts/global-budget.js';
+import { GLOBAL_BUDGET_OBJECT_NAME } from '../../packages/runtime-v2/src/global-budget/platform.js';
 
-type Request = Parameters<GlobalBudgetAuthorityCore['reserveGlobal']>[0];
-type Result<Method extends keyof GlobalBudgetAuthorityCore> = Awaited<
-  ReturnType<GlobalBudgetAuthorityCore[Method]>
+type Request = Parameters<GlobalBudgetAuthority['reserveGlobal']>[0];
+type Result<Method extends keyof GlobalBudgetAuthority> = Awaited<
+  ReturnType<GlobalBudgetAuthority[Method]>
 >;
 
 interface WorkerdHarness {
@@ -26,13 +28,16 @@ interface WorkerdHarness {
 
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const requestModule = createRequire(new URL('../../apps/api/package.json', import.meta.url));
+const runtimePackage = createRequire(
+  new URL('../../packages/runtime-v2/package.json', import.meta.url),
+);
 const binding = 'GLOBAL_BUDGET';
 
 describe('isolated workerd GlobalBudgetDO authority', () => {
   let harness: WorkerdHarness;
   const evidence: Array<{ scenario: string; samples: unknown }> = [];
 
-  beforeAll(async () => {
+  beforeEach(async () => {
     const wrangler = (await import(requestModule.resolve('wrangler'))) as {
       createTestHarness(options: unknown): WorkerdHarness;
     };
@@ -45,10 +50,13 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
             main: 'tests/integration/support/v2-m1-global-budget.worker.mjs',
             compatibility_date: '2026-11-01',
             send_metrics: false,
+            compatibility_flags: ['nodejs_compat'],
+            vars: { GLOBAL_DAILY_CEILING_MICRO_USD: '3000' },
             alias: {
-              '@ember/model-gateway': fileURLToPath(
-                new URL('../../packages/model-gateway/src/limits.ts', import.meta.url),
+              '@ember/runtime-v2/global-budget-do': runtimePackage.resolve(
+                '@ember/runtime-v2/global-budget-do',
               ),
+              '@ember/runtime-v2': runtimePackage.resolve('@ember/runtime-v2'),
             },
             durable_objects: { bindings: [{ name: binding, class_name: 'GlobalBudgetDO' }] },
             migrations: [{ tag: 'v1', new_sqlite_classes: ['GlobalBudgetDO'] }],
@@ -59,8 +67,11 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
     await harness.listen();
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     await harness?.close();
+  });
+
+  afterAll(() => {
     if (process.env.EMBER_GLOBAL_BUDGET_EVIDENCE && evidence.length === 2) {
       writeFileSync(
         process.env.EMBER_GLOBAL_BUDGET_EVIDENCE,
@@ -81,29 +92,28 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
     }
   });
 
-  function reserveRequest(operationId: string, overrides: Partial<Request> = {}): Request {
+  function reserveRequest(overrides: Partial<Request> = {}): Request {
     const now = Date.now();
     return {
-      tenantId: `tenant-${operationId}`,
-      principalId: `principal-${operationId}`,
-      agentId: `agent-${operationId}`,
+      tenantId: randomUUID(),
+      principalId: randomUUID(),
+      agentId: randomUUID(),
       leaseEpoch: 1,
       utcDay: new Date(now).toISOString().slice(0, 10),
       amountMicroUsd: 250,
       ceilingMicroUsd: 3_000,
       expiresAtMs: now + 120_000,
-      operationId,
+      operationId: randomUUID(),
       ...overrides,
     };
   }
 
-  async function rpc<Method extends Exclude<keyof GlobalBudgetAuthorityCore, 'alarm'>>(
-    scenario: string,
+  async function rpc<Method extends keyof GlobalBudgetAuthority>(
     method: Method,
-    input: Parameters<GlobalBudgetAuthorityCore[Method]>[0],
+    input: Parameters<GlobalBudgetAuthority[Method]>[0],
   ): Promise<{ result: Result<Method>; ms: number }> {
     const started = performance.now();
-    const response = await harness.fetch(`/${scenario}/${method}`, {
+    const response = await harness.fetch(`/${method}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify(input),
@@ -113,19 +123,19 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
     return { result, ms: performance.now() - started };
   }
 
-  async function storage(name: string) {
-    return harness.getWorker().getDurableObjectStorage(binding, { name });
+  async function storage() {
+    return harness
+      .getWorker()
+      .getDurableObjectStorage(binding, { name: GLOBAL_BUDGET_OBJECT_NAME });
   }
 
   it('admits 12 of 32 concurrent reserves and captures reserve, authorize, and settle timings', async () => {
     const scenario = 'different-operations';
-    const requests = Array.from({ length: 32 }, (_, index) =>
-      reserveRequest(`concurrent-${index}`),
-    );
+    const requests = Array.from({ length: 32 }, () => reserveRequest());
     const paths = await Promise.all(
       requests.map(async (request) => {
         const started = performance.now();
-        const reserve = await rpc(scenario, 'reserveGlobal', request);
+        const reserve = await rpc('reserveGlobal', request);
         const { result } = reserve;
         const entry = {
           operationId: request.operationId,
@@ -138,7 +148,7 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
           operationId: request.operationId,
           globalGrantId: result.globalGrantId,
         };
-        const authorize = await rpc(scenario, 'authorizeGlobalSend', key);
+        const authorize = await rpc('authorizeGlobalSend', key);
         return {
           key,
           entry: {
@@ -154,14 +164,14 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
     expect(admitted).toHaveLength(12);
     expect(paths.filter(({ entry }) => entry.kind === 'budget_exceeded')).toHaveLength(20);
     expect(paths.filter(({ entry }) => 'authorized' in entry && entry.authorized)).toHaveLength(12);
-    const sql = await storage(scenario);
+    const sql = await storage();
     expect(
       await sql.exec('SELECT reserved_micro_usd, consumed_micro_usd FROM global_spend_days'),
     ).toEqual([{ reserved_micro_usd: 3_000, consumed_micro_usd: 0 }]);
 
     const settles = await Promise.all(
       admitted.map(async (key) => {
-        const { result, ms } = await rpc(scenario, 'settleGlobal', {
+        const { result, ms } = await rpc('settleGlobal', {
           ...key,
           settlementRevision: 0,
           state: 'settled',
@@ -184,9 +194,9 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
 
   it('allows one send and one settlement during duplicate bursts and persists them across eviction', async () => {
     const scenario = 'same-operation';
-    const request = reserveRequest('duplicate');
+    const request = reserveRequest();
     const reservations = await Promise.all(
-      Array.from({ length: 32 }, () => rpc(scenario, 'reserveGlobal', request)),
+      Array.from({ length: 32 }, () => rpc('reserveGlobal', request)),
     );
     const newGrants = reservations.flatMap(({ result }) =>
       result.kind === 'reserved' && !result.replayed ? [result.globalGrantId] : [],
@@ -201,11 +211,11 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
 
     const key = { tenantId: request.tenantId, operationId: request.operationId, globalGrantId };
     const authorizations = await Promise.all(
-      Array.from({ length: 32 }, () => rpc(scenario, 'authorizeGlobalSend', key)),
+      Array.from({ length: 32 }, () => rpc('authorizeGlobalSend', key)),
     );
     expect(authorizations.filter(({ result }) => result.authorized)).toHaveLength(1);
-    await harness.getWorker().evictDurableObject(binding, { name: scenario });
-    expect((await rpc(scenario, 'authorizeGlobalSend', key)).result).toEqual({ authorized: false });
+    await harness.getWorker().evictDurableObject(binding, { name: GLOBAL_BUDGET_OBJECT_NAME });
+    expect((await rpc('authorizeGlobalSend', key)).result).toEqual({ authorized: false });
 
     const report = {
       ...key,
@@ -215,16 +225,17 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
       chargeMicroUsd: 250,
     } as const;
     const settles = await Promise.all(
-      Array.from({ length: 32 }, () => rpc(scenario, 'settleGlobal', report)),
+      Array.from({ length: 32 }, () => rpc('settleGlobal', report)),
     );
     expect(settles.filter(({ result }) => result.applied)).toHaveLength(1);
     expect(settles.filter(({ result }) => result.alreadySettled && !result.conflict)).toHaveLength(
       31,
     );
-    expect(
-      (await rpc(scenario, 'settleGlobal', { ...report, chargeMicroUsd: 251 })).result,
-    ).toMatchObject({ conflict: true, alreadySettled: false });
-    const sql = await storage(scenario);
+    expect((await rpc('settleGlobal', { ...report, chargeMicroUsd: 251 })).result).toMatchObject({
+      conflict: true,
+      alreadySettled: false,
+    });
+    const sql = await storage();
     expect(await sql.exec('SELECT delta_micro_usd FROM global_budget_settlements')).toEqual([
       { delta_micro_usd: 250 },
     ]);
@@ -245,13 +256,40 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
     });
   });
 
-  it('expires via a real idle alarm after eviction, denies refund, and halts on late overage', async () => {
-    const scenario = 'ttl';
-    const request = reserveRequest('earliest', {
-      expiresAtMs: Date.now() + 1_500,
-      ceilingMicroUsd: 500,
+  it('enforces strict canonical RPC validation and one configured ceiling across Agent identities', async () => {
+    const first = reserveRequest();
+    const differentAgent = reserveRequest();
+    expect(first.tenantId).not.toBe(differentAgent.tenantId);
+    expect(first.agentId).not.toBe(differentAgent.agentId);
+    await expect(
+      harness.fetch('/wrong-instance', {
+        method: 'POST',
+        body: JSON.stringify(first),
+      }),
+    ).rejects.toThrow('Unexpected GlobalBudgetDO instance');
+    await expect(rpc('reserveGlobal', { ...first, agentId: 'invalid-id' })).rejects.toThrow();
+    await expect(rpc('reserveGlobal', { ...first, unexpected: true } as Request)).rejects.toThrow();
+    expect((await rpc('reserveGlobal', { ...first, ceilingMicroUsd: 5_000 })).result).toEqual({
+      kind: 'budget_exceeded',
     });
-    const { result } = await rpc(scenario, 'reserveGlobal', request);
+    expect((await rpc('reserveGlobal', first)).result).toMatchObject({ kind: 'reserved' });
+    expect(
+      (await rpc('reserveGlobal', { ...differentAgent, ceilingMicroUsd: 500 })).result,
+    ).toEqual({ kind: 'budget_exceeded' });
+    const other = (await rpc('reserveGlobal', differentAgent)).result;
+    expect(other).toMatchObject({ kind: 'reserved' });
+    expect(
+      (await rpc('reserveGlobal', { ...reserveRequest(), ceilingMicroUsd: 5_000 })).result,
+    ).toEqual({ kind: 'budget_exceeded' });
+    const sql = await storage();
+    expect(
+      await sql.exec('SELECT ceiling_micro_usd, reserved_micro_usd FROM global_spend_days'),
+    ).toEqual([{ ceiling_micro_usd: 3_000, reserved_micro_usd: 500 }]);
+  });
+
+  it('expires via a real idle alarm after eviction, denies refund, and halts on late overage', async () => {
+    const request = reserveRequest({ expiresAtMs: Date.now() + 1_500 });
+    const { result } = await rpc('reserveGlobal', request);
     if (result.kind !== 'reserved') throw new Error('Expected grant');
     const key = {
       tenantId: request.tenantId,
@@ -259,15 +297,16 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
       globalGrantId: result.globalGrantId,
     };
 
-    const other = reserveRequest('other-tenant', { ceilingMicroUsd: 500 });
-    const second = (await rpc(scenario, 'reserveGlobal', other)).result;
+    const other = reserveRequest();
+    const second = (await rpc('reserveGlobal', other)).result;
     if (second.kind !== 'reserved') throw new Error('Expected second grant');
     const extension = request.expiresAtMs + 500;
-    expect(
-      (await rpc(scenario, 'renewGlobalGrant', { ...key, newExpiresAtMs: extension })).result,
-    ).toEqual({ renewed: true, state: 'reserved' });
-    await harness.getWorker().evictDurableObject(binding, { name: scenario });
-    const sql = await storage(scenario);
+    expect((await rpc('renewGlobalGrant', { ...key, newExpiresAtMs: extension })).result).toEqual({
+      renewed: true,
+      state: 'reserved',
+    });
+    await harness.getWorker().evictDurableObject(binding, { name: GLOBAL_BUDGET_OBJECT_NAME });
+    const sql = await storage();
     const readState = () =>
       sql.exec(
         'SELECT state FROM global_budget_reservations WHERE operation_id = ?',
@@ -285,39 +324,39 @@ describe('isolated workerd GlobalBudgetDO authority', () => {
       reservedMicroUsd: 250,
       chargeMicroUsd: 0,
     } as const;
-    expect((await rpc(scenario, 'settleGlobal', initial)).result).toMatchObject({
+    expect((await rpc('settleGlobal', initial)).result).toMatchObject({
       applied: false,
       alreadySettled: true,
       effectiveState: 'expired_consumed',
     });
     expect(
       (
-        await rpc(scenario, 'settleGlobal', {
+        await rpc('settleGlobal', {
           ...initial,
           settlementRevision: 1,
           state: 'settled',
-          chargeMicroUsd: 350,
-          observedCostMicroUsd: 350,
+          chargeMicroUsd: 2_850,
+          observedCostMicroUsd: 2_850,
         })
       ).result,
     ).toMatchObject({ applied: true, incidentOpened: true });
     expect(
       (
-        await rpc(scenario, 'authorizeGlobalSend', {
+        await rpc('authorizeGlobalSend', {
           tenantId: other.tenantId,
           operationId: other.operationId,
           globalGrantId: second.globalGrantId,
         })
       ).result,
     ).toEqual({ authorized: false });
-    expect(
-      (await rpc(scenario, 'reserveGlobal', reserveRequest('third', { ceilingMicroUsd: 500 })))
-        .result,
-    ).toEqual({ kind: 'budget_halted', reason: 'day_ceiling_exceeded' });
+    expect((await rpc('reserveGlobal', reserveRequest())).result).toEqual({
+      kind: 'budget_halted',
+      reason: 'day_ceiling_exceeded',
+    });
     expect(
       await sql.exec(
         'SELECT reserved_micro_usd, consumed_micro_usd, overage_micro_usd FROM global_spend_days',
       ),
-    ).toEqual([{ reserved_micro_usd: 250, consumed_micro_usd: 250, overage_micro_usd: '100' }]);
+    ).toEqual([{ reserved_micro_usd: 250, consumed_micro_usd: 2_750, overage_micro_usd: '100' }]);
   });
 });

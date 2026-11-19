@@ -1,0 +1,273 @@
+import { ModelGatewayFailure } from './errors.js';
+import {
+  FAKE_STREAM_MAX_REPLY_CHARS,
+  FAKE_V2_RATE_VERSION,
+  type FakeConversationJobStatus,
+  type FakeConversationStreamEvent,
+  type FakeConversationStreamRequest,
+  type FakeConversationUsageStatus,
+} from './fake-stream.js';
+import { FAKE_MODEL_LABEL } from './fake.js';
+import type { ModelUsage } from './types.js';
+
+const MAX_FRAME_CHARS = 32 * 1024;
+const JOB_HANDLE = /^[a-z0-9_-]{1,128}$/i;
+
+/** Transport for D's local fake-provider server. The server owns the shared provider job store. */
+export class LoopbackFakeModelGateway {
+  private readonly origin: string;
+
+  constructor(
+    url: string,
+    private readonly fetcher: typeof fetch = fetch,
+  ) {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== 'http:' ||
+      !['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname) ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      throw new TypeError('fake provider requires a loopback HTTP origin');
+    }
+    this.origin = parsed.origin;
+  }
+
+  async *streamConversationTurn(
+    request: FakeConversationStreamRequest,
+    signal: AbortSignal,
+  ): AsyncGenerator<FakeConversationStreamEvent, void> {
+    const response = await this.request('/v2/fake-model/stream', signal, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-ember-operation-id': request.operationId,
+        'x-ember-turn-id': request.input.turnId,
+      },
+      body: JSON.stringify({
+        prompt: request.input.context.at(-1)?.text ?? '',
+        deadlineAtMs: request.deadlineAtMs,
+      }),
+    });
+    if (
+      !response.ok ||
+      response.body === null ||
+      !response.headers.get('content-type')?.startsWith('text/event-stream')
+    ) {
+      void response.body?.cancel().catch(() => undefined);
+      const code =
+        response.status === 429
+          ? 'model_rate_limited'
+          : response.status === 504
+            ? 'model_timeout'
+            : 'model_unavailable';
+      throw new ModelGatewayFailure(code);
+    }
+
+    for await (const frame of readFakeFrames(response.body)) {
+      switch (frame.event) {
+        case 'job_handle': {
+          const handle = frame.data.providerJobHandle;
+          if (
+            typeof handle !== 'string' ||
+            !JOB_HANDLE.test(handle) ||
+            frame.data.modelLabel !== FAKE_MODEL_LABEL
+          ) {
+            throw new ModelGatewayFailure('model_invalid_output');
+          }
+          yield { kind: 'job', handle };
+          break;
+        }
+        case 'progress':
+          yield { kind: 'progress' };
+          break;
+        case 'delta':
+          if (typeof frame.data.text !== 'string')
+            throw new ModelGatewayFailure('model_invalid_output');
+          yield { kind: 'delta', text: frame.data.text };
+          break;
+        case 'done':
+          if (
+            frame.data.operationId !== undefined &&
+            frame.data.operationId !== request.operationId
+          ) {
+            throw new ModelGatewayFailure('model_invalid_output');
+          }
+          yield { kind: 'result', result: toFakeReply(frame.data) };
+          return;
+      }
+    }
+  }
+
+  async queryConversationJob(
+    operationId: string,
+    handle: string,
+    signal: AbortSignal,
+  ): Promise<FakeConversationJobStatus> {
+    if (!JOB_HANDLE.test(handle)) return { state: 'unavailable' };
+    const data = await this.readJson(
+      `/v2/fake-model/jobs/${encodeURIComponent(handle)}`,
+      operationId,
+      signal,
+    );
+    if (data?.handle !== handle) return { state: 'unavailable' };
+    if (data.status === 'running') return { state: 'pending' };
+    return data.status === 'completed'
+      ? { state: 'completed', result: toFakeReply(data) }
+      : { state: 'unavailable' };
+  }
+
+  async queryConversationUsage(
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<FakeConversationUsageStatus> {
+    const data = await this.readJson(
+      `/v2/fake-model/operations/${encodeURIComponent(operationId)}/usage`,
+      operationId,
+      signal,
+    );
+    if (data?.status === 'running') return { state: 'pending' };
+    return data?.status === 'completed'
+      ? { state: 'completed', usage: parseUsage(data.usage) }
+      : { state: 'unavailable' };
+  }
+
+  async queryUsageRevision(operationId: string, signal: AbortSignal) {
+    const data = await this.readJson(
+      `/v2/fake-model/revisions/${encodeURIComponent(operationId)}`,
+      operationId,
+      signal,
+    );
+    if (data === null) return null;
+    const { settlementRevision, cumulativeChargeMicroUsd } = data;
+    if (
+      !isCounter(settlementRevision) ||
+      settlementRevision === 0 ||
+      !isCounter(cumulativeChargeMicroUsd)
+    ) {
+      throw new ModelGatewayFailure('model_invalid_output');
+    }
+    return { operationId, settlementRevision, cumulativeChargeMicroUsd };
+  }
+
+  private request(path: string, signal: AbortSignal, init?: RequestInit): Promise<Response> {
+    signal.throwIfAborted();
+    return this.fetcher(this.origin + path, { ...init, signal, redirect: 'error' });
+  }
+
+  private async readJson(path: string, operationId: string, signal: AbortSignal) {
+    const response = await this.request(path, signal, {
+      headers: { 'x-ember-operation-id': operationId },
+    });
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => undefined);
+      if (response.status === 404) return null;
+      throw new ModelGatewayFailure('model_unavailable');
+    }
+    const body = await readBoundedFakeJson(response);
+    return body.operationId === operationId ? body : null;
+  }
+}
+
+function toFakeReply(data: Record<string, unknown>) {
+  const fake =
+    (data.modelLabel === undefined || data.modelLabel === FAKE_MODEL_LABEL) &&
+    data.simulated !== false;
+  return {
+    output: {
+      kind: 'reply' as const,
+      finishReason: 'stop' as const,
+      text:
+        fake && typeof data.text === 'string' && data.text.length <= FAKE_STREAM_MAX_REPLY_CHARS
+          ? data.text
+          : '',
+    },
+    modelLabel: FAKE_MODEL_LABEL,
+    simulated: true,
+    usage: fake ? parseUsage(data.usage) : null,
+  };
+}
+
+function parseUsage(value: unknown): ModelUsage | null {
+  if (!isRecord(value)) return null;
+  const { inputTokens, outputTokens, costMicroUsd, rateVersion } = value;
+  if (
+    !isCounter(costMicroUsd) ||
+    !isCounter(inputTokens) ||
+    !isCounter(outputTokens) ||
+    rateVersion !== FAKE_V2_RATE_VERSION
+  )
+    return null;
+  return { inputTokens, outputTokens, costMicroUsd, rateVersion };
+}
+
+function isCounter(value: unknown): value is number {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function parseJson(data: string): Record<string, unknown> {
+  let value: unknown;
+  try {
+    value = JSON.parse(data);
+  } catch {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  if (!isRecord(value)) throw new ModelGatewayFailure('model_invalid_output');
+  return value;
+}
+
+async function readBoundedFakeJson(response: Response): Promise<Record<string, unknown>> {
+  if (response.body === null) throw new ModelGatewayFailure('model_invalid_output');
+  let content = '';
+  for await (const chunk of decodeChunks(response.body)) {
+    content += chunk;
+    if (content.length > MAX_FRAME_CHARS) throw new ModelGatewayFailure('model_invalid_output');
+  }
+  return parseJson(content);
+}
+
+async function* readFakeFrames(body: ReadableStream<Uint8Array>) {
+  let buffer = '';
+  for await (const chunk of decodeChunks(body)) {
+    buffer = (buffer + chunk).replaceAll('\r\n', '\n');
+    for (let end = buffer.indexOf('\n\n'); end >= 0; end = buffer.indexOf('\n\n')) {
+      if (end > MAX_FRAME_CHARS) throw new ModelGatewayFailure('model_invalid_output');
+      const frame = buffer.slice(0, end);
+      buffer = buffer.slice(end + 2);
+      const lines = frame.split('\n');
+      const event = lines
+        .find((line) => line.startsWith('event:'))
+        ?.slice(6)
+        .trim();
+      const data = lines
+        .filter((line) => line.startsWith('data:'))
+        .map((line) => line.slice(5).trimStart())
+        .join('\n');
+      if (event !== undefined && data !== '') yield { event, data: parseJson(data) };
+    }
+    if (buffer.length > MAX_FRAME_CHARS) throw new ModelGatewayFailure('model_invalid_output');
+  }
+}
+
+async function* decodeChunks(body: ReadableStream<Uint8Array>) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  try {
+    for (;;) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      yield decoder.decode(chunk.value, { stream: true });
+    }
+    yield decoder.decode();
+  } finally {
+    void reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+  }
+}

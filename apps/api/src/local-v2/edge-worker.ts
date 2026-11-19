@@ -2,6 +2,7 @@ import { B1SendMessageReceiptSchema, B1SendMessageRequestSchema, IdSchema } from
 import { DomainError, isDomainError, type AuthContext } from '@ember/domain';
 import {
   FAKE_MODEL_LABEL,
+  FAKE_V2_RATE_VERSION,
   MODEL_LIMITS,
   type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
@@ -32,6 +33,7 @@ import {
   INTERACTIVE_TIMING,
   executeInteractive,
   type InteractiveExecution,
+  type ReportObservedTurnUsage,
 } from './interactive-executor.js';
 import type { EdgeAgentHeadRpc, PrepareTurnRequest, ResolvedMessageAttachment } from './rpc.js';
 
@@ -42,6 +44,9 @@ const B1_DURABLE_TIMING = {
   interactiveDeadlineMs: 22_000,
   turnDeadlineMs: MODEL_LIMITS.turnDeadlineMs,
 };
+// D's ordinary fake completion reports 120 micro-USD. Leave room for normal simulated
+// calls and use larger scripted amounts to exercise the actual overage path.
+const SIMULATED_RESERVATION_MICRO_USD = 250;
 const SSE_MAX_BUFFERED_BYTES = 32 * 1024;
 const SSE_ENCODER = new TextEncoder();
 
@@ -65,7 +70,10 @@ export interface LocalV2EdgeDependencies {
     auth: AuthContext,
     ids: readonly string[],
   ): Promise<readonly ResolvedMessageAttachment[]>;
-  readonly stream?: { readonly gateway: Pick<FakeStreamingModelGateway, 'streamConversationTurn'> };
+  readonly stream?: {
+    readonly gateway: Pick<FakeStreamingModelGateway, 'streamConversationTurn'>;
+    readonly reportObservedUsage: ReportObservedTurnUsage;
+  };
 }
 
 /** Separate Worker fetch handler for local composition. The existing API does not mount it. */
@@ -146,9 +154,9 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
               budgetMode: 'simulated_full_protocol',
               providerId: 'fake',
               modelLabel: FAKE_MODEL_LABEL,
-              rateVersion: 'fake-zero-cost',
+              rateVersion: FAKE_V2_RATE_VERSION,
               maxAttempts: 1,
-              estimatedMicroUsd: 1,
+              estimatedMicroUsd: SIMULATED_RESERVATION_MICRO_USD,
             },
           }),
         );
@@ -314,6 +322,7 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
                     : executeInteractive({
                         rpc: resolved.rpc,
                         gateway: stream.gateway,
+                        reportObservedUsage: stream.reportObservedUsage,
                         prepared: outcome,
                         scope: { tenantId: scope.tenantId, agentId: scope.agentId },
                         conversationId: resolved.conversationId,

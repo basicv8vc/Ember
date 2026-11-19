@@ -21,6 +21,10 @@ export const INTERACTIVE_TIMING = {
   providerIdleMs: 30_000,
 } as const;
 
+const USAGE_DRAIN_MS = 1_000;
+const USAGE_REPORT_TIMEOUT_MS = 1_000;
+const INTERRUPTED_RPC_TIMEOUT_MS = 2_500;
+
 type StopReason = 'disconnect' | 'handoff_window' | 'provider_idle' | 'lease_lost' | 'phase_ended';
 type SendState = 'unsent' | 'unknown' | 'authorized';
 type StreamResult = Extract<FakeConversationStreamEvent, { kind: 'result' }>['result'];
@@ -29,9 +33,28 @@ type ExecutorRpc = Pick<
   'markAttemptSent' | 'renewTurnLease' | 'handoffTurnToDurable' | 'commitTurn'
 >;
 
+/** Trusted, cumulative provider receipt scoped to the originally authorized attempt. */
+export interface ObservedTurnUsage {
+  readonly scope: HeadScope;
+  readonly turnId: string;
+  readonly attemptNo: number;
+  readonly operationId: string;
+  readonly observedCostMicroUsd: number;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+}
+
+/**
+ * The local runtime host submits evidence to the attempt authority. Repeated receipts for an
+ * operation must be idempotent alongside commitTurn and Durable recovery. This port only records
+ * usage, including after the Turn has been cleared, and has no publication or dispatch capability.
+ */
+export type ReportObservedTurnUsage = (receipt: ObservedTurnUsage) => Promise<void>;
+
 export interface InteractiveExecution {
   readonly rpc: ExecutorRpc;
   readonly gateway: Pick<FakeStreamingModelGateway, 'streamConversationTurn'>;
+  readonly reportObservedUsage: ReportObservedTurnUsage;
   readonly prepared: PreparedTurn;
   readonly scope: HeadScope;
   readonly conversationId: string;
@@ -45,7 +68,17 @@ export interface InteractiveExecution {
 }
 
 export async function executeInteractive(execution: InteractiveExecution): Promise<void> {
-  const { rpc, gateway, prepared, scope, conversationId, workerId, signal, emit } = execution;
+  const {
+    rpc,
+    gateway,
+    reportObservedUsage,
+    prepared,
+    scope,
+    conversationId,
+    workerId,
+    signal,
+    emit,
+  } = execution;
   const { attemptNo, operationId, turnId, leaseEpoch } = prepared;
   const fence = { scope, conversationId, turnId, leaseEpoch, leaseOwner: workerId };
   const attempt = { ...fence, attemptNo, operationId };
@@ -64,6 +97,10 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
   let leaseExpiresAt = prepared.leaseExpiresAtMs ?? acceptedAt;
   let jobHandle: string | undefined;
   let sendState: SendState = 'unsent';
+  let observedUsage: ObservedTurnUsage | undefined;
+  let usageReportStarted = false;
+  let pendingProviderRead: Promise<IteratorResult<FakeConversationStreamEvent, void>> | undefined;
+  let invalidOutput = false;
 
   const stop = new AbortController();
   const phase = new AbortController();
@@ -174,7 +211,17 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     let streamedChars = 0;
     try {
       for (;;) {
-        const frame = await untilAbort(provider.next(), stop.signal);
+        stop.signal.throwIfAborted();
+        // Keep observing the one already-issued read if abort wins. Its response may contain
+        // billing even when the executor has lost permission to use the text.
+        pendingProviderRead = provider.next().then((frame) => {
+          if (!frame.done && frame.value.kind === 'result') {
+            const result = frame.value.result;
+            observedUsage = toObservedUsage({ scope, turnId, attemptNo, operationId }, result);
+          }
+          return frame;
+        });
+        const frame = await untilAbort(pendingProviderRead, stop.signal);
         stop.signal.throwIfAborted();
         if (frame.done) throw new ModelGatewayFailure('model_invalid_output');
 
@@ -183,35 +230,48 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
         if (event.kind === 'job') jobHandle = event.handle;
         if (event.kind === 'delta') {
           streamedChars += event.text.length;
-          if (streamedChars > FAKE_STREAM_MAX_REPLY_CHARS) {
-            throw new ModelGatewayFailure('model_invalid_output');
-          }
-          emit('turn.delta', { turn_id: turnId, text: event.text });
+          invalidOutput ||= streamedChars > FAKE_STREAM_MAX_REPLY_CHARS;
+          if (!invalidOutput) emit('turn.delta', { turn_id: turnId, text: event.text });
         }
-        if (event.kind === 'result') {
-          if (
-            event.result.output.text.length > FAKE_STREAM_MAX_REPLY_CHARS ||
-            event.result.output.text.trim().length === 0 ||
-            !event.result.simulated
-          ) {
-            throw new ModelGatewayFailure('model_invalid_output');
-          }
-          return event.result;
-        }
+        if (event.kind === 'result') return event.result;
       }
     } finally {
       void provider.return().catch(() => undefined);
     }
   }
 
-  async function publish(command: CommitTurnRequest): Promise<void> {
-    const committed = await untilAbort(rpc.commitTurn(command), phase.signal);
-    if (committed.outcome === 'published' && !signal.aborted) {
-      emit('turn.committed', {
-        turn: B1AssistantTurnDtoSchema.parse(committed.turn),
-        response_message_id: IdSchema.parse(committed.responseMessageId),
-        sequence: committed.sequence,
-      });
+  async function reportUsage(): Promise<void> {
+    const receipt = observedUsage;
+    if (receipt === undefined || usageReportStarted) return;
+    usageReportStarted = true;
+    try {
+      await withinTimeout(() => reportObservedUsage(receipt), USAGE_REPORT_TIMEOUT_MS);
+    } catch {
+      // A provider receipt remains queryable when the provider supports recovery. An unknown
+      // accounting ACK must not trigger another provider call or a replacement settlement.
+    }
+  }
+
+  async function publish(command: CommitTurnRequest, interrupted = false): Promise<void> {
+    let recorded = false;
+    try {
+      const committed = interrupted
+        ? await withinTimeout(
+            () => untilAbort(rpc.commitTurn(command), phase.signal),
+            INTERRUPTED_RPC_TIMEOUT_MS,
+          )
+        : await untilAbort(rpc.commitTurn(command), AbortSignal.any([phase.signal, signal]));
+      recorded = committed.outcome === 'published';
+      if (committed.outcome === 'published' && !signal.aborted && !phase.signal.aborted) {
+        emit('turn.committed', {
+          turn: B1AssistantTurnDtoSchema.parse(committed.turn),
+          response_message_id: IdSchema.parse(committed.responseMessageId),
+          sequence: committed.sequence,
+        });
+      }
+    } finally {
+      // A fenced commit or lost ACK can still leave accounting for the original operation due.
+      if (!recorded) await reportUsage();
     }
   }
 
@@ -231,13 +291,17 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
       (reason === 'handoff_window' &&
         Date.now() <= acceptedAt + INTERACTIVE_TIMING.handoffLatestMs);
     if (wantsHandoff && (jobHandle !== undefined || sendState === 'unsent')) {
-      const handoff = await untilAbort(
-        rpc.handoffTurnToDurable({
-          ...fence,
-          reason: disconnected ? 'client_disconnect_handoff' : 'interactive_deadline_120s',
-          ...(jobHandle === undefined ? {} : { providerJobHandle: jobHandle }),
-        }),
-        phase.signal,
+      const handoff = await withinTimeout(
+        () =>
+          untilAbort(
+            rpc.handoffTurnToDurable({
+              ...fence,
+              reason: disconnected ? 'client_disconnect_handoff' : 'interactive_deadline_120s',
+              ...(jobHandle === undefined ? {} : { providerJobHandle: jobHandle }),
+            }),
+            phase.signal,
+          ),
+        INTERRUPTED_RPC_TIMEOUT_MS,
       );
       if (handoff.outcome === 'handed_off' && !signal.aborted) {
         emit('turn.handed_off', { turn_id: turnId, status: 'running' });
@@ -245,7 +309,10 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
       return;
     }
 
-    if (sendState === 'unknown') return;
+    if (sendState === 'unknown' || observedUsage !== undefined) return;
+    if (phase.signal.aborted || Date.now() >= Math.min(phaseEndsAt, leaseExpiresAt, deadlineAtMs)) {
+      return;
+    }
     const timedOut =
       reason === 'provider_idle' ||
       reason === 'handoff_window' ||
@@ -258,16 +325,19 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
           ? error.code
           : 'model_unavailable';
 
-    await publish({
-      ...attempt,
-      settlement:
-        sendState === 'unsent'
-          ? { state: 'released', outcomeCode: 'not_sent' }
-          : { state: 'unknown_billed', outcomeCode },
-      result: disconnected
-        ? { status: 'aborted_for_retry_or_reconcile' }
-        : { status: 'failed', failureReason: timedOut ? 'timeout' : 'internal_error' },
-    });
+    await publish(
+      {
+        ...attempt,
+        settlement:
+          sendState === 'unsent'
+            ? { state: 'released', outcomeCode: 'not_sent' }
+            : { state: 'unknown_billed', outcomeCode },
+        result: disconnected
+          ? { status: 'aborted_for_retry_or_reconcile' }
+          : { status: 'failed', failureReason: timedOut ? 'timeout' : 'internal_error' },
+      },
+      true,
+    );
   }
 
   signal.addEventListener('abort', disconnect, { once: true });
@@ -286,34 +356,51 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
       stop.signal.throwIfAborted();
     } catch (error) {
       stopExecutionTimers();
-      await handleInterrupted(error);
+      try {
+        if (stop.signal.aborted && pendingProviderRead !== undefined) {
+          const inFlight = pendingProviderRead;
+          await withinTimeout(() => inFlight, USAGE_DRAIN_MS).catch(() => undefined);
+        }
+        await handleInterrupted(error);
+      } finally {
+        await reportUsage();
+      }
       return;
     }
 
     stopExecutionTimers();
-    if (reply === undefined || Date.now() >= Math.min(leaseExpiresAt, phaseEndsAt, deadlineAtMs)) {
+    if (reply === undefined) return;
+    if (stop.signal.aborted || Date.now() >= Math.min(leaseExpiresAt, phaseEndsAt, deadlineAtMs)) {
+      await reportUsage();
       return;
     }
 
-    const usage = reply.usage;
+    invalidOutput ||=
+      reply.output.text.length > FAKE_STREAM_MAX_REPLY_CHARS ||
+      reply.output.text.trim().length === 0 ||
+      !reply.simulated;
+    const { observedCostMicroUsd, inputTokens, outputTokens } = observedUsage ?? {};
+    const settlement: CommitTurnRequest['settlement'] =
+      observedCostMicroUsd === undefined
+        ? { state: 'conservative_billed', outcomeCode: 'usage_missing' }
+        : {
+            state: 'settled',
+            outcomeCode: invalidOutput ? 'model_invalid_output' : 'ok',
+            observedCostMicroUsd,
+            ...(inputTokens === undefined ? {} : { inputTokens }),
+            ...(outputTokens === undefined ? {} : { outputTokens }),
+          };
     await publish({
       ...attempt,
-      settlement:
-        usage === null
-          ? { state: 'conservative_billed', outcomeCode: 'usage_missing' }
-          : {
-              state: 'settled',
-              outcomeCode: 'ok',
-              observedCostMicroUsd: usage.costMicroUsd,
-              inputTokens: usage.inputTokens,
-              outputTokens: usage.outputTokens,
-            },
-      result: {
-        status: 'completed',
-        text: reply.output.text,
-        modelLabel: FAKE_MODEL_LABEL,
-        simulated: true,
-      },
+      settlement,
+      result: invalidOutput
+        ? { status: 'failed', failureReason: 'internal_error' }
+        : {
+            status: 'completed',
+            text: reply.output.text,
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+          },
     });
   } finally {
     abort('phase_ended');
@@ -331,4 +418,32 @@ function untilAbort<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
     void work.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
     if (signal.aborted) abort();
   });
+}
+
+function toObservedUsage(
+  key: Pick<ObservedTurnUsage, 'scope' | 'turnId' | 'attemptNo' | 'operationId'>,
+  reply: StreamResult,
+): ObservedTurnUsage | undefined {
+  const usage = reply.usage;
+  if (usage === null || !isNonNegativeCounter(usage.costMicroUsd)) return undefined;
+  return {
+    ...key,
+    observedCostMicroUsd: usage.costMicroUsd,
+    ...(isNonNegativeCounter(usage.inputTokens) ? { inputTokens: usage.inputTokens } : {}),
+    ...(isNonNegativeCounter(usage.outputTokens) ? { outputTokens: usage.outputTokens } : {}),
+  };
+}
+
+function isNonNegativeCounter(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 0;
+}
+
+async function withinTimeout<T>(work: () => Promise<T>, timeoutMs: number): Promise<T> {
+  const deadline = new AbortController();
+  const timer = setTimeout(() => deadline.abort(), timeoutMs);
+  try {
+    return await untilAbort(work(), deadline.signal);
+  } finally {
+    clearTimeout(timer);
+  }
 }

@@ -8,13 +8,19 @@ import {
   type B1AssistantTurnDto,
 } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
-import { FakeStreamingModelGateway, type FakeConversationJob } from '@ember/model-gateway';
+import {
+  FAKE_MODEL_LABEL,
+  FakeStreamingModelGateway,
+  type FakeConversationJob,
+  type FakeConversationStreamEvent,
+} from '@ember/model-gateway';
 import type { B1SessionRuntime } from '../../apps/api/src/auth/b1-auth-runtime.js';
 import { generateSessionToken } from '../../apps/api/src/auth/session-token.js';
 import {
   createLocalV2EdgeWorker,
   type LocalV2EdgeDependencies,
 } from '../../apps/api/src/local-v2/edge-worker.js';
+import type { ObservedTurnUsage } from '../../apps/api/src/local-v2/interactive-executor.js';
 import type {
   EdgeAgentHeadRpc,
   PreparedTurn,
@@ -42,13 +48,19 @@ function mockRpc<T extends (...args: never[]) => Promise<unknown>>(
   return vi.fn((...args: Parameters<T>) => Promise.resolve().then(() => handler(...args)));
 }
 
-function fixture(reasoningMs = 0) {
+function fixture(reasoningMs = 0, usageCostMicroUsd: number | null = 0) {
   let saved:
     { request: PrepareTurnRequest; prepared: PreparedTurn; turn: B1AssistantTurnDto } | undefined;
   let epoch = 0;
   let assistantText: string | undefined;
   let authorized = false;
   const jobs = new Map<string, FakeConversationJob>();
+  const charged = new Map<string, number>();
+  const reportObservedUsage = vi.fn((receipt: ObservedTurnUsage) => {
+    const previousCost = charged.get(receipt.operationId) ?? 0;
+    charged.set(receipt.operationId, Math.max(previousCost, receipt.observedCostMicroUsd));
+    return Promise.resolve();
+  });
   const jobStore = {
     create: vi.fn((job: FakeConversationJob) => {
       if ([...jobs.values()].some((stored) => stored.operationId === job.operationId)) {
@@ -58,8 +70,11 @@ function fixture(reasoningMs = 0) {
       return Promise.resolve();
     }),
     get: vi.fn((handle: string) => Promise.resolve(jobs.get(handle) ?? null)),
+    findByOperationId: vi.fn((operationId: string) =>
+      Promise.resolve([...jobs.values()].find((job) => job.operationId === operationId) ?? null),
+    ),
   };
-  const provider = new FakeStreamingModelGateway(jobStore, { reasoningMs });
+  const provider = new FakeStreamingModelGateway(jobStore, { reasoningMs, usageCostMicroUsd });
   const startProvider = vi.spyOn(provider, 'streamConversationTurn');
 
   const rpc = {
@@ -110,7 +125,7 @@ function fixture(reasoningMs = 0) {
             : null,
         turnDeadlineMs: Date.now() + request.turnDeadlineMs,
         globalGrantId: crypto.randomUUID(),
-        reservedMicroUsd: 1,
+        reservedMicroUsd: request.modelReservation.estimatedMicroUsd,
         context: [{ sequence: 1, kind: 'user', text: request.request.text }],
       };
       const turn = B1AssistantTurnDtoSchema.parse({
@@ -150,6 +165,9 @@ function fixture(reasoningMs = 0) {
       }
       if (command.result.status === 'aborted_for_retry_or_reconcile') {
         return { outcome: 'reconciled_only', turn: saved.turn };
+      }
+      if (command.settlement.observedCostMicroUsd !== undefined) {
+        charged.set(command.operationId, command.settlement.observedCostMicroUsd);
       }
       const responseMessageId = crypto.randomUUID();
       const failed = command.result.status === 'failed';
@@ -250,7 +268,7 @@ function fixture(reasoningMs = 0) {
   const dependencies: LocalV2EdgeDependencies = {
     sessions,
     resolveAgentHead,
-    stream: { gateway: provider },
+    stream: { gateway: provider, reportObservedUsage },
   };
   const worker = createLocalV2EdgeWorker(dependencies);
   const background: Promise<void>[] = [];
@@ -269,6 +287,8 @@ function fixture(reasoningMs = 0) {
 
   return {
     rpc,
+    charged,
+    reportObservedUsage,
     provider,
     startProvider,
     jobStore,
@@ -312,7 +332,7 @@ describe('local V2 Edge HTTP contracts', () => {
     expect(prepare.scope).toMatchObject({ tenantId, principalId, agentId, policyVersion: 1 });
     expect(prepare.modelReservation).toMatchObject({
       budgetMode: 'simulated_full_protocol',
-      estimatedMicroUsd: 1,
+      estimatedMicroUsd: 250,
     });
     expect(f.rpc.markAttemptSent).not.toHaveBeenCalled();
     expect(f.startProvider).not.toHaveBeenCalled();
@@ -434,6 +454,70 @@ describe('local V2 Edge HTTP contracts', () => {
         )
       ).status,
     ).toBe(404);
+  });
+
+  it('routes identical submission IDs by verified identity and hides another conversation', async () => {
+    const f = fixture();
+    const other = fixture();
+    other.rpc.readMessages.mockRejectedValue(
+      new DomainError('NOT_FOUND', 'conversation is not visible'),
+    );
+    const otherToken = generateSessionToken();
+    const otherTenant = crypto.randomUUID();
+    const otherPrincipal = crypto.randomUUID();
+    const otherAgent = crypto.randomUUID();
+    const otherConversation = crypto.randomUUID();
+    const { sessions } = f.dependencies;
+    const worker = createLocalV2EdgeWorker({
+      ...f.dependencies,
+      sessions: {
+        ...sessions,
+        service: {
+          ...sessions.service,
+          async resolveActiveSession(raw) {
+            const session = await sessions.service.resolveActiveSession(
+              raw === otherToken ? token : raw,
+            );
+            if (raw !== otherToken || session === null) return session;
+            return {
+              auth: { tenantId: otherTenant, principalId: otherPrincipal, policyVersion: 1 },
+              session: { ...session.session, tenantId: otherTenant },
+            };
+          },
+        },
+      },
+      resolveAgentHead(auth) {
+        return auth.tenantId === otherTenant
+          ? Promise.resolve({
+              rpc: other.rpc,
+              agentId: otherAgent,
+              conversationId: otherConversation,
+            })
+          : f.resolveAgentHead();
+      },
+    });
+    const ownSend = await worker.fetch(
+      new Request(`http://localhost${messagePath}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers,
+      }),
+    );
+    expect(ownSend.status).toBe(201);
+    const otherHeaders = { ...headers, authorization: `Bearer ${otherToken}` };
+    const alternate = (path: string, init?: RequestInit) =>
+      worker.fetch(new Request(`http://localhost${path}`, { ...init, headers: otherHeaders }));
+    expect((await alternate(submissionPath)).status).toBe(404);
+    expect(
+      (await alternate(messagePath, { method: 'POST', body: JSON.stringify(payload) })).status,
+    ).toBe(404);
+    expect((await alternate(messagePath)).status).toBe(404);
+    expect(other.rpc.prepareTurn).not.toHaveBeenCalled();
+    expect(other.rpc.findSubmissionReceipt).toHaveBeenCalledExactlyOnceWith({
+      tenantId: otherTenant,
+      agentId: otherAgent,
+      clientSubmissionId: payload.client_submission_id,
+    });
   });
 
   it('emits provisional deltas after authorization and publishes only the fenced commit', async () => {
@@ -576,7 +660,7 @@ describe('local V2 Edge HTTP contracts', () => {
   );
 
   it('renews every 15s and hands off at 110s, then a fresh provider instance only queries the original job', async () => {
-    const f = fixture(140_000);
+    const f = fixture(140_000, 20);
     const response = await f.post(streamPath);
     const transferStartsAt = Date.now();
     const { operationId } = f.saved().prepared;
@@ -607,15 +691,175 @@ describe('local V2 Edge HTTP contracts', () => {
     expect(
       await durableGateway.queryConversationJob(operationId, providerJobHandle!, signal),
     ).toEqual({ state: 'unavailable' });
+    expect(await durableGateway.queryConversationUsage(operationId, signal)).toMatchObject({
+      state: 'completed',
+      usage: { costMicroUsd: 20 },
+    });
+    expect(await durableGateway.queryConversationUsage(crypto.randomUUID(), signal)).toEqual({
+      state: 'unavailable',
+    });
     expect(durableStart).not.toHaveBeenCalled();
     expect(f.jobStore.create).toHaveBeenCalledTimes(1);
     expect(f.startProvider).toHaveBeenCalledTimes(1);
   });
 
+  it.each(['disconnect', 'revoked', 'cleared', 'deadline'] as const)(
+    'reports an in-flight final receipt after %s without publishing text',
+    async (reason) => {
+      const f = fixture();
+      if (reason === 'deadline') {
+        const prepare = f.rpc.prepareTurn.getMockImplementation()!;
+        f.rpc.prepareTurn.mockImplementationOnce(async (request) => {
+          const prepared = await prepare(request);
+          if (prepared.kind !== 'prepared') throw new Error('expected a new turn');
+          return { ...prepared, turnDeadlineMs: Date.now() + 10_000 };
+        });
+      }
+      const closed = new AbortController();
+      let finishProvider!: (event: FakeConversationStreamEvent) => void;
+      const finalFrame = new Promise<FakeConversationStreamEvent>((resolve) => {
+        finishProvider = resolve;
+      });
+      f.startProvider.mockImplementationOnce(async function* () {
+        yield await finalFrame;
+      });
+      const response = await f.post(streamPath, payload, { signal: closed.signal });
+      const frames = response.text();
+      await vi.advanceTimersByTimeAsync(0);
+      const { turnId, operationId } = f.saved().prepared;
+
+      if (reason === 'disconnect') {
+        closed.abort();
+      } else if (reason === 'revoked') {
+        await f.fetch(`/v1/conversations/${conversationId}/turns/${turnId}/cancel`, {
+          method: 'POST',
+        });
+        await vi.advanceTimersByTimeAsync(15_000);
+      } else if (reason === 'cleared') {
+        await f.fetch('/v1/me/conversation/messages', { method: 'DELETE' });
+        await vi.advanceTimersByTimeAsync(15_000);
+      } else {
+        await vi.advanceTimersByTimeAsync(10_000);
+      }
+      await vi.advanceTimersByTimeAsync(100);
+      finishProvider({
+        kind: 'result',
+        result: {
+          output: { kind: 'reply', finishReason: 'stop', text: 'late result must stay private' },
+          modelLabel: FAKE_MODEL_LABEL,
+          simulated: true,
+          usage: {
+            inputTokens: 5,
+            outputTokens: 7,
+            costMicroUsd: 400,
+            rateVersion: 'fake-v2-m1',
+          },
+        },
+      });
+      expect(await frames).not.toMatch(/turn\.committed|late result must stay private/);
+      expect(f.rpc.commitTurn).not.toHaveBeenCalled();
+      expect(f.reportObservedUsage).toHaveBeenCalledExactlyOnceWith({
+        scope: { tenantId, agentId },
+        operationId,
+        turnId,
+        attemptNo: 1,
+        observedCostMicroUsd: 400,
+        inputTokens: 5,
+        outputTokens: 7,
+      });
+      expect(f.charged.get(operationId)).toBe(400);
+      expect(f.startProvider).toHaveBeenCalledTimes(1);
+      expect(await (await f.fetch(messagePath)).json()).toMatchObject({
+        messages: reason === 'cleared' ? [] : [{ kind: 'user' }],
+      });
+    },
+  );
+
+  it('bounds drain of a provider read that never returns and conservatively records uncertainty', async () => {
+    const f = fixture();
+    f.startProvider.mockImplementationOnce(async function* () {
+      yield await new Promise<FakeConversationStreamEvent>(() => undefined);
+    });
+    const connection = new AbortController();
+    const response = await f.post(streamPath, payload, { signal: connection.signal });
+    const frames = response.text();
+    await vi.advanceTimersByTimeAsync(0);
+    connection.abort();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(await frames).not.toContain('turn.committed');
+    expect(f.rpc.commitTurn.mock.calls[0]![0]).toMatchObject({
+      settlement: { state: 'unknown_billed', outcomeCode: 'client_cancelled' },
+      result: { status: 'aborted_for_retry_or_reconcile' },
+    });
+    expect(f.reportObservedUsage).not.toHaveBeenCalled();
+  });
+
+  it('charges known usage on invalid output and never publishes the invalid text', async () => {
+    const f = fixture();
+    const invalid = new FakeStreamingModelGateway(f.jobStore, {
+      onConversationTurn: () => ({ kind: 'reply', finishReason: 'stop', text: 'x'.repeat(9_000) }),
+      usageCostMicroUsd: 400,
+    });
+    const worker = createLocalV2EdgeWorker({
+      ...f.dependencies,
+      stream: { gateway: invalid, reportObservedUsage: f.reportObservedUsage },
+    });
+    const response = await worker.fetch(
+      new Request(`http://localhost${streamPath}`, {
+        method: 'POST',
+        body: JSON.stringify(payload),
+        headers,
+      }),
+    );
+    expect(await response.text()).not.toContain('turn.delta');
+    expect(f.rpc.commitTurn.mock.calls[0]![0]).toMatchObject({
+      settlement: {
+        state: 'settled',
+        outcomeCode: 'model_invalid_output',
+        observedCostMicroUsd: 400,
+      },
+      result: { status: 'failed' },
+    });
+    expect(f.reportObservedUsage).not.toHaveBeenCalled();
+    expect(f.charged.get(f.saved().prepared.operationId)).toBe(400);
+  });
+
+  it('reconciles a lost final commit ACK against the same operation without a second charge', async () => {
+    const f = fixture(0, 400);
+    const commit = f.rpc.commitTurn.getMockImplementation()!;
+    f.rpc.commitTurn.mockImplementationOnce(async (request) => {
+      await commit(request);
+      throw new Error('commit ACK lost');
+    });
+    expect(await (await f.post(streamPath)).text()).not.toContain('turn.committed');
+    const { operationId } = f.saved().prepared;
+    expect(f.rpc.commitTurn).toHaveBeenCalledTimes(1);
+    expect(f.reportObservedUsage.mock.calls).toEqual([
+      [expect.objectContaining({ operationId, observedCostMicroUsd: 400 })],
+    ]);
+    expect(f.charged.get(operationId)).toBe(400);
+    const page = B1ConversationPageSchema.parse(await (await f.fetch(messagePath)).json());
+    expect(page.messages.map((message) => message.kind)).toEqual(['user', 'ember']);
+  });
+
+  it('keeps missing usage conservative without inventing a provider receipt', async () => {
+    const f = fixture(0, null);
+    const response = await f.post(streamPath);
+    expect(await response.text()).toContain('turn.committed');
+    expect(f.rpc.commitTurn.mock.calls[0]![0].settlement).toEqual({
+      state: 'conservative_billed',
+      outcomeCode: 'usage_missing',
+    });
+    expect(f.reportObservedUsage).not.toHaveBeenCalled();
+  });
+
   it('settles conservatively when the first provider frame times out without a handle', async () => {
     const f = fixture();
     const slow = new FakeStreamingModelGateway(f.jobStore, { delayMs: 31_000 });
-    const worker = createLocalV2EdgeWorker({ ...f.dependencies, stream: { gateway: slow } });
+    const worker = createLocalV2EdgeWorker({
+      ...f.dependencies,
+      stream: { gateway: slow, reportObservedUsage: f.reportObservedUsage },
+    });
     const response = await worker.fetch(
       new Request(`http://localhost${streamPath}`, {
         method: 'POST',

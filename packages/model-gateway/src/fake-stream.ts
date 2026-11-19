@@ -1,6 +1,11 @@
 import { FakeModelGateway, type FakeModelGatewayOptions } from './fake.js';
 import { ModelGatewayFailure } from './errors.js';
-import type { ConversationTurnInput, ConversationTurnOutput, ModelCallResult } from './types.js';
+import type {
+  ConversationTurnInput,
+  ConversationTurnOutput,
+  ModelCallResult,
+  ModelUsage,
+} from './types.js';
 
 type FakeReply = ModelCallResult<Extract<ConversationTurnOutput, { kind: 'reply' }>>;
 
@@ -17,12 +22,17 @@ export interface FakeConversationJobStore {
   /** Insert once per operation. Reject duplicates without replacing the original job. */
   create(job: FakeConversationJob): Promise<void>;
   get(handle: string): Promise<FakeConversationJob | null>;
+  findByOperationId(operationId: string): Promise<FakeConversationJob | null>;
 }
 
 export type FakeConversationJobStatus =
   | { readonly state: 'pending' }
   | { readonly state: 'completed'; readonly result: FakeReply }
   | { readonly state: 'unavailable' };
+
+export type FakeConversationUsageStatus =
+  | { readonly state: 'pending' | 'unavailable' }
+  | { readonly state: 'completed'; readonly usage: ModelUsage | null };
 
 export type FakeConversationStreamEvent =
   | { readonly kind: 'job'; readonly handle: string }
@@ -37,15 +47,23 @@ export interface FakeConversationStreamRequest {
 }
 
 export const FAKE_STREAM_MAX_REPLY_CHARS = 8_192;
+export const FAKE_V2_RATE_VERSION = 'fake-v2-m1';
 const PROGRESS_INTERVAL_MS = 10_000;
 const CHUNK_CODE_POINTS = 128;
 
 export class FakeStreamingModelGateway extends FakeModelGateway {
   constructor(
     private readonly jobs: FakeConversationJobStore,
-    private readonly options: FakeModelGatewayOptions & { readonly reasoningMs?: number } = {},
+    private readonly options: FakeModelGatewayOptions & {
+      readonly reasoningMs?: number;
+      readonly usageCostMicroUsd?: number | null;
+    } = {},
   ) {
     super(options);
+    const cost = options.usageCostMicroUsd;
+    if (typeof cost === 'number' && (!Number.isSafeInteger(cost) || cost < 0)) {
+      throw new RangeError('simulated usage cost must be a non-negative integer');
+    }
   }
 
   async *streamConversationTurn(
@@ -54,25 +72,32 @@ export class FakeStreamingModelGateway extends FakeModelGateway {
   ): AsyncGenerator<FakeConversationStreamEvent, void> {
     signal.throwIfAborted();
     const generated = await this.generateConversationTurn(request.input, signal);
-    const output = generated.output;
-    if (
-      output.kind !== 'reply' ||
-      output.text.trim().length === 0 ||
-      output.text.length > FAKE_STREAM_MAX_REPLY_CHARS
-    ) {
-      throw new ModelGatewayFailure('model_invalid_output');
-    }
+    const output =
+      generated.output.kind === 'reply' &&
+      generated.output.text.length <= FAKE_STREAM_MAX_REPLY_CHARS &&
+      generated.output.text.trim().length > 0
+        ? generated.output
+        : { kind: 'reply' as const, text: '', finishReason: 'stop' as const };
 
     signal.throwIfAborted();
     if (Date.now() >= request.deadlineAtMs) {
       throw new ModelGatewayFailure('model_timeout');
     }
+    const cost = this.options.usageCostMicroUsd;
+    const usage =
+      cost === null || generated.usage === null
+        ? null
+        : {
+            ...generated.usage,
+            rateVersion: FAKE_V2_RATE_VERSION,
+            costMicroUsd: cost ?? generated.usage.costMicroUsd,
+          };
     const job: FakeConversationJob = {
       handle: crypto.randomUUID(),
       operationId: request.operationId,
       readyAtMs: Date.now() + Math.max(0, this.options.reasoningMs ?? 0),
       deadlineAtMs: request.deadlineAtMs,
-      result: { ...generated, output },
+      result: { ...generated, output, usage },
     };
     await this.jobs.create(job);
     yield { kind: 'job', handle: job.handle };
@@ -99,6 +124,23 @@ export class FakeStreamingModelGateway extends FakeModelGateway {
       yield { kind: 'delta', text: characters.slice(offset, offset + CHUNK_CODE_POINTS).join('') };
     }
     yield { kind: 'result', result: job.result };
+  }
+
+  /**
+   * Reads billing evidence after the publish deadline or worker loss. The provider store owns
+   * receipt retention. This read never returns assistant text or starts work.
+   */
+  async queryConversationUsage(
+    operationId: string,
+    signal: AbortSignal,
+  ): Promise<FakeConversationUsageStatus> {
+    signal.throwIfAborted();
+    const job = await this.jobs.findByOperationId(operationId);
+    signal.throwIfAborted();
+    if (job === null || job.operationId !== operationId) return { state: 'unavailable' };
+    return Date.now() < job.readyAtMs
+      ? { state: 'pending' }
+      : { state: 'completed', usage: job.result.usage };
   }
 
   async queryConversationJob(

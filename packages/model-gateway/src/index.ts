@@ -139,9 +139,12 @@ export { createModelGateway, type CreateModelGatewayOptions } from './gateway.js
 export {
   FakeStreamingModelGateway,
   FAKE_STREAM_MAX_REPLY_CHARS,
+  FAKE_V2_RATE_VERSION,
   type FakeConversationJob,
   type FakeConversationJobStatus,
   type FakeConversationJobStore,
   type FakeConversationStreamEvent,
   type FakeConversationStreamRequest,
+  type FakeConversationUsageStatus,
 } from './fake-stream.js';
+export { LoopbackFakeModelGateway } from './fake-loopback.js';

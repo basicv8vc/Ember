@@ -39,6 +39,7 @@ import type { OrdinaryOutboxEntityKind } from '../recovery/schema.js';
 import type { DurableObjectStorageLike } from '../storage.js';
 import {
   createGlobalBudgetSettlePortAdapter,
+  enqueueBudgetReleaseCompensationSync,
   reserveLocalAttemptSync,
   settleLocalAttemptAndEnqueueSync,
   type AgentBudgetSettleBridgeResult,
@@ -56,16 +57,19 @@ import {
 import { checkTaskModelLimits, toUtcDayString } from './state-machine.js';
 import { AgentHeadTurnService, type TurnRecoverySeamHooks } from './turn-service.js';
 
-export interface AgentHeadCoreOptions {
-  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
-  readonly tenantId: Id;
-  readonly agentId: Id;
+export interface AgentHeadEventRuntimeBindings {
   /** B-owned `RecoveryAdmissionPort` (production: `RecoveryCoverageCoordinator`). */
   readonly recoveryAdmission: RecoveryAdmissionPort;
   /** B-owned `EventRuntimeCoordinatorPort` (production: `OutboxCoordinator`). */
   readonly eventCoordinator: EventRuntimeCoordinatorPort;
   /** B-owned coordinator seam delegates (production: `RecoveryCoverageCoordinator`, `AlarmMultiplexer`, `relayDueBudgetSyncBatch`). */
   readonly recoveryHooks: TurnRecoverySeamHooks;
+}
+
+export type AgentHeadCoreOptions = {
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
+  readonly tenantId: Id;
+  readonly agentId: Id;
   readonly recoveryRegistry: RecoveryRegistryPort;
   readonly globalBudget: GlobalBudgetAuthority;
   readonly nowMs?: () => number;
@@ -73,6 +77,45 @@ export interface AgentHeadCoreOptions {
   readonly localCeilings?: LocalBudgetCeilings;
   readonly globalDailyCeilingMicroUsd?: number;
   readonly migrations?: readonly AgentHeadMigrationStep[];
+} & (
+  | AgentHeadEventRuntimeBindings
+  | {
+      /**
+       * Factory callback invoked synchronously inside `new AgentHeadCore(...)` once `this.recoveryService`
+       * (`AuthoritativeBusinessPort`) exists, cleanly resolving circular B-coordinator wiring.
+       */
+      readonly eventRuntimeFactory: (
+        business: AuthoritativeBusinessPort,
+      ) => AgentHeadEventRuntimeBindings;
+    }
+);
+
+function createLazyEventCoordinatorProxy(
+  getTarget: () => EventRuntimeCoordinatorPort,
+): EventRuntimeCoordinatorPort {
+  return {
+    enqueueDurableOutboxSync: (cmd) => getTarget().enqueueDurableOutboxSync(cmd),
+    cancelEntityOutboxSync: (entityKind, entityId, nowMs) =>
+      getTarget().cancelEntityOutboxSync(entityKind, entityId, nowMs),
+    ackOutboxSync: (outboxId, fenceEpoch, nowMs) =>
+      getTarget().ackOutboxSync(outboxId, fenceEpoch, nowMs),
+    applyOutboxDeadLetterSync: (cmd) => getTarget().applyOutboxDeadLetterSync(cmd),
+    recomputeAlarmSync: (nowMs) => getTarget().recomputeAlarmSync(nowMs),
+  };
+}
+
+function createLazyRecoveryHooksProxy(
+  getTarget: () => TurnRecoverySeamHooks,
+): TurnRecoverySeamHooks {
+  return {
+    reconcileCoverageSync: (cmd) => getTarget().reconcileCoverageSync(cmd),
+    confirmCoveragePlanSync: (cmd) => getTarget().confirmCoveragePlanSync(cmd),
+    getOutboxByIdSync: (outboxId) => getTarget().getOutboxByIdSync?.(outboxId) ?? null,
+    syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
+      getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs) ?? Promise.resolve(),
+    relayBudgetSync: (nowMs) => getTarget().relayBudgetSync?.(nowMs) ?? Promise.resolve(),
+    getCoverageRowSync: () => getTarget().getCoverageRowSync?.() ?? null,
+  };
 }
 
 export interface AgentHeadBootstrapInput {
@@ -115,8 +158,6 @@ export class AgentHeadCore
     this.storage = options.storage;
     this.tenantId = options.tenantId;
     this.agentId = options.agentId;
-    this.eventCoordinator = options.eventCoordinator;
-    this.recoveryHooks = options.recoveryHooks;
     this.globalBudget = options.globalBudget;
     this.nowMsFn = options.nowMs ?? (() => Date.now());
     this.newId = options.idFactory ?? (() => globalThis.crypto.randomUUID());
@@ -125,21 +166,44 @@ export class AgentHeadCore
       options.globalDailyCeilingMicroUsd ?? V2_BUDGET_LIMITS.globalDailyMicroUsd;
     this.migrations = options.migrations ?? createDefaultAgentHeadMigrations();
 
+    let resolvedBindings: AgentHeadEventRuntimeBindings | undefined =
+      'eventRuntimeFactory' in options ? undefined : options;
+
+    const getEventCoordinator = (): EventRuntimeCoordinatorPort => {
+      if (resolvedBindings === undefined) {
+        throw new Error('AgentHeadCore eventRuntimeFactory not yet initialized');
+      }
+      return resolvedBindings.eventCoordinator;
+    };
+    const getRecoveryHooks = (): TurnRecoverySeamHooks => {
+      if (resolvedBindings === undefined) {
+        throw new Error('AgentHeadCore eventRuntimeFactory not yet initialized');
+      }
+      return resolvedBindings.recoveryHooks;
+    };
+
     this.recoveryService = new AgentHeadRecoveryService({
       storage: this.storage,
-      eventCoordinator: this.eventCoordinator,
-      hooks: this.recoveryHooks,
+      eventCoordinator: createLazyEventCoordinatorProxy(getEventCoordinator),
+      hooks: createLazyRecoveryHooksProxy(getRecoveryHooks),
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
     });
 
+    if ('eventRuntimeFactory' in options) {
+      resolvedBindings = options.eventRuntimeFactory(this.recoveryService);
+    }
+    const bindings = resolvedBindings!;
+    this.eventCoordinator = bindings.eventCoordinator;
+    this.recoveryHooks = bindings.recoveryHooks;
+
     this.turnService = new AgentHeadTurnService({
       storage: this.storage,
-      recoveryAdmission: options.recoveryAdmission,
-      eventCoordinator: this.eventCoordinator,
+      recoveryAdmission: bindings.recoveryAdmission,
+      eventCoordinator: bindings.eventCoordinator,
       recoveryService: this.recoveryService,
-      recoveryHooks: this.recoveryHooks,
+      recoveryHooks: bindings.recoveryHooks,
       recoveryRegistry: options.recoveryRegistry,
       globalBudget: this.globalBudget,
       nowMs: this.nowMsFn,
@@ -147,6 +211,19 @@ export class AgentHeadCore
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
       globalDailyCeilingMicroUsd: this.globalDailyCeilingMicroUsd,
     });
+  }
+
+  private async syncAlarmAndRelayBudget(input: {
+    readonly alarmAtMs: number | null | undefined;
+    readonly nowMs: number;
+    readonly shouldRelayBudgetSync: boolean;
+  }): Promise<void> {
+    if (input.alarmAtMs !== undefined && this.recoveryHooks.syncPlatformAlarm !== undefined) {
+      await this.recoveryHooks.syncPlatformAlarm(input.alarmAtMs, input.nowMs);
+    }
+    if (input.shouldRelayBudgetSync && this.recoveryHooks.relayBudgetSync !== undefined) {
+      await this.recoveryHooks.relayBudgetSync(input.nowMs);
+    }
   }
 
   /**
@@ -504,31 +581,17 @@ export class AgentHeadCore
       ) {
         let alarmAtMs: number | null | undefined;
         if (globalGrantId !== null) {
-          this.eventCoordinator.enqueueDurableOutboxSync({
-            outboxId: `budget_sync:${pre.operationId}:rev:0`,
-            entityKind: 'budget_sync',
-            entityId: pre.operationId,
-            queueName: null,
-            payloadJson: JSON.stringify({
-              schemaVersion: 1,
-              tenantId: cmd.tenantId,
-              principalId: cmd.principalId,
-              agentId: cmd.agentId,
-              utcDay: pre.utcDay,
-              globalGrantId,
-              operationId: pre.operationId,
-              settlementRevision: 0,
-              state: 'released',
-              reservedMicroUsd: cmd.estimatedMicroUsd,
-              chargeMicroUsd: 0,
-              observedCostMicroUsd: null,
-              overageMicroUsd: 0,
-              openIncidentReason: null,
-            }),
+          enqueueBudgetReleaseCompensationSync({
+            coordinator: this.eventCoordinator,
+            tenantId: cmd.tenantId,
+            principalId: cmd.principalId,
+            agentId: cmd.agentId,
+            utcDay: pre.utcDay,
+            globalGrantId,
             operationId: pre.operationId,
-            revision: 0,
+            reservedMicroUsd: cmd.estimatedMicroUsd,
             fenceEpoch: cmd.leaseEpoch,
-            nextAttemptAtMs: nowMs,
+            nowMs,
           });
           alarmAtMs = this.eventCoordinator.recomputeAlarmSync(nowMs);
         }
@@ -559,31 +622,17 @@ export class AgentHeadCore
       } catch (err) {
         let alarmAtMs: number | null | undefined;
         if (globalGrantId !== null) {
-          this.eventCoordinator.enqueueDurableOutboxSync({
-            outboxId: `budget_sync:${pre.operationId}:rev:0`,
-            entityKind: 'budget_sync',
-            entityId: pre.operationId,
-            queueName: null,
-            payloadJson: JSON.stringify({
-              schemaVersion: 1,
-              tenantId: cmd.tenantId,
-              principalId: cmd.principalId,
-              agentId: cmd.agentId,
-              utcDay: pre.utcDay,
-              globalGrantId,
-              operationId: pre.operationId,
-              settlementRevision: 0,
-              state: 'released',
-              reservedMicroUsd: cmd.estimatedMicroUsd,
-              chargeMicroUsd: 0,
-              observedCostMicroUsd: null,
-              overageMicroUsd: 0,
-              openIncidentReason: null,
-            }),
+          enqueueBudgetReleaseCompensationSync({
+            coordinator: this.eventCoordinator,
+            tenantId: cmd.tenantId,
+            principalId: cmd.principalId,
+            agentId: cmd.agentId,
+            utcDay: pre.utcDay,
+            globalGrantId,
             operationId: pre.operationId,
-            revision: 0,
+            reservedMicroUsd: cmd.estimatedMicroUsd,
             fenceEpoch: cmd.leaseEpoch,
-            nextAttemptAtMs: nowMs,
+            nowMs,
           });
           alarmAtMs = this.eventCoordinator.recomputeAlarmSync(nowMs);
         }
@@ -597,12 +646,11 @@ export class AgentHeadCore
     });
 
     if (!committed.ok) {
-      if (committed.alarmAtMs !== undefined && this.recoveryHooks.syncPlatformAlarm !== undefined) {
-        await this.recoveryHooks.syncPlatformAlarm(committed.alarmAtMs, committed.nowMs);
-      }
-      if (this.recoveryHooks.relayBudgetSync !== undefined) {
-        await this.recoveryHooks.relayBudgetSync(committed.nowMs);
-      }
+      await this.syncAlarmAndRelayBudget({
+        alarmAtMs: committed.alarmAtMs,
+        nowMs: committed.nowMs,
+        shouldRelayBudgetSync: globalGrantId !== null,
+      });
       return { kind: 'refused', reason: committed.reason };
     }
 
@@ -662,12 +710,11 @@ export class AgentHeadCore
       return null;
     }
 
-    if (this.recoveryHooks.syncPlatformAlarm !== undefined) {
-      await this.recoveryHooks.syncPlatformAlarm(tx.alarmAtMs, tx.nowMs);
-    }
-    if (this.recoveryHooks.relayBudgetSync !== undefined) {
-      await this.recoveryHooks.relayBudgetSync(tx.nowMs);
-    }
+    await this.syncAlarmAndRelayBudget({
+      alarmAtMs: tx.alarmAtMs,
+      nowMs: tx.nowMs,
+      shouldRelayBudgetSync: tx.res.outboxId !== null,
+    });
     return tx.res;
   }
 }

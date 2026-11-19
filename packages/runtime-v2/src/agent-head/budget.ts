@@ -450,6 +450,42 @@ export function enqueueBudgetSyncOutboxSync(input: {
   return outboxId;
 }
 
+/** Enqueues an authoritative `rev=0` released `budget_sync` compensation outbox row when a global grant is aborted before local commit. */
+export function enqueueBudgetReleaseCompensationSync(input: {
+  readonly coordinator: EventRuntimeCoordinatorPort;
+  readonly tenantId: Id;
+  readonly principalId: Id;
+  readonly agentId: Id;
+  readonly utcDay: string;
+  readonly globalGrantId: string;
+  readonly operationId: Id;
+  readonly reservedMicroUsd: number;
+  readonly fenceEpoch: number;
+  readonly nowMs: number;
+}): string {
+  const payload = buildBudgetSyncOutboxPayload({
+    tenantId: input.tenantId,
+    principalId: input.principalId,
+    agentId: input.agentId,
+    utcDay: input.utcDay,
+    globalGrantId: input.globalGrantId,
+    operationId: input.operationId,
+    settlementRevision: 0,
+    state: 'released',
+    reservedMicroUsd: input.reservedMicroUsd,
+    chargeMicroUsd: 0,
+    observedCostMicroUsd: null,
+    overageMicroUsd: 0,
+    openIncidentReason: null,
+  });
+  return enqueueBudgetSyncOutboxSync({
+    coordinator: input.coordinator,
+    payload,
+    fenceEpoch: input.fenceEpoch,
+    nowMs: input.nowMs,
+  });
+}
+
 export interface LocalSettlementResult {
   readonly outcome: 'settled' | 'late_overage_booked' | 'audit_only' | 'already_settled';
   readonly finalState: ModelAttemptRow['state'];

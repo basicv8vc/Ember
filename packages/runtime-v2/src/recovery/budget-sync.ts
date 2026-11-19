@@ -8,19 +8,72 @@ export const DEFAULT_BUDGET_SYNC_RETRY_BASE_MS = 5_000;
 export const DEFAULT_BUDGET_SYNC_RETRY_MAX_MS = 60_000;
 
 export interface GlobalBudgetSettleResult {
-  readonly accepted: boolean;
-  readonly conflict?: boolean;
+  readonly accepted?: boolean;
+  readonly applied?: boolean;
   readonly alreadySettled?: boolean;
+  readonly conflict?: boolean;
   readonly appliedDeltaMicroUsd?: number;
+  readonly effectiveState?: string;
+  readonly incidentOpened?: boolean;
   readonly errorCode?: string;
 }
 
 /**
- * Port to Agent A's authoritative `GlobalBudgetAuthority`.
+ * Minimal structural contract matching Agent A's `GlobalBudgetAuthority.settleGlobal`
+ * and Agent E's `GlobalBudgetDO` RPC without introducing a cyclic package dependency.
+ */
+export interface GlobalBudgetAuthoritySettleLike {
+  settleGlobal(req: {
+    readonly tenantId: string;
+    readonly operationId: string;
+    readonly settlementRevision: number;
+    readonly globalGrantId: string;
+    readonly state: BudgetSyncOutboxPayload['state'];
+    readonly observedCostMicroUsd?: number | null;
+    readonly chargeMicroUsd: number;
+    readonly reservedMicroUsd: number;
+    readonly openIncidentReason?: Exclude<BudgetSyncOutboxPayload['openIncidentReason'], null>;
+  }): Promise<{
+    readonly applied: boolean;
+    readonly alreadySettled: boolean;
+    readonly conflict: boolean;
+    readonly effectiveState?: string;
+    readonly incidentOpened?: boolean;
+  }>;
+}
+
+/**
+ * Port to Agent A/E's authoritative `GlobalBudgetAuthority`.
  * Agent B passes `BudgetSyncOutboxPayload` verbatim and never computes refunds or fees.
  */
 export interface GlobalBudgetSettlePort {
   settleGlobal(payload: BudgetSyncOutboxPayload): Promise<GlobalBudgetSettleResult>;
+}
+
+/**
+ * Adapts Agent E's `GlobalBudgetDO` / Agent A's `GlobalBudgetAuthority` directly to
+ * `GlobalBudgetSettlePort`, passing the immutable settlement payload verbatim.
+ */
+export function createGlobalBudgetAuthoritySettlePort(
+  authority: GlobalBudgetAuthoritySettleLike,
+): GlobalBudgetSettlePort {
+  return {
+    settleGlobal(payload: BudgetSyncOutboxPayload): Promise<GlobalBudgetSettleResult> {
+      return authority.settleGlobal({
+        tenantId: payload.tenantId,
+        operationId: payload.operationId,
+        settlementRevision: payload.settlementRevision,
+        globalGrantId: payload.globalGrantId,
+        state: payload.state,
+        observedCostMicroUsd: payload.observedCostMicroUsd,
+        chargeMicroUsd: payload.chargeMicroUsd,
+        reservedMicroUsd: payload.reservedMicroUsd,
+        ...(payload.openIncidentReason !== null
+          ? { openIncidentReason: payload.openIncidentReason }
+          : {}),
+      });
+    },
+  };
 }
 
 export interface BudgetSyncRelayBatchResult {
@@ -167,7 +220,9 @@ export async function relayDueBudgetSyncBatch(cmd: {
         continue;
       }
 
-      if (outcome.accepted) {
+      const isAccepted =
+        outcome.accepted === true || outcome.applied === true || outcome.alreadySettled === true;
+      if (isAccepted) {
         cmd.storage.transactionSync(() => {
           cmd.coordinator.ackOutboxSync(row.outbox_id, row.fence_epoch, cmd.nowMs);
         });

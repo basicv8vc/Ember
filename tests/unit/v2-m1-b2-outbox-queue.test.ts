@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   applyAgentHeadMigrations,
   computePreDeadlineRetryAtMs,
+  createGlobalBudgetAuthoritySettlePort,
   EVENT_RECOVERY_DO_MIGRATION,
   findNextCronTzFireAtMs,
   getLocalWallClockParts,
@@ -808,5 +809,95 @@ describe('V2-M1-B2 Outbox, Queue Fencing, DLQ, Budget Relay, and Schedule Materi
     expect(dlqAcked).toBe(true);
     expect(dlqCalls).toHaveLength(1);
     expect(computePreDeadlineRetryAtMs(10_000, 11_000).shouldRetry).toBe(false);
+  });
+
+  it('bridges GlobalBudgetAuthority applied/alreadySettled/conflict RPC responses verbatim via createGlobalBudgetAuthoritySettlePort', async () => {
+    const { db, storage } = createNodeDoHarness();
+    const coordinator = new OutboxCoordinator(storage.sql);
+    const seenRequests: unknown[] = [];
+
+    const port = createGlobalBudgetAuthoritySettlePort({
+      settleGlobal: async (req) => {
+        await Promise.resolve();
+        seenRequests.push(req);
+        if (req.settlementRevision === 0) {
+          return {
+            applied: true,
+            alreadySettled: false,
+            conflict: false,
+            effectiveState: 'settled',
+            incidentOpened: false,
+          };
+        }
+        return {
+          applied: false,
+          alreadySettled: false,
+          conflict: true,
+          effectiveState: 'settled',
+          incidentOpened: false,
+        };
+      },
+    });
+
+    const rev0: BudgetSyncOutboxPayload = {
+      schemaVersion: 1,
+      tenantId: 't1',
+      principalId: 'p1',
+      agentId: 'a1',
+      utcDay: '2026-11-19',
+      globalGrantId: 'g-1',
+      operationId: 'op-bridge-1',
+      settlementRevision: 0,
+      state: 'settled',
+      reservedMicroUsd: 300,
+      chargeMicroUsd: 210,
+      observedCostMicroUsd: 210,
+      overageMicroUsd: 0,
+      openIncidentReason: null,
+    };
+    const rev1Conflict: BudgetSyncOutboxPayload = {
+      ...rev0,
+      settlementRevision: 1,
+      chargeMicroUsd: 400,
+      observedCostMicroUsd: 400,
+    };
+
+    storage.transactionSync(() => {
+      coordinator.enqueueDurableOutboxSync({
+        outboxId: 'bs-bridge-0',
+        entityKind: 'budget_sync',
+        entityId: rev0.operationId,
+        queueName: null,
+        payloadJson: JSON.stringify(rev0),
+        operationId: rev0.operationId,
+        revision: 0,
+        fenceEpoch: 1,
+        nextAttemptAtMs: 1_000,
+      });
+      coordinator.enqueueDurableOutboxSync({
+        outboxId: 'bs-bridge-1',
+        entityKind: 'budget_sync',
+        entityId: rev0.operationId,
+        queueName: null,
+        payloadJson: JSON.stringify(rev1Conflict),
+        operationId: rev0.operationId,
+        revision: 1,
+        fenceEpoch: 1,
+        nextAttemptAtMs: 1_000,
+      });
+    });
+
+    const relayRes = await relayDueBudgetSyncBatch({
+      sql: storage.sql,
+      storage,
+      coordinator,
+      globalBudget: port,
+      nowMs: 2_000,
+    });
+    expect(relayRes).toMatchObject({ ackedCount: 1, conflictCount: 1, retriedCount: 0 });
+    expect(seenRequests[0]).not.toHaveProperty('openIncidentReason');
+    expect(coordinator.getOutboxByIdSync('bs-bridge-0')?.state).toBe('acked');
+    expect(coordinator.getOutboxByIdSync('bs-bridge-1')?.state).toBe('pending');
+    db.close();
   });
 });

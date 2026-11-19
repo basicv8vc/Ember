@@ -21,6 +21,12 @@ import {
   PostgresAgentRepository,
   PostgresApprovalRepository,
   PostgresArtifactStore,
+  PostgresB1AssistantTurnRepository,
+  PostgresB1ConsumerProvisioningRepository,
+  PostgresB1ConsumerSessionRepository,
+  PostgresB1ConversationReadRepository,
+  PostgresB1ConversationWriteRepository,
+  PostgresB1TaskReadRepository,
   PostgresBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
@@ -35,9 +41,15 @@ import {
 } from '@ember/postgres';
 
 import { createApp } from '../../api/src/app.js';
+import { createB1AuthRuntimeFromEnvironment } from '../../api/src/auth/b1-auth-runtime.js';
+import { PostgresB1MeProjectionReader } from '../../api/src/auth/b1-me-projection-reader.js';
 import { createDevTokenAuthenticator } from '../../api/src/auth/bearer-authenticator.js';
 import { createDatabaseReadiness } from '../../api/src/readiness.js';
 import { shutdownTaskEventStreams } from '../../api/src/tasks/event-stream.js';
+import {
+  createFakeTurnResponder,
+  type FakeTurnResponderRunner,
+} from '../../worker/src/b1/fake-turn-responder.js';
 import {
   createDurableRunHandler,
   DURABLE_TASK_KINDS,
@@ -53,6 +65,8 @@ export interface BenchmarkHarnessOptions {
   readonly isolatedSchema?: boolean;
   readonly keepDb?: boolean;
   readonly telemetry?: TelemetryCollector;
+  readonly enableB1Chat?: boolean;
+  readonly fakeTurnPollIntervalMs?: number;
 }
 
 export interface BenchmarkHarness {
@@ -142,6 +156,32 @@ export async function createBenchmarkHarness(
 
   // Build and start API server
   const apiLogger = createWorkerLogger({ level: 'error', sink: () => undefined });
+  let server: ServerType | undefined;
+  let serverPort = 0;
+
+  const b1TurnRepo = options.enableB1Chat
+    ? new PostgresB1AssistantTurnRepository(apiPool, { expireOnRead: false })
+    : undefined;
+  const b1TaskReadRepo = options.enableB1Chat
+    ? new PostgresB1TaskReadRepository(apiPool)
+    : undefined;
+  const b1Session = options.enableB1Chat
+    ? createB1AuthRuntimeFromEnvironment({
+        ports: {
+          provisioning: new PostgresB1ConsumerProvisioningRepository(apiPool),
+          sessions: new PostgresB1ConsumerSessionRepository(apiPool),
+          me: new PostgresB1MeProjectionReader(apiPool),
+        },
+        env: {
+          EMBER_ENV: 'test',
+          EMBER_DEV_PROVIDER_ENABLED: 'true',
+          EMBER_DEV_PROVIDER_ISOLATED: 'true',
+          EMBER_APPLE_BUNDLE_ID: 'com.ember.bench',
+        },
+        actualListener: () => (server as HttpServer | undefined)?.address() ?? null,
+      })
+    : undefined;
+
   const app = createApp({
     readiness: createDatabaseReadiness(apiPool),
     serviceVersion: '0.0.0-bench',
@@ -151,10 +191,17 @@ export async function createBenchmarkHarness(
     taskStore: new PostgresTaskRepository(apiPool),
     approvalStore: new PostgresApprovalRepository(apiPool),
     artifactStore,
+    ...(options.enableB1Chat && b1Session && b1TurnRepo && b1TaskReadRepo
+      ? {
+          b1Session,
+          b1ConversationWriteRepository: new PostgresB1ConversationWriteRepository(apiPool),
+          b1ConversationReadRepository: new PostgresB1ConversationReadRepository(apiPool),
+          b1AssistantTurnRepository: b1TurnRepo,
+          b1TaskResultRepository: b1TaskReadRepo,
+          b1TaskReadRepository: b1TaskReadRepo,
+        }
+      : {}),
   });
-
-  let server: ServerType | undefined;
-  let serverPort = 0;
 
   await new Promise<void>((resolve, reject) => {
     try {
@@ -280,7 +327,20 @@ export async function createBenchmarkHarness(
     signal: workerAbort.signal,
   });
 
-  const workerStopping = Promise.all([reaperPromise, pollLoopPromise]);
+  const fakeTurnRunner: FakeTurnResponderRunner | undefined = options.enableB1Chat
+    ? createFakeTurnResponder({
+        repository: new PostgresB1AssistantTurnRepository(workerPool),
+        intervalMs: options.fakeTurnPollIntervalMs ?? 25,
+        batchSize: 50,
+        logger: apiLogger,
+      }).start(workerAbort.signal)
+    : undefined;
+
+  const workerStopping = Promise.all([
+    reaperPromise,
+    pollLoopPromise,
+    ...(fakeTurnRunner === undefined ? [] : [fakeTurnRunner.done]),
+  ]);
 
   return {
     schema,
@@ -294,6 +354,7 @@ export async function createBenchmarkHarness(
     stop: async () => {
       // 1. Abort and wait for Worker
       workerAbort.abort();
+      fakeTurnRunner?.stop();
       await workerStopping.catch(() => undefined);
 
       // 2. Close HTTP Server

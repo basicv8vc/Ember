@@ -1,0 +1,2429 @@
+{
+  "scenarioId": "ember-v2-m0-v1-baseline",
+  "evidenceKind": "measured_local_pg",
+  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
+  "timestamp": "2026-11-19T12:05:13.959Z",
+  "machine": {
+    "osPlatform": "darwin",
+    "osRelease": "27.2.0",
+    "osType": "Darwin",
+    "osVersion": "Darwin Kernel Version 27.2.0: Wed Oct 14 23:46:57 PDT 2026; root:xnu-13432.41.4~25/RELEASE_ARM64_T8103",
+    "cpuModel": "Apple M1",
+    "cpuCores": 8,
+    "totalMemoryBytes": 17179869184,
+    "totalMemoryGb": 16,
+    "nodeVersion": "v24.11.0",
+    "postgresVersion": "PostgreSQL 17.11 (Homebrew) on aarch64-apple-darwin25.6.0, compiled by Apple clang version 21.0.0 (clang-2100.3.34.2), 64-bit"
+  },
+  "conversationBenchmarks": [
+    {
+      "operation": "b1_send_message_ack",
+      "method": "POST",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 26,
+      "latency": {
+        "count": 50,
+        "minMs": 7.07,
+        "meanMs": 9.79,
+        "p50Ms": 8.95,
+        "p90Ms": 11.58,
+        "p95Ms": 12.11,
+        "p99Ms": 22.99,
+        "maxMs": 27.82,
+        "stdDevMs": 3.13
+      }
+    },
+    {
+      "operation": "b1_turn_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 26,
+      "latency": {
+        "count": 50,
+        "minMs": 15.78,
+        "meanMs": 38.43,
+        "p50Ms": 38.88,
+        "p90Ms": 44.01,
+        "p95Ms": 46.76,
+        "p99Ms": 69.39,
+        "maxMs": 78.17,
+        "stdDevMs": 9.13
+      }
+    },
+    {
+      "operation": "b1_send_message_ack",
+      "method": "POST",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 161.91,
+      "latency": {
+        "count": 50,
+        "minMs": 2.77,
+        "meanMs": 14.89,
+        "p50Ms": 6.39,
+        "p90Ms": 50.14,
+        "p95Ms": 52.67,
+        "p99Ms": 56,
+        "maxMs": 57.15,
+        "stdDevMs": 17.64
+      }
+    },
+    {
+      "operation": "b1_turn_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 161.91,
+      "latency": {
+        "count": 50,
+        "minMs": 32.36,
+        "meanMs": 60.03,
+        "p50Ms": 50.74,
+        "p90Ms": 101.67,
+        "p95Ms": 104.26,
+        "p99Ms": 124.44,
+        "maxMs": 124.74,
+        "stdDevMs": 23.35
+      }
+    },
+    {
+      "operation": "b1_send_message_ack",
+      "method": "POST",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 118.68,
+      "latency": {
+        "count": 50,
+        "minMs": 3.59,
+        "meanMs": 46.36,
+        "p50Ms": 30.47,
+        "p90Ms": 112.71,
+        "p95Ms": 114.11,
+        "p99Ms": 120.73,
+        "maxMs": 122.04,
+        "stdDevMs": 42.41
+      }
+    },
+    {
+      "operation": "b1_turn_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 118.68,
+      "latency": {
+        "count": 50,
+        "minMs": 106.67,
+        "meanMs": 191.14,
+        "p50Ms": 176.32,
+        "p90Ms": 293.15,
+        "p95Ms": 301.87,
+        "p99Ms": 312.31,
+        "maxMs": 313.9,
+        "stdDevMs": 62.14
+      }
+    },
+    {
+      "operation": "b1_send_message_ack",
+      "method": "POST",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 196.89,
+      "latency": {
+        "count": 50,
+        "minMs": 53.12,
+        "meanMs": 72.06,
+        "p50Ms": 72.69,
+        "p90Ms": 85.43,
+        "p95Ms": 85.86,
+        "p99Ms": 88.03,
+        "maxMs": 88.59,
+        "stdDevMs": 9.84
+      }
+    },
+    {
+      "operation": "b1_turn_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 196.89,
+      "latency": {
+        "count": 50,
+        "minMs": 98.93,
+        "meanMs": 189.59,
+        "p50Ms": 203.55,
+        "p90Ms": 249.81,
+        "p95Ms": 249.94,
+        "p99Ms": 250.06,
+        "maxMs": 250.12,
+        "stdDevMs": 49.34
+      }
+    }
+  ],
+  "taskBenchmarks": [
+    {
+      "operation": "task_submit_ack",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 11.54,
+      "latency": {
+        "count": 50,
+        "minMs": 2.54,
+        "meanMs": 4.39,
+        "p50Ms": 3.98,
+        "p90Ms": 5.85,
+        "p95Ms": 6.52,
+        "p99Ms": 12.11,
+        "maxMs": 13.62,
+        "stdDevMs": 1.85
+      }
+    },
+    {
+      "operation": "task_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/tasks/:id",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 11.54,
+      "latency": {
+        "count": 50,
+        "minMs": 67.42,
+        "meanMs": 86.61,
+        "p50Ms": 88.95,
+        "p90Ms": 108.77,
+        "p95Ms": 112.07,
+        "p99Ms": 118.98,
+        "maxMs": 123.39,
+        "stdDevMs": 13.6
+      }
+    },
+    {
+      "operation": "task_submit_ack",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 103.78,
+      "latency": {
+        "count": 50,
+        "minMs": 1.73,
+        "meanMs": 6.84,
+        "p50Ms": 3.83,
+        "p90Ms": 18.61,
+        "p95Ms": 19.63,
+        "p99Ms": 20.18,
+        "maxMs": 20.19,
+        "stdDevMs": 6.03
+      }
+    },
+    {
+      "operation": "task_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/tasks/:id",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 103.78,
+      "latency": {
+        "count": 50,
+        "minMs": 51.76,
+        "meanMs": 91.04,
+        "p50Ms": 88.04,
+        "p90Ms": 126.65,
+        "p95Ms": 138.55,
+        "p99Ms": 156.18,
+        "maxMs": 164.22,
+        "stdDevMs": 24.18
+      }
+    },
+    {
+      "operation": "task_submit_ack",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 101.05,
+      "latency": {
+        "count": 50,
+        "minMs": 1.69,
+        "meanMs": 25.31,
+        "p50Ms": 18.68,
+        "p90Ms": 52.14,
+        "p95Ms": 53.82,
+        "p99Ms": 54.15,
+        "maxMs": 54.34,
+        "stdDevMs": 22.14
+      }
+    },
+    {
+      "operation": "task_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/tasks/:id",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 101.05,
+      "latency": {
+        "count": 50,
+        "minMs": 96.46,
+        "meanMs": 228.5,
+        "p50Ms": 212.56,
+        "p90Ms": 342.44,
+        "p95Ms": 376.39,
+        "p99Ms": 392.75,
+        "maxMs": 402.38,
+        "stdDevMs": 76.12
+      }
+    },
+    {
+      "operation": "task_submit_ack",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 99.08,
+      "latency": {
+        "count": 50,
+        "minMs": 29.7,
+        "meanMs": 46.72,
+        "p50Ms": 46.72,
+        "p90Ms": 58.04,
+        "p95Ms": 58.84,
+        "p99Ms": 59.31,
+        "maxMs": 59.37,
+        "stdDevMs": 8.55
+      }
+    },
+    {
+      "operation": "task_end_to_end",
+      "method": "POST+POLL",
+      "path": "/v1/tasks/:id",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 99.08,
+      "latency": {
+        "count": 50,
+        "minMs": 176.48,
+        "meanMs": 387.42,
+        "p50Ms": 422.72,
+        "p90Ms": 490.76,
+        "p95Ms": 500.81,
+        "p99Ms": 500.97,
+        "maxMs": 501.04,
+        "stdDevMs": 104.5
+      }
+    }
+  ],
+  "statusReadBenchmarks": [
+    {
+      "operation": "task_status_read",
+      "method": "GET",
+      "path": "/v1/tasks/:id",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 738.93,
+      "latency": {
+        "count": 50,
+        "minMs": 0.8,
+        "meanMs": 1.35,
+        "p50Ms": 1.26,
+        "p90Ms": 1.81,
+        "p95Ms": 2.06,
+        "p99Ms": 2.76,
+        "maxMs": 3.14,
+        "stdDevMs": 0.44
+      }
+    },
+    {
+      "operation": "b1_conversation_history_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 192.49,
+      "latency": {
+        "count": 50,
+        "minMs": 3.39,
+        "meanMs": 5.19,
+        "p50Ms": 4.74,
+        "p90Ms": 6.46,
+        "p95Ms": 9.81,
+        "p99Ms": 13.91,
+        "maxMs": 14.56,
+        "stdDevMs": 2.27
+      }
+    },
+    {
+      "operation": "b1_turn_status_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 1,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 253.26,
+      "latency": {
+        "count": 50,
+        "minMs": 3.45,
+        "meanMs": 3.95,
+        "p50Ms": 3.91,
+        "p90Ms": 4.54,
+        "p95Ms": 4.58,
+        "p99Ms": 4.97,
+        "maxMs": 5.11,
+        "stdDevMs": 0.36
+      }
+    },
+    {
+      "operation": "task_status_read",
+      "method": "GET",
+      "path": "/v1/tasks/:id",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1567.53,
+      "latency": {
+        "count": 50,
+        "minMs": 2.68,
+        "meanMs": 6.04,
+        "p50Ms": 5.91,
+        "p90Ms": 8.02,
+        "p95Ms": 8.2,
+        "p99Ms": 10.29,
+        "maxMs": 10.79,
+        "stdDevMs": 1.77
+      }
+    },
+    {
+      "operation": "b1_conversation_history_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1266,
+      "latency": {
+        "count": 50,
+        "minMs": 5.25,
+        "meanMs": 7.74,
+        "p50Ms": 7.6,
+        "p90Ms": 9.87,
+        "p95Ms": 10.44,
+        "p99Ms": 10.95,
+        "maxMs": 11.06,
+        "stdDevMs": 1.39
+      }
+    },
+    {
+      "operation": "b1_turn_status_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 10,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 2151.61,
+      "latency": {
+        "count": 50,
+        "minMs": 3.46,
+        "meanMs": 4.53,
+        "p50Ms": 4.44,
+        "p90Ms": 5.19,
+        "p95Ms": 5.37,
+        "p99Ms": 5.77,
+        "maxMs": 5.98,
+        "stdDevMs": 0.53
+      }
+    },
+    {
+      "operation": "task_status_read",
+      "method": "GET",
+      "path": "/v1/tasks/:id",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1654.57,
+      "latency": {
+        "count": 50,
+        "minMs": 3.98,
+        "meanMs": 12.68,
+        "p50Ms": 12.47,
+        "p90Ms": 15.79,
+        "p95Ms": 16.76,
+        "p99Ms": 17.33,
+        "maxMs": 17.69,
+        "stdDevMs": 2.89
+      }
+    },
+    {
+      "operation": "b1_conversation_history_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1047.92,
+      "latency": {
+        "count": 50,
+        "minMs": 16.16,
+        "meanMs": 22.52,
+        "p50Ms": 21.61,
+        "p90Ms": 28.35,
+        "p95Ms": 29.24,
+        "p99Ms": 30.11,
+        "maxMs": 30.59,
+        "stdDevMs": 4.29
+      }
+    },
+    {
+      "operation": "b1_turn_status_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 25,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1657.48,
+      "latency": {
+        "count": 50,
+        "minMs": 10.16,
+        "meanMs": 14.23,
+        "p50Ms": 13.92,
+        "p90Ms": 17.96,
+        "p95Ms": 18.66,
+        "p99Ms": 19.07,
+        "maxMs": 19.11,
+        "stdDevMs": 2.65
+      }
+    },
+    {
+      "operation": "task_status_read",
+      "method": "GET",
+      "path": "/v1/tasks/:id",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 2234.72,
+      "latency": {
+        "count": 50,
+        "minMs": 15.55,
+        "meanMs": 17.34,
+        "p50Ms": 17.17,
+        "p90Ms": 18.88,
+        "p95Ms": 18.92,
+        "p99Ms": 18.95,
+        "maxMs": 18.95,
+        "stdDevMs": 1.21
+      }
+    },
+    {
+      "operation": "b1_conversation_history_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/messages",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1081.16,
+      "latency": {
+        "count": 50,
+        "minMs": 30.65,
+        "meanMs": 40.94,
+        "p50Ms": 42.66,
+        "p90Ms": 43.5,
+        "p95Ms": 43.58,
+        "p99Ms": 43.84,
+        "maxMs": 43.88,
+        "stdDevMs": 3.14
+      }
+    },
+    {
+      "operation": "b1_turn_status_read",
+      "method": "GET",
+      "path": "/v1/conversations/:id/turns/:turn_id",
+      "concurrency": 50,
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "throughputReqPerSec": 1972.43,
+      "latency": {
+        "count": 50,
+        "minMs": 18.8,
+        "meanMs": 22.16,
+        "p50Ms": 22.52,
+        "p90Ms": 23.69,
+        "p95Ms": 23.75,
+        "p99Ms": 23.89,
+        "maxMs": 24,
+        "stdDevMs": 1.4
+      }
+    }
+  ],
+  "concurrencySweep": [
+    {
+      "concurrency": 1,
+      "chatAckP50Ms": 8.95,
+      "chatAckP95Ms": 12.11,
+      "chatCompletionP50Ms": 38.88,
+      "chatCompletionP95Ms": 46.76,
+      "taskAckP50Ms": 3.98,
+      "taskAckP95Ms": 6.52,
+      "taskCompletionP50Ms": 88.95,
+      "taskCompletionP95Ms": 112.07,
+      "statusReadP95Ms": 2.06,
+      "chatThroughputPerSec": 26,
+      "taskThroughputPerSec": 11.54
+    },
+    {
+      "concurrency": 10,
+      "chatAckP50Ms": 6.39,
+      "chatAckP95Ms": 52.67,
+      "chatCompletionP50Ms": 50.74,
+      "chatCompletionP95Ms": 104.26,
+      "taskAckP50Ms": 3.83,
+      "taskAckP95Ms": 19.63,
+      "taskCompletionP50Ms": 88.04,
+      "taskCompletionP95Ms": 138.55,
+      "statusReadP95Ms": 8.2,
+      "chatThroughputPerSec": 161.91,
+      "taskThroughputPerSec": 103.78
+    },
+    {
+      "concurrency": 25,
+      "chatAckP50Ms": 30.47,
+      "chatAckP95Ms": 114.11,
+      "chatCompletionP50Ms": 176.32,
+      "chatCompletionP95Ms": 301.87,
+      "taskAckP50Ms": 18.68,
+      "taskAckP95Ms": 53.82,
+      "taskCompletionP50Ms": 212.56,
+      "taskCompletionP95Ms": 376.39,
+      "statusReadP95Ms": 16.76,
+      "chatThroughputPerSec": 118.68,
+      "taskThroughputPerSec": 101.05
+    },
+    {
+      "concurrency": 50,
+      "chatAckP50Ms": 72.69,
+      "chatAckP95Ms": 85.86,
+      "chatCompletionP50Ms": 203.55,
+      "chatCompletionP95Ms": 249.94,
+      "taskAckP50Ms": 46.72,
+      "taskAckP95Ms": 58.84,
+      "taskCompletionP50Ms": 422.72,
+      "taskCompletionP95Ms": 500.81,
+      "statusReadP95Ms": 18.92,
+      "chatThroughputPerSec": 196.89,
+      "taskThroughputPerSec": 99.08
+    }
+  ],
+  "dbMutationStats": [
+    {
+      "workloadName": "v1_b1_conversation_turn",
+      "concurrency": 1,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 300,
+      "mutationsPerOperation": 6,
+      "totalSchemaBytesAfter": 2703360,
+      "peakActiveConnections": 7,
+      "peakTotalConnections": 9,
+      "peakRssMb": 221.3,
+      "tables": [
+        {
+          "tableName": "assistant_turns",
+          "inserts": 50,
+          "updates": 50,
+          "deletes": 0,
+          "totalMutations": 100,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 147456
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 100,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 100,
+          "liveRowsAfter": 108,
+          "totalBytesAfter": 221184
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 100,
+          "deletes": 0,
+          "totalMutations": 100,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 139264
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 3,
+          "totalBytesAfter": 114688
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 4,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "runs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 131072
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 4,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 11,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 5,
+          "totalBytesAfter": 180224
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 2,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_durable_task_lifecycle",
+      "concurrency": 1,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 1348,
+      "mutationsPerOperation": 26.96,
+      "totalSchemaBytesAfter": 3440640,
+      "peakActiveConnections": 7,
+      "peakTotalConnections": 9,
+      "peakRssMb": 230.8,
+      "tables": [
+        {
+          "tableName": "task_events",
+          "inserts": 256,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 256,
+          "liveRowsAfter": 267,
+          "totalBytesAfter": 237568
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 103,
+          "updates": 104,
+          "deletes": 0,
+          "totalMutations": 207,
+          "liveRowsAfter": 106,
+          "totalBytesAfter": 188416
+        },
+        {
+          "tableName": "runs",
+          "inserts": 51,
+          "updates": 103,
+          "deletes": 0,
+          "totalMutations": 154,
+          "liveRowsAfter": 52,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 50,
+          "updates": 103,
+          "deletes": 0,
+          "totalMutations": 153,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 278528
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 104,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 104,
+          "liveRowsAfter": 108,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 52,
+          "updates": 52,
+          "deletes": 0,
+          "totalMutations": 104,
+          "liveRowsAfter": 52,
+          "totalBytesAfter": 131072
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 104,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 104,
+          "liveRowsAfter": 108,
+          "totalBytesAfter": 212992
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 52,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 54,
+          "totalBytesAfter": 139264
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 52,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 54,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 52,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 54,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 52,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 54,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 52,
+          "deletes": 0,
+          "totalMutations": 52,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 0,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 147456
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 221184
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_b1_conversation_turn",
+      "concurrency": 10,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 14,
+      "mutationsPerOperation": 0.28,
+      "totalSchemaBytesAfter": 3710976,
+      "peakActiveConnections": 7,
+      "peakTotalConnections": 18,
+      "peakRssMb": 261.5,
+      "tables": [
+        {
+          "tableName": "runs",
+          "inserts": 2,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 4,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 4,
+          "liveRowsAfter": 275,
+          "totalBytesAfter": 237568
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 188416
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 2,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 131072
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 2,
+          "deletes": 0,
+          "totalMutations": 2,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 278528
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 139264
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 229376
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 409600
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 212992
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 81920
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_durable_task_lifecycle",
+      "concurrency": 10,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 514,
+      "mutationsPerOperation": 10.28,
+      "totalSchemaBytesAfter": 4743168,
+      "peakActiveConnections": 7,
+      "peakTotalConnections": 24,
+      "peakRssMb": 283.4,
+      "tables": [
+        {
+          "tableName": "task_events",
+          "inserts": 76,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 76,
+          "liveRowsAfter": 351,
+          "totalBytesAfter": 442368
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 41,
+          "updates": 21,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 105,
+          "totalBytesAfter": 229376
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 62,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 210,
+          "totalBytesAfter": 409600
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 62,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "runs",
+          "inserts": 20,
+          "updates": 30,
+          "deletes": 0,
+          "totalMutations": 50,
+          "liveRowsAfter": 75,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 29,
+          "updates": 20,
+          "deletes": 0,
+          "totalMutations": 49,
+          "liveRowsAfter": 139,
+          "totalBytesAfter": 327680
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 16,
+          "updates": 30,
+          "deletes": 0,
+          "totalMutations": 46,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 385024
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 16,
+          "updates": 11,
+          "deletes": 0,
+          "totalMutations": 27,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 20,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 20,
+          "liveRowsAfter": 130,
+          "totalBytesAfter": 278528
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 20,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 20,
+          "liveRowsAfter": 130,
+          "totalBytesAfter": 385024
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 10,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 10,
+          "liveRowsAfter": 65,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 10,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 10,
+          "liveRowsAfter": 65,
+          "totalBytesAfter": 155648
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 10,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 10,
+          "liveRowsAfter": 65,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 10,
+          "deletes": 0,
+          "totalMutations": 10,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_b1_conversation_turn",
+      "concurrency": 25,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 314,
+      "mutationsPerOperation": 6.28,
+      "totalSchemaBytesAfter": 4931584,
+      "peakActiveConnections": 7,
+      "peakTotalConnections": 39,
+      "peakRssMb": 292.8,
+      "tables": [
+        {
+          "tableName": "assistant_turns",
+          "inserts": 15,
+          "updates": 50,
+          "deletes": 0,
+          "totalMutations": 65,
+          "liveRowsAfter": 120,
+          "totalBytesAfter": 270336
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 65,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 65,
+          "liveRowsAfter": 275,
+          "totalBytesAfter": 557056
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 65,
+          "deletes": 0,
+          "totalMutations": 65,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 9,
+          "updates": 12,
+          "deletes": 0,
+          "totalMutations": 21,
+          "liveRowsAfter": 148,
+          "totalBytesAfter": 327680
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 18,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 18,
+          "liveRowsAfter": 403,
+          "totalBytesAfter": 442368
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 12,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 12,
+          "liveRowsAfter": 142,
+          "totalBytesAfter": 278528
+        },
+        {
+          "tableName": "runs",
+          "inserts": 3,
+          "updates": 9,
+          "deletes": 0,
+          "totalMutations": 12,
+          "liveRowsAfter": 78,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 12,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 12,
+          "liveRowsAfter": 142,
+          "totalBytesAfter": 385024
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 5,
+          "updates": 6,
+          "deletes": 0,
+          "totalMutations": 11,
+          "liveRowsAfter": 76,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 9,
+          "deletes": 0,
+          "totalMutations": 9,
+          "liveRowsAfter": 105,
+          "totalBytesAfter": 385024
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 6,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 6,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 196608
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 6,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 6,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 155648
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 6,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 6,
+          "liveRowsAfter": 71,
+          "totalBytesAfter": 172032
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 6,
+          "deletes": 0,
+          "totalMutations": 6,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_durable_task_lifecycle",
+      "concurrency": 25,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 1094,
+      "mutationsPerOperation": 21.88,
+      "totalSchemaBytesAfter": 5808128,
+      "peakActiveConnections": 21,
+      "peakTotalConnections": 52,
+      "peakRssMb": 308.5,
+      "tables": [
+        {
+          "tableName": "task_events",
+          "inserts": 198,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 198,
+          "liveRowsAfter": 601,
+          "totalBytesAfter": 606208
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 83,
+          "updates": 77,
+          "deletes": 0,
+          "totalMutations": 160,
+          "liveRowsAfter": 231,
+          "totalBytesAfter": 442368
+        },
+        {
+          "tableName": "runs",
+          "inserts": 45,
+          "updates": 83,
+          "deletes": 0,
+          "totalMutations": 128,
+          "liveRowsAfter": 123,
+          "totalBytesAfter": 303104
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 31,
+          "updates": 83,
+          "deletes": 0,
+          "totalMutations": 114,
+          "liveRowsAfter": 136,
+          "totalBytesAfter": 532480
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 40,
+          "updates": 42,
+          "deletes": 0,
+          "totalMutations": 82,
+          "liveRowsAfter": 116,
+          "totalBytesAfter": 270336
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 77,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 77,
+          "liveRowsAfter": 219,
+          "totalBytesAfter": 360448
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 77,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 77,
+          "liveRowsAfter": 219,
+          "totalBytesAfter": 499712
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 39,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 39,
+          "liveRowsAfter": 110,
+          "totalBytesAfter": 204800
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 38,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 38,
+          "liveRowsAfter": 109,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 38,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 38,
+          "liveRowsAfter": 109,
+          "totalBytesAfter": 229376
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 38,
+          "deletes": 0,
+          "totalMutations": 38,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 35,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 35,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 270336
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 35,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 35,
+          "liveRowsAfter": 310,
+          "totalBytesAfter": 557056
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 35,
+          "deletes": 0,
+          "totalMutations": 35,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_b1_conversation_turn",
+      "concurrency": 50,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 186,
+      "mutationsPerOperation": 3.72,
+      "totalSchemaBytesAfter": 6160384,
+      "peakActiveConnections": 23,
+      "peakTotalConnections": 52,
+      "peakRssMb": 320.5,
+      "tables": [
+        {
+          "tableName": "assistant_turns",
+          "inserts": 18,
+          "updates": 44,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 173,
+          "totalBytesAfter": 368640
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 62,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 372,
+          "totalBytesAfter": 761856
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 62,
+          "deletes": 0,
+          "totalMutations": 62,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 114688
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 112,
+          "totalBytesAfter": 204800
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 236,
+          "totalBytesAfter": 442368
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 223,
+          "totalBytesAfter": 360448
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "runs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 125,
+          "totalBytesAfter": 303104
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 118,
+          "totalBytesAfter": 270336
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 223,
+          "totalBytesAfter": 499712
+        },
+        {
+          "tableName": "task_events",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 628,
+          "totalBytesAfter": 606208
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 111,
+          "totalBytesAfter": 163840
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 532480
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 111,
+          "totalBytesAfter": 229376
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        }
+      ]
+    },
+    {
+      "workloadName": "v1_durable_task_lifecycle",
+      "concurrency": 50,
+      "operationsCompleted": 50,
+      "totalLogicalMutations": 1106,
+      "mutationsPerOperation": 22.12,
+      "totalSchemaBytesAfter": 7258112,
+      "peakActiveConnections": 23,
+      "peakTotalConnections": 52,
+      "peakRssMb": 338.1,
+      "tables": [
+        {
+          "tableName": "task_events",
+          "inserts": 186,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 186,
+          "liveRowsAfter": 814,
+          "totalBytesAfter": 770048
+        },
+        {
+          "tableName": "budget_operations",
+          "inserts": 74,
+          "updates": 87,
+          "deletes": 0,
+          "totalMutations": 161,
+          "liveRowsAfter": 310,
+          "totalBytesAfter": 516096
+        },
+        {
+          "tableName": "runs",
+          "inserts": 37,
+          "updates": 81,
+          "deletes": 0,
+          "totalMutations": 118,
+          "liveRowsAfter": 162,
+          "totalBytesAfter": 385024
+        },
+        {
+          "tableName": "tasks",
+          "inserts": 25,
+          "updates": 81,
+          "deletes": 0,
+          "totalMutations": 106,
+          "liveRowsAfter": 180,
+          "totalBytesAfter": 745472
+        },
+        {
+          "tableName": "staged_blobs",
+          "inserts": 43,
+          "updates": 47,
+          "deletes": 0,
+          "totalMutations": 90,
+          "liveRowsAfter": 161,
+          "totalBytesAfter": 360448
+        },
+        {
+          "tableName": "operation_receipts",
+          "inserts": 87,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 87,
+          "liveRowsAfter": 310,
+          "totalBytesAfter": 458752
+        },
+        {
+          "tableName": "step_checkpoints",
+          "inserts": 87,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 87,
+          "liveRowsAfter": 310,
+          "totalBytesAfter": 598016
+        },
+        {
+          "tableName": "task_results",
+          "inserts": 44,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 44,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 221184
+        },
+        {
+          "tableName": "workspace_versions",
+          "inserts": 44,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 44,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 393216
+        },
+        {
+          "tableName": "workspaces",
+          "inserts": 0,
+          "updates": 44,
+          "deletes": 0,
+          "totalMutations": 44,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "artifacts",
+          "inserts": 43,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 43,
+          "liveRowsAfter": 155,
+          "totalBytesAfter": 262144
+        },
+        {
+          "tableName": "assistant_turns",
+          "inserts": 32,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 32,
+          "liveRowsAfter": 205,
+          "totalBytesAfter": 368640
+        },
+        {
+          "tableName": "conversation_messages",
+          "inserts": 32,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 32,
+          "liveRowsAfter": 410,
+          "totalBytesAfter": 761856
+        },
+        {
+          "tableName": "conversations",
+          "inserts": 0,
+          "updates": 32,
+          "deletes": 0,
+          "totalMutations": 32,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 114688
+        },
+        {
+          "tableName": "agents",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 100,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "blobs",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 55,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumer_identities",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 98304
+        },
+        {
+          "tableName": "consumer_sessions",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 90112
+        },
+        {
+          "tableName": "consumers",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 50,
+          "totalBytesAfter": 73728
+        },
+        {
+          "tableName": "platform_metadata",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 1,
+          "totalBytesAfter": 32768
+        },
+        {
+          "tableName": "principals",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 65536
+        },
+        {
+          "tableName": "schema_migrations",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 23,
+          "totalBytesAfter": 49152
+        },
+        {
+          "tableName": "tenants",
+          "inserts": 0,
+          "updates": 0,
+          "deletes": 0,
+          "totalMutations": 0,
+          "liveRowsAfter": 51,
+          "totalBytesAfter": 32768
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "All measurements collected locally against PostgreSQL 17 over 127.0.0.1 loopback.",
+    "B1 conversation turns use FakeTurnResponder (FakeLlm, zero external LLM calls) with 25ms poll interval.",
+    "Task submissions use DeterministicExecutor (mock.chat / mock.compute) with 25ms poll loop.",
+    "pg_stat_user_tables captures logical tuple inserts/updates/deletes in PostgreSQL, NOT Cloudflare SQLite billed row counts."
+  ]
+}

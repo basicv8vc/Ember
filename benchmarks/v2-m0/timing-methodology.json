@@ -1,0 +1,248 @@
+{
+  "scenarioId": "ember-v2-m0-timing-methodology",
+  "evidenceKind": "measured_local_workerd",
+  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
+  "timestamp": "2026-11-19T12:03:32.919Z",
+  "definitions": [
+    {
+      "metric": "ack",
+      "formula": "T_ack = t_http_ack - t_req_start = T_edge_auth + T_budget_check + T_do_prepare",
+      "targetDescription": "ADR-0006 near-region Durable ACK P95 <= 250 ms",
+      "includesModelIo": false
+    },
+    {
+      "metric": "runtime_overhead",
+      "formula": "T_runtime = T_edge_auth + T_budget_check + T_do_prepare + T_do_commit + T_stream_cpu",
+      "targetDescription": "ADR-0006 near-region Runtime Overhead P95 <= 200 ms (excl. model/provider)",
+      "includesModelIo": false
+    },
+    {
+      "metric": "streaming_cpu",
+      "formula": "C_stream = (cpuUsage_after.user + cpuUsage_after.system - cpuUsage_before) / 1000 ms",
+      "targetDescription": "Workers Standard bills active CPU ms ($0.02/M ms), not network wait wall time",
+      "includesModelIo": false
+    },
+    {
+      "metric": "global_budget_check",
+      "formula": "T_budget = t_atomic_reserve_ack - t_budget_rpc_start (subset of T_runtime)",
+      "targetDescription": "ADR-0006 M1 gate <= 50 ms near-region P95 inside <= 200 ms Runtime Overhead",
+      "includesModelIo": false
+    }
+  ],
+  "localTurnTiming": {
+    "evidenceKind": "measured_local_workerd",
+    "iterations": 40,
+    "ackMs": {
+      "count": 40,
+      "minMs": 5.04,
+      "meanMs": 6.49,
+      "p50Ms": 6.21,
+      "p90Ms": 7.67,
+      "p95Ms": 8.32,
+      "p99Ms": 10.59,
+      "maxMs": 11.97,
+      "stdDevMs": 1.21
+    },
+    "globalBudgetCheckMs": {
+      "count": 40,
+      "minMs": 2.2,
+      "meanMs": 2.99,
+      "p50Ms": 2.68,
+      "p90Ms": 3.97,
+      "p95Ms": 4.53,
+      "p99Ms": 6.66,
+      "maxMs": 7.95,
+      "stdDevMs": 0.97
+    },
+    "doPrepareMs": {
+      "count": 40,
+      "minMs": 2.79,
+      "meanMs": 3.5,
+      "p50Ms": 3.31,
+      "p90Ms": 4.14,
+      "p95Ms": 4.24,
+      "p99Ms": 5.21,
+      "maxMs": 5.55,
+      "stdDevMs": 0.54
+    },
+    "doCommitMs": {
+      "count": 40,
+      "minMs": 2.74,
+      "meanMs": 3.25,
+      "p50Ms": 3.16,
+      "p90Ms": 3.71,
+      "p95Ms": 3.84,
+      "p99Ms": 3.92,
+      "maxMs": 3.98,
+      "stdDevMs": 0.33
+    },
+    "runtimeOverheadMs": {
+      "count": 40,
+      "minMs": 7.8,
+      "meanMs": 9.75,
+      "p50Ms": 9.48,
+      "p90Ms": 11.27,
+      "p95Ms": 11.46,
+      "p99Ms": 13.78,
+      "maxMs": 15.06,
+      "stdDevMs": 1.29
+    }
+  },
+  "streamingCpu": {
+    "evidenceKind": "simulated_synthetic",
+    "samples": [
+      {
+        "label": "burst_50_chunks_24B",
+        "chunkCount": 50,
+        "chunkBytes": 24,
+        "simulatedTokenDelayMs": 0,
+        "iterations": 8,
+        "wallMs": {
+          "count": 8,
+          "minMs": 0.06,
+          "meanMs": 0.09,
+          "p50Ms": 0.07,
+          "p90Ms": 0.13,
+          "p95Ms": 0.17,
+          "p99Ms": 0.2,
+          "maxMs": 0.2,
+          "stdDevMs": 0.05
+        },
+        "activeCpuMs": {
+          "count": 8,
+          "minMs": 0.07,
+          "meanMs": 0.2,
+          "p50Ms": 0.22,
+          "p90Ms": 0.31,
+          "p95Ms": 0.32,
+          "p99Ms": 0.32,
+          "maxMs": 0.32,
+          "stdDevMs": 0.1
+        },
+        "waitWallRatioPercent": 0
+      },
+      {
+        "label": "burst_200_chunks_24B",
+        "chunkCount": 200,
+        "chunkBytes": 24,
+        "simulatedTokenDelayMs": 0,
+        "iterations": 8,
+        "wallMs": {
+          "count": 8,
+          "minMs": 0.14,
+          "meanMs": 0.17,
+          "p50Ms": 0.17,
+          "p90Ms": 0.19,
+          "p95Ms": 0.2,
+          "p99Ms": 0.2,
+          "maxMs": 0.21,
+          "stdDevMs": 0.02
+        },
+        "activeCpuMs": {
+          "count": 8,
+          "minMs": 0.14,
+          "meanMs": 0.27,
+          "p50Ms": 0.23,
+          "p90Ms": 0.48,
+          "p95Ms": 0.5,
+          "p99Ms": 0.52,
+          "maxMs": 0.53,
+          "stdDevMs": 0.14
+        },
+        "waitWallRatioPercent": 0
+      },
+      {
+        "label": "paced_50_chunks_5ms_wait",
+        "chunkCount": 50,
+        "chunkBytes": 24,
+        "simulatedTokenDelayMs": 5,
+        "iterations": 4,
+        "wallMs": {
+          "count": 4,
+          "minMs": 280.12,
+          "meanMs": 282.69,
+          "p50Ms": 282.32,
+          "p90Ms": 285.33,
+          "p95Ms": 285.67,
+          "p99Ms": 285.94,
+          "maxMs": 286.01,
+          "stdDevMs": 2.35
+        },
+        "activeCpuMs": {
+          "count": 4,
+          "minMs": 4.22,
+          "meanMs": 7.58,
+          "p50Ms": 7.73,
+          "p90Ms": 10.11,
+          "p95Ms": 10.38,
+          "p99Ms": 10.6,
+          "maxMs": 10.65,
+          "stdDevMs": 2.41
+        },
+        "waitWallRatioPercent": 97.32
+      }
+    ]
+  },
+  "budgetCheckContention": {
+    "evidenceKind": "measured_local_workerd",
+    "results": [
+      {
+        "mode": "sequential_warm",
+        "concurrency": 1,
+        "attempts": 30,
+        "approvedCount": 30,
+        "rejectedCount": 0,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 30,
+          "minMs": 2.24,
+          "meanMs": 3.79,
+          "p50Ms": 3.29,
+          "p90Ms": 4.49,
+          "p95Ms": 5.41,
+          "p99Ms": 14.77,
+          "maxMs": 18.37,
+          "stdDevMs": 2.84
+        }
+      },
+      {
+        "mode": "concurrent_contention",
+        "concurrency": 20,
+        "attempts": 40,
+        "approvedCount": 40,
+        "rejectedCount": 0,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 40,
+          "minMs": 14.07,
+          "meanMs": 32.83,
+          "p50Ms": 28.58,
+          "p90Ms": 48.09,
+          "p95Ms": 48.39,
+          "p99Ms": 48.73,
+          "maxMs": 48.81,
+          "stdDevMs": 10.08
+        }
+      },
+      {
+        "mode": "exhaustion_fail_closed",
+        "concurrency": 20,
+        "attempts": 20,
+        "approvedCount": 10,
+        "rejectedCount": 10,
+        "overCommitted": false,
+        "latencyMs": {
+          "count": 20,
+          "minMs": 10.95,
+          "meanMs": 21.28,
+          "p50Ms": 24.59,
+          "p90Ms": 24.92,
+          "p95Ms": 24.93,
+          "p99Ms": 24.94,
+          "maxMs": 24.95,
+          "stdDevMs": 5.95
+        }
+      }
+    ]
+  }
+}

@@ -1,0 +1,205 @@
+{
+  "scenarioId": "ember-v2-m0-model-routing",
+  "evidenceKind": "simulated_synthetic",
+  "gitSha": "ee660f52f02cad196cf724f0f818df3789fe3e8c",
+  "timestamp": "2026-11-19T12:02:16.192Z",
+  "evalCaseCount": 8,
+  "candidates": [
+    {
+      "routeId": "cloud-fast-zdr-nemotron",
+      "providerId": "openrouter",
+      "modelId": "nvidia/nemotron-3.5-lightning",
+      "placement": "cloud",
+      "approvalStatus": "approved_smoke_staging",
+      "rateProvenance": "official_price_verified",
+      "inputUsdPerMillion": 0.06,
+      "outputUsdPerMillion": 0.16,
+      "simulatedTtftP50Ms": 420,
+      "simulatedTtftP95Ms": 950,
+      "simulatedCompletionP50Ms": 1350,
+      "simulatedCompletionP95Ms": 2600,
+      "accuracyPercent": 76,
+      "taskSuccessRatePercent": 87.5,
+      "retryRatePercent": 4.5,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 249,
+      "costPerSuccessfulTaskUsd": 0.000245,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": false,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": false,
+        "summary": "OpenRouter pinned DeepInfra ZDR (dataCollection=deny)"
+      }
+    },
+    {
+      "routeId": "cloud-vision-tools-deepseek",
+      "providerId": "openrouter",
+      "modelId": "deepseek/deepseek-v4.1-flash-1017",
+      "placement": "cloud",
+      "approvalStatus": "approved_smoke_staging",
+      "rateProvenance": "official_price_verified",
+      "inputUsdPerMillion": 0.098,
+      "outputUsdPerMillion": 0.294,
+      "simulatedTtftP50Ms": 580,
+      "simulatedTtftP95Ms": 1350,
+      "simulatedCompletionP50Ms": 2100,
+      "simulatedCompletionP95Ms": 4100,
+      "accuracyPercent": 92.9,
+      "taskSuccessRatePercent": 100,
+      "retryRatePercent": 3,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 423,
+      "costPerSuccessfulTaskUsd": 0.000353,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": false,
+        "summary": "OpenRouter pinned DeepInfra fp8 ZDR (vision + tools, dataCollection=deny)"
+      }
+    },
+    {
+      "routeId": "cloud-reasoning-gpt56-luna",
+      "providerId": "openai",
+      "modelId": "gpt-5.6-luna",
+      "placement": "cloud",
+      "approvalStatus": "pending_cto_approval",
+      "rateProvenance": "unverified",
+      "inputUsdPerMillion": 0.2,
+      "outputUsdPerMillion": 1.2,
+      "simulatedTtftP50Ms": 650,
+      "simulatedTtftP95Ms": 1500,
+      "simulatedCompletionP50Ms": 2400,
+      "simulatedCompletionP95Ms": 4800,
+      "accuracyPercent": 96.4,
+      "taskSuccessRatePercent": 100,
+      "retryRatePercent": 1.5,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 1170,
+      "costPerSuccessfulTaskUsd": 0.000856,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": false,
+        "dataCollectionDeny": false,
+        "localOnly": false,
+        "summary": "Direct OpenAI candidate (pending CTO approval & privacy/ZDR review)"
+      }
+    },
+    {
+      "routeId": "cloud-adr0006-illustrative",
+      "providerId": "illustrative-provider",
+      "modelId": "adr0006-budget-reference-model",
+      "placement": "cloud",
+      "approvalStatus": "research_profile",
+      "rateProvenance": "illustrative",
+      "inputUsdPerMillion": 0.5,
+      "outputUsdPerMillion": 2,
+      "simulatedTtftP50Ms": 750,
+      "simulatedTtftP95Ms": 1800,
+      "simulatedCompletionP50Ms": 2800,
+      "simulatedCompletionP95Ms": 5500,
+      "accuracyPercent": 94.9,
+      "taskSuccessRatePercent": 100,
+      "retryRatePercent": 2,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 2411,
+      "costPerSuccessfulTaskUsd": 0.001906,
+      "capabilities": {
+        "toolCalling": true,
+        "strictJson": true,
+        "visionInput": true,
+        "reasoningEffort": "medium"
+      },
+      "privacy": {
+        "zdr": false,
+        "dataCollectionDeny": false,
+        "localOnly": false,
+        "summary": "ADR-0006 cost envelope illustrative pricing ($0.50/$2.00 per 1M)"
+      }
+    },
+    {
+      "routeId": "device-local-mlx-small",
+      "providerId": "apple-device-local",
+      "modelId": "local-4bit-instruct-research",
+      "placement": "device_local",
+      "approvalStatus": "research_profile",
+      "rateProvenance": "zero_egress_local",
+      "inputUsdPerMillion": 0,
+      "outputUsdPerMillion": 0,
+      "simulatedTtftP50Ms": 180,
+      "simulatedTtftP95Ms": 420,
+      "simulatedCompletionP50Ms": 1100,
+      "simulatedCompletionP95Ms": 2400,
+      "accuracyPercent": 50.9,
+      "taskSuccessRatePercent": 37.5,
+      "retryRatePercent": 8,
+      "avgInputTokensPerTask": 2773,
+      "avgOutputTokensPerTask": 241,
+      "conservativeReservedMicroUsd": 0,
+      "costPerSuccessfulTaskUsd": 0,
+      "capabilities": {
+        "toolCalling": false,
+        "strictJson": false,
+        "visionInput": false,
+        "reasoningEffort": "none"
+      },
+      "privacy": {
+        "zdr": true,
+        "dataCollectionDeny": true,
+        "localOnly": true,
+        "summary": "On-device CPU/GPU/NPU execution; zero raw prompt egress to cloud"
+      }
+    }
+  ],
+  "routingPolicySummary": [
+    {
+      "workloadClass": "simple_low_latency_chat",
+      "primaryRouteId": "cloud-fast-zdr-nemotron",
+      "fallbackRouteId": "cloud-vision-tools-deepseek",
+      "rationale": "Lowest verified ZDR cost ($0.06/$0.16 per 1M), reasoningEffort=none, fast simulated TTFT."
+    },
+    {
+      "workloadClass": "tool_calling_and_multimodal",
+      "primaryRouteId": "cloud-vision-tools-deepseek",
+      "fallbackRouteId": "cloud-reasoning-gpt56-luna",
+      "rationale": "Supports image input + tools + tool_choice on pinned DeepInfra fp8 ZDR endpoint ($0.098/$0.294 per 1M)."
+    },
+    {
+      "workloadClass": "privacy_sensitive_or_offline_device",
+      "primaryRouteId": "device-local-mlx-small",
+      "fallbackRouteId": "cloud-fast-zdr-nemotron",
+      "rationale": "Zero cloud egress for authorized Mac/iPhone local execution; fallback to cloud ZDR only with user/policy authorization."
+    },
+    {
+      "workloadClass": "complex_high_accuracy_reasoning",
+      "primaryRouteId": "cloud-vision-tools-deepseek",
+      "fallbackRouteId": "cloud-reasoning-gpt56-luna",
+      "rationale": "Use approved ZDR DeepSeek until gpt-5.6-luna receives explicit CTO approval and ZDR/privacy signoff."
+    }
+  ],
+  "caveats": [
+    "NO live LLM API calls were made. Latency, accuracy, and retry rates are deterministic M0 evaluation profiles.",
+    "Token pricing uses verified MODEL_RATE_ROWS from @ember/model-gateway where marked official_price_verified.",
+    "M4 rollout requires live provider canary measurements per ADR-0006 before revising budgets or model pins."
+  ]
+}

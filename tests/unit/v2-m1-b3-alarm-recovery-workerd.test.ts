@@ -14,6 +14,18 @@ interface MiniflareInstance {
 
 type MiniflareConstructor = new (options: Record<string, unknown>) => MiniflareInstance;
 
+function isRecoverySurfaceFile(relPath: string): boolean {
+  if (relPath.endsWith('.test.ts')) {
+    return false;
+  }
+  return (
+    relPath === 'index.ts' ||
+    relPath === 'storage.ts' ||
+    relPath === 'migrations.ts' ||
+    relPath.startsWith('recovery/')
+  );
+}
+
 function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: string }> {
   const srcRoot = resolve(REPO_ROOT, 'packages/runtime-v2/src');
   const entries = readdirSync(srcRoot, { recursive: true, withFileTypes: true });
@@ -24,7 +36,17 @@ function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: st
     }
     const fullPath = resolve(entry.parentPath, entry.name);
     const relPath = fullPath.slice(srcRoot.length + 1).replace(/\\/g, '/');
-    const source = readFileSync(fullPath, 'utf8');
+    if (!isRecoverySurfaceFile(relPath)) {
+      continue;
+    }
+    let source = readFileSync(fullPath, 'utf8');
+    if (relPath === 'index.ts') {
+      // Keep only recovery/storage/migration exports so merged A+B+E index entries don't pull unbundled workspace packages into Miniflare.
+      source = source
+        .split('\n')
+        .filter((line) => /from\s+['"]\.\/(?:storage|migrations|recovery\/)/.test(line))
+        .join('\n');
+    }
     const transpiled = ts.transpileModule(source, {
       fileName: relPath,
       compilerOptions: {

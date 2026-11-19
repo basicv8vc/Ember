@@ -1,5 +1,10 @@
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
-import type { GlobalBudgetSettlePort } from './budget-sync.js';
+import {
+  createGlobalBudgetAuthoritySettlePort,
+  relayDueBudgetSyncBatch,
+  type GlobalBudgetAuthoritySettleLike,
+  type GlobalBudgetSettlePort,
+} from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
 import {
   OutboxCoordinator,
@@ -18,7 +23,7 @@ import {
   type AgentRecoveryTargetPort,
   type AlarmCycleResult,
 } from './registry.js';
-import type { V2QueueName } from './schema.js';
+import type { V2DispatchOutboxRow, V2QueueName, V2RecoveryCoverageRow } from './schema.js';
 import { ScheduleRepository } from './schedules.js';
 
 export interface DurableExecutionClaimContext {
@@ -160,6 +165,105 @@ export async function executeRecoveredOrFreshDurableWork(cmd: {
 }
 
 /**
+ * Parses `claimDurableWork.contextJson` returned by Agent A's `AgentHeadRecoveryService`
+ * (or direct `DurableExecutionClaimContext`) into a normalized worker claim context.
+ */
+export function parseClaimExecutionContext(cmd: {
+  readonly targetKind: 'turn' | 'task';
+  readonly targetId: string;
+  readonly leaseEpoch: number;
+  readonly contextJson: string;
+}): DurableExecutionClaimContext {
+  const parsed = JSON.parse(cmd.contextJson) as Record<string, unknown>;
+  if (
+    typeof parsed['operationId'] === 'string' &&
+    (parsed['entityKind'] === 'turn' || parsed['entityKind'] === 'task')
+  ) {
+    return {
+      operationId: parsed['operationId'],
+      entityKind: parsed['entityKind'],
+      entityId: typeof parsed['entityId'] === 'string' ? parsed['entityId'] : cmd.targetId,
+      attemptId: typeof parsed['attemptId'] === 'string' ? parsed['attemptId'] : undefined,
+      sendStartedAtMs:
+        typeof parsed['sendStartedAtMs'] === 'number' ? parsed['sendStartedAtMs'] : null,
+      providerJobHandle:
+        typeof parsed['providerJobHandle'] === 'string' ? parsed['providerJobHandle'] : null,
+      interactiveHandoff:
+        typeof parsed['interactiveHandoff'] === 'boolean'
+          ? parsed['interactiveHandoff']
+          : undefined,
+      inputJson: typeof parsed['inputJson'] === 'string' ? parsed['inputJson'] : undefined,
+    };
+  }
+
+  return {
+    operationId: `${cmd.targetKind}:${cmd.targetId}:epoch:${cmd.leaseEpoch}`,
+    entityKind: cmd.targetKind,
+    entityId: cmd.targetId,
+    attemptId: typeof parsed['runId'] === 'string' ? parsed['runId'] : undefined,
+    sendStartedAtMs:
+      typeof parsed['sendStartedAtMs'] === 'number' ? parsed['sendStartedAtMs'] : null,
+    providerJobHandle:
+      typeof parsed['providerJobHandle'] === 'string' ? parsed['providerJobHandle'] : null,
+    inputJson:
+      typeof parsed['inputJson'] === 'string'
+        ? parsed['inputJson']
+        : parsed['context'] !== undefined
+          ? JSON.stringify(parsed['context'])
+          : undefined,
+  };
+}
+
+/**
+ * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
+ * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
+ */
+export function toAgentHeadDurableCommitOutcome(cmd: {
+  readonly targetKind: 'turn' | 'task';
+  readonly outcome: FakeOrProviderJobOutcome;
+  readonly modelLabel?: string;
+  readonly simulated?: boolean;
+}): Record<string, unknown> {
+  const fallbackText =
+    cmd.outcome.outputJson ?? `Completed ${cmd.targetKind} (${cmd.outcome.operationId})`;
+  if (cmd.targetKind === 'turn') {
+    if (cmd.outcome.status === 'succeeded') {
+      let text = fallbackText;
+      if (cmd.outcome.outputJson !== null) {
+        try {
+          const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
+          if (typeof parsed['text'] === 'string' && parsed['text'].length > 0) {
+            text = parsed['text'];
+          }
+        } catch {
+          // Retain raw outputJson string when non-JSON text is supplied
+        }
+      }
+      return {
+        status: 'completed',
+        text,
+        ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
+        ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
+      };
+    }
+    return {
+      status: 'failed',
+      failureReason: cmd.outcome.errorCode === 'TIMEOUT' ? 'timeout' : 'internal_error',
+    };
+  }
+
+  const isCompleted = cmd.outcome.status === 'succeeded';
+  return {
+    status: isCompleted ? 'completed' : 'failed',
+    summaryText: isCompleted ? fallbackText : null,
+    detailText: cmd.outcome.outputJson,
+    ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
+    ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
+    reasonCode: cmd.outcome.errorCode ?? (isCompleted ? 'ok' : 'internal_error'),
+  };
+}
+
+/**
  * Single cohesive Agent B runtime facade for `AgentHeadDO`, composing ScheduleRepository,
  * OutboxCoordinator, RecoveryCoverageCoordinator, and AlarmMultiplexer without duplicating
  * Agent A's business state machine.
@@ -262,6 +366,53 @@ export class AgentEventRuntimeFacade {
           ),
         ),
       runRecoveryAlarmCycle: cmd.onRecoveryAlarm,
+    };
+  }
+
+  /**
+   * Produces Agent A's `TurnRecoverySeamHooks` / `RecoveryCoordinatorHooks` structure,
+   * connecting Agent A's `AgentHeadCore` to Agent B's coverage, outbox, alarm, and `budget_sync` relay
+   * using either a `GlobalBudgetSettlePort` or Agent E's `GlobalBudgetAuthority` (`GlobalBudgetDO`).
+   */
+  asTurnRecoveryHooks(cmd: {
+    readonly globalBudget: GlobalBudgetSettlePort | GlobalBudgetAuthoritySettleLike;
+    readonly batchLimit?: number;
+  }): {
+    readonly getCoverageRowSync: () => V2RecoveryCoverageRow | null;
+    readonly reconcileCoverageSync: (req: {
+      readonly expectedGen: number;
+      readonly nowMs: number;
+    }) => Awaited<ReturnType<AgentHeadRecoveryPort['reconcileFromRegistry']>>;
+    readonly confirmCoveragePlanSync: (req: {
+      readonly generation: number;
+      readonly actualRecoveryAtMs: number | null;
+      readonly applied: boolean;
+      readonly nowMs: number;
+    }) => { readonly confirmed: boolean };
+    readonly getOutboxByIdSync: (outboxId: string) => V2DispatchOutboxRow | null;
+    readonly syncPlatformAlarm: (targetAlarmAtMs: number | null, nowMs: number) => Promise<boolean>;
+    readonly relayBudgetSync: (nowMs: number) => Promise<void>;
+  } {
+    const budgetPort = createGlobalBudgetAuthoritySettlePort(
+      cmd.globalBudget as GlobalBudgetAuthoritySettleLike,
+    );
+    return {
+      getCoverageRowSync: () => this.coverage.getCoverageRowSync(),
+      reconcileCoverageSync: (req) => this.coverage.reconcileFromRegistrySync(req),
+      confirmCoveragePlanSync: (req) => this.coverage.confirmRegistryPlanSync(req),
+      getOutboxByIdSync: (outboxId) => this.outbox.getOutboxByIdSync(outboxId),
+      syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
+        this.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs),
+      relayBudgetSync: async (nowMs) => {
+        await relayDueBudgetSyncBatch({
+          sql: this.storage.sql,
+          storage: this.storage,
+          coordinator: this.outbox,
+          globalBudget: budgetPort,
+          nowMs,
+          limit: cmd.batchLimit,
+        });
+      },
     };
   }
 }

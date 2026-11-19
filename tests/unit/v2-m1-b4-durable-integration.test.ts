@@ -6,6 +6,8 @@ import {
   computePreDeadlineRetryAtMs,
   EVENT_RECOVERY_DO_MIGRATION,
   executeRecoveredOrFreshDurableWork,
+  parseClaimExecutionContext,
+  toAgentHeadDurableCommitOutcome,
   validateHandoffTransition,
   type AuthoritativeBusinessPort,
   type DurableObjectStorageLike,
@@ -243,7 +245,7 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
     });
   });
 
-  it('wires AgentEventRuntimeFacade cleanly around shared ports', () => {
+  it('wires AgentEventRuntimeFacade cleanly around shared ports and Agent A/E seams', async () => {
     const { db, storage } = createStorage();
     const business: AuthoritativeBusinessPort = {
       earliestRequiredDiscoveryAtMsSync: () => null,
@@ -269,6 +271,64 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
     });
     const inspect = facade.coverage.inspectCoverageSync(50_000, 1_000);
     expect(inspect).toEqual({ kind: 'register', generation: 1, targetAtMs: 50_000 });
+
+    const turnClaimCtx = parseClaimExecutionContext({
+      targetKind: 'turn',
+      targetId: 'turn-a-1',
+      leaseEpoch: 3,
+      contextJson: JSON.stringify({
+        turnId: 'turn-a-1',
+        conversationId: 'conv-1',
+        providerJobHandle: 'handle-a-1',
+        deadlineAtMs: 120_000,
+        context: [{ role: 'user', text: 'hi' }],
+      }),
+    });
+    expect(turnClaimCtx).toMatchObject({
+      operationId: 'turn:turn-a-1:epoch:3',
+      entityKind: 'turn',
+      entityId: 'turn-a-1',
+      providerJobHandle: 'handle-a-1',
+    });
+
+    const mappedTurn = toAgentHeadDurableCommitOutcome({
+      targetKind: 'turn',
+      outcome: {
+        status: 'succeeded',
+        operationId: turnClaimCtx.operationId,
+        providerJobHandle: 'handle-a-1',
+        outputJson: JSON.stringify({ text: 'Hello from Fake Provider' }),
+        errorCode: null,
+        usage: { inputTokens: 10, outputTokens: 5, costMicroUsd: 50 },
+      },
+      modelLabel: 'fake-model',
+      simulated: true,
+    });
+    expect(mappedTurn).toEqual({
+      status: 'completed',
+      text: 'Hello from Fake Provider',
+      modelLabel: 'fake-model',
+      simulated: true,
+    });
+
+    const hooks = facade.asTurnRecoveryHooks({
+      globalBudget: {
+        settleGlobal: async () => {
+          await Promise.resolve();
+          return {
+            applied: true,
+            alreadySettled: false,
+            conflict: false,
+            effectiveState: 'settled',
+            incidentOpened: false,
+          };
+        },
+      },
+    });
+    expect(hooks.getCoverageRowSync()?.generation).toBe(1);
+    await hooks.syncPlatformAlarm(80_000, 1_000);
+    await hooks.relayBudgetSync(2_000);
+    expect(hooks.getCoverageRowSync()?.armed_alarm_at_ms).toBe(80_000);
     db.close();
   });
 });

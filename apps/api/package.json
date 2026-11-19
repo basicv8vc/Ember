@@ -14,6 +14,7 @@
   "dependencies": {
     "@ember/contracts": "workspace:*",
     "@ember/domain": "workspace:*",
+    "@ember/model-gateway": "workspace:*",
     "@ember/postgres": "workspace:*",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",

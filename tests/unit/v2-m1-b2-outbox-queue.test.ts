@@ -140,9 +140,6 @@ class InMemoryAuthoritativeBusiness implements AuthoritativeBusinessPort {
     occurrenceSeq: number,
     nowMs: number,
   ): void {
-    if (scheduleId === 'sched-corrupt') {
-      throw new Error('simulated corrupt schedule target');
-    }
     this.materialized.push({ scheduleId, occurrenceSeq, nowMs });
   }
 }
@@ -685,6 +682,10 @@ describe('V2-M1-B2 Outbox, Queue Fencing, DLQ, Budget Relay, and Schedule Materi
       nowMs: 5_000,
     });
 
+    // Persisted invalid interval configuration is isolated before occurrence writes.
+    db.exec(
+      "UPDATE v2_schedules SET schedule_kind = 'interval' WHERE schedule_id = 'sched-corrupt'",
+    );
     const batchRes = storage.transactionSync(() =>
       repo.processDueSchedulesSync(business, 150_000, 10),
     );
@@ -701,6 +702,65 @@ describe('V2-M1-B2 Outbox, Queue Fencing, DLQ, Budget Relay, and Schedule Materi
       { scheduleId: 'sched-int', occurrenceSeq: 1, nowMs: 150_000 },
     ]);
 
+    db.close();
+  });
+
+  it('rolls back schedule progress and partial business writes on materialization failure', () => {
+    const { db, storage } = createNodeDoHarness();
+    const repo = new ScheduleRepository(storage.sql);
+    db.exec(
+      'CREATE TABLE schedule_test_work (schedule_id TEXT NOT NULL, occurrence_seq INTEGER NOT NULL, PRIMARY KEY (schedule_id, occurrence_seq))',
+    );
+    repo.upsertScheduleSync({
+      scheduleId: 'sched-retry',
+      tenantId: 't1',
+      agentId: 'a1',
+      sourceKind: 'reminder',
+      sourceId: 'rem-retry',
+      scheduleKind: 'once',
+      intervalSeconds: null,
+      cronExpr: null,
+      firstFireAtMs: 10_000,
+      nowMs: 5_000,
+    });
+
+    let fail = true;
+    const business = new InMemoryAuthoritativeBusiness();
+    business.materializeScheduleOccurrenceSync = (scheduleId, occurrenceSeq) => {
+      storage.sql.exec(
+        'INSERT INTO schedule_test_work (schedule_id, occurrence_seq) VALUES (?, ?)',
+        scheduleId,
+        occurrenceSeq,
+      );
+      if (fail) {
+        throw new Error('injected failure after business write');
+      }
+    };
+    const getSchedule = () =>
+      db.prepare("SELECT * FROM v2_schedules WHERE schedule_id = 'sched-retry'").get();
+    const getWork = () => db.prepare('SELECT * FROM schedule_test_work').all();
+
+    expect(() =>
+      storage.transactionSync(() => repo.processDueSchedulesSync(business, 15_000)),
+    ).toThrow('injected failure after business write');
+    expect(getSchedule()).toMatchObject({
+      status: 'active',
+      occurrence_seq: 0,
+      last_fired_at_ms: null,
+      next_fire_at_ms: 10_000,
+      version: 1,
+    });
+    expect(getWork()).toEqual([]);
+
+    fail = false;
+    const result = storage.transactionSync(() => repo.processDueSchedulesSync(business, 15_000));
+    expect(result.processedCount).toBe(1);
+    expect(getSchedule()).toMatchObject({ status: 'completed', occurrence_seq: 1 });
+    expect(getWork()).toEqual([{ schedule_id: 'sched-retry', occurrence_seq: 1 }]);
+    expect(
+      storage.transactionSync(() => repo.processDueSchedulesSync(business, 15_000)).processedCount,
+    ).toBe(0);
+    expect(getWork()).toHaveLength(1);
     db.close();
   });
 

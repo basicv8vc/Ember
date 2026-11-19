@@ -17,5 +17,11 @@
   ],
   "scripts": {
     "build": "tsc -b tsconfig.build.json"
+  },
+  "dependencies": {
+    "@ember/contracts": "workspace:*",
+    "@ember/domain": "workspace:*",
+    "@ember/model-gateway": "workspace:*",
+    "zod": "4.6.7"
   }
 }

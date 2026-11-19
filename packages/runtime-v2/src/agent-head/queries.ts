@@ -1,0 +1,407 @@
+import {
+  B1AssistantTurnDtoSchema,
+  B1ConversationMessageSchema,
+  TaskCommandSchema,
+  toInvalidArgumentError,
+  type B1AssistantTurnDto,
+  type B1ConversationMessage,
+} from '@ember/contracts';
+import { DomainError, type Id, type TaskCommand } from '@ember/domain';
+import { V2_B1_COMPAT_CONSTANTS } from '../contracts/constants.js';
+import type { B2MessageAttachmentMeta, B2TurnContextRow } from '../contracts/agent-head-rpc.js';
+import type { SqlStorageLike, SqlStorageRow } from '../storage.js';
+import type {
+  AgentHeadMetaRow,
+  AssistantTurnRow,
+  ConversationMessageRow,
+  ConversationRow,
+  MessageAttachmentRow,
+  ModelAttemptRow,
+  RunRow,
+  TaskRow,
+} from './schema.js';
+import { toIsoTimestamp } from './state-machine.js';
+
+export const TASK_COMMAND_DIGEST_VERSION = 'ember.task-command.v1';
+export const TASK_COMMAND_MAX_BYTES = 64 * 1024;
+
+export function sqlExecAll<T>(sql: SqlStorageLike, query: string, ...bindings: unknown[]): T[] {
+  return sql.exec<SqlStorageRow>(query, ...bindings).toArray() as unknown as T[];
+}
+
+export function sqlExecMaybe<T>(
+  sql: SqlStorageLike,
+  query: string,
+  ...bindings: unknown[]
+): T | null {
+  return sqlExecAll<T>(sql, query, ...bindings)[0] ?? null;
+}
+
+export function sqlExecOne<T>(sql: SqlStorageLike, query: string, ...bindings: unknown[]): T {
+  return sql.exec<SqlStorageRow>(query, ...bindings).one() as unknown as T;
+}
+
+export function getHeadMetaSync(sql: SqlStorageLike): AgentHeadMetaRow | null {
+  return sqlExecMaybe<AgentHeadMetaRow>(sql, 'SELECT * FROM agent_head_meta WHERE id = 1');
+}
+
+export function assertHeadScopeSync(
+  sql: SqlStorageLike,
+  tenantId: Id,
+  agentId: Id,
+): AgentHeadMetaRow {
+  const meta = getHeadMetaSync(sql);
+  if (meta === null || meta.tenant_id !== tenantId || meta.agent_id !== agentId) {
+    throw new DomainError('NOT_FOUND', 'agent head is not visible in this tenant');
+  }
+  return meta;
+}
+
+export function getConversationSync(
+  sql: SqlStorageLike,
+  conversationId: Id,
+): ConversationRow | null {
+  return sqlExecMaybe<ConversationRow>(
+    sql,
+    'SELECT * FROM conversations WHERE id = ?',
+    conversationId,
+  );
+}
+
+export function getMainConversationSync(sql: SqlStorageLike): ConversationRow | null {
+  return sqlExecMaybe<ConversationRow>(
+    sql,
+    `SELECT * FROM conversations WHERE kind = 'main' LIMIT 1`,
+  );
+}
+
+export function toTurnDto(row: AssistantTurnRow): B1AssistantTurnDto {
+  return B1AssistantTurnDtoSchema.parse({
+    turn_id: row.id,
+    conversation_id: row.conversation_id,
+    source_message_id: row.source_message_id,
+    status: row.status,
+    created_at: toIsoTimestamp(row.created_at_ms),
+    updated_at: toIsoTimestamp(row.updated_at_ms),
+    response_message_id: row.response_message_id,
+    failure_reason: row.failure_reason,
+  });
+}
+
+export function toConversationMessageDto(row: ConversationMessageRow): B1ConversationMessage {
+  const base = {
+    message_id: row.id,
+    sequence: row.sequence,
+    created_at: toIsoTimestamp(row.created_at_ms),
+  };
+
+  let candidate: unknown;
+  switch (row.kind) {
+    case 'user':
+      candidate = {
+        ...base,
+        kind: 'user',
+        text: row.text,
+        client_submission_id: row.client_submission_id,
+      };
+      break;
+    case 'ember':
+      candidate = {
+        ...base,
+        kind: 'ember',
+        text: row.text,
+        model_label: row.model_label,
+        simulated: row.simulated === 1,
+      };
+      break;
+    case 'activity':
+      candidate = {
+        ...base,
+        kind: 'activity',
+        text: row.text,
+        source: row.source,
+      };
+      break;
+    case 'task_reference':
+      candidate = {
+        ...base,
+        kind: 'task_reference',
+        task_id: row.task_id,
+      };
+      break;
+    case 'commitment_reference':
+      candidate = {
+        ...base,
+        kind: 'commitment_reference',
+        commitment_id: row.commitment_id,
+      };
+      break;
+    case 'outcome_reference': {
+      const parsedOutcome: unknown =
+        row.outcome_json === null ? null : JSON.parse(row.outcome_json);
+      candidate = {
+        ...base,
+        kind: 'outcome_reference',
+        outcome: parsedOutcome,
+      };
+      break;
+    }
+  }
+
+  return B1ConversationMessageSchema.parse(candidate);
+}
+
+export function listAttachmentsForMessageSync(
+  sql: SqlStorageLike,
+  messageId: Id,
+): readonly B2MessageAttachmentMeta[] {
+  const rows = sqlExecAll<MessageAttachmentRow>(
+    sql,
+    'SELECT * FROM message_attachments WHERE message_id = ? ORDER BY position ASC',
+    messageId,
+  );
+  return rows.map((row) => ({
+    uploadId: row.upload_id,
+    filename: row.filename,
+    mediaType: row.media_type,
+    sizeBytes: row.size_bytes,
+  }));
+}
+
+export function readRecentTurnContextSync(
+  sql: SqlStorageLike,
+  conversationId: Id,
+  maxMessages = V2_B1_COMPAT_CONSTANTS.maxContextMessages,
+): readonly B2TurnContextRow[] {
+  const rows = sqlExecAll<ConversationMessageRow>(
+    sql,
+    `SELECT *
+       FROM conversation_messages
+      WHERE conversation_id = ?
+        AND kind IN ('user', 'ember')
+      ORDER BY sequence DESC
+      LIMIT ?`,
+    conversationId,
+    maxMessages,
+  ).reverse();
+
+  return rows.map((row) => {
+    const attachments = row.kind === 'user' ? listAttachmentsForMessageSync(sql, row.id) : [];
+    return {
+      sequence: row.sequence,
+      kind: row.kind as 'user' | 'ember',
+      text: row.text ?? '',
+      ...(attachments.length > 0 ? { attachments } : {}),
+    };
+  });
+}
+
+export function allocateConversationSequenceSync(
+  sql: SqlStorageLike,
+  conversationId: Id,
+  nowMs: number,
+): number {
+  sql.exec(
+    `UPDATE conversations
+        SET last_sequence = last_sequence + 1,
+            updated_at_ms = ?
+      WHERE id = ?`,
+    nowMs,
+    conversationId,
+  );
+  const row = sqlExecMaybe<{ readonly last_sequence: number }>(
+    sql,
+    'SELECT last_sequence FROM conversations WHERE id = ?',
+    conversationId,
+  );
+  if (row === null) {
+    throw new DomainError('NOT_FOUND', 'conversation disappeared while allocating sequence');
+  }
+  return row.last_sequence;
+}
+
+export function insertEmberMessageSync(input: {
+  readonly sql: SqlStorageLike;
+  readonly messageId: Id;
+  readonly conversationId: Id;
+  readonly text: string;
+  readonly modelLabel: string;
+  readonly simulated: boolean;
+  readonly nowMs: number;
+}): { readonly messageId: Id; readonly sequence: number } {
+  const sequence = allocateConversationSequenceSync(input.sql, input.conversationId, input.nowMs);
+  input.sql.exec(
+    `INSERT INTO conversation_messages (
+       id, conversation_id, sequence, kind, text, model_label, simulated, created_at_ms
+     ) VALUES (?, ?, ?, 'ember', ?, ?, ?, ?)`,
+    input.messageId,
+    input.conversationId,
+    sequence,
+    input.text,
+    input.modelLabel,
+    input.simulated ? 1 : 0,
+    input.nowMs,
+  );
+  return { messageId: input.messageId, sequence };
+}
+
+export function getTurnRowSync(sql: SqlStorageLike, turnId: Id): AssistantTurnRow | null {
+  return sqlExecMaybe<AssistantTurnRow>(sql, 'SELECT * FROM assistant_turns WHERE id = ?', turnId);
+}
+
+export function getTaskRowSync(sql: SqlStorageLike, taskId: Id): TaskRow | null {
+  return sqlExecMaybe<TaskRow>(sql, 'SELECT * FROM tasks WHERE id = ?', taskId);
+}
+
+export function getLatestRunForTaskSync(sql: SqlStorageLike, taskId: Id): RunRow | null {
+  return sqlExecMaybe<RunRow>(
+    sql,
+    'SELECT * FROM runs WHERE task_id = ? ORDER BY attempt DESC LIMIT 1',
+    taskId,
+  );
+}
+
+export function listReservedAttemptsSync(
+  sql: SqlStorageLike,
+  subjectType: 'turn' | 'task',
+  subjectId: Id,
+): readonly ModelAttemptRow[] {
+  return sqlExecAll<ModelAttemptRow>(
+    sql,
+    `SELECT *
+       FROM model_attempts
+      WHERE subject_type = ? AND subject_id = ? AND state = 'reserved'
+      ORDER BY attempt_no ASC`,
+    subjectType,
+    subjectId,
+  );
+}
+
+export function getLatestAttemptForSubjectSync(
+  sql: SqlStorageLike,
+  subjectType: 'turn' | 'task',
+  subjectId: Id,
+): ModelAttemptRow | null {
+  return sqlExecMaybe<ModelAttemptRow>(
+    sql,
+    `SELECT *
+       FROM model_attempts
+      WHERE subject_type = ? AND subject_id = ?
+      ORDER BY attempt_no DESC
+      LIMIT 1`,
+    subjectType,
+    subjectId,
+  );
+}
+
+export function earliestBusinessAlarmAtMsSync(sql: SqlStorageLike): number | null {
+  const turnRow = sqlExecOne<{ readonly m: number | null }>(
+    sql,
+    `SELECT MIN(
+       CASE
+         WHEN lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms < deadline_at_ms
+           THEN lease_expires_at_ms
+         ELSE deadline_at_ms
+       END
+     ) AS m
+       FROM assistant_turns
+      WHERE status = 'running'`,
+  );
+
+  const taskRow = sqlExecOne<{ readonly m: number | null }>(
+    sql,
+    `SELECT MIN(
+       CASE
+         WHEN status = 'running' THEN
+           CASE
+             WHEN lease_expires_at_ms IS NOT NULL AND (deadline_at_ms IS NULL OR lease_expires_at_ms < deadline_at_ms)
+               THEN lease_expires_at_ms
+             ELSE COALESCE(deadline_at_ms, lease_expires_at_ms)
+           END
+         WHEN status IN ('queued', 'retryable_failed') THEN
+           CASE
+             WHEN deadline_at_ms IS NOT NULL AND deadline_at_ms < next_run_at_ms
+               THEN deadline_at_ms
+             ELSE next_run_at_ms
+           END
+         ELSE deadline_at_ms
+       END
+     ) AS m
+       FROM tasks
+      WHERE status IN ('queued', 'retryable_failed', 'running', 'waiting_approval')`,
+  );
+
+  const approvalRow = sqlExecOne<{ readonly m: number | null }>(
+    sql,
+    `SELECT MIN(expires_at_ms) AS m FROM approvals WHERE status = 'pending'`,
+  );
+
+  const candidates = [turnRow.m, taskRow.m, approvalRow.m].filter((v): v is number => v !== null);
+  return candidates.length === 0 ? null : Math.min(...candidates);
+}
+
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(sortJsonValue);
+  }
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    const sorted: Record<string, unknown> = {};
+    for (const key of Object.keys(record).sort()) {
+      const item = record[key];
+      if (item !== undefined) {
+        sorted[key] = sortJsonValue(item);
+      }
+    }
+    return sorted;
+  }
+  return value;
+}
+
+export async function prepareEdgeSafeTaskCommand(command: unknown): Promise<{
+  readonly command: TaskCommand;
+  readonly canonical: string;
+  readonly digest: string;
+  readonly deadlineAt: string | null;
+}> {
+  const parsed = TaskCommandSchema.safeParse(command);
+  if (!parsed.success) {
+    throw toInvalidArgumentError(parsed.error);
+  }
+
+  const validated = parsed.data;
+  const deadlineAt =
+    validated.deadlineAt === undefined ? null : new Date(validated.deadlineAt).toISOString();
+
+  const canonical = JSON.stringify(
+    sortJsonValue({
+      agentId: validated.agentId,
+      kind: validated.kind,
+      ...(validated.title === undefined ? {} : { title: validated.title }),
+      input: validated.input,
+      deadlineAt,
+    }),
+  );
+
+  const bytes = new TextEncoder().encode(`${TASK_COMMAND_DIGEST_VERSION}\n${canonical}`);
+  if (new TextEncoder().encode(canonical).byteLength > TASK_COMMAND_MAX_BYTES) {
+    throw new DomainError('INVALID_ARGUMENT', 'task command exceeds 64 KiB canonical limit');
+  }
+
+  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const digest = Array.from(new Uint8Array(hashBuffer))
+    .map((b) => b.toString(16).padStart(2, '0'))
+    .join('');
+
+  return { command: validated, canonical, digest, deadlineAt };
+}
+
+export async function deterministicEdgeUuid(seed: string): Promise<Id> {
+  const bytes = new TextEncoder().encode(seed);
+  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', bytes);
+  const arr = new Uint8Array(hashBuffer).slice(0, 16);
+  arr[6] = (arr[6]! & 0x0f) | 0x40;
+  arr[8] = (arr[8]! & 0x3f) | 0x80;
+  const hex = Array.from(arr, (b) => b.toString(16).padStart(2, '0')).join('');
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+}

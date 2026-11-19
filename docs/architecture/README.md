@@ -14,7 +14,7 @@
 
 - [ADR-0005：Cloudflare-native Cloud Runtime V2](../adr/0005-cloudflare-native-runtime-v2.md)：合并后锁定长期技术方向与 V1 防腐纪律；不授权迁移或 PoC，不覆盖 V1 已批准契约。
 
-- [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)：待评审；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。合并后细化 ADR-0005，仅授权有边界的 V2 PoC，不授权生产迁移。
+- [ADR-0006：Experience-first, Device-powered Runtime V2](../adr/0006-experience-first-device-powered-runtime-v2.md)（[中文版](../adr/0006-experience-first-device-powered-runtime-v2.zh-CN.md)，以英文原版为准）：待评审；定义两条长期架构原则、Fast/Durable Path、端侧执行、性能门禁及部署预算。合并后细化 ADR-0005，仅授权有边界的 V2 PoC，不授权生产迁移。
 
 ## 决策权威和阅读顺序
 

@@ -3,6 +3,7 @@ export * from './state-machine.js';
 export * from './budget.js';
 export * from './queries.js';
 export * from './memory-service.js';
+export * from './task-artifact-service.js';
 export * from './recovery-service.js';
 export * from './turn-service.js';
 export * from './proactive-schedule-service.js';

@@ -606,7 +606,8 @@ describe('Agent E — V2 proactive schedules runtime', () => {
     db.exec(`INSERT INTO personal_memories (
       id, tenant_id, principal_id, kind, content, provenance_source, created_at_ms, updated_at_ms
     ) VALUES ('mem-1', 't1', 'p1', 'preference', 'Keep briefs concise', 'explicit_user_request', 1000, 1000)`);
-    const upgrade = applyAgentHeadMigrations(storage, allSteps, 2_000);
+    const upToV7 = allSteps.filter((s) => s.version <= 7);
+    const upgrade = applyAgentHeadMigrations(storage, upToV7, 2_000);
     expect(upgrade.appliedVersions).toEqual([7]);
     expect(
       db.prepare(`SELECT schedule_id FROM v2_schedules WHERE schedule_id = 'legacy-sched'`).get(),

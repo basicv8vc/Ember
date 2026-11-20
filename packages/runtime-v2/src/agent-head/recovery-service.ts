@@ -642,6 +642,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
+      this.purgeUncommittedTaskOutputsSync(task.id);
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
@@ -686,6 +687,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
+      this.purgeUncommittedTaskOutputsSync(task.id);
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
@@ -715,6 +717,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
+      this.purgeUncommittedTaskOutputsSync(task.id);
 
       const hasHandle = task.provider_job_handle !== null && task.provider_job_handle.length > 0;
       const canRetry = task.attempt_count < task.max_attempts && (!anyUncertain || hasHandle);
@@ -926,6 +929,24 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         this.deps.storage.sql,
         `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_schedules'`,
       ) !== null
+    );
+  }
+
+  private hasTaskArtifactsTableSync(): boolean {
+    return (
+      sqlExecMaybe<{ readonly name: string }>(
+        this.deps.storage.sql,
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_task_artifacts'`,
+      ) !== null
+    );
+  }
+
+  private purgeUncommittedTaskOutputsSync(taskId: string): void {
+    if (!this.hasTaskArtifactsTableSync()) return;
+    this.deps.storage.sql.exec(
+      `DELETE FROM v2_task_artifacts
+        WHERE task_id = ? AND created_by = 'run' AND committed = 0`,
+      taskId,
     );
   }
 
@@ -1309,6 +1330,14 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           leaseMs: cmd.leaseMs,
         },
       );
+      appendTaskEventSync(this.deps.storage.sql, {
+        id: this.newId(),
+        taskId: task.id,
+        phase: 'leased',
+        traceId: this.newId(),
+        nowMs,
+        payload: { taskKind: task.kind, runId, attempt: nextAttempt },
+      });
       this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
       const latestTaskAttempt = getLatestAttemptForSubjectSync(
@@ -1641,6 +1670,36 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           );
         }
       }
+
+      // Atomically commit only the winning run's staged output artifacts and purge uncommitted
+      // rows from any other/failed attempts inside the same SQLite transaction as task completion.
+      if (this.hasTaskArtifactsTableSync()) {
+        if (isCompleted) {
+          this.deps.storage.sql.exec(
+            `UPDATE v2_task_artifacts
+                SET committed = 1
+              WHERE task_id = ? AND created_by = 'run' AND run_id = ?`,
+            task.id,
+            run.id,
+          );
+        }
+        this.purgeUncommittedTaskOutputsSync(task.id);
+      }
+
+      appendTaskEventSync(this.deps.storage.sql, {
+        id: this.newId(),
+        taskId: task.id,
+        phase: isCompleted ? 'completed' : 'failed',
+        traceId: this.newId(),
+        nowMs,
+        payload: {
+          taskKind: task.kind,
+          runId: run.id,
+          attempt: run.attempt,
+          toStatus: isCompleted ? 'completed' : 'failed',
+          simulated: parsedTask.simulated ?? true,
+        },
+      });
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);

@@ -26,6 +26,11 @@ import type {
   PersonalMemoryResponse,
   PersonalMemoryRpc,
 } from '../contracts/personal-memory.js';
+import type {
+  TaskArtifactCommand,
+  TaskArtifactResponse,
+  TaskArtifactRpc,
+} from '../contracts/task-artifacts.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
 import type {
   ProactiveScheduleCommand,
@@ -59,6 +64,7 @@ import {
 import { AgentHeadDeviceService } from './device-service.js';
 import { AgentHeadMemoryService } from './memory-service.js';
 import { AgentHeadProactiveScheduleService } from './proactive-schedule-service.js';
+import { AgentHeadTaskArtifactService } from './task-artifact-service.js';
 import { getHeadMetaSync, getTaskRowSync, sqlExecMaybe } from './queries.js';
 import { AgentHeadRecoveryService } from './recovery-service.js';
 import {
@@ -167,11 +173,13 @@ export class AgentHeadCore
     AuthoritativeBusinessPort,
     DeviceExecutionRpc,
     PersonalMemoryRpc,
-    ProactiveScheduleRpc
+    ProactiveScheduleRpc,
+    TaskArtifactRpc
 {
   private readonly deviceService: AgentHeadDeviceService;
   private readonly memoryService: AgentHeadMemoryService;
   private readonly proactiveScheduleService: AgentHeadProactiveScheduleService;
+  private readonly taskArtifactService: AgentHeadTaskArtifactService;
   readonly recoveryService: AgentHeadRecoveryService;
   readonly turnService: AgentHeadTurnService;
 
@@ -258,6 +266,17 @@ export class AgentHeadCore
     });
 
     this.proactiveScheduleService = new AgentHeadProactiveScheduleService({
+      storage: this.storage,
+      recoveryAdmission: bindings.recoveryAdmission,
+      recoveryHooks: bindings.recoveryHooks,
+      recoveryRegistry: options.recoveryRegistry,
+      earliestDiscovery: this.recoveryService,
+      eventCoordinator: bindings.eventCoordinator,
+      nowMs: this.nowMsFn,
+      newId: this.newId,
+    });
+
+    this.taskArtifactService = new AgentHeadTaskArtifactService({
       storage: this.storage,
       recoveryAdmission: bindings.recoveryAdmission,
       recoveryHooks: bindings.recoveryHooks,
@@ -422,6 +441,10 @@ export class AgentHeadCore
 
   personalMemory(cmd: PersonalMemoryCommand): Promise<PersonalMemoryResponse> {
     return this.memoryService.execute(cmd);
+  }
+
+  taskArtifacts(cmd: TaskArtifactCommand): Promise<TaskArtifactResponse> {
+    return this.taskArtifactService.execute(cmd);
   }
 
   getMainConversation(req: {

@@ -12,6 +12,7 @@ import {
   executeRecoveredOrFreshDurableWork,
   parseClaimExecutionContext,
   parseProactiveScheduleTaskInput,
+  runV2FakePythonSandbox,
   toAgentHeadDurableCommitOutcome,
   type DurableExecutionClaimContext,
   type DurableExecutorPort,
@@ -19,6 +20,8 @@ import {
   type PersonalMemoryContextItem,
   type ProactiveScheduleList,
   type ProactiveScheduleTaskPayload,
+  type V2PublishTaskOutputsResultDto,
+  type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
 import {
   buildProactiveBriefPrompt,
@@ -27,6 +30,23 @@ import {
   type ProactiveBriefContext,
 } from './proactive-brief-context.js';
 import { createEdgeRpc, getHead, type AgentHeadDO, type LocalRuntimeEnv } from './runtime-head.js';
+
+function decodeBase64ToBytes(encoded: string): Uint8Array {
+  const binary = globalThis.atob(encoded);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+function encodeBytesToBase64(bytes: Uint8Array): string {
+  let binary = '';
+  for (let i = 0; i < bytes.byteLength; i += 1) {
+    binary += String.fromCharCode(bytes[i]!);
+  }
+  return globalThis.btoa(binary);
+}
 
 export type V2FakeDurableGateway = Pick<
   FakeStreamingModelGateway,
@@ -132,6 +152,77 @@ export function createDurableExecutor(
           simulated: false,
           reasonCode: 'ok',
         };
+      }
+
+      if (claim.targetKind === 'task' && context.attemptId === undefined && proactive === null) {
+        const rawContext = JSON.parse(claim.contextJson) as {
+          readonly kind?: string;
+          readonly runId?: string;
+          readonly inputJson?: string;
+        };
+        if (rawContext.kind === 'python.agent' && rawContext.runId !== undefined) {
+          if (env.EMBER_MODEL_MODE !== 'fake') {
+            return { status: 'failed', reasonCode: 'sandbox_provider_unavailable' };
+          }
+          const taskInput = JSON.parse(rawContext.inputJson ?? '{}') as {
+            readonly prompt?: string;
+            readonly instructions?: string;
+          };
+          const loadedInputs = (await head.taskArtifacts({
+            kind: 'load_task_inputs',
+            tenantId: claim.tenantId,
+            principalId: claim.agentId,
+            agentId: claim.agentId,
+            requestId: crypto.randomUUID(),
+            taskId: claim.targetId,
+            runId: rawContext.runId,
+            leaseEpoch: claim.leaseEpoch,
+            workerId: claim.workerId,
+          })) as readonly V2TaskInputFileDto[];
+
+          const sandboxResult = runV2FakePythonSandbox({
+            prompt: taskInput.prompt ?? '',
+            ...(taskInput.instructions === undefined ? {} : { instructions: taskInput.instructions }),
+            inputFiles: loadedInputs.map((file) => ({
+              filename: file.filename,
+              mediaType: file.mediaType,
+              bytes: decodeBase64ToBytes(file.contentBase64),
+            })),
+          });
+
+          if (sandboxResult.outputFiles.length > 0) {
+            const published = (await head.taskArtifacts({
+              kind: 'publish_task_outputs',
+              tenantId: claim.tenantId,
+              principalId: claim.agentId,
+              agentId: claim.agentId,
+              requestId: crypto.randomUUID(),
+              taskId: claim.targetId,
+              runId: rawContext.runId,
+              leaseEpoch: claim.leaseEpoch,
+              workerId: claim.workerId,
+              outputs: sandboxResult.outputFiles.map((file) => ({
+                filename: file.filename,
+                mediaType: file.mediaType,
+                contentBase64: encodeBytesToBase64(file.bytes),
+              })),
+            })) as V2PublishTaskOutputsResultDto;
+            if (!published.accepted) {
+              return { status: 'failed', reasonCode: 'lease_lost' };
+            }
+          }
+
+          return {
+            status: 'completed',
+            summaryText: sandboxResult.summaryText,
+            detailText: sandboxResult.detailText,
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            truncated: false,
+            reasonCode: 'ok',
+          };
+        }
+        return { status: 'failed', reasonCode: 'local_task_driver_unavailable' };
       }
 
       if (claim.targetKind === 'task' && context.attemptId === undefined) {

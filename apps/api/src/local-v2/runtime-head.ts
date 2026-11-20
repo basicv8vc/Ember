@@ -22,6 +22,8 @@ import {
   type PersonalMemoryRpc,
   type ProactiveScheduleRpc,
   type QueueLike,
+  type TaskArtifactCommand,
+  type TaskArtifactRpc,
   type V2DispatchEnvelope,
 } from '@ember/runtime-v2';
 import { DurableObject } from 'cloudflare:workers';
@@ -57,8 +59,13 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
 type LocalEdgeRpc = EdgeAgentHeadRpc &
   DeviceExecutionRpc &
   PersonalMemoryRpc &
-  ProactiveScheduleRpc;
-type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc & ProactiveScheduleRpc;
+  ProactiveScheduleRpc &
+  TaskArtifactRpc;
+type CoreEdgeRpc = AgentHeadRpc &
+  DeviceExecutionRpc &
+  PersonalMemoryRpc &
+  ProactiveScheduleRpc &
+  TaskArtifactRpc;
 type EdgeMethod = keyof LocalEdgeRpc;
 type EdgeRequest<K extends EdgeMethod> = Parameters<CoreEdgeRpc[K]>[0];
 type EdgeResult<K extends EdgeMethod> = Awaited<ReturnType<CoreEdgeRpc[K]>>;
@@ -92,6 +99,7 @@ export function createEdgeRpc(head: AgentHeadDO): LocalEdgeRpc {
     deviceExecution: (req) => call('deviceExecution', req),
     personalMemory: (req) => call('personalMemory', req),
     proactiveSchedule: (req) => call('proactiveSchedule', req),
+    taskArtifacts: (req) => call('taskArtifacts', req),
   };
 }
 
@@ -199,6 +207,10 @@ export class AgentHeadDO
 
   commitDurableResult(req: Parameters<AgentHeadCore['commitDurableResult']>[0]) {
     return this.#load().core.commitDurableResult(req);
+  }
+
+  taskArtifacts(req: TaskArtifactCommand) {
+    return this.#load().core.taskArtifacts(req);
   }
 
   reconcileFromRegistry(req: Parameters<AgentHeadCore['reconcileFromRegistry']>[0]) {

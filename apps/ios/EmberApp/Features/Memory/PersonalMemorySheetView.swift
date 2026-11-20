@@ -6,6 +6,9 @@ struct PersonalMemorySheetView: View {
 
     @State private var draftContent = ""
     @State private var selectedKind: PersonalMemoryKind = .preference
+    @State private var editingItem: PersonalMemoryItemDTO?
+    @State private var editDraftContent = ""
+    @State private var editSelectedKind: PersonalMemoryKind = .preference
     @State private var pendingDeleteItem: PersonalMemoryItemDTO?
 
     private var trimmedDraft: String {
@@ -136,6 +139,9 @@ struct PersonalMemorySheetView: View {
             } message: {
                 Text("memory.delete.confirm_message", tableName: "Conversation")
             }
+            .sheet(item: $editingItem) { item in
+                editMemorySheet(for: item)
+            }
         }
     }
 
@@ -199,6 +205,7 @@ struct PersonalMemorySheetView: View {
 
     private func memoryRow(_ item: PersonalMemoryItemDTO) -> some View {
         let isDeleting = store.deletingIDs.contains(item.memoryID)
+        let isUpdating = store.updatingIDs.contains(item.memoryID)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .center, spacing: 8) {
                 Text(
@@ -222,6 +229,23 @@ struct PersonalMemorySheetView: View {
 
                 Spacer(minLength: 8)
 
+                Button {
+                    editSelectedKind = item.kind
+                    editDraftContent = item.content
+                    editingItem = item
+                } label: {
+                    if isUpdating {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "pencil")
+                            .font(.caption.weight(.semibold))
+                    }
+                }
+                .disabled(isDeleting || isUpdating)
+                .accessibilityLabel(Text("memory.edit.action", tableName: "Conversation"))
+                .accessibilityIdentifier("memory-edit-\(item.memoryID.uuidString.lowercased())")
+
                 Button(role: .destructive) {
                     pendingDeleteItem = item
                 } label: {
@@ -233,7 +257,7 @@ struct PersonalMemorySheetView: View {
                             .font(.caption.weight(.semibold))
                     }
                 }
-                .disabled(isDeleting)
+                .disabled(isDeleting || isUpdating)
                 .accessibilityLabel(Text("memory.delete.action", tableName: "Conversation"))
                 .accessibilityIdentifier("memory-delete-\(item.memoryID.uuidString.lowercased())")
             }
@@ -271,5 +295,83 @@ struct PersonalMemorySheetView: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("memory-item-\(item.memoryID.uuidString.lowercased())")
+    }
+
+    private func editMemorySheet(for item: PersonalMemoryItemDTO) -> some View {
+        let trimmed = editDraftContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let isUpdating = store.updatingIDs.contains(item.memoryID)
+        let canCommit = !trimmed.isEmpty
+            && trimmed.count <= store.limits.maxContentChars
+            && !isUpdating
+            && (trimmed != item.content || editSelectedKind != item.kind)
+
+        return NavigationStack {
+            VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                Picker(
+                    String(localized: "memory.kind.label", table: "Conversation"),
+                    selection: $editSelectedKind
+                ) {
+                    Text("memory.kind.preference", tableName: "Conversation")
+                        .tag(PersonalMemoryKind.preference)
+                    Text("memory.kind.fact", tableName: "Conversation")
+                        .tag(PersonalMemoryKind.fact)
+                }
+                .pickerStyle(.segmented)
+
+                TextField(
+                    String(localized: "memory.composer.placeholder", table: "Conversation"),
+                    text: $editDraftContent,
+                    axis: .vertical
+                )
+                .lineLimit(3...6)
+                .textFieldStyle(.roundedBorder)
+                .accessibilityIdentifier("memory-edit-input")
+
+                HStack {
+                    Text("\(trimmed.count) / \(store.limits.maxContentChars)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(
+                            trimmed.count > store.limits.maxContentChars ? Color.red : Color.secondary
+                        )
+                    Spacer()
+                }
+                Spacer()
+            }
+            .padding(EmberDesignTokens.standardSpacing)
+            .background(EmberDesignTokens.groupedBackground)
+            .navigationTitle(Text("memory.edit.title", tableName: "Conversation"))
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button {
+                        editingItem = nil
+                    } label: {
+                        Text("conversation.live.cancel", tableName: "Conversation")
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        let nextKind = editSelectedKind
+                        let nextContent = trimmed
+                        Task {
+                            if await store.update(id: item.memoryID, kind: nextKind, content: nextContent) {
+                                editingItem = nil
+                            }
+                        }
+                    } label: {
+                        if isUpdating {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("memory.composer.save", tableName: "Conversation")
+                                .fontWeight(.semibold)
+                        }
+                    }
+                    .disabled(!canCommit)
+                    .accessibilityIdentifier("memory-edit-save")
+                }
+            }
+        }
+        .presentationDetents([.medium])
     }
 }

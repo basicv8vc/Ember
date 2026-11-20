@@ -70,6 +70,25 @@ final class PersonalMemoryTests: XCTestCase {
                 }
                 """)
             }
+            if request.httpMethod == "PATCH" && path == "/v2/memories/\(memoryIDLower)" {
+                return .json(statusCode: 200, body: """
+                {
+                  "item": {
+                    "memory_id": "\(memoryIDLower)",
+                    "kind": "preference",
+                    "key": null,
+                    "content": "Based in Shanghai (UTC+8) — prefer metric units",
+                    "provenance": {
+                      "source": "user_settings",
+                      "conversation_id": null,
+                      "message_id": null
+                    },
+                    "created_at": "2026-11-20T09:00:00Z",
+                    "updated_at": "2026-11-20T09:15:00Z"
+                  }
+                }
+                """)
+            }
             if request.httpMethod == "DELETE" && path == "/v2/memories/\(memoryIDLower)" {
                 return .json(statusCode: 200, body: """
                 {
@@ -98,6 +117,17 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertTrue(saveResult.created)
         XCTAssertEqual(saveResult.item.kind, .fact)
         XCTAssertTrue(savedPayload.value.contains("\"source\":\"user_settings\""))
+
+        let updateResult = try await repo.updateMemory(
+            id: memoryID,
+            UpdatePersonalMemoryRequestDTO(
+                kind: .preference,
+                content: "Based in Shanghai (UTC+8) — prefer metric units"
+            )
+        )
+        XCTAssertEqual(updateResult.item.kind, .preference)
+        XCTAssertEqual(updateResult.item.content, "Based in Shanghai (UTC+8) — prefer metric units")
+        XCTAssertEqual(updateResult.item.createdAt, "2026-11-20T09:00:00Z")
 
         let deleteResult = try await repo.deleteMemory(id: memoryID)
         XCTAssertTrue(deleteResult.deleted)
@@ -144,6 +174,18 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertTrue(saved)
         XCTAssertEqual(store.items.count, 1)
         let savedID = try XCTUnwrap(store.items.first?.memoryID)
+        let originalCreatedAt = store.items.first?.createdAt
+        XCTAssertEqual(store.items.first?.provenance.source, .userSettings)
+
+        let updated = await store.update(
+            id: savedID,
+            kind: .fact,
+            content: "Prefer concise Chinese bullet summaries"
+        )
+        XCTAssertTrue(updated)
+        XCTAssertEqual(store.items.first?.kind, .fact)
+        XCTAssertEqual(store.items.first?.content, "Prefer concise Chinese bullet summaries")
+        XCTAssertEqual(store.items.first?.createdAt, originalCreatedAt)
         XCTAssertEqual(store.items.first?.provenance.source, .userSettings)
 
         await store.delete(id: savedID)

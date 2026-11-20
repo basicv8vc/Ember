@@ -6,9 +6,23 @@ private struct MockReceiptPresentation: Identifiable {
     var id: UUID { taskID }
 }
 
+struct EmberCloudTarget: Equatable, Sendable {
+    let baseURL: URL
+    let keychainConfiguration: KeychainSessionStore.Configuration
+    let journalSubdirectory: String
+    let environmentBadge: String
+
+    var isV2Staging: Bool {
+        baseURL.host?.lowercased() == AppCompositionRoot.v2StagingHost
+    }
+}
+
 @MainActor
 enum AppCompositionRoot {
     static let defaultCloudBaseURL = "https://ember-api.slowfast.dev"
+    static let v2StagingCloudBaseURL = "https://ember-v2-staging.slowfast.dev"
+    static let v2StagingHost = "ember-v2-staging.slowfast.dev"
+    private static let defaultHost = "ember-api.slowfast.dev"
 
     private static let mockLaunchArguments: Set<String> = [
         "--ember-mock-demo",
@@ -18,6 +32,68 @@ enum AppCompositionRoot {
         "--ember-mock-chat-tasks",
     ]
 
+    /// Resolves the active cloud target and isolated local storage namespace.
+    /// - Explicit `EMBER_CLOUD_BASE_URL` takes precedence and fails closed if invalid or non-HTTPS.
+    /// - `--ember-v2-staging` selects the isolated V2 Staging environment (`ember-v2-staging.slowfast.dev`)
+    ///   with a separate Keychain account and conversation journal directory so V1 sessions are never overwritten.
+    /// - Default remains V1 (`ember-api.slowfast.dev`).
+    static func resolveCloudTarget(
+        arguments: Set<String>,
+        environment: [String: String]
+    ) -> EmberCloudTarget? {
+        let origin: String
+        if let envOrigin = environment["EMBER_CLOUD_BASE_URL"], !envOrigin.isEmpty {
+            origin = envOrigin
+        } else if arguments.contains("--ember-v2-staging") {
+            origin = v2StagingCloudBaseURL
+        } else {
+            origin = defaultCloudBaseURL
+        }
+
+        guard let url = URL(string: origin),
+              LiveEmberSessionAPI.isAcceptableBaseURL(url),
+              let host = url.host?.lowercased()
+        else {
+            return nil
+        }
+
+        if host == defaultHost {
+            return EmberCloudTarget(
+                baseURL: url,
+                keychainConfiguration: .live,
+                journalSubdirectory: "EmberConversation",
+                environmentBadge: "LIVE CLOUD"
+            )
+        }
+
+        if host == v2StagingHost {
+            return EmberCloudTarget(
+                baseURL: url,
+                keychainConfiguration: KeychainSessionStore.Configuration(
+                    service: KeychainSessionStore.Configuration.live.service,
+                    account: "ember.session.v2-staging"
+                ),
+                journalSubdirectory: "EmberConversation-v2-staging",
+                environmentBadge: "V2 STAGING"
+            )
+        }
+
+        let sanitizedHost = host.replacingOccurrences(
+            of: #"[^a-z0-9.-]"#,
+            with: "_",
+            options: .regularExpression
+        )
+        return EmberCloudTarget(
+            baseURL: url,
+            keychainConfiguration: KeychainSessionStore.Configuration(
+                service: KeychainSessionStore.Configuration.live.service,
+                account: "ember.session.\(sanitizedHost)"
+            ),
+            journalSubdirectory: "EmberConversation-\(sanitizedHost)",
+            environmentBadge: "CUSTOM CLOUD"
+        )
+    }
+
     /// Live Ember Cloud is the default entrypoint.
     /// Mock flows remain explicitly selectable via launch arguments for UI tests.
     /// An explicitly invalid or non-HTTPS EMBER_CLOUD_BASE_URL fails closed; never fall back to Mock.
@@ -26,10 +102,14 @@ enum AppCompositionRoot {
         let arguments = Set(ProcessInfo.processInfo.arguments)
         if arguments.contains("--ember-device-executor") {
             DeviceExecutorWorkbenchView(model: DeviceExecutorWorkbenchModel())
-        } else if arguments.isDisjoint(with: mockLaunchArguments) || arguments.contains("--ember-live-cloud") {
-            let origin = ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"] ?? defaultCloudBaseURL
-            if let url = URL(string: origin),
-               let model = try? LiveComposition.make(baseURL: url) {
+        } else if arguments.isDisjoint(with: mockLaunchArguments)
+            || arguments.contains("--ember-live-cloud")
+            || arguments.contains("--ember-v2-staging") {
+            if let target = resolveCloudTarget(
+                arguments: arguments,
+                environment: ProcessInfo.processInfo.environment
+            ),
+               let model = try? LiveComposition.make(target: target) {
                 LiveConversationHost(model: model)
             } else {
                 ContentUnavailableView(
@@ -52,18 +132,23 @@ enum AppCompositionRoot {
 
 @MainActor
 private enum LiveComposition {
-    static func make(baseURL: URL) throws -> LiveConversationHostModel {
+    static func make(target: EmberCloudTarget) throws -> LiveConversationHostModel {
         let client = EmberAPIClient()
-        let api = try LiveEmberSessionAPI(baseURL: baseURL, client: client)
-        let transport = try EmberAuthenticatedTransport(baseURL: baseURL, client: client)
+        let api = try LiveEmberSessionAPI(baseURL: target.baseURL, client: client)
+        let transport = try EmberAuthenticatedTransport(baseURL: target.baseURL, client: client)
         // Built before the coordinator so the durable-intent cleanup can be handed to it at
         // construction. Registering it afterwards would leave a window in which a logout clears the
         // credential but leaves unsent private text on disk.
-        let journal = LiveConversationJournal()
+        let appSupport = FileManager.default.urls(
+            for: .applicationSupportDirectory, in: .userDomainMask
+        )[0]
+        let journal = LiveConversationJournal(
+            directory: appSupport.appendingPathComponent(target.journalSubdirectory, isDirectory: true)
+        )
         let auth = LiveAuthSessionCoordinator(dependencies: .init(
             api: api,
             transport: transport,
-            store: KeychainSessionStore(),
+            store: KeychainSessionStore(configuration: target.keychainConfiguration),
             appleSignIn: AppleSignInAuthorizer(),
             signOutCleanupHooks: [{ try? await journal.reset() }]
         ))
@@ -81,7 +166,8 @@ private enum LiveComposition {
             auth: auth,
             taskRepository: taskRepository,
             scheduleRepository: scheduleRepository,
-            memoryRepository: memoryRepository
+            memoryRepository: memoryRepository,
+            environmentBadge: target.environmentBadge
         )
     }
 }

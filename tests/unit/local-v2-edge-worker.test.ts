@@ -166,7 +166,7 @@ function fixture(reasoningMs = 0, usageCostMicroUsd: number | null = 0) {
       if (command.result.status === 'aborted_for_retry_or_reconcile') {
         return { outcome: 'reconciled_only', turn: saved.turn };
       }
-      if (command.settlement.observedCostMicroUsd !== undefined) {
+      if (command.settlement.observedCostMicroUsd != null) {
         charged.set(command.operationId, command.settlement.observedCostMicroUsd);
       }
       const responseMessageId = crypto.randomUUID();

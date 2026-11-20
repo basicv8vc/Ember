@@ -24,6 +24,7 @@ import type {
   HandoffTurnResult,
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
+  ObservedTurnUsage,
   PrepareTurnRequest,
   PrepareTurnResult,
   RenewTurnLeaseRequest,
@@ -35,6 +36,7 @@ import {
   parseCommitTurnRequest,
   parseHandoffTurnRequest,
   parseMarkAttemptSentRequest,
+  parseObservedTurnUsage,
   parsePrepareTurnRequest,
   parseRenewTurnLeaseRequest,
 } from '../contracts/validation.js';
@@ -1251,6 +1253,26 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       settlement: req.settlement,
       result: req.result,
       allowDeadlineTimeoutPublish: true,
+      throwOnScopeMismatch: true,
+    });
+  }
+
+  async recordTurnUsage(rawReq: ObservedTurnUsage): Promise<void> {
+    const req = parseObservedTurnUsage(rawReq);
+    await executeAuthoritativeTurnCommit(this.toTurnCommitDeps(), {
+      tenantId: req.scope.tenantId,
+      agentId: req.scope.agentId,
+      turnId: req.turnId,
+      attemptNo: req.attemptNo,
+      operationId: req.operationId,
+      settlement: {
+        state: 'settled',
+        outcomeCode: 'ok',
+        observedCostMicroUsd: req.observedCostMicroUsd,
+        inputTokens: req.inputTokens,
+        outputTokens: req.outputTokens,
+      },
+      accountingOnly: true,
       throwOnScopeMismatch: true,
     });
   }

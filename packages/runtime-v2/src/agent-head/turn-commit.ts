@@ -492,20 +492,25 @@ export async function executeAuthoritativeTurnCommit(
     readonly agentId: Id;
     readonly conversationId?: Id;
     readonly turnId: Id;
-    readonly leaseEpoch: number;
-    readonly leaseOwner: string;
     readonly attemptNo: number;
     readonly operationId: Id;
     readonly settlement: CommitTurnSettlementInput;
-    readonly result: CommitTurnRequest['result'];
-    readonly allowDeadlineTimeoutPublish: boolean;
     readonly throwOnScopeMismatch: boolean;
-  },
+  } & (
+    | {
+        readonly leaseEpoch: number;
+        readonly leaseOwner: string;
+        readonly result: CommitTurnRequest['result'];
+        readonly allowDeadlineTimeoutPublish: boolean;
+      }
+    | { readonly accountingOnly: true }
+  ),
 ): Promise<CommitTurnResult> {
+  const publication = 'leaseEpoch' in cmd ? cmd : null;
   if (
-    cmd.result.status === 'completed' &&
-    !cmd.result.simulated &&
-    SIMULATED_LABEL_PATTERN.test(cmd.result.modelLabel)
+    publication?.result.status === 'completed' &&
+    !publication.result.simulated &&
+    SIMULATED_LABEL_PATTERN.test(publication.result.modelLabel)
   ) {
     throw new DomainError(
       'INVALID_ARGUMENT',
@@ -514,12 +519,12 @@ export async function executeAuthoritativeTurnCommit(
   }
 
   let preparedDelegation: PreparedDelegationPayload | null = null;
-  if (cmd.result.status === 'completed' && cmd.result.delegation !== undefined) {
+  if (publication?.result.status === 'completed' && publication.result.delegation !== undefined) {
     preparedDelegation = await prepareDelegationCommand(
       cmd.tenantId,
       cmd.agentId,
       cmd.turnId,
-      cmd.result.delegation,
+      publication.result.delegation,
       deps.idFactory,
     );
   }
@@ -585,7 +590,7 @@ export async function executeAuthoritativeTurnCommit(
         .toArray().length > 0;
     const attemptBindingValid =
       attempt !== null ||
-      (cmd.allowDeadlineTimeoutPublish &&
+      (publication?.allowDeadlineTimeoutPublish &&
         !hasAnyAttemptForTurn &&
         cmd.attemptNo === 1 &&
         (cmd.settlement.observedCostMicroUsd ?? null) === null);
@@ -595,20 +600,20 @@ export async function executeAuthoritativeTurnCommit(
       cmd.conversationId !== undefined &&
       turn.conversation_id !== cmd.conversationId;
     const fence =
-      turn === null
+      turn === null || publication === null
         ? ({ ok: false, reason: 'terminal' } as const)
-        : evaluateTurnFence(turn, cmd.leaseEpoch, cmd.leaseOwner, nowMs, {
+        : evaluateTurnFence(turn, publication.leaseEpoch, publication.leaseOwner, nowMs, {
             allowCancelRequested: true,
           });
     const deadlineTimeoutOverride =
       turn !== null &&
-      cmd.allowDeadlineTimeoutPublish &&
+      publication?.allowDeadlineTimeoutPublish &&
       turn.status === 'running' &&
       !fence.ok &&
       fence.reason === 'expired' &&
       nowMs >= turn.deadline_at_ms &&
-      turn.lease_owner === cmd.leaseOwner &&
-      turn.lease_epoch === cmd.leaseEpoch;
+      turn.lease_owner === publication.leaseOwner &&
+      turn.lease_epoch === publication.leaseEpoch;
 
     const authorizedToPublish =
       turn !== null &&
@@ -616,12 +621,19 @@ export async function executeAuthoritativeTurnCommit(
       attemptBindingValid &&
       (fence.ok || deadlineTimeoutOverride);
 
-    if (!authorizedToPublish) {
+    if (publication === null || !authorizedToPublish) {
       let alarmAtMs: number | null | undefined;
       let hasBudgetSync = false;
 
-      if (!conversationMismatch && attempt !== null) {
-        const allowActiveReservedSettle = turn === null || turn.status !== 'running';
+      const mayHaveSent =
+        attempt !== null &&
+        (attempt.send_started_at_ms !== null || attempt.send_authorizing_at_ms !== null);
+      if (!conversationMismatch && attempt !== null && (publication !== null || mayHaveSent)) {
+        const allowActiveReservedSettle =
+          publication === null ||
+          turn === null ||
+          turn.status !== 'running' ||
+          (mayHaveSent && cmd.settlement.observedCostMicroUsd != null);
         const needsBudgetCoverage =
           (attempt.state !== 'reserved' || allowActiveReservedSettle) &&
           doesSettlementNeedBudgetCoverageSync({
@@ -769,7 +781,7 @@ export async function executeAuthoritativeTurnCommit(
       deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
       const alarmAtMs = deps.eventCoordinator.recomputeAlarmSync(nowMs);
       const updated = getTurnRowSync(deps.storage.sql, turn.id)!;
-      if (cmd.result.status === 'failed') {
+      if (publication.result.status === 'failed') {
         return {
           result: {
             outcome: 'published' as const,
@@ -791,7 +803,7 @@ export async function executeAuthoritativeTurnCommit(
       };
     }
 
-    if (cmd.result.status === 'aborted_for_retry_or_reconcile') {
+    if (publication.result.status === 'aborted_for_retry_or_reconcile') {
       const nextEpoch = turn.lease_epoch + 1;
       deps.storage.sql.exec(
         `UPDATE assistant_turns
@@ -837,7 +849,7 @@ export async function executeAuthoritativeTurnCommit(
       };
     }
 
-    if (cmd.result.status === 'failed') {
+    if (publication.result.status === 'failed') {
       const { messageId, sequence } = insertEmberMessageSync({
         sql: deps.storage.sql,
         messageId: deps.idFactory(),
@@ -856,7 +868,7 @@ export async function executeAuthoritativeTurnCommit(
                 lease_expires_at_ms = NULL,
                 updated_at_ms = ?
           WHERE id = ?`,
-        cmd.result.failureReason,
+        publication.result.failureReason,
         messageId,
         nowMs,
         turn.id,
@@ -902,9 +914,9 @@ export async function executeAuthoritativeTurnCommit(
       sql: deps.storage.sql,
       messageId: deps.idFactory(),
       conversationId: turn.conversation_id,
-      text: cmd.result.text,
-      modelLabel: cmd.result.modelLabel,
-      simulated: cmd.result.simulated,
+      text: publication.result.text,
+      modelLabel: publication.result.modelLabel,
+      simulated: publication.result.simulated,
       nowMs,
     });
 

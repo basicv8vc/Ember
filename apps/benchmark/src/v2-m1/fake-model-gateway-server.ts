@@ -26,6 +26,8 @@ export interface FakeGatewayScriptRule {
   readonly costMicroUsd?: number;
   readonly lateRevisionCostMicroUsd?: number;
   readonly providerJobHandle?: string;
+  /** Let the first matching query release the scripted result before its delay elapses. */
+  readonly completeOnPoll?: boolean;
 }
 
 export interface FakeGatewayCallRecord {
@@ -56,7 +58,8 @@ interface PendingJobRecord {
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costMicroUsd: number;
-  readonly readyAtMs: number;
+  readyAtMs: number;
+  readonly completeOnPoll: boolean;
   readonly deadlineAtMs: number | null;
   readonly usageMissing: boolean;
 }
@@ -220,6 +223,9 @@ export class FakeModelGatewayServer {
         modelLabel: FAKE_MODEL_LABEL,
         simulated: true,
       };
+      if (job.completeOnPoll && operationId !== null && operationId === job.operationId) {
+        job.readyAtMs = Math.min(job.readyAtMs, Date.now());
+      }
       if (Date.now() < job.readyAtMs) {
         this.#sendJson(res, 200, { ...common, status: 'running' });
       } else {
@@ -377,6 +383,7 @@ export class FakeModelGatewayServer {
         outputTokens,
         costMicroUsd,
         readyAtMs: startedAtMs + reasoningMs,
+        completeOnPoll: rule.completeOnPoll === true,
         deadlineAtMs,
         usageMissing: rule.mode === 'usage_missing',
       };

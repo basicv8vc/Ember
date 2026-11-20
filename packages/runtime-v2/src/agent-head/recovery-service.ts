@@ -1073,7 +1073,18 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
         const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
 
-        const context = readRecentTurnContextSync(this.deps.storage.sql, turn.conversation_id);
+        const source = this.deps.storage.sql
+          .exec<{ sequence: number }>(
+            'SELECT sequence FROM conversation_messages WHERE id = ?',
+            turn.source_message_id,
+          )
+          .one();
+        const context = readRecentTurnContextSync(
+          this.deps.storage.sql,
+          turn.conversation_id,
+          undefined,
+          source.sequence,
+        );
         const latestAttempt = getLatestAttemptForSubjectSync(
           this.deps.storage.sql,
           'turn',

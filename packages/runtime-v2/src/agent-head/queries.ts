@@ -172,6 +172,7 @@ export function readRecentTurnContextSync(
   sql: SqlStorageLike,
   conversationId: Id,
   maxMessages = V2_B1_COMPAT_CONSTANTS.maxContextMessages,
+  throughSequence: number = Number.MAX_SAFE_INTEGER,
 ): readonly B2TurnContextRow[] {
   const rows = sqlExecAll<ConversationMessageRow>(
     sql,
@@ -179,9 +180,11 @@ export function readRecentTurnContextSync(
        FROM conversation_messages
       WHERE conversation_id = ?
         AND kind IN ('user', 'ember')
+        AND sequence <= ?
       ORDER BY sequence DESC
       LIMIT ?`,
     conversationId,
+    throughSequence,
     maxMessages,
   ).reverse();
 

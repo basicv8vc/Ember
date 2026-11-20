@@ -140,22 +140,19 @@ jobs:
             tests/integration/v2-m1-harness-smoke.test.ts \
             tests/integration/v2-m1-acceptance.test.ts
           pnpm exec vitest run --config vitest.integration.config.ts \
+            tests/integration/v2-m1-runtime-assembly.test.ts
+          pnpm exec vitest run --config vitest.integration.config.ts \
             tests/integration/v2-m0-probes.test.ts \
             -t "isolated local workerd|2-RPC|RTT"
 
-      - name: Report Full M1 E2E Gate status (BLOCKED until A+B+E+F converge)
+      - name: Report V2 runtime acceptance scope
         run: |
           {
             echo "### V2-M1 Gate Status"
             echo ""
-            echo "| Gate | Status | Notes |"
-            echo "| :--- | :--- | :--- |"
-            echo "| V2 Runtime Build & Unit Tests | PASS | Fake Provider, no cloud/LLM/Daytona credentials |"
-            echo "| V2 Real Local Workerd Integration Tests | PASS | M0 DO/D1 probes + M1 harness smoke + acceptance contract |"
-            if [ -z "${EMBER_V2_RUNTIME_CONFIG:-}" ]; then
-              echo "| Full M1 E2E Gate (F-1..F-23 & FI-01..FI-16) | BLOCKED | EMBER_V2_RUNTIME_CONFIG unset; awaiting A+B+E+F worker assembly |"
-              echo "::warning title=M1 Full E2E Gate BLOCKED::Full M1 E2E tests (F-1..F-23 and FI-01..FI-16) are BLOCKED until A, B1-B4, E, and F converge into an executable A+B+E+F wrangler entrypoint."
-            else
-              echo "| Full M1 E2E Gate (F-1..F-23 & FI-01..FI-16) | CONFIGURED | Target: ${EMBER_V2_RUNTIME_CONFIG} |"
-            fi
+            echo "| Gate | Status |"
+            echo "| :--- | :--- |"
+            echo "| V2 Runtime Build & Unit Tests | PASS |"
+            echo "| Local workerd harness, M0 probes and V2 conversation smoke | PASS |"
+            echo "| Full M1 acceptance matrix (F-1..F-23 & FI-01..FI-16) | Tracked separately |"
           } >> "$GITHUB_STEP_SUMMARY"

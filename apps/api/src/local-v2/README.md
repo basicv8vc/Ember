@@ -1,42 +1,44 @@
-# Ember V2-M1-F local Edge Worker
+# Ember V2-M1 local runtime
 
-`createLocalV2EdgeWorker` returns a Worker-compatible `fetch` handler for a
-loopback runtime host. The host supplies B1 sessions, an Agent Head-backed
-`/v1/me` projection, and a resolver from verified identity to the canonical
-Agent Head RPC stub. Session, conversation and attachment routing use trusted
-host ports. The production API entry point does not import this module.
+Run the conversation smoke from the repository root with Node 24 and pnpm 12.
 
-The B1 chat routes return the existing receipts, transcript pages and Turn
-DTOs. B1 submissions select the durable queue with the original 60-second
-deadline. The Agent Head creates the dispatch obligation and grants no
-interactive lease on that path. Unknown ACKs reconcile through
-`GET /v1/message-submissions/{client_submission_id}`.
+```sh
+pnpm install --frozen-lockfile
+pnpm build
+pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-m1-runtime-assembly.test.ts
+```
 
-Supplying the fake streaming gateway enables the local-only
-`POST /v2/conversations/{id}/messages/stream` experiment. Clients receive
-`turn.accepted`, provisional `turn.delta` frames, and an acknowledgement of
-a successful commit or handoff. On reconnect, read the authoritative Turn and
-transcript cursor through the B1 endpoints. A submission replay returns the
-original receipt and opens no provider stream.
+The Agent D harness starts local workerd and the loopback Fake Model Gateway,
+applies the D1 recovery migration, and disposes both after the test. The smoke
+exercises B1 session creation, receipt recovery after an unknown ACK, durable
+dispatch, SSE, disconnect and query-only handoff, cancellation, transcript
+clear, and settlement in the actual GlobalBudgetDO SQLite ledger.
 
-The executor checks a positive simulated global reservation and the
-`markAttemptSent` authorization before starting the Fake Provider. Active
-streams renew 45-second leases every 15 seconds. At 110 seconds the executor
-can hand off the original job handle to Durable. The original total deadline
-caps both the interactive stream and job queries. The host must share the
-same fake provider job store between the Edge and Durable executors for
-query-only recovery. The store retains simulated provider usage by operation
-ID for accounting queries beyond the user-facing deadline.
+For manual HTTP testing, start the same fake gateway in one terminal.
 
-After an abort, the executor can observe the single pending provider read for
-up to one second. It sends known usage through the host's accounting-only
-reporter for the original attempt when publication is fenced or its commit
-ACK is uncertain. The reporter has a separate one-second wait budget and
-must be idempotent alongside commit and recovery. It receives numeric usage
-and attempt identifiers. Turn state, publication and settlement revisions
-live in Agent Head and Global Budget.
+```sh
+pnpm exec tsx --input-type=module -e 'import { FakeModelGatewayServer } from "./apps/benchmark/src/v2-m1/fake-model-gateway-server.ts"; const gateway = new FakeModelGatewayServer(); console.log(await gateway.start());'
+```
 
-Run the local contract and loopback transport tests with
-`pnpm test:unit tests/unit/local-v2-edge-worker.test.ts`. The tested host uses
-mock RPC and a test provider store. The shared Agent Head RPC, Global Budget
-and Queue bindings are required for the separate local workerd acceptance.
+In a second terminal, copy the printed loopback origin into the Wrangler
+variable and start the local Worker.
+
+```sh
+pnpm --filter @ember/api exec wrangler d1 migrations apply D1_RECOVERY --local --config wrangler.local-v2.jsonc
+pnpm --filter @ember/api exec wrangler dev --local --config wrangler.local-v2.jsonc --ip 127.0.0.1 --var FAKE_MODEL_GATEWAY_URL:http://127.0.0.1:12345
+```
+
+Use `POST /v1/auth/session` with provider `dev`, an identity token, and a nonce.
+Use the returned bearer token for `GET /v1/me` to discover the main conversation
+and transcript epoch. The B1 message endpoint uses Durable Queue. The local
+`POST /v2/conversations/{id}/messages/stream` endpoint accepts the same request
+body, streams provisional deltas, and emits an acknowledgement after a commit
+or handoff. Recover an unknown submission response with
+`GET /v1/message-submissions/{client_submission_id}`. After SSE disconnect,
+read the authoritative Turn and message cursor using the B1 endpoints.
+
+This entrypoint uses dev identity and stores session token digests in the local
+D1 binding. AgentHead SQLite owns turns, messages and model attempts. Global
+Budget owns global grants and charges. Task claims without model attempts use
+the ordinary task failure result because the local conversation runtime has
+no sandbox driver.

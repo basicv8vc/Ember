@@ -16,12 +16,14 @@
     "@ember/domain": "workspace:*",
     "@ember/model-gateway": "workspace:*",
     "@ember/postgres": "workspace:*",
+    "@ember/runtime-v2": "workspace:*",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",
     "jose": "6.1.3",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@cloudflare/workers-types": "5.20261107.1",
     "wrangler": "4.158.0"
   }
 }

@@ -3,7 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import {
   CONVERSATION_SYSTEM_PROMPT,
   MODEL_LIMITS,
-  PERSONAL_MEMORY_SYSTEM_HEADER,
+  PERSONAL_MEMORY_CONTEXT_HEADER,
   buildBoundedPersonalMemoryContext,
   preflightConversationTurn,
 } from '@ember/model-gateway';
@@ -104,7 +104,7 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       { kind: 'preference', key: 'reply_style', content: 'Always use bullet points' },
       { kind: 'fact', content: 'Based in Tokyo' },
     ]);
-    expect(bounded.text).toContain(PERSONAL_MEMORY_SYSTEM_HEADER);
+    expect(bounded.text).toContain(PERSONAL_MEMORY_CONTEXT_HEADER);
     expect(bounded.text).toContain('- [preference:reply_style] Always use bullet points');
     expect(bounded.text).toContain('- [fact] Based in Tokyo');
     expect(bounded.characters).toBe(bounded.text.length);
@@ -121,14 +121,17 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
     expect(capped.droppedItems).toBe(manyItems.length - capped.items.length);
   });
 
-  it('injects personal memories into system message and accounts for them in preflight', () => {
+  it('keeps the fixed system prompt untouched and injects personal memories as a user-role context message', () => {
     const messagesWithout = buildConversationTurnMessages({
       conversationId: randomUUID(),
       turnId: randomUUID(),
       context: [{ role: 'user', text: 'Plan my day' }],
       maxOutputTokens: 256,
     });
-    expect(messagesWithout[0]).toEqual({ role: 'system', content: CONVERSATION_SYSTEM_PROMPT });
+    expect(messagesWithout).toEqual([
+      { role: 'system', content: CONVERSATION_SYSTEM_PROMPT },
+      { role: 'user', content: 'Plan my day' },
+    ]);
 
     const personalMemories = [
       { kind: 'preference' as const, key: 'response_style', content: 'Be concise and use bullets' },
@@ -140,9 +143,12 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       personalMemories,
       maxOutputTokens: 256,
     });
-    expect(messagesWith[0]?.role).toBe('system');
-    expect(messagesWith[0]?.content).toContain(CONVERSATION_SYSTEM_PROMPT);
-    expect(messagesWith[0]?.content).toContain('Be concise and use bullets');
+    expect(messagesWith).toHaveLength(3);
+    expect(messagesWith[0]).toEqual({ role: 'system', content: CONVERSATION_SYSTEM_PROMPT });
+    expect(messagesWith[1]?.role).toBe('user');
+    expect(messagesWith[1]?.content).toContain(PERSONAL_MEMORY_CONTEXT_HEADER);
+    expect(messagesWith[1]?.content).toContain('Be concise and use bullets');
+    expect(messagesWith[2]).toEqual({ role: 'user', content: 'Plan my day' });
 
     const basePreflight = preflightConversationTurn({
       messages: [{ role: 'user', text: 'Plan my day' }],
@@ -159,7 +165,7 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
 });
 
 describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
-  it('saves, updates by key, inspects provenance, deletes, and isolates principals', async () => {
+  it('saves, updates by key, verifies provenance ownership, deletes, and isolates principals', async () => {
     const { storage } = createInMemoryDoStorage();
     const tenantId = randomUUID();
     const agentId = randomUUID();
@@ -168,6 +174,18 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     const conversationId = randomUUID();
     const messageId = randomUUID();
     bootstrapHead(storage, tenantId, agentId);
+    storage.sql.exec(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 1, 0, 1700000000000, 1700000000000)`,
+      conversationId,
+    );
+    storage.sql.exec(
+      `INSERT INTO conversation_messages (id, conversation_id, sequence, kind, text, client_submission_id, created_at_ms)
+       VALUES (?, ?, 1, 'user', 'Please remember my response style', ?, 1700000000000)`,
+      messageId,
+      conversationId,
+      randomUUID(),
+    );
 
     let now = 1_700_000_001_000;
     const service = new AgentHeadMemoryService({
@@ -309,6 +327,163 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
         },
       }),
     ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+  });
+
+  it('guarantees idempotency on Unknown ACK retries via client_request_id and rejects conflicting reuse', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+
+    let now = 1_700_000_010_000;
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => now,
+      newId: () => randomUUID(),
+    });
+
+    const clientRequestId = randomUUID();
+    const first = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'fact',
+        content: 'Prefers metric units',
+        client_request_id: clientRequestId,
+        provenance: { source: 'explicit_user_request' },
+      },
+    });
+    expect('created' in first && first.created).toBe(true);
+    if (!('item' in first)) throw new Error('expected save result');
+
+    // Fill up to PERSONAL_MEMORY_MAX_ITEMS to verify replay still succeeds at cap
+    for (let i = 1; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      await service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: `Filler #${i}`,
+          provenance: { source: 'explicit_user_request' },
+        },
+      });
+    }
+
+    now += 5_000;
+    const replay = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'fact',
+        content: 'Prefers metric units',
+        client_request_id: clientRequestId,
+        provenance: { source: 'explicit_user_request' },
+      },
+    });
+    expect('created' in replay && replay.created).toBe(false);
+    if (!('item' in replay)) throw new Error('expected save result');
+    expect(replay.item).toEqual(first.item);
+
+    await expect(
+      service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: 'Different content with same client_request_id',
+          client_request_id: clientRequestId,
+          provenance: { source: 'explicit_user_request' },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+  });
+
+  it('rejects unverified provenance conversation_id and message_id references', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalId = randomUUID();
+    const conversationId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+    storage.sql.exec(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 0, 0, 1700000000000, 1700000000000)`,
+      conversationId,
+    );
+
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => 1_700_000_000_000,
+      newId: () => randomUUID(),
+    });
+
+    await expect(
+      service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: 'Unknown conversation',
+          provenance: {
+            source: 'explicit_user_request',
+            conversation_id: randomUUID(),
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    await expect(
+      service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: 'Message without conversation',
+          provenance: {
+            source: 'explicit_user_request',
+            message_id: randomUUID(),
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    await expect(
+      service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: 'Message not in conversation',
+          provenance: {
+            source: 'explicit_user_request',
+            conversation_id: conversationId,
+            message_id: randomUUID(),
+          },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
   });
 
   it('parses optional personalMemories in durable claim context', () => {

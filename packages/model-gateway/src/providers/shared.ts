@@ -293,12 +293,9 @@ export function buildConversationTurnMessages(input: ConversationTurnInput): Pro
     input.personalMemories !== undefined && input.personalMemories.length > 0
       ? buildBoundedPersonalMemoryContext(input.personalMemories).text
       : '';
-  const systemContent =
-    memoryBlock.length > 0
-      ? `${CONVERSATION_SYSTEM_PROMPT}\n\n${memoryBlock}`
-      : CONVERSATION_SYSTEM_PROMPT;
   return [
-    { role: 'system' as const, content: systemContent },
+    { role: 'system' as const, content: CONVERSATION_SYSTEM_PROMPT },
+    ...(memoryBlock.length > 0 ? [{ role: 'user' as const, content: memoryBlock }] : []),
     ...input.context.map(formatContextTurnMessage),
   ];
 }

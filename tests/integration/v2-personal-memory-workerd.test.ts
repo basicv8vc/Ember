@@ -243,9 +243,95 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(callsAfterDelete).toHaveLength(3);
     expect(callsAfterDelete[2]?.personalMemories).toBeUndefined();
 
-    // 8. Negative gates: unauthenticated 401, disallowed silent source 400, invalid UUID 400
+    // 8. Unknown ACK retry idempotency via Idempotency-Key & conflicting reuse 409
+    const idempotencyKey = randomUUID();
+    const unkeyedPayload = {
+      kind: 'fact',
+      content: 'Based in Tokyo.',
+      provenance: { source: 'user_settings' },
+    };
+    const firstUnkeyed = await json<PersonalMemorySaveResultDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+          'idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify(unkeyedPayload),
+      }),
+      201,
+    );
+    expect(firstUnkeyed.created).toBe(true);
+
+    const retriedUnkeyed = await json<PersonalMemorySaveResultDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+          'idempotency-key': idempotencyKey,
+        },
+        body: JSON.stringify(unkeyedPayload),
+      }),
+      200,
+    );
+    expect(retriedUnkeyed.created).toBe(false);
+    expect(retriedUnkeyed.item).toEqual(firstUnkeyed.item);
+
+    const conflictingReuse = await harness.fetchOverHttp('/v2/memories', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+        'idempotency-key': idempotencyKey,
+      },
+      body: JSON.stringify({
+        kind: 'fact',
+        content: 'Conflicting content.',
+        provenance: { source: 'user_settings' },
+      }),
+    });
+    expect(conflictingReuse.status).toBe(409);
+
+    // 9. Negative gates: unauthenticated 401, foreign/unverified provenance 400, disallowed silent source 400, invalid UUID 400
     const unauthRes = await harness.fetchOverHttp('/v2/memories', { method: 'GET' });
     expect(unauthRes.status).toBe(401);
+
+    const foreignConvRes = await harness.fetchOverHttp('/v2/memories', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'fact',
+        content: 'Cross-account conversation ref',
+        provenance: {
+          source: 'explicit_user_request',
+          conversation_id: userB.conversationId,
+        },
+      }),
+    });
+    expect(foreignConvRes.status).toBe(400);
+
+    const unverifiedMsgRes = await harness.fetchOverHttp('/v2/memories', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'fact',
+        content: 'Unverified message ref',
+        provenance: {
+          source: 'explicit_user_request',
+          conversation_id: userA.conversationId,
+          message_id: randomUUID(),
+        },
+      }),
+    });
+    expect(unverifiedMsgRes.status).toBe(400);
 
     const silentSourceRes = await harness.fetchOverHttp('/v2/memories', {
       method: 'POST',

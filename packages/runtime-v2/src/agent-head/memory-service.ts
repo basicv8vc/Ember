@@ -26,6 +26,7 @@ export interface PersonalMemoryRow {
   readonly principal_id: string;
   readonly kind: PersonalMemoryKind;
   readonly memory_key: string | null;
+  readonly client_request_id: string | null;
   readonly content: string;
   readonly provenance_source: PersonalMemorySource;
   readonly source_conversation_id: string | null;
@@ -160,10 +161,82 @@ export class AgentHeadMemoryService {
     const input = parsed.data;
     const nowMs = this.deps.nowMs();
     const memoryKey = input.key ?? null;
+    const clientRequestId = input.client_request_id ?? null;
     const sourceConversationId = input.provenance.conversation_id ?? null;
     const sourceMessageId = input.provenance.message_id ?? null;
 
+    if (sourceMessageId !== null && sourceConversationId === null) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'provenance.message_id requires provenance.conversation_id',
+      );
+    }
+
     return this.deps.storage.transactionSync(() => {
+      if (sourceConversationId !== null) {
+        const conversation = sqlExecMaybe<{ readonly id: string }>(
+          this.sql,
+          `SELECT id
+             FROM conversations
+            WHERE id = ?`,
+          sourceConversationId,
+        );
+        if (conversation === null) {
+          throw new DomainError(
+            'INVALID_ARGUMENT',
+            'provenance.conversation_id does not belong to this agent head',
+          );
+        }
+      }
+
+      if (sourceMessageId !== null && sourceConversationId !== null) {
+        const message = sqlExecMaybe<{ readonly id: string }>(
+          this.sql,
+          `SELECT id
+             FROM conversation_messages
+            WHERE id = ?
+              AND conversation_id = ?`,
+          sourceMessageId,
+          sourceConversationId,
+        );
+        if (message === null) {
+          throw new DomainError(
+            'INVALID_ARGUMENT',
+            'provenance.message_id does not belong to the specified conversation',
+          );
+        }
+      }
+
+      if (clientRequestId !== null) {
+        const existingByRequest = sqlExecMaybe<PersonalMemoryRow>(
+          this.sql,
+          `SELECT *
+             FROM personal_memories
+            WHERE tenant_id = ?
+              AND principal_id = ?
+              AND client_request_id = ?`,
+          cmd.tenantId,
+          cmd.principalId,
+          clientRequestId,
+        );
+        if (existingByRequest !== null) {
+          const samePayload =
+            existingByRequest.kind === input.kind &&
+            existingByRequest.memory_key === memoryKey &&
+            existingByRequest.content === input.content &&
+            existingByRequest.provenance_source === input.provenance.source &&
+            existingByRequest.source_conversation_id === sourceConversationId &&
+            existingByRequest.source_message_id === sourceMessageId;
+          if (!samePayload) {
+            throw new DomainError(
+              'IDEMPOTENCY_CONFLICT',
+              'client_request_id already used with different personal memory payload',
+            );
+          }
+          return { item: toPersonalMemoryDto(existingByRequest), created: false };
+        }
+      }
+
       if (memoryKey !== null) {
         const existing = sqlExecMaybe<PersonalMemoryRow>(
           this.sql,
@@ -177,9 +250,11 @@ export class AgentHeadMemoryService {
           memoryKey,
         );
         if (existing !== null) {
+          const nextClientRequestId = clientRequestId ?? existing.client_request_id;
           this.sql.exec(
             `UPDATE personal_memories
                 SET kind = ?,
+                    client_request_id = ?,
                     content = ?,
                     provenance_source = ?,
                     source_conversation_id = ?,
@@ -189,6 +264,7 @@ export class AgentHeadMemoryService {
                 AND tenant_id = ?
                 AND principal_id = ?`,
             input.kind,
+            nextClientRequestId,
             input.content,
             input.provenance.source,
             sourceConversationId,
@@ -201,6 +277,7 @@ export class AgentHeadMemoryService {
           const updated: PersonalMemoryRow = {
             ...existing,
             kind: input.kind,
+            client_request_id: nextClientRequestId,
             content: input.content,
             provenance_source: input.provenance.source,
             source_conversation_id: sourceConversationId,
@@ -232,18 +309,20 @@ export class AgentHeadMemoryService {
            principal_id,
            kind,
            memory_key,
+           client_request_id,
            content,
            provenance_source,
            source_conversation_id,
            source_message_id,
            created_at_ms,
            updated_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         id,
         cmd.tenantId,
         cmd.principalId,
         input.kind,
         memoryKey,
+        clientRequestId,
         input.content,
         input.provenance.source,
         sourceConversationId,
@@ -258,6 +337,7 @@ export class AgentHeadMemoryService {
         principal_id: cmd.principalId,
         kind: input.kind,
         memory_key: memoryKey,
+        client_request_id: clientRequestId,
         content: input.content,
         provenance_source: input.provenance.source,
         source_conversation_id: sourceConversationId,

@@ -39,6 +39,7 @@ export const savePersonalMemoryRequestSchema = z.strictObject({
   kind: personalMemoryKindSchema,
   content: personalMemoryContentSchema,
   key: personalMemoryKeySchema.optional(),
+  client_request_id: personalMemoryIdSchema.optional(),
   provenance: personalMemoryProvenanceInputSchema,
 });
 

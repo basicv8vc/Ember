@@ -51,12 +51,39 @@ export function createMemoryRoutes(
   });
 
   routes.post('/memories', async (c) => {
+    const rawIdempotencyKey = c.req.header('idempotency-key');
+    let headerClientRequestId: string | undefined;
+    if (rawIdempotencyKey !== undefined) {
+      const parsedHeader = personalMemoryIdSchema.safeParse(rawIdempotencyKey.trim());
+      if (!parsedHeader.success) {
+        throw new DomainError('INVALID_ARGUMENT', 'invalid idempotency-key header');
+      }
+      headerClientRequestId = parsedHeader.data;
+    }
+
     const body = await readJsonBody(c.req.raw, MAX_MEMORY_REQUEST_BYTES);
     const parsed = body.ok ? savePersonalMemoryRequestSchema.safeParse(body.value) : undefined;
     if (!parsed?.success) {
       throw new DomainError('INVALID_ARGUMENT', 'invalid personal memory request');
     }
-    const result = await run({ kind: 'save', input: parsed.data });
+
+    if (
+      headerClientRequestId !== undefined &&
+      parsed.data.client_request_id !== undefined &&
+      headerClientRequestId !== parsed.data.client_request_id
+    ) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'idempotency-key header does not match client_request_id',
+      );
+    }
+
+    const clientRequestId = parsed.data.client_request_id ?? headerClientRequestId;
+    const input =
+      clientRequestId === undefined
+        ? parsed.data
+        : { ...parsed.data, client_request_id: clientRequestId };
+    const result = await run({ kind: 'save', input });
     return c.json(result, 'created' in result && result.created ? 201 : 200);
   });
 

@@ -722,6 +722,7 @@ export const PERSONAL_MEMORY_STATEMENTS = [
   principal_id           TEXT    NOT NULL,
   kind                   TEXT    NOT NULL CHECK (kind IN ('preference', 'fact')),
   memory_key             TEXT,
+  client_request_id      TEXT,
   content                TEXT    NOT NULL,
   provenance_source      TEXT    NOT NULL CHECK (provenance_source IN ('explicit_user_request', 'user_settings')),
   source_conversation_id TEXT,
@@ -734,6 +735,9 @@ export const PERSONAL_MEMORY_STATEMENTS = [
   `CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_memories_scope_key
   ON personal_memories (tenant_id, principal_id, memory_key)
   WHERE memory_key IS NOT NULL;`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_memories_scope_client_request
+  ON personal_memories (tenant_id, principal_id, client_request_id)
+  WHERE client_request_id IS NOT NULL;`,
 ] as const;
 
 export function createPersonalMemoryDoMigration(

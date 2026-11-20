@@ -507,7 +507,35 @@ export function createAgentHeadBusinessDoMigration(
   };
 }
 
-/** Canonical ordered AgentHeadDO migrations (A v1 business tables + B v2 event/recovery tables). */
+const DEVICE_EXECUTION_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS device_registrations (
+    id TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL,
+    token_digest TEXT NOT NULL,
+    capability TEXT NOT NULL,
+    capability_version INTEGER NOT NULL,
+    ready_until_ms INTEGER NOT NULL,
+    revoked_at_ms INTEGER
+  )`,
+  `CREATE TABLE IF NOT EXISTS device_task_placements (
+    task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    principal_id TEXT NOT NULL,
+    device_id TEXT NOT NULL
+  )`,
+  `CREATE INDEX IF NOT EXISTS idx_device_task_placements
+    ON device_task_placements (principal_id, device_id, task_id)`,
+] as const;
+
+/** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
-  return [createAgentHeadBusinessDoMigration(), createEventRecoveryDoMigration()];
+  return [
+    createAgentHeadBusinessDoMigration(),
+    createEventRecoveryDoMigration(),
+    {
+      version: 3,
+      name: 'v2_device_execution',
+      statements: DEVICE_EXECUTION_STATEMENTS,
+      checksum: computeMigrationChecksumSync(DEVICE_EXECUTION_STATEMENTS),
+    },
+  ];
 }

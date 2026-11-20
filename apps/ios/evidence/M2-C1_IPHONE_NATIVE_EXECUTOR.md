@@ -2,7 +2,7 @@
 
 - Date: 2026-11-20 (Asia/Shanghai)
 - Branch: `feat/v2-m2-c1-ios-native-executor`
-- Base: `origin/main` (`d3c559c`)
+- Base: `origin/main` (`b669b0e`, merged via `#189` + `#194`)
 - Scope: Minimal runnable iPhone native execution node prototype (Swift + Apple native frameworks; no Python runtime; no Cloud Runtime integration, which Agent F handles in parallel)
 
 ## Architecture & Implemented Capabilities
@@ -27,30 +27,31 @@ All new native runtime files live under `apps/ios/EmberApp/DeviceExecutor/`:
 - **P1-3**: Keyed on-disk artifact blobs by `artifactID` (`<artifactID>.blob`) and verified SHA-256 + byte length on every `readArtifactData(for:)` read.
 - **P1-4**: Disabled `regex_match` and `regex_replace` in `NativeTextTool` and removed `.regularExpression` usage from line normalization.
 - **P2**: Fixed `waitForCompletion()` registration race via actor-local `cachedOutcomes`, fixed `updatingTask` to clear `currentRunID` to `nil` when re-queued, enforced file extension vs. MIME type consistency in `NativeFileGeneratorTool`, enforced `maxOutputTextBytes` on `structuredData`, and added `maxJournalTasks` / `maxJournalBytes` capacity pruning in `DeviceExecutionJournal`.
+- **Closure**: Prioritized persisted `cancelRequested` inside `DeviceExecutionJournal.commitFailed()` and `DeviceExecutionJournal.commitInterruptedForRetry()`, with deterministic Cancel-vs-Failure and Cancel-vs-Background-Interruption regression tests.
 
 ## Verification Evidence
 
 ### 1. Physical Device Verification (`iPhone13,4` / iPhone 12 Pro Max, iOS `27.0.1`)
 
 - Device: `Haha🎀` (`00008101-000E0D923E01001E`), `iPhone 12 Pro Max (iPhone13,4)`, iOS `27.0.1 (24A446)`, Developer Mode enabled, paired over local network.
-- Command (run on final Swift code `8a46873` after all P1/P2 fixes, `DEVELOPMENT_TEAM=9RN3YNYN27 SWIFT_STRICT_CONCURRENCY=complete`):
+- Command (run on merged `origin/main` `b669b0e` + final Swift closure `3d4f2de`, `DEVELOPMENT_TEAM=9RN3YNYN27 SWIFT_STRICT_CONCURRENCY=complete`):
   ```bash
   xcodebuild -project apps/ios/Ember.xcodeproj -scheme Ember -configuration Debug \
     -destination 'platform=iOS,id=00008101-000E0D923E01001E' \
     -only-testing:EmberTests/DeviceExecutorTests \
     DEVELOPMENT_TEAM=9RN3YNYN27 SWIFT_STRICT_CONCURRENCY=complete test
   ```
-- Result: `DeviceExecutorTests` **15/15 passed in 1.645s** (`0 failures`).
-- Observed physical-device benchmark metrics (`2026-11-20T05:34:20.598Z`, `thermalState = nominal`, `isLowPowerModeEnabled = false`, 5 iterations per case):
+- Result: `DeviceExecutorTests` **17/17 passed in 1.711s** (`0 failures`).
+- Observed physical-device benchmark metrics (`2026-11-20T05:39:39.955Z`, `thermalState = nominal`, `isLowPowerModeEnabled = false`, 5 iterations per case):
 
 | Case                       | Iterations | P50 (ms) | P95 (ms) | Max (ms) | Mean (ms) | Memory Delta (KiB) | Notes                                     |
 | -------------------------- | ---------: | -------: | -------: | -------: | --------: | -----------------: | ----------------------------------------- |
-| `text_stats_and_extract`   |          5 |    24.39 |    28.86 |    28.86 |     24.70 |              128.0 | 120 lines `NLTokenizer` + extraction      |
-| `json_1k_aggregate_csv`    |          5 |   110.85 |   116.25 |   116.25 |    111.13 |             4432.0 | 1,000 JSON objects filter+group+CSV       |
-| `file_generate_md_csv_pdf` |          5 |    83.49 |    92.99 |    92.99 |     85.12 |              160.0 | Atomic MD + CSV + `UIGraphicsPDFRenderer` |
-| `cold_journal_recovery`    |          5 |     4.94 |     5.33 |     5.33 |      5.02 |                0.0 | Recover queued+running+terminal records   |
+| `text_stats_and_extract`   |          5 |    24.02 |    28.05 |    28.05 |     24.29 |               96.0 | 120 lines `NLTokenizer` + extraction      |
+| `json_1k_aggregate_csv`    |          5 |   108.47 |   116.06 |   116.06 |    109.44 |             4048.0 | 1,000 JSON objects filter+group+CSV       |
+| `file_generate_md_csv_pdf` |          5 |    87.48 |    89.57 |    89.57 |     85.60 |               96.0 | Atomic MD + CSV + `UIGraphicsPDFRenderer` |
+| `cold_journal_recovery`    |          5 |     4.96 |     5.25 |     5.25 |      5.02 |                0.0 | Recover queued+running+terminal records   |
 
-### 2. Post-P1/P2-Fix Verification (`iPhone 18 Pro` Simulator, iOS `27.2`)
+### 2. Post-Closure & `origin/main`-Aligned Verification (`iPhone 18 Pro` Simulator, iOS `27.2`)
 
 - Command (matching `.github/workflows/ios-l2-compile.yml` strict concurrency & signing flags):
   ```bash
@@ -63,6 +64,6 @@ All new native runtime files live under `apps/ios/EmberApp/DeviceExecutor/`:
     -only-testing:EmberUITests/LiveModeLaunchUITests \
     CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- SWIFT_STRICT_CONCURRENCY=complete test
   ```
-- Results (after all P1/P2 fixes and final `boundText` edit):
-  - `EmberTests.xctest`: **360/360 passed in 18.810s** (`0 failures`, including `DeviceExecutorTests` **15/15**).
-  - `EmberUITests.xctest` (selected suites): **5/5 passed in 50.939s** (`DeviceExecutorWorkbenchUITests` 1/1, `LaunchSmokeUITests` 1/1, `LiveModeLaunchUITests` 3/3).
+- Results (after merging `origin/main` `b669b0e` and all closure edits):
+  - `EmberTests.xctest`: **362/362 passed in 19.718s** (`0 failures`, including `DeviceExecutorTests` **17/17**).
+  - `EmberUITests.xctest` (selected suites): **5/5 passed in 53.831s** (`DeviceExecutorWorkbenchUITests` 1/1, `LaunchSmokeUITests` 1/1, `LiveModeLaunchUITests` 3/3).

@@ -6,6 +6,7 @@ import {
   PostgresApprovalRepository,
   PostgresB1AssistantTurnRepository,
   PostgresBlobStore,
+  PostgresByteaBlobStore,
   PostgresBudgetLedger,
   PostgresCheckpointStore,
   PostgresCommitmentRepository,
@@ -14,6 +15,7 @@ import {
   PostgresLeaseQueue,
   PostgresModelTurnExecutionRepository,
   PostgresNotesTaskExecutionRepository,
+  PostgresPythonAgentExecutionRepository,
   PostgresRunExecutionContextReader,
   PostgresRunResultCommitter,
   PostgresWorkspaceStore,
@@ -46,6 +48,8 @@ import { CommitmentSourceReader } from './commitment-source-reader.js';
 import { createDurableRunHandler, DURABLE_TASK_KINDS } from './durable-run-handler.js';
 import { createWorkerLogger, safeWorkerErrorCategory, type WorkerLogger } from './logger.js';
 import { createNotesTaskHandler } from './notes-task-handler.js';
+import { createFakePythonAgentSandboxFactory } from './b3/fake-python-sandbox.js';
+import { createPythonAgentTaskHandler } from './b3/python-agent-handler.js';
 import { createFakeTurnResponder, type FakeTurnResponderRunner } from './b1/fake-turn-responder.js';
 import {
   createModelTurnResponder,
@@ -95,9 +99,14 @@ async function main(): Promise<void> {
   const baseClaimableKinds =
     config.mode === 'poll' && config.blobRoot !== null ? DURABLE_TASK_KINDS : EXECUTABLE_TASK_KINDS;
   const modelEnabled = config.model.ok && config.model.mode !== 'disabled';
+  const fakePythonAgentEnabled = config.mode === 'poll' && config.model.ok && config.model.mode === 'fake';
   const claimableKinds =
     config.mode === 'poll' && modelEnabled
-      ? ([...baseClaimableKinds, 'notes.action_items'] as const)
+      ? ([
+          ...baseClaimableKinds,
+          'notes.action_items',
+          ...(fakePythonAgentEnabled ? (['python.agent'] as const) : []),
+        ] as const)
       : baseClaimableKinds;
   const queue = new PostgresLeaseQueue(pool, {
     ...config.lease,
@@ -376,11 +385,31 @@ async function main(): Promise<void> {
           })
         : undefined;
 
+    const pythonAgentHandler =
+      modelGateway !== undefined && fakePythonAgentEnabled && config.model.ok && config.model.mode === 'fake'
+        ? createPythonAgentTaskHandler({
+            mode: 'fake',
+            leaseQueue: queue,
+            repository: new PostgresPythonAgentExecutionRepository(pool),
+            blobStore: new PostgresByteaBlobStore(pool),
+            gateway: modelGateway,
+            createSandbox: createFakePythonAgentSandboxFactory(),
+            sandboxOwner: config.workerId,
+            policy: config.lease,
+            ceilings: config.model.settings.ceilings,
+            rate: null,
+            leaseDurationMs: config.lease.leaseDurationMs,
+            attemptTimeoutMs: config.model.settings.attemptTimeoutMs,
+            logger,
+          })
+        : undefined;
+
     const handler = createCommitmentRouteAwareRunHandler({
       contextReader,
       clock: systemClock,
       commitmentHandler,
       ...(notesHandler === undefined ? {} : { notesHandler }),
+      ...(pythonAgentHandler === undefined ? {} : { pythonAgentHandler }),
       defaultHandler,
       logger,
     });

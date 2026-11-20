@@ -724,6 +724,14 @@ final class LiveConversationHostModel {
                 capability: taskStore.isMock(task) ? .mockOnly : .real
             )
             let cancelResponse = taskStore.cancelResponseByTaskID[taskID]
+            let generatedArtifactCount = (taskStore.artifactsByTaskID[taskID] ?? [])
+                .filter { $0.createdBy == .run }
+                .count
+            let progressDetail = Self.taskCardProgressDetail(
+                task: task,
+                latestEvent: taskStore.eventsByTaskID[taskID]?.last,
+                result: taskStore.resultsByTaskID[taskID]
+            )
             return .inlineCard(id: stableID, accessibilityLabel: task.displayTitle) {
                 TaskActivityCard(
                     title: task.displayTitle,
@@ -732,6 +740,8 @@ final class LiveConversationHostModel {
                     updatedAt: task.updatedAt,
                     presentation: presentation,
                     cancelResponse: cancelResponse,
+                    progressDetail: progressDetail,
+                    artifactCount: generatedArtifactCount,
                     onOpenDetail: { [weak self] in
                         self?.openTaskFromChat(taskID)
                     }
@@ -754,6 +764,33 @@ final class LiveConversationHostModel {
                 }
             )
         }
+    }
+
+    static func taskCardProgressDetail(
+        task: SessionTaskDTO,
+        latestEvent: SessionTaskEventDTO?,
+        result: SessionTaskResultDTO?
+    ) -> String? {
+        if task.status == .completed,
+           let summary = result?.result?.summaryText.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty {
+            return summary
+        }
+
+        if let latestEvent {
+            let facts = ActivityEventRow.facts(for: latestEvent.asTaskEventDTO())
+            let localizedTitle = Bundle.main.localizedString(
+                forKey: facts.titleKey,
+                value: nil,
+                table: "ConversationCards"
+            )
+            if let errorCode = facts.errorCode {
+                return "\(localizedTitle) (\(errorCode.rawValue))"
+            }
+            return localizedTitle
+        }
+
+        return nil
     }
 
     private func makeOutcomeReferenceEntry(stableID: String, outcome: OutcomeReference) -> ConversationTimelineEntry {

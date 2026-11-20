@@ -8,6 +8,8 @@ public struct TaskActivityCard: View {
     private let updatedAt: String
     private let presentation: TaskPresentationState
     private let cancelResponse: TaskCancelDTO?
+    private let progressDetail: String?
+    private let artifactCount: Int
     private let onOpenDetail: () -> Void
 
     private var facts: TaskActivityFacts {
@@ -16,7 +18,9 @@ public struct TaskActivityCard: View {
             status: taskStatus,
             updatedAt: updatedAt,
             presentation: presentation,
-            cancelResponse: cancelResponse
+            cancelResponse: cancelResponse,
+            progressDetail: progressDetail,
+            artifactCount: artifactCount
         )
     }
 
@@ -25,6 +29,8 @@ public struct TaskActivityCard: View {
         task: TaskDTO,
         presentation: TaskPresentationState,
         cancelResponse: TaskCancelDTO? = nil,
+        progressDetail: String? = nil,
+        artifactCount: Int = 0,
         onOpenDetail: @escaping () -> Void
     ) {
         self.init(
@@ -34,6 +40,8 @@ public struct TaskActivityCard: View {
             updatedAt: task.updatedAt,
             presentation: presentation,
             cancelResponse: cancelResponse,
+            progressDetail: progressDetail,
+            artifactCount: artifactCount,
             onOpenDetail: onOpenDetail
         )
     }
@@ -45,6 +53,8 @@ public struct TaskActivityCard: View {
         updatedAt: String,
         presentation: TaskPresentationState,
         cancelResponse: TaskCancelDTO? = nil,
+        progressDetail: String? = nil,
+        artifactCount: Int = 0,
         onOpenDetail: @escaping () -> Void
     ) {
         self.title = title
@@ -53,6 +63,8 @@ public struct TaskActivityCard: View {
         self.updatedAt = updatedAt
         self.presentation = presentation
         self.cancelResponse = cancelResponse
+        self.progressDetail = progressDetail
+        self.artifactCount = artifactCount
         self.onOpenDetail = onOpenDetail
     }
 
@@ -90,8 +102,32 @@ public struct TaskActivityCard: View {
                     }
 
                     HStack(alignment: .center, spacing: 10) {
-                        TaskStatusBadge(status: facts.status)
+                        HStack(spacing: 6) {
+                            TaskStatusBadge(status: facts.status)
+                            if facts.isActiveProgress && facts.connectionPhase != .disconnected {
+                                ProgressView()
+                                    .controlSize(.mini)
+                                    .accessibilityHidden(true)
+                            }
+                        }
                         Spacer(minLength: 0)
+                        if facts.artifactCount > 0 {
+                            Label {
+                                if facts.artifactCount == 1 {
+                                    Text("card.artifact_single", tableName: "ConversationCards")
+                                } else {
+                                    Text("card.artifact_plural \(facts.artifactCount)", tableName: "ConversationCards")
+                                }
+                            } icon: {
+                                Image(systemName: "paperclip")
+                                    .accessibilityHidden(true)
+                            }
+                            .font(.caption.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(EmberDesignTokens.groupedBackground, in: Capsule())
+                        }
                         if let updatedAt = facts.updatedAt {
                             HStack(spacing: 4) {
                                 Image(systemName: "clock")
@@ -105,6 +141,14 @@ public struct TaskActivityCard: View {
                             }
                             .fixedSize(horizontal: true, vertical: false)
                         }
+                    }
+
+                    if let progressDetail = facts.progressDetail {
+                        Text(progressDetail)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
 
                     if facts.cancellationPending {
@@ -132,14 +176,18 @@ public struct TaskActivityCard: View {
     static func facts(
         for task: TaskDTO,
         presentation: TaskPresentationState,
-        cancelResponse: TaskCancelDTO?
+        cancelResponse: TaskCancelDTO?,
+        progressDetail: String? = nil,
+        artifactCount: Int = 0
     ) -> TaskActivityFacts {
         facts(
             taskID: task.taskID,
             status: task.status,
             updatedAt: task.updatedAt,
             presentation: presentation,
-            cancelResponse: cancelResponse
+            cancelResponse: cancelResponse,
+            progressDetail: progressDetail,
+            artifactCount: artifactCount
         )
     }
 
@@ -148,15 +196,23 @@ public struct TaskActivityCard: View {
         status: TaskStatus,
         updatedAt: String,
         presentation: TaskPresentationState,
-        cancelResponse: TaskCancelDTO?
+        cancelResponse: TaskCancelDTO?,
+        progressDetail: String? = nil,
+        artifactCount: Int = 0
     ) -> TaskActivityFacts {
-        TaskActivityFacts(
+        let trimmedProgress = progressDetail?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedProgress = (trimmedProgress?.isEmpty == false) ? trimmedProgress : nil
+        return TaskActivityFacts(
             status: status,
             updatedAt: ConversationCardFormatting.date(from: updatedAt),
             capability: presentation.capability,
             connectionPhase: presentation.connectionPhase,
             commandInFlight: presentation.commandInFlight,
-            cancellationPending: isCancellationPending(taskID: taskID, status: status, response: cancelResponse)
+            cancellationPending: isCancellationPending(taskID: taskID, status: status, response: cancelResponse),
+            isActiveProgress: status == .queued || status == .running,
+            progressDetail: normalizedProgress,
+            artifactCount: max(0, artifactCount)
         )
     }
 
@@ -180,6 +236,9 @@ struct TaskActivityFacts: Equatable {
     let connectionPhase: ConnectionPhase
     let commandInFlight: TaskCommandInFlight?
     let cancellationPending: Bool
+    let isActiveProgress: Bool
+    let progressDetail: String?
+    let artifactCount: Int
 }
 
 #Preview("Task activity states · MOCK ONLY") {

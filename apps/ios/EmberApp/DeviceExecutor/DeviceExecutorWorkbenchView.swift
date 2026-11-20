@@ -19,13 +19,13 @@ final class DeviceExecutorWorkbenchModel {
 
     init(
         executor: DeviceTaskExecutor = DeviceTaskExecutor(),
-        cloudMonitor: CloudDeviceAdapterMonitor = CloudDeviceAdapterMonitor()
+        cloudMonitor: CloudDeviceAdapterMonitor? = nil
     ) {
         self.executor = executor
         self.taskStore = SessionTaskStore(
             repository: DeviceSessionTaskRepository(executor: executor)
         )
-        self.cloudMonitor = cloudMonitor
+        self.cloudMonitor = cloudMonitor ?? CloudDeviceAdapterMonitor()
     }
 
     func bootstrap() async {

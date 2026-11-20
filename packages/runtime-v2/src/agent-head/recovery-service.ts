@@ -1532,6 +1532,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       alarmAtMs: committed.alarmAtMs,
       nowMs: committed.nowMs,
       shouldRelayBudgetSync: committed.hasBudgetSync,
+      recomputeAlarmSync: (ts) =>
+        this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
     return { accepted: committed.accepted };
   }

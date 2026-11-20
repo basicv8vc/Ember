@@ -410,6 +410,7 @@ export class AgentEventRuntimeFacade {
     readonly agentId: string;
     readonly business: AuthoritativeBusinessPort;
     readonly recoveryGraceMs?: number;
+    readonly coverageIdleGraceMs?: number;
   }) {
     this.storage = cmd.storage;
     this.identity = { tenantId: cmd.tenantId, agentId: cmd.agentId };
@@ -425,6 +426,7 @@ export class AgentEventRuntimeFacade {
       agentId: cmd.agentId,
       business: cmd.business,
       graceMs: cmd.recoveryGraceMs,
+      idleGraceMs: cmd.coverageIdleGraceMs,
     });
     this.alarm = new AlarmMultiplexer({
       storage: cmd.storage,

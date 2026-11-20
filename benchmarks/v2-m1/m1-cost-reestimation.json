@@ -1,10 +1,10 @@
 {
   "scenarioId": "ember-v2-m1-cost-reestimation",
   "evidenceKind": "estimated_adr0006_formula",
-  "gitSha": "ace80c18945531c15bacb17af4ed8e82cc7cb332",
-  "timestamp": "2026-11-20T07:21:40.152Z",
+  "gitSha": "cb259254d82f09739987b4aed9a46a878def68e5",
+  "timestamp": "2026-11-20T07:42:51.311Z",
   "fixed20RowsConstraintEnforced": false,
-  "note": "Updated using measured local workerd A+B+E+F telemetry (292 DO rowsRead/event, 46 DO rowsWritten/event, 3.33 D1 writes/event, 1 Queue ops/event). Model estimates only; not Cloudflare production invoices.",
+  "note": "Updated using measured local workerd A+B+E+F telemetry (262 DO rowsRead/event, 43 DO rowsWritten/event, 0.6 D1 writes/event, 1 Queue ops/event). Model estimates only; not Cloudflare production invoices.",
   "rows": [
     {
       "label": "adr0006_planning_20rows_1k",
@@ -660,9 +660,9 @@
     {
       "label": "m1_measured_workerd_1k",
       "mau": 1000,
-      "doRowsWrittenPerEvent": 46,
-      "doRowsReadPerEvent": 292,
-      "d1WritesPerEvent": 3.33,
+      "doRowsWrittenPerEvent": 43,
+      "doRowsReadPerEvent": 262,
+      "d1WritesPerEvent": 0.6,
       "queueOpsPerEvent": 1,
       "independentRecoveryEnabled": true,
       "monthsElapsed": 6,
@@ -724,7 +724,7 @@
           {
             "meter": "do_sqlite_rows_read",
             "unit": "1M rows",
-            "emberUsage": 199728000,
+            "emberUsage": 179208000,
             "includedAllowance": 25000000000,
             "remainingAllowance": 25000000000,
             "overageRaw": 0,
@@ -736,7 +736,7 @@
           {
             "meter": "do_sqlite_rows_written",
             "unit": "1M rows",
-            "emberUsage": 31464000,
+            "emberUsage": 29412000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
             "overageRaw": 0,
@@ -772,7 +772,7 @@
           {
             "meter": "d1_rows_written",
             "unit": "1M rows",
-            "emberUsage": 4555440,
+            "emberUsage": 820800,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
             "overageRaw": 0,
@@ -877,18 +877,18 @@
     {
       "label": "m1_measured_workerd_10k",
       "mau": 10000,
-      "doRowsWrittenPerEvent": 46,
-      "doRowsReadPerEvent": 292,
-      "d1WritesPerEvent": 3.33,
+      "doRowsWrittenPerEvent": 43,
+      "doRowsReadPerEvent": 262,
+      "d1WritesPerEvent": 0.6,
       "queueOpsPerEvent": 1,
       "independentRecoveryEnabled": true,
       "monthsElapsed": 6,
       "dormantRetainedRatio": 1,
-      "cloudRuntimeUsd": 337.29,
+      "cloudRuntimeUsd": 316.77,
       "cloudMonthlyBreakdown": {
         "baseFeeUsd": 5,
-        "meterOverageTotalUsd": 332.29,
-        "totalUsd": 337.29,
+        "meterOverageTotalUsd": 311.77,
+        "totalUsd": 316.77,
         "meters": [
           {
             "meter": "workers_requests",
@@ -941,7 +941,7 @@
           {
             "meter": "do_sqlite_rows_read",
             "unit": "1M rows",
-            "emberUsage": 1997280000,
+            "emberUsage": 1792080000,
             "includedAllowance": 25000000000,
             "remainingAllowance": 25000000000,
             "overageRaw": 0,
@@ -953,14 +953,14 @@
           {
             "meter": "do_sqlite_rows_written",
             "unit": "1M rows",
-            "emberUsage": 314640000,
+            "emberUsage": 294120000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
-            "overageRaw": 264640000,
-            "billableUnits": 264.64,
+            "overageRaw": 244120000,
+            "billableUnits": 244.12,
             "ratePerUnitUsd": 1,
             "roundingRule": "prorated",
-            "costUsd": 264.64
+            "costUsd": 244.12
           },
           {
             "meter": "do_sqlite_storage",
@@ -989,7 +989,7 @@
           {
             "meter": "d1_rows_written",
             "unit": "1M rows",
-            "emberUsage": 45554400,
+            "emberUsage": 8208000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
             "overageRaw": 0,
@@ -1088,24 +1088,24 @@
       "llmCostZdrFlashUsd": 3146.4,
       "sandboxGrossUsd": 1665,
       "sandbox50PctOffloadUsd": 832.5,
-      "combinedIllustrativeTotalUsd": 32782.29,
-      "combinedZdrOffloadTotalUsd": 4316.19
+      "combinedIllustrativeTotalUsd": 32761.77,
+      "combinedZdrOffloadTotalUsd": 4295.67
     },
     {
       "label": "m1_measured_workerd_100k",
       "mau": 100000,
-      "doRowsWrittenPerEvent": 46,
-      "doRowsReadPerEvent": 292,
-      "d1WritesPerEvent": 3.33,
+      "doRowsWrittenPerEvent": 43,
+      "doRowsReadPerEvent": 262,
+      "d1WritesPerEvent": 0.6,
       "queueOpsPerEvent": 1,
       "independentRecoveryEnabled": true,
       "monthsElapsed": 6,
       "dormantRetainedRatio": 1,
-      "cloudRuntimeUsd": 4222.54,
+      "cloudRuntimeUsd": 3643.88,
       "cloudMonthlyBreakdown": {
         "baseFeeUsd": 5,
-        "meterOverageTotalUsd": 4217.54,
-        "totalUsd": 4222.54,
+        "meterOverageTotalUsd": 3638.88,
+        "totalUsd": 3643.88,
         "meters": [
           {
             "meter": "workers_requests",
@@ -1158,7 +1158,7 @@
           {
             "meter": "do_sqlite_rows_read",
             "unit": "1M rows",
-            "emberUsage": 19972800000,
+            "emberUsage": 17920800000,
             "includedAllowance": 25000000000,
             "remainingAllowance": 25000000000,
             "overageRaw": 0,
@@ -1170,14 +1170,14 @@
           {
             "meter": "do_sqlite_rows_written",
             "unit": "1M rows",
-            "emberUsage": 3146400000,
+            "emberUsage": 2941200000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
-            "overageRaw": 3096400000,
-            "billableUnits": 3096.4,
+            "overageRaw": 2891200000,
+            "billableUnits": 2891.2,
             "ratePerUnitUsd": 1,
             "roundingRule": "prorated",
-            "costUsd": 3096.4
+            "costUsd": 2891.2
           },
           {
             "meter": "do_sqlite_storage",
@@ -1206,14 +1206,14 @@
           {
             "meter": "d1_rows_written",
             "unit": "1M rows",
-            "emberUsage": 455544000,
+            "emberUsage": 82080000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
-            "overageRaw": 405544000,
-            "billableUnits": 405.544,
+            "overageRaw": 32080000,
+            "billableUnits": 32.08,
             "ratePerUnitUsd": 1,
             "roundingRule": "prorated",
-            "costUsd": 405.544
+            "costUsd": 32.08
           },
           {
             "meter": "d1_storage",
@@ -1305,24 +1305,24 @@
       "llmCostZdrFlashUsd": 31464,
       "sandboxGrossUsd": 16650,
       "sandbox50PctOffloadUsd": 8325,
-      "combinedIllustrativeTotalUsd": 328672.54,
-      "combinedZdrOffloadTotalUsd": 44011.54
+      "combinedIllustrativeTotalUsd": 328093.88,
+      "combinedZdrOffloadTotalUsd": 43432.88
     },
     {
       "label": "uncoalesced_worst_case_10k",
       "mau": 10000,
-      "doRowsWrittenPerEvent": 46,
-      "doRowsReadPerEvent": 292,
+      "doRowsWrittenPerEvent": 45,
+      "doRowsReadPerEvent": 280,
       "d1WritesPerEvent": 2,
       "queueOpsPerEvent": 1,
       "independentRecoveryEnabled": true,
       "monthsElapsed": 12,
       "dormantRetainedRatio": 2,
-      "cloudRuntimeUsd": 371.63,
+      "cloudRuntimeUsd": 364.79,
       "cloudMonthlyBreakdown": {
         "baseFeeUsd": 5,
-        "meterOverageTotalUsd": 366.63,
-        "totalUsd": 371.63,
+        "meterOverageTotalUsd": 359.79,
+        "totalUsd": 364.79,
         "meters": [
           {
             "meter": "workers_requests",
@@ -1375,7 +1375,7 @@
           {
             "meter": "do_sqlite_rows_read",
             "unit": "1M rows",
-            "emberUsage": 1997280000,
+            "emberUsage": 1915200000,
             "includedAllowance": 25000000000,
             "remainingAllowance": 25000000000,
             "overageRaw": 0,
@@ -1387,14 +1387,14 @@
           {
             "meter": "do_sqlite_rows_written",
             "unit": "1M rows",
-            "emberUsage": 314640000,
+            "emberUsage": 307800000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
-            "overageRaw": 264640000,
-            "billableUnits": 264.64,
+            "overageRaw": 257800000,
+            "billableUnits": 257.8,
             "ratePerUnitUsd": 1,
             "roundingRule": "prorated",
-            "costUsd": 264.64
+            "costUsd": 257.8
           },
           {
             "meter": "do_sqlite_storage",
@@ -1522,24 +1522,24 @@
       "llmCostZdrFlashUsd": 3146.4,
       "sandboxGrossUsd": 1665,
       "sandbox50PctOffloadUsd": 832.5,
-      "combinedIllustrativeTotalUsd": 32816.63,
-      "combinedZdrOffloadTotalUsd": 4350.53
+      "combinedIllustrativeTotalUsd": 32809.79,
+      "combinedZdrOffloadTotalUsd": 4343.69
     },
     {
       "label": "uncoalesced_worst_case_100k",
       "mau": 100000,
-      "doRowsWrittenPerEvent": 46,
-      "doRowsReadPerEvent": 292,
+      "doRowsWrittenPerEvent": 45,
+      "doRowsReadPerEvent": 280,
       "d1WritesPerEvent": 2,
       "queueOpsPerEvent": 1,
       "independentRecoveryEnabled": true,
       "monthsElapsed": 12,
       "dormantRetainedRatio": 2,
-      "cloudRuntimeUsd": 4384.01,
+      "cloudRuntimeUsd": 4315.61,
       "cloudMonthlyBreakdown": {
         "baseFeeUsd": 5,
-        "meterOverageTotalUsd": 4379.01,
-        "totalUsd": 4384.01,
+        "meterOverageTotalUsd": 4310.61,
+        "totalUsd": 4315.61,
         "meters": [
           {
             "meter": "workers_requests",
@@ -1592,7 +1592,7 @@
           {
             "meter": "do_sqlite_rows_read",
             "unit": "1M rows",
-            "emberUsage": 19972800000,
+            "emberUsage": 19152000000,
             "includedAllowance": 25000000000,
             "remainingAllowance": 25000000000,
             "overageRaw": 0,
@@ -1604,14 +1604,14 @@
           {
             "meter": "do_sqlite_rows_written",
             "unit": "1M rows",
-            "emberUsage": 3146400000,
+            "emberUsage": 3078000000,
             "includedAllowance": 50000000,
             "remainingAllowance": 50000000,
-            "overageRaw": 3096400000,
-            "billableUnits": 3096.4,
+            "overageRaw": 3028000000,
+            "billableUnits": 3028,
             "ratePerUnitUsd": 1,
             "roundingRule": "prorated",
-            "costUsd": 3096.4
+            "costUsd": 3028
           },
           {
             "meter": "do_sqlite_storage",
@@ -1739,8 +1739,8 @@
       "llmCostZdrFlashUsd": 31464,
       "sandboxGrossUsd": 16650,
       "sandbox50PctOffloadUsd": 8325,
-      "combinedIllustrativeTotalUsd": 328834.01,
-      "combinedZdrOffloadTotalUsd": 44173.01
+      "combinedIllustrativeTotalUsd": 328765.61,
+      "combinedZdrOffloadTotalUsd": 44104.61
     }
   ]
 }

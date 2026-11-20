@@ -696,7 +696,7 @@ export class TestAgentHeadDO extends DurableObject {
       }
       const nextAlarm = this.ctx.storage.transactionSync(() => runtime.outbox.recomputeAlarmSync(c.now_ms));
       await runtime.alarm.syncPlatformAlarm(nextAlarm, c.now_ms);
-      await runtime.coverage.syncPostCycleCoverage({ nowMs: c.now_ms, registry });
+      await runtime.coverage.syncPostCycleCoverage({ nowMs: c.now_ms, registry, idleGraceMs: 0 });
       return Response.json({ accepted });
     }
 

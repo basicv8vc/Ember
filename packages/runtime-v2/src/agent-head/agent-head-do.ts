@@ -261,6 +261,8 @@ export class AgentHeadCore
       alarmAtMs: input.alarmAtMs,
       nowMs: input.nowMs,
       shouldRelayBudgetSync: input.shouldRelayBudgetSync,
+      recomputeAlarmSync: (ts) =>
+        this.storage.transactionSync(() => this.eventCoordinator.recomputeAlarmSync(ts)),
     });
   }
 

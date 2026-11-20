@@ -720,6 +720,192 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
       }
+    },
+    "schedules.nav_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "定时任务" } }
+      }
+    },
+    "schedules.subtitle" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Set up recurring morning briefs or one-time follow-ups. Ember runs them in the cloud even when the app is closed." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设置每日晨间简报或一次性跟进提醒。即使关闭应用，Ember 也会按时在云端执行并发送结果。" } }
+      }
+    },
+    "schedules.kind.label" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Type" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "类型" } }
+      }
+    },
+    "schedules.kind.brief" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Morning Brief" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每日简报" } }
+      }
+    },
+    "schedules.kind.follow_up" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Follow-up" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "跟进" } }
+      }
+    },
+    "schedules.kind.reminder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reminder" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "提醒" } }
+      }
+    },
+    "schedules.status.active" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Active" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "运行中" } }
+      }
+    },
+    "schedules.status.paused" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
+      }
+    },
+    "schedules.status.completed" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Completed" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已完成" } }
+      }
+    },
+    "schedules.status.cancelled" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancelled" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
+      }
+    },
+    "schedules.composer.title_placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Title (e.g. Morning Brief)" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "标题（例如：晨间简报）" } }
+      }
+    },
+    "schedules.composer.prompt_placeholder" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "What should Ember prepare or follow up on?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "希望 Ember 准备什么内容或跟进什么事项？" } }
+      }
+    },
+    "schedules.composer.daily_time" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Daily time" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每日时间" } }
+      }
+    },
+    "schedules.composer.fire_at" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Run at" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "执行时间" } }
+      }
+    },
+    "schedules.composer.create" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Create" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "创建" } }
+      }
+    },
+    "schedules.list.section_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your Schedules" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "我的定时任务" } }
+      }
+    },
+    "schedules.next_run" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Next:" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下次：" } }
+      }
+    },
+    "schedules.action.pause" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pause" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂停" } }
+      }
+    },
+    "schedules.action.resume" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Resume" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "恢复" } }
+      }
+    },
+    "schedules.action.cancel" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
+      }
+    },
+    "schedules.cancel.confirm_title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel this schedule?" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要取消这个定时任务吗？" } }
+      }
+    },
+    "schedules.cancel.confirm_message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember will stop future runs and cancel any pending occurrence." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消后，Ember 将停止后续执行并取消待处理的触发。" } }
+      }
+    },
+    "schedules.empty.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "No schedules yet" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无定时任务" } }
+      }
+    },
+    "schedules.empty.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Create a daily morning brief or follow-up reminder above." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在上方创建每日晨间简报或跟进提醒。" } }
+      }
+    },
+    "schedules.endpoint_unavailable.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules are not enabled on this server" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前服务端尚未开启定时任务" } }
+      }
+    },
+    "schedules.endpoint_unavailable.message" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connect to a V2 Ember Cloud environment to create and manage proactive schedules." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接到 V2 Ember 云端环境后即可创建和管理定时任务。" } }
+      }
+    },
+    "schedules.error.title" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules unavailable" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "定时任务操作失败" } }
+      }
+    },
+    "schedules.error.invalid_input" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter a valid title, prompt, and schedule time." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请输入有效的标题、内容和执行时间。" } }
+      }
+    },
+    "schedules.error.limit_reached" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedule limit reached. Cancel an existing schedule before creating a new one." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已达到定时任务数量上限，请先取消旧任务后再创建。" } }
+      }
+    },
+    "schedules.error.unauthenticated" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign in again to manage your schedules." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请重新登录后管理定时任务。" } }
+      }
+    },
+    "schedules.error.unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not sync schedules right now. Try again." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时无法同步定时任务，请稍后重试。" } }
+      }
     }
   },
   "version" : "1.0"

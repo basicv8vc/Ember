@@ -949,6 +949,123 @@ final class CloudDeviceAdapterTests: XCTestCase {
         XCTAssertFalse(monitor.isRunning)
     }
 
+    @MainActor
+    func testMonitorConcurrentReconnectWaitsForPreviousAdapterExitBeforeStartingNewAdapter() async throws {
+        let dir1 = try makeTempDirectory()
+        let dir2 = try makeTempDirectory()
+        let dir3 = try makeTempDirectory()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds1 = InMemoryCloudDeviceCredentialStore()
+        let creds2 = InMemoryCloudDeviceCredentialStore()
+        let creds3 = InMemoryCloudDeviceCredentialStore()
+        let config1 = try makeConfiguration(origin: "https://one.ember.test")
+        let config2 = try makeConfiguration(origin: "https://two.ember.test")
+        let config3 = try makeConfiguration(origin: "https://three.ember.test")
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let transport1 = GatedCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let transport2 = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let transport3 = GatedCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+
+        let monitor = CloudDeviceAdapterMonitor()
+        try await monitor.connect(
+            configuration: config1,
+            authProvider: auth,
+            credentialStore: creds1,
+            transport: transport1,
+            journal: CloudDeviceExecutionJournal(directory: dir1),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir1),
+            clock: clock,
+            autoStart: true
+        )
+        await transport1.waitForClaimEntry()
+        let expectedThirdID = try creds3.loadOrCreateCredential(for: config3.scopeIdentifier).id
+
+        // Start first reconnect while adapter 1 is blocked inside claim().
+        let reconnect1 = Task {
+            try await monitor.connect(
+                configuration: config2,
+                authProvider: auth,
+                credentialStore: creds2,
+                transport: transport2,
+                journal: CloudDeviceExecutionJournal(directory: dir2),
+                workspace: DeviceSandboxWorkspace(rootDirectory: dir2),
+                clock: clock,
+                autoStart: true
+            )
+        }
+        await transport1.waitForCancellationObserved()
+
+        // While adapter 1 still has NOT exited, issue a second concurrent reconnect.
+        let reconnect2Completed = LockedFlag()
+        let reconnect2 = Task {
+            try await monitor.connect(
+                configuration: config3,
+                authProvider: auth,
+                credentialStore: creds3,
+                transport: transport3,
+                journal: CloudDeviceExecutionJournal(directory: dir3),
+                workspace: DeviceSandboxWorkspace(rootDirectory: dir3),
+                clock: clock,
+                autoStart: true
+            )
+            reconnect2Completed.set(true)
+        }
+
+        // Yield on MainActor so reconnect2 runs up to its teardown wait point.
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+
+        // Adapter 1 has not exited yet: neither adapter 2 nor adapter 3 may have started.
+        XCTAssertFalse(
+            reconnect2Completed.value,
+            "Concurrent reconnect must wait for previous adapter teardown before completing"
+        )
+        XCTAssertNotEqual(monitor.deviceID, expectedThirdID)
+        XCTAssertFalse(monitor.isRunning)
+        let t2RegistersBeforeExit = await transport2.registerCount
+        let t2ClaimsBeforeExit = await transport2.claimCount
+        let t3RegistersBeforeExit = await transport3.registerCount
+        let t3ClaimsBeforeExit = await transport3.claimCount
+        XCTAssertEqual(t2RegistersBeforeExit, 0)
+        XCTAssertEqual(t2ClaimsBeforeExit, 0)
+        XCTAssertEqual(
+            t3RegistersBeforeExit,
+            0,
+            "New adapter must not register before previous adapter fully exits"
+        )
+        XCTAssertEqual(
+            t3ClaimsBeforeExit,
+            0,
+            "New adapter must not start claiming before previous adapter fully exits"
+        )
+
+        // Release adapter 1's gate so it can fully exit; reconnect2 should now start adapter 3.
+        await transport1.releaseGate()
+        try await reconnect1.value
+        try await reconnect2.value
+        await transport3.waitForClaimEntry()
+
+        let t2RegistersAfterExit = await transport2.registerCount
+        let t2ClaimsAfterExit = await transport2.claimCount
+        let t3RegistersAfterExit = await transport3.registerCount
+        let t3ClaimsAfterExit = await transport3.claimCount
+        XCTAssertEqual(t2RegistersAfterExit, 0, "Superseded reconnect must never start its adapter")
+        XCTAssertEqual(t2ClaimsAfterExit, 0, "Superseded reconnect must never start its adapter")
+        XCTAssertGreaterThanOrEqual(t3RegistersAfterExit, 1)
+        XCTAssertGreaterThanOrEqual(t3ClaimsAfterExit, 1)
+        XCTAssertEqual(monitor.deviceID, expectedThirdID)
+        XCTAssertTrue(monitor.isRunning)
+
+        // Cleanly stop adapter 3 before test finishes.
+        let stopTask = Task { await monitor.stop() }
+        await transport3.waitForCancellationObserved()
+        await transport3.releaseGate()
+        await stopTask.value
+        XCTAssertFalse(monitor.isRunning)
+    }
+
     func testJournalWriteFailureBlocksResultSubmission() async throws {
         let dir = try makeTempDirectory()
         // Place a regular file where the journal directory wants to be so persistState() throws.
@@ -1647,6 +1764,8 @@ private actor GatedCloudTransport: CloudDeviceAPITransporting {
     private let readyUntilMs: Int64
     private var currentConcurrentClaims = 0
     private(set) var maxConcurrentClaims = 0
+    private(set) var registerCount = 0
+    private(set) var claimCount = 0
     private var enteredClaim = false
     private var cancellationObserved = false
     private var gateReleased = false
@@ -1688,7 +1807,8 @@ private actor GatedCloudTransport: CloudDeviceAPITransporting {
     }
 
     func register(credential: CloudDeviceCredential) async throws -> CloudDeviceRegistrationReceipt {
-        CloudDeviceRegistrationReceipt(
+        registerCount += 1
+        return CloudDeviceRegistrationReceipt(
             deviceId: credential.id,
             capability: CloudDeviceContract.textCapability,
             version: CloudDeviceContract.capabilityVersion,
@@ -1697,6 +1817,7 @@ private actor GatedCloudTransport: CloudDeviceAPITransporting {
     }
 
     func claim(credential: CloudDeviceCredential) async throws -> CloudDeviceClaimResponse {
+        claimCount += 1
         currentConcurrentClaims += 1
         maxConcurrentClaims = max(maxConcurrentClaims, currentConcurrentClaims)
         defer { currentConcurrentClaims -= 1 }

@@ -483,6 +483,139 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertEqual(messageReloadCount.value, loadsBeforeRejected)
     }
 
+    func testRefreshFailureSurfacesHonestOfflineNoticeAndClearsOnRecovery() async throws {
+        let isOffline = LockedBool(false)
+        let phase = LockedInt(0)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                if isOffline.value {
+                    return .failure(URLError(.notConnectedToInternet))
+                }
+                if phase.value == 0 {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                      "transcript_epoch":0,
+                      "messages":[
+                        {"message_id":"55555555-5555-4555-8555-555555555511",
+                         "sequence":1,"created_at":"2026-11-20T08:00:00Z",
+                         "kind":"ember","text":"Morning brief ready.",
+                         "model_label":"ember-alpha","simulated":false}
+                      ],
+                      "next_after":1,"has_more":false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[
+                    {"message_id":"55555555-5555-4555-8555-555555555511",
+                     "sequence":1,"created_at":"2026-11-20T08:00:00Z",
+                     "kind":"ember","text":"Morning brief ready.",
+                     "model_label":"ember-alpha","simulated":false},
+                    {"message_id":"55555555-5555-4555-8555-555555555512",
+                     "sequence":2,"created_at":"2026-11-20T08:05:00Z",
+                     "kind":"ember","text":"Follow-up complete.",
+                     "model_label":"ember-alpha","simulated":false}
+                  ],
+                  "next_after":2,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                return isOffline.value
+                    ? .failure(URLError(.notConnectedToInternet))
+                    : .json(statusCode: 200, body: "{\"tasks\":[]}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: makeTempDirectory())
+        model.handleViewAppeared()
+        await model.start()
+
+        XCTAssertNil(model.refreshErrorMessage)
+        XCTAssertEqual(model.screen.timeline.count, 1)
+
+        // Go offline and pull to refresh: existing timeline stays intact and honest notice appears.
+        isOffline.value = true
+        await model.refreshConversationAndTasks()
+
+        XCTAssertNotNil(model.refreshErrorMessage)
+        XCTAssertEqual(model.screen.timeline.count, 1)
+
+        // Recover connectivity and refresh again: notice clears and new message syncs.
+        isOffline.value = false
+        phase.increment()
+        await model.refreshConversationAndTasks()
+
+        XCTAssertNil(model.refreshErrorMessage)
+        XCTAssertEqual(model.screen.timeline.count, 2)
+    }
+
+    func testRefreshRecoversWhenColdStartFailedOffline() async throws {
+        let session = StubSession.make()
+        sessions.append(session)
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let api = FakeEmberSessionAPI()
+        api.setBootstrapResults([
+            .failure(.offline),
+            .success(AuthFixture.me()),
+        ])
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: api,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let repo = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth),
+            journal: LiveConversationJournal(directory: makeTempDirectory())
+        )
+        let taskRepo = LiveB1SessionTaskRepository(auth: auth)
+        let model = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            taskRepository: taskRepo
+        )
+        models.append(model)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,"messages":[],"next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[]}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        await model.start()
+        XCTAssertNil(model.profile)
+        XCTAssertEqual(model.reply, .failed(message: "Cloud connection unavailable. Retry to connect.", retryable: true))
+
+        await model.refreshConversationAndTasks()
+        XCTAssertNotNil(model.profile)
+        XCTAssertNotNil(model.snapshot)
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertNil(model.refreshErrorMessage)
+    }
+
     func testAttachFilesAndPhotosRejectsBlockedAndClearsAfterSend() async throws {
         let directory = makeTempDirectory()
         let csvFile = directory.appendingPathComponent("q4 sales.csv")

@@ -44,6 +44,7 @@ final class LiveConversationHostModel {
     private(set) var command: ConversationCommandStatus = .idle
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
+    private(set) var refreshErrorMessage: String?
     private(set) var requiresSignIn = false
     private(set) var rejectedDraftText: String?
     private(set) var stagedAttachments: [ComposerAttachment] = []
@@ -81,6 +82,7 @@ final class LiveConversationHostModel {
                 let recovered = try await repository.recoverAfterRelaunch()
                 snapshot = recovered
                 status = nil
+                refreshErrorMessage = nil
                 reply = .idle
                 if let rejected = try await repository.rejectedDraft() {
                     rejectedDraftText = rejected.text
@@ -123,6 +125,7 @@ final class LiveConversationHostModel {
             snapshot = loaded
             requiresSignIn = false
             status = nil
+            refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
         } catch let error as AuthError where error == .appleCancelled {
             status = "Sign-in cancelled."
@@ -174,6 +177,7 @@ final class LiveConversationHostModel {
         stagedAttachments.removeAll()
         isUploadingAttachment = false
         attachmentError = nil
+        refreshErrorMessage = nil
         command = .idle
         reply = .idle
         isPollingPaused = false
@@ -420,6 +424,7 @@ final class LiveConversationHostModel {
             reply = .generating
             let loaded = try await repository.load()
             snapshot = loaded
+            refreshErrorMessage = nil
             status = isMockMode ? nil : "Message saved to Ember Cloud."
             beginPolling()
             await syncTasksFromCloud(snapshot: loaded)
@@ -526,6 +531,17 @@ final class LiveConversationHostModel {
         if let inFlight = conversationRefreshTask {
             _ = await inFlight.value
         }
+        if profile == nil,
+           !requiresSignIn,
+           !isLoading,
+           !isSubmitting,
+           !isSigningIn,
+           !isSigningOut,
+           command != .unknownAcknowledgement,
+           rejectedDraftText == nil {
+            await start()
+            return
+        }
         guard canPerformBackgroundRefresh else {
             await refreshTasks()
             return
@@ -577,11 +593,16 @@ final class LiveConversationHostModel {
                   canPerformBackgroundRefresh
             else { return }
             snapshot = loaded
+            refreshErrorMessage = nil
+            if command == .idle, case .failed(_, retryable: true) = reply {
+                reply = .idle
+            }
             await syncTasksFromCloud(snapshot: loaded)
         } catch is CancellationError {
             return
         } catch {
             guard sessionGeneration == expectedGeneration else { return }
+            refreshErrorMessage = String(localized: "conversation.live.refresh_unavailable", table: "Conversation")
             await syncTasksFromCloud(snapshot: snapshot)
         }
     }
@@ -1225,6 +1246,36 @@ struct LiveConversationHost: View {
                         .accessibilityIdentifier("live-conversation-status")
                 }
 
+                if let refreshError = model.refreshErrorMessage {
+                    HStack(alignment: .center, spacing: 10) {
+                        Image(systemName: "wifi.slash")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color(uiColor: .systemOrange))
+                            .accessibilityHidden(true)
+                        Text(refreshError)
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                        Button {
+                            Task { await model.refreshConversationAndTasks() }
+                        } label: {
+                            Text("conversation.live.refresh_retry", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .accessibilityIdentifier("live-conversation-refresh-retry")
+                    }
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 8)
+                    .background(Color(uiColor: .systemOrange).opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+                    .padding(.horizontal, 16)
+                    .padding(.top, 4)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("live-conversation-refresh-error")
+                }
+
                 if model.isPollingPaused {
                     Button {
                         model.resumePolling()
@@ -1273,7 +1324,10 @@ struct LiveConversationHost: View {
                         : "conversation.reply.cancel_cloud_turn",
                     emberMessageAuthorText: model.isMockMode
                         ? "conversation.message.ember_mock"
-                        : "conversation.message.ember_cloud"
+                        : "conversation.message.ember_cloud",
+                    onRefresh: {
+                        await model.refreshConversationAndTasks()
+                    }
                 )
             }
             .photosPicker(

@@ -9,6 +9,7 @@ struct ConversationTimelineView: View {
     let replyPreparingText: LocalizedStringKey
     let replyStopText: LocalizedStringKey
     let emberMessageAuthorText: LocalizedStringKey
+    var onRefresh: (() async -> Void)? = nil
 
     private let bottomAnchor = "conversation-timeline-bottom"
 
@@ -50,6 +51,7 @@ struct ConversationTimelineView: View {
                 .padding(.bottom, 20)
             }
             .scrollDismissesKeyboard(.interactively)
+            .modifier(OptionalRefreshableModifier(onRefresh: onRefresh))
             .onAppear {
                 DispatchQueue.main.async {
                     proxy.scrollTo(bottomAnchor, anchor: .bottom)
@@ -342,6 +344,21 @@ private struct ConversationReplyStatusView: View {
                     .strokeBorder(Color.red.opacity(0.2), lineWidth: 1)
             }
             .accessibilityElement(children: .contain)
+        }
+    }
+}
+
+private struct OptionalRefreshableModifier: ViewModifier {
+    let onRefresh: (() async -> Void)?
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if let onRefresh {
+            content.refreshable {
+                await onRefresh()
+            }
+        } else {
+            content
         }
     }
 }

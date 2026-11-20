@@ -6,6 +6,7 @@ import { FakeModelGatewayServer } from './fake-model-gateway-server.js';
 import { V2FaultInjector } from './fault-injector.js';
 import {
   assertIsolatedWranglerConfig,
+  assertLoopbackHttpUrl,
   assertNoAccidentalEnvFiles,
   assertSafeLocalV2RuntimeEnv,
   buildSanitizedLocalWorkerVars,
@@ -69,17 +70,19 @@ interface WranglerWorkerHandle {
   getDurableObjectStorage(
     classNameOrBindingName: string,
     options: { readonly name?: string; readonly id?: string },
-  ): Promise<{
-    exec<T = Record<string, unknown>>(
-      sql: string,
-      ...bindings: (string | number | null)[]
-    ): Promise<T[]>;
-  }>;
+  ): Promise<DurableObjectStorageHandle>;
   applyD1Migrations?(bindingName: string): Promise<void>;
 }
 
+interface DurableObjectStorageHandle {
+  exec<T = Record<string, unknown>>(
+    sql: string,
+    ...bindings: (string | number | null)[]
+  ): Promise<T[]>;
+}
+
 interface WranglerTestHarness {
-  listen(): Promise<void>;
+  listen(): Promise<{ readonly url: string | URL }>;
   close(): Promise<void>;
   getWorker(): Promise<WranglerWorkerHandle>;
 }
@@ -334,6 +337,7 @@ export class V2LocalRuntimeHarness {
   #tempDir: string | null = null;
   #wranglerHarness: WranglerTestHarness | null = null;
   #worker: WranglerWorkerHandle | null = null;
+  #listenUrl: URL | null = null;
   #d1BindingName = 'D1_RECOVERY';
 
   private constructor(
@@ -499,7 +503,9 @@ export class V2LocalRuntimeHarness {
 
       // Set #wranglerHarness BEFORE listen() so startup failures always clean up via dispose().
       harness.#wranglerHarness = wranglerHarness;
-      await wranglerHarness.listen();
+      const { url } = await wranglerHarness.listen();
+      harness.#listenUrl = new URL(url);
+      assertLoopbackHttpUrl('Wrangler test listener', harness.#listenUrl.href);
       const worker = await wranglerHarness.getWorker();
       harness.#worker = worker;
 
@@ -557,6 +563,15 @@ export class V2LocalRuntimeHarness {
 
   async fetch(pathname: string, init?: RequestInit): Promise<Response> {
     return this.#requireWorker().fetch(pathname, init);
+  }
+
+  fetchOverHttp(pathname: string, init?: RequestInit): Promise<Response> {
+    const base = this.#listenUrl;
+    if (base === null) throw new Error('V2LocalRuntimeHarness is not listening');
+    const url = new URL(pathname, base);
+    if (url.origin !== base.origin)
+      throw new Error('Request must target the loopback test listener');
+    return fetch(url, { ...init, redirect: 'error' });
   }
 
   async fetchJson<T = unknown>(
@@ -619,21 +634,20 @@ export class V2LocalRuntimeHarness {
     await this.#requireWorker().evictDurableObject(classNameOrBindingName, identifier);
   }
 
+  /** Inspect actual local DO SQLite state without adding a Worker HTTP route. */
   async readDurableObjectRows<T = Record<string, unknown>>(
-    classNameOrBindingName: string,
-    identifier: { readonly name?: string; readonly id?: string },
+    bindingName: string,
+    identifier: { readonly name: string } | { readonly id: string },
     query: `SELECT ${string}`,
     ...bindings: (string | number | null)[]
   ): Promise<T[]> {
-    const sql = await this.#requireWorker().getDurableObjectStorage(
-      classNameOrBindingName,
-      identifier,
-    );
+    const sql = await this.#requireWorker().getDurableObjectStorage(bindingName, identifier);
     return sql.exec<T>(query, ...bindings);
   }
 
   async dispose(): Promise<void> {
     this.#worker = null;
+    this.#listenUrl = null;
     if (this.#wranglerHarness !== null) {
       await this.#wranglerHarness.close().catch(() => undefined);
       this.#wranglerHarness = null;

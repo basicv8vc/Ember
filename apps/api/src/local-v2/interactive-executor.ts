@@ -1,3 +1,5 @@
+import type { ObservedTurnUsage } from '@ember/runtime-v2';
+export type { ObservedTurnUsage } from '@ember/runtime-v2';
 import { B1AssistantTurnDtoSchema, IdSchema } from '@ember/contracts';
 import {
   buildBoundedContext,
@@ -32,17 +34,6 @@ type ExecutorRpc = Pick<
   EdgeAgentHeadRpc,
   'markAttemptSent' | 'renewTurnLease' | 'handoffTurnToDurable' | 'commitTurn'
 >;
-
-/** Trusted, cumulative provider receipt scoped to the originally authorized attempt. */
-export interface ObservedTurnUsage {
-  readonly scope: HeadScope;
-  readonly turnId: string;
-  readonly attemptNo: number;
-  readonly operationId: string;
-  readonly observedCostMicroUsd: number;
-  readonly inputTokens?: number;
-  readonly outputTokens?: number;
-}
 
 /**
  * The local runtime host submits evidence to the attempt authority. Repeated receipts for an

@@ -79,7 +79,7 @@ describe('local V2 loopback provider', () => {
     expect(url).toBe(`${origin}/v2/fake-model/stream`);
     expect(init).toMatchObject({
       method: 'POST',
-      redirect: 'error',
+      redirect: 'manual',
       headers: { 'x-ember-operation-id': operationId, 'x-ember-turn-id': turnId },
       body: JSON.stringify({ prompt: '你好', deadlineAtMs: 600_000 }),
     });

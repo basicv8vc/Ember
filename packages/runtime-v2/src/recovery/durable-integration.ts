@@ -37,6 +37,7 @@ export interface DurableExecutionClaimContext {
   readonly sendStartedAtMs: number | null;
   readonly deadlineAtMs: number | null;
   readonly providerJobHandle: string | null;
+  readonly conversationId?: string;
   readonly interactiveHandoff?: boolean;
   readonly inputJson?: string;
 }
@@ -292,6 +293,9 @@ export function parseClaimExecutionContext(cmd: {
     sendState: parsed['sendState'],
     deadlineAtMs: parsed['deadlineAtMs'],
     providerJobHandle: parsed['providerJobHandle'],
+    ...(typeof parsed['conversationId'] === 'string'
+      ? { conversationId: parsed['conversationId'] }
+      : {}),
     interactiveHandoff:
       typeof parsed['interactiveHandoff'] === 'boolean' ? parsed['interactiveHandoff'] : undefined,
     inputJson:

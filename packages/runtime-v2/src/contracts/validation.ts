@@ -21,6 +21,7 @@ import type {
   CommitTurnRequest,
   HandoffTurnRequest,
   MarkAttemptSentRequest,
+  ObservedTurnUsage,
   PrepareTurnRequest,
   RenewTurnLeaseRequest,
 } from './agent-head-rpc.js';
@@ -133,6 +134,16 @@ export const AgentHeadCallerScopeSchema = z.strictObject({
 export const AgentHeadTenantScopeSchema = z.strictObject({
   tenantId: IdSchema,
   agentId: IdSchema,
+});
+
+const ObservedTurnUsageSchema = z.strictObject({
+  scope: AgentHeadTenantScopeSchema,
+  turnId: IdSchema,
+  attemptNo: z.number().int().min(1).max(V2_BUDGET_LIMITS.maxAttemptsPerTurn),
+  operationId: IdSchema,
+  observedCostMicroUsd: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
+  inputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
+  outputTokens: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).optional(),
 });
 
 export const ModelReservationInputSchema = z.strictObject({
@@ -364,6 +375,10 @@ export function parseDurableTaskOutcome(input: unknown): DurableTaskOutcome | nu
 
 export function parsePrepareTurnRequest(input: unknown): PrepareTurnRequest {
   return parseOrThrow(PrepareTurnRequestSchema, input);
+}
+
+export function parseObservedTurnUsage(input: unknown): ObservedTurnUsage {
+  return parseOrThrow(ObservedTurnUsageSchema, input);
 }
 
 export function parseMarkAttemptSentRequest(input: unknown): MarkAttemptSentRequest {

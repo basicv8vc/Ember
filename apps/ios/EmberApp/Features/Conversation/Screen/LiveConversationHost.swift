@@ -26,6 +26,7 @@ final class LiveConversationHostModel {
 
     let taskStore: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore
+    let memoryStore: PersonalMemoryStore
     let isMockMode: Bool
 
     var selectedTab: RootTab = .chat
@@ -57,6 +58,7 @@ final class LiveConversationHostModel {
         auth: any LiveAuthControlling,
         taskRepository: (any SessionTaskRepositoryProtocol)? = nil,
         scheduleRepository: (any ProactiveScheduleRepositoryProtocol)? = nil,
+        memoryRepository: (any PersonalMemoryRepositoryProtocol)? = nil,
         isMockMode: Bool = false,
         pollingWindow: Duration = .seconds(60),
         taskPollInterval: Duration = .seconds(2),
@@ -66,6 +68,7 @@ final class LiveConversationHostModel {
         self.auth = auth
         self.taskStore = SessionTaskStore(repository: taskRepository)
         self.scheduleStore = ProactiveScheduleStore(repository: scheduleRepository)
+        self.memoryStore = PersonalMemoryStore(repository: memoryRepository)
         self.isMockMode = isMockMode
         self.pollingWindow = pollingWindow
         self.taskPollInterval = taskPollInterval
@@ -189,6 +192,7 @@ final class LiveConversationHostModel {
         tasksNavigationPath.removeAll()
         taskStore.clear()
         scheduleStore.clear()
+        memoryStore.clear()
     }
 
     func removeAttachment(_ attachmentID: UUID) {
@@ -1110,6 +1114,7 @@ struct LiveConversationHost: View {
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
     @State private var isConfirmingSignOut = false
+    @State private var isShowingMemorySheet = false
     @State private var isShowingFileImporter = false
     @State private var isShowingPhotoPicker = false
     @State private var isShowingCamera = false
@@ -1217,17 +1222,46 @@ struct LiveConversationHost: View {
         NavigationStack(path: $model.chatNavigationPath) {
             VStack(spacing: 0) {
                 if model.isMockMode {
-                    MockOnlyBanner()
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
-                        .padding(.bottom, 4)
-                        .background(EmberDesignTokens.groupedBackground)
+                    HStack(spacing: 12) {
+                        MockOnlyBanner()
+                        if model.memoryStore.hasRepository {
+                            Button {
+                                isShowingMemorySheet = true
+                            } label: {
+                                Label {
+                                    Text("memory.nav_title", tableName: "Conversation")
+                                } icon: {
+                                    Image(systemName: "brain.head.profile")
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                            .accessibilityIdentifier("live-conversation-open-memory")
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 4)
+                    .background(EmberDesignTokens.groupedBackground)
                 } else {
-                    HStack {
+                    HStack(spacing: 12) {
                         Text("LIVE CLOUD")
                             .font(.caption.weight(.semibold))
                             .accessibilityIdentifier("live-cloud-mode")
                         Spacer()
+                        if model.memoryStore.hasRepository {
+                            Button {
+                                isShowingMemorySheet = true
+                            } label: {
+                                Label {
+                                    Text("memory.nav_title", tableName: "Conversation")
+                                } icon: {
+                                    Image(systemName: "brain.head.profile")
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                            .disabled(model.isSigningOut || model.isLoading)
+                            .accessibilityIdentifier("live-conversation-open-memory")
+                        }
                         Button {
                             isConfirmingSignOut = true
                         } label: {
@@ -1389,6 +1423,9 @@ struct LiveConversationHost: View {
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
+            }
+            .sheet(isPresented: $isShowingMemorySheet) {
+                PersonalMemorySheetView(store: model.memoryStore)
             }
         }
     }

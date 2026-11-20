@@ -1,912 +1,2774 @@
 {
-  "sourceLanguage" : "en",
-  "strings" : {
-    "conversation.composer.accessibility" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Message Ember" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送消息给 Ember" } }
-      }
-    },
-    "conversation.composer.local_note" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your message stays in this local demo." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "消息仅保留在本地演示中。" } }
-      }
-    },
-    "conversation.composer.cloud_note" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sent messages are saved in your Ember Cloud conversation." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已发送的消息会保存在 Ember 云端对话中。" } }
-      }
-    },
-    "conversation.composer.placeholder" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Message Ember…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "给 Ember 发消息…" } }
-      }
-    },
-    "conversation.composer.send" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "发送" } }
-      }
-    },
-    "conversation.composer.send_hint" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Send this message to Ember." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "将这条消息发送给 Ember。" } }
-      }
-    },
-    "conversation.live.sign_out" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign out" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "退出登录" } }
-      }
-    },
-    "conversation.live.cancel" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
-      }
-    },
-    "conversation.live.sign_out_confirm_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign out of Ember Cloud?" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要退出 Ember 云端登录吗？" } }
-      }
-    },
-    "conversation.live.sign_out_confirm_message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your conversation will stay in Ember Cloud. This device's session will be cleared." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对话会保留在 Ember 云端，此设备上的登录会话将被清除。" } }
-      }
-    },
-    "conversation.live.signed_out" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Signed out. Sign in again with Apple to continue." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已退出登录。请重新使用 Apple 登录。" } }
-      }
-    },
-    "conversation.live.sign_out_unconfirmed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "This device is signed out, but Cloud revocation could not be confirmed." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "此设备已退出登录，但无法确认云端会话是否撤销。" } }
-      }
-    },
-    "conversation.live.sign_out_local_error" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not clear this device's session. Try again before continuing." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法清除此设备的登录会话，请重试后再继续。" } }
-      }
-    },
-    "conversation.activity.commitment" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Commitment update" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 承诺动态" } }
-      }
-    },
-    "conversation.activity.system" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Conversation update" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 对话动态" } }
-      }
-    },
-    "conversation.activity.task" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · Task update" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 任务动态" } }
-      }
-    },
-    "conversation.commitment.unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Commitment unavailable" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关联承诺暂不可用" } }
-      }
-    },
-    "conversation.empty.message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Bring a question, a thought, or something you want to work through. You can keep the conversation going here." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "带来一个问题、一点想法，或正在思考的事情。你可以在这里继续聊下去。" } }
-      }
-    },
-    "conversation.empty.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "I’m here with you." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "我在这里陪你聊。" } }
-      }
-    },
-    "conversation.error.recoverable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "The MOCK reply could not be prepared. Your message is still here; you can try again." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "这条模拟回复暂时无法准备。你的消息仍在，可以重试。" } }
-      }
-    },
-    "conversation.error.load" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · The local conversation could not be loaded. Retry to try again." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 本地对话暂时无法加载，请重试。" } }
-      }
-    },
-    "conversation.header.subtitle" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your personal AI partner" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你的个人 AI 伙伴" } }
-      }
-    },
-    "conversation.message.ember_mock" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember · MOCK" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember · 模拟回复" } }
-      }
-    },
-    "conversation.message.ember_cloud" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember" } }
-      }
-    },
-    "conversation.message.you" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "You" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "你" } }
-      }
-    },
-    "conversation.mock_reply.default" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: We can take this one step at a time. What feels most useful to start with?" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：我们可以一步一步来。你觉得从哪里开始最有帮助？" } }
-      }
-    },
-    "conversation.mock_reply.notes" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: I can help shape those notes into a clear next step, then we can refine it together." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：我可以帮你把这些笔记整理成清晰的下一步，然后我们再一起完善。" } }
-      }
-    },
-    "conversation.mock_reply.plan" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply: Let’s make the plan manageable: choose one outcome, one small next step, and when you want to revisit it." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复：让计划轻一些：先选定一个结果、一个小步骤，以及你想回头检查的时间。" } }
-      }
-    },
-    "conversation.prompt.hint" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Fills the message box. It will not send until you choose Send." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入输入框；只有你点击发送后才会发出。" } }
-      }
-    },
-    "conversation.prompt.notes" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me turn a note into a clear next step." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "帮我把一段笔记整理成清晰的下一步。" } }
-      }
-    },
-    "conversation.prompt.plan" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me make a simple plan for my day." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "帮我为今天安排一个简单的计划。" } }
-      }
-    },
-    "conversation.prompt.reflect" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Help me think something through." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "陪我把一件事想清楚。" } }
-      }
-    },
-    "conversation.reply.preparing" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preparing a MOCK reply" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在准备模拟回复" } }
-      }
-    },
-    "conversation.reply.waiting_for_cloud" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Waiting for Ember Cloud to process this turn" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "等待 Ember Cloud 处理此轮消息" } }
-      }
-    },
-    "conversation.reply.retry" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Try again" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
-      }
-    },
-    "conversation.reply.stop" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Stop reply" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "停止回复" } }
-      }
-    },
-    "conversation.reply.cancel_cloud_turn" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel turn" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消此轮" } }
-      }
-    },
-    "conversation.reply.stop_detail" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Only this local MOCK reply stopped. No Ember task was cancelled." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仅停止了这条本地模拟回复，没有取消任何 Ember 任务。" } }
-      }
-    },
-    "conversation.reply.stopped" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK reply stopped" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟回复已停止" } }
-      }
-    },
-    "conversation.submission.acknowledged" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ACK · Message accepted" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ACK · 消息已确认" } }
-      }
-    },
-    "conversation.submission.failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · The message could not be accepted." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "MOCK ONLY · 消息未能确认。" } }
-      }
-    },
-    "conversation.suggestions.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Start anywhere" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "可以从这里开始" } }
-      }
-    },
-    "conversation.task.loading" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Loading linked task…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在加载关联任务…" } }
-      }
-    },
-    "conversation.task.unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Linked Task unavailable" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关联任务暂不可用" } }
-      }
-    },
-    "conversation.live.check_again" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Check again" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重新检查" } }
-      }
-    },
-    "conversation.live.checking_status" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Checking Ember Cloud…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在检查 Ember Cloud…" } }
-      }
-    },
-    "conversation.live.waiting_for_cloud" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Still waiting for Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "仍在等待 Ember Cloud…" } }
-      }
-    },
-    "tab.chat" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Chat" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "对话" } }
-      }
-    },
-    "tab.tasks" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Tasks" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务" } }
-      }
-    },
-    "tasks.kind.notes_action_items" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Notes · Action Items" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "笔记 · 待办整理" } }
-      }
-    },
-    "tasks.kind.python_sandbox" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sandbox · Python" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "沙盒 · Python" } }
-      }
-    },
-    "tasks.kind.mock_chat" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Chat" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 对话" } }
-      }
-    },
-    "tasks.kind.mock_compute" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Compute" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 计算" } }
-      }
-    },
-    "tasks.kind.mock_file" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · File" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 文件" } }
-      }
-    },
-    "tasks.kind.mock_approval" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Mock · Approval" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "模拟 · 审批" } }
-      }
-    },
-    "tasks.group.needs_intervention" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Needs Attention" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "需要介入" } }
-      }
-    },
-    "tasks.group.in_progress" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "In Progress" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进行中" } }
-      }
-    },
-    "tasks.group.completed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Completed" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已完成" } }
-      }
-    },
-    "tasks.error.list_load" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load tasks from Ember Cloud. Pull to try again." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务列表，请下拉重试。" } }
-      }
-    },
-    "tasks.error.detail_load" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task details from Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务详情。" } }
-      }
-    },
-    "tasks.error.result_load" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task result from Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法从 Ember Cloud 加载任务结果。" } }
-      }
-    },
-    "tasks.error.cancel_failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not request task cancellation. Check task status before retrying." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法发送取消请求，请检查任务状态后重试。" } }
-      }
-    },
-    "tasks.error.cancel_unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task cancellation is not yet enabled on Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "Ember Cloud 暂未开放任务取消接口。" } }
-      }
-    },
-    "tasks.action.refresh" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Refresh tasks" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "刷新任务" } }
-      }
-    },
-    "tasks.action.load_more" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Load more tasks" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "加载更多任务" } }
-      }
-    },
-    "tasks.pagination.more_available" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "More earlier tasks are stored in Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "云端还有更早的任务记录，点击可继续加载。" } }
-      }
-    },
-    "tasks.pagination.partial_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Showing recent tasks" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前仅显示最近任务" } }
-      }
-    },
-    "tasks.pagination.partial_message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Additional earlier tasks exist on the server." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端存在更早的任务，当前列表仅展示了最新一页。" } }
-      }
-    },
-    "tasks.row.result_ready" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result ready" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果已就绪" } }
-      }
-    },
-    "tasks.detail.nav_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task Detail" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务详情" } }
-      }
-    },
-    "tasks.detail.copied_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result copied" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "结果已复制" } }
-      }
-    },
-    "tasks.detail.ok" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "OK" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "好" } }
-      }
-    },
-    "tasks.detail.server_truth_note" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Progress and lifecycle reflect persisted server state only." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "进度与状态仅来自服务端持久记录，不做客户端估算。" } }
-      }
-    },
-    "tasks.detail.updated_at" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Updated" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "更新于" } }
-      }
-    },
-    "tasks.detail.created_at" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Created" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "创建于" } }
-      }
-    },
-    "tasks.detail.attempts" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Attempts" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "执行次数" } }
-      }
-    },
-    "tasks.detail.task_id" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task ID" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务编号" } }
-      }
-    },
-    "tasks.detail.cancel_section_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Task Actions" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务控制" } }
-      }
-    },
-    "tasks.detail.cancel_honest_note" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Requesting cancellation notifies the server; status updates only after persisted confirmation." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请求取消后会等待服务端持久确认，确认前会继续显示当前状态。" } }
-      }
-    },
-    "tasks.detail.cancel_button" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel Task" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消任务" } }
-      }
-    },
-    "tasks.detail.activity_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Execution Activity" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "真实执行活动" } }
-      }
-    },
-    "tasks.detail.activity_empty" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "No persisted execution events yet." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无服务端持久执行记录。" } }
-      }
-    },
-    "tasks.detail.activity_unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Execution activity timeline is not yet available from this server." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "服务端暂未提供执行活动时间线。" } }
-      }
-    },
-    "tasks.detail.result_section_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Result" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务结果" } }
-      }
-    },
-    "conversation.composer.attach_file" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Add photo or file" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "添加照片或文件" } }
-      }
-    },
-    "conversation.composer.remove_attachment" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Remove attachment" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "移除附件" } }
-      }
-    },
-    "conversation.composer.uploading_attachment" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Uploading file…" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "正在上传文件…" } }
-      }
-    },
-    "conversation.composer.attachment_limit" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "You can attach up to 5 files per message." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每条消息最多只能附加 5 个文件。" } }
-      }
-    },
-    "conversation.composer.attachment_unsupported" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "This file type cannot be uploaded." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂不支持上传此文件类型。" } }
-      }
-    },
-    "conversation.composer.attachment_too_large" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "File exceeds the 15 MB upload limit." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件超过 15 MB 上传大小限制。" } }
-      }
-    },
-    "conversation.composer.camera_unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Camera is not available on this device." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前设备不支持拍照。" } }
-      }
-    },
-    "conversation.composer.attachment_upload_failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not upload the file to Ember Cloud." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件上传至 Ember 云端失败。" } }
-      }
-    },
-    "conversation.composer.attachment_read_failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not open the selected file." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法读取所选文件。" } }
-      }
-    },
-    "conversation.composer.attachment_menu.open_hint" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Opens attachment and prompt options." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "打开文件上传与快捷提示选项。" } }
-      }
-    },
-    "conversation.composer.attachment_menu.close" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close options" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭选项" } }
-      }
-    },
-    "conversation.composer.attachment_menu.camera_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Take Photo" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "拍照" } }
-      }
-    },
-    "conversation.composer.attachment_menu.photo_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Photo Library" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "照片图库" } }
-      }
-    },
-    "conversation.composer.attachment_menu.file_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Choose File" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "选择文件" } }
-      }
-    },
-    "conversation.composer.attachment_menu.file_subtitle" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "PDF, images, docs, data · 15 MB max" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "支持 PDF、图片、表格与文档（上限 15 MB）" } }
-      }
-    },
-    "conversation.composer.attachment_menu.file_badge" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "PDF · Docs" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "PDF · 文档" } }
-      }
-    },
-    "conversation.composer.attachment_menu.file_limit_reached" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "5-file limit reached for this message" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前消息已达到 5 个文件上限" } }
-      }
-    },
-    "conversation.composer.attachment_menu.notes_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Organize Notes" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "整理笔记为清单" } }
-      }
-    },
-    "conversation.composer.attachment_menu.notes_subtitle" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Insert an action-items prompt" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入提取行动项的提示词" } }
-      }
-    },
-    "conversation.composer.attachment_menu.notes_prompt" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Turn these notes into clear, prioritized action items." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请把这些笔记整理成清晰、按优先级排列的行动清单。" } }
-      }
-    },
-    "conversation.composer.attachment_menu.data_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Analyze Spreadsheet" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "分析表格数据" } }
-      }
-    },
-    "conversation.composer.attachment_menu.data_subtitle" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Insert a Python & CSV summary prompt" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "填入表格分析与汇总提示词" } }
-      }
-    },
-    "conversation.composer.attachment_menu.data_prompt" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Analyze the attached dataset, check for issues, and summarize key metrics." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请分析这份数据文件，检查异常并汇总关键指标。" } }
-      }
-    },
-    "tasks.artifacts.section_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Files & Artifacts" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "文件与产物" } }
-      }
-    },
-    "tasks.artifacts.source_user" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Uploaded input" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "用户上传输入" } }
-      }
-    },
-    "tasks.artifacts.source_run" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Generated output" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "任务生成输出" } }
-      }
-    },
-    "tasks.artifacts.download" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Download File" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下载文件" } }
-      }
-    },
-    "tasks.artifacts.preview" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Preview" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "预览" } }
-      }
-    },
-    "tasks.artifacts.export" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Share / Save" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "导出 / 分享" } }
-      }
-    },
-    "tasks.artifacts.not_found" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "This file is no longer available on the server." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "该文件在服务端已不可用。" } }
-      }
-    },
-    "tasks.artifacts.download_failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not download this file. Try again." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下载文件失败，请重试。" } }
-      }
-    },
-    "tasks.artifacts.list_failed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not load task files." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "无法加载任务文件列表。" } }
-      }
-    },
-    "tasks.artifacts.open_files_count %lld" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "View Generated Files (%lld)" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "查看生成文件 (%lld)" } }
-      }
-    },
-    "tasks.detail.close" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Close" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
-      }
-    },
-    "conversation.live.refresh_unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unable to reach Ember Cloud. Showing last synced messages." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时无法连接 Ember 云端，正在显示最近同步的消息。" } }
-      }
-    },
-    "conversation.live.refresh_retry" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
-      }
-    },
-    "schedules.nav_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "定时任务" } }
-      }
-    },
-    "schedules.subtitle" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Set up recurring morning briefs or one-time follow-ups. Ember runs them in the cloud even when the app is closed." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "设置每日晨间简报或一次性跟进提醒。即使关闭应用，Ember 也会按时在云端执行并发送结果。" } }
-      }
-    },
-    "schedules.kind.label" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Type" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "类型" } }
-      }
-    },
-    "schedules.kind.brief" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Morning Brief" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每日简报" } }
-      }
-    },
-    "schedules.kind.follow_up" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Follow-up" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "跟进" } }
-      }
-    },
-    "schedules.kind.reminder" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Reminder" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "提醒" } }
-      }
-    },
-    "schedules.status.active" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Active" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "运行中" } }
-      }
-    },
-    "schedules.status.paused" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Paused" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已暂停" } }
-      }
-    },
-    "schedules.status.completed" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Completed" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已完成" } }
-      }
-    },
-    "schedules.status.cancelled" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancelled" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已取消" } }
-      }
-    },
-    "schedules.composer.title_placeholder" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Title (e.g. Morning Brief)" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "标题（例如：晨间简报）" } }
-      }
-    },
-    "schedules.composer.prompt_placeholder" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "What should Ember prepare or follow up on?" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "希望 Ember 准备什么内容或跟进什么事项？" } }
-      }
-    },
-    "schedules.composer.daily_time" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Daily time" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "每日时间" } }
-      }
-    },
-    "schedules.composer.fire_at" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Run at" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "执行时间" } }
-      }
-    },
-    "schedules.composer.create" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Create" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "创建" } }
-      }
-    },
-    "schedules.list.section_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Your Schedules" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "我的定时任务" } }
-      }
-    },
-    "schedules.next_run" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Next:" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "下次：" } }
-      }
-    },
-    "schedules.action.pause" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Pause" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂停" } }
-      }
-    },
-    "schedules.action.resume" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Resume" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "恢复" } }
-      }
-    },
-    "schedules.action.cancel" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消" } }
-      }
-    },
-    "schedules.cancel.confirm_title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Cancel this schedule?" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "要取消这个定时任务吗？" } }
-      }
-    },
-    "schedules.cancel.confirm_message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Ember will stop future runs and cancel any pending occurrence." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "取消后，Ember 将停止后续执行并取消待处理的触发。" } }
-      }
-    },
-    "schedules.empty.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "No schedules yet" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂无定时任务" } }
-      }
-    },
-    "schedules.empty.message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Create a daily morning brief or follow-up reminder above." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "在上方创建每日晨间简报或跟进提醒。" } }
-      }
-    },
-    "schedules.endpoint_unavailable.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules are not enabled on this server" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "当前服务端尚未开启定时任务" } }
-      }
-    },
-    "schedules.endpoint_unavailable.message" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Connect to a V2 Ember Cloud environment to create and manage proactive schedules." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "连接到 V2 Ember 云端环境后即可创建和管理定时任务。" } }
-      }
-    },
-    "schedules.error.title" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedules unavailable" } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "定时任务操作失败" } }
-      }
-    },
-    "schedules.error.invalid_input" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Enter a valid title, prompt, and schedule time." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请输入有效的标题、内容和执行时间。" } }
-      }
-    },
-    "schedules.error.limit_reached" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Schedule limit reached. Cancel an existing schedule before creating a new one." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "已达到定时任务数量上限，请先取消旧任务后再创建。" } }
-      }
-    },
-    "schedules.error.unauthenticated" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Sign in again to manage your schedules." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "请重新登录后管理定时任务。" } }
-      }
-    },
-    "schedules.error.unavailable" : {
-      "localizations" : {
-        "en" : { "stringUnit" : { "state" : "translated", "value" : "Could not sync schedules right now. Try again." } },
-        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时无法同步定时任务，请稍后重试。" } }
+  "sourceLanguage": "en",
+  "strings": {
+    "conversation.composer.accessibility": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message Ember"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送消息给 Ember"
+          }
+        }
+      }
+    },
+    "conversation.composer.local_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your message stays in this local demo."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息仅保留在本地演示中。"
+          }
+        }
+      }
+    },
+    "conversation.composer.cloud_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sent messages are saved in your Ember Cloud conversation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已发送的消息会保存在 Ember 云端对话中。"
+          }
+        }
+      }
+    },
+    "conversation.composer.placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message Ember…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "给 Ember 发消息…"
+          }
+        }
+      }
+    },
+    "conversation.composer.send": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送"
+          }
+        }
+      }
+    },
+    "conversation.composer.send_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Send this message to Ember."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "将这条消息发送给 Ember。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign out"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "退出登录"
+          }
+        }
+      }
+    },
+    "conversation.live.cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_out_confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign out of Ember Cloud?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要退出 Ember 云端登录吗？"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_out_confirm_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your conversation will stay in Ember Cloud. This device's session will be cleared."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话会保留在 Ember 云端，此设备上的登录会话将被清除。"
+          }
+        }
+      }
+    },
+    "conversation.live.signed_out": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signed out. Sign in again with Apple to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已退出登录。请重新使用 Apple 登录。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_out_unconfirmed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This device is signed out, but Cloud revocation could not be confirmed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "此设备已退出登录，但无法确认云端会话是否撤销。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_out_local_error": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not clear this device's session. Try again before continuing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法清除此设备的登录会话，请重试后再继续。"
+          }
+        }
+      }
+    },
+    "conversation.activity.commitment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · Commitment update"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · 承诺动态"
+          }
+        }
+      }
+    },
+    "conversation.activity.system": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · Conversation update"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · 对话动态"
+          }
+        }
+      }
+    },
+    "conversation.activity.task": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · Task update"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · 任务动态"
+          }
+        }
+      }
+    },
+    "conversation.commitment.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked Commitment unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联承诺暂不可用"
+          }
+        }
+      }
+    },
+    "conversation.empty.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Bring a question, a thought, or something you want to work through. You can keep the conversation going here."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "带来一个问题、一点想法，或正在思考的事情。你可以在这里继续聊下去。"
+          }
+        }
+      }
+    },
+    "conversation.empty.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "I’m here with you."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我在这里陪你聊。"
+          }
+        }
+      }
+    },
+    "conversation.error.recoverable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The MOCK reply could not be prepared. Your message is still here; you can try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这条模拟回复暂时无法准备。你的消息仍在，可以重试。"
+          }
+        }
+      }
+    },
+    "conversation.error.load": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · The local conversation could not be loaded. Retry to try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · 本地对话暂时无法加载，请重试。"
+          }
+        }
+      }
+    },
+    "conversation.header.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your personal AI partner"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的个人 AI 伙伴"
+          }
+        }
+      }
+    },
+    "conversation.message.ember_mock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember · MOCK"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember · 模拟回复"
+          }
+        }
+      }
+    },
+    "conversation.message.ember_cloud": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember"
+          }
+        }
+      }
+    },
+    "conversation.message.you": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你"
+          }
+        }
+      }
+    },
+    "conversation.mock_reply.default": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK reply: We can take this one step at a time. What feels most useful to start with?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟回复：我们可以一步一步来。你觉得从哪里开始最有帮助？"
+          }
+        }
+      }
+    },
+    "conversation.mock_reply.notes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK reply: I can help shape those notes into a clear next step, then we can refine it together."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟回复：我可以帮你把这些笔记整理成清晰的下一步，然后我们再一起完善。"
+          }
+        }
+      }
+    },
+    "conversation.mock_reply.plan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK reply: Let’s make the plan manageable: choose one outcome, one small next step, and when you want to revisit it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟回复：让计划轻一些：先选定一个结果、一个小步骤，以及你想回头检查的时间。"
+          }
+        }
+      }
+    },
+    "conversation.prompt.hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fills the message box. It will not send until you choose Send."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "填入输入框；只有你点击发送后才会发出。"
+          }
+        }
+      }
+    },
+    "conversation.prompt.notes": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help me turn a note into a clear next step."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮我把一段笔记整理成清晰的下一步。"
+          }
+        }
+      }
+    },
+    "conversation.prompt.plan": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help me make a simple plan for my day."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮我为今天安排一个简单的计划。"
+          }
+        }
+      }
+    },
+    "conversation.prompt.reflect": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help me think something through."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "陪我把一件事想清楚。"
+          }
+        }
+      }
+    },
+    "conversation.reply.preparing": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preparing a MOCK reply"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在准备模拟回复"
+          }
+        }
+      }
+    },
+    "conversation.reply.waiting_for_cloud": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for Ember Cloud to process this turn"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待 Ember Cloud 处理此轮消息"
+          }
+        }
+      }
+    },
+    "conversation.reply.retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Try again"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试"
+          }
+        }
+      }
+    },
+    "conversation.reply.stop": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop reply"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止回复"
+          }
+        }
+      }
+    },
+    "conversation.reply.cancel_cloud_turn": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel turn"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消此轮"
+          }
+        }
+      }
+    },
+    "conversation.reply.stop_detail": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Only this local MOCK reply stopped. No Ember task was cancelled."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅停止了这条本地模拟回复，没有取消任何 Ember 任务。"
+          }
+        }
+      }
+    },
+    "conversation.reply.stopped": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK reply stopped"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟回复已停止"
+          }
+        }
+      }
+    },
+    "conversation.submission.acknowledged": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ACK · Message accepted"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ACK · 消息已确认"
+          }
+        }
+      }
+    },
+    "conversation.submission.failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · The message could not be accepted."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "MOCK ONLY · 消息未能确认。"
+          }
+        }
+      }
+    },
+    "conversation.suggestions.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Start anywhere"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "可以从这里开始"
+          }
+        }
+      }
+    },
+    "conversation.task.loading": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Loading linked task…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在加载关联任务…"
+          }
+        }
+      }
+    },
+    "conversation.task.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Linked Task unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关联任务暂不可用"
+          }
+        }
+      }
+    },
+    "conversation.live.check_again": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check again"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重新检查"
+          }
+        }
+      }
+    },
+    "conversation.live.checking_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking Ember Cloud…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在检查 Ember Cloud…"
+          }
+        }
+      }
+    },
+    "conversation.live.waiting_for_cloud": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Still waiting for Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍在等待 Ember Cloud…"
+          }
+        }
+      }
+    },
+    "tab.chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话"
+          }
+        }
+      }
+    },
+    "tab.tasks": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务"
+          }
+        }
+      }
+    },
+    "tasks.kind.notes_action_items": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Notes · Action Items"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "笔记 · 待办整理"
+          }
+        }
+      }
+    },
+    "tasks.kind.python_sandbox": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sandbox · Python"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "沙盒 · Python"
+          }
+        }
+      }
+    },
+    "tasks.kind.mock_chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock · Chat"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟 · 对话"
+          }
+        }
+      }
+    },
+    "tasks.kind.mock_compute": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock · Compute"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟 · 计算"
+          }
+        }
+      }
+    },
+    "tasks.kind.mock_file": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock · File"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟 · 文件"
+          }
+        }
+      }
+    },
+    "tasks.kind.mock_approval": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock · Approval"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟 · 审批"
+          }
+        }
+      }
+    },
+    "tasks.group.needs_intervention": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Needs Attention"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "需要介入"
+          }
+        }
+      }
+    },
+    "tasks.group.in_progress": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In Progress"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "进行中"
+          }
+        }
+      }
+    },
+    "tasks.group.completed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Completed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已完成"
+          }
+        }
+      }
+    },
+    "tasks.error.list_load": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load tasks from Ember Cloud. Pull to try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法从 Ember Cloud 加载任务列表，请下拉重试。"
+          }
+        }
+      }
+    },
+    "tasks.error.detail_load": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load task details from Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法从 Ember Cloud 加载任务详情。"
+          }
+        }
+      }
+    },
+    "tasks.error.result_load": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load task result from Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法从 Ember Cloud 加载任务结果。"
+          }
+        }
+      }
+    },
+    "tasks.error.cancel_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not request task cancellation. Check task status before retrying."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法发送取消请求，请检查任务状态后重试。"
+          }
+        }
+      }
+    },
+    "tasks.error.cancel_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task cancellation is not yet enabled on Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember Cloud 暂未开放任务取消接口。"
+          }
+        }
+      }
+    },
+    "tasks.action.refresh": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Refresh tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "刷新任务"
+          }
+        }
+      }
+    },
+    "tasks.action.load_more": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Load more tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "加载更多任务"
+          }
+        }
+      }
+    },
+    "tasks.pagination.more_available": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More earlier tasks are stored in Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "云端还有更早的任务记录，点击可继续加载。"
+          }
+        }
+      }
+    },
+    "tasks.pagination.partial_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Showing recent tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前仅显示最近任务"
+          }
+        }
+      }
+    },
+    "tasks.pagination.partial_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Additional earlier tasks exist on the server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务端存在更早的任务，当前列表仅展示了最新一页。"
+          }
+        }
+      }
+    },
+    "tasks.row.result_ready": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Result ready"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "结果已就绪"
+          }
+        }
+      }
+    },
+    "tasks.detail.nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task Detail"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务详情"
+          }
+        }
+      }
+    },
+    "tasks.detail.copied_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Result copied"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "结果已复制"
+          }
+        }
+      }
+    },
+    "tasks.detail.ok": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "OK"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "好"
+          }
+        }
+      }
+    },
+    "tasks.detail.server_truth_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Progress and lifecycle reflect persisted server state only."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "进度与状态仅来自服务端持久记录，不做客户端估算。"
+          }
+        }
+      }
+    },
+    "tasks.detail.updated_at": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Updated"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更新于"
+          }
+        }
+      }
+    },
+    "tasks.detail.created_at": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Created"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建于"
+          }
+        }
+      }
+    },
+    "tasks.detail.attempts": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attempts"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行次数"
+          }
+        }
+      }
+    },
+    "tasks.detail.task_id": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务编号"
+          }
+        }
+      }
+    },
+    "tasks.detail.cancel_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task Actions"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务控制"
+          }
+        }
+      }
+    },
+    "tasks.detail.cancel_honest_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Requesting cancellation notifies the server; status updates only after persisted confirmation."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求取消后会等待服务端持久确认，确认前会继续显示当前状态。"
+          }
+        }
+      }
+    },
+    "tasks.detail.cancel_button": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel Task"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消任务"
+          }
+        }
+      }
+    },
+    "tasks.detail.activity_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution Activity"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "真实执行活动"
+          }
+        }
+      }
+    },
+    "tasks.detail.activity_empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No persisted execution events yet."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无服务端持久执行记录。"
+          }
+        }
+      }
+    },
+    "tasks.detail.activity_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution activity timeline is not yet available from this server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务端暂未提供执行活动时间线。"
+          }
+        }
+      }
+    },
+    "tasks.detail.result_section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Result"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务结果"
+          }
+        }
+      }
+    },
+    "conversation.composer.attach_file": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add photo or file"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加照片或文件"
+          }
+        }
+      }
+    },
+    "conversation.composer.remove_attachment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove attachment"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除附件"
+          }
+        }
+      }
+    },
+    "conversation.composer.uploading_attachment": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uploading file…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在上传文件…"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_limit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can attach up to 5 files per message."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每条消息最多只能附加 5 个文件。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_unsupported": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file type cannot be uploaded."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不支持上传此文件类型。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File exceeds the 15 MB upload limit."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件超过 15 MB 上传大小限制。"
+          }
+        }
+      }
+    },
+    "conversation.composer.camera_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Camera is not available on this device."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前设备不支持拍照。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_upload_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not upload the file to Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件上传至 Ember 云端失败。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_read_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not open the selected file."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法读取所选文件。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.open_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Opens attachment and prompt options."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "打开文件上传与快捷提示选项。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.close": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close options"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭选项"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.camera_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Take Photo"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "拍照"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.photo_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Photo Library"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "照片图库"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.file_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose File"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "选择文件"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.file_subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF, images, docs, data · 15 MB max"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "支持 PDF、图片、表格与文档（上限 15 MB）"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.file_badge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF · Docs"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "PDF · 文档"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.file_limit_reached": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "5-file limit reached for this message"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前消息已达到 5 个文件上限"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Organize Notes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "整理笔记为清单"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Insert an action-items prompt"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "填入提取行动项的提示词"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.notes_prompt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn these notes into clear, prioritized action items."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请把这些笔记整理成清晰、按优先级排列的行动清单。"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.data_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Analyze Spreadsheet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分析表格数据"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.data_subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Insert a Python & CSV summary prompt"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "填入表格分析与汇总提示词"
+          }
+        }
+      }
+    },
+    "conversation.composer.attachment_menu.data_prompt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Analyze the attached dataset, check for issues, and summarize key metrics."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请分析这份数据文件，检查异常并汇总关键指标。"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Files & Artifacts"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件与产物"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.source_user": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Uploaded input"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "用户上传输入"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.source_run": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generated output"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务生成输出"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.download": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Download File"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载文件"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.preview": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preview"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "预览"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.export": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Share / Save"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "导出 / 分享"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This file is no longer available on the server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该文件在服务端已不可用。"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.download_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not download this file. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载文件失败，请重试。"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.list_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not load task files."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法加载任务文件列表。"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.open_files_count %lld": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View Generated Files (%lld)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "查看生成文件 (%lld)"
+          }
+        }
+      }
+    },
+    "tasks.detail.close": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Close"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "关闭"
+          }
+        }
+      }
+    },
+    "conversation.live.refresh_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Unable to reach Ember Cloud. Showing last synced messages."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法连接 Ember 云端，正在显示最近同步的消息。"
+          }
+        }
+      }
+    },
+    "conversation.live.refresh_retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "重试"
+          }
+        }
+      }
+    },
+    "schedules.nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedules"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务"
+          }
+        }
+      }
+    },
+    "schedules.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set up recurring morning briefs or one-time follow-ups. Ember runs them in the cloud even when the app is closed."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置每日晨间简报或一次性跟进提醒。即使关闭应用，Ember 也会按时在云端执行并发送结果。"
+          }
+        }
+      }
+    },
+    "schedules.kind.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "类型"
+          }
+        }
+      }
+    },
+    "schedules.kind.brief": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Morning Brief"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每日简报"
+          }
+        }
+      }
+    },
+    "schedules.kind.follow_up": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Follow-up"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跟进"
+          }
+        }
+      }
+    },
+    "schedules.kind.reminder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reminder"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提醒"
+          }
+        }
+      }
+    },
+    "schedules.status.active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "运行中"
+          }
+        }
+      }
+    },
+    "schedules.status.paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
+    },
+    "schedules.status.completed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Completed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已完成"
+          }
+        }
+      }
+    },
+    "schedules.status.cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancelled"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消"
+          }
+        }
+      }
+    },
+    "schedules.composer.title_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Title (e.g. Morning Brief)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "标题（例如：晨间简报）"
+          }
+        }
+      }
+    },
+    "schedules.composer.prompt_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "What should Ember prepare or follow up on?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "希望 Ember 准备什么内容或跟进什么事项？"
+          }
+        }
+      }
+    },
+    "schedules.composer.daily_time": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Daily time"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "每日时间"
+          }
+        }
+      }
+    },
+    "schedules.composer.fire_at": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run at"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "执行时间"
+          }
+        }
+      }
+    },
+    "schedules.composer.create": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "创建"
+          }
+        }
+      }
+    },
+    "schedules.list.section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your Schedules"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "我的定时任务"
+          }
+        }
+      }
+    },
+    "schedules.next_run": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Next:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下次："
+          }
+        }
+      }
+    },
+    "schedules.action.pause": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Pause"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂停"
+          }
+        }
+      }
+    },
+    "schedules.action.resume": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Resume"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "恢复"
+          }
+        }
+      }
+    },
+    "schedules.action.cancel": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消"
+          }
+        }
+      }
+    },
+    "schedules.cancel.confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel this schedule?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要取消这个定时任务吗？"
+          }
+        }
+      }
+    },
+    "schedules.cancel.confirm_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember will stop future runs and cancel any pending occurrence."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消后，Ember 将停止后续执行并取消待处理的触发。"
+          }
+        }
+      }
+    },
+    "schedules.empty.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No schedules yet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无定时任务"
+          }
+        }
+      }
+    },
+    "schedules.empty.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Create a daily morning brief or follow-up reminder above."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在上方创建每日晨间简报或跟进提醒。"
+          }
+        }
+      }
+    },
+    "schedules.endpoint_unavailable.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedules are not enabled on this server"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前服务端尚未开启定时任务"
+          }
+        }
+      }
+    },
+    "schedules.endpoint_unavailable.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect to a V2 Ember Cloud environment to create and manage proactive schedules."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接到 V2 Ember 云端环境后即可创建和管理定时任务。"
+          }
+        }
+      }
+    },
+    "schedules.error.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedules unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务操作失败"
+          }
+        }
+      }
+    },
+    "schedules.error.invalid_input": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a valid title, prompt, and schedule time."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入有效的标题、内容和执行时间。"
+          }
+        }
+      }
+    },
+    "schedules.error.limit_reached": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Schedule limit reached. Cancel an existing schedule before creating a new one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已达到定时任务数量上限，请先取消旧任务后再创建。"
+          }
+        }
+      }
+    },
+    "schedules.error.unauthenticated": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again to manage your schedules."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请重新登录后管理定时任务。"
+          }
+        }
+      }
+    },
+    "schedules.error.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not sync schedules right now. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法同步定时任务，请稍后重试。"
+          }
+        }
+      }
+    },
+    "memory.nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Memory"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "记忆"
+          }
+        }
+      }
+    },
+    "memory.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Explicit preferences and facts Ember remembers across new conversations. You can inspect or delete any item at any time."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你明确告知 Ember 记住的偏好和事实，会在新对话中继续生效。你可以随时查看或删除。"
+          }
+        }
+      }
+    },
+    "memory.kind.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Type"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "类型"
+          }
+        }
+      }
+    },
+    "memory.kind.preference": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preference"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "偏好"
+          }
+        }
+      }
+    },
+    "memory.kind.fact": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Fact"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "事实"
+          }
+        }
+      }
+    },
+    "memory.composer.placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "e.g. Keep morning briefs concise with bullet points"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "例如：晨间简报请用简洁要点呈现"
+          }
+        }
+      }
+    },
+    "memory.composer.save": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Save"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保存"
+          }
+        }
+      }
+    },
+    "memory.saved.section_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved Memory"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已保存的记忆"
+          }
+        }
+      }
+    },
+    "memory.empty.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "No saved memories yet"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂无已保存的记忆"
+          }
+        }
+      }
+    },
+    "memory.empty.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add a preference or fact above so Ember can carry it across future conversations."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在上方添加一条偏好或事实，Ember 会在后续对话中参考它。"
+          }
+        }
+      }
+    },
+    "memory.endpoint_unavailable.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Memory is not enabled on this server"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前服务端尚未开启记忆功能"
+          }
+        }
+      }
+    },
+    "memory.endpoint_unavailable.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect to a V2 Ember Cloud environment to inspect and manage personal memory."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接到 V2 Ember 云端环境后即可查看和管理个人记忆。"
+          }
+        }
+      }
+    },
+    "memory.source.chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved from chat"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来自对话"
+          }
+        }
+      }
+    },
+    "memory.source.settings": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Saved in Memory"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在记忆页添加"
+          }
+        }
+      }
+    },
+    "memory.delete.action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除"
+          }
+        }
+      }
+    },
+    "memory.delete.confirm_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delete this memory?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "要删除这条记忆吗？"
+          }
+        }
+      }
+    },
+    "memory.delete.confirm_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember will no longer use this item in future conversations."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "删除后，Ember 将不再在后续对话中使用这条内容。"
+          }
+        }
+      }
+    },
+    "memory.error.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Memory unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "记忆操作失败"
+          }
+        }
+      }
+    },
+    "memory.error.invalid_input": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Enter a non-empty memory within the character limit."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请输入非空且不超过字数限制的内容。"
+          }
+        }
+      }
+    },
+    "memory.error.limit_reached": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Memory limit reached. Delete an existing item before saving a new one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已达到记忆数量上限，请先删除旧条目后再保存。"
+          }
+        }
+      }
+    },
+    "memory.error.unauthenticated": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again to manage your personal memory."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请重新登录后管理你的个人记忆。"
+          }
+        }
+      }
+    },
+    "memory.error.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not sync personal memory right now. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法同步个人记忆，请稍后重试。"
+          }
+        }
       }
     }
   },
-  "version" : "1.0"
+  "version": "1.0"
 }

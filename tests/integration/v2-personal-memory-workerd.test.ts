@@ -13,7 +13,12 @@ import type {
 } from '@ember/runtime-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
-import { PERSONAL_MEMORY_SAVED_REPLY } from '../../packages/runtime-v2/src/agent-head/memory-service.js';
+import {
+  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
+  PERSONAL_MEMORY_SAVED_REPLY,
+  PERSONAL_MEMORY_UPDATED_REPLY,
+} from '../../packages/runtime-v2/src/agent-head/memory-service.js';
+import { PERSONAL_MEMORY_MAX_ITEMS } from '../../packages/runtime-v2/src/contracts/personal-memory.js';
 
 const configPath = fileURLToPath(
   new URL('../../apps/api/wrangler.local-v2.jsonc', import.meta.url),
@@ -316,6 +321,33 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(patchedUnkeyed.item.key).toBe('home_city');
     expect(patchedUnkeyed.item.created_at).toBe(firstUnkeyed.item.created_at);
 
+    // Subsequent turn sees the edited content immediately
+    const postPatchStream = await harness.fetchOverHttp(
+      `/v2/conversations/${userA.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Where do I live?',
+          transcript_epoch: cleared.transcript_epoch,
+        }),
+      },
+    );
+    expect(postPatchStream.status).toBe(201);
+    await postPatchStream.text();
+    const callsAfterPatch = harness.fakeGateway.getAuditSnapshot().calls;
+    expect(callsAfterPatch.at(-1)?.personalMemories).toEqual([
+      {
+        kind: 'fact',
+        key: 'home_city',
+        content: 'Based in Kyoto.',
+      },
+    ]);
+
     const crossPatch = await harness.fetchOverHttp(`/v2/memories/${firstUnkeyed.item.memory_id}`, {
       method: 'PATCH',
       headers: {
@@ -581,5 +613,163 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
       200,
     );
     expect(afterBrief.items).toHaveLength(2);
+
+    // 5. Repeated unkeyed save + key-based update in chat deduplicate and reply truthfully
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Noted again.',
+      savePersonalMemory: {
+        kind: 'fact',
+        content: '  Lives in Kyoto.  ',
+      },
+    });
+    const repeatUnkeyedRes = await harness.fetchOverHttp(
+      `/v2/conversations/${userA.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Remember again that I live in Kyoto.',
+          transcript_epoch: userA.transcriptEpoch,
+        }),
+      },
+    );
+    expect(repeatUnkeyedRes.status).toBe(201);
+    await repeatUnkeyedRes.text();
+
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Updated currency.',
+      savePersonalMemory: {
+        kind: 'preference',
+        key: 'currency',
+        content: 'Prefer US dollars (USD) for travel quotes.',
+      },
+    });
+    const keyUpdateRes = await harness.fetchOverHttp(
+      `/v2/conversations/${userA.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Actually remember I prefer US dollars for travel quotes.',
+          transcript_epoch: userA.transcriptEpoch,
+        }),
+      },
+    );
+    expect(keyUpdateRes.status).toBe(201);
+    await keyUpdateRes.text();
+
+    const afterDedup = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    expect(afterDedup.items).toHaveLength(2);
+    expect(afterDedup.items.find((item) => item.key === 'currency')?.content).toBe(
+      'Prefer US dollars (USD) for travel quotes.',
+    );
+
+    const updatedMsgs = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${userA.conversationId}/messages?after=0&limit=20`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${userA.token}` },
+        },
+      ),
+      200,
+    );
+    expect(updatedMsgs.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: PERSONAL_MEMORY_UPDATED_REPLY,
+    });
+
+    // 6. Chat-saved memories survive a new conversation (clearTranscript) and respect the 50-item cap
+    const clearedAfterSave = await json<{ transcript_epoch: number }>(
+      await harness.fetchOverHttp('/v1/me/conversation/messages', {
+        method: 'DELETE',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    for (let i = afterDedup.items.length; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      const fill = await harness.fetchOverHttp('/v2/memories', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          kind: 'fact',
+          content: `Cap filler fact #${i}`,
+          provenance: { source: 'user_settings' },
+        }),
+      });
+      expect(fill.status).toBe(201);
+    }
+
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'This should be overridden by cap reply.',
+      savePersonalMemory: {
+        kind: 'fact',
+        content: 'Memory #51 over the cap',
+      },
+    });
+    const overCapStream = await harness.fetchOverHttp(
+      `/v2/conversations/${userA.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Remember one more thing over the limit.',
+          transcript_epoch: clearedAfterSave.transcript_epoch,
+        }),
+      },
+    );
+    expect(overCapStream.status).toBe(201);
+    await overCapStream.text();
+
+    const afterCapList = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    expect(afterCapList.items).toHaveLength(PERSONAL_MEMORY_MAX_ITEMS);
+    expect(afterCapList.items.some((item) => item.content === 'Memory #51 over the cap')).toBe(
+      false,
+    );
+
+    const newConvMsgs = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${userA.conversationId}/messages?after=0&limit=10`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${userA.token}` },
+        },
+      ),
+      200,
+    );
+    expect(newConvMsgs.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
+    });
   });
 });

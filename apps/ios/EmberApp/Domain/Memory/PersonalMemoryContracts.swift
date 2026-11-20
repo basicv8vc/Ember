@@ -107,17 +107,20 @@ public struct SavePersonalMemoryRequestDTO: Equatable, Encodable, Sendable {
     public let kind: PersonalMemoryKind
     public let content: String
     public let key: String?
+    public let clientRequestID: UUID?
     public let provenance: PersonalMemoryProvenanceDTO
 
     public init(
         kind: PersonalMemoryKind,
         content: String,
         key: String? = nil,
+        clientRequestID: UUID? = nil,
         provenance: PersonalMemoryProvenanceDTO
     ) {
         self.kind = kind
         self.content = content
         self.key = key
+        self.clientRequestID = clientRequestID
         self.provenance = provenance
     }
 
@@ -125,6 +128,7 @@ public struct SavePersonalMemoryRequestDTO: Equatable, Encodable, Sendable {
         case kind
         case content
         case key
+        case clientRequestID = "client_request_id"
         case provenance
     }
 
@@ -134,6 +138,9 @@ public struct SavePersonalMemoryRequestDTO: Equatable, Encodable, Sendable {
         try container.encode(content, forKey: .content)
         if let key {
             try container.encode(key, forKey: .key)
+        }
+        if let clientRequestID {
+            try container.encode(clientRequestID.uuidString.lowercased(), forKey: .clientRequestID)
         }
         try container.encode(provenance, forKey: .provenance)
     }

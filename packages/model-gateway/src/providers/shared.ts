@@ -31,6 +31,8 @@ export const DEFAULT_DELEGATION_ACK_TEXT =
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
 export const DEFAULT_MEMORY_SAVE_ACK_TEXT = "Got it — I'll remember that.";
+export const COMMITTED_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
+export const COMMITTED_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
 export const DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT = 'I have created your proactive schedule.';
 
 const HISTORICAL_NOTES_DELEGATION_MARKER = '[Prior turn called delegate_notes_action_items.]';
@@ -41,6 +43,8 @@ const FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES = new Set([
   DEFAULT_DELEGATION_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
+  COMMITTED_MEMORY_SAVED_REPLY,
+  COMMITTED_MEMORY_UPDATED_REPLY,
   DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT,
   HISTORICAL_NOTES_DELEGATION_MARKER,
   HISTORICAL_PYTHON_DELEGATION_MARKER,
@@ -528,7 +532,11 @@ function formatContextTurnMessage(
     if (trimmed === DEFAULT_PYTHON_DELEGATION_ACK_TEXT) {
       return { role: 'assistant', content: HISTORICAL_PYTHON_DELEGATION_MARKER };
     }
-    if (trimmed === DEFAULT_MEMORY_SAVE_ACK_TEXT) {
+    if (
+      trimmed === DEFAULT_MEMORY_SAVE_ACK_TEXT ||
+      trimmed === COMMITTED_MEMORY_SAVED_REPLY ||
+      trimmed === COMMITTED_MEMORY_UPDATED_REPLY
+    ) {
       return { role: 'assistant', content: HISTORICAL_MEMORY_SAVE_MARKER };
     }
     if (trimmed === DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT) {

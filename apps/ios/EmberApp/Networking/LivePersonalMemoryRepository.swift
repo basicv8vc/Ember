@@ -33,7 +33,7 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
         let response = try await sendRequest(
             method: "POST",
             pathComponents: ["v2", "memories"],
-            idempotency: .nonIdempotent(clientSubmissionID: nil),
+            idempotency: .nonIdempotent(clientSubmissionID: request.clientRequestID?.uuidString.lowercased()),
             body: bodyData
         )
         if response.statusCode == 404 || response.statusCode == 405 || response.statusCode == 501 {
@@ -159,6 +159,7 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
     nonisolated let isMockOnly: Bool = true
     private let limits: PersonalMemoryLimitsDTO
     private var items: [PersonalMemoryItemDTO]
+    private var savedByClientRequestID: [UUID: (request: SavePersonalMemoryRequestDTO, memoryID: UUID)] = [:]
 
     init(
         items: [PersonalMemoryItemDTO] = InMemoryPersonalMemoryRepository.defaultSamples,
@@ -186,6 +187,20 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
         let now = Date().ISO8601Format()
         let normalizedKey = request.key?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
 
+        if let clientRequestID = request.clientRequestID,
+           let prior = savedByClientRequestID[clientRequestID] {
+            let priorKey = prior.request.key?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            let priorContent = prior.request.content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard prior.request.kind == request.kind,
+                  priorKey == normalizedKey,
+                  priorContent == trimmed,
+                  prior.request.provenance == request.provenance,
+                  let existing = items.first(where: { $0.memoryID == prior.memoryID }) else {
+                throw PersonalMemoryRepositoryError.invalidInput
+            }
+            return PersonalMemorySaveResultDTO(item: existing, created: false)
+        }
+
         if let normalizedKey, !normalizedKey.isEmpty,
            let index = items.firstIndex(where: { $0.key == normalizedKey }) {
             let existing = items[index]
@@ -199,6 +214,9 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
                 updatedAt: now
             )
             items[index] = updated
+            if let clientRequestID = request.clientRequestID {
+                savedByClientRequestID[clientRequestID] = (request, updated.memoryID)
+            }
             return PersonalMemorySaveResultDTO(item: updated, created: false)
         }
 
@@ -216,6 +234,9 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             updatedAt: now
         )
         items.insert(created, at: 0)
+        if let clientRequestID = request.clientRequestID {
+            savedByClientRequestID[clientRequestID] = (request, created.memoryID)
+        }
         return PersonalMemorySaveResultDTO(item: created, created: true)
     }
 

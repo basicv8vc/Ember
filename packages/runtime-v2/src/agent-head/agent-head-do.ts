@@ -20,6 +20,7 @@ import type {
   RenewTurnLeaseRequest,
   RenewTurnLeaseResult,
 } from '../contracts/agent-head-rpc.js';
+import type { DeviceExecutionCommand, DeviceExecutionRpc } from '../contracts/device-execution.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
 import { applyAgentHeadMigrations, type AgentHeadMigrationStep } from '../migrations.js';
 import type {
@@ -46,6 +47,7 @@ import {
   type LocalBudgetCeilings,
   type LocalSettlementResult,
 } from './budget.js';
+import { AgentHeadDeviceService } from './device-service.js';
 import { getHeadMetaSync, getTaskRowSync, sqlExecMaybe } from './queries.js';
 import { AgentHeadRecoveryService } from './recovery-service.js';
 import {
@@ -148,8 +150,9 @@ export interface AgentHeadBootstrapInput {
  * `RecoveryAdmissionPort`, and `recoveryHooks`).
  */
 export class AgentHeadCore
-  implements AgentHeadRpc, AgentHeadRecoveryPort, AuthoritativeBusinessPort
+  implements AgentHeadRpc, AgentHeadRecoveryPort, AuthoritativeBusinessPort, DeviceExecutionRpc
 {
+  private readonly deviceService: AgentHeadDeviceService;
   readonly recoveryService: AgentHeadRecoveryService;
   readonly turnService: AgentHeadTurnService;
 
@@ -217,6 +220,18 @@ export class AgentHeadCore
     this.eventCoordinator = bindings.eventCoordinator;
     this.recoveryHooks = bindings.recoveryHooks;
 
+    this.deviceService = new AgentHeadDeviceService({
+      storage: this.storage,
+      recoveryAdmission: bindings.recoveryAdmission,
+      recoveryHooks: bindings.recoveryHooks,
+      recoveryRegistry: options.recoveryRegistry,
+      earliestDiscovery: this.recoveryService,
+      recovery: this.recoveryService,
+      eventCoordinator: bindings.eventCoordinator,
+      nowMs: this.nowMsFn,
+      newId: this.newId,
+    });
+
     this.turnService = new AgentHeadTurnService({
       storage: this.storage,
       recoveryAdmission: bindings.recoveryAdmission,
@@ -230,6 +245,10 @@ export class AgentHeadCore
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
       globalDailyCeilingMicroUsd: this.globalDailyCeilingMicroUsd,
     });
+  }
+
+  deviceExecution(cmd: DeviceExecutionCommand) {
+    return this.deviceService.execute(cmd);
   }
 
   private syncAlarmAndRelayBudget(input: {
@@ -507,6 +526,7 @@ export class AgentHeadCore
       const task = getTaskRowSync(this.storage.sql, cmd.taskId);
       if (
         task === null ||
+        task.execution_target !== 'cloud' ||
         task.status !== 'running' ||
         task.cancel_requested_at_ms !== null ||
         task.lease_epoch !== cmd.leaseEpoch ||
@@ -598,6 +618,7 @@ export class AgentHeadCore
       const task = getTaskRowSync(this.storage.sql, cmd.taskId);
       if (
         task === null ||
+        task.execution_target !== 'cloud' ||
         task.status !== 'running' ||
         task.lease_epoch !== cmd.leaseEpoch ||
         task.current_run_id !== cmd.runId ||

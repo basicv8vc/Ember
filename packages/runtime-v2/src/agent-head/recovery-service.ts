@@ -44,6 +44,12 @@ import {
 import type { ApprovalRow, AssistantTurnRow, ModelAttemptRow, TaskRow } from './schema.js';
 import { toUtcDayString } from './state-machine.js';
 import {
+  appendTaskEventSync,
+  finishTaskRunSync,
+  hasLiveTaskLease,
+  startTaskRunSync,
+} from './task-execution.js';
+import {
   confirmOrVerifyCoverageInTxSync,
   executeAuthoritativeTurnCommit,
   isCoverageValidAtSync,
@@ -132,7 +138,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
          SELECT created_at_ms AS started_at_ms FROM assistant_turns WHERE status = 'running'
          UNION ALL
          SELECT r.started_at_ms FROM tasks t JOIN runs r ON r.id = t.current_run_id
-          WHERE t.status = 'running' AND r.status = 'running'
+          WHERE t.execution_target = 'cloud' AND t.status = 'running' AND r.status = 'running'
        )`,
     ).m;
     const candidates = [bizDue, outboxDue, schedDue, activeSince].filter(
@@ -229,9 +235,11 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             (deadline_at_ms IS NOT NULL AND deadline_at_ms <= ?)
             OR cancel_requested_at_ms IS NOT NULL
             OR (status = 'running' AND lease_expires_at_ms IS NOT NULL AND lease_expires_at_ms <= ?)
-            OR (status IN ('queued', 'retryable_failed') AND next_run_at_ms <= ?)
+            OR (execution_target = 'cloud' AND status IN ('queued', 'retryable_failed') AND next_run_at_ms <= ?)
           )
-        ORDER BY COALESCE(lease_expires_at_ms, deadline_at_ms, next_run_at_ms) ASC, id ASC
+        ORDER BY CASE WHEN execution_target = 'device' AND status = 'queued' THEN deadline_at_ms
+                       ELSE COALESCE(lease_expires_at_ms, deadline_at_ms, next_run_at_ms)
+                   END ASC, id ASC
         LIMIT ?`,
       nowMs,
       nowMs,
@@ -248,7 +256,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             : task.lease_expires_at_ms;
       } else if (task.deadline_at_ms !== null) {
         nextDueMs =
-          task.status === 'waiting_approval'
+          task.status === 'waiting_approval' || task.execution_target === 'device'
             ? task.deadline_at_ms
             : Math.min(task.next_run_at_ms, task.deadline_at_ms);
       }
@@ -306,7 +314,25 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     if (targetKind === 'turn') {
       this.convergeDueTurnSync(meta.tenant_id, meta.agent_id, targetId, nowMs);
     } else {
-      this.convergeDueTaskSync(meta.tenant_id, meta.agent_id, targetId, nowMs);
+      const before = getTaskRowSync(this.deps.storage.sql, targetId);
+      this.convergeDueTaskSync(meta.tenant_id, meta.agent_id, before, nowMs);
+      if (before?.execution_target === 'device') {
+        const after = getTaskRowSync(this.deps.storage.sql, targetId)!;
+        if (
+          after.status !== before.status &&
+          (after.status === 'queued' || after.status === 'cancelled' || after.status === 'failed')
+        ) {
+          const eventId = this.newId();
+          appendTaskEventSync(this.deps.storage.sql, {
+            id: eventId,
+            traceId: eventId,
+            taskId: after.id,
+            nowMs,
+            phase: after.status === 'queued' ? 'retry_scheduled' : after.status,
+            payload: { leaseEpoch: after.lease_epoch },
+          });
+        }
+      }
     }
 
     this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
@@ -541,9 +567,13 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     }
   }
 
-  private convergeDueTaskSync(tenantId: Id, agentId: Id, taskId: string, nowMs: number): void {
+  private convergeDueTaskSync(
+    tenantId: Id,
+    agentId: Id,
+    task: TaskRow | null,
+    nowMs: number,
+  ): void {
     const sql = this.deps.storage.sql;
-    const task = getTaskRowSync(sql, taskId);
     if (task === null || isTerminalTaskStatus(task.status)) {
       return;
     }
@@ -693,7 +723,10 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       }
 
       const deadline = task.deadline_at_ms ?? nowMs + 60_000;
-      const retryDecision = computePreDeadlineRetryAtMs(nowMs, deadline, 5_000);
+      const retryDecision =
+        task.execution_target === 'device'
+          ? { shouldRetry: true as const, nextAttemptAtMs: nowMs }
+          : computePreDeadlineRetryAtMs(nowMs, deadline, 5_000);
       if (!retryDecision.shouldRetry) {
         sql.exec(
           `UPDATE tasks
@@ -724,6 +757,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         task.id,
       );
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
+      // Device work is discovered only by the assigned device's authenticated poll.
+      if (task.execution_target === 'device') return;
       const outboxId = `task:${task.id}:epoch:${nextEpoch}`;
       const envelope: V2DispatchEnvelope = {
         schemaVersion: 2,
@@ -1163,6 +1198,12 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       }
 
       const task = getTaskRowSync(this.deps.storage.sql, target.targetId)!;
+      if (task.execution_target !== 'cloud') {
+        return {
+          res: { kind: 'not_claimed' as const, reason: 'stale_or_invalid_envelope' as const },
+          alarmAtMs: undefined,
+        };
+      }
       if (task.lease_expires_at_ms !== null && nowMs < task.lease_expires_at_ms) {
         return {
           res: { kind: 'not_claimed' as const, reason: 'lease_active' as const },
@@ -1176,44 +1217,17 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         };
       }
 
-      const nextEpoch = task.lease_epoch + 1;
-      const nextAttempt = task.attempt_count + 1;
-      const leaseExpiresAtMs =
-        task.deadline_at_ms === null
-          ? nowMs + cmd.leaseMs
-          : Math.min(nowMs + cmd.leaseMs, task.deadline_at_ms);
       const runId = this.newId();
-
-      this.deps.storage.sql.exec(
-        `INSERT INTO runs (
-           id, task_id, attempt, lease_epoch, status, worker_id, executor_kind,
-           leased_until_ms, provider_job_handle, started_at_ms, updated_at_ms
-         ) VALUES (?, ?, ?, ?, 'running', ?, 'queue_worker', ?, ?, ?, ?)`,
-        runId,
-        task.id,
-        nextAttempt,
-        nextEpoch,
-        cmd.workerId,
-        leaseExpiresAtMs,
-        task.provider_job_handle,
-        nowMs,
-        nowMs,
-      );
-      this.deps.storage.sql.exec(
-        `UPDATE tasks
-            SET status = 'running',
-                attempt_count = ?,
-                current_run_id = ?,
-                lease_epoch = ?,
-                lease_expires_at_ms = ?,
-                updated_at_ms = ?
-          WHERE id = ?`,
-        nextAttempt,
-        runId,
-        nextEpoch,
-        leaseExpiresAtMs,
-        nowMs,
-        task.id,
+      const { nextEpoch, nextAttempt, leaseExpiresAtMs } = startTaskRunSync(
+        this.deps.storage.sql,
+        task,
+        {
+          runId,
+          workerId: cmd.workerId,
+          executorKind: 'queue_worker',
+          nowMs,
+          leaseMs: cmd.leaseMs,
+        },
       );
       this.deps.eventCoordinator.ackOutboxSync(outbox.outbox_id, outbox.fence_epoch, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
@@ -1370,19 +1384,17 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
 
       const task = getTaskRowSync(this.deps.storage.sql, cmd.entityId);
       const run = task === null ? null : getLatestRunForTaskSync(this.deps.storage.sql, task.id);
+      if (task?.execution_target === 'device') {
+        return { accepted: false, alarmAtMs: undefined, nowMs, hasBudgetSync: false };
+      }
       const isFencedValid =
         task !== null &&
         run !== null &&
-        task.status === 'running' &&
-        run.status === 'running' &&
-        task.lease_epoch === cmd.leaseEpoch &&
-        run.lease_epoch === cmd.leaseEpoch &&
-        run.worker_id === cmd.workerId &&
-        task.lease_expires_at_ms !== null &&
-        nowMs < task.lease_expires_at_ms &&
-        nowMs < run.leased_until_ms &&
-        (task.deadline_at_ms === null || nowMs < task.deadline_at_ms) &&
-        task.cancel_requested_at_ms === null;
+        hasLiveTaskLease(task, run, nowMs, {
+          leaseEpoch: cmd.leaseEpoch,
+          workerId: cmd.workerId,
+          executorKind: 'queue_worker',
+        });
 
       if (!isFencedValid) {
         let alarmAtMs: number | null | undefined;
@@ -1500,41 +1512,15 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       }
 
       const isCompleted = parsedTask.status !== 'failed';
-      this.deps.storage.sql.exec(
-        `UPDATE runs
-            SET status = ?,
-                finished_at_ms = ?,
-                updated_at_ms = ?
-          WHERE id = ?`,
-        isCompleted ? 'succeeded' : 'failed_terminal',
-        nowMs,
-        nowMs,
-        run.id,
-      );
-      this.deps.storage.sql.exec(
-        `INSERT INTO task_results (
-           task_id, summary_text, detail_text, model_label, simulated, truncated, reason_code, produced_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-         ON CONFLICT (task_id) DO NOTHING`,
-        task.id,
-        parsedTask.summaryText ?? null,
-        parsedTask.detailText ?? null,
-        parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-        (parsedTask.simulated ?? true) ? 1 : 0,
-        (parsedTask.truncated ?? false) ? 1 : 0,
-        parsedTask.reasonCode ?? (isCompleted ? 'ok' : 'internal_error'),
-        nowMs,
-      );
-      this.deps.storage.sql.exec(
-        `UPDATE tasks
-            SET status = ?,
-                lease_expires_at_ms = NULL,
-                updated_at_ms = ?
-          WHERE id = ?`,
-        isCompleted ? 'completed' : 'failed',
-        nowMs,
-        task.id,
-      );
+      finishTaskRunSync(this.deps.storage.sql, task, run, nowMs, {
+        status: isCompleted ? 'completed' : 'failed',
+        summaryText: parsedTask.summaryText ?? null,
+        detailText: parsedTask.detailText ?? null,
+        modelLabel: parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        simulated: parsedTask.simulated ?? true,
+        truncated: parsedTask.truncated ?? false,
+        reasonCode: parsedTask.reasonCode ?? (isCompleted ? 'ok' : 'internal_error'),
+      });
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);

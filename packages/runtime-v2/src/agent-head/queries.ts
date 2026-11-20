@@ -321,6 +321,7 @@ export function earliestBusinessAlarmAtMsSync(sql: SqlStorageLike): number | nul
                THEN lease_expires_at_ms
              ELSE COALESCE(deadline_at_ms, lease_expires_at_ms)
            END
+         WHEN execution_target = 'device' THEN deadline_at_ms
          WHEN status IN ('queued', 'retryable_failed') THEN
            CASE
              WHEN deadline_at_ms IS NOT NULL AND deadline_at_ms < next_run_at_ms
@@ -386,17 +387,18 @@ export async function prepareEdgeSafeTaskCommand(command: unknown): Promise<{
     }),
   );
 
-  const bytes = new TextEncoder().encode(`${TASK_COMMAND_DIGEST_VERSION}\n${canonical}`);
   if (new TextEncoder().encode(canonical).byteLength > TASK_COMMAND_MAX_BYTES) {
     throw new DomainError('INVALID_ARGUMENT', 'task command exceeds 64 KiB canonical limit');
   }
 
-  const hashBuffer = await globalThis.crypto.subtle.digest('SHA-256', bytes);
-  const digest = Array.from(new Uint8Array(hashBuffer))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('');
+  const digest = await sha256Hex(`${TASK_COMMAND_DIGEST_VERSION}\n${canonical}`);
 
   return { command: validated, canonical, digest, deadlineAt };
+}
+
+export async function sha256Hex(value: string): Promise<string> {
+  const hash = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+  return Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('');
 }
 
 export async function deterministicEdgeUuid(seed: string): Promise<Id> {

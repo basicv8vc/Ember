@@ -52,6 +52,30 @@ export async function runV2StagingSmoke({
   checks.push({ name: 'v2_me_unauthenticated', ok: v2AnonMeOk, status: v2AnonMe.status });
   if (!v2AnonMeOk) errors.push(`V2 /v1/me anonymous check failed (HTTP ${v2AnonMe.status})`);
 
+  const v2AnonMemories = await fetchJson(fetchImpl, `${v2BaseUrl}/v2/memories`);
+  const v2AnonMemoriesOk =
+    v2AnonMemories.status === 401 && v2AnonMemories.body?.error?.code === 'UNAUTHENTICATED';
+  checks.push({
+    name: 'v2_memories_unauthenticated',
+    ok: v2AnonMemoriesOk,
+    status: v2AnonMemories.status,
+  });
+  if (!v2AnonMemoriesOk) {
+    errors.push(`V2 /v2/memories anonymous check failed (HTTP ${v2AnonMemories.status})`);
+  }
+
+  const v2AnonSchedules = await fetchJson(fetchImpl, `${v2BaseUrl}/v2/schedules`);
+  const v2AnonSchedulesOk =
+    v2AnonSchedules.status === 401 && v2AnonSchedules.body?.error?.code === 'UNAUTHENTICATED';
+  checks.push({
+    name: 'v2_schedules_unauthenticated',
+    ok: v2AnonSchedulesOk,
+    status: v2AnonSchedules.status,
+  });
+  if (!v2AnonSchedulesOk) {
+    errors.push(`V2 /v2/schedules anonymous check failed (HTTP ${v2AnonSchedules.status})`);
+  }
+
   const v2DevDenied = await fetchJson(fetchImpl, `${v2BaseUrl}/v1/auth/session`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },

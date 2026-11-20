@@ -910,6 +910,7 @@ export class AlarmMultiplexer {
   readonly #coordinator: OutboxCoordinator;
   readonly #schedules: ScheduleRepository;
   readonly #coverage: RecoveryCoverageCoordinator;
+  #alarmSyncTail: Promise<void> = Promise.resolve();
 
   constructor(cmd: {
     readonly storage: DurableObjectStorageLike;
@@ -926,40 +927,47 @@ export class AlarmMultiplexer {
   }
 
   /**
-   * Synchronizes the platform DO Alarm on-demand when target changes or when an active alarm
-   * at/before `nowMs` was just consumed during `runAlarmCycle`.
+   * Synchronizes the platform DO Alarm on-demand using `storage.getAlarm()` (zero SQLite writes),
+   * serialized in-process to prevent concurrent `getAlarm` / `setAlarm` interleaving.
    */
   async syncPlatformAlarm(
     targetAlarmAtMs: number | null,
     nowMs: number,
     options?: { readonly forceRearmConsumed?: boolean },
   ): Promise<boolean> {
-    const current = this.#storage.transactionSync(
-      () => this.#coverage.getCoverageRowSync()?.armed_alarm_at_ms ?? null,
-    );
-    const consumedCurrentAlarm =
-      options?.forceRearmConsumed === true &&
-      targetAlarmAtMs !== null &&
-      current !== null &&
-      current <= nowMs;
-    if (current === targetAlarmAtMs && !consumedCurrentAlarm) {
-      return false;
-    }
-    if (targetAlarmAtMs === null) {
-      await this.#storage.deleteAlarm();
-    } else {
-      await this.#storage.setAlarm(targetAlarmAtMs);
-    }
-    this.#storage.transactionSync(() => {
-      this.#storage.sql.exec(
-        `UPDATE v2_recovery_coverage
-         SET armed_alarm_at_ms = ?, updated_at_ms = ?
-         WHERE id = 1`,
-        targetAlarmAtMs,
-        nowMs,
+    const run = async (): Promise<boolean> => {
+      const current = await this.#storage.getAlarm();
+      const latestDbTarget = this.#storage.transactionSync(() =>
+        this.#coordinator.recomputeAlarmSync(nowMs),
       );
-    });
-    return true;
+      // Never delete or postpone past an authoritative DB obligation committed concurrently.
+      const effectiveTarget =
+        targetAlarmAtMs === null
+          ? latestDbTarget
+          : latestDbTarget === null
+            ? targetAlarmAtMs
+            : Math.min(targetAlarmAtMs, latestDbTarget);
+      const consumedCurrentAlarm =
+        options?.forceRearmConsumed === true &&
+        effectiveTarget !== null &&
+        current !== null &&
+        current <= nowMs;
+      if (current === effectiveTarget && !consumedCurrentAlarm) {
+        return false;
+      }
+      if (effectiveTarget === null) {
+        await this.#storage.deleteAlarm();
+      } else {
+        await this.#storage.setAlarm(effectiveTarget);
+      }
+      return true;
+    };
+    const next = this.#alarmSyncTail.then(run, run);
+    this.#alarmSyncTail = next.then(
+      () => undefined,
+      () => undefined,
+    );
+    return next;
   }
 
   recordAlarmFailureSync(nowMs: number): number {
@@ -994,7 +1002,7 @@ export class AlarmMultiplexer {
       this.#storage.sql.exec(
         `UPDATE v2_recovery_coverage
          SET alarm_fail_count = 0, updated_at_ms = ?
-         WHERE id = 1`,
+         WHERE id = 1 AND alarm_fail_count > 0`,
         cmd.nowMs,
       );
 

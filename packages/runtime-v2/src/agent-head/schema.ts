@@ -534,6 +534,185 @@ const NATIVE_DEVICE_PLACEMENT_STATEMENTS = [
      ADD COLUMN capability_version INTEGER NOT NULL DEFAULT 1 CHECK (capability_version = 1)`,
 ] as const;
 
+export const DEFAULT_AGENT_HEAD_WRITE_OPT_MIGRATION_VERSION = 5;
+
+/**
+ * M1-A6 DO SQLite write-amplification migration (v5, after M2-F2 v4):
+ * - OPT-1: Drop duplicate `idx_messages_conv_seq` (covered by `UNIQUE(conversation_id, sequence)`).
+ * - OPT-2: Convert `assistant_turns.response_message_id` from full UNIQUE to partial UNIQUE index.
+ * - OPT-5: Rebuild small PK-lookup tables (`assistant_turns`, `model_attempts`,
+ *   `agent_spend_days`, `v2_dispatch_outbox`) as `WITHOUT ROWID`, preserving all rows,
+ *   UNIQUE/CHECK/FOREIGN KEY constraints, and non-OPT-6 indexes.
+ */
+export const V2_AGENT_HEAD_WRITE_OPT_V4_STATEMENTS = [
+  `DROP INDEX IF EXISTS idx_messages_conv_seq;`,
+  `CREATE TABLE assistant_turns_v4 (
+  id                      TEXT    PRIMARY KEY,
+  conversation_id         TEXT    NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+  source_message_id       TEXT    NOT NULL UNIQUE REFERENCES conversation_messages(id) ON DELETE CASCADE,
+  response_message_id     TEXT    REFERENCES conversation_messages(id) ON DELETE CASCADE,
+  status                  TEXT    NOT NULL DEFAULT 'running'
+    CHECK (status IN ('running', 'completed', 'failed', 'cancelled')),
+  failure_reason          TEXT    CHECK (failure_reason IS NULL OR failure_reason IN ('timeout', 'internal_error')),
+  execution_mode          TEXT    NOT NULL DEFAULT 'fast_interactive'
+    CHECK (execution_mode IN ('fast_interactive', 'durable_queue', 'device')),
+  deadline_at_ms          INTEGER NOT NULL,
+  interactive_deadline_ms INTEGER,
+  lease_epoch             INTEGER NOT NULL DEFAULT 0 CHECK (lease_epoch >= 0),
+  lease_owner             TEXT,
+  lease_expires_at_ms     INTEGER,
+  claim_count             INTEGER NOT NULL DEFAULT 0 CHECK (claim_count >= 0),
+  cancel_requested_at_ms  INTEGER,
+  provider_job_handle     TEXT,
+  handoff_reason          TEXT,
+  linked_task_id          TEXT,
+  created_at_ms           INTEGER NOT NULL,
+  updated_at_ms           INTEGER NOT NULL,
+  CHECK ((lease_owner IS NULL) = (lease_expires_at_ms IS NULL)),
+  CHECK (status != 'running' OR response_message_id IS NULL),
+  CHECK (status NOT IN ('completed', 'failed') OR response_message_id IS NOT NULL),
+  CHECK ((status = 'failed' AND failure_reason IS NOT NULL) OR (status != 'failed' AND failure_reason IS NULL))
+) WITHOUT ROWID;`,
+  `INSERT INTO assistant_turns_v4 (
+  id, conversation_id, source_message_id, response_message_id, status, failure_reason,
+  execution_mode, deadline_at_ms, interactive_deadline_ms, lease_epoch, lease_owner,
+  lease_expires_at_ms, claim_count, cancel_requested_at_ms, provider_job_handle,
+  handoff_reason, linked_task_id, created_at_ms, updated_at_ms
+) SELECT
+  id, conversation_id, source_message_id, response_message_id, status, failure_reason,
+  execution_mode, deadline_at_ms, interactive_deadline_ms, lease_epoch, lease_owner,
+  lease_expires_at_ms, claim_count, cancel_requested_at_ms, provider_job_handle,
+  handoff_reason, linked_task_id, created_at_ms, updated_at_ms
+FROM assistant_turns;`,
+  `DROP TABLE assistant_turns;`,
+  `ALTER TABLE assistant_turns_v4 RENAME TO assistant_turns;`,
+  `CREATE INDEX IF NOT EXISTS idx_turns_running_lease
+  ON assistant_turns (status, lease_expires_at_ms, deadline_at_ms) WHERE status = 'running';`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_response_message
+  ON assistant_turns (response_message_id) WHERE response_message_id IS NOT NULL;`,
+  `CREATE TABLE model_attempts_v4 (
+  subject_type            TEXT    NOT NULL CHECK (subject_type IN ('turn', 'task')),
+  subject_id              TEXT    NOT NULL,
+  attempt_no              INTEGER NOT NULL CHECK (attempt_no BETWEEN 1 AND 6),
+  operation_id            TEXT    NOT NULL UNIQUE,
+  principal_id            TEXT    NOT NULL,
+  utc_day                 TEXT    NOT NULL,
+  lease_epoch             INTEGER NOT NULL CHECK (lease_epoch >= 0),
+  provider_id             TEXT    NOT NULL CHECK (provider_id IN ('fake', 'openai', 'openrouter')),
+  model_label             TEXT    NOT NULL,
+  rate_version            TEXT    NOT NULL,
+  budget_mode             TEXT    NOT NULL CHECK (budget_mode IN ('disabled_echo_only', 'simulated_full_protocol', 'real')),
+  state                   TEXT    NOT NULL CHECK (
+    state IN ('reserved', 'settled', 'unknown_billed', 'released', 'conservative_billed')
+  ),
+  outcome_code            TEXT,
+  reserved_micro_usd      INTEGER NOT NULL CHECK (reserved_micro_usd BETWEEN 0 AND 5000),
+  applied_cost_micro_usd  INTEGER,
+  observed_cost_micro_usd INTEGER,
+  input_tokens            INTEGER,
+  output_tokens           INTEGER,
+  billing_basis           TEXT,
+  overage_micro_usd       INTEGER NOT NULL DEFAULT 0 CHECK (overage_micro_usd >= 0),
+  settlement_revision     INTEGER NOT NULL DEFAULT 0 CHECK (settlement_revision >= 0),
+  global_grant_id         TEXT,
+  global_grant_expires_ms INTEGER,
+  global_synced_at_ms     INTEGER,
+  send_authorizing_at_ms  INTEGER,
+  send_started_at_ms      INTEGER,
+  started_at_ms           INTEGER NOT NULL,
+  settled_at_ms           INTEGER,
+  PRIMARY KEY (subject_type, subject_id, attempt_no)
+) WITHOUT ROWID;`,
+  `INSERT INTO model_attempts_v4 (
+  subject_type, subject_id, attempt_no, operation_id, principal_id, utc_day, lease_epoch,
+  provider_id, model_label, rate_version, budget_mode, state, outcome_code,
+  reserved_micro_usd, applied_cost_micro_usd, observed_cost_micro_usd, input_tokens,
+  output_tokens, billing_basis, overage_micro_usd, settlement_revision, global_grant_id,
+  global_grant_expires_ms, global_synced_at_ms, send_authorizing_at_ms, send_started_at_ms,
+  started_at_ms, settled_at_ms
+) SELECT
+  subject_type, subject_id, attempt_no, operation_id, principal_id, utc_day, lease_epoch,
+  provider_id, model_label, rate_version, budget_mode, state, outcome_code,
+  reserved_micro_usd, applied_cost_micro_usd, observed_cost_micro_usd, input_tokens,
+  output_tokens, billing_basis, overage_micro_usd, settlement_revision, global_grant_id,
+  global_grant_expires_ms, global_synced_at_ms, send_authorizing_at_ms, send_started_at_ms,
+  started_at_ms, settled_at_ms
+FROM model_attempts;`,
+  `DROP TABLE model_attempts;`,
+  `ALTER TABLE model_attempts_v4 RENAME TO model_attempts;`,
+  `CREATE TABLE agent_spend_days_v4 (
+  scope_kind         TEXT    NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
+  scope_id           TEXT    NOT NULL,
+  utc_day            TEXT    NOT NULL,
+  reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (reserved_micro_usd >= 0),
+  consumed_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (consumed_micro_usd >= 0),
+  overage_micro_usd  INTEGER NOT NULL DEFAULT 0 CHECK (overage_micro_usd >= 0),
+  turns_started      INTEGER NOT NULL DEFAULT 0 CHECK (turns_started >= 0),
+  updated_at_ms      INTEGER NOT NULL,
+  PRIMARY KEY (scope_kind, scope_id, utc_day)
+) WITHOUT ROWID;`,
+  `INSERT INTO agent_spend_days_v4 (
+  scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd,
+  overage_micro_usd, turns_started, updated_at_ms
+) SELECT
+  scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd,
+  overage_micro_usd, turns_started, updated_at_ms
+FROM agent_spend_days;`,
+  `DROP TABLE agent_spend_days;`,
+  `ALTER TABLE agent_spend_days_v4 RENAME TO agent_spend_days;`,
+  `CREATE TABLE v2_dispatch_outbox_v4 (
+  outbox_id            TEXT    PRIMARY KEY,
+  entity_kind          TEXT    NOT NULL CHECK (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff', 'budget_sync')),
+  entity_id            TEXT    NOT NULL,
+  queue_name           TEXT    CHECK (queue_name IS NULL OR queue_name IN ('durable_turn', 'agent_task')),
+  payload_json         TEXT    NOT NULL,
+  operation_id         TEXT,
+  revision             INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
+  state                TEXT    NOT NULL DEFAULT 'pending' CHECK (state IN ('pending', 'enqueued', 'acked', 'dead_lettered', 'cancelled')),
+  next_attempt_at_ms   INTEGER NOT NULL,
+  last_enqueued_at_ms  INTEGER,
+  publish_attempts     INTEGER NOT NULL DEFAULT 0 CHECK (publish_attempts >= 0),
+  dlq_count            INTEGER NOT NULL DEFAULT 0 CHECK (dlq_count >= 0),
+  fence_epoch          INTEGER NOT NULL DEFAULT 0 CHECK (fence_epoch >= 0 AND fence_epoch <= 9007199254740991),
+  last_error_code      TEXT,
+  created_at_ms        INTEGER NOT NULL,
+  updated_at_ms        INTEGER NOT NULL,
+  CHECK (
+    (entity_kind = 'budget_sync' AND queue_name IS NULL AND operation_id IS NOT NULL)
+    OR
+    (entity_kind IN ('turn', 'task', 'schedule_occurrence', 'handoff') AND queue_name IS NOT NULL AND queue_name IN ('durable_turn', 'agent_task'))
+  )
+) WITHOUT ROWID;`,
+  `INSERT INTO v2_dispatch_outbox_v4 (
+  outbox_id, entity_kind, entity_id, queue_name, payload_json, operation_id, revision,
+  state, next_attempt_at_ms, last_enqueued_at_ms, publish_attempts, dlq_count,
+  fence_epoch, last_error_code, created_at_ms, updated_at_ms
+) SELECT
+  outbox_id, entity_kind, entity_id, queue_name, payload_json, operation_id, revision,
+  state, next_attempt_at_ms, last_enqueued_at_ms, publish_attempts, dlq_count,
+  fence_epoch, last_error_code, created_at_ms, updated_at_ms
+FROM v2_dispatch_outbox;`,
+  `DROP TABLE v2_dispatch_outbox;`,
+  `ALTER TABLE v2_dispatch_outbox_v4 RENAME TO v2_dispatch_outbox;`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_outbox_due
+  ON v2_dispatch_outbox (next_attempt_at_ms, outbox_id)
+  WHERE state IN ('pending', 'enqueued', 'dead_lettered');`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_v2_outbox_budget_sync_op_rev
+  ON v2_dispatch_outbox (operation_id, revision)
+  WHERE entity_kind = 'budget_sync';`,
+] as const;
+
+export function createAgentHeadWriteOptMigration(
+  version = DEFAULT_AGENT_HEAD_WRITE_OPT_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_sqlite_write_opt_v1',
+    statements: V2_AGENT_HEAD_WRITE_OPT_V4_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_AGENT_HEAD_WRITE_OPT_V4_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -551,5 +730,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
       statements: NATIVE_DEVICE_PLACEMENT_STATEMENTS,
       checksum: computeMigrationChecksumSync(NATIVE_DEVICE_PLACEMENT_STATEMENTS),
     },
+    createAgentHeadWriteOptMigration(),
   ];
 }

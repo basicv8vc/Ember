@@ -1,5 +1,5 @@
 import { MODEL_BUDGET_ABSOLUTE_CEILINGS } from '@ember/model-gateway';
-import { GLOBAL_BUDGET_SCHEMA } from './schema.js';
+import { GLOBAL_BUDGET_SCHEMA, GLOBAL_BUDGET_WITHOUT_ROWID_UPGRADE_STATEMENTS } from './schema.js';
 
 import type {
   GlobalBudgetAuthorizeSendRequest,
@@ -77,6 +77,32 @@ export class GlobalBudgetLedger {
       throw new Error('Invalid global daily budget ceiling');
     }
     storage.transactionSync(() => storage.sql.exec(GLOBAL_BUDGET_SCHEMA));
+    this.upgradeWithoutRowidIfNeeded();
+  }
+
+  private upgradeWithoutRowidIfNeeded(): void {
+    const ddl = this.exec<{ sql: string | null }>(
+      `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'global_budget_reservations'`,
+    )[0]?.sql;
+    if (ddl === null || ddl === undefined || /\bWITHOUT\s+ROWID\b/i.test(ddl)) {
+      return;
+    }
+    this.storage.sql.exec('PRAGMA foreign_keys = OFF');
+    try {
+      this.storage.transactionSync(() => {
+        for (const stmt of GLOBAL_BUDGET_WITHOUT_ROWID_UPGRADE_STATEMENTS) {
+          this.storage.sql.exec(stmt);
+        }
+        const violations = this.exec<SqlStorageRow>('PRAGMA foreign_key_check');
+        if (violations.length > 0) {
+          throw new Error(
+            `GlobalBudgetDO foreign key check failed after WITHOUT ROWID upgrade (${violations.length} violation(s))`,
+          );
+        }
+      });
+    } finally {
+      this.storage.sql.exec('PRAGMA foreign_keys = ON');
+    }
   }
 
   private exec<T extends SqlStorageRow>(query: string, ...bindings: Binding[]): T[] {

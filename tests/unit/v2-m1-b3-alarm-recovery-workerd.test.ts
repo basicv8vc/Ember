@@ -428,7 +428,16 @@ export class TestAgentHeadDO extends DurableObject {
       const cov = this.ctx.storage.sql.exec('SELECT * FROM v2_recovery_coverage WHERE id = 1').toArray()[0];
       const state = this.ctx.storage.sql.exec('SELECT * FROM test_state WHERE id = 1').one();
       const d1 = await registry.getCoverage({ tenantId: 'ten-1', agentId: 'ag-1' });
-      return Response.json({ turns, outbox, schedules: schedulesRows, coverage: cov, state, d1 });
+      const platformAlarmAtMs = await this.ctx.storage.getAlarm();
+      return Response.json({
+        turns,
+        outbox,
+        schedules: schedulesRows,
+        coverage: cov,
+        platformAlarmAtMs,
+        state,
+        d1,
+      });
     }
 
     return new Response('not-found', { status: 404 });
@@ -598,12 +607,14 @@ export default {
         turns: Array<{ turn_id: string; status: string; commit_count: number }>;
         schedules: Array<{ schedule_id: string; status: string; next_fire_at_ms: number }>;
         coverage: { armed_alarm_at_ms: number | null; coverage_state: string };
+        platformAlarmAtMs: number | null;
         state: { alarm_attempts_observed: number };
         d1: { exists: boolean; actualRecoveryAtMs: number | null };
       } = {
         turns: [],
         schedules: [],
         coverage: { armed_alarm_at_ms: null, coverage_state: 'uncovered' },
+        platformAlarmAtMs: null,
         state: { alarm_attempts_observed: 0 },
         d1: { exists: false, actualRecoveryAtMs: null },
       };
@@ -628,7 +639,7 @@ export default {
         status: 'active',
         next_fire_at_ms: futureScheduleAtMs,
       });
-      expect(inspected.coverage.armed_alarm_at_ms).toBe(futureScheduleAtMs);
+      expect(inspected.platformAlarmAtMs).toBe(futureScheduleAtMs);
       expect(inspected.d1).toMatchObject({
         exists: true,
         actualRecoveryAtMs: futureScheduleAtMs + 45_000,

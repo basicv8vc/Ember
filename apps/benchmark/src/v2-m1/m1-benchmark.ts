@@ -108,6 +108,7 @@ export interface V2M1PerEventTelemetryStats {
   readonly agentHeadSqlStatementsMean: number;
   readonly globalBudgetRowsReadPerTurn: number;
   readonly globalBudgetRowsWrittenPerTurn: number;
+  readonly globalBudgetSqlStatementsMean: number;
   readonly totalDoRowsReadMean: number;
   readonly totalDoRowsWrittenMean: number;
   readonly d1OpsMean: number;
@@ -593,6 +594,21 @@ interface BenchInspectPayload {
   }>;
 }
 
+interface GlobalBudgetInspectPayload {
+  readonly sql: {
+    readonly statements: number;
+    readonly rowsRead: number;
+    readonly rowsWritten: number;
+    readonly alarmSetCalls: number;
+    readonly alarmDeleteCalls: number;
+  };
+}
+
+interface BenchTelemetrySample {
+  readonly agent: BenchInspectPayload;
+  readonly globalBudget: GlobalBudgetInspectPayload;
+}
+
 async function provisionBenchAgent(
   harness: V2LocalRuntimeHarness,
   subject: string,
@@ -691,26 +707,27 @@ function meanOf(nums: readonly number[]): number {
   return Number((nums.reduce((a, b) => a + b, 0) / nums.length).toFixed(2));
 }
 
-function summarizeTelemetry(samples: readonly BenchInspectPayload[]): V2M1PerEventTelemetryStats {
+function summarizeTelemetry(samples: readonly BenchTelemetrySample[]): V2M1PerEventTelemetryStats {
+  const agentRead = meanOf(samples.map((s) => s.agent.telemetry.sql.rowsRead));
+  const agentWrite = meanOf(samples.map((s) => s.agent.telemetry.sql.rowsWritten));
+  const gbRead = meanOf(samples.map((s) => s.globalBudget.sql.rowsRead));
+  const gbWrite = meanOf(samples.map((s) => s.globalBudget.sql.rowsWritten));
   return {
     sampleCount: samples.length,
-    agentHeadRowsReadMean: meanOf(samples.map((s) => s.telemetry.sql.rowsRead)),
-    agentHeadRowsWrittenMean: meanOf(samples.map((s) => s.telemetry.sql.rowsWritten)),
-    agentHeadSqlStatementsMean: meanOf(samples.map((s) => s.telemetry.sql.statements)),
-    globalBudgetRowsReadPerTurn: 8,
-    globalBudgetRowsWrittenPerTurn: 9,
-    totalDoRowsReadMean: Number(
-      (meanOf(samples.map((s) => s.telemetry.sql.rowsRead)) + 8).toFixed(2),
-    ),
-    totalDoRowsWrittenMean: Number(
-      (meanOf(samples.map((s) => s.telemetry.sql.rowsWritten)) + 9).toFixed(2),
-    ),
-    d1OpsMean: meanOf(samples.map((s) => s.telemetry.d1Ops)),
-    d1RowsReadMean: meanOf(samples.map((s) => s.telemetry.d1RowsRead)),
-    d1RowsWrittenMean: meanOf(samples.map((s) => s.telemetry.d1RowsWritten)),
-    queueSendsMean: meanOf(samples.map((s) => s.telemetry.queueSends)),
-    alarmSetCallsMean: meanOf(samples.map((s) => s.telemetry.sql.alarmSetCalls)),
-    alarmFiresMean: meanOf(samples.map((s) => s.telemetry.alarmFiresObserved)),
+    agentHeadRowsReadMean: agentRead,
+    agentHeadRowsWrittenMean: agentWrite,
+    agentHeadSqlStatementsMean: meanOf(samples.map((s) => s.agent.telemetry.sql.statements)),
+    globalBudgetRowsReadPerTurn: gbRead,
+    globalBudgetRowsWrittenPerTurn: gbWrite,
+    globalBudgetSqlStatementsMean: meanOf(samples.map((s) => s.globalBudget.sql.statements)),
+    totalDoRowsReadMean: Number((agentRead + gbRead).toFixed(2)),
+    totalDoRowsWrittenMean: Number((agentWrite + gbWrite).toFixed(2)),
+    d1OpsMean: meanOf(samples.map((s) => s.agent.telemetry.d1Ops)),
+    d1RowsReadMean: meanOf(samples.map((s) => s.agent.telemetry.d1RowsRead)),
+    d1RowsWrittenMean: meanOf(samples.map((s) => s.agent.telemetry.d1RowsWritten)),
+    queueSendsMean: meanOf(samples.map((s) => s.agent.telemetry.queueSends)),
+    alarmSetCallsMean: meanOf(samples.map((s) => s.agent.telemetry.sql.alarmSetCalls)),
+    alarmFiresMean: meanOf(samples.map((s) => s.agent.telemetry.alarmFiresObserved)),
   };
 }
 
@@ -757,7 +774,7 @@ export async function runV2M1FullRuntimeBenchmark(
     log('[V2-M1 Bench] Measuring Uncovered B1 Durable baseline...');
     const uncoveredAckLatencies: number[] = [];
     const durableDispatchLatencies: number[] = [];
-    const uncoveredTelemetries: BenchInspectPayload[] = [];
+    const uncoveredTelemetries: BenchTelemetrySample[] = [];
     let uncovOk = 0;
     let uncovErr = 0;
 
@@ -767,6 +784,7 @@ export async function runV2M1FullRuntimeBenchmark(
         tenantId: agent.tenantId,
         agentId: agent.agentId,
       });
+      await harness.fetchJson('/_test/global-budget/reset-telemetry', {});
       const t0 = performance.now();
       const res = await harness.fetchJson<{ turn?: { turn_id: string } }>(
         `/v1/conversations/${agent.conversationId}/messages`,
@@ -778,8 +796,13 @@ export async function runV2M1FullRuntimeBenchmark(
       if (res.status === 201 && res.data.turn?.turn_id) {
         uncovOk += 1;
         const settled = await waitTurnSettled(harness, agent, res.data.turn.turn_id);
-        durableDispatchLatencies.push(performance.now() - tAck);
-        uncoveredTelemetries.push(settled);
+        const tSettled = performance.now();
+        durableDispatchLatencies.push(tSettled - tAck);
+        const gbInsp = await harness.fetchJson<GlobalBudgetInspectPayload>(
+          '/_test/global-budget/inspect',
+          {},
+        );
+        uncoveredTelemetries.push({ agent: settled, globalBudget: gbInsp.data });
       } else {
         uncovErr += 1;
       }
@@ -788,7 +811,7 @@ export async function runV2M1FullRuntimeBenchmark(
     // 2. Covered B1 Durable baseline (reuse covered agents)
     log('[V2-M1 Bench] Measuring Covered B1 Durable baseline...');
     const coveredAckLatencies: number[] = [];
-    const coveredTelemetries: BenchInspectPayload[] = [];
+    const coveredTelemetries: BenchTelemetrySample[] = [];
     let covOk = 0;
     let covErr = 0;
     const covAgent = await provisionBenchAgent(harness, `bench-cov-b1-${randomUUID()}`);
@@ -804,6 +827,7 @@ export async function runV2M1FullRuntimeBenchmark(
         tenantId: covAgent.tenantId,
         agentId: covAgent.agentId,
       });
+      await harness.fetchJson('/_test/global-budget/reset-telemetry', {});
       const t0 = performance.now();
       const res = await harness.fetchJson<{ turn?: { turn_id: string } }>(
         `/v1/conversations/${covAgent.conversationId}/messages`,
@@ -815,8 +839,13 @@ export async function runV2M1FullRuntimeBenchmark(
       if (res.status === 201 && res.data.turn?.turn_id) {
         covOk += 1;
         const settled = await waitTurnSettled(harness, covAgent, res.data.turn.turn_id);
-        durableDispatchLatencies.push(performance.now() - tAck);
-        coveredTelemetries.push(settled);
+        const tSettled = performance.now();
+        durableDispatchLatencies.push(tSettled - tAck);
+        const gbInsp = await harness.fetchJson<GlobalBudgetInspectPayload>(
+          '/_test/global-budget/inspect',
+          {},
+        );
+        coveredTelemetries.push({ agent: settled, globalBudget: gbInsp.data });
       } else {
         covErr += 1;
       }
@@ -857,12 +886,13 @@ export async function runV2M1FullRuntimeBenchmark(
         },
       },
     });
-    const activeCoveredTelemetries: BenchInspectPayload[] = [];
+    const activeCoveredTelemetries: BenchTelemetrySample[] = [];
     for (let i = 0; i < Math.min(5, baseIterations); i++) {
       await harness.fetchJson('/_test/agent/reset-telemetry', {
         tenantId: activeCovAgent.tenantId,
         agentId: activeCovAgent.agentId,
       });
+      await harness.fetchJson('/_test/global-budget/reset-telemetry', {});
       const res = await harness.fetchJson<{ turn?: { turn_id: string } }>(
         `/v1/conversations/${activeCovAgent.conversationId}/messages`,
         { client_submission_id: randomUUID(), text: `ActiveCov #${i}`, transcript_epoch: 0 },
@@ -870,7 +900,11 @@ export async function runV2M1FullRuntimeBenchmark(
       );
       if (res.status === 201 && res.data.turn?.turn_id) {
         const settled = await waitTurnSettled(harness, activeCovAgent, res.data.turn.turn_id);
-        activeCoveredTelemetries.push(settled);
+        const gbInsp = await harness.fetchJson<GlobalBudgetInspectPayload>(
+          '/_test/global-budget/inspect',
+          {},
+        );
+        activeCoveredTelemetries.push({ agent: settled, globalBudget: gbInsp.data });
       }
     }
     if (holderPrep.data.result?.turnId) {
@@ -904,7 +938,7 @@ export async function runV2M1FullRuntimeBenchmark(
 
     const fastAckLatencies: number[] = [];
     const fastOverheadLatencies: number[] = [];
-    const fastTelemetries: BenchInspectPayload[] = [];
+    const fastTelemetries: BenchTelemetrySample[] = [];
     const gbCheckLatencies: number[] = [];
     const ttftLatencies: number[] = [];
     let fastOk = 0;
@@ -980,6 +1014,8 @@ export async function runV2M1FullRuntimeBenchmark(
           },
         );
         gbSuccess = auth.data.result.authorized === true;
+        const gbAuthorizedAt = performance.now();
+        gbCheckLatencies.push(gbAuthorizedAt - gbStart);
         await harness.fetchJson('/_test/global-budget/rpc', {
           method: 'settleGlobal',
           arg: {
@@ -992,8 +1028,9 @@ export async function runV2M1FullRuntimeBenchmark(
             reservedMicroUsd: 250,
           },
         });
+      } else {
+        gbCheckLatencies.push(performance.now() - gbStart);
       }
-      gbCheckLatencies.push(performance.now() - gbStart);
       if (gbSuccess) gbOk += 1;
       else gbErr += 1;
 
@@ -1002,6 +1039,7 @@ export async function runV2M1FullRuntimeBenchmark(
         tenantId: fastAgent.tenantId,
         agentId: fastAgent.agentId,
       });
+      await harness.fetchJson('/_test/global-budget/reset-telemetry', {});
       const workerId = `bench-fast-${i}`;
       const f0 = performance.now();
       const prep = await harness.fetchJson<{
@@ -1102,7 +1140,11 @@ export async function runV2M1FullRuntimeBenchmark(
           tenantId: fastAgent.tenantId,
           agentId: fastAgent.agentId,
         });
-        fastTelemetries.push(insp.data);
+        const gbInsp = await harness.fetchJson<GlobalBudgetInspectPayload>(
+          '/_test/global-budget/inspect',
+          {},
+        );
+        fastTelemetries.push({ agent: insp.data, globalBudget: gbInsp.data });
       } else {
         fastErr += 1;
       }
@@ -1522,7 +1564,7 @@ export async function runV2M1FullRuntimeBenchmark(
       targetComparison,
       caveats: [
         'All measurements ran on local single-host workerd (loopback TCP/DO IPC); never claim local latencies as Cloudflare global production SLAs.',
-        'GlobalBudgetDO SQLite row counts (8 read / 9 write per turn) reflect GlobalBudgetAuthorityCore statements measured in M0 without modifying production GlobalBudgetDO.',
+        'GlobalBudgetDO SQLite row counts (rowsRead / rowsWritten / statements) are measured live from local workerd SqlStorageCursor telemetry without modifying production GlobalBudgetDO.',
         edgeSseStreamProbe.sawDeltaEvent
           ? 'Edge SSE /v2/conversations/:id/messages/stream streamed turn.delta cleanly; 3-RPC Fast Path overhead was additionally isolated via AgentHeadDO + GlobalBudgetDO RPC.'
           : 'Edge SSE /v2/conversations/:id/messages/stream failed inside workerd without turn.delta; 3-RPC Fast Path was measured directly via AgentHeadDO + GlobalBudgetDO RPC.',

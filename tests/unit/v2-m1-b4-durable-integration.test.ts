@@ -40,6 +40,7 @@ function createStorage(): { db: DatabaseSync; storage: DurableObjectStorageLike 
     };
   };
   let inTx = false;
+  let armedAlarm: number | null = null;
   const storage: DurableObjectStorageLike = {
     sql: { exec },
     transactionSync<T>(closure: () => T): T {
@@ -59,9 +60,15 @@ function createStorage(): { db: DatabaseSync; storage: DurableObjectStorageLike 
         inTx = false;
       }
     },
-    getAlarm: () => Promise.resolve(null),
-    setAlarm: () => Promise.resolve(),
-    deleteAlarm: () => Promise.resolve(),
+    getAlarm: () => Promise.resolve(armedAlarm),
+    setAlarm: (ts: number | Date) => {
+      armedAlarm = ts instanceof Date ? ts.getTime() : ts;
+      return Promise.resolve();
+    },
+    deleteAlarm: () => {
+      armedAlarm = null;
+      return Promise.resolve();
+    },
   };
   applyAgentHeadMigrations(storage, [EVENT_RECOVERY_DO_MIGRATION], 1_000);
   return { db, storage };
@@ -421,7 +428,7 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
     expect(hooks.getCoverageRowSync()?.generation).toBe(1);
     await hooks.syncPlatformAlarm(80_000, 1_000);
     await hooks.relayBudgetSync(2_000);
-    expect(hooks.getCoverageRowSync()?.armed_alarm_at_ms).toBe(80_000);
+    expect(await storage.getAlarm()).toBe(80_000);
     db.close();
   });
 });

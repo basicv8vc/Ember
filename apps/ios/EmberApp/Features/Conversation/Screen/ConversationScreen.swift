@@ -9,6 +9,7 @@ struct ConversationScreen: View {
     var replyPreparingText: LocalizedStringKey = "conversation.reply.preparing"
     var replyStopText: LocalizedStringKey = "conversation.reply.stop"
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
+    var onRefresh: (() async -> Void)? = nil
 
     @FocusState private var composerIsFocused: Bool
     @State private var isAttachmentMenuPresented = false
@@ -46,7 +47,8 @@ struct ConversationScreen: View {
                 onStopGenerating: actions.stopGenerating,
                 replyPreparingText: replyPreparingText,
                 replyStopText: replyStopText,
-                emberMessageAuthorText: emberMessageAuthorText
+                emberMessageAuthorText: emberMessageAuthorText,
+                onRefresh: onRefresh
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }

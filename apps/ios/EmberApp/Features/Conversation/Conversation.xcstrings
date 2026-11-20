@@ -708,6 +708,18 @@
         "en" : { "stringUnit" : { "state" : "translated", "value" : "Close" } },
         "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "关闭" } }
       }
+    },
+    "conversation.live.refresh_unavailable" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Unable to reach Ember Cloud. Showing last synced messages." } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "暂时无法连接 Ember 云端，正在显示最近同步的消息。" } }
+      }
+    },
+    "conversation.live.refresh_retry" : {
+      "localizations" : {
+        "en" : { "stringUnit" : { "state" : "translated", "value" : "Retry" } },
+        "zh-Hans" : { "stringUnit" : { "state" : "translated", "value" : "重试" } }
+      }
     }
   },
   "version" : "1.0"

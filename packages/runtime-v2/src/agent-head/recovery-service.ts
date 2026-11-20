@@ -424,19 +424,42 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     }
 
     if (turn.lease_expires_at_ms !== null && nowMs >= turn.lease_expires_at_ms) {
-      const { anyUncertain } = this.settleOpenAttemptsForSubjectSync(
-        tenantId,
-        agentId,
-        'turn',
-        turn.id,
-        'not_sent',
-        'model_unavailable',
-        nowMs,
-      );
-
-      // Honest degradation: uncertain outbound call with NO resumable provider handle never blindly replays
+      const retryDecision = computePreDeadlineRetryAtMs(nowMs, turn.deadline_at_ms);
       const hasResumableHandle =
         turn.provider_job_handle !== null && turn.provider_job_handle.length > 0;
+
+      // A durable claim that crashed before the send gate has not spent its model
+      // attempt. Transfer the existing reservation, not a released attempt, to the
+      // next fenced lease. Never preserve an uncertain or expired grant for a send.
+      const latest = getLatestAttemptForSubjectSync(sql, 'turn', turn.id);
+      const reserved = listReservedAttemptsSync(sql, 'turn', turn.id);
+      const preserveUnsentReservation =
+        turn.execution_mode === 'durable_queue' &&
+        retryDecision.shouldRetry &&
+        !hasResumableHandle &&
+        latest !== null &&
+        reserved.length === 1 &&
+        reserved[0]?.operation_id === latest.operation_id &&
+        latest.state === 'reserved' &&
+        latest.send_started_at_ms === null &&
+        latest.send_authorizing_at_ms === null &&
+        (latest.budget_mode === 'disabled_echo_only' ||
+          (latest.global_grant_id !== null &&
+            latest.global_grant_expires_ms !== null &&
+            latest.global_grant_expires_ms >= turn.deadline_at_ms));
+      const { anyUncertain } = preserveUnsentReservation
+        ? { anyUncertain: false }
+        : this.settleOpenAttemptsForSubjectSync(
+            tenantId,
+            agentId,
+            'turn',
+            turn.id,
+            'not_sent',
+            'model_unavailable',
+            nowMs,
+          );
+
+      // Honest degradation: uncertain outbound call with NO resumable provider handle never blindly replays
       if (anyUncertain && !hasResumableHandle) {
         const { messageId } = insertEmberMessageSync({
           sql,
@@ -465,7 +488,6 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         return;
       }
 
-      const retryDecision = computePreDeadlineRetryAtMs(nowMs, turn.deadline_at_ms);
       if (!retryDecision.shouldRetry) {
         sql.exec(
           `UPDATE assistant_turns

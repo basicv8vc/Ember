@@ -2,6 +2,7 @@ import SwiftUI
 
 struct ProactiveSchedulesSheetView: View {
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scenePhase
     @Bindable var store: ProactiveScheduleStore
 
     @State private var selectedKind: ProactiveScheduleKind = .brief
@@ -102,6 +103,11 @@ struct ProactiveSchedulesSheetView: View {
             }
             .task {
                 await store.refresh()
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    Task { await store.refresh() }
+                }
             }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
@@ -222,30 +228,50 @@ struct ProactiveSchedulesSheetView: View {
         )
     }
 
-    private func buildCreateRequest() -> CreateProactiveScheduleRequestDTO {
-        let tz = TimeZone.current.identifier
-        let trigger: ProactiveScheduleTriggerInput
-        let deliveryMode: ProactiveDeliveryMode
+    static func defaultDeliveryMode(for kind: ProactiveScheduleKind) -> ProactiveDeliveryMode {
+        kind == .reminder ? .directReminder : .modelBrief
+    }
 
-        if selectedKind == .brief {
-            let comps = Calendar.current.dateComponents([.hour, .minute], from: dailyTime)
+    static func makeCreateRequest(
+        kind: ProactiveScheduleKind,
+        title: String,
+        prompt: String,
+        dailyTime: Date,
+        oneTimeFireAt: Date,
+        timeZone: TimeZone = .current,
+        calendar: Calendar = .current
+    ) -> CreateProactiveScheduleRequestDTO {
+        let tz = timeZone.identifier
+        let trigger: ProactiveScheduleTriggerInput
+        let deliveryMode = defaultDeliveryMode(for: kind)
+
+        if kind == .brief {
+            let comps = calendar.dateComponents([.hour, .minute], from: dailyTime)
             let minute = comps.minute ?? 0
             let hour = comps.hour ?? 8
             trigger = .cron(cronExpr: "\(minute) \(hour) * * *", timezone: tz)
-            deliveryMode = .modelBrief
         } else {
             trigger = .once(fireAt: oneTimeFireAt.ISO8601Format())
-            deliveryMode = .directReminder
         }
 
         return CreateProactiveScheduleRequestDTO(
-            kind: selectedKind,
-            title: trimmedTitle,
-            prompt: trimmedPrompt,
+            kind: kind,
+            title: title,
+            prompt: prompt,
             trigger: trigger,
             timezone: tz,
             misfirePolicy: .coalesceLatest,
             deliveryMode: deliveryMode
+        )
+    }
+
+    private func buildCreateRequest() -> CreateProactiveScheduleRequestDTO {
+        Self.makeCreateRequest(
+            kind: selectedKind,
+            title: trimmedTitle,
+            prompt: trimmedPrompt,
+            dailyTime: dailyTime,
+            oneTimeFireAt: oneTimeFireAt
         )
     }
 
@@ -298,13 +324,39 @@ struct ProactiveSchedulesSheetView: View {
                 .foregroundStyle(.secondary)
             }
 
-            if let latestSummary = schedule.latestRun?.summaryText, !latestSummary.isEmpty {
-                Text(latestSummary)
+            if let latestRun = schedule.latestRun {
+                if latestRun.status == "failed" || latestRun.status == "retryable_failed" {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.caption2)
+                        Text("schedules.last_run_failed", tableName: "Conversation")
+                        if let reason = latestRun.reasonCode, !reason.isEmpty {
+                            Text("(\(reason))")
+                                .font(.caption2.monospaced())
+                        }
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Color(uiColor: .systemOrange))
+                } else if let completedAt = latestRun.completedAt,
+                          let completedDate = ConversationCardFormatting.date(from: completedAt) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption2)
+                        Text("schedules.last_run", tableName: "Conversation")
+                        Text(completedDate, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .padding(8)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 8))
+                }
+
+                if let latestSummary = latestRun.summaryText, !latestSummary.isEmpty {
+                    Text(latestSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(8)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 8))
+                }
             }
 
             if !schedule.status.isTerminal {

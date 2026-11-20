@@ -313,11 +313,7 @@ export function createDurableExecutor(
             const job = await gateway.queryConversationJob(operationId, handle, signal);
             if (job.state === 'unavailable') return unknownOutcome(handle, 'JOB_UNAVAILABLE');
             if (job.state === 'completed') {
-              if (
-                claim.targetKind !== 'turn' &&
-                (job.result.output.kind === 'save_memory' ||
-                  job.result.output.kind === 'create_schedule')
-              ) {
+              if (claim.targetKind !== 'turn' && job.result.output.kind !== 'reply') {
                 return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
               }
               return {
@@ -388,7 +384,7 @@ export function createDurableExecutor(
                           enableProactiveScheduleTool: true,
                           currentTimeIso: new Date().toISOString(),
                         }
-                      : {}),
+                      : { allowDelegationTools: false }),
                     maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
                   },
                 },
@@ -396,11 +392,7 @@ export function createDurableExecutor(
               )) {
                 if (event.kind === 'job') handle = event.handle;
                 if (event.kind === 'result') {
-                  if (
-                    claim.targetKind !== 'turn' &&
-                    (event.result.output.kind === 'save_memory' ||
-                      event.result.output.kind === 'create_schedule')
-                  ) {
+                  if (claim.targetKind !== 'turn' && event.result.output.kind !== 'reply') {
                     return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
                   }
                   return {

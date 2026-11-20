@@ -157,8 +157,14 @@ export class OpenAiModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
+    const allowDelegation = input.allowDelegationTools !== false;
     const allowSavePersonalMemory = input.enablePersonalMemorySaveTool === true;
     const allowCreateProactiveSchedule = input.enableProactiveScheduleTool === true;
+    const tools = getConversationTools({
+      allowDelegation,
+      allowSavePersonalMemory,
+      allowCreateProactiveSchedule,
+    });
     const body = JSON.stringify({
       model: this.#modelId,
       messages: buildConversationTurnMessages(input),
@@ -166,13 +172,13 @@ export class OpenAiModelGateway implements ModelGateway {
       n: 1,
       stream: false,
       store: false,
-      tools: getConversationTools({ allowSavePersonalMemory, allowCreateProactiveSchedule }),
-      tool_choice: 'auto',
+      ...(tools.length > 0 ? { tools, tool_choice: 'auto' } : {}),
       ...rateRequestModifiers(this.#rate, 'openai'),
     });
 
     return await this.#sendChatCompletion(body, signal, (choice) =>
       parseConversationTurnChoice(choice, {
+        allowDelegation,
         allowSavePersonalMemory,
         allowCreateProactiveSchedule,
       }),

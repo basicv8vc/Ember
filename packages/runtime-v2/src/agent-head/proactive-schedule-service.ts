@@ -476,7 +476,13 @@ export class AgentHeadProactiveScheduleService {
     const { storage, eventCoordinator, recoveryHooks, nowMs } = this.deps;
     const preNow = nowMs();
     // Validate input & timezone/cron eagerly before coverage I/O.
-    normalizeCreateInput(cmd.input, preNow);
+    const preNormalized = normalizeCreateInput(cmd.input, preNow);
+    const hasExplicitAbsoluteFireTime =
+      cmd.input.trigger.type === 'once' ||
+      (cmd.input.trigger.type === 'interval' && cmd.input.trigger.firstFireAt !== undefined);
+    if (hasExplicitAbsoluteFireTime && preNormalized.firstFireAtMs < preNow - 5_000) {
+      throw new DomainError('INVALID_ARGUMENT', 'scheduled fire time must not be in the past');
+    }
 
     const deliveryMode = cmd.input.deliveryMode ?? defaultDeliveryMode(cmd.input.kind);
     const misfirePolicy = cmd.input.misfirePolicy ?? 'coalesce_latest';

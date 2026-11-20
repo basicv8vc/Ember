@@ -135,6 +135,53 @@ final class ProactiveScheduleTests: XCTestCase {
         XCTAssertFalse(store.isEndpointUnavailable)
     }
 
+    func testSchedulesComposerUsesModelBriefForFollowUpAndBriefAndDirectReminderForReminder() throws {
+        let tz = try XCTUnwrap(TimeZone(identifier: "America/Los_Angeles"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = tz
+        let dailyTime = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 11, day: 21, hour: 8, minute: 30)))
+        let fireAt = Date(timeIntervalSince1970: 1_795_255_200)
+
+        let followUpReq = ProactiveSchedulesSheetView.makeCreateRequest(
+            kind: .followUp,
+            title: "Follow up on Q4 budget",
+            prompt: "Summarize finance approval status",
+            dailyTime: dailyTime,
+            oneTimeFireAt: fireAt,
+            timeZone: tz,
+            calendar: calendar
+        )
+        XCTAssertEqual(followUpReq.kind, .followUp)
+        XCTAssertEqual(followUpReq.deliveryMode, .modelBrief)
+        XCTAssertEqual(followUpReq.trigger, .once(fireAt: fireAt.ISO8601Format()))
+
+        let reminderReq = ProactiveSchedulesSheetView.makeCreateRequest(
+            kind: .reminder,
+            title: "Call Alex",
+            prompt: "Call Alex at 4pm",
+            dailyTime: dailyTime,
+            oneTimeFireAt: fireAt,
+            timeZone: tz,
+            calendar: calendar
+        )
+        XCTAssertEqual(reminderReq.kind, .reminder)
+        XCTAssertEqual(reminderReq.deliveryMode, .directReminder)
+        XCTAssertEqual(reminderReq.trigger, .once(fireAt: fireAt.ISO8601Format()))
+
+        let briefReq = ProactiveSchedulesSheetView.makeCreateRequest(
+            kind: .brief,
+            title: "Morning Brief",
+            prompt: "Daily priorities",
+            dailyTime: dailyTime,
+            oneTimeFireAt: fireAt,
+            timeZone: tz,
+            calendar: calendar
+        )
+        XCTAssertEqual(briefReq.kind, .brief)
+        XCTAssertEqual(briefReq.deliveryMode, .modelBrief)
+        XCTAssertEqual(briefReq.trigger, .cron(cronExpr: "30 8 * * *", timezone: "America/Los_Angeles"))
+    }
+
     private func makeLiveRepository() throws -> LiveProactiveScheduleRepository {
         let session = StubSession.make()
         sessions.append(session)

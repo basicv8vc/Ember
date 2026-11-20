@@ -333,7 +333,8 @@ describe('Agent E — V2 proactive schedules runtime', () => {
     if (claim.kind !== 'claimed') throw new Error('expected claimed');
     expect(claim.targetKind).toBe('task');
 
-    const rawCtx = JSON.parse(claim.contextJson) as { inputJson?: string };
+    const rawCtx = JSON.parse(claim.contextJson) as { inputJson?: string; conversationId?: string };
+    expect(rawCtx.conversationId).toBe(h.conversationId);
     const proactivePayload = parseProactiveScheduleTaskInput(rawCtx.inputJson);
     expect(proactivePayload?.scheduleId).toBe(created.scheduleId);
     expect(proactivePayload?.deliveryMode).toBe('direct_reminder');
@@ -689,5 +690,55 @@ describe('Agent E — V2 proactive schedules runtime', () => {
       limit: 10,
     });
     expect(page.messages).toHaveLength(0);
+  });
+
+  it('rejects past absolute once.fireAt and interval.firstFireAt on proactiveSchedule create', async () => {
+    const h = createHarness(Date.parse('2026-11-20T08:00:00.000Z'));
+
+    await expect(
+      h.core.proactiveSchedule({
+        kind: 'create',
+        tenantId: h.tenantId,
+        principalId: h.principalId,
+        agentId: h.agentId,
+        requestId: randomUUID(),
+        input: {
+          idempotencyKey: 'past-once-1',
+          kind: 'reminder',
+          title: 'Past reminder',
+          prompt: 'Should be rejected',
+          trigger: { type: 'once', fireAt: '2026-11-20T07:59:00.000Z' },
+          timezone: 'UTC',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      diagnostic: 'scheduled fire time must not be in the past',
+    });
+
+    await expect(
+      h.core.proactiveSchedule({
+        kind: 'create',
+        tenantId: h.tenantId,
+        principalId: h.principalId,
+        agentId: h.agentId,
+        requestId: randomUUID(),
+        input: {
+          idempotencyKey: 'past-interval-1',
+          kind: 'follow_up',
+          title: 'Past interval',
+          prompt: 'Should be rejected',
+          trigger: {
+            type: 'interval',
+            intervalSeconds: 3600,
+            firstFireAt: '2026-11-20T07:50:00.000Z',
+          },
+          timezone: 'UTC',
+        },
+      }),
+    ).rejects.toMatchObject({
+      code: 'INVALID_ARGUMENT',
+      diagnostic: 'scheduled fire time must not be in the past',
+    });
   });
 });

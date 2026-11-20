@@ -52,6 +52,12 @@ export interface ConversationTurnInput {
   /** Bounded account-scoped user-requested preferences/facts, newest-updated first. */
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
   /**
+   * Controls whether conversation-only delegation tools (`delegate_notes_action_items`,
+   * `delegate_python_agent`) are advertised and accepted. Defaults to `true` for interactive
+   * conversations; set to `false` for non-conversation scheduled executions (`model_brief`).
+   */
+  readonly allowDelegationTools?: boolean;
+  /**
    * Explicit runtime capability gate for the closed `save_personal_memory` tool.
    * Defaults to `false` so V1 and non-conversation/scheduled executions never advertise or accept it.
    */

@@ -2193,6 +2193,38 @@
         }
       }
     },
+    "schedules.last_run": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last run:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上次执行："
+          }
+        }
+      }
+    },
+    "schedules.last_run_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Last run failed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上次执行失败"
+          }
+        }
+      }
+    },
     "schedules.action.pause": {
       "localizations": {
         "en": {

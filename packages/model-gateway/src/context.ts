@@ -32,6 +32,20 @@ export const CONVERSATION_SYSTEM_PROMPT = [
 ].join(' ');
 
 /**
+ * Fixed, code-owned system prompt for non-conversation scheduled executions (`model_brief`,
+ * `follow_up`). Omits conversation-only delegation instructions so scheduled executions never
+ * advertise or attempt interactive side-effect tools.
+ */
+export const SCHEDULED_BRIEF_SYSTEM_PROMPT = [
+  'You are Ember, a concise personal assistant delivering a scheduled brief or follow-up.',
+  "Reply in the user's language.",
+  'Be direct, accurate, and concise; prefer short paragraphs or bullets when helpful.',
+  'Use the provided saved preferences and recent conversation context when relevant.',
+  'If unsure, say so instead of inventing facts, dates, prices, or commitments.',
+  'Reply directly in plain text without invoking tools or claiming you started background tasks.',
+].join(' ');
+
+/**
  * Fixed, code-owned instruction appended ONLY when the runtime explicitly enables the closed
  * `save_personal_memory` tool on V2 user-initiated conversation turns. Scoped strictly to the
  * latest actual user message — never saved memories, prior history, or quoted/attached material.

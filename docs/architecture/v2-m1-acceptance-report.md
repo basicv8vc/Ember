@@ -1,13 +1,13 @@
 # Ember V2-M1 — Runtime Integration & Acceptance Report
 
-- **Status:** **M1 ACCEPTANCE: NO-GO (D6.3 EXECUTED ON REAL LOCAL `workerd` — 11/20 TEST CASES / 28 PASS, 10 FAIL, 1 N/A ACROSS 39 MATRIX ITEMS; 5 VERIFIED PRODUCT DEFECTS BLOCK RELEASE)**
-- **Date:** 2026-11-20 (historical D0/D1/D4/D5 sections below dated 2026-11-19 preserved)
+- **Status:** **M1 ACCEPTANCE: NO-GO (D7 ON `main @ 1131415`: 21/22 ACCEPTANCE TESTS PASS — ALL `F-1..F-23` & `FI-01..FI-16` PASS (`F-11` N/A VERIFIED), D6 DEFECTS #1–#5 FIXED; 1 NEW DEFECT #6 BLOCKS `D7 Step 4A`)**
+- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6 sections below preserved verbatim)
 - **Role:** Performance, Integration & Reliability Engineer (V2-M1-D)
-- **Tested `main` SHA:** `a537e4f8f3f43d69915cb51a2cf301bdd18b49f7` (post A+B+E+F merges; prior D0/D1 baseline `1ba860ce3cb4378ada3cdadf95aef311137c8321`, M0 `6da1b483b6a854199a0f2eef27e53abc770be6cc`)
+- **Latest Tested `main` SHA:** `1131415bd25ef3db7de5375a16735e3adf0974cf` (post-D6 fixes `#186`/`#187`; prior D6 `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`, D0/D1 `1ba860ce3cb4378ada3cdadf95aef311137c8321`, M0 `6da1b483b6a854199a0f2eef27e53abc770be6cc`)
 - **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
 
 > [!IMPORTANT]
-> **D6 Full Runtime Verdict (`main @ a537e4f`):** On `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`, all Agent A, B, E, and F modules are merged and were assembled into a real local Cloudflare `workerd` (`wrangler@4.158.0`) runtime ([runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts)). Full acceptance testing ([v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts)) and full performance benchmarking ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json)) ran end-to-end. While baseline build/unit/chaos/E2E gates and single-turn durable paths are healthy with `0` safety violations on passing paths, **5 concrete product/runtime defects** cause **9/20 acceptance test cases (10/39 matrix items)** to fail and cause Edge SSE streaming (`/v2/conversations/:id/messages/stream`) and covered D1-outage durability (`F-5`) to fail. **V2-M1 Verdict: NO-GO** until Defects #1–#5 are resolved by module owners. Historical D0/D1/D4/D5 sections (§0–§5) are preserved verbatim below for audit traceability, followed by complete D6 results (§6–§12).
+> **D7 Full Runtime Verdict (`main @ 1131415`):** Re-verification against real local `workerd` ([runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts) delegating directly to `apps/api/src/local-v2/worker.ts`) confirms that **all 5 D6 defects (#1–#5) are resolved**: **all 20 matrix tests (`F-1..F-23`, `FI-01..FI-16`, with `F-11` marked N/A + alternative verified) and `D7 Step 4B` PASS (`21/22` tests passing)**. However, **1 newly discovered runtime defect (Defect #6)** causes **`D7 Step 4A`** (pre-send crash recovery after `claimDurableWork` before `markAttemptSent`) to fail because `reconcileTurnSync` prematurely sets Attempt #1 to `released` on lease expiry without allocating a new reserved attempt for retry. Per D7 scope adjustment, Benchmark & Cost re-estimation are paused until Defect #6 is fixed. Historical D0–D6 evidence (§0–§12) is preserved below; see **§13** for complete D7 results and Defect #6 details.
 
 ---
 
@@ -332,3 +332,43 @@ Updated via `benchmarks/v2-m1/m1-cost-reestimation.json` using measured Covered 
 **Verdict: NO-GO for V2-M1 Production Release.**
 
 `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7` passes all static/unit/chaos/E2E gates and executes single-turn covered/uncovered durable paths, recovery alarms, Sweeper repairs, DLQ handling, DST schedules, and multi-agent load with zero duplicate commits or budget overcommits. However, **Defects #1–#5** cause **9/20 acceptance tests (10/39 matrix items)** to fail — specifically breaking Edge SSE streaming (`F-10`, `/v2/.../messages/stream`), covered-path D1-outage resilience (`F-5`, `FI-12`), concurrent uncovered idempotency/ceiling admission (`F-1`, `F-6`), HTTP domain error propagation (`F-2`, `F-3`, `F-16`), and cancellation guard reason reporting (`F-9`) — alongside `64` DO rowsWritten/event inflating Cloud costs beyond `$300` / `$3,500` targets at `10k–100k` MAU. Re-verification against real `workerd` is required after owner fixes land.
+
+---
+
+## 13. D7 — Re-Verification on `main @ 1131415bd25ef3db7de5375a16735e3adf0974cf`
+
+Per CTO D7 execution scope adjustment, acceptance verification ran directly against `main @ 1131415bd25ef3db7de5375a16735e3adf0974cf` (with [runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts) delegating `/v1/*` & `/v2/*` HTTP and Queue consumers directly to `apps/api/src/local-v2/worker.ts` and `AgentHeadDO` / `GlobalBudgetDO`). Performance Benchmark and Cost re-estimation are paused until Defect #6 is resolved.
+
+### 13.1 D7 Acceptance Matrix Tally (`21 / 22` Tests Passed)
+
+- **All 39 Matrix Items (`F-1..F-23`, `FI-01..FI-16`) — PASS (`38 PASS`, `1 N/A — Alternative Verified`):**
+  - **D6 Defects #1–#5 Verified Fixed:**
+    - **Defect #1 (`F-1`, `F-6`):** `F-1` (`1x 201 + 4x 200`, `totalCalls: 1`) and `F-6` (concurrent daily ceiling `429 BUDGET_EXCEEDED`, GlobalBudget unavailable `503`) **PASS**.
+    - **Defect #2 (`F-2`, `F-3`, `F-6`, `F-16`):** Edge DO RPC domain error propagation (`409 IDEMPOTENCY_CONFLICT`, `409` Stage 3 abort, `429 BUDGET_EXCEEDED`, `404 NOT_FOUND`) **PASS**.
+    - **Defect #3 (`F-5`, `FI-12`):** Covered path executes with `0` sync D1 ops during hard D1 outage and completes `unknown_billed` / `settled` recovery cleanly **PASS**.
+    - **Defect #4 (`F-10`, `F-15` Cross-Agent Halt):** Real `/v2/conversations/:id/messages/stream` SSE streaming, client disconnect handoff to `durable_turn`, single provider job poll, and `usage_missing` cross-agent incident halt **PASS**.
+    - **Defect #5 (`F-9`):** `markAttemptSent` prioritizes `cancelled` guard ahead of `already_sent` **PASS**.
+  - **Remaining Matrix Items (`F-4`, `F-7`, `F-8`, `F-11 [N/A alt verified]`, `F-12`, `F-13`, `F-14`, `F-15 [Grant Expiry]`, `F-17`, `F-18`, `F-19`, `F-20`, `F-21`, `F-22`, `F-23`, `FI-01..FI-16`):** All **PASS**.
+- **D7 Step 4B (`Crash after Provider send before Commit`) — PASS** (`1213ms` targeted run; `totalCalls === 1`, `unknown_billed` conservative `250` micro-USD settled, `0` duplicate sends).
+- **D7 Step 4A (`Crash after Claim before markAttemptSent` pre-send retry) — FAIL / BLOCKED (Defect #6)**.
+
+### 13.2 Newly Discovered Runtime Defect #6 (Blocking `D7 Step 4A`)
+
+6. **Defect #6 [High] — Pre-Send Durable Turn Retry Fails After Lease Expiry (`reconcileTurnSync` Releases Attempt #1 Without Allocating a New Reserved Attempt) (`D7 Step 4A`)**
+   - **Location:**
+     - [recovery-service.ts](../../packages/runtime-v2/src/agent-head/recovery-service.ts#L427-L519) (`reconcileTurnSync`)
+     - [recovery-service.ts](../../packages/runtime-v2/src/agent-head/recovery-service.ts#L1113-L1137) (`claimDurableWork`)
+     - [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L886-L888) (`markAttemptSent`)
+     - [durable-integration.ts](../../packages/runtime-v2/src/recovery/durable-integration.ts#L225-L245) (`executeRecoveredOrFreshDurableWork`)
+   - **Mechanism:**
+     1. After `claimDurableWork` claims epoch 1 (`turn.status = 'running'`, `claim_count = 1`) and crashes before `markAttemptSent` (`send_started_at_ms = NULL`), the 45s lease expires while still inside the 60s `deadline_at_ms`.
+     2. `AgentHeadDO.alarm()` executes `reconcileTurnSync`, which immediately calls `settleOpenAttemptsForSubjectSync(..., 'not_sent', 'model_unavailable', nowMs)` (`recovery-service.ts#L427-L435`), transitioning `model_attempts` attempt #1 to `state = 'released'`.
+     3. Because `!anyUncertain` and `computePreDeadlineRetryAtMs` returns `shouldRetry: true`, `reconcileTurnSync` (`L484-L518`) increments `lease_epoch` and enqueues `turn:<turnId>:epoch:<nextEpoch>` (`durable_turn`), **without** inserting/reserving a new `model_attempts` row (`attempt_no = 2`, `state = 'reserved'`).
+     4. On retry delivery, `claimDurableWork` (`L1113-L1137`) calls `getLatestAttemptForSubjectSync` and puts the **already-released** attempt #1 into `contextJson`.
+     5. `executeRecoveredOrFreshDurableWork` (`durable-integration.ts#L225`) calls `markAttemptSent({ attemptNo: 1, ... })`, which hits `attempt.state !== 'reserved'` (`turn-service.ts#L886-L888`) and rejects with `{ ok: false, reason: 'already_sent' }`.
+     6. `executeRecoveredOrFreshDurableWork` (`L244`) degrades to `uncertainOutcome(context)` (`unknown_billed`), causing `commitDurableResult` to fail the turn instead of retrying the provider send.
+   - **Reproduction:**
+     - Run `env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY -u all_proxy pnpm vitest run -c vitest.integration.config.ts tests/integration/v2-m1-full-runtime-acceptance.test.ts -t "D7 Step 4A"`.
+     - Or: submit `POST /v1/conversations/:id/messages` at `t0`, crash `claimDurableWork` at `after_claim_before_send`, advance clock to `t0 + 46_000` and invoke DO alarm (schedules retry at `t0 + 55_000`), advance clock to `t0 + 55_500` and invoke DO alarm (queue delivers retry).
+   - **Actual Result:** Retry `markAttemptSent` rejects attempt #1 (`state = 'released'`) with `already_sent`; provider is never invoked (`totalCalls === 0`); test times out at `15000ms` waiting for `turn.status === 'completed'` and `attempt.state === 'settled'`.
+   - **Expected Result:** Pre-send durable retry either allocates a fresh reserved `model_attempts` row (`attempt_no = 2` with active reservation/grant) before/on retry claim or preserves an open `reserved` attempt across pre-send retry so the retried queue worker calls the provider once (`totalCalls === 1`), completes the turn, and settles `165` micro-USD.

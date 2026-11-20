@@ -1,51 +1,40 @@
-import { DurableObject } from 'cloudflare:workers';
-import type { B1MeResponse } from '@ember/contracts';
-import {
-  FAKE_MODEL_LABEL,
-  FAKE_V2_RATE_VERSION,
-  LoopbackFakeModelGateway,
-  type FakeConversationJobStatus,
-} from '../../../../packages/model-gateway/src/index.js';
-import {
-  createB1SessionRuntime,
-  type B1SessionRuntime,
-} from '../../../../apps/api/src/auth/b1-auth-runtime.js';
-import type { DevProviderPolicy } from '../../../../apps/api/src/auth/dev-provider-policy.js';
-import { createLocalV2EdgeWorker } from '../../../../apps/api/src/local-v2/edge-worker.js';
-import type { EdgeAgentHeadRpc } from '../../../../apps/api/src/local-v2/rpc.js';
+// eslint-disable-next-line @typescript-eslint/triple-slash-reference -- Share minimal Cloudflare Workers ambient types without DOM collisions.
+/// <reference path="../../../../packages/runtime-v2/src/global-budget/cloudflare-workers.d.ts" />
+
+import { DomainError } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
   D1RecoveryRegistry,
   RecoverySweeper,
   createAgentHeadGlobalBudgetOptions,
-  executeRecoveredOrFreshDurableWork,
-  handleDurableDeadLetterBatch,
-  handleDurableQueueBatch,
-  parseClaimExecutionContext,
-  resolveDeadLetterRetrySchedule,
-  toAgentHeadDurableCommitOutcome,
-  type AgentHeadEventRuntimeBindings,
+  getHeadMetaSync,
   type AgentHeadRpc,
-  type AgentRecoveryTargetPort,
-  type BudgetSyncOutboxPayload,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
   type DurableObjectStorageLike,
-  type DurableProviderExecutorPort,
   type GlobalBudgetAuthority,
   type QueueLike,
   type QueueMessageLike,
-  type RecoveryRegistryPort,
   type SqlStorageCursorLike,
   type SqlStorageLike,
   type SqlStorageRow,
-  type V2DispatchEnvelope,
-  type V2QueueName,
-} from '../../../../packages/runtime-v2/src/index.js';
-import { GlobalBudgetDO } from '../../../../packages/runtime-v2/src/global-budget/worker.js';
+} from '@ember/runtime-v2';
+import {
+  AgentHeadDO as OfficialAgentHeadDO,
+  getHead,
+  type LocalRuntimeEnv,
+} from '../../../../apps/api/src/local-v2/runtime-head.js';
+import officialWorker from '../../../../apps/api/src/local-v2/runtime-worker.js';
 
-export { GlobalBudgetDO };
+type DurableObjectState = ConstructorParameters<typeof OfficialAgentHeadDO>[0];
+
+export { GlobalBudgetDO } from '../../../../apps/api/src/local-v2/runtime-worker.js';
+
+export interface FaultRuntimeEnv extends LocalRuntimeEnv {
+  readonly V2_FAULT_CONTROL_URL?: string;
+  readonly GLOBAL_DAILY_CEILING_MICRO_USD?: string;
+}
 
 interface FaultControlSnapshot {
   readonly d1Mode:
@@ -68,86 +57,120 @@ interface FaultControlSnapshot {
   readonly effectiveNowMs: number;
 }
 
-export interface WorkerDurableObjectId {
-  equals(other: WorkerDurableObjectId): boolean;
-  readonly name?: string;
+interface AgentTelemetry {
+  readonly sql: {
+    statements: number;
+    rowsRead: number;
+    rowsWritten: number;
+    alarmSetCalls: number;
+    alarmDeleteCalls: number;
+  };
+  d1Ops: number;
+  d1RowsRead: number;
+  d1RowsWritten: number;
+  readonly globalBudget: {
+    reserveCalls: number;
+    authorizeCalls: number;
+    renewCalls: number;
+    settleCalls: number;
+  };
+  queueSends: number;
+  alarmFiresObserved: number;
+  alarmSuccessCount: number;
+  alarmFailureCount: number;
 }
 
-export interface WorkerDurableObjectStorage extends DurableObjectStorageLike {
-  getAlarm(): Promise<number | null>;
-  setAlarm(scheduledTime: number | Date): Promise<void>;
-  deleteAlarm(): Promise<void>;
+const DEFAULT_FAULT: FaultControlSnapshot = {
+  d1Mode: 'healthy',
+  d1DelayMs: 0,
+  globalBudgetMode: 'healthy',
+  queueDuplicateCount: 1,
+  queueForceDlq: false,
+  crashPoint: 'none',
+  alarmFailRemaining: 0,
+  virtualNowMs: null,
+  effectiveNowMs: Date.now(),
+};
+
+const NATIVE_DATE_NOW = Date.now.bind(Date);
+let activeVirtualNowMs: number | null = null;
+
+function applyVirtualClock(virtualNowMs: number | null): void {
+  activeVirtualNowMs = virtualNowMs;
+  Date.now =
+    virtualNowMs !== null ? () => activeVirtualNowMs ?? NATIVE_DATE_NOW() : NATIVE_DATE_NOW;
 }
 
-export interface WorkerDurableObjectState {
-  readonly id: WorkerDurableObjectId;
-  readonly storage: WorkerDurableObjectStorage;
-  blockConcurrencyWhile<T>(callback: () => Promise<T>): Promise<T>;
+async function fetchFaultState(faultUrl: string | undefined): Promise<FaultControlSnapshot> {
+  if (!faultUrl) return { ...DEFAULT_FAULT, effectiveNowMs: NATIVE_DATE_NOW() };
+  try {
+    const res = await fetch(`${faultUrl}/faults/state`, { redirect: 'manual' });
+    if (!res.ok) return { ...DEFAULT_FAULT, effectiveNowMs: NATIVE_DATE_NOW() };
+    const snap = (await res.json()) as FaultControlSnapshot;
+    applyVirtualClock(snap.virtualNowMs ?? null);
+    return snap;
+  } catch {
+    return { ...DEFAULT_FAULT, effectiveNowMs: NATIVE_DATE_NOW() };
+  }
 }
 
-export interface WorkerDurableObjectNamespace<T> {
-  idFromName(name: string): WorkerDurableObjectId;
-  get(id: WorkerDurableObjectId): T;
-  getByName(name: string): T;
+async function consumeFaultCrash(faultUrl: string | undefined, hook: string): Promise<boolean> {
+  if (!faultUrl) return false;
+  const res = await fetch(`${faultUrl}/faults/consume-crash?hook=${encodeURIComponent(hook)}`, {
+    method: 'POST',
+    redirect: 'manual',
+  });
+  if (!res.ok) return false;
+  const data = (await res.json()) as { shouldCrash?: boolean };
+  return data.shouldCrash === true;
 }
 
-export interface WorkerExecutionContext {
-  waitUntil(promise: Promise<unknown>): void;
+async function consumeFaultAlarmFailure(faultUrl: string | undefined): Promise<boolean> {
+  if (!faultUrl) return false;
+  const res = await fetch(`${faultUrl}/faults/consume-alarm`, {
+    method: 'POST',
+    redirect: 'manual',
+  });
+  if (!res.ok) return false;
+  const data = (await res.json()) as { shouldFail?: boolean };
+  return data.shouldFail === true;
 }
 
-export interface WorkerMessageBatch<T = unknown> {
-  readonly queue: string;
-  readonly messages: ReadonlyArray<QueueMessageLike<T>>;
+function createEmptyTelemetry(): AgentTelemetry {
+  return {
+    sql: { statements: 0, rowsRead: 0, rowsWritten: 0, alarmSetCalls: 0, alarmDeleteCalls: 0 },
+    d1Ops: 0,
+    d1RowsRead: 0,
+    d1RowsWritten: 0,
+    globalBudget: { reserveCalls: 0, authorizeCalls: 0, renewCalls: 0, settleCalls: 0 },
+    queueSends: 0,
+    alarmFiresObserved: 0,
+    alarmSuccessCount: 0,
+    alarmFailureCount: 0,
+  };
 }
 
-export interface WorkerScheduledController {
-  readonly scheduledTime: number;
-  readonly cron: string;
-}
-
-export interface RuntimeWorkerEnv {
-  readonly AGENT_HEAD: WorkerDurableObjectNamespace<AgentHeadDO>;
-  readonly GLOBAL_BUDGET: WorkerDurableObjectNamespace<GlobalBudgetDO>;
-  readonly AUTH_SESSION: WorkerDurableObjectNamespace<AuthSessionDO>;
-  readonly D1_RECOVERY: D1DatabaseLike;
-  readonly DURABLE_TURN_QUEUE: QueueLike<V2DispatchEnvelope>;
-  readonly AGENT_TASK_QUEUE: QueueLike<V2DispatchEnvelope>;
-  readonly EMBER_ENV?: string;
-  readonly EMBER_MODEL_MODE?: string;
-  readonly FAKE_MODEL_GATEWAY_URL: string;
-  readonly V2_FAULT_CONTROL_URL: string;
-  readonly GLOBAL_DAILY_CEILING_MICRO_USD?: string;
-}
-
-interface SqlTelemetryTotals {
-  statements: number;
-  rowsRead: number;
-  rowsWritten: number;
-  alarmSetCalls: number;
-  alarmDeleteCalls: number;
-}
-
-function createInstrumentedStorage(
-  rawStorage: WorkerDurableObjectStorage,
-  totals: SqlTelemetryTotals,
-): DurableObjectStorageLike {
-  const sql: SqlStorageLike = {
+function wrapStorageWithTelemetry(
+  rawState: DurableObjectState,
+  telemetry: AgentTelemetry,
+): DurableObjectState {
+  const rawStorage = rawState.storage;
+  const sqlProxy: SqlStorageLike = {
     exec<T extends SqlStorageRow = SqlStorageRow>(
       query: string,
       ...bindings: unknown[]
     ): SqlStorageCursorLike<T> {
       const cursor = rawStorage.sql.exec<T>(query, ...bindings);
-      totals.statements += 1;
+      telemetry.sql.statements += 1;
       let recorded = false;
       const recordOnce = () => {
         if (!recorded) {
           recorded = true;
-          totals.rowsRead += cursor.rowsRead;
-          totals.rowsWritten += cursor.rowsWritten;
+          telemetry.sql.rowsRead += cursor.rowsRead;
+          telemetry.sql.rowsWritten += cursor.rowsWritten;
         }
       };
-      const isRead = /^\s*(SELECT|WITH|EXPLAIN|PRAGMA)\b/i.test(query);
-      if (!isRead) {
+      if (!/^\s*(SELECT|WITH|EXPLAIN|PRAGMA)\b/i.test(query)) {
         recordOnce();
       }
       return {
@@ -168,83 +191,72 @@ function createInstrumentedStorage(
           return cursor.rowsWritten;
         },
         [Symbol.iterator]() {
-          const iter = cursor[Symbol.iterator]();
-          return {
-            next() {
-              const res = iter.next();
-              if (res.done) {
-                recordOnce();
-              }
-              return res;
-            },
-          };
+          const rows = cursor.toArray();
+          recordOnce();
+          return rows[Symbol.iterator]();
         },
       };
     },
   };
 
-  return {
-    sql,
-    transactionSync<T>(closure: () => T): T {
-      return rawStorage.transactionSync(closure);
+  const storageProxy = new Proxy(rawStorage, {
+    get(target, prop, receiver) {
+      if (prop === 'sql') return sqlProxy;
+      if (prop === 'setAlarm') {
+        return async (scheduledTime: number | Date) => {
+          telemetry.sql.alarmSetCalls += 1;
+          return target.setAlarm(scheduledTime);
+        };
+      }
+      if (prop === 'deleteAlarm') {
+        return async () => {
+          telemetry.sql.alarmDeleteCalls += 1;
+          return target.deleteAlarm();
+        };
+      }
+      const val = Reflect.get(target, prop, receiver) as unknown;
+      return bindMember(target, val);
     },
-    getAlarm(): Promise<number | null> {
-      return rawStorage.getAlarm();
-    },
-    setAlarm(scheduledTime: number | Date): Promise<void> {
-      totals.alarmSetCalls += 1;
-      return rawStorage.setAlarm(scheduledTime);
-    },
-    deleteAlarm(): Promise<void> {
-      totals.alarmDeleteCalls += 1;
-      return rawStorage.deleteAlarm();
-    },
-  };
-}
-
-async function fetchFaultState(faultUrl: string): Promise<FaultControlSnapshot> {
-  const res = await fetch(`${faultUrl}/faults/state`);
-  if (!res.ok) {
-    throw new Error(`Fault control server returned ${res.status}`);
-  }
-  return (await res.json()) as FaultControlSnapshot;
-}
-
-async function consumeFaultCrash(faultUrl: string, hook: string): Promise<boolean> {
-  const res = await fetch(`${faultUrl}/faults/consume-crash?hook=${encodeURIComponent(hook)}`, {
-    method: 'POST',
   });
-  if (!res.ok) return false;
-  const body = (await res.json()) as { shouldCrash?: boolean };
-  return body.shouldCrash === true;
+
+  return new Proxy(rawState, {
+    get(target, prop, receiver) {
+      if (prop === 'storage') return storageProxy;
+      const val = Reflect.get(target, prop, receiver) as unknown;
+      return bindMember(target, val);
+    },
+  });
 }
 
-async function consumeFaultAlarmFailure(faultUrl: string): Promise<boolean> {
-  const res = await fetch(`${faultUrl}/faults/consume-alarm`, { method: 'POST' });
-  if (!res.ok) return false;
-  const body = (await res.json()) as { shouldFail?: boolean };
-  return body.shouldFail === true;
+function bindMember(target: object, val: unknown): unknown {
+  return typeof val === 'function' ? (val as (...args: unknown[]) => unknown).bind(target) : val;
 }
 
 function createFaultInjectedD1(
   rawDb: D1DatabaseLike,
+  faultUrl: string | undefined,
   getFault: () => FaultControlSnapshot,
-  onSyncOp: (rows?: { readonly read?: number; readonly written?: number }) => void,
+  onSyncOp: (meta?: { readonly read: number; readonly written: number }) => void,
 ): D1DatabaseLike {
   const extractMeta = (res: unknown): { readonly read: number; readonly written: number } => {
     if (res !== null && typeof res === 'object' && 'meta' in res) {
-      const meta = (res as { readonly meta?: { rows_read?: number; rows_written?: number } }).meta;
+      const m = (res as { meta?: { rows_read?: unknown; rows_written?: unknown } }).meta;
       return {
-        read: typeof meta?.rows_read === 'number' ? meta.rows_read : 0,
-        written: typeof meta?.rows_written === 'number' ? meta.rows_written : 0,
+        read: typeof m?.rows_read === 'number' ? m.rows_read : 0,
+        written: typeof m?.rows_written === 'number' ? m.rows_written : 0,
       };
     }
     return { read: 0, written: 0 };
   };
 
-  const wrapStmt = (stmt: D1PreparedStatementLike): D1PreparedStatementLike => {
+  const wrapStmt = (query: string, stmt: D1PreparedStatementLike): D1PreparedStatementLike => {
+    const isRegistryMutation =
+      /\b(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+v2_recovery_registry\b/i.test(query);
+
     const runWithFault = async <T>(execFn: () => Promise<T>): Promise<T> => {
-      onSyncOp();
+      if (isRegistryMutation && (await consumeFaultCrash(faultUrl, 'after_do_pending_before_d1'))) {
+        throw new Error('CRASH_AFTER_DO_PENDING_BEFORE_D1');
+      }
       const fault = getFault();
       if (fault.d1DelayMs > 0) {
         await new Promise((r) => setTimeout(r, fault.d1DelayMs));
@@ -260,16 +272,19 @@ function createFaultInjectedD1(
         throw new Error('D1_UNCERTAIN_TIMEOUT_COMMITTED');
       }
       const res = await execFn();
-      const m = extractMeta(res);
-      if (m.read > 0 || m.written > 0) {
-        onSyncOp(m);
+      const meta = extractMeta(res);
+      if (meta.read > 0 || meta.written > 0) {
+        onSyncOp(meta);
+      }
+      if (isRegistryMutation && (await consumeFaultCrash(faultUrl, 'after_d1_before_confirm'))) {
+        throw new Error('CRASH_AFTER_D1_BEFORE_CONFIRM');
       }
       return res;
     };
 
     return {
       bind(...values: unknown[]) {
-        return wrapStmt(stmt.bind(...values));
+        return wrapStmt(query, stmt.bind(...values));
       },
       first<T = unknown>(colName?: string): Promise<T | null> {
         return runWithFault(() =>
@@ -287,7 +302,7 @@ function createFaultInjectedD1(
 
   return {
     prepare(query: string) {
-      return wrapStmt(rawDb.prepare(query));
+      return wrapStmt(query, rawDb.prepare(query));
     },
     async batch<T = Record<string, unknown>>(statements: D1PreparedStatementLike[]) {
       onSyncOp();
@@ -303,12 +318,7 @@ function createFaultInjectedD1(
 function createFaultInjectedGlobalBudget(
   rawBudget: GlobalBudgetAuthority,
   getFault: () => FaultControlSnapshot,
-  counters: {
-    reserveCalls: number;
-    authorizeCalls: number;
-    renewCalls: number;
-    settleCalls: number;
-  },
+  counters: AgentTelemetry['globalBudget'],
 ): GlobalBudgetAuthority {
   return {
     async reserveGlobal(req) {
@@ -356,7 +366,9 @@ function createFaultInjectedGlobalBudget(
       if (fault.globalBudgetMode === 'conflict_payload') {
         return rawBudget.settleGlobal({
           ...req,
-          chargeMicroUsd: req.chargeMicroUsd + 777,
+          state: req.state === 'released' ? 'settled' : 'released',
+          chargeMicroUsd: req.state === 'released' ? 999 : 0,
+          ...(req.state === 'released' ? { observedCostMicroUsd: 999 } : {}),
         });
       }
       return rawBudget.settleGlobal(req);
@@ -364,52 +376,12 @@ function createFaultInjectedGlobalBudget(
   };
 }
 
-function createFaultInjectedRegistry(
-  rawRegistry: RecoveryRegistryPort,
-  faultUrl: string,
+function createFaultInjectedQueue<T>(
+  rawQueue: QueueLike<T>,
+  faultUrl: string | undefined,
   getFault: () => FaultControlSnapshot,
-): RecoveryRegistryPort {
-  return {
-    async upsertCoverage(cmd) {
-      if (await consumeFaultCrash(faultUrl, 'after_do_pending_before_d1')) {
-        throw new Error('CRASH_AFTER_DO_PENDING_BEFORE_D1');
-      }
-      const res = await rawRegistry.upsertCoverage(cmd);
-      if (await consumeFaultCrash(faultUrl, 'after_d1_before_confirm')) {
-        throw new Error('CRASH_AFTER_D1_BEFORE_CONFIRM');
-      }
-      return res;
-    },
-    async postponeCoverage(cmd) {
-      if (await consumeFaultCrash(faultUrl, 'after_do_pending_before_d1')) {
-        throw new Error('CRASH_AFTER_DO_PENDING_BEFORE_D1');
-      }
-      const res = await rawRegistry.postponeCoverage(cmd);
-      if (await consumeFaultCrash(faultUrl, 'after_d1_before_confirm')) {
-        throw new Error('CRASH_AFTER_D1_BEFORE_CONFIRM');
-      }
-      return res;
-    },
-    async retireCoverage(cmd) {
-      if (await consumeFaultCrash(faultUrl, 'after_do_pending_before_d1')) {
-        throw new Error('CRASH_AFTER_DO_PENDING_BEFORE_D1');
-      }
-      return rawRegistry.retireCoverage(cmd);
-    },
-    getCoverage(cmd) {
-      // Allow getCoverage on healthy or uncertain_timeout_committed recovery reads
-      void getFault();
-      return rawRegistry.getCoverage(cmd);
-    },
-  };
-}
-
-function createFaultInjectedQueue(
-  rawQueue: QueueLike<V2DispatchEnvelope>,
-  faultUrl: string,
-  getFault: () => FaultControlSnapshot,
-  counter: { sends: number },
-): QueueLike<V2DispatchEnvelope> {
+  onSend: () => void,
+): QueueLike<T> {
   return {
     async send(message, options) {
       if (await consumeFaultCrash(faultUrl, 'after_do_commit_before_queue_send')) {
@@ -418,7 +390,7 @@ function createFaultInjectedQueue(
       const fault = getFault();
       const dupCount = Math.max(1, fault.queueDuplicateCount || 1);
       for (let i = 0; i < dupCount; i += 1) {
-        counter.sends += 1;
+        onSend();
         await rawQueue.send(message, options);
       }
       if (await consumeFaultCrash(faultUrl, 'after_queue_send_before_outbox_update')) {
@@ -428,513 +400,157 @@ function createFaultInjectedQueue(
   };
 }
 
-// ============================================================================
-// AuthSessionDO — B1 session/provisioning persistence inside workerd SQLite
-// ============================================================================
-
-export class AuthSessionDO extends DurableObject<RuntimeWorkerEnv> {
-  constructor(ctx: WorkerDurableObjectState, env: RuntimeWorkerEnv) {
-    super(ctx as never, env);
-    void ctx.blockConcurrencyWhile(() => {
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS b1_identities (
-          provider TEXT NOT NULL,
-          provider_subject TEXT NOT NULL,
-          consumer_id TEXT NOT NULL,
-          tenant_id TEXT NOT NULL,
-          principal_id TEXT NOT NULL,
-          agent_id TEXT NOT NULL,
-          conversation_id TEXT NOT NULL,
-          policy_version INTEGER NOT NULL DEFAULT 1,
-          created_at TEXT NOT NULL,
-          PRIMARY KEY (provider, provider_subject)
-        );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_b1_identities_tenant ON b1_identities(tenant_id);
-        CREATE TABLE IF NOT EXISTS b1_sessions (
-          session_id TEXT PRIMARY KEY,
-          family_id TEXT NOT NULL,
-          consumer_id TEXT NOT NULL,
-          tenant_id TEXT NOT NULL,
-          principal_id TEXT NOT NULL,
-          policy_version INTEGER NOT NULL,
-          token_digest_hex TEXT NOT NULL UNIQUE,
-          replaced_by_hex TEXT,
-          revoked_at_ms INTEGER,
-          expires_at TEXT NOT NULL,
-          idle_expires_at TEXT NOT NULL,
-          created_at_ms INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS idx_b1_sessions_family ON b1_sessions(family_id);
-        CREATE INDEX IF NOT EXISTS idx_b1_sessions_consumer ON b1_sessions(consumer_id);
-      `);
-      return Promise.resolve();
-    });
-  }
-
-  async provisionIdentityAndCreateSession(cmd: {
-    readonly provider: 'apple' | 'dev';
-    readonly providerSubject: string;
-    readonly tokenDigestHex: string;
-    readonly expiresAt: string;
-    readonly idleExpiresAt: string;
-  }) {
-    let identity = this.ctx.storage.sql
-      .exec<{
-        consumer_id: string;
-        tenant_id: string;
-        principal_id: string;
-        agent_id: string;
-        conversation_id: string;
-        policy_version: number;
-      }>(
-        `SELECT consumer_id, tenant_id, principal_id, agent_id, conversation_id, policy_version
-           FROM b1_identities WHERE provider = ? AND provider_subject = ?`,
-        cmd.provider,
-        cmd.providerSubject,
-      )
-      .toArray()[0];
-
-    let isNew = false;
-    if (identity === undefined) {
-      isNew = true;
-      identity = {
-        consumer_id: crypto.randomUUID(),
-        tenant_id: crypto.randomUUID(),
-        principal_id: crypto.randomUUID(),
-        agent_id: crypto.randomUUID(),
-        conversation_id: crypto.randomUUID(),
-        policy_version: 1,
-      };
-      this.ctx.storage.sql.exec(
-        `INSERT INTO b1_identities (
-           provider, provider_subject, consumer_id, tenant_id, principal_id,
-           agent_id, conversation_id, policy_version, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        cmd.provider,
-        cmd.providerSubject,
-        identity.consumer_id,
-        identity.tenant_id,
-        identity.principal_id,
-        identity.agent_id,
-        identity.conversation_id,
-        identity.policy_version,
-        new Date().toISOString(),
-      );
-    }
-
-    if (isNew) {
-      const head = this.env.AGENT_HEAD.get(
-        this.env.AGENT_HEAD.idFromName(`${identity.tenant_id}:${identity.agent_id}`),
-      );
-      await head.bootstrapHead({
-        tenantId: identity.tenant_id,
-        agentId: identity.agent_id,
-        conversationId: identity.conversation_id,
-        policyVersion: identity.policy_version,
-      });
-    }
-
-    const sessionId = crypto.randomUUID();
-    const nowMs = Date.now();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO b1_sessions (
-         session_id, family_id, consumer_id, tenant_id, principal_id, policy_version,
-         token_digest_hex, replaced_by_hex, revoked_at_ms, expires_at, idle_expires_at, created_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
-      sessionId,
-      sessionId,
-      identity.consumer_id,
-      identity.tenant_id,
-      identity.principal_id,
-      identity.policy_version,
-      cmd.tokenDigestHex,
-      cmd.expiresAt,
-      cmd.idleExpiresAt,
-      nowMs,
-    );
-
-    return {
-      identity: {
-        consumerId: identity.consumer_id,
-        tenantId: identity.tenant_id,
-        principalId: identity.principal_id,
-        agentId: identity.agent_id,
-        conversationId: identity.conversation_id,
-      },
-      session: {
-        sessionId,
-        consumerId: identity.consumer_id,
-        tenantId: identity.tenant_id,
-        expiresAt: cmd.expiresAt,
-        idleExpiresAt: cmd.idleExpiresAt,
-        revokedAt: null,
-      },
-    };
-  }
-
-  findActiveSession(tokenDigestHex: string) {
-    return Promise.resolve(
-      this.ctx.storage.transactionSync(() => {
-        const row = this.ctx.storage.sql
-          .exec<{
-            session_id: string;
-            family_id: string;
-            consumer_id: string;
-            tenant_id: string;
-            principal_id: string;
-            policy_version: number;
-            replaced_by_hex: string | null;
-            revoked_at_ms: number | null;
-            expires_at: string;
-            idle_expires_at: string;
-          }>(`SELECT * FROM b1_sessions WHERE token_digest_hex = ?`, tokenDigestHex)
-          .toArray()[0];
-        if (row === undefined) return null;
-        if (row.replaced_by_hex !== null) {
-          // Reuse of a rotated token revokes the entire session family
-          this.ctx.storage.sql.exec(
-            `UPDATE b1_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE family_id = ?`,
-            Date.now(),
-            row.family_id,
-          );
-          return null;
-        }
-        if (row.revoked_at_ms !== null) return null;
-        const now = Date.now();
-        if (Date.parse(row.expires_at) <= now || Date.parse(row.idle_expires_at) <= now) {
-          return null;
-        }
-        return {
-          session: {
-            sessionId: row.session_id,
-            consumerId: row.consumer_id,
-            tenantId: row.tenant_id,
-            expiresAt: row.expires_at,
-            idleExpiresAt: row.idle_expires_at,
-            revokedAt: null,
-          },
-          principalId: row.principal_id,
-          policyVersion: row.policy_version,
-        };
-      }),
-    );
-  }
-
-  rotateSession(cmd: {
-    readonly currentTokenDigestHex: string;
-    readonly newTokenDigestHex: string;
-    readonly expiresAt: string;
-    readonly idleExpiresAt: string;
-  }) {
-    return Promise.resolve(
-      this.ctx.storage.transactionSync(() => {
-        const row = this.ctx.storage.sql
-          .exec<{
-            session_id: string;
-            family_id: string;
-            consumer_id: string;
-            tenant_id: string;
-            principal_id: string;
-            policy_version: number;
-            replaced_by_hex: string | null;
-            revoked_at_ms: number | null;
-            expires_at: string;
-            idle_expires_at: string;
-          }>(`SELECT * FROM b1_sessions WHERE token_digest_hex = ?`, cmd.currentTokenDigestHex)
-          .toArray()[0];
-        if (row === undefined) return { kind: 'inactive' as const };
-        if (row.replaced_by_hex !== null) {
-          this.ctx.storage.sql.exec(
-            `UPDATE b1_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE family_id = ?`,
-            Date.now(),
-            row.family_id,
-          );
-          return { kind: 'reuse_detected' as const };
-        }
-        if (row.revoked_at_ms !== null) return { kind: 'inactive' as const };
-        const now = Date.now();
-        if (Date.parse(row.expires_at) <= now || Date.parse(row.idle_expires_at) <= now) {
-          return { kind: 'inactive' as const };
-        }
-
-        const newSessionId = crypto.randomUUID();
-        this.ctx.storage.sql.exec(
-          `UPDATE b1_sessions SET replaced_by_hex = ? WHERE session_id = ?`,
-          cmd.newTokenDigestHex,
-          row.session_id,
-        );
-        this.ctx.storage.sql.exec(
-          `INSERT INTO b1_sessions (
-           session_id, family_id, consumer_id, tenant_id, principal_id, policy_version,
-           token_digest_hex, replaced_by_hex, revoked_at_ms, expires_at, idle_expires_at, created_at_ms
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
-          newSessionId,
-          row.family_id,
-          row.consumer_id,
-          row.tenant_id,
-          row.principal_id,
-          row.policy_version,
-          cmd.newTokenDigestHex,
-          cmd.expiresAt,
-          cmd.idleExpiresAt,
-          now,
-        );
-        return {
-          kind: 'rotated' as const,
-          session: {
-            sessionId: newSessionId,
-            consumerId: row.consumer_id,
-            tenantId: row.tenant_id,
-            expiresAt: cmd.expiresAt,
-            idleExpiresAt: cmd.idleExpiresAt,
-            revokedAt: null,
-          },
-        };
-      }),
-    );
-  }
-
-  revokeSession(cmd: { readonly sessionId: string; readonly tenantId: string }): Promise<void> {
-    this.ctx.storage.sql.exec(
-      `UPDATE b1_sessions SET revoked_at_ms = COALESCE(revoked_at_ms, ?) WHERE session_id = ? AND tenant_id = ?`,
-      Date.now(),
-      cmd.sessionId,
-      cmd.tenantId,
-    );
-    return Promise.resolve();
-  }
-
-  async getIdentityByTokenDigestHex(tokenDigestHex: string) {
-    const sess = this.ctx.storage.sql
-      .exec<{ tenant_id: string }>(
-        `SELECT tenant_id FROM b1_sessions WHERE token_digest_hex = ? AND revoked_at_ms IS NULL`,
-        tokenDigestHex,
-      )
-      .toArray()[0];
-    if (sess === undefined) return null;
-    return this.getIdentityForTenant(sess.tenant_id);
-  }
-
-  getIdentityForTenant(tenantId: string) {
-    return Promise.resolve(
-      this.ctx.storage.sql
-        .exec<{
-          consumer_id: string;
-          tenant_id: string;
-          principal_id: string;
-          agent_id: string;
-          conversation_id: string;
-          created_at: string;
-        }>(
-          `SELECT consumer_id, tenant_id, principal_id, agent_id, conversation_id, created_at
-             FROM b1_identities WHERE tenant_id = ?`,
-          tenantId,
-        )
-        .toArray()[0] ?? null,
-    );
-  }
+interface DoContext {
+  readonly rawState: DurableObjectState;
+  readonly wrappedState: DurableObjectState;
+  readonly rawBindings: FaultRuntimeEnv;
+  readonly faultBindings: FaultRuntimeEnv;
+  readonly telemetry: AgentTelemetry;
+  fault: FaultControlSnapshot;
 }
 
-// ============================================================================
-// AgentHeadDO — Real A + B + E integration inside workerd DO SQLite
-// ============================================================================
+const DO_CONTEXTS = new WeakMap<AgentHeadDO, DoContext>();
 
-export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
-  #core: AgentHeadCore | null = null;
-  #facade: AgentEventRuntimeFacade | null = null;
-  #faultSnapshot: FaultControlSnapshot = {
-    d1Mode: 'healthy',
-    d1DelayMs: 0,
-    globalBudgetMode: 'healthy',
-    queueDuplicateCount: 1,
-    queueForceDlq: false,
-    crashPoint: 'none',
-    alarmFailRemaining: 0,
-    virtualNowMs: null,
-    effectiveNowMs: Date.now(),
+function buildFaultContext(rawState: DurableObjectState, rawBindings: FaultRuntimeEnv) {
+  const telemetry = createEmptyTelemetry();
+  let fault: FaultControlSnapshot = { ...DEFAULT_FAULT, effectiveNowMs: NATIVE_DATE_NOW() };
+  const recordD1Op = (meta?: { readonly read: number; readonly written: number }) => {
+    telemetry.d1Ops += 1;
+    telemetry.d1RowsRead += meta?.read ?? 0;
+    telemetry.d1RowsWritten += meta?.written ?? 0;
   };
-  #telemetry: {
-    sql: SqlTelemetryTotals;
-    d1Ops: number;
-    d1RowsRead: number;
-    d1RowsWritten: number;
-    globalBudget: {
-      reserveCalls: number;
-      authorizeCalls: number;
-      renewCalls: number;
-      settleCalls: number;
-    };
-    queueSends: number;
-    alarmFiresObserved: number;
-    alarmSuccessCount: number;
-    alarmFailureCount: number;
-  } = {
-    sql: { statements: 0, rowsRead: 0, rowsWritten: 0, alarmSetCalls: 0, alarmDeleteCalls: 0 },
-    d1Ops: 0,
-    d1RowsRead: 0,
-    d1RowsWritten: 0,
-    globalBudget: { reserveCalls: 0, authorizeCalls: 0, renewCalls: 0, settleCalls: 0 },
-    queueSends: 0,
-    alarmFiresObserved: 0,
-    alarmSuccessCount: 0,
-    alarmFailureCount: 0,
+  const wrappedState = wrapStorageWithTelemetry(rawState, telemetry);
+  const faultD1 = createFaultInjectedD1(
+    rawBindings.D1_RECOVERY,
+    rawBindings.V2_FAULT_CONTROL_URL,
+    () => fault,
+    recordD1Op,
+  );
+  const faultBindings: FaultRuntimeEnv = {
+    ...rawBindings,
+    D1_RECOVERY: faultD1,
+    GLOBAL_BUDGET: {
+      getByName: (name: string) =>
+        createFaultInjectedGlobalBudget(
+          rawBindings.GLOBAL_BUDGET.getByName(name),
+          () => fault,
+          telemetry.globalBudget,
+        ),
+    },
+    DURABLE_TURN_QUEUE: createFaultInjectedQueue(
+      rawBindings.DURABLE_TURN_QUEUE,
+      rawBindings.V2_FAULT_CONTROL_URL,
+      () => fault,
+      () => {
+        telemetry.queueSends += 1;
+      },
+    ),
+    AGENT_TASK_QUEUE: createFaultInjectedQueue(
+      rawBindings.AGENT_TASK_QUEUE,
+      rawBindings.V2_FAULT_CONTROL_URL,
+      () => fault,
+      () => {
+        telemetry.queueSends += 1;
+      },
+    ),
   };
-  #identity: { tenantId: string; agentId: string } | null = null;
 
-  constructor(ctx: WorkerDurableObjectState, env: RuntimeWorkerEnv) {
-    super(ctx as never, env);
-    void ctx.blockConcurrencyWhile(() => {
-      const hasMeta =
-        this.ctx.storage.sql
-          .exec<{ name: string }>(
-            `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_head_meta'`,
-          )
-          .toArray().length > 0;
-      if (hasMeta) {
-        const meta = this.ctx.storage.sql
-          .exec<{ tenant_id: string; agent_id: string }>(
-            `SELECT tenant_id, agent_id FROM agent_head_meta WHERE id = 1`,
-          )
-          .toArray()[0];
-        if (meta !== undefined) {
-          this.#identity = { tenantId: meta.tenant_id, agentId: meta.agent_id };
-          this.#ensureCore(meta.tenant_id, meta.agent_id);
-        }
-      } else if (ctx.id.name !== undefined && ctx.id.name.includes(':')) {
-        const [tenantId, agentId] = ctx.id.name.split(':');
-        if (tenantId && agentId) {
-          this.#identity = { tenantId, agentId };
-          this.#ensureCore(tenantId, agentId);
-        }
-      }
-      return Promise.resolve();
-    });
+  const ctx: DoContext = {
+    rawState,
+    wrappedState,
+    rawBindings,
+    faultBindings,
+    telemetry,
+    get fault() {
+      return fault;
+    },
+    set fault(next: FaultControlSnapshot) {
+      fault = next;
+    },
+  };
+  return { wrappedState, faultBindings, ctx };
+}
+
+/**
+ * Thin fault-injection & telemetry wrapper directly subclassing #184's official `AgentHeadDO`.
+ * All conversation, turn, queue, budget, and recovery logic executes inside #184 untouched.
+ */
+export class AgentHeadDO extends OfficialAgentHeadDO {
+  constructor(state: DurableObjectState, env: FaultRuntimeEnv) {
+    const built = buildFaultContext(state, env);
+    super(state, built.faultBindings);
+    (this as unknown as { state: DurableObjectState }).state = built.wrappedState;
+    DO_CONTEXTS.set(this, built.ctx);
+  }
+
+  #ctx(): DoContext {
+    const found = DO_CONTEXTS.get(this);
+    if (found === undefined) throw new Error('AgentHeadDO context not initialized');
+    return found;
   }
 
   async #refreshFaults(): Promise<FaultControlSnapshot> {
-    this.#faultSnapshot = await fetchFaultState(this.env.V2_FAULT_CONTROL_URL);
-    return this.#faultSnapshot;
+    const c = this.#ctx();
+    c.fault = await fetchFaultState(c.rawBindings.V2_FAULT_CONTROL_URL);
+    return c.fault;
   }
 
-  #nowMs = (): number => {
-    return this.#faultSnapshot.virtualNowMs ?? Date.now();
-  };
-
-  #recordD1Op = (rows?: { readonly read?: number; readonly written?: number }): void => {
-    if (rows === undefined) {
-      this.#telemetry.d1Ops += 1;
-      return;
-    }
-    this.#telemetry.d1RowsRead += rows.read ?? 0;
-    this.#telemetry.d1RowsWritten += rows.written ?? 0;
-  };
-
-  #ensureCore(
-    tenantId: string,
-    agentId: string,
-  ): {
-    core: AgentHeadCore;
-    facade: AgentEventRuntimeFacade;
-  } {
-    if (this.#core !== null && this.#facade !== null) {
-      return { core: this.#core, facade: this.#facade };
-    }
-
-    const storage = createInstrumentedStorage(this.ctx.storage, this.#telemetry.sql);
-    const d1 = createFaultInjectedD1(
-      this.env.D1_RECOVERY,
-      () => this.#faultSnapshot,
-      this.#recordD1Op,
-    );
-    const rawRegistry = new D1RecoveryRegistry(d1);
-    const recoveryRegistry = createFaultInjectedRegistry(
-      rawRegistry,
-      this.env.V2_FAULT_CONTROL_URL,
-      () => this.#faultSnapshot,
-    );
-    const globalOptions = createAgentHeadGlobalBudgetOptions(this.env);
-    const globalBudget = createFaultInjectedGlobalBudget(
-      globalOptions.globalBudget,
-      () => this.#faultSnapshot,
-      this.#telemetry.globalBudget,
-    );
-
-    let facade!: AgentEventRuntimeFacade;
-    const core = new AgentHeadCore({
-      storage,
-      tenantId,
-      agentId,
-      recoveryRegistry,
-      globalBudget,
-      globalDailyCeilingMicroUsd: globalOptions.globalDailyCeilingMicroUsd,
-      nowMs: this.#nowMs,
-      eventRuntimeFactory: (business): AgentHeadEventRuntimeBindings => {
-        facade = new AgentEventRuntimeFacade({
-          storage,
-          tenantId,
-          agentId,
+  #taskHarness(): { readonly core: AgentHeadCore; readonly facade: AgentEventRuntimeFacade } {
+    const c = this.#ctx();
+    const meta = getHeadMetaSync(c.rawState.storage.sql);
+    if (meta === null)
+      throw new Error('AgentHeadDO is not bootstrapped for task/schedule test helper');
+    const scope = { tenantId: meta.tenant_id, agentId: meta.agent_id };
+    let events!: AgentEventRuntimeFacade;
+    const core: AgentHeadCore = new AgentHeadCore({
+      ...scope,
+      storage: c.wrappedState.storage as unknown as DurableObjectStorageLike,
+      recoveryRegistry: new D1RecoveryRegistry(c.faultBindings.D1_RECOVERY),
+      ...createAgentHeadGlobalBudgetOptions(c.faultBindings),
+      eventRuntimeFactory: (business) => {
+        events = new AgentEventRuntimeFacade({
+          ...scope,
+          storage: c.wrappedState.storage,
           business,
         });
         return {
-          recoveryAdmission: facade.coverage,
-          eventCoordinator: facade.outbox,
-          recoveryHooks: facade.asTurnRecoveryHooks({
-            globalBudget: {
-              settleGlobal: (payload: BudgetSyncOutboxPayload) =>
-                core.createGlobalBudgetSettlePort().settleGlobal(payload),
-            },
+          recoveryAdmission: events.coverage,
+          eventCoordinator: events.outbox,
+          recoveryHooks: events.asTurnRecoveryHooks({
+            globalBudget: { settleGlobal: (payload) => settlePort.settleGlobal(payload) },
           }),
         };
       },
     });
-
-    this.#core = core;
-    this.#facade = facade;
-    this.#identity = { tenantId, agentId };
-    return { core, facade };
+    const settlePort = core.createGlobalBudgetSettlePort();
+    return { core, facade: events };
   }
 
-  #requireCore(): { core: AgentHeadCore; facade: AgentEventRuntimeFacade } {
-    if (this.#core !== null && this.#facade !== null) {
-      return { core: this.#core, facade: this.#facade };
-    }
-    if (this.#identity !== null) {
-      return this.#ensureCore(this.#identity.tenantId, this.#identity.agentId);
-    }
-    throw new Error('AgentHeadDO is not bootstrapped');
-  }
-
-  async bootstrapHead(input: {
-    readonly tenantId: string;
-    readonly agentId: string;
-    readonly conversationId: string;
-    readonly policyVersion?: number;
-  }) {
+  override async edgeRpc<K extends Parameters<OfficialAgentHeadDO['edgeRpc']>[0]>(
+    method: K,
+    req: Parameters<OfficialAgentHeadDO['edgeRpc']>[1],
+  ) {
+    const c = this.#ctx();
     await this.#refreshFaults();
-    const { core } = this.#ensureCore(input.tenantId, input.agentId);
-    return core.bootstrapHead({
-      conversationId: input.conversationId,
-      policyVersion: input.policyVersion ?? 1,
-    });
-  }
-
-  async prepareTurn(req: Parameters<AgentHeadRpc['prepareTurn']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.prepareTurn(req);
-  }
-
-  async markAttemptSent(req: Parameters<AgentHeadRpc['markAttemptSent']>[0]) {
-    await this.#refreshFaults();
-    if (await consumeFaultCrash(this.env.V2_FAULT_CONTROL_URL, 'after_prepare_before_mark_sent')) {
+    if (
+      method === 'markAttemptSent' &&
+      (await consumeFaultCrash(
+        c.rawBindings.V2_FAULT_CONTROL_URL,
+        'after_prepare_before_mark_sent',
+      ))
+    ) {
       throw new Error('CRASH_AFTER_PREPARE_BEFORE_MARK_SENT');
     }
-    const { core } = this.#requireCore();
-    const res = await core.markAttemptSent(req);
+    const res = await super.edgeRpc(method, req);
     if (
-      res.authorized &&
+      method === 'markAttemptSent' &&
+      'value' in res &&
+      typeof res.value === 'object' &&
+      res.value !== null &&
+      'authorized' in res.value &&
+      res.value.authorized === true &&
       (await consumeFaultCrash(
-        this.env.V2_FAULT_CONTROL_URL,
+        c.rawBindings.V2_FAULT_CONTROL_URL,
         'after_mark_sent_before_provider_fetch',
       ))
     ) {
@@ -943,167 +559,127 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
     return res;
   }
 
-  async renewTurnLease(req: Parameters<AgentHeadRpc['renewTurnLease']>[0]) {
+  override async recordTurnUsage(req: Parameters<OfficialAgentHeadDO['recordTurnUsage']>[0]) {
     await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.renewTurnLease(req);
+    return super.recordTurnUsage(req);
   }
 
-  async handoffTurnToDurable(req: Parameters<AgentHeadRpc['handoffTurnToDurable']>[0]) {
+  override async markAttemptSent(req: Parameters<OfficialAgentHeadDO['markAttemptSent']>[0]) {
+    const c = this.#ctx();
     await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.handoffTurnToDurable(req);
-  }
-
-  async commitTurn(req: Parameters<AgentHeadRpc['commitTurn']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.commitTurn(req);
-  }
-
-  async recordTurnUsage(req: {
-    readonly scope: { readonly tenantId: string; readonly agentId: string };
-    readonly turnId: string;
-    readonly attemptNo: number;
-    readonly operationId: string;
-    readonly observedCostMicroUsd: number;
-    readonly inputTokens?: number;
-    readonly outputTokens?: number;
-  }) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    await core.commitDurableResult({
-      tenantId: req.scope.tenantId,
-      agentId: req.scope.agentId,
-      entityType: 'turn',
-      entityId: req.turnId,
-      leaseEpoch: 0,
-      workerId: 'accounting-only',
-      outcome: {
-        attemptNo: req.attemptNo,
-        operationId: req.operationId,
-        settlement: {
-          state: 'settled',
-          outcomeCode: 'ok',
-          observedCostMicroUsd: req.observedCostMicroUsd,
-          ...(req.inputTokens !== undefined ? { inputTokens: req.inputTokens } : {}),
-          ...(req.outputTokens !== undefined ? { outputTokens: req.outputTokens } : {}),
-        },
-        status: 'aborted_for_retry_or_reconcile',
-      },
-    });
-  }
-
-  async cancelTurn(req: Parameters<AgentHeadRpc['cancelTurn']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.cancelTurn(req);
-  }
-
-  async clearTranscript(req: Parameters<AgentHeadRpc['clearTranscript']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.clearTranscript(req);
-  }
-
-  async getMainConversation(req: Parameters<AgentHeadRpc['getMainConversation']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.getMainConversation(req);
-  }
-
-  async readMessages(req: Parameters<AgentHeadRpc['readMessages']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.readMessages(req);
-  }
-
-  async findSubmissionReceipt(req: Parameters<AgentHeadRpc['findSubmissionReceipt']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.findSubmissionReceipt(req);
-  }
-
-  async getTurn(req: Parameters<AgentHeadRpc['getTurn']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.getTurn(req);
-  }
-
-  async claimDurableWork(cmd: Parameters<AgentHeadCore['claimDurableWork']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.claimDurableWork(cmd);
-  }
-
-  async commitDurableResult(cmd: Parameters<AgentHeadCore['commitDurableResult']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.commitDurableResult(cmd);
-  }
-
-  async reconcileFromRegistry(cmd: Parameters<AgentHeadCore['reconcileFromRegistry']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.reconcileFromRegistry(cmd);
-  }
-
-  async confirmRegistryPlan(cmd: Parameters<AgentHeadCore['confirmRegistryPlan']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.confirmRegistryPlan(cmd);
-  }
-
-  async onDispatchDeadLetter(cmd: {
-    readonly envelope: V2DispatchEnvelope;
-    readonly errorCode: string;
-    readonly nowMs: number;
-    readonly graceMs?: number;
-  }) {
-    await this.#refreshFaults();
-    const { core, facade } = this.#requireCore();
-    const decision = this.ctx.storage.transactionSync(() => {
-      const target = core.inspectOutboxTargetSync(cmd.envelope.entityKind, cmd.envelope.entityId);
-      const schedule = resolveDeadLetterRetrySchedule({
-        nowMs: cmd.nowMs,
-        deadlineAtMs: target.deadlineAtMs || cmd.nowMs + 10_000,
-        isTerminalOrCancelled: !target.exists || target.isTerminal || target.cancelRequested,
-        graceMs: cmd.graceMs,
-      });
-      if (schedule.action === 'ignored_stale_or_terminal') {
-        return { schedule, applied: false, nextAlarm: null as number | null };
-      }
-      const applied = facade.outbox.applyOutboxDeadLetterSync({
-        outboxId: cmd.envelope.eventId,
-        fenceEpoch: cmd.envelope.fenceEpoch,
-        errorCode: cmd.errorCode,
-        nextAttemptAtMs: schedule.alarmAtMs,
-        nowMs: cmd.nowMs,
-      });
-      const nextAlarm = applied ? facade.outbox.recomputeAlarmSync(cmd.nowMs) : null;
-      return { schedule, applied, nextAlarm };
-    });
-    if (decision.applied && decision.nextAlarm !== null) {
-      await facade.alarm.syncPlatformAlarm(decision.nextAlarm, cmd.nowMs);
+    if (
+      await consumeFaultCrash(c.rawBindings.V2_FAULT_CONTROL_URL, 'after_prepare_before_mark_sent')
+    ) {
+      throw new Error('CRASH_AFTER_PREPARE_BEFORE_MARK_SENT');
     }
-    return {
-      action: decision.schedule.action,
-      alarmAtMs: decision.nextAlarm,
+    const res = await super.markAttemptSent(req);
+    if (
+      res.authorized &&
+      (await consumeFaultCrash(
+        c.rawBindings.V2_FAULT_CONTROL_URL,
+        'after_mark_sent_before_provider_fetch',
+      ))
+    ) {
+      throw new Error('CRASH_AFTER_MARK_SENT_BEFORE_PROVIDER_FETCH');
+    }
+    return res;
+  }
+
+  override async claimDurableWork(req: Parameters<OfficialAgentHeadDO['claimDurableWork']>[0]) {
+    const c = this.#ctx();
+    await this.#refreshFaults();
+    const res = await super.claimDurableWork(req);
+    if (
+      res.kind === 'claimed' &&
+      (await consumeFaultCrash(c.rawBindings.V2_FAULT_CONTROL_URL, 'after_claim_before_send'))
+    ) {
+      throw new Error('CRASH_AFTER_CLAIM_BEFORE_SEND');
+    }
+    return res;
+  }
+
+  override async commitDurableResult(
+    req: Parameters<OfficialAgentHeadDO['commitDurableResult']>[0],
+  ) {
+    const c = this.#ctx();
+    await this.#refreshFaults();
+    if (await consumeFaultCrash(c.rawBindings.V2_FAULT_CONTROL_URL, 'after_claim_before_commit')) {
+      throw new Error('CRASH_AFTER_CLAIM_BEFORE_COMMIT');
+    }
+    const res = await super.commitDurableResult(req);
+    if (
+      await consumeFaultCrash(c.rawBindings.V2_FAULT_CONTROL_URL, 'after_commit_before_queue_ack')
+    ) {
+      throw new Error('CRASH_AFTER_COMMIT_BEFORE_QUEUE_ACK');
+    }
+    return res;
+  }
+
+  override async reconcileFromRegistry(
+    req: Parameters<OfficialAgentHeadDO['reconcileFromRegistry']>[0],
+  ) {
+    await this.#refreshFaults();
+    return super.reconcileFromRegistry(req);
+  }
+
+  override async confirmRegistryPlan(
+    req: Parameters<OfficialAgentHeadDO['confirmRegistryPlan']>[0],
+  ) {
+    await this.#refreshFaults();
+    return super.confirmRegistryPlan(req);
+  }
+
+  override async runRecoveryAlarmCycle(nowMs: number) {
+    const c = this.#ctx();
+    const snap = await this.#refreshFaults();
+    const effectiveNow = snap.virtualNowMs ?? nowMs;
+    c.telemetry.alarmFiresObserved += 1;
+    const recordFailure = () => {
+      c.telemetry.alarmFailureCount += 1;
+      c.rawState.storage.transactionSync(() => {
+        c.rawState.storage.sql.exec(
+          `UPDATE v2_recovery_coverage
+           SET alarm_fail_count = alarm_fail_count + 1, updated_at_ms = ?
+           WHERE id = 1`,
+          effectiveNow,
+        );
+      });
     };
+
+    if (await consumeFaultCrash(c.rawBindings.V2_FAULT_CONTROL_URL, 'alarm_exhaust_6_retries')) {
+      recordFailure();
+      throw new Error('SIMULATED_DO_ALARM_FAILURE');
+    }
+    if (await consumeFaultAlarmFailure(c.rawBindings.V2_FAULT_CONTROL_URL)) {
+      recordFailure();
+      throw new Error('SIMULATED_DO_ALARM_FAILURE');
+    }
+    try {
+      await super.runRecoveryAlarmCycle(effectiveNow);
+      c.telemetry.alarmSuccessCount += 1;
+    } catch (err) {
+      recordFailure();
+      throw err;
+    }
   }
 
-  async reserveTaskModelAttempt(cmd: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.reserveTaskModelAttempt(cmd);
+  async runTestRecoveryAlarmCycle(nowMs?: number): Promise<{ ok: boolean; error?: string }> {
+    const snap = await this.#refreshFaults();
+    const effectiveNow = nowMs ?? snap.virtualNowMs ?? NATIVE_DATE_NOW();
+    try {
+      await this.runRecoveryAlarmCycle(effectiveNow);
+      return { ok: true };
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) };
+    }
   }
 
-  async settleTaskModelAttempt(cmd: Parameters<AgentHeadCore['settleTaskModelAttempt']>[0]) {
-    await this.#refreshFaults();
-    const { core } = this.#requireCore();
-    return core.settleTaskModelAttempt(cmd);
+  override async alarm() {
+    const snap = await this.#refreshFaults();
+    await this.runRecoveryAlarmCycle(snap.virtualNowMs ?? NATIVE_DATE_NOW());
   }
 
+  // Test-only schedule & task helpers sharing the exact #184 SQLite storage (local HTTP worker lacks task/schedule routes).
   async createTestTask(cmd: {
     readonly tenantId: string;
     readonly agentId: string;
@@ -1114,17 +690,13 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
     readonly idempotencyKey: string;
     readonly deadlineAtMs: number | null;
   }) {
+    const c = this.#ctx();
     await this.#refreshFaults();
-    const { facade } = this.#requireCore();
-    const nowMs = this.#nowMs();
-    const d1 = createFaultInjectedD1(
-      this.env.D1_RECOVERY,
-      () => this.#faultSnapshot,
-      this.#recordD1Op,
-    );
-    const registry = new D1RecoveryRegistry(d1);
+    const nowMs = c.fault.virtualNowMs ?? NATIVE_DATE_NOW();
+    const { facade } = this.#taskHarness();
+    const registry = new D1RecoveryRegistry(c.faultBindings.D1_RECOVERY);
     const bound = (cmd.deadlineAtMs ?? nowMs + 60_000) + 45_000;
-    const plan = this.ctx.storage.transactionSync(() =>
+    const plan = c.rawState.storage.transactionSync(() =>
       facade.coverage.inspectCoverageSync(bound, nowMs),
     );
     if (plan.kind === 'register') {
@@ -1135,7 +707,7 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         recoveryAtMs: plan.targetAtMs,
         nowMs,
       });
-      this.ctx.storage.transactionSync(() => {
+      c.rawState.storage.transactionSync(() => {
         facade.coverage.confirmCoverageSync({
           generation: reg.currentGeneration,
           actualRecoveryAtMs: reg.actualRecoveryAtMs,
@@ -1145,8 +717,8 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         });
       });
     }
-    const alarmAtMs = this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec(
+    const alarmAtMs = c.rawState.storage.transactionSync(() => {
+      c.rawState.storage.sql.exec(
         `INSERT INTO tasks (
            id, kind, title, input_json, digest, idempotency_key, status,
            execution_path, execution_target, attempt_count, max_attempts,
@@ -1164,7 +736,7 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         nowMs,
       );
       const outboxId = `task:${cmd.taskId}:epoch:1`;
-      const env: V2DispatchEnvelope = {
+      const envPayload = {
         schemaVersion: 2,
         eventId: outboxId,
         tenantId: cmd.tenantId,
@@ -1179,7 +751,7 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         entityKind: 'task',
         entityId: cmd.taskId,
         queueName: 'agent_task',
-        payloadJson: JSON.stringify(env),
+        payloadJson: JSON.stringify(envPayload),
         fenceEpoch: 1,
         nextAttemptAtMs: nowMs,
       });
@@ -1193,26 +765,28 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
     readonly tenantId: string;
     readonly agentId: string;
     readonly scheduleId: string;
-    readonly sourceKind: 'commitment' | 'reminder' | 'deferred_task' | 'cleanup';
+    readonly sourceKind: Parameters<
+      AgentEventRuntimeFacade['schedules']['upsertScheduleSync']
+    >[0]['sourceKind'];
     readonly sourceId: string;
-    readonly scheduleKind: 'once' | 'interval' | 'cron_tz';
-    readonly intervalSeconds: number | null;
-    readonly cronExpr: string | null;
+    readonly scheduleKind: Parameters<
+      AgentEventRuntimeFacade['schedules']['upsertScheduleSync']
+    >[0]['scheduleKind'];
+    readonly intervalSeconds?: number | null;
+    readonly cronExpr?: string | null;
     readonly timezone?: string;
     readonly firstFireAtMs: number;
-    readonly misfirePolicy?: 'coalesce_latest' | 'fire_once' | 'skip_missed';
+    readonly misfirePolicy?: Parameters<
+      AgentEventRuntimeFacade['schedules']['upsertScheduleSync']
+    >[0]['misfirePolicy'];
   }) {
+    const c = this.#ctx();
     await this.#refreshFaults();
-    const { facade } = this.#requireCore();
-    const nowMs = this.#nowMs();
-    const d1 = createFaultInjectedD1(
-      this.env.D1_RECOVERY,
-      () => this.#faultSnapshot,
-      this.#recordD1Op,
-    );
-    const registry = new D1RecoveryRegistry(d1);
+    const nowMs = c.fault.virtualNowMs ?? NATIVE_DATE_NOW();
+    const { facade } = this.#taskHarness();
+    const registry = new D1RecoveryRegistry(c.faultBindings.D1_RECOVERY);
     const bound = cmd.firstFireAtMs + 45_000;
-    const plan = this.ctx.storage.transactionSync(() =>
+    const plan = c.rawState.storage.transactionSync(() =>
       facade.coverage.inspectCoverageSync(bound, nowMs),
     );
     if (plan.kind === 'register') {
@@ -1223,7 +797,7 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         recoveryAtMs: plan.targetAtMs,
         nowMs,
       });
-      this.ctx.storage.transactionSync(() => {
+      c.rawState.storage.transactionSync(() => {
         facade.coverage.confirmCoverageSync({
           generation: reg.currentGeneration,
           actualRecoveryAtMs: reg.actualRecoveryAtMs,
@@ -1233,7 +807,7 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         });
       });
     }
-    const alarmAtMs = this.ctx.storage.transactionSync(() => {
+    const alarmAtMs = c.rawState.storage.transactionSync(() => {
       facade.schedules.upsertScheduleSync({
         scheduleId: cmd.scheduleId,
         tenantId: cmd.tenantId,
@@ -1241,8 +815,8 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
         sourceKind: cmd.sourceKind,
         sourceId: cmd.sourceId,
         scheduleKind: cmd.scheduleKind,
-        intervalSeconds: cmd.intervalSeconds,
-        cronExpr: cmd.cronExpr,
+        intervalSeconds: cmd.intervalSeconds ?? null,
+        cronExpr: cmd.cronExpr ?? null,
         timezone: cmd.timezone ?? 'UTC',
         firstFireAtMs: cmd.firstFireAtMs,
         misfirePolicy: cmd.misfirePolicy ?? 'coalesce_latest',
@@ -1254,118 +828,20 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
     return { scheduleId: cmd.scheduleId, alarmAtMs };
   }
 
-  async runRecoveryAlarmCycle(nowMs?: number): Promise<{ ok: boolean; error?: string }> {
+  async reserveTaskModelAttempt(cmd: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) {
     await this.#refreshFaults();
-    const effectiveNow = nowMs ?? this.#nowMs();
-    try {
-      await this.#executeAlarmCycle(effectiveNow);
-      return { ok: true };
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) };
-    }
+    return this.#taskHarness().core.reserveTaskModelAttempt(cmd);
   }
 
-  override async alarm(): Promise<void> {
+  async settleTaskModelAttempt(cmd: Parameters<AgentHeadCore['settleTaskModelAttempt']>[0]) {
     await this.#refreshFaults();
-    await this.#executeAlarmCycle(this.#nowMs());
-  }
-
-  async #executeAlarmCycle(nowMs: number): Promise<void> {
-    this.#telemetry.alarmFiresObserved += 1;
-    const { core, facade } = this.#requireCore();
-    if (await consumeFaultCrash(this.env.V2_FAULT_CONTROL_URL, 'alarm_exhaust_6_retries')) {
-      this.#telemetry.alarmFailureCount += 1;
-      facade.alarm.recordAlarmFailureSync(nowMs);
-      throw new Error('SIMULATED_DO_ALARM_FAILURE');
-    }
-    if (await consumeFaultAlarmFailure(this.env.V2_FAULT_CONTROL_URL)) {
-      this.#telemetry.alarmFailureCount += 1;
-      facade.alarm.recordAlarmFailureSync(nowMs);
-      throw new Error('SIMULATED_DO_ALARM_FAILURE');
-    }
-
-    const d1 = createFaultInjectedD1(
-      this.env.D1_RECOVERY,
-      () => this.#faultSnapshot,
-      this.#recordD1Op,
-    );
-    const registry = createFaultInjectedRegistry(
-      new D1RecoveryRegistry(d1),
-      this.env.V2_FAULT_CONTROL_URL,
-      () => this.#faultSnapshot,
-    );
-    const qCounter = { sends: 0 };
-    const durableTurnQ = createFaultInjectedQueue(
-      this.env.DURABLE_TURN_QUEUE,
-      this.env.V2_FAULT_CONTROL_URL,
-      () => this.#faultSnapshot,
-      qCounter,
-    );
-    const agentTaskQ = createFaultInjectedQueue(
-      this.env.AGENT_TASK_QUEUE,
-      this.env.V2_FAULT_CONTROL_URL,
-      () => this.#faultSnapshot,
-      qCounter,
-    );
-    const globalOptions = createAgentHeadGlobalBudgetOptions(this.env);
-    const faultBudget = createFaultInjectedGlobalBudget(
-      globalOptions.globalBudget,
-      () => this.#faultSnapshot,
-      this.#telemetry.globalBudget,
-    );
-    const settlePort = {
-      settleGlobal: async (payload: BudgetSyncOutboxPayload) => {
-        const res = await faultBudget.settleGlobal({
-          tenantId: payload.tenantId,
-          operationId: payload.operationId,
-          settlementRevision: payload.settlementRevision,
-          globalGrantId: payload.globalGrantId,
-          state: payload.state,
-          observedCostMicroUsd: payload.observedCostMicroUsd,
-          chargeMicroUsd: payload.chargeMicroUsd,
-          reservedMicroUsd: payload.reservedMicroUsd,
-          ...(payload.openIncidentReason !== null
-            ? { openIncidentReason: payload.openIncidentReason }
-            : {}),
-        });
-        const accepted = (res.applied || res.alreadySettled) && !res.conflict;
-        if (accepted) {
-          this.ctx.storage.transactionSync(() => {
-            this.ctx.storage.sql.exec(
-              `UPDATE model_attempts
-                  SET global_synced_at_ms = ?
-                WHERE operation_id = ? AND settlement_revision <= ? AND global_synced_at_ms IS NULL`,
-              nowMs,
-              payload.operationId,
-              payload.settlementRevision,
-            );
-          });
-        }
-        return { accepted, conflict: res.conflict, alreadySettled: res.alreadySettled };
-      },
-    };
-
-    try {
-      await facade.handleAlarm({
-        nowMs,
-        queues: { durable_turn: durableTurnQ, agent_task: agentTaskQ },
-        globalBudget: settlePort,
-        registry,
-      });
-      this.#telemetry.queueSends += qCounter.sends;
-      this.#telemetry.alarmSuccessCount += 1;
-    } catch (err) {
-      this.#telemetry.queueSends += qCounter.sends;
-      this.#telemetry.alarmFailureCount += 1;
-      throw err;
-    } finally {
-      void core;
-    }
+    return this.#taskHarness().core.settleTaskModelAttempt(cmd);
   }
 
   async inspectState() {
-    const sql = this.ctx.storage.sql;
-    const safeRows = <T extends SqlStorageRow>(query: string): T[] => {
+    const c = this.#ctx();
+    const sql = c.rawState.storage.sql;
+    const safeRows = <T extends Record<string, SqlStorageValue>>(query: string): T[] => {
       try {
         return sql.exec<T>(query).toArray();
       } catch {
@@ -1373,8 +849,8 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
       }
     };
     return {
-      telemetry: this.#telemetry,
-      alarmArmedAtMs: await this.ctx.storage.getAlarm(),
+      telemetry: c.telemetry,
+      alarmArmedAtMs: await c.rawState.storage.getAlarm(),
       headMeta: safeRows('SELECT * FROM agent_head_meta'),
       conversations: safeRows('SELECT * FROM conversations'),
       messages: safeRows('SELECT * FROM conversation_messages ORDER BY sequence ASC'),
@@ -1392,213 +868,53 @@ export class AgentHeadDO extends DurableObject<RuntimeWorkerEnv> {
   }
 
   resetTelemetry() {
-    Object.assign(this.#telemetry.sql, {
+    const c = this.#ctx();
+    Object.assign(c.telemetry.sql, {
       statements: 0,
       rowsRead: 0,
       rowsWritten: 0,
       alarmSetCalls: 0,
       alarmDeleteCalls: 0,
     });
-    this.#telemetry.d1Ops = 0;
-    this.#telemetry.d1RowsRead = 0;
-    this.#telemetry.d1RowsWritten = 0;
-    Object.assign(this.#telemetry.globalBudget, {
+    c.telemetry.d1Ops = 0;
+    c.telemetry.d1RowsRead = 0;
+    c.telemetry.d1RowsWritten = 0;
+    Object.assign(c.telemetry.globalBudget, {
       reserveCalls: 0,
       authorizeCalls: 0,
       renewCalls: 0,
       settleCalls: 0,
     });
-    this.#telemetry.queueSends = 0;
-    this.#telemetry.alarmFiresObserved = 0;
-    this.#telemetry.alarmSuccessCount = 0;
-    this.#telemetry.alarmFailureCount = 0;
+    c.telemetry.queueSends = 0;
+    c.telemetry.alarmFiresObserved = 0;
+    c.telemetry.alarmSuccessCount = 0;
+    c.telemetry.alarmFailureCount = 0;
     return Promise.resolve({ ok: true });
   }
 }
 
-// ============================================================================
-// Worker Edge + Queue + Scheduled Entrypoint
-// ============================================================================
+type SqlStorageValue = string | number | ArrayBuffer | null;
 
-const ALLOW_DEV_POLICY: DevProviderPolicy = Object.freeze({
-  evaluate: () => ({ enabled: true, deniedBy: [] }),
-});
-
-function createSessionsAdapter(env: RuntimeWorkerEnv): B1SessionRuntime {
-  const authDo = env.AUTH_SESSION.get(env.AUTH_SESSION.idFromName('global-auth'));
-  const toHex = (bytes: Uint8Array): string =>
-    Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-
-  return createB1SessionRuntime({
-    ports: {
-      provisioning: {
-        provisionIdentityAndCreateSession: (cmd) =>
-          authDo.provisionIdentityAndCreateSession({
-            provider: cmd.provider,
-            providerSubject: cmd.providerSubject,
-            tokenDigestHex: toHex(cmd.tokenDigest),
-            expiresAt: cmd.expiresAt,
-            idleExpiresAt: cmd.idleExpiresAt,
-          }),
-      },
-      sessions: {
-        findActiveSession: (digest) => authDo.findActiveSession(toHex(digest)),
-        rotateSession: (cmd) =>
-          authDo.rotateSession({
-            currentTokenDigestHex: toHex(cmd.currentTokenDigest),
-            newTokenDigestHex: toHex(cmd.newTokenDigest),
-            expiresAt: cmd.expiresAt,
-            idleExpiresAt: cmd.idleExpiresAt,
-          }),
-        revokeSession: (cmd) => authDo.revokeSession(cmd),
-      },
-      me: {
-        async getMeForTenant(tenantId): Promise<B1MeResponse | null> {
-          const identity = await authDo.getIdentityForTenant(tenantId);
-          if (identity === null) return null;
-          const head = env.AGENT_HEAD.get(
-            env.AGENT_HEAD.idFromName(`${identity.tenant_id}:${identity.agent_id}`),
-          );
-          const conv = await head.getMainConversation({
-            tenantId: identity.tenant_id,
-            agentId: identity.agent_id,
-          });
-          return {
-            consumer_id: identity.consumer_id,
-            agent: {
-              agent_id: identity.agent_id,
-              display_name: 'Ember',
-            },
-            conversation: {
-              conversation_id: identity.conversation_id,
-              transcript_epoch: conv?.transcriptEpoch ?? 0,
-              created_at: identity.created_at,
-              updated_at: identity.created_at,
-            },
-          };
-        },
-      },
-    },
-    apple: { audience: 'com.ember.mobile' },
-    devProvider: ALLOW_DEV_POLICY,
-  });
-}
-
-function makeEdgeRpcAdapter(stub: AgentHeadDO): EdgeAgentHeadRpc {
-  return {
-    prepareTurn: (req) => stub.prepareTurn(req),
-    markAttemptSent: (req) => stub.markAttemptSent(req),
-    renewTurnLease: (req) => stub.renewTurnLease(req),
-    handoffTurnToDurable: (req) => stub.handoffTurnToDurable(req),
-    commitTurn: (req) => stub.commitTurn(req),
-    readMessages: (req) => stub.readMessages(req),
-    findSubmissionReceipt: (req) => stub.findSubmissionReceipt(req),
-    getTurn: (req) => stub.getTurn(req),
-    cancelTurn: (req) => stub.cancelTurn(req),
-    clearTranscript: (req) => stub.clearTranscript(req),
-  };
-}
-
-function createProviderExecutor(env: RuntimeWorkerEnv): DurableProviderExecutorPort {
-  const gateway = new LoopbackFakeModelGateway(env.FAKE_MODEL_GATEWAY_URL, (input, init) =>
-    fetch(input, init),
-  );
-  return {
-    async pollProviderJob(cmd) {
-      const status: FakeConversationJobStatus = await gateway.queryConversationJob(
-        cmd.operationId,
-        cmd.providerJobHandle,
-        cmd.signal ?? AbortSignal.timeout(10_000),
-      );
-      if (status.state === 'pending') {
-        throw new Error('PROVIDER_JOB_PENDING_RETRY');
-      }
-      if (status.state === 'unavailable') {
-        const usageStatus = await gateway.queryConversationUsage(
-          cmd.operationId,
-          cmd.signal ?? AbortSignal.timeout(10_000),
-        );
-        return {
-          status: 'unknown_billed',
-          operationId: cmd.operationId,
-          providerJobHandle: cmd.providerJobHandle,
-          outputJson: null,
-          errorCode: 'PROVIDER_HANDLE_UNAVAILABLE',
-          usage: usageStatus.state === 'completed' ? usageStatus.usage : null,
-        };
-      }
-      return {
-        status: 'succeeded',
-        operationId: cmd.operationId,
-        providerJobHandle: cmd.providerJobHandle,
-        outputJson: JSON.stringify({ text: status.result.output.text }),
-        errorCode: null,
-        usage: status.result.usage,
-      };
-    },
-
-    async startProviderJob(cmd) {
-      let prompt = 'durable turn';
-      if (cmd.inputJson) {
-        try {
-          const parsed = JSON.parse(cmd.inputJson) as
-            Array<{ text?: string }> | { prompt?: string };
-          if (Array.isArray(parsed)) {
-            prompt = parsed.at(-1)?.text ?? prompt;
-          } else if (typeof parsed?.prompt === 'string') {
-            prompt = parsed.prompt;
-          }
-        } catch {
-          // fallback
-        }
-      }
-
-      const res = await fetch(`${env.FAKE_MODEL_GATEWAY_URL}/v2/fake-model/complete`, {
-        method: 'POST',
-        headers: {
-          'content-type': 'application/json',
-          'x-ember-operation-id': cmd.operationId,
-          'x-ember-turn-id': cmd.entityId,
-        },
-        body: JSON.stringify({ prompt }),
-        signal: cmd.signal ?? AbortSignal.timeout(10_000),
-      });
-      if (!res.ok) {
-        return {
-          status: res.status === 503 || res.status === 429 ? 'retryable_failed' : 'failed',
-          operationId: cmd.operationId,
-          providerJobHandle: null,
-          outputJson: null,
-          errorCode: res.status === 504 ? 'TIMEOUT' : `HTTP_${res.status}`,
-          usage: null,
-        };
-      }
-      const data = (await res.json()) as {
-        providerJobHandle?: string | null;
-        text?: string;
-        usage?: { inputTokens: number; outputTokens: number; costMicroUsd: number } | null;
-      };
-      return {
-        status: 'succeeded',
-        operationId: cmd.operationId,
-        providerJobHandle: data.providerJobHandle ?? null,
-        outputJson: JSON.stringify({ text: data.text ?? 'Simulated durable reply.' }),
-        errorCode: null,
-        usage: data.usage ?? null,
-      };
-    },
-  };
+function unwrapEdgeRpc<T>(
+  res: { readonly value: T } | { readonly code: ConstructorParameters<typeof DomainError>[0] },
+): T {
+  if ('code' in res) {
+    throw new DomainError(res.code);
+  }
+  return res.value;
 }
 
 export default {
   async fetch(
     request: Request,
-    env: RuntimeWorkerEnv,
-    ctx: WorkerExecutionContext,
+    env: FaultRuntimeEnv,
+    ctx: { waitUntil(work: Promise<unknown>): void },
   ): Promise<Response> {
+    const fault = await fetchFaultState(env.V2_FAULT_CONTROL_URL);
     const url = new URL(request.url);
+
     if (url.pathname === '/v1/health') {
-      return Response.json({ ok: true, runtime: 'v2-m1-full-runtime', env: env.EMBER_ENV });
+      return Response.json({ ok: true, runtime: 'v2-m1-full-runtime-aligned', env: env.EMBER_ENV });
     }
 
     if (url.pathname.startsWith('/_test/')) {
@@ -1613,90 +929,116 @@ export default {
         const digestHex = Array.from(new Uint8Array(digestBuf), (b) =>
           b.toString(16).padStart(2, '0'),
         ).join('');
-        const authDo = env.AUTH_SESSION.get(env.AUTH_SESSION.idFromName('global-auth'));
-        const identity = await authDo.getIdentityByTokenDigestHex(digestHex);
-        if (identity === null) return Response.json({ error: 'NOT_FOUND' }, { status: 404 });
+        const row = await env.D1_RECOVERY.prepare(
+          `SELECT consumerId, tenantId, principalId, agentId FROM local_v2_sessions WHERE digest = ?`,
+        )
+          .bind(digestHex)
+          .first<{ consumerId: string; tenantId: string; principalId: string; agentId: string }>();
+        if (row === null) return Response.json({ error: 'NOT_FOUND' }, { status: 404 });
+        const conv = await getHead(env, row.tenantId, row.agentId).projectConversation({
+          tenantId: row.tenantId,
+          agentId: row.agentId,
+        });
         return Response.json({
-          consumerId: identity.consumer_id,
-          tenantId: identity.tenant_id,
-          principalId: identity.principal_id,
-          agentId: identity.agent_id,
-          conversationId: identity.conversation_id,
+          consumerId: row.consumerId,
+          tenantId: row.tenantId,
+          principalId: row.principalId,
+          agentId: row.agentId,
+          conversationId: conv?.conversation_id ?? null,
         });
       }
+
       if (url.pathname === '/_test/agent/inspect') {
-        const stub = env.AGENT_HEAD.get(
-          env.AGENT_HEAD.idFromName(`${String(payload.tenantId)}:${String(payload.agentId)}`),
-        );
+        const stub = getHead(env, String(payload.tenantId), String(payload.agentId)) as AgentHeadDO;
         return Response.json(await stub.inspectState());
       }
+
       if (url.pathname === '/_test/agent/reset-telemetry') {
-        const stub = env.AGENT_HEAD.get(
-          env.AGENT_HEAD.idFromName(`${String(payload.tenantId)}:${String(payload.agentId)}`),
-        );
+        const stub = getHead(env, String(payload.tenantId), String(payload.agentId)) as AgentHeadDO;
         return Response.json(await stub.resetTelemetry());
       }
+
       if (url.pathname === '/_test/agent/alarm') {
-        const stub = env.AGENT_HEAD.get(
-          env.AGENT_HEAD.idFromName(`${String(payload.tenantId)}:${String(payload.agentId)}`),
-        );
+        const stub = getHead(env, String(payload.tenantId), String(payload.agentId)) as AgentHeadDO;
         return Response.json(
-          await stub.runRecoveryAlarmCycle(
+          await stub.runTestRecoveryAlarmCycle(
             typeof payload.nowMs === 'number' ? payload.nowMs : undefined,
           ),
         );
       }
+
       if (url.pathname === '/_test/agent/rpc') {
-        const stub = env.AGENT_HEAD.get(
-          env.AGENT_HEAD.idFromName(`${String(payload.tenantId)}:${String(payload.agentId)}`),
-        );
+        const stub = getHead(env, String(payload.tenantId), String(payload.agentId)) as AgentHeadDO;
         const method = String(payload.method);
         const arg = payload.arg;
         try {
           let result: unknown;
           switch (method) {
             case 'prepareTurn':
-              result = await stub.prepareTurn(arg as Parameters<AgentHeadDO['prepareTurn']>[0]);
-              break;
-            case 'markAttemptSent':
-              result = await stub.markAttemptSent(
-                arg as Parameters<AgentHeadDO['markAttemptSent']>[0],
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc(
+                  'prepareTurn',
+                  arg as Parameters<AgentHeadRpc['prepareTurn']>[0],
+                ),
               );
               break;
             case 'renewTurnLease':
-              result = await stub.renewTurnLease(
-                arg as Parameters<AgentHeadDO['renewTurnLease']>[0],
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc(
+                  'renewTurnLease',
+                  arg as Parameters<AgentHeadRpc['renewTurnLease']>[0],
+                ),
               );
               break;
             case 'handoffTurnToDurable':
-              result = await stub.handoffTurnToDurable(
-                arg as Parameters<AgentHeadDO['handoffTurnToDurable']>[0],
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc(
+                  'handoffTurnToDurable',
+                  arg as Parameters<AgentHeadRpc['handoffTurnToDurable']>[0],
+                ),
               );
               break;
             case 'commitTurn':
-              result = await stub.commitTurn(arg as Parameters<AgentHeadDO['commitTurn']>[0]);
-              break;
-            case 'recordTurnUsage':
-              result = await stub.recordTurnUsage(
-                arg as Parameters<AgentHeadDO['recordTurnUsage']>[0],
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc('commitTurn', arg as Parameters<AgentHeadRpc['commitTurn']>[0]),
               );
               break;
             case 'cancelTurn':
-              result = await stub.cancelTurn(arg as Parameters<AgentHeadDO['cancelTurn']>[0]);
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc('cancelTurn', arg as Parameters<AgentHeadRpc['cancelTurn']>[0]),
+              );
               break;
             case 'clearTranscript':
-              result = await stub.clearTranscript(
-                arg as Parameters<AgentHeadDO['clearTranscript']>[0],
+              result = unwrapEdgeRpc(
+                await stub.edgeRpc(
+                  'clearTranscript',
+                  arg as Parameters<AgentHeadRpc['clearTranscript']>[0],
+                ),
+              );
+              break;
+            case 'markAttemptSent':
+              result = await stub.markAttemptSent(
+                arg as Parameters<OfficialAgentHeadDO['markAttemptSent']>[0],
+              );
+              break;
+            case 'recordTurnUsage':
+              result = await stub.recordTurnUsage(
+                arg as Parameters<OfficialAgentHeadDO['recordTurnUsage']>[0],
               );
               break;
             case 'reconcileFromRegistry':
               result = await stub.reconcileFromRegistry(
-                arg as Parameters<AgentHeadDO['reconcileFromRegistry']>[0],
+                arg as Parameters<OfficialAgentHeadDO['reconcileFromRegistry']>[0],
               );
               break;
             case 'claimDurableWork':
               result = await stub.claimDurableWork(
-                arg as Parameters<AgentHeadDO['claimDurableWork']>[0],
+                arg as Parameters<OfficialAgentHeadDO['claimDurableWork']>[0],
+              );
+              break;
+            case 'commitDurableResult':
+              result = await stub.commitDurableResult(
+                arg as Parameters<OfficialAgentHeadDO['commitDurableResult']>[0],
               );
               break;
             case 'reserveTaskModelAttempt':
@@ -1740,10 +1082,12 @@ export default {
           );
         }
       }
+
       if (url.pathname === '/_test/d1/inspect') {
         const rows = await env.D1_RECOVERY.prepare('SELECT * FROM v2_recovery_registry').all();
         return Response.json({ results: rows.results });
       }
+
       if (url.pathname === '/_test/d1/exec') {
         const sql = String(payload.sql);
         const bindings: unknown[] = Array.isArray(payload.bindings) ? payload.bindings : [];
@@ -1752,6 +1096,7 @@ export default {
           .all();
         return Response.json(res);
       }
+
       if (url.pathname === '/_test/global-budget/rpc') {
         const gb = createAgentHeadGlobalBudgetOptions(env).globalBudget;
         const method = String(payload.method);
@@ -1779,39 +1124,30 @@ export default {
             );
             break;
           default:
-            return Response.json(
-              { ok: false, error: `Unknown GlobalBudget method ${method}` },
-              { status: 400 },
-            );
+            return Response.json({ ok: false, error: `Unknown ${method}` }, { status: 400 });
         }
         return Response.json({ ok: true, result: res });
       }
-      if (url.pathname === '/_test/queue/send') {
-        const queueName = String(payload.queueName) as V2QueueName;
-        const q = queueName === 'agent_task' ? env.AGENT_TASK_QUEUE : env.DURABLE_TURN_QUEUE;
-        await q.send(payload.envelope as V2DispatchEnvelope);
-        return Response.json({ ok: true });
-      }
+
       if (url.pathname === '/_test/sweeper/run') {
-        const fault = await fetchFaultState(env.V2_FAULT_CONTROL_URL);
-        const d1 = createFaultInjectedD1(
+        const faultD1 = createFaultInjectedD1(
           env.D1_RECOVERY,
+          env.V2_FAULT_CONTROL_URL,
           () => fault,
           () => {},
         );
-        const registry = new D1RecoveryRegistry(d1);
         const sweeper = new RecoverySweeper({
-          db: d1,
-          registry,
+          db: faultD1,
+          registry: new D1RecoveryRegistry(faultD1),
           targets: {
-            getRecoveryTarget(tenantId, agentId): AgentRecoveryTargetPort {
-              const stub = env.AGENT_HEAD.get(env.AGENT_HEAD.idFromName(`${tenantId}:${agentId}`));
+            getRecoveryTarget(tenantId, agentId) {
+              const stub = getHead(env, tenantId, agentId) as AgentHeadDO;
               return {
                 reconcileFromRegistry: (req) => stub.reconcileFromRegistry(req),
                 confirmRegistryPlan: (req) => stub.confirmRegistryPlan(req),
                 runRecoveryAlarmCycle: async (ts) => {
-                  const res = await stub.runRecoveryAlarmCycle(ts);
-                  if (!res.ok) throw new Error(res.error ?? 'alarm cycle failed');
+                  const r = await stub.runTestRecoveryAlarmCycle(ts);
+                  if (!r.ok) throw new Error(r.error ?? 'alarm cycle failed');
                 },
               };
             },
@@ -1827,199 +1163,54 @@ export default {
         });
         return Response.json(res);
       }
+
       return Response.json({ error: 'UNKNOWN_TEST_ROUTE' }, { status: 404 });
     }
 
-    const sessions = createSessionsAdapter(env);
-    const authDo = env.AUTH_SESSION.get(env.AUTH_SESSION.idFromName('global-auth'));
-    const gateway = new LoopbackFakeModelGateway(env.FAKE_MODEL_GATEWAY_URL, (input, init) =>
-      fetch(input, init),
-    );
-
-    const edge = createLocalV2EdgeWorker({
-      sessions,
-      async resolveAgentHead(auth) {
-        const identity = await authDo.getIdentityForTenant(auth.tenantId);
-        if (identity === null) return null;
-        const stub = env.AGENT_HEAD.get(
-          env.AGENT_HEAD.idFromName(`${identity.tenant_id}:${identity.agent_id}`),
-        );
-        return {
-          agentId: identity.agent_id,
-          conversationId: identity.conversation_id,
-          rpc: makeEdgeRpcAdapter(stub),
-        };
-      },
-      stream: {
-        gateway,
-        async reportObservedUsage(receipt) {
-          const stub = env.AGENT_HEAD.get(
-            env.AGENT_HEAD.idFromName(`${receipt.scope.tenantId}:${receipt.scope.agentId}`),
-          );
-          await stub.recordTurnUsage(receipt);
-        },
-      },
-    });
-
-    return edge.fetch(request, env, ctx);
+    // Delegate all /v1/* and /v2/* endpoints directly to #184's official runtime worker!
+    return officialWorker.fetch(request, env, ctx);
   },
 
-  async queue(batch: WorkerMessageBatch<unknown>, env: RuntimeWorkerEnv): Promise<void> {
+  async queue(
+    batch: { readonly queue: string; readonly messages: readonly QueueMessageLike[] },
+    env: FaultRuntimeEnv,
+  ): Promise<void> {
     const fault = await fetchFaultState(env.V2_FAULT_CONTROL_URL);
-    const nowMs = () => fault.virtualNowMs ?? Date.now();
-    const workerId = `queue-worker-${crypto.randomUUID()}`;
-    const router = {
-      getAgentHeadRecoveryPort: (tenantId: string, agentId: string) =>
-        env.AGENT_HEAD.get(env.AGENT_HEAD.idFromName(`${tenantId}:${agentId}`)),
-      getDeadLetterPort: (tenantId: string, agentId: string) =>
-        env.AGENT_HEAD.get(env.AGENT_HEAD.idFromName(`${tenantId}:${agentId}`)),
-    };
-    const messages = batch.messages;
-
-    if (batch.queue === 'durable_turn_dlq' || batch.queue === 'agent_task_dlq') {
-      const expectedQueueName: V2QueueName =
-        batch.queue === 'durable_turn_dlq' ? 'durable_turn' : 'agent_task';
-      await handleDurableDeadLetterBatch({
-        expectedQueueName,
-        messages,
-        router,
-        nowMs,
-      });
-      return;
-    }
-
-    const queueName: V2QueueName = batch.queue === 'agent_task' ? 'agent_task' : 'durable_turn';
-    if (fault.queueForceDlq) {
-      for (const msg of messages) {
+    if (fault.queueForceDlq && (batch.queue === 'durable_turn' || batch.queue === 'agent_task')) {
+      for (const msg of batch.messages) {
         msg.retry({ delaySeconds: 0 });
       }
       return;
     }
-
-    const provider = createProviderExecutor(env);
-    await handleDurableQueueBatch({
-      queueName,
-      messages,
-      router,
-      workerId,
-      retryDelaySeconds: 1,
-      executor: {
-        async executeDurableWork(cmd) {
-          const context = parseClaimExecutionContext({
-            targetKind: cmd.targetKind,
-            targetId: cmd.targetId,
-            leaseEpoch: cmd.leaseEpoch,
-            contextJson: cmd.contextJson,
-          });
-          const head = env.AGENT_HEAD.get(
-            env.AGENT_HEAD.idFromName(`${cmd.tenantId}:${cmd.agentId}`),
-          );
-          if (cmd.targetKind === 'task') {
-            const principalId =
-              (
-                await env.AUTH_SESSION.get(
-                  env.AUTH_SESSION.idFromName('global-auth'),
-                ).getIdentityForTenant(cmd.tenantId)
-              )?.principal_id ?? crypto.randomUUID();
-            const parsedCtx = JSON.parse(cmd.contextJson) as { runId?: string };
-            const reserved = await head.reserveTaskModelAttempt({
-              tenantId: cmd.tenantId,
-              principalId,
-              agentId: cmd.agentId,
-              taskId: cmd.targetId,
-              runId: parsedCtx.runId ?? crypto.randomUUID(),
-              leaseEpoch: cmd.leaseEpoch,
-              providerId: 'fake',
-              modelLabel: FAKE_MODEL_LABEL,
-              rateVersion: FAKE_V2_RATE_VERSION,
-              budgetMode: 'simulated_full_protocol',
-              estimatedMicroUsd: 250,
-            });
-            if (reserved.kind !== 'reserved') {
-              return { status: 'failed', reasonCode: reserved.reason };
-            }
-            const taskCtx = {
-              ...context,
-              attemptNo: reserved.attemptNo,
-              operationId: reserved.operationId,
-            };
-            const outcome = await executeRecoveredOrFreshDurableWork({
-              context: taskCtx,
-              provider,
-              nowMs,
-              sendGate: {
-                scope: { tenantId: cmd.tenantId, agentId: cmd.agentId },
-                leaseEpoch: cmd.leaseEpoch,
-                leaseOwner: cmd.workerId,
-                leaseExpiresAtMs: cmd.leaseExpiresAtMs,
-                markAttemptSent: (req) => head.markAttemptSent(req),
-              },
-            });
-            return toAgentHeadDurableCommitOutcome({
-              targetKind: 'task',
-              context: taskCtx,
-              outcome,
-              modelLabel: FAKE_MODEL_LABEL,
-              simulated: true,
-            });
-          }
-
-          const outcome = await executeRecoveredOrFreshDurableWork({
-            context,
-            provider,
-            nowMs,
-            sendGate: {
-              scope: { tenantId: cmd.tenantId, agentId: cmd.agentId },
-              leaseEpoch: cmd.leaseEpoch,
-              leaseOwner: cmd.workerId,
-              leaseExpiresAtMs: cmd.leaseExpiresAtMs,
-              markAttemptSent: (req) => head.markAttemptSent(req),
-            },
-          });
-          if (outcome.status === 'retryable_failed') {
-            throw new Error(`DURABLE_RETRYABLE_PROVIDER_ERROR:${outcome.errorCode ?? 'unknown'}`);
-          }
-          return toAgentHeadDurableCommitOutcome({
-            targetKind: 'turn',
-            context,
-            outcome,
-            modelLabel: FAKE_MODEL_LABEL,
-            simulated: true,
-          });
-        },
-      },
-    });
+    return officialWorker.queue(batch, env);
   },
 
-  async scheduled(controller: WorkerScheduledController, env: RuntimeWorkerEnv): Promise<void> {
+  async scheduled(event: { readonly scheduledTime: number }, env: FaultRuntimeEnv): Promise<void> {
     const fault = await fetchFaultState(env.V2_FAULT_CONTROL_URL);
-    const d1 = createFaultInjectedD1(
+    const faultD1 = createFaultInjectedD1(
       env.D1_RECOVERY,
+      env.V2_FAULT_CONTROL_URL,
       () => fault,
       () => {},
     );
-    const registry = new D1RecoveryRegistry(d1);
-    const sweeper = new RecoverySweeper({
-      db: d1,
-      registry,
+    const envWithFaultD1: FaultRuntimeEnv = { ...env, D1_RECOVERY: faultD1 };
+    const effectiveNow = fault.virtualNowMs ?? event.scheduledTime;
+    await new RecoverySweeper({
+      db: faultD1,
+      registry: new D1RecoveryRegistry(faultD1),
       targets: {
-        getRecoveryTarget(tenantId, agentId): AgentRecoveryTargetPort {
-          const stub = env.AGENT_HEAD.get(env.AGENT_HEAD.idFromName(`${tenantId}:${agentId}`));
+        getRecoveryTarget: (tenantId, agentId) => {
+          const stub = getHead(envWithFaultD1, tenantId, agentId) as AgentHeadDO;
           return {
             reconcileFromRegistry: (req) => stub.reconcileFromRegistry(req),
             confirmRegistryPlan: (req) => stub.confirmRegistryPlan(req),
             runRecoveryAlarmCycle: async (ts) => {
-              const res = await stub.runRecoveryAlarmCycle(ts);
-              if (!res.ok) throw new Error(res.error ?? 'alarm cycle failed');
+              const r = await stub.runTestRecoveryAlarmCycle(ts);
+              if (!r.ok) throw new Error(r.error ?? 'alarm cycle failed');
             },
           };
         },
       },
-    });
-    const nowMs = fault.virtualNowMs ?? controller.scheduledTime;
-    await sweeper.sweepDueAgents({
-      sweeperId: `cron-${crypto.randomUUID()}`,
-      nowMs,
-    });
+    }).sweepDueAgents({ sweeperId: `cron-${crypto.randomUUID()}`, nowMs: effectiveNow });
   },
 };

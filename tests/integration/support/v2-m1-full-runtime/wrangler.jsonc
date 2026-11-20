@@ -2,27 +2,26 @@
   "name": "ember-v2-m1-full-runtime-acceptance",
   "main": "runtime-worker.ts",
   "compatibility_date": "2026-11-01",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "send_metrics": false,
   "durable_objects": {
     "bindings": [
       { "name": "AGENT_HEAD", "class_name": "AgentHeadDO" },
       { "name": "GLOBAL_BUDGET", "class_name": "GlobalBudgetDO" },
-      { "name": "AUTH_SESSION", "class_name": "AuthSessionDO" },
     ],
   },
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["AgentHeadDO", "GlobalBudgetDO", "AuthSessionDO"],
+      "new_sqlite_classes": ["AgentHeadDO", "GlobalBudgetDO"],
     },
   ],
   "d1_databases": [
     {
       "binding": "D1_RECOVERY",
-      "database_name": "ember-v2-m1-acceptance-d1",
-      "database_id": "00000000-0000-0000-0000-000000000020",
-      "migrations_dir": "migrations",
+      "database_name": "ember-local-v2-recovery",
+      "database_id": "00000000-0000-0000-0000-000000000010",
+      "migrations_dir": "../../../../packages/runtime-v2/migrations",
     },
   ],
   "queues": {

@@ -84,6 +84,7 @@ interface AgentInspectSnapshot {
     lease_epoch: number;
     lease_owner: string | null;
     lease_expires_at_ms: number | null;
+    claim_count: number;
     deadline_at_ms: number;
     provider_job_handle: string | null;
     handoff_reason: string | null;
@@ -428,6 +429,7 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
     expect(diffText.data.error.code).toBe('IDEMPOTENCY_CONFLICT');
 
     // F-2b: Differing attachment_ids via direct DO RPC -> IDEMPOTENCY_CONFLICT
+    const attId = randomUUID();
     const diffAtt = await agentRpc(harness, tenant, 'prepareTurn', {
       scope: {
         tenantId: tenant.tenantId,
@@ -441,7 +443,7 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
         client_submission_id: subId,
         text: 'Initial F-2 turn',
         transcript_epoch: 0,
-        attachment_ids: [randomUUID()],
+        attachment_ids: [attId],
       },
       workerId: 'w-f2',
       leaseMs: 45_000,
@@ -450,11 +452,11 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
       executionMode: 'fast_interactive',
       resolvedAttachments: [
         {
-          uploadId: randomUUID(),
-          filename: 'doc.txt',
-          mediaType: 'text/plain',
+          uploadId: attId,
+          filename: 'doc.png',
+          mediaType: 'image/png',
           sizeBytes: 12,
-          r2Key: 'r2/doc.txt',
+          r2Key: 'r2/doc.png',
           sha256: 'a'.repeat(64),
         },
       ],
@@ -1034,21 +1036,17 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
     expect(foreignTurn.status).toBe(404);
 
     // F-16: Refresh token rotation + reuse revokes entire session family
-    const refresh1 = await harness.fetchJson<{ access_token: string }>(
-      '/v1/auth/session/refresh',
-      {},
-      { authorization: `Bearer ${tenantB.accessToken}` },
-    );
+    const refresh1 = await harness.fetch('/v1/auth/session/refresh', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${tenantB.accessToken}` },
+    });
     expect(refresh1.status).toBe(200);
-    const newToken = refresh1.data.access_token;
+    const refreshData = (await refresh1.json()) as { access_token: string };
+    const newToken = refreshData.access_token;
     // Replay old token -> 401 AND revokes newToken!
     const reuseRes = await harness.fetch('/v1/auth/session/refresh', {
       method: 'POST',
-      headers: {
-        authorization: `Bearer ${tenantB.accessToken}`,
-        'content-type': 'application/json',
-      },
-      body: '{}',
+      headers: { authorization: `Bearer ${tenantB.accessToken}` },
     });
     expect(reuseRes.status).toBe(401);
     const afterReuse = await harness.fetch('/v1/me', {
@@ -1150,73 +1148,97 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
     expect(spend8[0]?.consumed_micro_usd).toBe(250);
   });
 
-  it('F-10: Client disconnect mid-stream hands off to Durable Queue, polls job handle once, commits zero duplicates', async () => {
-    const harness = await bootHarness();
-    const tenant = await createTenantSession(harness);
-    const fixedHandle = `job_f10_${randomUUID().slice(0, 8)}`;
-    harness.fakeGateway.setDefaultRule({
-      mode: 'slow_handoff',
-      delayMs: 1_500,
-      replyText: 'Recovered after SSE disconnect',
-      costMicroUsd: 165,
-      providerJobHandle: fixedHandle,
-    });
+  it(
+    'F-10: Client disconnect mid-stream hands off to Durable Queue, polls job handle once, commits zero duplicates',
+    { timeout: 145_000 },
+    async () => {
+      const harness = await bootHarness();
+      const tenant = await createTenantSession(harness);
+      const fixedHandle = `job_f10_${randomUUID().slice(0, 8)}`;
+      harness.fakeGateway.setDefaultRule({
+        mode: 'slow_handoff',
+        delayMs: 118_000,
+        completeOnPoll: true,
+        replyText: 'Recovered after SSE disconnect',
+        costMicroUsd: 165,
+        providerJobHandle: fixedHandle,
+      });
 
-    const subId = randomUUID();
-    const res = await harness.fetch(`/v2/conversations/${tenant.conversationId}/messages/stream`, {
-      method: 'POST',
-      headers: {
-        authorization: `Bearer ${tenant.accessToken}`,
-        'content-type': 'application/json',
-      },
-      body: JSON.stringify({
-        client_submission_id: subId,
-        text: 'Disconnect mid-stream F-10',
-        transcript_epoch: 0,
-      }),
-    });
-    expect(res.status).toBe(201);
-    const reader = (res.body as ReadableStream<Uint8Array>).getReader();
-    const decoder = new TextDecoder();
-    let seen = '';
-    while (!seen.includes('event: turn.delta')) {
-      const chunk = await reader.read();
-      expect(chunk.done).toBe(false);
-      seen += decoder.decode(chunk.value, { stream: true });
-    }
-    const frames = parseSseFrames(seen);
-    const receipt = B1SendMessageReceiptSchema.parse(
-      frames.find((f) => f.event === 'turn.accepted')!.data,
-    );
-    // Client disconnects mid-stream!
-    await reader.cancel();
+      const subId = randomUUID();
+      const connection = new AbortController();
+      const res = await harness.fetchOverHttp(
+        `/v2/conversations/${tenant.conversationId}/messages/stream`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${tenant.accessToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            client_submission_id: subId,
+            text: 'Disconnect mid-stream F-10',
+            transcript_epoch: 0,
+          }),
+          signal: connection.signal,
+        },
+      );
+      expect(res.status).toBe(201);
+      const reader = (res.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let seen = '';
+      while (!seen.includes('event: turn.delta')) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        seen += decoder.decode(chunk.value, { stream: true });
+      }
+      const frames = parseSseFrames(seen);
+      const receipt = B1SendMessageReceiptSchema.parse(
+        frames.find((f) => f.event === 'turn.accepted')!.data,
+      );
+      // Client disconnects mid-stream!
+      connection.abort();
+      await reader.cancel().catch(() => undefined);
 
-    const completed = await waitFor(async () => {
-      const tRes = await harness.fetchJson<{ status: string }>(
-        `/v1/conversations/${tenant.conversationId}/turns/${receipt.turn.turn_id}`,
+      const completed = await waitFor(
+        async () => {
+          const tRes = await harness.fetchJson<{ status: string }>(
+            `/v1/conversations/${tenant.conversationId}/turns/${receipt.turn.turn_id}`,
+            undefined,
+            { authorization: `Bearer ${tenant.accessToken}` },
+          );
+          return tRes.data.status === 'completed'
+            ? B1AssistantTurnDtoSchema.parse(tRes.data)
+            : null;
+        },
+        130_000,
+        250,
+      );
+      expect(completed.status).toBe('completed');
+
+      const pageRes = await harness.fetchJson(
+        `/v1/conversations/${tenant.conversationId}/messages?after=0&limit=50`,
         undefined,
         { authorization: `Bearer ${tenant.accessToken}` },
       );
-      return tRes.data.status === 'completed' ? B1AssistantTurnDtoSchema.parse(tRes.data) : null;
-    });
-    expect(completed.status).toBe('completed');
+      const page = B1ConversationPageSchema.parse(pageRes.data);
+      expect(page.messages).toHaveLength(2);
+      expect(page.messages[1]).toMatchObject({
+        kind: 'ember',
+        text: 'Recovered after SSE disconnect',
+      });
 
-    const pageRes = await harness.fetchJson(
-      `/v1/conversations/${tenant.conversationId}/messages?after=0&limit=50`,
-      undefined,
-      { authorization: `Bearer ${tenant.accessToken}` },
-    );
-    const page = B1ConversationPageSchema.parse(pageRes.data);
-    expect(page.messages).toHaveLength(2);
-    expect(page.messages[1]).toMatchObject({
-      kind: 'ember',
-      text: 'Recovered after SSE disconnect',
-    });
-
-    const audit = harness.fakeGateway.getAuditSnapshot();
-    expect(audit.totalCalls).toBe(1);
-    expect(audit.jobPollCount).toBeGreaterThanOrEqual(1);
-  });
+      const audit = await waitFor(
+        async () => {
+          const snap = harness.fakeGateway.getAuditSnapshot();
+          return Promise.resolve(snap.totalCalls === 1 ? snap : null);
+        },
+        15_000,
+        100,
+      );
+      expect(audit.totalCalls).toBe(1);
+      expect(audit.jobPollCount).toBeGreaterThanOrEqual(1);
+    },
+  );
 
   // ==========================================================================
   // Category 5: Long-Reasoning Handoff & Fencing (F-12, F-21, FI-13, FI-14)
@@ -1557,6 +1579,119 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
       nextAttemptAtMs: tNow + 1_000,
       remainingMs: 1_001,
     });
+  });
+
+  it('D7 Step 4A: Crash after Claim before markAttemptSent preserves accepted work (pre-send retry) and zero duplicate sends', async () => {
+    const harness = await bootHarness();
+
+    // Subcase A: Claim -> crash BEFORE markAttemptSent (after_claim_before_send) -> lease expires -> re-enqueued & completes with 1 provider call & 0 lost work
+    const tenantA = await createTenantSession(harness);
+    harness.fakeGateway.setDefaultRule({
+      mode: 'fast_ok',
+      replyText: 'Recovered pre-send claim',
+      costMicroUsd: 165,
+    });
+    const t0 = Date.now();
+    harness.faultInjector.setVirtualNowMs(t0);
+    harness.faultInjector.setCrashPoint('after_claim_before_send', true);
+
+    const subA = await harness.fetchJson<B1SendMessageReceipt>(
+      `/v1/conversations/${tenantA.conversationId}/messages`,
+      { client_submission_id: randomUUID(), text: 'Claim crash before sent', transcript_epoch: 0 },
+      { authorization: `Bearer ${tenantA.accessToken}` },
+    );
+    expect(subA.status).toBe(201);
+
+    // Wait for first claim attempt to commit claim_count >= 1 & crash before markAttemptSent
+    const afterClaimCrash = await waitFor(async () => {
+      const s = await inspectAgent(harness, tenantA);
+      const t = s.turns.find((r) => r.id === subA.data.turn.turn_id);
+      const o = s.outbox.find((r) => r.entity_id === subA.data.turn.turn_id);
+      return t && t.claim_count >= 1 && o?.state === 'acked' ? s : null;
+    });
+    expect(afterClaimCrash.turns[0]?.status).toBe('running');
+    expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(0);
+
+    // Advance virtual clock past 45s lease (still inside 60s turn deadline!) -> schedules retry at min(now+60s, deadline-5s)=+55s -> fire at +55.5s!
+    harness.faultInjector.setVirtualNowMs(t0 + 46_000);
+    await harness.fetchJson('/_test/agent/alarm', {
+      tenantId: tenantA.tenantId,
+      agentId: tenantA.agentId,
+      nowMs: t0 + 46_000,
+    });
+    harness.faultInjector.setVirtualNowMs(t0 + 55_500);
+    await harness.fetchJson('/_test/agent/alarm', {
+      tenantId: tenantA.tenantId,
+      agentId: tenantA.agentId,
+      nowMs: t0 + 55_500,
+    });
+
+    const settledA = await waitFor(async () => {
+      const s = await inspectAgent(harness, tenantA);
+      const t = s.turns.find((r) => r.id === subA.data.turn.turn_id);
+      const a = s.attempts.find(
+        (r) => r.subject_id === subA.data.turn.turn_id && r.state === 'settled',
+      );
+      return t?.status === 'completed' && a?.global_synced_at_ms !== null ? s : null;
+    });
+    expect(settledA.messages.filter((m) => m.kind === 'ember')).toHaveLength(1);
+    expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(1);
+    const spendA = await readGlobalSpendDays(harness);
+    expect(spendA[0]?.consumed_micro_usd).toBe(165);
+  });
+
+  it('D7 Step 4B: Crash after Provider send before Commit preserves known/conservative usage and zero duplicate sends', async () => {
+    const harness = await bootHarness();
+    const tenantB = await createTenantSession(harness);
+    harness.fakeGateway.setDefaultRule({
+      mode: 'fast_ok',
+      replyText: 'Crash after send',
+      costMicroUsd: 165,
+    });
+    const callsBeforeB = harness.fakeGateway.getAuditSnapshot().totalCalls;
+    const tB = Date.now();
+    harness.faultInjector.setVirtualNowMs(tB);
+    harness.faultInjector.setCrashPoint('after_claim_before_commit', true);
+
+    const subB = await harness.fetchJson<B1SendMessageReceipt>(
+      `/v1/conversations/${tenantB.conversationId}/messages`,
+      {
+        client_submission_id: randomUUID(),
+        text: 'Claim crash after send before commit',
+        transcript_epoch: 0,
+      },
+      { authorization: `Bearer ${tenantB.accessToken}` },
+    );
+    expect(subB.status).toBe(201);
+
+    // Wait until markAttemptSent + provider ran (totalCalls == callsBeforeB + 1) and crash blocked commit
+    await waitFor(async () => {
+      const s = await inspectAgent(harness, tenantB);
+      const a = s.attempts.find((r) => r.subject_id === subB.data.turn.turn_id);
+      return a?.send_started_at_ms !== null &&
+        harness.fakeGateway.getAuditSnapshot().totalCalls === callsBeforeB + 1
+        ? s
+        : null;
+    });
+
+    // Advance past 45s lease + 60s turn deadline -> alarm converges conservatively (unknown_billed, 250 micro_usd), ZERO duplicate sends!
+    harness.faultInjector.setVirtualNowMs(tB + 61_000);
+    await harness.fetchJson('/_test/agent/alarm', {
+      tenantId: tenantB.tenantId,
+      agentId: tenantB.agentId,
+      nowMs: tB + 61_000,
+    });
+    const settledB = await waitFor(async () => {
+      const s = await inspectAgent(harness, tenantB);
+      const a = s.attempts.find((r) => r.subject_id === subB.data.turn.turn_id);
+      return a?.global_synced_at_ms !== null ? s : null;
+    });
+    expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(callsBeforeB + 1);
+    expect(settledB.attempts[0]?.state).toBe('unknown_billed');
+    expect(settledB.attempts[0]?.applied_cost_micro_usd).toBe(250);
+    const spendB = await readGlobalSpendDays(harness);
+    expect(spendB[0]?.consumed_micro_usd).toBe(250);
+    harness.faultInjector.setVirtualNowMs(null);
   });
 
   // ==========================================================================

@@ -123,8 +123,16 @@ async function relay(request: IncomingMessage, response: ServerResponse): Promis
     const id = match[1]?.toLowerCase();
     if (deviceId !== id) writeEvent('device_registered', { deviceId: id });
     deviceId = id;
-  } else if (event === 'claim' || event?.includes('/')) {
-    const parsed = JSON.parse(payload) as Record<string, unknown>;
+  } else if (event === 'register' || event === 'claim' || event?.includes('/')) {
+    let parsed: Record<string, unknown> = {};
+    try {
+      const value: unknown = JSON.parse(payload);
+      if (value !== null && typeof value === 'object' && !Array.isArray(value)) {
+        parsed = value as Record<string, unknown>;
+      }
+    } catch {
+      // Non-JSON upstream error body; still log status below.
+    }
     if (mode === 'drop-result-ack' && event.endsWith('/result') && upstream.ok) {
       mode = 'online';
       writeEvent('result_ack_dropped', { path, replayed: parsed['replayed'] });
@@ -136,6 +144,7 @@ async function relay(request: IncomingMessage, response: ServerResponse): Promis
         path,
         status: upstream.status,
         kind: parsed['kind'],
+        error: parsed['error'],
         taskId: parsed['taskId'],
         runId: parsed['runId'],
         leaseEpoch: parsed['leaseEpoch'],
@@ -256,6 +265,13 @@ try {
             'POST',
           );
           break;
+        case 'revoke': {
+          const targetDeviceId =
+            cmd['deviceId'] === undefined ? deviceId : deviceIdSchema.parse(cmd['deviceId']);
+          if (targetDeviceId === undefined) throw new Error('device has not registered');
+          await cloudCommand('/v2/devices/' + targetDeviceId + '/revoke', 'POST');
+          break;
+        }
         case 'runs': {
           const [headId] = await workerd.listDurableObjectIds('AGENT_HEAD');
           if (headId === undefined) throw new Error('missing Agent Head');

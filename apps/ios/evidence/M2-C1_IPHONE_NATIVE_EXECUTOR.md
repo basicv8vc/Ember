@@ -33,22 +33,22 @@ All new native runtime files live under `apps/ios/EmberApp/DeviceExecutor/`:
 ### 1. Physical Device Verification (`iPhone13,4` / iPhone 12 Pro Max, iOS `27.0.1`)
 
 - Device: `Haha🎀` (`00008101-000E0D923E01001E`), `iPhone 12 Pro Max (iPhone13,4)`, iOS `27.0.1 (24A446)`, Developer Mode enabled, paired over local network.
-- Baseline physical-device run on initial prototype (prior to the P1/P2 review fixes; device subsequently auto-locked with `passcodeRequired: true`, blocking final-HEAD on-device re-run until unlocked):
+- Command (run on final Swift code `8a46873` after all P1/P2 fixes, `DEVELOPMENT_TEAM=9RN3YNYN27 SWIFT_STRICT_CONCURRENCY=complete`):
   ```bash
   xcodebuild -project apps/ios/Ember.xcodeproj -scheme Ember -configuration Debug \
     -destination 'platform=iOS,id=00008101-000E0D923E01001E' \
     -only-testing:EmberTests/DeviceExecutorTests \
     DEVELOPMENT_TEAM=9RN3YNYN27 SWIFT_STRICT_CONCURRENCY=complete test
   ```
-- Result on initial prototype: `DeviceExecutorTests` **11/11 passed in 1.475s** (`0 failures`).
-- Observed physical-device benchmark metrics (`thermalState = nominal`, `isLowPowerModeEnabled = false`, 5 iterations per case):
+- Result: `DeviceExecutorTests` **15/15 passed in 1.645s** (`0 failures`).
+- Observed physical-device benchmark metrics (`2026-11-20T05:34:20.598Z`, `thermalState = nominal`, `isLowPowerModeEnabled = false`, 5 iterations per case):
 
-| Case                       | Iterations | P50 (ms) | P95 (ms) | Max (ms) | Mean (ms) | Memory Delta (KiB) | Notes                                                      |
-| -------------------------- | ---------: | -------: | -------: | -------: | --------: | -----------------: | ---------------------------------------------------------- |
-| `text_stats_and_extract`   |          5 |    23.10 |    27.40 |    27.40 |     23.70 |              112.0 | 120 lines `NLTokenizer` + extraction                       |
-| `json_1k_aggregate_csv`    |          5 |   110.35 |   118.59 |   118.59 |    111.24 |             4160.0 | 1,000 JSON objects filter+group+CSV                        |
-| `file_generate_md_csv_pdf` |          5 |    73.00 |    77.74 |    77.74 |     72.72 |              112.0 | Atomic MD + `UIGraphicsPDFRenderer` (prior to `.csv` step) |
-| `cold_journal_recovery`    |          5 |     5.15 |     5.28 |     5.28 |      5.16 |                0.0 | Recover queued+running+terminal records                    |
+| Case                       | Iterations | P50 (ms) | P95 (ms) | Max (ms) | Mean (ms) | Memory Delta (KiB) | Notes                                     |
+| -------------------------- | ---------: | -------: | -------: | -------: | --------: | -----------------: | ----------------------------------------- |
+| `text_stats_and_extract`   |          5 |    24.39 |    28.86 |    28.86 |     24.70 |              128.0 | 120 lines `NLTokenizer` + extraction      |
+| `json_1k_aggregate_csv`    |          5 |   110.85 |   116.25 |   116.25 |    111.13 |             4432.0 | 1,000 JSON objects filter+group+CSV       |
+| `file_generate_md_csv_pdf` |          5 |    83.49 |    92.99 |    92.99 |     85.12 |              160.0 | Atomic MD + CSV + `UIGraphicsPDFRenderer` |
+| `cold_journal_recovery`    |          5 |     4.94 |     5.33 |     5.33 |      5.02 |                0.0 | Recover queued+running+terminal records   |
 
 ### 2. Post-P1/P2-Fix Verification (`iPhone 18 Pro` Simulator, iOS `27.2`)
 

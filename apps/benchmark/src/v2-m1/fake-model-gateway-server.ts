@@ -42,6 +42,7 @@ export interface FakeGatewayCallRecord {
   readonly aborted: boolean;
   readonly providerJobHandle: string | null;
   readonly statusCode: number;
+  readonly personalMemories?: readonly unknown[];
 }
 
 export interface FakeModelGatewayAuditSnapshot {
@@ -328,6 +329,9 @@ export class FakeModelGatewayServer {
           aborted,
           providerJobHandle: handle,
           statusCode,
+          ...(Array.isArray(body.personalMemories)
+            ? { personalMemories: body.personalMemories }
+            : {}),
         });
       };
 

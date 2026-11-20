@@ -11,6 +11,7 @@ import type { Id, NotesActionItemsInput } from '@ember/domain';
 import type { ModelAttemptBudgetMode, ModelAttemptProviderId } from '../agent-head/schema.js';
 import type { BudgetSyncSettlementState } from '../recovery/envelope.js';
 import type { TurnExecutionMode } from '../recovery/ports.js';
+import type { PersonalMemoryContextItem } from './personal-memory.js';
 
 export type { TurnExecutionMode };
 
@@ -118,6 +119,7 @@ export type PrepareTurnResult =
       readonly reservedMicroUsd: number;
       readonly globalGrantId: string | null;
       readonly context: readonly B2TurnContextRow[];
+      readonly personalMemories?: readonly PersonalMemoryContextItem[];
       readonly attachments: readonly B2MessageAttachmentMeta[];
     }
   | {

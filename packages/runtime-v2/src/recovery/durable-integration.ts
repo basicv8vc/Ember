@@ -3,6 +3,7 @@ import type {
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
 } from '../contracts/agent-head-rpc.js';
+import type { PersonalMemoryContextItem } from '../contracts/personal-memory.js';
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
 import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
@@ -40,6 +41,7 @@ export interface DurableExecutionClaimContext {
   readonly conversationId?: string;
   readonly interactiveHandoff?: boolean;
   readonly inputJson?: string;
+  readonly personalMemories?: readonly PersonalMemoryContextItem[];
 }
 
 export interface FakeOrProviderJobOutcome {
@@ -304,9 +306,37 @@ export function parseClaimExecutionContext(cmd: {
         : parsed['context'] !== undefined
           ? JSON.stringify(parsed['context'])
           : undefined,
+    ...(Array.isArray(parsed['personalMemories'])
+      ? { personalMemories: parsePersonalMemoryContextItems(parsed['personalMemories']) }
+      : {}),
   };
   assertClaimContext(context);
   return context;
+}
+
+function parsePersonalMemoryContextItems(raw: unknown[]): readonly PersonalMemoryContextItem[] {
+  const items: PersonalMemoryContextItem[] = [];
+  for (const entry of raw) {
+    if (entry === null || typeof entry !== 'object') {
+      continue;
+    }
+    const record = entry as Record<string, unknown>;
+    const kind = record['kind'];
+    const content = record['content'];
+    const key = record['key'];
+    if (
+      (kind === 'preference' || kind === 'fact') &&
+      typeof content === 'string' &&
+      content.length > 0
+    ) {
+      items.push({
+        kind,
+        ...(typeof key === 'string' && key.length > 0 ? { key } : {}),
+        content,
+      });
+    }
+  }
+  return items;
 }
 
 /**

@@ -100,6 +100,11 @@ export function createDurableExecutor(
                     conversationId: context.conversationId ?? claim.targetId,
                     turnId: claim.targetId,
                     context: messages,
+                    ...(claim.targetKind === 'turn' &&
+                    context.personalMemories !== undefined &&
+                    context.personalMemories.length > 0
+                      ? { personalMemories: context.personalMemories }
+                      : {}),
                     maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
                   },
                 },

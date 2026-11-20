@@ -56,6 +56,7 @@ import {
   settleLocalAttemptAndEnqueueSync,
   type LocalBudgetCeilings,
 } from './budget.js';
+import { readPersonalMemoriesForTurnSync } from './memory-service.js';
 import {
   allocateConversationSequenceSync,
   assertHeadScopeSync,
@@ -784,6 +785,14 @@ export class AgentHeadTurnService implements AgentHeadRpc {
             undefined,
             sequence,
           ),
+          ...(() => {
+            const personalMemories = readPersonalMemoriesForTurnSync(
+              this.deps.storage.sql,
+              req.scope.tenantId,
+              req.scope.principalId,
+            );
+            return personalMemories.length > 0 ? { personalMemories } : {};
+          })(),
           attachments: attachmentsMeta,
         },
       };

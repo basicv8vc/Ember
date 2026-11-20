@@ -713,6 +713,44 @@ export function createAgentHeadWriteOptMigration(
   };
 }
 
+export const DEFAULT_PERSONAL_MEMORY_MIGRATION_VERSION = 6;
+
+export const PERSONAL_MEMORY_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS personal_memories (
+  id                     TEXT    PRIMARY KEY,
+  tenant_id              TEXT    NOT NULL,
+  principal_id           TEXT    NOT NULL,
+  kind                   TEXT    NOT NULL CHECK (kind IN ('preference', 'fact')),
+  memory_key             TEXT,
+  client_request_id      TEXT,
+  content                TEXT    NOT NULL,
+  provenance_source      TEXT    NOT NULL CHECK (provenance_source IN ('explicit_user_request', 'user_settings')),
+  source_conversation_id TEXT,
+  source_message_id      TEXT,
+  created_at_ms          INTEGER NOT NULL,
+  updated_at_ms          INTEGER NOT NULL
+);`,
+  `CREATE INDEX IF NOT EXISTS idx_personal_memories_scope_updated
+  ON personal_memories (tenant_id, principal_id, updated_at_ms DESC, id ASC);`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_memories_scope_key
+  ON personal_memories (tenant_id, principal_id, memory_key)
+  WHERE memory_key IS NOT NULL;`,
+  `CREATE UNIQUE INDEX IF NOT EXISTS idx_personal_memories_scope_client_request
+  ON personal_memories (tenant_id, principal_id, client_request_id)
+  WHERE client_request_id IS NOT NULL;`,
+] as const;
+
+export function createPersonalMemoryDoMigration(
+  version = DEFAULT_PERSONAL_MEMORY_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_personal_memory',
+    statements: PERSONAL_MEMORY_STATEMENTS,
+    checksum: computeMigrationChecksumSync(PERSONAL_MEMORY_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -731,5 +769,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
       checksum: computeMigrationChecksumSync(NATIVE_DEVICE_PLACEMENT_STATEMENTS),
     },
     createAgentHeadWriteOptMigration(),
+    createPersonalMemoryDoMigration(),
   ];
 }

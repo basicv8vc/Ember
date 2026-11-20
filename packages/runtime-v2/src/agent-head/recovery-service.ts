@@ -26,6 +26,7 @@ import {
   settleLocalAttemptAndEnqueueSync,
   type LocalBudgetCeilings,
 } from './budget.js';
+import { readPersonalMemoriesForTurnSync } from './memory-service.js';
 import {
   assertHeadScopeSync,
   earliestBusinessAlarmAtMsSync,
@@ -1172,6 +1173,14 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           'turn',
           turn.id,
         );
+        const personalMemories =
+          latestAttempt !== null
+            ? readPersonalMemoriesForTurnSync(
+                this.deps.storage.sql,
+                cmd.envelope.tenantId,
+                latestAttempt.principal_id,
+              )
+            : [];
         return {
           res: {
             kind: 'claimed' as const,
@@ -1190,6 +1199,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
                 conversationId: turn.conversation_id,
                 deadlineAtMs: turn.deadline_at_ms,
                 context,
+                ...(personalMemories.length > 0 ? { personalMemories } : {}),
               }),
             ),
           },

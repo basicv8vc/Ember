@@ -39,6 +39,7 @@ export type {
   ModelProviderId,
   NotesActionItemsInput,
   NotesActionItemsOutput,
+  PersonalMemoryContextItem,
   PythonAgentInputFile,
   PythonAgentStepInput,
   PythonAgentStepMessage,
@@ -49,9 +50,12 @@ export type {
 export {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
+  PERSONAL_MEMORY_CONTEXT_HEADER,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedContext,
+  buildBoundedPersonalMemoryContext,
   type BoundedContext,
+  type BoundedPersonalMemoryContext,
   type ContextRow,
 } from './context.js';
 export {

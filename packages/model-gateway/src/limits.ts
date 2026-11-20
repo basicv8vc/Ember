@@ -15,6 +15,10 @@ export const MODEL_LIMITS = Object.freeze({
   maxContextMessages: 8,
   /** Hard character ceiling for concatenated context text. Enforced before request construction. */
   maxContextChars: 12_000,
+  /** Bounded account-scoped personal memory items injected per turn. */
+  maxPersonalMemoryItems: 20,
+  /** Hard character ceiling for formatted personal memory context block. */
+  maxPersonalMemoryChars: 2_000,
   /** Provider-side output cap passed as `max_completion_tokens`. */
   maxOutputTokens: 512,
   /** Output cap for structured Notes -> Action Items extraction. */

@@ -6,7 +6,7 @@ import {
   MODEL_LIMITS,
   type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
-import type { DeviceExecutionRpc } from '@ember/runtime-v2';
+import type { DeviceExecutionRpc, PersonalMemoryRpc } from '@ember/runtime-v2';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { B1SessionRuntime } from '../auth/b1-auth-runtime.js';
 import { requireSessionAuth } from '../auth/session-authenticator.js';
@@ -32,6 +32,7 @@ import {
 import type { ReadinessCheck } from '../readiness.js';
 import { createB1TurnRoutes } from '../turns/turn-routes.js';
 import { createDeviceRoutes } from './device-routes.js';
+import { createMemoryRoutes } from './memory-routes.js';
 import {
   INTERACTIVE_TIMING,
   executeInteractive,
@@ -60,7 +61,7 @@ interface LocalWorkerContext {
 export interface ResolvedAgentHead {
   readonly agentId: string;
   readonly conversationId: string;
-  readonly rpc: EdgeAgentHeadRpc & Partial<DeviceExecutionRpc>;
+  readonly rpc: EdgeAgentHeadRpc & Partial<DeviceExecutionRpc> & Partial<PersonalMemoryRpc>;
 }
 
 export interface LocalV2EdgeDependencies {
@@ -315,6 +316,18 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         createDeviceRoutes(requireSessionAuth({ service: sessions }), async (command) => {
           const resolved = await head();
           const execute = resolved.rpc.deviceExecution;
+          if (execute === undefined) throw new DomainError('NOT_FOUND');
+          return callRuntime(() =>
+            execute({ ...command, ...resolved.auth, agentId: resolved.agentId, requestId }),
+          );
+        }),
+      );
+
+      app.route(
+        '/v2',
+        createMemoryRoutes(requireSessionAuth({ service: sessions }), async (command) => {
+          const resolved = await head();
+          const execute = resolved.rpc.personalMemory;
           if (execute === undefined) throw new DomainError('NOT_FOUND');
           return callRuntime(() =>
             execute({ ...command, ...resolved.auth, agentId: resolved.agentId, requestId }),

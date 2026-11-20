@@ -38,11 +38,19 @@ export interface ModelMessage {
   readonly attachments?: readonly ConversationAttachmentMetadata[];
 }
 
+export interface PersonalMemoryContextItem {
+  readonly kind: 'preference' | 'fact';
+  readonly key?: string;
+  readonly content: string;
+}
+
 export interface ConversationTurnInput {
   readonly conversationId: string;
   readonly turnId: string;
   /** Bounded, oldest-first; the last entry is the message being answered. */
   readonly context: readonly ModelMessage[];
+  /** Bounded account-scoped user-requested preferences/facts, newest-updated first. */
+  readonly personalMemories?: readonly PersonalMemoryContextItem[];
   readonly maxOutputTokens: number;
 }
 

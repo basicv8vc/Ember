@@ -90,11 +90,16 @@ async function sha256BytesHex(bytes: Uint8Array): Promise<string> {
 }
 
 function encodeTaskListCursor(createdAtMs: number, taskId: string): string {
-  const base64 = globalThis.btoa(`${toIsoTimestamp(createdAtMs)}${TASK_LIST_CURSOR_DELIMITER}${taskId}`);
+  const base64 = globalThis.btoa(
+    `${toIsoTimestamp(createdAtMs)}${TASK_LIST_CURSOR_DELIMITER}${taskId}`,
+  );
   return base64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/u, '');
 }
 
-function decodeTaskListCursor(raw: string): { readonly createdAtMs: number; readonly taskId: string } {
+function decodeTaskListCursor(raw: string): {
+  readonly createdAtMs: number;
+  readonly taskId: string;
+} {
   if (!TASK_LIST_CURSOR_REGEX.test(raw) || raw.length % 4 === 1) {
     throw new DomainError('INVALID_ARGUMENT', 'after cursor is malformed');
   }
@@ -290,7 +295,12 @@ export class AgentHeadTaskArtifactService {
     };
     const inputJson = JSON.stringify(canonicalInput);
     const digest = await sha256Hex(
-      JSON.stringify([input.title ?? null, input.prompt, input.instructions ?? null, attachmentIds]),
+      JSON.stringify([
+        input.title ?? null,
+        input.prompt,
+        input.instructions ?? null,
+        attachmentIds,
+      ]),
     );
 
     const coverage = await prepareObligationCoverageAsync(this.deps, {
@@ -464,9 +474,7 @@ export class AgentHeadTaskArtifactService {
     return tx.result;
   }
 
-  private listTasksSync(
-    cmd: Extract<TaskArtifactCommand, { kind: 'list_tasks' }>,
-  ): B1TaskListDto {
+  private listTasksSync(cmd: Extract<TaskArtifactCommand, { kind: 'list_tasks' }>): B1TaskListDto {
     const limit = Math.max(1, Math.min(50, cmd.limit ?? 20));
     const cursor = cmd.after === undefined ? undefined : decodeTaskListCursor(cmd.after);
 
@@ -626,7 +634,11 @@ export class AgentHeadTaskArtifactService {
 
     const tx = this.deps.storage.transactionSync(() => {
       const now = this.deps.nowMs();
-      const task = sqlExecMaybe<TaskRow>(this.sql, 'SELECT * FROM tasks WHERE id = ?', parsedId.data);
+      const task = sqlExecMaybe<TaskRow>(
+        this.sql,
+        'SELECT * FROM tasks WHERE id = ?',
+        parsedId.data,
+      );
       if (task === null) {
         return { result: null as B1TaskCancelDto | null, now, alarmAtMs: null as number | null };
       }

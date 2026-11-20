@@ -449,11 +449,14 @@ describe('V2 AgentHeadTaskArtifactService', () => {
         runId: run1Id,
         leaseEpoch: claim1.leaseEpoch,
         workerId: 'worker-1',
-        outputs: Array.from({ length: PYTHON_AGENT_LIMITS.maxOutputArtifactsPerTask + 1 }, (_, i) => ({
-          filename: `out-${i}.csv`,
-          mediaType: 'text/csv',
-          contentBase64: toBase64('a,b\n1,2\n'),
-        })),
+        outputs: Array.from(
+          { length: PYTHON_AGENT_LIMITS.maxOutputArtifactsPerTask + 1 },
+          (_, i) => ({
+            filename: `out-${i}.csv`,
+            mediaType: 'text/csv',
+            contentBase64: toBase64('a,b\n1,2\n'),
+          }),
+        ),
       }),
     ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
 
@@ -461,7 +464,11 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     clock.now += 15_000;
     core.recoveryService.convergeDueBusinessItemSync('task', taskId, clock.now);
     const outboxRow = storage.sql
-      .exec<{ readonly outbox_id: string; readonly fence_epoch: number; readonly payload_json: string }>(
+      .exec<{
+        readonly outbox_id: string;
+        readonly fence_epoch: number;
+        readonly payload_json: string;
+      }>(
         `SELECT outbox_id, fence_epoch, payload_json
            FROM v2_dispatch_outbox
           WHERE entity_kind = 'task' AND entity_id = ? AND state = 'pending'
@@ -581,7 +588,9 @@ describe('V2 AgentHeadTaskArtifactService', () => {
       runId: cancelRunId,
       leaseEpoch: cancelClaim.leaseEpoch,
       workerId: 'worker-c',
-      outputs: [{ filename: 'aborted.csv', mediaType: 'text/csv', contentBase64: toBase64('x\n1\n') }],
+      outputs: [
+        { filename: 'aborted.csv', mediaType: 'text/csv', contentBase64: toBase64('x\n1\n') },
+      ],
     })) as V2PublishTaskOutputsResultDto;
     expect(cancelPub.accepted).toBe(true);
 
@@ -978,8 +987,9 @@ describe('V2 AgentHeadTaskArtifactService', () => {
 
     // Existing rows survive intact and v2_task_artifacts table exists.
     expect(
-      storage.sql.exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM personal_memories').one()
-        .cnt,
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM personal_memories')
+        .one().cnt,
     ).toBe(1);
     expect(
       storage.sql

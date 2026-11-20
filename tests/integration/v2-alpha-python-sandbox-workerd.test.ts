@@ -20,12 +20,9 @@ const configPath = fileURLToPath(
   new URL('../../apps/api/wrangler.local-v2.jsonc', import.meta.url),
 );
 
-const SALES_CSV = [
-  'region,revenue,units',
-  'north,120.50,10',
-  'south,79.50,5',
-  'west,200,15',
-].join('\n');
+const SALES_CSV = ['region,revenue,units', 'north,120.50,10', 'south,79.50,5', 'west,200,15'].join(
+  '\n',
+);
 
 async function signIn(harness: V2LocalRuntimeHarness, assertion: string): Promise<string> {
   const response = await harness.fetchOverHttp('/v1/auth/session', {
@@ -144,9 +141,9 @@ describe('V2 Tools & Execution: Python Sandbox & Artifact Delivery in workerd', 
       headers: authHeaders(tokenA),
     });
     expect(listRes.status).toBe(200);
-    expect(B1TaskListDtoSchema.parse(await listRes.json()).tasks.some((t) => t.task_id === taskId)).toBe(
-      true,
-    );
+    expect(
+      B1TaskListDtoSchema.parse(await listRes.json()).tasks.some((t) => t.task_id === taskId),
+    ).toBe(true);
 
     const eventsRes = await harness.fetchOverHttp(`/v1/me/tasks/${taskId}/events`, {
       headers: authHeaders(tokenA),

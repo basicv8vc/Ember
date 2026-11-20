@@ -381,12 +381,11 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         ),
       );
 
-      type ScopedTaskArtifactCommand =
-        TaskArtifactCommand extends infer T
-          ? T extends TaskArtifactCommand
-            ? Omit<T, 'tenantId' | 'principalId' | 'agentId' | 'requestId'>
-            : never
-          : never;
+      type ScopedTaskArtifactCommand = TaskArtifactCommand extends infer T
+        ? T extends TaskArtifactCommand
+          ? Omit<T, 'tenantId' | 'principalId' | 'agentId' | 'requestId'>
+          : never
+        : never;
 
       const runTaskArtifacts = async (
         command: ScopedTaskArtifactCommand,

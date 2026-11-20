@@ -182,7 +182,9 @@ export function createDurableExecutor(
 
           const sandboxResult = runV2FakePythonSandbox({
             prompt: taskInput.prompt ?? '',
-            ...(taskInput.instructions === undefined ? {} : { instructions: taskInput.instructions }),
+            ...(taskInput.instructions === undefined
+              ? {}
+              : { instructions: taskInput.instructions }),
             inputFiles: loadedInputs.map((file) => ({
               filename: file.filename,
               mediaType: file.mediaType,

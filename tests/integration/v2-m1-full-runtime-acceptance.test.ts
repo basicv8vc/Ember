@@ -1463,19 +1463,53 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
         async () => {
           const s = await inspectAgent(harness, tenant);
           const t = s.turns.find((r) => r.id === handoffReceipt.turn.turn_id);
-          return t?.status === 'completed' ? s : null;
+          const spendDays = await readGlobalSpendDays(harness);
+          const globalRes = await readGlobalReservations(harness);
+          if (
+            t?.status === 'completed' &&
+            s.attempts.length === 22 &&
+            s.attempts.every((a) => a.state === 'settled' && a.global_synced_at_ms !== null) &&
+            s.localBuckets.every((b) => b.reserved_micro_usd === 0) &&
+            spendDays.every((d) => d.reserved_micro_usd === 0) &&
+            globalRes.every((r) => r.state !== 'reserved')
+          ) {
+            return { snap: s, spendDays, globalRes };
+          }
+          return null;
         },
         130_000,
         250,
       );
       expect(
-        handoffCompleted.turns.find((r) => r.id === handoffReceipt.turn.turn_id)?.handoff_reason,
+        handoffCompleted.snap.turns.find((r) => r.id === handoffReceipt.turn.turn_id)
+          ?.handoff_reason,
       ).toBe('client_disconnect_handoff');
       expect(
-        handoffCompleted.messages.find(
+        handoffCompleted.snap.messages.find(
           (m) => m.sequence === handoffReceipt.message.sequence + 1 && m.kind === 'ember',
         )?.text,
       ).toBe('Turn 22 durable handoff after 20+ turns');
+      expect(handoffCompleted.snap.messages).toHaveLength(44);
+      expect(handoffCompleted.snap.messages.filter((m) => m.kind === 'user')).toHaveLength(22);
+      expect(handoffCompleted.snap.messages.filter((m) => m.kind === 'ember')).toHaveLength(22);
+      expect(handoffCompleted.snap.messages.map((m) => m.sequence)).toEqual(
+        Array.from({ length: 44 }, (_, idx) => idx + 1),
+      );
+      expect(new Set(handoffCompleted.snap.messages.map((m) => m.id)).size).toBe(44);
+      expect(handoffCompleted.snap.turns).toHaveLength(22);
+      expect(handoffCompleted.snap.turns.every((t) => t.status === 'completed')).toBe(true);
+      expect(new Set(handoffCompleted.snap.turns.map((t) => t.id)).size).toBe(22);
+      expect(new Set(handoffCompleted.snap.turns.map((t) => t.response_message_id)).size).toBe(22);
+      expect(
+        handoffCompleted.snap.attempts.every(
+          (a) => a.state === 'settled' && a.global_synced_at_ms !== null,
+        ),
+      ).toBe(true);
+      expect(handoffCompleted.snap.localBuckets.every((b) => b.reserved_micro_usd === 0)).toBe(
+        true,
+      );
+      expect(handoffCompleted.spendDays.every((d) => d.reserved_micro_usd === 0)).toBe(true);
+      expect(handoffCompleted.globalRes.every((r) => r.state === 'settled')).toBe(true);
       const handoffAudit = await waitFor(
         async () => {
           const snap = harness.fakeGateway.getAuditSnapshot();

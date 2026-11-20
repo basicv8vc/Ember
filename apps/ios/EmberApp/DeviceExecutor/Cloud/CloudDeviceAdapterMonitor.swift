@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import SwiftUI
 
 /// QA file schema compatible with Agent F's M2-F2 `local-device-qa.json` in the app's Documents folder.
 public struct CloudDeviceQAFileConfiguration: Decodable, Sendable {
@@ -84,6 +85,7 @@ public final class CloudDeviceAdapterMonitor {
     public private(set) var isRunning = false
 
     private var adapter: CloudDeviceExecutorAdapter?
+    private var connectionGeneration: UInt64 = 0
 
     public init() {}
 
@@ -104,31 +106,53 @@ public final class CloudDeviceAdapterMonitor {
         configuration: CloudDeviceEndpointConfiguration,
         authProvider: AuthSessionProvider,
         credentialStore: CloudDeviceCredentialStoring = KeychainCloudDeviceCredentialStore(),
+        transport: CloudDeviceAPITransporting? = nil,
+        journal: CloudDeviceExecutionJournal? = nil,
+        workspace: DeviceSandboxWorkspace? = nil,
+        textTool: any NativeTool = NativeTextTool(),
+        clock: CloudDeviceClock = SystemCloudDeviceClock(),
+        backgroundTaskManager: any BackgroundTaskManaging = UIKitBackgroundTaskManager(),
         autoStart: Bool = false
     ) async throws {
-        await stop()
+        connectionGeneration &+= 1
+        let myGeneration = connectionGeneration
+        let previousAdapter = adapter
+        adapter = nil
+        isRunning = false
+
+        if let previousAdapter {
+            await previousAdapter.stop()
+        }
+        guard connectionGeneration == myGeneration else { return }
+
         let created = try CloudDeviceExecutorAdapter(
             configuration: configuration,
             authProvider: authProvider,
             credentialStore: credentialStore,
+            transport: transport,
+            journal: journal,
+            workspace: workspace,
+            textTool: textTool,
+            clock: clock,
+            backgroundTaskManager: backgroundTaskManager,
             statusHandler: { [weak self] snapshot in
                 Task { @MainActor [weak self] in
-                    guard let self else { return }
-                    self.deviceID = snapshot.deviceID
-                    self.statusLabel = snapshot.status.label
-                    self.summary = snapshot.journalSummary
-                    if let detail = snapshot.lastEventDescription {
-                        self.lastEvent = detail
-                    }
+                    guard let self, self.connectionGeneration == myGeneration else { return }
+                    self.applySnapshot(snapshot)
                 }
             }
         )
+        guard connectionGeneration == myGeneration else {
+            await created.stop()
+            return
+        }
         self.adapter = created
         let snapshot = try await created.currentSnapshot()
-        self.deviceID = snapshot.deviceID
-        self.statusLabel = snapshot.status.label
-        self.summary = snapshot.journalSummary
-        self.lastEvent = snapshot.lastEventDescription
+        guard connectionGeneration == myGeneration else {
+            await created.stop()
+            return
+        }
+        applySnapshot(snapshot)
         if autoStart {
             await start()
         }
@@ -136,13 +160,47 @@ public final class CloudDeviceAdapterMonitor {
 
     public func start() async {
         guard let adapter else { return }
-        isRunning = true
+        let myGeneration = connectionGeneration
         await adapter.start()
+        guard connectionGeneration == myGeneration else { return }
+        if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
+            applySnapshot(snapshot)
+        }
     }
 
     public func stop() async {
         isRunning = false
         guard let adapter else { return }
+        let myGeneration = connectionGeneration
         await adapter.stop()
+        guard connectionGeneration == myGeneration else { return }
+        if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
+            applySnapshot(snapshot)
+        }
+    }
+
+    public func handleScenePhase(_ phase: ScenePhase) async {
+        guard let adapter else { return }
+        let myGeneration = connectionGeneration
+        await adapter.handleScenePhase(phase)
+        guard connectionGeneration == myGeneration else { return }
+        if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
+            applySnapshot(snapshot)
+        }
+    }
+
+    private func applySnapshot(_ snapshot: CloudDeviceAdapterSnapshot) {
+        self.deviceID = snapshot.deviceID
+        self.statusLabel = snapshot.status.label
+        self.summary = snapshot.journalSummary
+        if let detail = snapshot.lastEventDescription {
+            self.lastEvent = detail
+        }
+        switch snapshot.status {
+        case .registering, .ready, .executing, .backingOff:
+            self.isRunning = true
+        case .stopped, .suspended, .halted:
+            self.isRunning = false
+        }
     }
 }

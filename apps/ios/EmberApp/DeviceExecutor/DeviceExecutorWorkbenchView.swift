@@ -43,6 +43,7 @@ final class DeviceExecutorWorkbenchModel {
 
     func handleScenePhase(_ phase: ScenePhase) async {
         await executor.handleScenePhase(phase)
+        await cloudMonitor.handleScenePhase(phase)
         if phase == .active {
             await taskStore.refreshAll()
         }

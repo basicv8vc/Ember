@@ -356,6 +356,22 @@ public struct CloudDeviceTextStats: Codable, Equatable, Sendable {
             byte == 0x0A ? count + 1 : count
         }
     }
+
+    public init(nativeToolOutput: NativeToolOutput) throws {
+        guard let obj = nativeToolOutput.structuredData?.objectValue,
+              let utf8Bytes = obj["utf8_bytes"]?.intValue,
+              let unicodeScalars = obj["unicode_scalars"]?.intValue,
+              let lines = obj["lf_line_count"]?.intValue,
+              (0...CloudDeviceContract.maxTextUTF8Bytes).contains(utf8Bytes),
+              (0...CloudDeviceContract.maxTextUTF16Units).contains(unicodeScalars),
+              (0...CloudDeviceContract.maxLinesCount).contains(lines)
+        else {
+            throw CloudDeviceError.invalidResponse
+        }
+        self.utf8Bytes = utf8Bytes
+        self.unicodeScalars = unicodeScalars
+        self.lines = lines
+    }
 }
 
 public enum CloudDeviceSubmissionStatus: String, Codable, Equatable, Sendable {

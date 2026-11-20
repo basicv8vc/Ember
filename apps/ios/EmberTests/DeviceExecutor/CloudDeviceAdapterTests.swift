@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Ember
 
@@ -648,6 +649,670 @@ final class CloudDeviceAdapterTests: XCTestCase {
         XCTAssertNotNil(keptTerminal)
     }
 
+    // MARK: - 7. P1-1: iOS ScenePhase Lifecycle & Background Expiration
+
+    func testBackgroundSuspendsClaimingAndForegroundReregistersAndRecoversPrioritizingPending() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration(heartbeatInterval: .seconds(10))
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+        let bgManager = StubBackgroundTaskManager()
+
+        let pendingOffer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "pending")
+        )
+        let unfinishedOffer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 2,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "unfinished\nline2")
+        )
+        let freshOffer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "fresh")
+        )
+
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        let transport = RecordingCloudTransport(
+            readyUntilMs: clock.nowMs + 30_000,
+            queuedClaims: [freshOffer],
+            renewOutcome: .renewed(leaseExpiresAtMs: clock.nowMs + 45_000),
+            commitOutcome: .committed(replayed: true)
+        )
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock,
+            backgroundTaskManager: bgManager
+        )
+
+        // Start in foreground, then enter background -> must stop claiming new work.
+        await adapter.handleScenePhase(.background)
+        let bgCycle = try await adapter.runSingleCycle()
+        XCTAssertEqual(bgCycle, .idle)
+        let claimCountInBg = await transport.claimCount
+        XCTAssertEqual(claimCountInBg, 0, "Must not claim new tasks while in background")
+
+        // Stage a pending submission and an unfinished claim (as if left behind prior to suspension).
+        _ = try await journal.recordClaim(pendingOffer, nowMs: clock.nowMs)
+        _ = try await journal.stageResultSubmission(
+            taskID: pendingOffer.taskId,
+            submission: CloudDeviceResultSubmission(
+                fence: pendingOffer.fence,
+                output: CloudDeviceTextStats(text: "pending")
+            ),
+            nowMs: clock.nowMs + 1
+        )
+        _ = try await journal.recordClaim(unfinishedOffer, nowMs: clock.nowMs + 2)
+
+        let regCountBeforeForeground = await transport.registerCount
+
+        // Return to foreground -> must re-register, flush pending first, then renew & recover unfinished, then claim.
+        await adapter.handleScenePhase(.active)
+
+        let cycle1 = try await adapter.runSingleCycle()
+        XCTAssertEqual(cycle1, .flushedPending(taskId: pendingOffer.taskId, outcome: .committed(replayed: true)))
+        let regCountAfterForeground = await transport.registerCount
+        XCTAssertEqual(regCountAfterForeground, regCountBeforeForeground + 1, "Foreground resume must re-register device")
+
+        let cycle2 = try await adapter.runSingleCycle()
+        XCTAssertEqual(cycle2, .recoveredUnfinished(taskId: unfinishedOffer.taskId, outcome: .committed(replayed: true)))
+        let renewedFences = await transport.renewedFences
+        XCTAssertEqual(renewedFences, [unfinishedOffer.fence], "Unfinished task must verify original Cloud fence via /renew")
+
+        let cycle3 = try await adapter.runSingleCycle()
+        XCTAssertEqual(cycle3, .executed(taskId: freshOffer.taskId, outcome: .committed(replayed: true)))
+
+        let leaked = await bgManager.activeTaskIDs
+        XCTAssertTrue(leaked.isEmpty, "All background task identifiers must be released")
+    }
+
+    func testBackgroundExpirationInterruptsExecutionPreservesJournalAndReleasesBackgroundTask() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+        let bgManager = StubBackgroundTaskManager()
+
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "interrupt me\nplease")
+        )
+
+        let toolGate = ControllableNativeTextTool()
+        let transport = RecordingCloudTransport(
+            readyUntilMs: clock.nowMs + 30_000,
+            queuedClaims: [offer],
+            renewOutcome: .renewed(leaseExpiresAtMs: clock.nowMs + 45_000)
+        )
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            textTool: toolGate,
+            clock: clock,
+            backgroundTaskManager: bgManager
+        )
+
+        let cycleTask = Task {
+            try await adapter.runSingleCycle()
+        }
+
+        // Deterministically wait until NativeTool execution has started.
+        await toolGate.waitUntilStarted()
+        await adapter.handleScenePhase(.background)
+
+        let beganCount = await bgManager.beganCount
+        XCTAssertGreaterThanOrEqual(beganCount, 1)
+        let hasExpirationHandler = await bgManager.hasActiveExpirationHandler
+        XCTAssertTrue(hasExpirationHandler, "beginBackgroundTask must install a real expiration handler")
+
+        // Trigger iOS background expiration deterministically.
+        await bgManager.triggerExpiration()
+
+        do {
+            _ = try await cycleTask.value
+            XCTFail("Expected CancellationError when background execution expires")
+        } catch is CancellationError {
+            // Expected cooperative interruption
+        }
+
+        // Background task identifier must be released and never leaked.
+        let activeBG = await bgManager.activeTaskIDs
+        XCTAssertTrue(activeBG.isEmpty, "Background task identifier must be ended after expiration")
+        let endedCount = await bgManager.endedCount
+        XCTAssertEqual(endedCount, beganCount)
+
+        // Durable journal must preserve the claimed record (not failedLocally or fenced) and nothing submitted.
+        let submissionsBeforeResume = await transport.resultSubmissions.count
+        XCTAssertEqual(submissionsBeforeResume, 0)
+        let preserved = try await journal.record(for: offer.taskId)
+        XCTAssertEqual(preserved?.phase, .claimed)
+
+        // Allow tool to complete on foreground recovery, resume foreground, and verify /renew + completion.
+        await toolGate.setShouldPause(false)
+        await adapter.handleScenePhase(.active)
+        let recovered = try await adapter.runSingleCycle()
+        XCTAssertEqual(recovered, .recoveredUnfinished(taskId: offer.taskId, outcome: .committed(replayed: false)))
+        let renewedFences = await transport.renewedFences
+        XCTAssertEqual(renewedFences, [offer.fence])
+    }
+
+    // MARK: - 8. P1-2: Stop / Start Concurrency Safety & Monitor Reconnect
+
+    func testStopWaitsForOldLoopAndRapidStopStartNeverCreatesDuplicateLoops() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let gatedTransport = GatedCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: gatedTransport,
+            journal: CloudDeviceExecutionJournal(directory: dir),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock
+        )
+
+        // Duplicate start() calls must not spawn >1 loop.
+        await adapter.start()
+        await adapter.start()
+        await gatedTransport.waitForClaimEntry()
+
+        // Start stop() while claim is blocked; verify stop() does not return until claim unwinds.
+        let stopCompleted = LockedFlag()
+        let stopTask = Task {
+            await adapter.stop()
+            stopCompleted.set(true)
+        }
+
+        // Wait until the gated claim observes cancellation, then release it.
+        await gatedTransport.waitForCancellationObserved()
+        XCTAssertFalse(stopCompleted.value, "stop() must wait for the old loop to exit before returning")
+        await gatedTransport.releaseGate()
+        await stopTask.value
+        XCTAssertTrue(stopCompleted.value)
+
+        let maxConcurrentAfterStop = await gatedTransport.maxConcurrentClaims
+        XCTAssertEqual(maxConcurrentAfterStop, 1, "Never allow more than one concurrent execution loop")
+
+        // Rapid stop -> start -> start -> stop sequence must maintain single-loop invariant.
+        await gatedTransport.resetGate()
+        async let s1: Void = adapter.start()
+        async let s2: Void = adapter.start()
+        _ = await (s1, s2)
+        await gatedTransport.waitForClaimEntry()
+
+        let rapidStop = Task { await adapter.stop() }
+        await gatedTransport.waitForCancellationObserved()
+        await gatedTransport.releaseGate()
+        await rapidStop.value
+
+        let maxConcurrentOverall = await gatedTransport.maxConcurrentClaims
+        XCTAssertEqual(maxConcurrentOverall, 1, "Rapid stop/start must never produce multiple execution loops")
+    }
+
+    @MainActor
+    func testMonitorReconnectIgnoresStaleStatusCallbacksFromPreviousAdapter() async throws {
+        let dir1 = try makeTempDirectory()
+        let dir2 = try makeTempDirectory()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds1 = InMemoryCloudDeviceCredentialStore()
+        let creds2 = InMemoryCloudDeviceCredentialStore()
+        let config1 = try makeConfiguration(origin: "https://one.ember.test")
+        let config2 = try makeConfiguration(origin: "https://two.ember.test")
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let transport1 = GatedCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let transport2 = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+
+        let monitor = CloudDeviceAdapterMonitor()
+        try await monitor.connect(
+            configuration: config1,
+            authProvider: auth,
+            credentialStore: creds1,
+            transport: transport1,
+            journal: CloudDeviceExecutionJournal(directory: dir1),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir1),
+            clock: clock,
+            autoStart: true
+        )
+        await transport1.waitForClaimEntry()
+        let firstDeviceID = monitor.deviceID
+        XCTAssertNotNil(firstDeviceID)
+
+        // Reconnect while first adapter is mid-claim; release gate when cancelled.
+        let reconnectTask = Task {
+            try await monitor.connect(
+                configuration: config2,
+                authProvider: auth,
+                credentialStore: creds2,
+                transport: transport2,
+                journal: CloudDeviceExecutionJournal(directory: dir2),
+                workspace: DeviceSandboxWorkspace(rootDirectory: dir2),
+                clock: clock,
+                autoStart: false
+            )
+        }
+        await transport1.waitForCancellationObserved()
+        await transport1.releaseGate()
+        try await reconnectTask.value
+
+        // Flush MainActor queue to ensure any stale async statusHandler tasks from adapter 1 have run.
+        await Task.yield()
+        await Task.yield()
+
+        let expectedSecondID = try creds2.loadOrCreateCredential(for: config2.scopeIdentifier).id
+        XCTAssertNotEqual(firstDeviceID, expectedSecondID)
+        XCTAssertEqual(monitor.deviceID, expectedSecondID, "Stale adapter callback must not overwrite new adapter deviceID")
+        XCTAssertFalse(monitor.isRunning)
+    }
+
+    func testJournalWriteFailureBlocksResultSubmission() async throws {
+        let dir = try makeTempDirectory()
+        // Place a regular file where the journal directory wants to be so persistState() throws.
+        let blockedDir = dir.appendingPathComponent("not-a-directory", isDirectory: false)
+        try Data("blocker".utf8).write(to: blockedDir)
+
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "do not submit")
+        )
+        let transport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [offer])
+        let failingJournal = CloudDeviceExecutionJournal(directory: blockedDir)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: failingJournal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock
+        )
+
+        do {
+            _ = try await adapter.runSingleCycle()
+            XCTFail("Expected journal persistence failure to throw")
+        } catch {
+            // Expected storage error
+        }
+        let submitted = await transport.resultSubmissions.count
+        XCTAssertEqual(submitted, 0, "Unpersisted result must never be submitted when journal write fails")
+    }
+
+    func testStageFailureOnFencedJournalRecordBlocksResultSubmission() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "fenced mid-run")
+        )
+
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        // Tool fences the journal record while executing (simulating superseded/fenced record).
+        let fencingTool = HookedNativeTextTool {
+            _ = try await journal.recordFenced(
+                taskID: offer.taskId,
+                fence: offer.fence,
+                reason: "Fenced externally during execution",
+                nowMs: clock.nowMs + 5
+            )
+        }
+        let transport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [offer])
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            textTool: fencingTool,
+            clock: clock
+        )
+
+        let outcome = try await adapter.runSingleCycle()
+        XCTAssertEqual(outcome, .interruptedFenced(taskId: offer.taskId))
+        let submitted = await transport.resultSubmissions.count
+        XCTAssertEqual(submitted, 0, "Must never submit result when recordCheckpoint/stageResultSubmission returns fenced record")
+    }
+
+    // MARK: - 9. P1-3: Real Execution Path Lease Safety
+
+    func testRealExecutionChecksExpiredLeaseBeforeRunningTool() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration(heartbeatInterval: .seconds(10))
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_010_000)
+
+        // Lease already expired relative to clock.nowMs, even though deadline is still in the future.
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs - 1,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "expired lease")
+        )
+
+        let toolCalled = LockedFlag()
+        let tool = HookedNativeTextTool {
+            toolCalled.set(true)
+        }
+        let transport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [offer])
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            textTool: tool,
+            clock: clock
+        )
+
+        let outcome = try await adapter.runSingleCycle()
+        XCTAssertEqual(outcome, .interruptedFenced(taskId: offer.taskId))
+        XCTAssertFalse(toolCalled.value, "NativeTool must not run when lease is already expired")
+        let submitted = await transport.resultSubmissions.count
+        XCTAssertEqual(submitted, 0)
+        let saved = try await journal.record(for: offer.taskId)
+        XCTAssertEqual(saved?.phase, .fenced)
+    }
+
+    func testRealExecutionRenewsLowLeaseAndCommitsOnSuccess() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration(heartbeatInterval: .seconds(10))
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        // Remaining lease is 5s <= 10s heartbeat threshold -> must trigger /renew before execution.
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 5_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "renew me")
+        )
+        let renewedExpiry = clock.nowMs + 35_000
+        let transport = RecordingCloudTransport(
+            readyUntilMs: clock.nowMs + 30_000,
+            queuedClaims: [offer],
+            renewOutcome: .renewed(leaseExpiresAtMs: renewedExpiry)
+        )
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock
+        )
+
+        let outcome = try await adapter.runSingleCycle()
+        XCTAssertEqual(outcome, .executed(taskId: offer.taskId, outcome: .committed(replayed: false)))
+        let renewed = await transport.renewedFences
+        XCTAssertEqual(renewed, [offer.fence])
+        let saved = try await journal.record(for: offer.taskId)
+        XCTAssertEqual(saved?.leaseExpiresAtMs, renewedExpiry)
+        XCTAssertEqual(saved?.phase, .committed(replayed: false))
+    }
+
+    func testRealExecutionStopsWhenLeaseExpiresDuringNativeToolWithoutSubmitting() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration(heartbeatInterval: .seconds(10))
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "slow native tool")
+        )
+
+        // Advance clock past leaseExpiresAtMs inside NativeTool execution.
+        let slowTool = HookedNativeTextTool {
+            clock.advance(byMs: 31_000)
+        }
+        let transport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [offer])
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            textTool: slowTool,
+            clock: clock
+        )
+
+        let outcome = try await adapter.runSingleCycle()
+        XCTAssertEqual(outcome, .interruptedFenced(taskId: offer.taskId))
+        let submitted = await transport.resultSubmissions.count
+        XCTAssertEqual(submitted, 0, "Expired lease during NativeTool execution must not submit a new result")
+        let saved = try await journal.record(for: offer.taskId)
+        XCTAssertEqual(saved?.phase, .fenced)
+    }
+
+    func testPendingSubmissionStillReplaysOriginalFenceAfterLocalLeaseExpiry() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_100_000)
+
+        // Lease & deadline already passed, but result was already staged as pendingSubmission (Unknown ACK).
+        let offer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 3,
+            leaseExpiresAtMs: clock.nowMs - 50_000,
+            deadlineAtMs: clock.nowMs - 10_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "unknown ack")
+        )
+        let expectedSubmission = CloudDeviceResultSubmission(
+            fence: offer.fence,
+            output: CloudDeviceTextStats(text: "unknown ack")
+        )
+        let journal = CloudDeviceExecutionJournal(directory: dir)
+        _ = try await journal.recordClaim(offer, nowMs: clock.nowMs - 60_000)
+        _ = try await journal.stageResultSubmission(
+            taskID: offer.taskId,
+            submission: expectedSubmission,
+            nowMs: clock.nowMs - 55_000
+        )
+
+        let transport = RecordingCloudTransport(
+            readyUntilMs: clock.nowMs + 30_000,
+            commitOutcome: .committed(replayed: true)
+        )
+        let adapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: journal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock
+        )
+
+        let outcome = try await adapter.runSingleCycle()
+        XCTAssertEqual(outcome, .flushedPending(taskId: offer.taskId, outcome: .committed(replayed: true)))
+        let submissions = await transport.resultSubmissions
+        XCTAssertEqual(submissions, [expectedSubmission])
+    }
+
+    // MARK: - 10. P2: Unified NativeTool Result Source
+
+    func testWireResultOriginatesDirectlyFromNativeToolOutputAndMatchesF2Contract() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        // 1. Verify Agent F's exact contract vector through real NativeTextTool:
+        // "𝄞\r\ne\u{0301}\n" -> { utf8Bytes: 10, unicodeScalars: 6, lines: 3 }
+        let contractText = "𝄞\r\ne\u{0301}\n"
+        let realOffer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: contractText)
+        )
+        let realTransport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [realOffer])
+        let realJournal = CloudDeviceExecutionJournal(directory: dir)
+        let realAdapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: realTransport,
+            journal: realJournal,
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock
+        )
+        let realOutcome = try await realAdapter.runSingleCycle()
+        XCTAssertEqual(realOutcome, .executed(taskId: realOffer.taskId, outcome: .committed(replayed: false)))
+        let realSubmissions = await realTransport.resultSubmissions
+        XCTAssertEqual(realSubmissions.first?.output, CloudDeviceTextStats(utf8Bytes: 10, unicodeScalars: 6, lines: 3))
+
+        let maybeSavedRecord = try await realJournal.record(for: realOffer.taskId)
+        let savedRecord = try XCTUnwrap(maybeSavedRecord)
+        let checkpointStats = try CloudDeviceTextStats(nativeToolOutput: XCTUnwrap(savedRecord.nativeStepOutput))
+        XCTAssertEqual(checkpointStats, realSubmissions.first?.output)
+
+        // 2. Verify CloudDeviceExecutorAdapter uses NativeTool output directly rather than recomputing from offer.input.text.
+        let sentinelOutput = NativeToolOutput(
+            summaryText: "Sentinel stats",
+            outputText: "{}",
+            structuredData: .object([
+                "utf8_bytes": .int(77),
+                "unicode_scalars": .int(55),
+                "lf_line_count": .int(3),
+            ])
+        )
+        let sentinelOffer = CloudDeviceClaimOffer(
+            taskId: UUID(),
+            operationId: UUID(),
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: clock.nowMs + 30_000,
+            deadlineAtMs: clock.nowMs + 60_000,
+            capability: CloudDeviceContract.textCapability,
+            version: 1,
+            input: CloudDeviceTextInput(operation: "stats", text: "abc")
+        )
+        let sentinelTransport = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000, queuedClaims: [sentinelOffer])
+        let sentinelAdapter = try CloudDeviceExecutorAdapter(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: sentinelTransport,
+            journal: CloudDeviceExecutionJournal(directory: try makeTempDirectory()),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            textTool: FixedOutputNativeTool(output: sentinelOutput),
+            clock: clock
+        )
+        _ = try await sentinelAdapter.runSingleCycle()
+        let sentinelSubmissions = await sentinelTransport.resultSubmissions
+        XCTAssertEqual(
+            sentinelSubmissions.first?.output,
+            CloudDeviceTextStats(utf8Bytes: 77, unicodeScalars: 55, lines: 3),
+            "Wire result must come directly from NativeToolOutput, not independent recomputation"
+        )
+    }
+
     // MARK: - Test Helpers
 
     private static func readBody(_ request: URLRequest) -> Data? {
@@ -765,13 +1430,322 @@ private final class MutableCloudDeviceClock: CloudDeviceClock, @unchecked Sendab
         return _nowMs
     }
 
+    func advance(byMs delta: Int64) {
+        lock.lock()
+        _nowMs += delta
+        lock.unlock()
+    }
+
     func sleep(for duration: Duration) async throws {
         try await Task.sleep(for: .milliseconds(10))
         let (seconds, attoseconds) = duration.components
         let ms = (seconds * 1_000) + (attoseconds / 1_000_000_000_000_000)
+        advance(byMs: ms)
+    }
+}
+
+private final class LockedFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value = false
+
+    var value: Bool {
         lock.lock()
-        _nowMs += ms
+        defer { lock.unlock() }
+        return _value
+    }
+
+    func set(_ newValue: Bool) {
+        lock.lock()
+        _value = newValue
         lock.unlock()
+    }
+}
+
+private actor StubBackgroundTaskManager: BackgroundTaskManaging {
+    private var nextID = 1
+    private var handlers: [Int: @Sendable () -> Void] = [:]
+    private(set) var activeTaskIDs: Set<Int> = []
+    private(set) var beganCount = 0
+    private(set) var endedCount = 0
+
+    var hasActiveExpirationHandler: Bool {
+        !handlers.isEmpty
+    }
+
+    func beginBackgroundTask(
+        name: String,
+        expirationHandler: @escaping @Sendable () -> Void
+    ) async -> Int {
+        let id = nextID
+        nextID += 1
+        beganCount += 1
+        activeTaskIDs.insert(id)
+        handlers[id] = expirationHandler
+        return id
+    }
+
+    func endBackgroundTask(_ identifier: Int) async {
+        if activeTaskIDs.remove(identifier) != nil {
+            endedCount += 1
+            handlers.removeValue(forKey: identifier)
+        }
+    }
+
+    func triggerExpiration() async {
+        let activeHandlers = Array(handlers.values)
+        for handler in activeHandlers {
+            handler()
+        }
+    }
+}
+
+private actor ControllableNativeTextTool: NativeTool {
+    nonisolated let name: DeviceToolName = .textProcess
+    private let delegate = NativeTextTool()
+    private var shouldPause = true
+    private var started = false
+    private var startedWaiters: [CheckedContinuation<Void, Never>] = []
+    private var pauseContinuation: CheckedContinuation<Void, Error>?
+
+    func setShouldPause(_ pause: Bool) {
+        shouldPause = pause
+    }
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startedWaiters.append(continuation)
+        }
+    }
+
+    func execute(
+        context: NativeToolExecutionContext,
+        arguments: [String: DeviceJSONValue]
+    ) async throws -> NativeToolOutput {
+        started = true
+        let waiters = startedWaiters
+        startedWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+
+        if shouldPause {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                    if Task.isCancelled {
+                        continuation.resume(throwing: CancellationError())
+                    } else {
+                        self.pauseContinuation = continuation
+                    }
+                }
+            } onCancel: {
+                Task { await self.cancelPause() }
+            }
+        }
+        return try await delegate.execute(context: context, arguments: arguments)
+    }
+
+    private func cancelPause() {
+        if let continuation = pauseContinuation {
+            pauseContinuation = nil
+            continuation.resume(throwing: CancellationError())
+        }
+    }
+}
+
+private struct HookedNativeTextTool: NativeTool {
+    let name: DeviceToolName = .textProcess
+    private let delegate = NativeTextTool()
+    private let hook: @Sendable () async throws -> Void
+
+    init(hook: @escaping @Sendable () async throws -> Void) {
+        self.hook = hook
+    }
+
+    func execute(
+        context: NativeToolExecutionContext,
+        arguments: [String: DeviceJSONValue]
+    ) async throws -> NativeToolOutput {
+        try await hook()
+        return try await delegate.execute(context: context, arguments: arguments)
+    }
+}
+
+private struct FixedOutputNativeTool: NativeTool {
+    let name: DeviceToolName = .textProcess
+    let output: NativeToolOutput
+
+    func execute(
+        context: NativeToolExecutionContext,
+        arguments: [String: DeviceJSONValue]
+    ) async throws -> NativeToolOutput {
+        try context.checkCancellation()
+        return output
+    }
+}
+
+private actor RecordingCloudTransport: CloudDeviceAPITransporting {
+    private let readyUntilMs: Int64
+    private var queuedClaims: [CloudDeviceClaimOffer]
+    private let renewOutcome: CloudDeviceRenewOutcome
+    private let commitOutcome: CloudDeviceCommitOutcome
+    private(set) var registerCount = 0
+    private(set) var claimCount = 0
+    private(set) var renewedFences: [CloudDeviceFence] = []
+    private(set) var resultSubmissions: [CloudDeviceResultSubmission] = []
+
+    init(
+        readyUntilMs: Int64,
+        queuedClaims: [CloudDeviceClaimOffer] = [],
+        renewOutcome: CloudDeviceRenewOutcome = .renewed(leaseExpiresAtMs: 0),
+        commitOutcome: CloudDeviceCommitOutcome = .committed(replayed: false)
+    ) {
+        self.readyUntilMs = readyUntilMs
+        self.queuedClaims = queuedClaims
+        self.renewOutcome = renewOutcome
+        self.commitOutcome = commitOutcome
+    }
+
+    func register(credential: CloudDeviceCredential) async throws -> CloudDeviceRegistrationReceipt {
+        registerCount += 1
+        return CloudDeviceRegistrationReceipt(
+            deviceId: credential.id,
+            capability: CloudDeviceContract.textCapability,
+            version: CloudDeviceContract.capabilityVersion,
+            readyUntilMs: readyUntilMs
+        )
+    }
+
+    func claim(credential: CloudDeviceCredential) async throws -> CloudDeviceClaimResponse {
+        claimCount += 1
+        guard !queuedClaims.isEmpty else { return .idle }
+        return .claimed(queuedClaims.removeFirst())
+    }
+
+    func renew(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        fence: CloudDeviceFence,
+        previousLeaseExpiresAtMs: Int64,
+        deadlineAtMs: Int64
+    ) async throws -> CloudDeviceRenewOutcome {
+        renewedFences.append(fence)
+        return renewOutcome
+    }
+
+    func submitResult(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        submission: CloudDeviceResultSubmission
+    ) async throws -> CloudDeviceCommitOutcome {
+        resultSubmissions.append(submission)
+        return commitOutcome
+    }
+}
+
+private actor GatedCloudTransport: CloudDeviceAPITransporting {
+    private let readyUntilMs: Int64
+    private var currentConcurrentClaims = 0
+    private(set) var maxConcurrentClaims = 0
+    private var enteredClaim = false
+    private var cancellationObserved = false
+    private var gateReleased = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+    private var cancelWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+
+    init(readyUntilMs: Int64) {
+        self.readyUntilMs = readyUntilMs
+    }
+
+    func resetGate() {
+        enteredClaim = false
+        cancellationObserved = false
+        gateReleased = false
+    }
+
+    func waitForClaimEntry() async {
+        if enteredClaim { return }
+        await withCheckedContinuation { continuation in
+            entryWaiters.append(continuation)
+        }
+    }
+
+    func waitForCancellationObserved() async {
+        if cancellationObserved { return }
+        await withCheckedContinuation { continuation in
+            cancelWaiters.append(continuation)
+        }
+    }
+
+    func releaseGate() {
+        gateReleased = true
+        let waiters = releaseWaiters
+        releaseWaiters.removeAll()
+        for waiter in waiters {
+            waiter.resume()
+        }
+    }
+
+    func register(credential: CloudDeviceCredential) async throws -> CloudDeviceRegistrationReceipt {
+        CloudDeviceRegistrationReceipt(
+            deviceId: credential.id,
+            capability: CloudDeviceContract.textCapability,
+            version: CloudDeviceContract.capabilityVersion,
+            readyUntilMs: readyUntilMs
+        )
+    }
+
+    func claim(credential: CloudDeviceCredential) async throws -> CloudDeviceClaimResponse {
+        currentConcurrentClaims += 1
+        maxConcurrentClaims = max(maxConcurrentClaims, currentConcurrentClaims)
+        defer { currentConcurrentClaims -= 1 }
+
+        enteredClaim = true
+        let eWaiters = entryWaiters
+        entryWaiters.removeAll()
+        for w in eWaiters { w.resume() }
+
+        await withTaskCancellationHandler {
+            if !gateReleased {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    if self.gateReleased {
+                        continuation.resume()
+                    } else {
+                        self.releaseWaiters.append(continuation)
+                    }
+                }
+            }
+        } onCancel: {
+            Task { await self.markCancellationObserved() }
+        }
+        try Task.checkCancellation()
+        return .idle
+    }
+
+    private func markCancellationObserved() {
+        cancellationObserved = true
+        let waiters = cancelWaiters
+        cancelWaiters.removeAll()
+        for w in waiters { w.resume() }
+    }
+
+    func renew(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        fence: CloudDeviceFence,
+        previousLeaseExpiresAtMs: Int64,
+        deadlineAtMs: Int64
+    ) async throws -> CloudDeviceRenewOutcome {
+        .renewed(leaseExpiresAtMs: deadlineAtMs)
+    }
+
+    func submitResult(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        submission: CloudDeviceResultSubmission
+    ) async throws -> CloudDeviceCommitOutcome {
+        .committed(replayed: false)
     }
 }
 

@@ -350,6 +350,18 @@ export function createProactiveScheduleFromTurnSync(
     };
   }
 
+  // Newly created chat schedules must not silently turn a past absolute timestamp into
+  // immediate catch-up work; idempotent replays of already-created schedules are handled above.
+  const hasExplicitAbsoluteFireTime =
+    cmd.input.trigger.type === 'once' ||
+    (cmd.input.trigger.type === 'interval' && cmd.input.trigger.firstFireAt !== undefined);
+  if (hasExplicitAbsoluteFireTime && normalized.firstFireAtMs <= cmd.nowMs) {
+    return {
+      outcome: 'invalid',
+      message: 'scheduled fire time must be in the future',
+    };
+  }
+
   const scheduleId = cmd.newId();
   const sourceKind = mapSourceKind(cmd.input.kind);
   const schedules = new ScheduleRepository(sql);

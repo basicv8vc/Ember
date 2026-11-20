@@ -1,0 +1,339 @@
+import { randomUUID } from 'node:crypto';
+import { DatabaseSync } from 'node:sqlite';
+import {
+  CONVERSATION_SYSTEM_PROMPT,
+  MODEL_LIMITS,
+  PERSONAL_MEMORY_SYSTEM_HEADER,
+  buildBoundedPersonalMemoryContext,
+  preflightConversationTurn,
+} from '@ember/model-gateway';
+import { buildConversationTurnMessages } from '../../packages/model-gateway/src/providers/shared.js';
+import {
+  AgentHeadMemoryService,
+  PERSONAL_MEMORY_MAX_ITEMS,
+  applyAgentHeadMigrations,
+  createDefaultAgentHeadMigrations,
+  parseClaimExecutionContext,
+  readPersonalMemoriesForTurnSync,
+  type DurableObjectStorageLike,
+  type SqlStorageCursorLike,
+  type SqlStorageRow,
+} from '@ember/runtime-v2';
+import { describe, expect, it } from 'vitest';
+
+function createInMemoryDoStorage(): {
+  readonly db: DatabaseSync;
+  readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
+} {
+  const db = new DatabaseSync(':memory:');
+  db.exec('PRAGMA foreign_keys = ON;');
+
+  const sql = {
+    exec<T extends SqlStorageRow = SqlStorageRow>(
+      query: string,
+      ...bindings: unknown[]
+    ): SqlStorageCursorLike<T> {
+      const stmt = db.prepare(query);
+      const isRead = /^\s*(SELECT|PRAGMA|WITH|EXPLAIN)\b/i.test(query);
+      const rows = isRead
+        ? (stmt.all(...(bindings as never[])) as unknown as T[])
+        : (stmt.run(...(bindings as never[])), [] as T[]);
+      return {
+        toArray: () => rows,
+        one: () => {
+          if (rows.length !== 1) {
+            throw new Error(`Expected 1 row, got ${rows.length}`);
+          }
+          return rows[0]!;
+        },
+        [Symbol.iterator]: () => rows[Symbol.iterator](),
+        rowsRead: isRead ? rows.length : 0,
+        rowsWritten: isRead ? 0 : 1,
+      };
+    },
+  };
+
+  let inTx = false;
+  const storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'> = {
+    sql,
+    transactionSync<T>(closure: () => T): T {
+      if (inTx) {
+        return closure();
+      }
+      inTx = true;
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const result = closure();
+        db.exec('COMMIT;');
+        return result;
+      } catch (error) {
+        db.exec('ROLLBACK;');
+        throw error;
+      } finally {
+        inTx = false;
+      }
+    },
+  };
+
+  return { db, storage };
+}
+
+function bootstrapHead(
+  storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>,
+  tenantId: string,
+  agentId: string,
+) {
+  applyAgentHeadMigrations(storage, createDefaultAgentHeadMigrations(), 1_700_000_000_000);
+  storage.sql.exec(
+    `INSERT INTO agent_head_meta (id, tenant_id, agent_id, policy_version, home_region, created_at_ms, updated_at_ms)
+     VALUES (1, ?, ?, 1, 'local', 1700000000000, 1700000000000)`,
+    tenantId,
+    agentId,
+  );
+}
+
+describe('Personal Memory — model-gateway bounded context & preflight', () => {
+  it('formats bounded personal memories cleanly, strips newlines, and enforces caps', () => {
+    const bounded = buildBoundedPersonalMemoryContext([
+      { kind: 'preference', key: 'reply_style', content: 'Always use\nbullet\tpoints' },
+      { kind: 'fact', content: 'Based in Tokyo' },
+    ]);
+
+    expect(bounded.droppedItems).toBe(0);
+    expect(bounded.items).toEqual([
+      { kind: 'preference', key: 'reply_style', content: 'Always use bullet points' },
+      { kind: 'fact', content: 'Based in Tokyo' },
+    ]);
+    expect(bounded.text).toContain(PERSONAL_MEMORY_SYSTEM_HEADER);
+    expect(bounded.text).toContain('- [preference:reply_style] Always use bullet points');
+    expect(bounded.text).toContain('- [fact] Based in Tokyo');
+    expect(bounded.characters).toBe(bounded.text.length);
+
+    // Enforce maxPersonalMemoryChars without mid-item truncation
+    const manyItems = Array.from({ length: 30 }, (_, i) => ({
+      kind: 'preference' as const,
+      key: `pref_${i}`,
+      content: 'x'.repeat(250),
+    }));
+    const capped = buildBoundedPersonalMemoryContext(manyItems);
+    expect(capped.characters).toBeLessThanOrEqual(MODEL_LIMITS.maxPersonalMemoryChars);
+    expect(capped.items.length).toBeLessThan(manyItems.length);
+    expect(capped.droppedItems).toBe(manyItems.length - capped.items.length);
+  });
+
+  it('injects personal memories into system message and accounts for them in preflight', () => {
+    const messagesWithout = buildConversationTurnMessages({
+      conversationId: randomUUID(),
+      turnId: randomUUID(),
+      context: [{ role: 'user', text: 'Plan my day' }],
+      maxOutputTokens: 256,
+    });
+    expect(messagesWithout[0]).toEqual({ role: 'system', content: CONVERSATION_SYSTEM_PROMPT });
+
+    const personalMemories = [
+      { kind: 'preference' as const, key: 'response_style', content: 'Be concise and use bullets' },
+    ];
+    const messagesWith = buildConversationTurnMessages({
+      conversationId: randomUUID(),
+      turnId: randomUUID(),
+      context: [{ role: 'user', text: 'Plan my day' }],
+      personalMemories,
+      maxOutputTokens: 256,
+    });
+    expect(messagesWith[0]?.role).toBe('system');
+    expect(messagesWith[0]?.content).toContain(CONVERSATION_SYSTEM_PROMPT);
+    expect(messagesWith[0]?.content).toContain('Be concise and use bullets');
+
+    const basePreflight = preflightConversationTurn({
+      messages: [{ role: 'user', text: 'Plan my day' }],
+      maxOutputTokens: 256,
+    });
+    const memoryPreflight = preflightConversationTurn({
+      messages: [{ role: 'user', text: 'Plan my day' }],
+      personalMemories,
+      maxOutputTokens: 256,
+    });
+    expect(memoryPreflight.inputChars).toBeGreaterThan(basePreflight.inputChars);
+    expect(memoryPreflight.inputTokens).toBeGreaterThan(basePreflight.inputTokens);
+  });
+});
+
+describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
+  it('saves, updates by key, inspects provenance, deletes, and isolates principals', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalA = randomUUID();
+    const principalB = randomUUID();
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+
+    let now = 1_700_000_001_000;
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => now,
+      newId: () => randomUUID(),
+    });
+
+    const created = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        key: 'Response_Style',
+        content: 'Prefer concise bullet points',
+        provenance: {
+          source: 'explicit_user_request',
+          conversation_id: conversationId,
+          message_id: messageId,
+        },
+      },
+    });
+    expect('created' in created && created.created).toBe(true);
+    if (!('item' in created)) throw new Error('expected save result');
+    expect(created.item.key).toBe('response_style');
+    expect(created.item.provenance).toEqual({
+      source: 'explicit_user_request',
+      conversation_id: conversationId,
+      message_id: messageId,
+    });
+
+    // Upsert by same normalized key updates in place
+    now += 5_000;
+    const updated = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        key: 'response_style',
+        content: 'Prefer numbered lists',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    expect('created' in updated && updated.created).toBe(false);
+    if (!('item' in updated)) throw new Error('expected save result');
+    expect(updated.item.memory_id).toBe(created.item.memory_id);
+    expect(updated.item.content).toBe('Prefer numbered lists');
+    expect(updated.item.provenance).toEqual({
+      source: 'user_settings',
+      conversation_id: null,
+      message_id: null,
+    });
+
+    // Principal B cannot see or delete Principal A's memory
+    const listB = await service.execute({
+      kind: 'list',
+      tenantId,
+      principalId: principalB,
+      agentId,
+      requestId: randomUUID(),
+    });
+    expect('items' in listB && listB.items).toEqual([]);
+    expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalB)).toEqual([]);
+
+    await expect(
+      service.execute({
+        kind: 'delete',
+        tenantId,
+        principalId: principalB,
+        agentId,
+        requestId: randomUUID(),
+        memoryId: created.item.memory_id,
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+
+    // Principal A retrieves it for turn context
+    expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalA)).toEqual([
+      { kind: 'preference', key: 'response_style', content: 'Prefer numbered lists' },
+    ]);
+
+    // Principal A deletes it
+    const deleted = await service.execute({
+      kind: 'delete',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      memoryId: created.item.memory_id,
+    });
+    expect(deleted).toEqual({ deleted: true, memory_id: created.item.memory_id });
+    expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalA)).toEqual([]);
+  });
+
+  it('enforces PERSONAL_MEMORY_MAX_ITEMS per principal', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => 1_700_000_000_000,
+      newId: () => randomUUID(),
+    });
+
+    for (let i = 0; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      await service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: `Fact #${i}`,
+          provenance: { source: 'explicit_user_request' },
+        },
+      });
+    }
+
+    await expect(
+      service.execute({
+        kind: 'save',
+        tenantId,
+        principalId,
+        agentId,
+        requestId: randomUUID(),
+        input: {
+          kind: 'fact',
+          content: 'Overflow fact',
+          provenance: { source: 'explicit_user_request' },
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+  });
+
+  it('parses optional personalMemories in durable claim context', () => {
+    const turnId = randomUUID();
+    const parsed = parseClaimExecutionContext({
+      targetKind: 'turn',
+      targetId: turnId,
+      leaseEpoch: 1,
+      contextJson: JSON.stringify({
+        entityKind: 'turn',
+        entityId: turnId,
+        operationId: randomUUID(),
+        attemptNo: 1,
+        sendStartedAtMs: null,
+        sendAuthorizingAtMs: null,
+        sendState: 'unsent',
+        deadlineAtMs: 1_700_000_060_000,
+        providerJobHandle: null,
+        context: [{ sequence: 1, kind: 'user', text: 'hi' }],
+        personalMemories: [{ kind: 'preference', key: 'lang', content: 'Reply in English' }],
+      }),
+    });
+
+    expect(parsed.personalMemories).toEqual([
+      { kind: 'preference', key: 'lang', content: 'Reply in English' },
+    ]);
+  });
+});

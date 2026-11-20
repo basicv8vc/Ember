@@ -149,7 +149,7 @@ function createSqliteDoHarness(initialAlarm: number | null = null) {
 describe('M1-A6 DO SQLite Write Amplification Optimizations', () => {
   it('upgrades existing pre-v5 AgentHeadDO database (v1..v4 incl. M2-F2) to v5 (OPT-1, OPT-2, OPT-5) preserving all rows, UNIQUE, and FK constraints', () => {
     const h = createSqliteDoHarness();
-    const allMigrations = createDefaultAgentHeadMigrations();
+    const allMigrations = createDefaultAgentHeadMigrations().filter((m) => m.version <= 5);
     const preV5 = allMigrations.filter((m) => m.version < 5);
     expect(preV5.map((m) => m.version)).toEqual([1, 2, 3, 4]);
 

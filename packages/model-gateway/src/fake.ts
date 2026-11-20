@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { buildBoundedPersonalMemoryContext } from './context.js';
 import { ModelGatewayFailure } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative } from './limits.js';
 import { clampText } from './providers/shared.js';
@@ -83,6 +84,12 @@ export class FakeModelGateway implements ModelGateway {
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
     await this.#beforeExecute(signal);
 
+    const memoryText =
+      input.personalMemories !== undefined && input.personalMemories.length > 0
+        ? buildBoundedPersonalMemoryContext(input.personalMemories).text
+        : '';
+    const memoryTokens = memoryText.length > 0 ? estimateTokensConservative(memoryText) : 0;
+
     if (this.#onConversationTurn !== undefined) {
       const output = this.#onConversationTurn(input);
       return Object.freeze({
@@ -90,10 +97,11 @@ export class FakeModelGateway implements ModelGateway {
         modelLabel: FAKE_MODEL_LABEL,
         simulated: true as const,
         usage: Object.freeze({
-          inputTokens: input.context.reduce(
-            (total, message) => total + estimateTokensConservative(message.text),
-            0,
-          ),
+          inputTokens:
+            input.context.reduce(
+              (total, message) => total + estimateTokensConservative(message.text),
+              0,
+            ) + memoryTokens,
           outputTokens: Math.max(1, estimateTokensConservative(output.text)),
           costMicroUsd: 0,
           rateVersion: 'fake-zero-cost',
@@ -115,10 +123,11 @@ export class FakeModelGateway implements ModelGateway {
     }
 
     const usage: ModelUsage = Object.freeze({
-      inputTokens: input.context.reduce(
-        (total, message) => total + estimateTokensConservative(message.text),
-        0,
-      ),
+      inputTokens:
+        input.context.reduce(
+          (total, message) => total + estimateTokensConservative(message.text),
+          0,
+        ) + memoryTokens,
       outputTokens: words.length,
       costMicroUsd: 0,
       rateVersion: 'fake-zero-cost',

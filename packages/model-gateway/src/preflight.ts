@@ -2,6 +2,7 @@ import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   PYTHON_AGENT_SYSTEM_PROMPT,
+  buildBoundedPersonalMemoryContext,
 } from './context.js';
 import { ModelInputRefused } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative, serializationOverheadTokens } from './limits.js';
@@ -11,7 +12,11 @@ import {
   buildPythonAgentInitialUserText,
   formatConversationMessageText,
 } from './providers/shared.js';
-import type { ConversationAttachmentMetadata, PythonAgentStepInput } from './types.js';
+import type {
+  ConversationAttachmentMetadata,
+  PersonalMemoryContextItem,
+  PythonAgentStepInput,
+} from './types.js';
 
 export interface TokenPreflight {
   /** Characters that will be sent, including the fixed prompt and the JSON envelope. */
@@ -56,6 +61,7 @@ export function preflightConversationTurn(input: {
     readonly text: string;
     readonly attachments?: readonly ConversationAttachmentMetadata[];
   }[];
+  readonly personalMemories?: readonly PersonalMemoryContextItem[];
   readonly maxOutputTokens: number;
 }): TokenPreflight {
   if (
@@ -104,10 +110,27 @@ export function preflightConversationTurn(input: {
     throw new ModelInputRefused('context_too_large');
   }
 
+  const memoryBlock =
+    input.personalMemories !== undefined && input.personalMemories.length > 0
+      ? buildBoundedPersonalMemoryContext(input.personalMemories)
+      : undefined;
+  const memoryChars = memoryBlock === undefined ? 0 : memoryBlock.characters;
+  const memoryTokens =
+    memoryBlock === undefined || memoryBlock.text.length === 0
+      ? 0
+      : estimateTokensConservative(memoryBlock.text);
+
   const inputChars =
-    messageChars + MODEL_LIMITS.systemPromptChars + MODEL_LIMITS.serializationOverheadChars;
+    messageChars +
+    memoryChars +
+    MODEL_LIMITS.systemPromptChars +
+    MODEL_LIMITS.serializationOverheadChars;
   const inputTokens =
-    messageTokens + SYSTEM_PROMPT_TOKENS + DELEGATION_TOOLS_TOKEN_ESTIMATE + OVERHEAD_TOKENS;
+    messageTokens +
+    memoryTokens +
+    SYSTEM_PROMPT_TOKENS +
+    DELEGATION_TOOLS_TOKEN_ESTIMATE +
+    OVERHEAD_TOKENS;
 
   if (inputTokens > MODEL_LIMITS.maxInputTokens) {
     throw new ModelInputRefused('input_tokens_over_cap');

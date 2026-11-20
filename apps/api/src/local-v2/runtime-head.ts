@@ -19,6 +19,7 @@ import {
   type DeviceExecutionRpc,
   type GlobalBudgetBindings,
   type ObservedTurnUsage,
+  type PersonalMemoryRpc,
   type QueueLike,
   type V2DispatchEnvelope,
 } from '@ember/runtime-v2';
@@ -43,8 +44,8 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
   readonly EMBER_V2_AGENT_TASK_DLQ_NAME?: string;
 }
 
-type LocalEdgeRpc = EdgeAgentHeadRpc & DeviceExecutionRpc;
-type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc;
+type LocalEdgeRpc = EdgeAgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc;
+type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc;
 type EdgeMethod = keyof LocalEdgeRpc;
 type EdgeRequest<K extends EdgeMethod> = Parameters<CoreEdgeRpc[K]>[0];
 type EdgeResult<K extends EdgeMethod> = Awaited<ReturnType<CoreEdgeRpc[K]>>;
@@ -76,6 +77,7 @@ export function createEdgeRpc(head: AgentHeadDO): LocalEdgeRpc {
     cancelTurn: (req) => call('cancelTurn', req),
     clearTranscript: (req) => call('clearTranscript', req),
     deviceExecution: (req) => call('deviceExecution', req),
+    personalMemory: (req) => call('personalMemory', req),
   };
 }
 

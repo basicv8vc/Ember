@@ -192,6 +192,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
           conversationId,
           turnId,
           context: context.messages,
+          ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
+            ? { personalMemories: prepared.personalMemories }
+            : {}),
           maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
         },
         operationId,

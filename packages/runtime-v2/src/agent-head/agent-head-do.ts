@@ -21,6 +21,11 @@ import type {
   RenewTurnLeaseResult,
 } from '../contracts/agent-head-rpc.js';
 import type { DeviceExecutionCommand, DeviceExecutionRpc } from '../contracts/device-execution.js';
+import type {
+  PersonalMemoryCommand,
+  PersonalMemoryResponse,
+  PersonalMemoryRpc,
+} from '../contracts/personal-memory.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
 import { applyAgentHeadMigrations, type AgentHeadMigrationStep } from '../migrations.js';
 import type {
@@ -48,6 +53,7 @@ import {
   type LocalSettlementResult,
 } from './budget.js';
 import { AgentHeadDeviceService } from './device-service.js';
+import { AgentHeadMemoryService } from './memory-service.js';
 import { getHeadMetaSync, getTaskRowSync, sqlExecMaybe } from './queries.js';
 import { AgentHeadRecoveryService } from './recovery-service.js';
 import {
@@ -150,9 +156,15 @@ export interface AgentHeadBootstrapInput {
  * `RecoveryAdmissionPort`, and `recoveryHooks`).
  */
 export class AgentHeadCore
-  implements AgentHeadRpc, AgentHeadRecoveryPort, AuthoritativeBusinessPort, DeviceExecutionRpc
+  implements
+    AgentHeadRpc,
+    AgentHeadRecoveryPort,
+    AuthoritativeBusinessPort,
+    DeviceExecutionRpc,
+    PersonalMemoryRpc
 {
   private readonly deviceService: AgentHeadDeviceService;
+  private readonly memoryService: AgentHeadMemoryService;
   readonly recoveryService: AgentHeadRecoveryService;
   readonly turnService: AgentHeadTurnService;
 
@@ -228,6 +240,12 @@ export class AgentHeadCore
       earliestDiscovery: this.recoveryService,
       recovery: this.recoveryService,
       eventCoordinator: bindings.eventCoordinator,
+      nowMs: this.nowMsFn,
+      newId: this.newId,
+    });
+
+    this.memoryService = new AgentHeadMemoryService({
+      storage: this.storage,
       nowMs: this.nowMsFn,
       newId: this.newId,
     });
@@ -378,6 +396,10 @@ export class AgentHeadCore
     readonly conversationId: Id;
   }): Promise<B1TranscriptClearResult> {
     return this.turnService.clearTranscript(req);
+  }
+
+  personalMemory(cmd: PersonalMemoryCommand): Promise<PersonalMemoryResponse> {
+    return this.memoryService.execute(cmd);
   }
 
   getMainConversation(req: {

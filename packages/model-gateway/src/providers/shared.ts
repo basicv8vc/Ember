@@ -3,6 +3,7 @@ import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   PYTHON_AGENT_SYSTEM_PROMPT,
+  buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
 } from '../context.js';
 import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
@@ -288,8 +289,16 @@ function formatContextTurnMessage(
 }
 
 export function buildConversationTurnMessages(input: ConversationTurnInput): ProviderChatMessage[] {
+  const memoryBlock =
+    input.personalMemories !== undefined && input.personalMemories.length > 0
+      ? buildBoundedPersonalMemoryContext(input.personalMemories).text
+      : '';
+  const systemContent =
+    memoryBlock.length > 0
+      ? `${CONVERSATION_SYSTEM_PROMPT}\n\n${memoryBlock}`
+      : CONVERSATION_SYSTEM_PROMPT;
   return [
-    { role: 'system' as const, content: CONVERSATION_SYSTEM_PROMPT },
+    { role: 'system' as const, content: systemContent },
     ...input.context.map(formatContextTurnMessage),
   ];
 }

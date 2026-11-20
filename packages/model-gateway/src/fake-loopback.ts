@@ -49,6 +49,10 @@ export class LoopbackFakeModelGateway {
       },
       body: JSON.stringify({
         prompt: request.input.context.at(-1)?.text ?? '',
+        ...(request.input.personalMemories !== undefined &&
+        request.input.personalMemories.length > 0
+          ? { personalMemories: request.input.personalMemories }
+          : {}),
         deadlineAtMs: request.deadlineAtMs,
       }),
     });

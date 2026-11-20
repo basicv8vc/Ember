@@ -231,13 +231,14 @@ describe('V2-M1 assembled runtime in local workerd', () => {
   });
 
   it(
-    'recovers a disconnected stream after handoff to the original provider job',
-    { timeout: 145_000 },
+    'hands a disconnected stream to Durable and only queries the original provider job',
+    { timeout: 115_000 },
     async () => {
       const handle = 'smoke_original_handoff';
       harness.fakeGateway.setDefaultRule({
         mode: 'slow_handoff',
-        delayMs: 114_000,
+        // Wrangler can buffer disconnect propagation. Complete before the 110s timed handoff.
+        delayMs: 90_000,
         replyText: 'Handoff reply',
         costMicroUsd: 149,
         providerJobHandle: handle,
@@ -256,7 +257,7 @@ describe('V2-M1 assembled runtime in local workerd', () => {
       const turnId = receipt.turn.turn_id;
       expect(await submission(body)).toEqual(receipt);
       await expect
-        .poll(() => turn(turnId), { interval: 250, timeout: 125_000 })
+        .poll(() => turn(turnId), { timeout: 100_000, interval: 250 })
         .toMatchObject({ status: 'completed' });
       const completed = await turn(turnId);
       const call = await providerCall(turnId);
@@ -268,18 +269,15 @@ describe('V2-M1 assembled runtime in local workerd', () => {
       await assertSettlement(call.operationId, [149]);
       expect(
         await headRows(
-          'SELECT execution_mode, provider_job_handle, handoff_reason, claim_count, deadline_at_ms - created_at_ms AS ttl FROM assistant_turns WHERE id = ?',
+          'SELECT execution_mode, provider_job_handle, handoff_reason, claim_count > 0 AS claimed, deadline_at_ms - created_at_ms AS ttl FROM assistant_turns WHERE id = ?',
           turnId,
         ),
       ).toEqual([
         {
           execution_mode: 'durable_queue',
           provider_job_handle: handle,
-          // The Wrangler proxy can retain its upstream request after the client disconnects.
-          handoff_reason: expect.stringMatching(
-            /^(client_disconnect_handoff|interactive_deadline_120s)$/,
-          ),
-          claim_count: 1,
+          handoff_reason: 'client_disconnect_handoff',
+          claimed: 1,
           ttl: 600_000,
         },
       ]);

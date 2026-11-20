@@ -24,7 +24,9 @@ enum AppCompositionRoot {
     @ViewBuilder
     static func makeRootView() -> some View {
         let arguments = Set(ProcessInfo.processInfo.arguments)
-        if arguments.isDisjoint(with: mockLaunchArguments) || arguments.contains("--ember-live-cloud") {
+        if arguments.contains("--ember-device-executor") {
+            DeviceExecutorWorkbenchView(model: DeviceExecutorWorkbenchModel())
+        } else if arguments.isDisjoint(with: mockLaunchArguments) || arguments.contains("--ember-live-cloud") {
             let origin = ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"] ?? defaultCloudBaseURL
             if let url = URL(string: origin),
                let model = try? LiveComposition.make(baseURL: url) {

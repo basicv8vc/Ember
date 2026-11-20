@@ -630,6 +630,7 @@ export class TestAgentHeadDO extends DurableObject {
               sendAuthorizingAtMs: row.send_started_at_ms,
               sendStartedAtMs: row.send_started_at_ms,
               deadlineAtMs: row.deadline_at_ms,
+              testNowMs: c.now_ms,
               providerJobHandle: row.provider_job_handle,
             }),
           };
@@ -645,6 +646,30 @@ export class TestAgentHeadDO extends DurableObject {
       });
       if (res.kind === 'claimed') return Response.json(res.claim);
       return Response.json({ kind: 'not_claimed', reason: 'terminal' });
+    }
+
+    // Test-only authority: atomically fence a provider start against the claimed row.
+    if (url.pathname === '/mark-attempt-sent') {
+      const cmd = await request.json();
+      return Response.json(this.ctx.storage.transactionSync(() => {
+        const row = this.ctx.storage.sql.exec('SELECT * FROM b4_entities WHERE entity_id = ?', cmd.subjectId).toArray()[0];
+        if (!row || cmd.scope.tenantId !== 'ten-b4' || cmd.scope.agentId !== 'ag-b4' ||
+            row.entity_kind !== cmd.subjectType || row.operation_id !== cmd.operationId ||
+            cmd.attemptNo !== 1 || row.lease_epoch !== cmd.leaseEpoch ||
+            row.lease_owner !== cmd.leaseOwner || row.status !== 'running') {
+          return { authorized: false, reason: 'fenced' };
+        }
+        if (row.cancel_requested_at_ms !== null) return { authorized: false, reason: 'cancelled' };
+        const startBeforeMs = Math.min(row.lease_expires_at_ms, row.deadline_at_ms);
+        if (c.now_ms >= startBeforeMs) return { authorized: false, reason: 'expired' };
+        if (row.send_started_at_ms !== null) return { authorized: false, reason: 'already_sent' };
+        this.ctx.storage.sql.exec(
+          'UPDATE b4_entities SET send_started_at_ms = ? WHERE entity_id = ?',
+          c.now_ms,
+          row.entity_id,
+        );
+        return { authorized: true, sentAtMs: c.now_ms, startBeforeMs };
+      }));
     }
 
     if (url.pathname === '/commit') {
@@ -1347,6 +1372,18 @@ export default {
           let polls = 0;
           const res = await executeRecoveredOrFreshDurableWork({
             context: ctx,
+            nowMs: () => ctx.testNowMs,
+            sendGate: {
+              scope: { tenantId: cmd.tenantId, agentId: cmd.agentId },
+              leaseEpoch: cmd.leaseEpoch,
+              leaseOwner: cmd.workerId,
+              leaseExpiresAtMs: cmd.leaseExpiresAtMs,
+              markAttemptSent: async (req) =>
+                (await stub.fetch('http://do/mark-attempt-sent', {
+                  method: 'POST',
+                  body: JSON.stringify(req),
+                })).json(),
+            },
             provider: {
               pollProviderJob: async (p) => {
                 polls += 1;

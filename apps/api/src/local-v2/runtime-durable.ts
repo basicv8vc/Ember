@@ -16,6 +16,7 @@ import {
   type DurableExecutionClaimContext,
   type DurableExecutorPort,
   type FakeOrProviderJobOutcome,
+  type PersonalMemoryContextItem,
   type ProactiveScheduleList,
   type ProactiveScheduleTaskPayload,
 } from '@ember/runtime-v2';
@@ -44,6 +45,7 @@ async function loadProactiveBriefContext(
   const rpc = createEdgeRpc(head);
   let recentMessages: readonly BriefContextMessage[] = [];
   let activeSchedules: ProactiveScheduleList['schedules'] = [];
+  let personalMemories: PersonalMemoryContextItem[] = [];
 
   if (conversationId !== undefined) {
     try {
@@ -74,7 +76,26 @@ async function loadProactiveBriefContext(
     // Best-effort context; proceed with base brief prompt if unavailable.
   }
 
-  return { recentMessages, activeSchedules };
+  try {
+    const memories = await rpc.personalMemory({
+      kind: 'list',
+      tenantId,
+      principalId: proactive.principalId,
+      agentId,
+      requestId: crypto.randomUUID(),
+    });
+    if ('items' in memories) {
+      personalMemories = memories.items.map((item) => ({
+        kind: item.kind,
+        ...(item.key === null ? {} : { key: item.key }),
+        content: item.content,
+      }));
+    }
+  } catch {
+    // Best-effort context; proceed with base brief prompt if unavailable.
+  }
+
+  return { recentMessages, activeSchedules, personalMemories };
 }
 
 function unwrapJsonText(raw: unknown): string | null {

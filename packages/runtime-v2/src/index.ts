@@ -13,3 +13,4 @@ export * from './agent-head/index.js';
 export * from './global-budget/platform.js';
 export * from './recovery/registry.js';
 export * from './recovery/sweeper.js';
+export * from './recovery/durable-integration.js';

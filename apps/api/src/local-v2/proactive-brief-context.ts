@@ -5,7 +5,8 @@ export const MAX_BRIEF_ACTIVE_SCHEDULES = 6;
 export const MAX_BRIEF_ITEM_CHARS = 240;
 export const MAX_BRIEF_PROMPT_CHARS = 3_600;
 export const BRIEF_MESSAGE_PAGE_SIZE = 50;
-export const MAX_BRIEF_MESSAGE_PAGES = 20;
+export const MAX_BRIEF_TAIL_PROBE_STEPS = 30;
+export const MAX_BRIEF_TAIL_WALK_PAGES = 4;
 
 export interface BriefContextMessage {
   readonly kind: 'user' | 'ember';
@@ -20,32 +21,89 @@ export interface BriefMessagePage {
   readonly next_after: number | null;
 }
 
+function appendUserOrEmber(
+  tail: BriefContextMessage[],
+  messages: BriefMessagePage['messages'],
+  maxMessages: number,
+): BriefContextMessage[] {
+  for (const msg of messages) {
+    if ((msg.kind === 'user' || msg.kind === 'ember') && typeof msg.text === 'string') {
+      tail.push({ kind: msg.kind, text: msg.text });
+    }
+  }
+  return tail.length > maxMessages ? tail.slice(-maxMessages) : tail;
+}
+
 /**
- * Walks ascending conversation pages (`WHERE sequence > after ORDER BY sequence ASC`)
- * in a bounded loop and retains only the latest `maxMessages` user/ember messages.
+ * Retrieves the latest `maxMessages` user/ember messages using existing ascending
+ * `sequence > after` pagination:
+ * - Fast path (<= 50 messages): single page read.
+ * - Long conversations (including > 1,000 messages): O(log N) exponential + binary
+ *   sequence probe to locate the true tail, then bounded tail-window read.
+ * - Fail-closed: if the true tail (`has_more === false`) cannot be reached within
+ *   the bounded budget, returns `[]` so stale older history is never injected as
+ *   recent context.
  */
 export async function loadRecentBriefMessages(
   readPage: (after: number, limit: number) => Promise<BriefMessagePage>,
   maxMessages = MAX_BRIEF_RECENT_MESSAGES,
 ): Promise<readonly BriefContextMessage[]> {
-  let after = 0;
-  let tail: BriefContextMessage[] = [];
-  for (let pageIndex = 0; pageIndex < MAX_BRIEF_MESSAGE_PAGES; pageIndex += 1) {
-    const page = await readPage(after, BRIEF_MESSAGE_PAGE_SIZE);
-    for (const msg of page.messages) {
-      if ((msg.kind === 'user' || msg.kind === 'ember') && typeof msg.text === 'string') {
-        tail.push({ kind: msg.kind, text: msg.text });
-      }
-    }
-    if (tail.length > maxMessages) {
-      tail = tail.slice(-maxMessages);
-    }
-    if (!page.has_more || page.next_after === null || page.next_after <= after) {
+  const first = await readPage(0, BRIEF_MESSAGE_PAGE_SIZE);
+  if (!first.has_more) {
+    return appendUserOrEmber([], first.messages, maxMessages);
+  }
+  if (first.next_after === null || first.next_after <= 0) {
+    return [];
+  }
+
+  // Locate an upper bound `high` >= trueLastSeq via exponential sequence probing.
+  let low = first.next_after;
+  let high: number | null = null;
+  let step = BRIEF_MESSAGE_PAGE_SIZE;
+
+  for (let i = 0; i < MAX_BRIEF_TAIL_PROBE_STEPS; i += 1) {
+    const probe = low + step;
+    const probePage = await readPage(probe, 1);
+    if (probePage.messages.length === 0) {
+      high = probe;
       break;
+    }
+    low = Math.max(probe + 1, probePage.next_after ?? probe + 1);
+    step *= 2;
+  }
+
+  if (high === null) {
+    return [];
+  }
+
+  // Narrow [low, high] via binary search until within one page of the true tail.
+  while (high - low > BRIEF_MESSAGE_PAGE_SIZE) {
+    const mid = Math.floor((low + high) / 2);
+    const probePage = await readPage(mid, 1);
+    if (probePage.messages.length > 0) {
+      low = Math.max(mid + 1, probePage.next_after ?? mid + 1);
+    } else {
+      high = mid;
+    }
+  }
+
+  // Walk the tail window until `has_more === false`.
+  let after = Math.max(0, low - BRIEF_MESSAGE_PAGE_SIZE);
+  let tail: BriefContextMessage[] = [];
+  for (let pageIndex = 0; pageIndex < MAX_BRIEF_TAIL_WALK_PAGES; pageIndex += 1) {
+    const page = await readPage(after, BRIEF_MESSAGE_PAGE_SIZE);
+    tail = appendUserOrEmber(tail, page.messages, maxMessages);
+    if (!page.has_more) {
+      return tail;
+    }
+    if (page.next_after === null || page.next_after <= after) {
+      return [];
     }
     after = page.next_after;
   }
-  return tail;
+
+  // Could not confirm the true tail within bounded pages -> fail closed rather than returning stale context.
+  return [];
 }
 
 export interface ProactiveBriefContext {

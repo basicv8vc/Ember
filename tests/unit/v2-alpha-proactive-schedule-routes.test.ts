@@ -167,8 +167,9 @@ describe('Agent E — proactive brief context builder', () => {
     expect(prompt.length).toBeLessThanOrEqual(MAX_BRIEF_PROMPT_CHARS);
   });
 
-  it('paginates ascending conversation history to retain the latest tail messages', async () => {
-    const allMessages = Array.from({ length: 120 }, (_, idx) => ({
+  it('locates the true tail for conversations exceeding 1,000 messages and fails closed if tail is unreachable', async () => {
+    const totalMessages = 1_500;
+    const allMessages = Array.from({ length: totalMessages }, (_, idx) => ({
       seq: idx + 1,
       kind: idx % 3 === 0 ? 'activity' : idx % 2 === 0 ? 'user' : 'ember',
       text: `turn-${idx + 1}`,
@@ -187,8 +188,22 @@ describe('Agent E — proactive brief context builder', () => {
       });
     }, 4);
 
-    expect(calls.length).toBe(3);
-    expect(recent.map((m) => m.text)).toEqual(['turn-116', 'turn-117', 'turn-119', 'turn-120']);
+    // O(log N) sequence probing reaches seq 1,500 in far fewer calls than a linear scan.
+    expect(calls.length).toBeLessThan(20);
+    expect(recent.map((m) => m.text)).toEqual(['turn-1496', 'turn-1497', 'turn-1499', 'turn-1500']);
+
+    // Fail-closed: if the conversation stream never reaches `has_more === false`, do not return stale messages.
+    const unreachable = await loadRecentBriefMessages((after, limit) =>
+      Promise.resolve({
+        messages: Array.from({ length: limit }, (_, i) => ({
+          kind: 'user',
+          text: `stale-${after + i + 1}`,
+        })),
+        has_more: true,
+        next_after: after + limit,
+      }),
+    );
+    expect(unreachable).toEqual([]);
   });
 });
 

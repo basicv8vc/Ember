@@ -2,6 +2,7 @@ import { DomainError } from '@ember/domain';
 import {
   personalMemoryIdSchema,
   savePersonalMemoryRequestSchema,
+  updatePersonalMemoryRequestSchema,
   type PersonalMemoryCommand,
   type PersonalMemoryResponse,
 } from '@ember/runtime-v2';
@@ -85,6 +86,16 @@ export function createMemoryRoutes(
         : { ...parsed.data, client_request_id: clientRequestId };
     const result = await run({ kind: 'save', input });
     return c.json(result, 'created' in result && result.created ? 201 : 200);
+  });
+
+  routes.patch('/memories/:memoryId', async (c) => {
+    const memoryId = readMemoryId(c.req.param('memoryId'));
+    const body = await readJsonBody(c.req.raw, MAX_MEMORY_REQUEST_BYTES);
+    const parsed = body.ok ? updatePersonalMemoryRequestSchema.safeParse(body.value) : undefined;
+    if (!parsed?.success) {
+      throw new DomainError('INVALID_ARGUMENT', 'invalid personal memory update request');
+    }
+    return c.json(await run({ kind: 'update', memoryId, input: parsed.data }), 200);
   });
 
   routes.delete('/memories/:memoryId', async (c) => {

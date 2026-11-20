@@ -9,6 +9,7 @@ import type {
   PersonalMemoryDeleteResultDto,
   PersonalMemoryListDto,
   PersonalMemorySaveResultDto,
+  PersonalMemoryUpdateResultDto,
 } from '@ember/runtime-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
@@ -294,7 +295,47 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     });
     expect(conflictingReuse.status).toBe(409);
 
-    // 9. Negative gates: unauthenticated 401, foreign/unverified provenance 400, disallowed silent source 400, invalid UUID 400
+    // 9. PATCH /v2/memories/:memoryId updates in place, reflects in next turn, and enforces isolation
+    const patchedUnkeyed = await json<PersonalMemoryUpdateResultDto>(
+      await harness.fetchOverHttp(`/v2/memories/${firstUnkeyed.item.memory_id}`, {
+        method: 'PATCH',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          content: 'Based in Kyoto.',
+          key: 'home_city',
+        }),
+      }),
+      200,
+    );
+    expect(patchedUnkeyed.item.memory_id).toBe(firstUnkeyed.item.memory_id);
+    expect(patchedUnkeyed.item.content).toBe('Based in Kyoto.');
+    expect(patchedUnkeyed.item.key).toBe('home_city');
+    expect(patchedUnkeyed.item.created_at).toBe(firstUnkeyed.item.created_at);
+
+    const crossPatch = await harness.fetchOverHttp(`/v2/memories/${firstUnkeyed.item.memory_id}`, {
+      method: 'PATCH',
+      headers: {
+        authorization: `Bearer ${userB.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({ content: 'Cross-account overwrite' }),
+    });
+    expect(crossPatch.status).toBe(404);
+
+    const emptyPatch = await harness.fetchOverHttp(`/v2/memories/${firstUnkeyed.item.memory_id}`, {
+      method: 'PATCH',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({}),
+    });
+    expect(emptyPatch.status).toBe(400);
+
+    // 10. Negative gates: unauthenticated 401, foreign/unverified provenance 400, disallowed silent source 400, invalid UUID 400
     const unauthRes = await harness.fetchOverHttp('/v2/memories', { method: 'GET' });
     expect(unauthRes.status).toBe(401);
 

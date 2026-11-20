@@ -6,6 +6,7 @@ import {
   PERSONAL_MEMORY_MAX_RETRIEVED_ITEMS,
   personalMemoryIdSchema,
   savePersonalMemoryRequestSchema,
+  updatePersonalMemoryRequestSchema,
   type PersonalMemoryCommand,
   type PersonalMemoryContextItem,
   type PersonalMemoryDeleteResultDto,
@@ -15,6 +16,7 @@ import {
   type PersonalMemoryResponse,
   type PersonalMemorySaveResultDto,
   type PersonalMemorySource,
+  type PersonalMemoryUpdateResultDto,
 } from '../contracts/personal-memory.js';
 import type { DurableObjectStorageLike, SqlStorageLike } from '../storage.js';
 import { assertHeadScopeSync, sqlExecAll, sqlExecMaybe } from './queries.js';
@@ -124,6 +126,8 @@ export class AgentHeadMemoryService {
         return this.listSync(cmd.tenantId, cmd.principalId);
       case 'save':
         return this.saveSync(cmd);
+      case 'update':
+        return this.updateSync(cmd);
       case 'delete':
         return this.deleteSync(cmd.tenantId, cmd.principalId, cmd.memoryId);
     }
@@ -346,6 +350,90 @@ export class AgentHeadMemoryService {
         updated_at_ms: nowMs,
       };
       return { item: toPersonalMemoryDto(created), created: true };
+    });
+  }
+
+  private updateSync(
+    cmd: Extract<PersonalMemoryCommand, { kind: 'update' }>,
+  ): PersonalMemoryUpdateResultDto {
+    const parsedId = personalMemoryIdSchema.safeParse(cmd.memoryId);
+    if (!parsedId.success) {
+      throw new DomainError('INVALID_ARGUMENT', 'invalid personal memory id');
+    }
+    const parsedInput = updatePersonalMemoryRequestSchema.safeParse(cmd.input);
+    if (!parsedInput.success) {
+      throw new DomainError('INVALID_ARGUMENT', 'invalid personal memory update payload');
+    }
+
+    const memoryId = parsedId.data;
+    const input = parsedInput.data;
+    const nowMs = this.deps.nowMs();
+
+    return this.deps.storage.transactionSync(() => {
+      const existing = sqlExecMaybe<PersonalMemoryRow>(
+        this.sql,
+        `SELECT *
+           FROM personal_memories
+          WHERE id = ?
+            AND tenant_id = ?
+            AND principal_id = ?`,
+        memoryId,
+        cmd.tenantId,
+        cmd.principalId,
+      );
+      if (existing === null) {
+        throw new DomainError('NOT_FOUND', 'personal memory not found');
+      }
+
+      const nextKind = input.kind ?? existing.kind;
+      const nextContent = input.content ?? existing.content;
+      const nextKey = input.key === undefined ? existing.memory_key : input.key;
+
+      if (nextKey !== null && nextKey !== existing.memory_key) {
+        const collision = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
+          this.sql,
+          `SELECT id
+             FROM personal_memories
+            WHERE tenant_id = ?
+              AND principal_id = ?
+              AND memory_key = ?
+              AND id != ?`,
+          cmd.tenantId,
+          cmd.principalId,
+          nextKey,
+          memoryId,
+        );
+        if (collision !== null) {
+          throw new DomainError('IDEMPOTENCY_CONFLICT', 'personal memory key already exists');
+        }
+      }
+
+      this.sql.exec(
+        `UPDATE personal_memories
+            SET kind = ?,
+                memory_key = ?,
+                content = ?,
+                updated_at_ms = ?
+          WHERE id = ?
+            AND tenant_id = ?
+            AND principal_id = ?`,
+        nextKind,
+        nextKey,
+        nextContent,
+        nowMs,
+        memoryId,
+        cmd.tenantId,
+        cmd.principalId,
+      );
+
+      const updated: PersonalMemoryRow = {
+        ...existing,
+        kind: nextKind,
+        memory_key: nextKey,
+        content: nextContent,
+        updated_at_ms: nowMs,
+      };
+      return { item: toPersonalMemoryDto(updated) };
     });
   }
 

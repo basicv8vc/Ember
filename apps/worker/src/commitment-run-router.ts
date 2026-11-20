@@ -12,6 +12,8 @@ export interface CommitmentRouteAwareRunHandlerDependencies {
   readonly commitmentHandler: RunHandler;
   /** Handler for `notes.action_items` Tasks when model execution is enabled. */
   readonly notesHandler?: RunHandler;
+  /** Handler for `python.agent` Tasks when model + sandbox execution is enabled. */
+  readonly pythonAgentHandler?: RunHandler;
   /** Handler for every other Task kind (P0B-05 simulation / P0B-06 durable path). */
   readonly defaultHandler: RunHandler;
   readonly logger: WorkerLogger;
@@ -49,6 +51,10 @@ export function createCommitmentRouteAwareRunHandler(
 
       if (context.kind === 'notes.action_items' && deps.notesHandler !== undefined) {
         return deps.notesHandler.handle(run, signal, context);
+      }
+
+      if (context.kind === 'python.agent' && deps.pythonAgentHandler !== undefined) {
+        return deps.pythonAgentHandler.handle(run, signal, context);
       }
 
       return deps.defaultHandler.handle(run, signal, context);

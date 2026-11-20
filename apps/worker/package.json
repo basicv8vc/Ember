@@ -15,6 +15,14 @@
     "./b3/python-agent-executor": {
       "types": "./dist/b3/python-agent-executor.d.ts",
       "default": "./dist/b3/python-agent-executor.js"
+    },
+    "./b3/fake-python-sandbox": {
+      "types": "./dist/b3/fake-python-sandbox.d.ts",
+      "default": "./dist/b3/fake-python-sandbox.js"
+    },
+    "./b3/python-agent-handler": {
+      "types": "./dist/b3/python-agent-handler.d.ts",
+      "default": "./dist/b3/python-agent-handler.js"
     }
   },
   "scripts": {

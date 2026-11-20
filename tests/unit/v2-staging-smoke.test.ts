@@ -9,7 +9,7 @@ function jsonResponse(body: unknown, status = 200): Response {
 }
 
 describe('V2 staging smoke verifier', () => {
-  it('passes when V2 staging and V1 non-regression endpoints are healthy', async () => {
+  it('passes when V2 staging (incl. /v2/memories and /v2/schedules 401) and V1 are healthy', async () => {
     const fetchImpl: typeof fetch = (input) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (url === 'https://v2.test/healthz') {
@@ -23,7 +23,11 @@ describe('V2 staging smoke verifier', () => {
           ),
         );
       }
-      if (url === 'https://v2.test/v1/me') {
+      if (
+        url === 'https://v2.test/v1/me' ||
+        url === 'https://v2.test/v2/memories' ||
+        url === 'https://v2.test/v2/schedules'
+      ) {
         return Promise.resolve(jsonResponse({ error: { code: 'UNAUTHENTICATED' } }, 401));
       }
       if (url === 'https://v2.test/v1/auth/session') {
@@ -51,10 +55,10 @@ describe('V2 staging smoke verifier', () => {
 
     expect(result.ok).toBe(true);
     expect(result.errors).toEqual([]);
-    expect(result.checks).toHaveLength(6);
+    expect(result.checks).toHaveLength(8);
   });
 
-  it('fails closed when D1 readiness is down or dev login is unexpectedly accepted', async () => {
+  it('fails closed when D1 readiness is down, routes drift (404), or dev login is accepted', async () => {
     const fetchImpl: typeof fetch = (input) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
       if (url === 'https://v2.test/healthz') {
@@ -67,6 +71,9 @@ describe('V2 staging smoke verifier', () => {
       }
       if (url === 'https://v2.test/v1/me') {
         return Promise.resolve(jsonResponse({ error: { code: 'UNAUTHENTICATED' } }, 401));
+      }
+      if (url === 'https://v2.test/v2/memories' || url === 'https://v2.test/v2/schedules') {
+        return Promise.resolve(jsonResponse({ error: { code: 'NOT_FOUND' } }, 404));
       }
       if (url === 'https://v2.test/v1/auth/session') {
         return Promise.resolve(jsonResponse({ session: 'should-never-happen' }, 201));
@@ -82,6 +89,8 @@ describe('V2 staging smoke verifier', () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes('/readyz'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('/v2/memories'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('/v2/schedules'))).toBe(true);
     expect(result.errors.some((e) => e.includes('dev-denial'))).toBe(true);
   });
 });

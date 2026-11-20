@@ -99,10 +99,6 @@ export function readPersonalMemoriesForTurnSync(
   return selected;
 }
 
-function normalizeMemoryContentForDedup(content: string): string {
-  return content.trim().replace(/\s+/g, ' ').toLowerCase();
-}
-
 export const PERSONAL_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
 export const PERSONAL_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
 export const PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY =
@@ -189,38 +185,28 @@ export function savePersonalMemoryFromTurnSync(
       return { outcome: 'saved', memoryId: existingByKey.id, created: false };
     }
   } else {
-    const normalizedContent = normalizeMemoryContentForDedup(parsed.content);
-    const candidates = sqlExecAll<Pick<PersonalMemoryRow, 'id' | 'content'>>(
+    const existingByContent = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
       sql,
-      `SELECT id, content
+      `SELECT id
          FROM personal_memories
         WHERE tenant_id = ?
           AND principal_id = ?
           AND kind = ?
-        ORDER BY updated_at_ms DESC, id ASC`,
+          AND content = ?
+        ORDER BY updated_at_ms DESC, id ASC
+        LIMIT 1`,
       params.tenantId,
       params.principalId,
       parsed.kind,
+      parsed.content,
     );
-    const existingByContent = candidates.find(
-      (row) => normalizeMemoryContentForDedup(row.content) === normalizedContent,
-    );
-    if (existingByContent !== undefined) {
+    if (existingByContent !== null) {
       sql.exec(
         `UPDATE personal_memories
-            SET client_request_id = ?,
-                content = ?,
-                provenance_source = 'explicit_user_request',
-                source_conversation_id = ?,
-                source_message_id = ?,
-                updated_at_ms = ?
+            SET updated_at_ms = ?
           WHERE id = ?
             AND tenant_id = ?
             AND principal_id = ?`,
-        clientRequestId,
-        parsed.content,
-        params.conversationId,
-        params.sourceMessageId,
         params.nowMs,
         existingByContent.id,
         params.tenantId,

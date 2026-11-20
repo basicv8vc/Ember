@@ -1272,7 +1272,7 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     expect(committedMsg.text).not.toBe(PERSONAL_MEMORY_SAVED_REPLY);
   });
 
-  it('deduplicates unkeyed savePersonalMemoryFromTurnSync by normalized content and kind, preserving key and working at the 50-item cap', async () => {
+  it('deduplicates unkeyed savePersonalMemoryFromTurnSync by exact trimmed content and kind, preserving key/client_request_id, keeping case-sensitive values distinct, and working at the 50-item cap', async () => {
     const { storage } = createInMemoryDoStorage();
     const tenantId = randomUUID();
     const agentId = randomUUID();
@@ -1290,24 +1290,24 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       newId: () => randomUUID(),
     });
 
-    // Save a keyed preference first
-    const initial = savePersonalMemoryFromTurnSync(storage.sql, {
+    // 1. Unkeyed POST /v2/memories (client_request_id = postReqId) -> matching chat turn B -> unknown-ACK retry of POST A
+    const postReqId = randomUUID();
+    const postSave = await svc.execute({
+      kind: 'save',
       tenantId,
+      agentId,
       principalId: principalA,
-      turnId: randomUUID(),
-      conversationId: convA,
-      sourceMessageId: msgA1,
+      requestId: randomUUID(),
       input: {
         kind: 'preference',
-        key: 'reply_style',
         content: 'Prefer concise bullet points',
+        client_request_id: postReqId,
+        provenance: { source: 'user_settings' },
       },
-      nowMs,
-      newId: () => randomUUID(),
     });
-    expect(initial.outcome).toBe('saved');
-    if (initial.outcome !== 'saved') throw new Error('expected saved');
-    expect(initial.created).toBe(true);
+    if (!('item' in postSave && 'created' in postSave)) throw new Error('expected save result');
+    expect(postSave.created).toBe(true);
+    const originalMemoryId = postSave.item.memory_id;
 
     // Fill up to the 50-item cap for principalA
     for (let i = 1; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
@@ -1324,7 +1324,7 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       expect(filler.outcome).toBe('saved');
     }
 
-    // Re-saving identical content without a key (different casing & whitespace) updates in-place even at 50/50
+    // Exact repeat (after trim) from chat turn B updates in place even at 50/50, preserving content and client_request_id
     const deduped = savePersonalMemoryFromTurnSync(storage.sql, {
       tenantId,
       principalId: principalA,
@@ -1333,16 +1333,34 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       sourceMessageId: msgA2,
       input: {
         kind: 'preference',
-        content: '  prefer   CONCISE bullet points  ',
+        content: '  Prefer concise bullet points  ',
       },
       nowMs: nowMs + 10_000,
       newId: () => randomUUID(),
     });
     expect(deduped).toEqual({
       outcome: 'saved',
-      memoryId: initial.memoryId,
+      memoryId: originalMemoryId,
       created: false,
     });
+
+    // Unknown-ACK retry of original unkeyed POST A must replay idempotently without creating a duplicate or hitting the cap
+    const postRetry = await svc.execute({
+      kind: 'save',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        content: 'Prefer concise bullet points',
+        client_request_id: postReqId,
+        provenance: { source: 'user_settings' },
+      },
+    });
+    if (!('item' in postRetry && 'created' in postRetry)) throw new Error('expected save result');
+    expect(postRetry.created).toBe(false);
+    expect(postRetry.item.memory_id).toBe(originalMemoryId);
 
     const listA = await svc.execute({
       kind: 'list',
@@ -1353,40 +1371,56 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     });
     if (!('items' in listA)) throw new Error('expected list response');
     expect(listA.items).toHaveLength(PERSONAL_MEMORY_MAX_ITEMS);
-    const updatedItem = listA.items.find((item) => item.memory_id === initial.memoryId);
-    expect(updatedItem?.key).toBe('reply_style');
-    expect(updatedItem?.provenance.message_id).toBe(msgA2);
+    const updatedItem = listA.items.find((item) => item.memory_id === originalMemoryId);
+    expect(updatedItem?.content).toBe('Prefer concise bullet points');
+    expect(updatedItem?.provenance.source).toBe('user_settings');
+    expect(updatedItem?.provenance.message_id).toBeNull();
+    expect(updatedItem?.updated_at).toBe(new Date(nowMs + 10_000).toISOString());
 
-    // Different principal is isolated and creates its own row
-    const otherPrincipal = savePersonalMemoryFromTurnSync(storage.sql, {
+    // 2. Case-sensitive facts (e.g. paths/identifiers) must NOT be merged
+    const pathUpper = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalB,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA1,
+      input: { kind: 'fact', content: 'Project path is /data/ABC' },
+      nowMs: nowMs + 11_000,
+      newId: () => randomUUID(),
+    });
+    const pathLower = savePersonalMemoryFromTurnSync(storage.sql, {
       tenantId,
       principalId: principalB,
       turnId: randomUUID(),
       conversationId: convA,
       sourceMessageId: msgA2,
-      input: { kind: 'preference', content: 'Prefer concise bullet points' },
-      nowMs: nowMs + 11_000,
+      input: { kind: 'fact', content: 'Project path is /data/abc' },
+      nowMs: nowMs + 12_000,
       newId: () => randomUUID(),
     });
-    expect(otherPrincipal.outcome).toBe('saved');
-    if (otherPrincipal.outcome !== 'saved') throw new Error('expected saved');
-    expect(otherPrincipal.created).toBe(true);
-    expect(otherPrincipal.memoryId).not.toBe(initial.memoryId);
+    expect(pathUpper.outcome).toBe('saved');
+    expect(pathLower.outcome).toBe('saved');
+    if (pathUpper.outcome !== 'saved' || pathLower.outcome !== 'saved') {
+      throw new Error('expected saved');
+    }
+    expect(pathUpper.created).toBe(true);
+    expect(pathLower.created).toBe(true);
+    expect(pathLower.memoryId).not.toBe(pathUpper.memoryId);
 
-    // Different kind ('fact' vs 'preference') for principalB is NOT merged
+    // 3. Different kind ('preference' vs 'fact') with identical content is NOT merged
     const diffKind = savePersonalMemoryFromTurnSync(storage.sql, {
       tenantId,
       principalId: principalB,
       turnId: randomUUID(),
       conversationId: convA,
       sourceMessageId: msgA2,
-      input: { kind: 'fact', content: 'Prefer concise bullet points' },
-      nowMs: nowMs + 12_000,
+      input: { kind: 'preference', content: 'Project path is /data/ABC' },
+      nowMs: nowMs + 13_000,
       newId: () => randomUUID(),
     });
     expect(diffKind.outcome).toBe('saved');
     if (diffKind.outcome !== 'saved') throw new Error('expected saved');
     expect(diffKind.created).toBe(true);
-    expect(diffKind.memoryId).not.toBe(otherPrincipal.memoryId);
+    expect(diffKind.memoryId).not.toBe(pathUpper.memoryId);
   });
 });

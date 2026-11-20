@@ -20,6 +20,7 @@ final class V2StagingIntegrationTests: XCTestCase {
         XCTAssertEqual(v1?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
         XCTAssertEqual(v1?.keychainConfiguration, .live)
         XCTAssertEqual(v1?.journalSubdirectory, "EmberConversation")
+        XCTAssertEqual(v1?.authFenceSubdirectory, "EmberAuth")
         XCTAssertEqual(v1?.environmentBadge, "LIVE CLOUD")
         XCTAssertEqual(v1?.isV2Staging, false)
 
@@ -31,6 +32,7 @@ final class V2StagingIntegrationTests: XCTestCase {
         XCTAssertEqual(v2Flag?.keychainConfiguration.account, "ember.session.v2-staging")
         XCTAssertNotEqual(v2Flag?.keychainConfiguration, .live)
         XCTAssertEqual(v2Flag?.journalSubdirectory, "EmberConversation-v2-staging")
+        XCTAssertEqual(v2Flag?.authFenceSubdirectory, "EmberAuth-v2-staging")
         XCTAssertEqual(v2Flag?.environmentBadge, "V2 STAGING")
         XCTAssertEqual(v2Flag?.isV2Staging, true)
 
@@ -45,6 +47,45 @@ final class V2StagingIntegrationTests: XCTestCase {
             environment: ["EMBER_CLOUD_BASE_URL": "http://ember-v2-staging.slowfast.dev"]
         )
         XCTAssertNil(insecure, "Non-HTTPS cloud URL must fail closed")
+    }
+
+    func testSessionRecoveryFenceIsolationBetweenV1AndV2Staging() throws {
+        let v1Target = try XCTUnwrap(AppCompositionRoot.resolveCloudTarget(arguments: [], environment: [:]))
+        let v2Target = try XCTUnwrap(AppCompositionRoot.resolveCloudTarget(arguments: ["--ember-v2-staging"], environment: [:]))
+
+        let tempRoot = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ember-fence-isolation-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: tempRoot) }
+
+        let v1Fence = FileSessionRecoveryFence(
+            directory: tempRoot.appendingPathComponent(v1Target.authFenceSubdirectory, isDirectory: true)
+        )
+        let v2Fence = FileSessionRecoveryFence(
+            directory: tempRoot.appendingPathComponent(v2Target.authFenceSubdirectory, isDirectory: true)
+        )
+
+        XCTAssertFalse(v1Fence.isArmed)
+        XCTAssertFalse(v2Fence.isArmed)
+
+        // Arming V2 Staging must not arm V1.
+        try v2Fence.arm()
+        XCTAssertTrue(v2Fence.isArmed)
+        XCTAssertFalse(v1Fence.isArmed)
+
+        // Arming V1 leaves both independently armed.
+        try v1Fence.arm()
+        XCTAssertTrue(v1Fence.isArmed)
+        XCTAssertTrue(v2Fence.isArmed)
+
+        // Clearing V2 Staging must not disarm V1.
+        v2Fence.clear()
+        XCTAssertFalse(v2Fence.isArmed)
+        XCTAssertTrue(v1Fence.isArmed)
+
+        // Clearing V1 disarms V1 cleanly.
+        v1Fence.clear()
+        XCTAssertFalse(v1Fence.isArmed)
+        XCTAssertFalse(v2Fence.isArmed)
     }
 
     func testV2StagingFullJourneyAuthMemorySchedulesAndSignOutClear() async throws {

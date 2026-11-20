@@ -57,6 +57,7 @@ public enum JournalCancelOutcome: Sendable {
 public enum JournalInterruptOutcome: Sendable {
     case requeued(PersistedDeviceTaskRecord)
     case failedMaxAttempts(PersistedDeviceTaskRecord)
+    case cancelled(PersistedDeviceTaskRecord)
     case alreadyTerminal(PersistedDeviceTaskRecord)
 }
 
@@ -568,6 +569,14 @@ public actor DeviceExecutionJournal {
         if let expectedLeaseEpoch, record.leaseEpoch != expectedLeaseEpoch {
             throw DeviceExecutorError.staleLease("Lease epoch mismatch on failure commit.")
         }
+        if record.task.cancelRequested {
+            return try commitCancelled(
+                taskID: taskID,
+                expectedLeaseEpoch: expectedLeaseEpoch,
+                reason: "Task cancelled prior to failure commit.",
+                now: now
+            )
+        }
 
         let nowISO = DeviceWireDate.format(now)
         let previousStatus = record.task.status
@@ -634,6 +643,15 @@ public actor DeviceExecutionJournal {
               record.ownerBootSessionID == bootSessionID
         else {
             throw DeviceExecutorError.staleLease("Lease mismatch on background interruption.")
+        }
+        if record.task.cancelRequested {
+            let cancelled = try commitCancelled(
+                taskID: taskID,
+                expectedLeaseEpoch: expectedLeaseEpoch,
+                reason: "Task cancelled prior to background interruption.",
+                now: now
+            )
+            return .cancelled(cancelled)
         }
 
         let nowISO = DeviceWireDate.format(now)

@@ -587,7 +587,7 @@ public actor DeviceTaskExecutor {
                     if !queuedTaskIDs.contains(taskID) {
                         queuedTaskIDs.append(taskID)
                     }
-                case .failedMaxAttempts(let record), .alreadyTerminal(let record):
+                case .failedMaxAttempts(let record), .cancelled(let record), .alreadyTerminal(let record):
                     let resolved = outcome(from: record)
                     cachedOutcomes[taskID] = resolved
                     resumeWaiters(for: taskID, with: .success(resolved))

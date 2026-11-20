@@ -823,6 +823,119 @@ final class DeviceExecutorTests: XCTestCase {
         XCTAssertEqual(oversizedOutcome.status, .failed)
         XCTAssertEqual(oversizedOutcome.errorCode, .policyDenied)
     }
+
+    func testCancelTakesPrecedenceOverFailureCommit() async throws {
+        // 1. Journal-level deterministic test: requestCancel before commitFailed -> .cancelled
+        let dir = makeSandboxRoot()
+        let journal = DeviceExecutionJournal(directory: dir)
+        let bootID = UUID()
+        let submission = DeviceTaskSubmission(
+            idempotencyKey: "cancel-vs-fail-journal",
+            steps: [DeviceToolStep(tool: .textProcess, arguments: ["op": .string("stats"), "text": .string("hi")])]
+        )
+        let (inserted, _) = try await journal.insertOrReplay(
+            submission: submission,
+            requestDigest: try submission.canonicalDigest(),
+            title: "Cancel vs Failure",
+            now: Date()
+        )
+        let claimed = try await journal.claimRun(
+            taskID: inserted.task.taskID,
+            runID: UUID(),
+            bootSessionID: bootID,
+            now: Date()
+        )
+        _ = try await journal.requestCancel(taskID: inserted.task.taskID, now: Date())
+
+        let committed = try await journal.commitFailed(
+            taskID: inserted.task.taskID,
+            expectedLeaseEpoch: claimed.leaseEpoch,
+            errorCode: .executionTimeout,
+            message: "Should yield to persisted cancelRequested",
+            now: Date()
+        )
+        XCTAssertEqual(committed.task.status, .cancelled)
+        XCTAssertEqual(committed.events.last?.phase, .cancelled)
+
+        // 2. Executor-level deterministic test: tool throws non-cancel error after cancelTask
+        let failAfterStart = FailOnCancelTool()
+        let (executor, _) = makeExecutor(tools: [failAfterStart] + NativeToolRegistry.defaultTools())
+        let receipt = try await executor.submitTask(DeviceTaskSubmission(
+            idempotencyKey: "cancel-vs-fail-exec",
+            steps: [DeviceToolStep(tool: FailOnCancelTool.toolName)]
+        ))
+        await failAfterStart.waitUntilStarted()
+        _ = try await executor.cancelTask(id: receipt.taskID)
+        await failAfterStart.triggerFailure()
+
+        let outcome = try await executor.waitForCompletion(taskID: receipt.taskID)
+        XCTAssertEqual(outcome.status, .cancelled)
+        XCTAssertEqual(outcome.errorCode, .cancelled)
+    }
+
+    func testCancelTakesPrecedenceOverBackgroundInterruption() async throws {
+        // 1. Journal-level deterministic test: requestCancel before commitInterruptedForRetry -> .cancelled
+        let dir = makeSandboxRoot()
+        let journal = DeviceExecutionJournal(directory: dir)
+        let bootID = UUID()
+        let runID = UUID()
+        let submission = DeviceTaskSubmission(
+            idempotencyKey: "cancel-vs-bg-journal",
+            steps: [DeviceToolStep(tool: .textProcess, arguments: ["op": .string("stats"), "text": .string("hi")])],
+            maxAttempts: 3
+        )
+        let (inserted, _) = try await journal.insertOrReplay(
+            submission: submission,
+            requestDigest: try submission.canonicalDigest(),
+            title: "Cancel vs Background",
+            now: Date()
+        )
+        let claimed = try await journal.claimRun(
+            taskID: inserted.task.taskID,
+            runID: runID,
+            bootSessionID: bootID,
+            now: Date()
+        )
+        _ = try await journal.requestCancel(taskID: inserted.task.taskID, now: Date())
+
+        let interruptOutcome = try await journal.commitInterruptedForRetry(
+            taskID: inserted.task.taskID,
+            runID: runID,
+            expectedLeaseEpoch: claimed.leaseEpoch,
+            bootSessionID: bootID,
+            now: Date()
+        )
+        guard case .cancelled(let cancelledRecord) = interruptOutcome else {
+            return XCTFail("Expected .cancelled outcome when cancelRequested is true")
+        }
+        XCTAssertEqual(cancelledRecord.task.status, .cancelled)
+        XCTAssertEqual(cancelledRecord.events.last?.phase, .cancelled)
+
+        // 2. Executor-level deterministic test: background + cancel + expiration -> stays cancelled on foreground
+        let bgManager = FakeBackgroundTaskManager()
+        let slowTool = SlowCancellableTool(stepDelayMs: 2_000)
+        let (executor, _) = makeExecutor(
+            tools: [slowTool] + NativeToolRegistry.defaultTools(),
+            backgroundTaskManager: bgManager
+        )
+        let receipt = try await executor.submitTask(DeviceTaskSubmission(
+            idempotencyKey: "cancel-vs-bg-exec",
+            steps: [DeviceToolStep(tool: SlowCancellableTool.toolName)],
+            maxAttempts: 3
+        ))
+        try await slowTool.waitUntilStarted()
+        await executor.handleScenePhase(.background)
+        _ = try await executor.cancelTask(id: receipt.taskID)
+        bgManager.fireLatestExpiration()
+
+        let outcome = try await executor.waitForCompletion(taskID: receipt.taskID)
+        XCTAssertEqual(outcome.status, .cancelled)
+
+        await executor.handleScenePhase(.active)
+        let persisted = try await executor.record(for: receipt.taskID)
+        XCTAssertEqual(persisted?.task.status, .cancelled)
+        XCTAssertEqual(persisted?.task.attemptCount, 1)
+    }
 }
 
 private final class FakeBackgroundTaskManager: BackgroundTaskManaging, @unchecked Sendable {
@@ -924,5 +1037,50 @@ private struct OversizedStructuredTool: NativeTool {
             outputText: "ok",
             structuredData: .object(["payload": .string(bigString)])
         )
+    }
+}
+
+private actor FailOnCancelTool: NativeTool {
+    static let toolName = DeviceToolName(rawValue: "device.test.fail_on_cancel")!
+    let name: DeviceToolName = FailOnCancelTool.toolName
+
+    private var started = false
+    private var startWaiters: [CheckedContinuation<Void, Never>] = []
+    private var shouldFail = false
+    private var failWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitUntilStarted() async {
+        if started { return }
+        await withCheckedContinuation { continuation in
+            startWaiters.append(continuation)
+        }
+    }
+
+    func triggerFailure() {
+        shouldFail = true
+        let pending = failWaiters
+        failWaiters.removeAll()
+        for waiter in pending {
+            waiter.resume()
+        }
+    }
+
+    func execute(
+        context: NativeToolExecutionContext,
+        arguments: [String: DeviceJSONValue]
+    ) async throws -> NativeToolOutput {
+        started = true
+        let pendingStarts = startWaiters
+        startWaiters.removeAll()
+        for waiter in pendingStarts {
+            waiter.resume()
+        }
+
+        if !shouldFail {
+            await withCheckedContinuation { continuation in
+                failWaiters.append(continuation)
+            }
+        }
+        throw DeviceExecutorError.executionTimeout("Simulated late tool failure")
     }
 }

@@ -184,6 +184,36 @@ export function savePersonalMemoryFromTurnSync(
       );
       return { outcome: 'saved', memoryId: existingByKey.id, created: false };
     }
+  } else {
+    const existingByContent = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
+      sql,
+      `SELECT id
+         FROM personal_memories
+        WHERE tenant_id = ?
+          AND principal_id = ?
+          AND kind = ?
+          AND content = ?
+        ORDER BY updated_at_ms DESC, id ASC
+        LIMIT 1`,
+      params.tenantId,
+      params.principalId,
+      parsed.kind,
+      parsed.content,
+    );
+    if (existingByContent !== null) {
+      sql.exec(
+        `UPDATE personal_memories
+            SET updated_at_ms = ?
+          WHERE id = ?
+            AND tenant_id = ?
+            AND principal_id = ?`,
+        params.nowMs,
+        existingByContent.id,
+        params.tenantId,
+        params.principalId,
+      );
+      return { outcome: 'saved', memoryId: existingByContent.id, created: false };
+    }
   }
 
   const countRow = sqlExecMaybe<{ readonly count: number }>(

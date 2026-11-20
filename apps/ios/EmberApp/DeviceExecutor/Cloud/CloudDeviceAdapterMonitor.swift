@@ -86,6 +86,8 @@ public final class CloudDeviceAdapterMonitor {
 
     private var adapter: CloudDeviceExecutorAdapter?
     private var connectionGeneration: UInt64 = 0
+    private var pendingStopTask: Task<Void, Never>?
+    private var pendingStopID: UInt64 = 0
 
     public init() {}
 
@@ -121,7 +123,11 @@ public final class CloudDeviceAdapterMonitor {
         isRunning = false
 
         if let previousAdapter {
-            await previousAdapter.stop()
+            enqueueAdapterStop(previousAdapter)
+        }
+        while let stopTask = pendingStopTask {
+            await stopTask.value
+            guard connectionGeneration == myGeneration else { return }
         }
         guard connectionGeneration == myGeneration else { return }
 
@@ -170,12 +176,32 @@ public final class CloudDeviceAdapterMonitor {
 
     public func stop() async {
         isRunning = false
-        guard let adapter else { return }
+        guard let adapter else {
+            while let stopTask = pendingStopTask {
+                await stopTask.value
+            }
+            return
+        }
         let myGeneration = connectionGeneration
         await adapter.stop()
         guard connectionGeneration == myGeneration else { return }
         if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
             applySnapshot(snapshot)
+        }
+    }
+
+    private func enqueueAdapterStop(_ previousAdapter: CloudDeviceExecutorAdapter) {
+        let priorStop = pendingStopTask
+        pendingStopID &+= 1
+        let stopID = pendingStopID
+        pendingStopTask = Task { @MainActor [weak self] in
+            if let priorStop {
+                await priorStop.value
+            }
+            await previousAdapter.stop()
+            if let self, self.pendingStopID == stopID {
+                self.pendingStopTask = nil
+            }
         }
     }
 

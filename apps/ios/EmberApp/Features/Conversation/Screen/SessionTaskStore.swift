@@ -214,13 +214,15 @@ final class SessionTaskStore {
         )
     }
 
-    func loadDetail(taskID: UUID) async {
+    func loadDetail(taskID: UUID, silent: Bool = false) async {
         guard let repository else { return }
         let startGeneration = generation
-        loadingDetailTaskIDs.insert(taskID)
+        if !silent {
+            loadingDetailTaskIDs.insert(taskID)
+        }
         detailErrorByTaskID[taskID] = nil
         defer {
-            if generation == startGeneration {
+            if !silent, generation == startGeneration {
                 loadingDetailTaskIDs.remove(taskID)
             }
         }
@@ -261,6 +263,47 @@ final class SessionTaskStore {
         if !missingTaskIDs.contains(taskID), tasksByID[taskID] != nil {
             await refreshArtifacts(taskID, using: repository, generation: startGeneration)
         }
+    }
+
+    /// Loads task detail immediately and, while the task remains actively executing
+    /// (non-terminal and not waiting for approval), polls incrementally for new timeline events,
+    /// terminal result, and downloadable artifacts within a bounded window.
+    func observeActiveDetail(
+        taskID: UUID,
+        pollInterval: Duration = .seconds(2),
+        maxPolls: Int = 30
+    ) async {
+        guard repository != nil else { return }
+        let startGeneration = generation
+        await loadDetail(taskID: taskID)
+        guard generation == startGeneration, !Task.isCancelled else { return }
+
+        var pollsRemaining = max(0, maxPolls)
+        while pollsRemaining > 0,
+              generation == startGeneration,
+              !Task.isCancelled,
+              shouldContinueObservingDetail(for: taskID) {
+            pollsRemaining -= 1
+            do {
+                try await Task.sleep(for: pollInterval)
+            } catch {
+                return
+            }
+            guard generation == startGeneration,
+                  !Task.isCancelled,
+                  shouldContinueObservingDetail(for: taskID) else {
+                return
+            }
+            await loadDetail(taskID: taskID, silent: true)
+        }
+    }
+
+    private func shouldContinueObservingDetail(for taskID: UUID) -> Bool {
+        guard !missingTaskIDs.contains(taskID),
+              let task = tasksByID[taskID] else {
+            return false
+        }
+        return !task.status.isTerminal && task.status != .waitingApproval
     }
 
     func cancelTask(taskID: UUID) async {

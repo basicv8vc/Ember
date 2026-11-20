@@ -41,6 +41,7 @@ private struct ArtifactPreviewPayload: Identifiable {
 }
 
 private struct SessionTaskDetailContent: View {
+    @Environment(\.scenePhase) private var scenePhase
     let taskID: UUID
     @Bindable var store: SessionTaskStore
 
@@ -117,8 +118,12 @@ private struct SessionTaskDetailContent: View {
         .refreshable {
             await store.loadDetail(taskID: taskID)
         }
-        .task(id: taskID) {
-            await store.loadDetail(taskID: taskID)
+        .task(id: "\(taskID.uuidString)-\(scenePhase == .active)") {
+            if scenePhase == .active {
+                await store.observeActiveDetail(taskID: taskID)
+            } else if store.tasksByID[taskID] == nil {
+                await store.loadDetail(taskID: taskID)
+            }
         }
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {

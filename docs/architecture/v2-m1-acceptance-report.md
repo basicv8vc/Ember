@@ -1,13 +1,13 @@
 # Ember V2-M1 — Runtime Integration & Acceptance Report
 
-- **Status:** **M1 FUNCTIONAL & SAFETY ACCEPTANCE: 22/22 PASS ON `main @ 1131415` + PR `#188` (`f057c3e`) — ALL `F-1..F-23` & `FI-01..FI-16` (`F-11` N/A VERIFIED) + `D7 Step 4A/4B` PASS; DEFECTS #1–#6 RESOLVED (D6 BENCHMARK / COST RE-ESTIMATION PAUSED PER D7 SCOPE)**
-- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6 sections below preserved verbatim)
+- **Status:** **M1-D8 FINAL VERIFICATION ON `main @ d3c559c` + PR `#185` (`af93106`): ACCEPTANCE `22/22` PASS (`0` SAFETY VIOLATIONS); LATENCY & COVERED `0` D1 I/O TARGETS PASS; CONDITIONAL / NO-GO FOR `/v2/.../messages/stream` >4 TURNS (NEW DEFECT #7) & `10k/100k` CLOUD COST TARGET (`$412.53–$440.92` VS `$300`, `$4,602.85–$5,303.26` VS `$3,500`)**
+- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6/D7 sections below preserved verbatim)
 - **Role:** Performance, Integration & Reliability Engineer (V2-M1-D)
-- **Latest Tested `main` + Fix SHA:** `main @ 1131415bd25ef3db7de5375a16735e3adf0974cf` + PR `#188` (`fix/v2-m1-d7-unsent-durable-retry @ f057c3e1c83663b53589bda75d0b4773198229d0`) integrated into PR `#185` (`test/v2-m1-full-runtime-acceptance`; prior D6 `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`, D0/D1 `1ba860ce3cb4378ada3cdadf95aef311137c8321`, M0 `6da1b483b6a854199a0f2eef27e53abc770be6cc`)
+- **Latest Tested `main` + PR `#185` Baseline:** `main @ d3c559cc107e3d445fe58fb649ee3b407510a2ba` + PR `#185` (`test/v2-m1-full-runtime-acceptance @ af93106e161d83e792c93c03b56cf6aefee364ec`; prior D7 pre-merge `main @ 1131415` + PR `#188 @ f057c3e`, D6 `main @ a537e4f`, D0/D1 `1ba860c`, M0 `6da1b48`)
 - **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
 
 > [!IMPORTANT]
-> **D7 Full Runtime Verdict (`main @ 1131415` + PR `#188` @ `f057c3e`):** With PR `#188` (candidate fix for Defect #6, Prettier-fixed at `f057c3e`) integrated into real local `workerd` ([runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts) delegating directly to `apps/api/src/local-v2/worker.ts`), **all 22 / 22 acceptance test cases PASS (`98.20s`)**: all 39 matrix items (`F-1..F-23`, `FI-01..FI-16`, with `F-11` marked N/A + alternative verified), `D7 Step 4A`, and `D7 Step 4B` pass with `0` duplicate provider calls, `0` duplicate messages/commits, `0` lost accepted work, and `0` budget overcommits. Per D7 scope adjustment, Benchmark & Cost re-estimation remain paused (D6 numbers in §9–§10 reflect prior `main @ a537e4f`). Historical D0–D6 evidence (§0–§12) and pre-`#188` Defect #6 discovery (§13.1–§13.2) are preserved below; see **§13.3** for final `22/22` pass evidence.
+> **M1-D8 Final Performance & Cost Verdict (`main @ d3c559c` + PR `#185` @ `af93106`):** Re-benchmarking real local `workerd` ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), [m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)) alongside the already-passed `22/22` acceptance suite (`0` safety violations) confirms: (1) **All ADR-0006 single-stream latency targets PASS** (`Covered ACK P95 = 17.42 ms`, `Runtime Overhead P95 = 25.02 ms`, `GlobalBudget Reserve+Authorize P95 = 11.17 ms`, `Durable Dispatch P95 = 55.85 ms`, `Fake Provider TTFT P95 = 0.61 ms`, `Offline Recovery = 50s detect / 66s recover`); (2) **Covered Path sync D1 I/O is verified at `0` ops (`d1OpsMean = 0`)** when coverage is held active, and drops from `7.92` (D6) to `3.90` D1 rows written/turn on isolated idle-cycling turns; (3) **Two remaining non-safety gaps prevent unconditional GA**: newly discovered **Defect #7** (`prepareTurn` returns `9` context rows on conversations with `>= 8` messages, causing `/v2/conversations/:id/messages/stream` interactive execution to fail with `internal_error` on turn 5+) and **10k/100k Cloud Runtime cost overrun** (`$412.53–$440.92` vs `$300` at 10k; `$4,602.85–$5,303.26` vs `$3,500` at 100k) driven by `57–61` DO `rowsWritten/event` vs ADR-0006's `20`-row assumption. See **§14** for complete D8 measurements and verdict.
 
 ---
 
@@ -383,3 +383,78 @@ Per CTO D7 execution scope adjustment, acceptance verification ran directly agai
   - **Result:** **`22 passed (22)`** in `98.20s` (`D7 Step 4A` `656ms` PASS, `D7 Step 4B` `554ms` PASS, all `F-1..F-23` & `FI-01..FI-16` PASS with `F-11` N/A + alternative verified).
   - **Safety Counters:** Duplicate Provider Calls = `0`, Duplicate Assistant Messages = `0`, Duplicate Commits = `0`, Lost Accepted Work = `0`, Budget Overcommit = `0`.
   - **Benchmark / Cost Note:** Per D7 scope adjustment, Benchmark & Cost re-estimation (`§9–§10`) remain paused and were not re-run post-`1131415`/`#188`.
+
+---
+
+## 14. M1-D8 — Final Performance, Covered D1 I/O & Cost Verification (`main @ d3c559c` + PR `#185` @ `af93106`)
+
+Executed via `pnpm bench:local --suite m1-full-runtime --enable-local-load --concurrency-levels 1,10,25,50 --requests-per-level 20 --out-dir benchmarks/v2-m1` ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), [m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json), `gitSha: af93106e161d83e792c93c03b56cf6aefee364ec`, `wrangler@4.158.0`, FakeModelGateway `delay = 0 ms`, cost `120` micro-USD; zero runtime files modified). Per M1-D8 scope, the already-verified `22/22` acceptance suite (`§13.3`) was not re-executed.
+
+### 14.1 Core Latency Metrics & ADR-0006 Target Comparison (`[Measured: Local workerd]`)
+
+| Metric                                           | Workload & Timing Start                                        |        P50 |                        P95 |        P99 | ADR-0006 / M0 Target      |      D6 (`a537e4f`) P95 | D8 Status            |
+| :----------------------------------------------- | :------------------------------------------------------------- | ---------: | -------------------------: | ---------: | :------------------------ | ----------------------: | :------------------- |
+| **Covered HTTP ACK (`B1 POST`)**                 | Covered agent HTTP request -> `201` receipt (`n=20`)           | `12.70 ms` |             **`17.42 ms`** | `18.24 ms` | `<= 250 ms` (near-region) |              `16.97 ms` | **PASS**             |
+| **Uncovered HTTP ACK (`B1 POST`)**               | Fresh uncovered agent HTTP request -> `201` (`n=20`)           | `13.94 ms` |             **`15.85 ms`** | `17.11 ms` | `<= 250 ms` (near-region) |              `15.94 ms` | **PASS**             |
+| **3-RPC Fast Path ACK (`prepareTurn`)**          | `AgentHeadDO.prepareTurn` RPC -> `prepared` (`n=20`)           |  `9.02 ms` |             **`12.89 ms`** | `13.06 ms` | `<= 250 ms`               |              `12.23 ms` | **PASS**             |
+| **Runtime Overhead (3-RPC Fast Path)**           | `(prepare + markSent + gateway + commit) - gatewayMs` (`n=20`) | `21.28 ms` |             **`25.02 ms`** | `25.53 ms` | `<= 200 ms`               |              `26.86 ms` | **PASS**             |
+| **Fake Provider TTFT (`/v2/fake-model/stream`)** | Loopback SSE request -> first `event: delta` (`n=20`)          |  `0.50 ms` |              **`0.61 ms`** |  `1.12 ms` | Reference baseline        |               `0.73 ms` | **PASS**             |
+| **GlobalBudget Reserve + Authorize**             | `reserveGlobal` + `authorizeGlobalSend` RPC (`n=20`)           |  `8.00 ms` |             **`11.17 ms`** | `11.45 ms` | `<= 50 ms`                |              `12.40 ms` | **PASS**             |
+| **Durable Dispatch (`POST -> completed`)**       | Post-ACK -> DO `completed` + `global_synced_at_ms` (`n=40`)    | `52.99 ms` |             **`55.85 ms`** | `56.56 ms` | `<= 3,000 ms`             |              `54.15 ms` | **PASS**             |
+| **Offline Detection / Recovery**                 | Virtual clock + 7 alarm failures + Cron Sweeper                |          — |                `50s / 66s` |          — | `<= 2m / <= 5m`           |             `50s / 66s` | **PASS**             |
+| **Uncovered Contention (`5x` same head)**        | `5` concurrent `prepareTurn` on 1 uncovered head               |          — |             `5/5 HTTP 201` |          — | `0x 503` race             |        `4/5 503` (FAIL) | **PASS (Fixed)**     |
+| **Edge SSE (`< 8` prior msgs)**                  | `POST /v2/conversations/:id/messages/stream` fresh head        |          — |  `HTTP 201, sawDelta=true` |          — | Stream `turn.delta`       | `sawDelta=false` (FAIL) | **PASS (Fixed)**     |
+| **Edge SSE (`>= 8` prior msgs)**                 | `POST /v2/conversations/:id/messages/stream` (`42` msgs)       |          — | `HTTP 201, sawDelta=false` |          — | Stream `turn.delta`       |                     N/A | **FAIL (Defect #7)** |
+
+> [!NOTE]
+> Local `workerd` latencies reflect single-host loopback DO/Queue IPC (`FakeModelGateway delay = 0 ms`) and are **not** production global WAN SLAs. In the synthetic regional RTT overlay ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json#L426-L466)), near-region simulation yields `ACK P95 = 41.42 ms`, `Runtime Overhead P95 = 53.02 ms`, and `GlobalBudget Check P95 = 27.17 ms`.
+
+### 14.2 Concurrency Sweep & 1,000 Logical Agents (`[Measured: Local workerd]`)
+
+| Concurrency / Workload                 | Samples / Success | ACK P50 / P95 (ms) | Durable Dispatch P50 / P95 (ms) |                  Throughput (req/s) | Safety Violations         |
+| :------------------------------------- | ----------------: | -----------------: | ------------------------------: | ----------------------------------: | :------------------------ |
+| `c = 1` (pre-covered distinct agents)  |         `20 / 20` |    `11.85 / 18.25` |                 `53.06 / 56.09` |                             `15.01` | `0` across all 5 counters |
+| `c = 10` (pre-covered distinct agents) |         `20 / 20` |    `50.70 / 94.89` |               `639.90 / 816.27` |                             `13.22` | `0` across all 5 counters |
+| `c = 25` (pre-covered distinct agents) |         `25 / 25` |  `190.14 / 223.73` |           `1,677.80 / 2,265.81` |                              `9.86` | `0` across all 5 counters |
+| `c = 50` (pre-covered distinct agents) |         `50 / 50` |  `332.84 / 382.34` |           `5,664.04 / 7,562.63` |                              `6.22` | `0` across all 5 counters |
+| `1,000` Agents / `100` Concurrent      |       `100 / 100` |  `754.34 / 897.02` |           `5,648.74 / 8,067.15` | `~10.4s` provision, `901.28 MB` RSS | `0` across all 5 counters |
+
+### 14.3 Covered Path D1 Operation Verification & Per-Event Resource Counts
+
+| Path Measured (`AgentHeadDO` + M0 `GlobalBudgetDO 8R / 9W`)    |            DO Rows Read |       DO Rows Written |     D1 Ops | D1 Rows Read | D1 Rows Written | Queue Sends | Alarm Set / Fires |
+| :------------------------------------------------------------- | ----------------------: | --------------------: | ---------: | -----------: | --------------: | ----------: | ----------------: |
+| **`activeCoveredB1DurablePath` (`n=5`, coverage held active)** |     `233.0` (`225 + 8`) |   `56.6` (`47.6 + 9`) | **`0.00`** |   **`0.00`** |      **`0.00`** |         `1` |       `3.8 / 1.6` |
+| `covered3RpcFastPath` (`n=20`, idle-retires between turns)     |   `177.4` (`169.4 + 8`) |     `51.0` (`42 + 9`) |     `1.00` |       `1.00` |          `3.00` |         `0` |       `2.0 / 0.0` |
+| `coveredB1DurablePath` (`n=20`, sequential idle-cycle turns)   |   `268.9` (`260.9 + 8`) | `60.75` (`51.75 + 9`) |     `1.90` |       `1.90` |          `3.90` |         `1` |      `4.0 / 1.75` |
+| `uncoveredB1DurablePath` (`n=20`, fresh uncovered agents)      | `181.55` (`173.55 + 8`) | `61.15` (`52.15 + 9`) |     `1.05` |       `1.05` |          `3.05` |         `1` |       `4.0 / 1.1` |
+
+- **Covered Path D1 Verification Finding:** When an AgentHead already holds active D1 coverage (`activeCoveredB1DurablePath` — e.g. overlapping turns or scheduled recovery window), Defect #3's fix achieves **exact `0` D1 operations (`0` reads, `0` writes)** per covered turn (matching `F-5`). On sequential turns separated by full idle settlement (`coveredB1DurablePath`), `syncPostCycleCoverage` retires D1 coverage when `openD === null` and the next turn re-registers, reducing blended `80/20` D1 writes from **`7.92`** (D6 `a537e4f`) to **`3.73`** (`0.8 * 3.90 + 0.2 * 3.05`) on `d3c559c` (or **`0.61`** D1 writes/event under active-covered `80/20` steady state).
+
+### 14.4 Updated Cost Model (`1,000 / 10,000 / 100,000` MAU — `[Estimated: ADR-0006 Formula over D8 Telemetry]`)
+
+| Scenario (`DO rowsW / rowsR / D1 writes / Q ops`)       |           MAU |   Cloud Runtime | ADR-0006 Cloud Target  | LLM (Illustrative / ZDR-Flash) | Sandbox (Gross / 50% Offload) | Combined Total (Illust. / ZDR+Offload) |
+| :------------------------------------------------------ | ------------: | --------------: | :--------------------- | -----------------------------: | ----------------------------: | -------------------------------------: |
+| `adr0006_planning_20rows_1k` (`20 / 200 / 0.2 / 1.2`)   |       `1,000` |         `$9.33` | `< $15`                |          `$3,078.00 / $314.64` |            `$166.50 / $83.25` |                  `$3,253.83 / $407.22` |
+| **`m1_d8_idle_cycle_1k` (`61 / 269 / 3.73 / 1`)**       |   **`1,000`** |     **`$7.72`** | `<= $15` (**PASS**)    |          `$3,078.00 / $314.64` |            `$166.50 / $83.25` |              **`$3,252.22 / $405.61`** |
+| `m1_d8_active_cov_1k` (`57 / 233 / 0.61 / 1`)           |       `1,000` |         `$7.72` | `<= $15` (**PASS**)    |          `$3,078.00 / $314.64` |            `$166.50 / $83.25` |                  `$3,252.22 / $405.61` |
+| `adr0006_planning_20rows_10k` (`20 / 200 / 0.2 / 1.2`)  |      `10,000` |       `$176.07` | `$300`                 |       `$30,780.00 / $3,146.40` |         `$1,665.00 / $832.50` |               `$32,621.07 / $4,154.97` |
+| **`m1_d8_idle_cycle_10k` (`61 / 269 / 3.73 / 1`)**      |  **`10,000`** |   **`$440.92`** | `$300` (**EXCEEDS**)   |       `$30,780.00 / $3,146.40` |         `$1,665.00 / $832.50` |           **`$32,885.92 / $4,419.82`** |
+| `m1_d8_active_cov_10k` (`57 / 233 / 0.61 / 1`)          |      `10,000` |       `$412.53` | `$300` (**EXCEEDS**)   |       `$30,780.00 / $3,146.40` |         `$1,665.00 / $832.50` |               `$32,857.53 / $4,391.43` |
+| `adr0006_planning_20rows_100k` (`20 / 200 / 0.2 / 1.2`) |     `100,000` |     `$2,204.80` | `$3,500`               |     `$307,800.00 / $31,464.00` |      `$16,650.00 / $8,325.00` |             `$326,654.80 / $41,993.80` |
+| **`m1_d8_idle_cycle_100k` (`61 / 269 / 3.73 / 1`)**     | **`100,000`** | **`$5,303.26`** | `$3,500` (**EXCEEDS**) |     `$307,800.00 / $31,464.00` |      `$16,650.00 / $8,325.00` |         **`$329,753.26 / $45,092.26`** |
+| `m1_d8_active_cov_100k` (`57 / 233 / 0.61 / 1`)         |     `100,000` |     `$4,602.85` | `$3,500` (**EXCEEDS**) |     `$307,800.00 / $31,464.00` |      `$16,650.00 / $8,325.00` |             `$329,052.85 / $44,391.85` |
+
+- **Cost Attribution:** Fixing Defect #3 lowered estimated Cloud Runtime at `100k` MAU by `$778/mo` (`$6,081.66 -> $5,303.26`, or `$4,602.85` under `0.61` D1 writes/event). However, **DO SQLite `rowsWritten` (`57–61` rows/event, `~2.9x–3.1x` ADR-0006's `20`-row assumption)** remains the dominant Cloud cost driver above `1k` MAU (`$412–$441` vs `$300` at `10k`; `$4,603–$5,303` vs `$3,500` at `100k`). LLM & Sandbox dominate total spend (`~88–99%` of total).
+
+### 14.5 Newly Discovered Defect #7 (Exposed by D8 Multi-Turn SSE Probe; Zero Runtime Edits in D8)
+
+7. **Defect #7 [High] — Multi-Turn Interactive SSE Fails on Turn 5+ (`prepareTurn` Appends New User Message to `LIMIT 8` Context, Producing `9 > maxContextMessages`)**
+   - **Location:** [turn-service.ts#L366](../../packages/runtime-v2/src/agent-head/turn-service.ts#L366) (`readRecentTurnContextSync`), [turn-service.ts#L778-L786](../../packages/runtime-v2/src/agent-head/turn-service.ts#L778-L786) (`prepareTurn` Stage 3), [interactive-executor.ts#L159](../../apps/api/src/local-v2/interactive-executor.ts#L159), [context.ts#L88-L90](../../packages/model-gateway/src/context.ts#L88-L90) (`buildBoundedContext`).
+   - **Mechanism:** `stage1.context = readRecentTurnContextSync(...)` loads up to `LIMIT 8` (`MODEL_LIMITS.maxContextMessages = 8`) prior messages. Once a conversation has `>= 8` messages (4+ completed turns), `stage1.context` has `8` rows, and Stage 3 returns `[...stage1.context, newUserMessage]` (**`9` rows**). `executeInteractive` calls `buildBoundedContext(prepared.context)`, which throws `ModelInputRefused('context_invalid')` on `rows.length > 8`, committing `status = 'failed', failure_reason = 'internal_error'` with `0` `turn.delta` frames.
+   - **Reproduction:** Execute 20 fast turns on one conversation, then `POST /v2/conversations/:id/messages/stream` (`multiTurnSseContextProbe` in [m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json#L153-L158)).
+   - **Expected:** `stage1` should read `maxContextMessages - 1` (`7`) prior messages (or slice `.slice(-MODEL_LIMITS.maxContextMessages)` in Stage 3) so `prepared.context.length <= 8`.
+
+### 14.6 Final M1 Acceptance Verdict (`main @ d3c559c` + PR `#185`)
+
+- **Functional, Durability & Safety Core:** **PASS (`22/22` acceptance tests, `0` duplicate provider calls/commits/messages, `0` lost accepted work, `0` budget overcommits, `0` D1 I/O on active covered turns, all ADR-0006 single-stream latency targets met).**
+- **Release Verdict:** **CONDITIONAL / NO-GO FOR UNCONDITIONAL GA** — while V2-M1 durable execution, recovery, and budget safety are verified ready, **Defect #7** breaks `/v2/conversations/:id/messages/stream` interactive SSE after 4 prior turns (`>= 8` messages), and `57–61` DO `rowsWritten/event` exceeds ADR-0006 Cloud Runtime budgets at `10k/100k` MAU (`$412–$441` vs `$300`; `$4,603–$5,303` vs `$3,500`). Fix Defect #7 before shipping multi-turn interactive SSE, and schedule DO SQLite write coalescing if strict `$300 / $3,500` Cloud Runtime targets are enforced for `10k–100k` MAU.

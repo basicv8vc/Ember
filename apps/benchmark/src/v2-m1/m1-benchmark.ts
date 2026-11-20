@@ -158,10 +158,17 @@ export interface V2M1FullRuntimeBenchmarkReport {
       readonly sawDeltaEvent: boolean;
       readonly outcomeSummary: string;
     };
+    readonly multiTurnSseContextProbe?: {
+      readonly priorMessagesCount: number;
+      readonly status: number;
+      readonly sawDeltaEvent: boolean;
+      readonly outcomeSummary: string;
+    };
   };
   readonly measuredPerEventOps: {
     readonly covered3RpcFastPath: V2M1PerEventTelemetryStats;
     readonly coveredB1DurablePath: V2M1PerEventTelemetryStats;
+    readonly activeCoveredB1DurablePath: V2M1PerEventTelemetryStats;
     readonly uncoveredB1DurablePath: V2M1PerEventTelemetryStats;
   };
   readonly concurrencySweep: readonly V2M1ConcurrencySweepRow[];
@@ -580,7 +587,10 @@ interface BenchInspectPayload {
   };
   readonly messages: ReadonlyArray<{ readonly kind: string }>;
   readonly turns: ReadonlyArray<{ readonly id: string; readonly status: string }>;
-  readonly attempts: ReadonlyArray<{ readonly global_synced_at_ms: number | null }>;
+  readonly attempts: ReadonlyArray<{
+    readonly subject_id?: string;
+    readonly global_synced_at_ms: number | null;
+  }>;
 }
 
 async function provisionBenchAgent(
@@ -633,21 +643,31 @@ async function waitTurnSettled(
   pollIntervalMs = 20,
 ): Promise<BenchInspectPayload> {
   const deadline = Date.now() + timeoutMs;
+  let lastTurn: unknown = null;
+  let lastAttempts: unknown = null;
   while (Date.now() < deadline) {
     const res = await harness.fetchJson<BenchInspectPayload>('/_test/agent/inspect', {
       tenantId: agent.tenantId,
       agentId: agent.agentId,
     });
     const turn = res.data.turns.find((t) => t.id === turnId);
+    const turnAttempts = res.data.attempts.filter(
+      (a) => a.subject_id === undefined || a.subject_id === turnId,
+    );
+    lastTurn = turn ?? null;
+    lastAttempts = turnAttempts;
     if (
       turn?.status === 'completed' &&
-      res.data.attempts.every((a) => a.global_synced_at_ms !== null)
+      turnAttempts.length > 0 &&
+      turnAttempts.every((a) => a.global_synced_at_ms !== null)
     ) {
       return res.data;
     }
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
-  throw new Error(`Timed out waiting for turn ${turnId} to settle`);
+  throw new Error(
+    `Timed out waiting for turn ${turnId} to settle (turn=${JSON.stringify(lastTurn)}, attempts=${JSON.stringify(lastAttempts)})`,
+  );
 }
 
 async function runWithConcurrency<T>(
@@ -800,6 +820,76 @@ export async function runV2M1FullRuntimeBenchmark(
       } else {
         covErr += 1;
       }
+    }
+
+    // 2b. Active-Covered B1 Durable baseline (open turn holds coverage_state === 'covered' -> 0 D1 I/O)
+    log('[V2-M1 Bench] Measuring Active-Covered B1 Durable Path (0 D1 I/O check)...');
+    const activeCovAgent = await provisionBenchAgent(harness, `bench-active-cov-${randomUUID()}`);
+    const holderPrep = await harness.fetchJson<{
+      ok: boolean;
+      result?: { turnId: string; operationId: string };
+    }>('/_test/agent/rpc', {
+      tenantId: activeCovAgent.tenantId,
+      agentId: activeCovAgent.agentId,
+      method: 'prepareTurn',
+      arg: {
+        scope: {
+          tenantId: activeCovAgent.tenantId,
+          principalId: activeCovAgent.principalId,
+          agentId: activeCovAgent.agentId,
+          policyVersion: 1,
+          requestId: randomUUID(),
+        },
+        conversationId: activeCovAgent.conversationId,
+        request: { client_submission_id: randomUUID(), text: 'hold coverage', transcript_epoch: 0 },
+        workerId: 'bench-coverage-holder',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: {
+          budgetMode: 'simulated_full_protocol',
+          providerId: 'fake',
+          modelLabel: 'ember-fake-model-gateway-1',
+          rateVersion: 'fake-v2-2026-11',
+          maxAttempts: 1,
+          estimatedMicroUsd: 250,
+        },
+      },
+    });
+    const activeCoveredTelemetries: BenchInspectPayload[] = [];
+    for (let i = 0; i < Math.min(5, baseIterations); i++) {
+      await harness.fetchJson('/_test/agent/reset-telemetry', {
+        tenantId: activeCovAgent.tenantId,
+        agentId: activeCovAgent.agentId,
+      });
+      const res = await harness.fetchJson<{ turn?: { turn_id: string } }>(
+        `/v1/conversations/${activeCovAgent.conversationId}/messages`,
+        { client_submission_id: randomUUID(), text: `ActiveCov #${i}`, transcript_epoch: 0 },
+        { authorization: `Bearer ${activeCovAgent.accessToken}` },
+      );
+      if (res.status === 201 && res.data.turn?.turn_id) {
+        const settled = await waitTurnSettled(harness, activeCovAgent, res.data.turn.turn_id);
+        activeCoveredTelemetries.push(settled);
+      }
+    }
+    if (holderPrep.data.result?.turnId) {
+      await harness.fetchJson('/_test/agent/rpc', {
+        tenantId: activeCovAgent.tenantId,
+        agentId: activeCovAgent.agentId,
+        method: 'cancelTurn',
+        arg: {
+          scope: {
+            tenantId: activeCovAgent.tenantId,
+            principalId: activeCovAgent.principalId,
+            agentId: activeCovAgent.agentId,
+            policyVersion: 1,
+            requestId: randomUUID(),
+          },
+          conversationId: activeCovAgent.conversationId,
+          turnId: holderPrep.data.result.turnId,
+        },
+      });
     }
 
     // 3. 3-RPC Fast Path (Covered) + GlobalBudgetDO reserve+authorize + Fake Provider TTFT
@@ -1019,17 +1109,19 @@ export async function runV2M1FullRuntimeBenchmark(
     }
 
     // 4. Probe real HTTP SSE stream route (/v2/conversations/:id/messages/stream)
+    // 4a. Fresh agent (< 8 prior messages)
+    const sseFreshAgent = await provisionBenchAgent(harness, `bench-sse-fresh-${randomUUID()}`);
     const sseProbeRes = await harness.fetch(
-      `/v2/conversations/${fastAgent.conversationId}/messages/stream`,
+      `/v2/conversations/${sseFreshAgent.conversationId}/messages/stream`,
       {
         method: 'POST',
         headers: {
-          authorization: `Bearer ${fastAgent.accessToken}`,
+          authorization: `Bearer ${sseFreshAgent.accessToken}`,
           'content-type': 'application/json',
         },
         body: JSON.stringify({
           client_submission_id: randomUUID(),
-          text: 'Bench SSE probe',
+          text: 'Bench SSE fresh probe',
           transcript_epoch: 0,
         }),
       },
@@ -1039,8 +1131,34 @@ export async function runV2M1FullRuntimeBenchmark(
       status: sseProbeRes.status,
       sawDeltaEvent: sseProbeBody.includes('event: turn.delta'),
       outcomeSummary: sseProbeBody.includes('event: turn.delta')
-        ? 'SSE streamed turn.delta cleanly'
-        : 'Closed without turn.delta (workerd fetch redirect:error defect in LoopbackFakeModelGateway)',
+        ? 'SSE streamed turn.delta and committed cleanly'
+        : `Closed without turn.delta (${sseProbeBody.slice(0, 160)})`,
+    };
+
+    // 4b. Multi-turn agent (>= 8 prior messages) — probes Defect #7 (stage1 LIMIT 8 + new message = 9 > maxContextMessages)
+    const sseMultiRes = await harness.fetch(
+      `/v2/conversations/${fastAgent.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${fastAgent.accessToken}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Bench SSE multi-turn probe',
+          transcript_epoch: 0,
+        }),
+      },
+    );
+    const sseMultiBody = await sseMultiRes.text();
+    const multiTurnSseContextProbe = {
+      priorMessagesCount: (1 + fastOk) * 2,
+      status: sseMultiRes.status,
+      sawDeltaEvent: sseMultiBody.includes('event: turn.delta'),
+      outcomeSummary: sseMultiBody.includes('event: turn.delta')
+        ? 'SSE streamed turn.delta cleanly on >=8 message conversation'
+        : `Failed without turn.delta (Defect #7: prepareTurn returns 9 context rows > maxContextMessages=8 -> internal_error)`,
     };
 
     // 5. Concurrency Sweep (1, 10, 25, 50) on pre-covered distinct agents
@@ -1195,7 +1313,7 @@ export async function runV2M1FullRuntimeBenchmark(
     const offAgent = await provisionBenchAgent(harness, `bench-offline-${randomUUID()}`);
     const offBaseMs = Date.now();
     harness.faultInjector.setVirtualNowMs(offBaseMs);
-    harness.faultInjector.setAlarmExhaustion(7);
+    harness.faultInjector.setAlarmExhaustion(20);
     const offPrep = await harness.fetchJson<{ ok: boolean; result: { turnId: string } }>(
       '/_test/agent/rpc',
       {
@@ -1244,7 +1362,6 @@ export async function runV2M1FullRuntimeBenchmark(
         nowMs: offBaseMs + i * 5_000,
       });
     }
-    harness.faultInjector.setAlarmExhaustion(0);
     const d1Rows = await harness.fetchJson<{
       results: Array<{
         agent_key: string;
@@ -1268,6 +1385,7 @@ export async function runV2M1FullRuntimeBenchmark(
         (r) => r.agent_key === `${offAgent.tenantId}:${offAgent.agentId}`,
       )!.retry_not_before_ms! + 1_000;
     harness.faultInjector.setVirtualNowMs(retryAt);
+    harness.faultInjector.setAlarmExhaustion(0);
     await harness.fetchJson('/_test/sweeper/run', {
       nowMs: retryAt,
       sweeperId: 'bench-sweeper-recover',
@@ -1287,6 +1405,7 @@ export async function runV2M1FullRuntimeBenchmark(
       fakeProviderTtftMs: summarize(ttftLatencies, ttftOk, ttftErr),
       globalBudgetReserveAndAuthorizeMs: summarize(gbCheckLatencies, gbOk, gbErr),
       edgeSseStreamProbe,
+      multiTurnSseContextProbe,
     };
 
     const profiles = options.regionalProfiles ?? DEFAULT_REGIONAL_RTT_PROFILES;
@@ -1320,6 +1439,7 @@ export async function runV2M1FullRuntimeBenchmark(
     const measuredPerEventOps = {
       covered3RpcFastPath: summarizeTelemetry(fastTelemetries),
       coveredB1DurablePath: summarizeTelemetry(coveredTelemetries),
+      activeCoveredB1DurablePath: summarizeTelemetry(activeCoveredTelemetries),
       uncoveredB1DurablePath: summarizeTelemetry(uncoveredTelemetries),
     };
 
@@ -1387,7 +1507,9 @@ export async function runV2M1FullRuntimeBenchmark(
         concurrency: 5,
         statusCounts,
         defectNote:
-          'Concurrent uncovered prepareTurn requests on the same AgentHeadDO race on RecoveryCoverageCoordinator.inspectCoverageSync generation increment (4/5 fail 503).',
+          (statusCounts['503'] ?? 0) > 0
+            ? `Concurrent uncovered prepareTurn requests on the same AgentHeadDO saw ${statusCounts['503']}x 503 responses (generation race).`
+            : 'All 5 concurrent uncovered prepareTurn requests on the same AgentHeadDO succeeded (no 503 generation race).',
       },
       ...(logical1000AgentFeasibility !== undefined ? { logical1000AgentFeasibility } : {}),
       offlineRecoveryTiming: {
@@ -1401,8 +1523,10 @@ export async function runV2M1FullRuntimeBenchmark(
       caveats: [
         'All measurements ran on local single-host workerd (loopback TCP/DO IPC); never claim local latencies as Cloudflare global production SLAs.',
         'GlobalBudgetDO SQLite row counts (8 read / 9 write per turn) reflect GlobalBudgetAuthorityCore statements measured in M0 without modifying production GlobalBudgetDO.',
-        'Edge SSE /v2/conversations/:id/messages/stream fails inside workerd due to LoopbackFakeModelGateway using fetch(..., { redirect: "error" }); 3-RPC Fast Path was measured directly via AgentHeadDO + GlobalBudgetDO RPC.',
-        'Pre-covered distinct agents were used in the concurrency sweep to avoid Defect #1 (single-agent concurrent uncovered generation race).',
+        edgeSseStreamProbe.sawDeltaEvent
+          ? 'Edge SSE /v2/conversations/:id/messages/stream streamed turn.delta cleanly; 3-RPC Fast Path overhead was additionally isolated via AgentHeadDO + GlobalBudgetDO RPC.'
+          : 'Edge SSE /v2/conversations/:id/messages/stream failed inside workerd without turn.delta; 3-RPC Fast Path was measured directly via AgentHeadDO + GlobalBudgetDO RPC.',
+        'Pre-covered distinct agents were used in the multi-agent concurrency sweep.',
       ],
     };
   } finally {

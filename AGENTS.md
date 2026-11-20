@@ -4,6 +4,7 @@ This file is the single source of repository-wide instructions for coding agents
 
 ## Priorities
 
+- The current product milestone and six-agent ownership are defined in [Product Alpha Roadmap](docs/product/PRODUCT-ALPHA-ROADMAP.md). Read it on startup/resume, identify your assigned workstream, and continue authorized work from current repository state.
 - Ship the smallest useful, reliable product increment quickly. Avoid overengineering, speculative features, broad refactors, and unnecessary abstractions.
 - Follow the assigned task scope and the current accepted architecture. For V2, read [ADR-0006](docs/adr/0006-experience-first-device-powered-runtime-v2.md) and the relevant contracts before changing runtime behavior. Do not use the historical README as the current roadmap.
 - Preserve V1 behavior unless the task explicitly changes it. Keep cloud-authoritative task identity, leases, fencing, idempotency, cancellation, durability, tenant isolation, and budget safety intact.

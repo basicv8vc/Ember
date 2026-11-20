@@ -6,6 +6,7 @@ import {
   MODEL_LIMITS,
   type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
+import type { DeviceExecutionRpc } from '@ember/runtime-v2';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { B1SessionRuntime } from '../auth/b1-auth-runtime.js';
 import { requireSessionAuth } from '../auth/session-authenticator.js';
@@ -29,6 +30,7 @@ import {
   toInternalErrorResponse,
 } from '../http/error-mapping.js';
 import { createB1TurnRoutes } from '../turns/turn-routes.js';
+import { createDeviceRoutes } from './device-routes.js';
 import {
   INTERACTIVE_TIMING,
   executeInteractive,
@@ -57,7 +59,7 @@ interface LocalWorkerContext {
 export interface ResolvedAgentHead {
   readonly agentId: string;
   readonly conversationId: string;
-  readonly rpc: EdgeAgentHeadRpc;
+  readonly rpc: EdgeAgentHeadRpc & Partial<DeviceExecutionRpc>;
 }
 
 export interface LocalV2EdgeDependencies {
@@ -272,6 +274,18 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
             transcript_epoch: result.transcriptEpoch,
           });
         },
+      );
+
+      app.route(
+        '/v2',
+        createDeviceRoutes(requireSessionAuth({ service: sessions }), async (command) => {
+          const resolved = await head();
+          const execute = resolved.rpc.deviceExecution;
+          if (execute === undefined) throw new DomainError('NOT_FOUND');
+          return callRuntime(() =>
+            execute({ ...command, ...resolved.auth, agentId: resolved.agentId, requestId }),
+          );
+        }),
       );
 
       const stream = deps.stream;

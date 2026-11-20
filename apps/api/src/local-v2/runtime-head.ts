@@ -16,6 +16,7 @@ import {
   type AgentHeadRpc,
   type AgentRecoveryTargetPort,
   type D1DatabaseLike,
+  type DeviceExecutionRpc,
   type GlobalBudgetBindings,
   type ObservedTurnUsage,
   type QueueLike,
@@ -38,16 +39,18 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
   readonly EMBER_V2_ISOLATED_HARNESS: string;
 }
 
-type EdgeMethod = keyof EdgeAgentHeadRpc;
-type EdgeRequest<K extends EdgeMethod> = Parameters<AgentHeadRpc[K]>[0];
-type EdgeResult<K extends EdgeMethod> = Awaited<ReturnType<AgentHeadRpc[K]>>;
+type LocalEdgeRpc = EdgeAgentHeadRpc & DeviceExecutionRpc;
+type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc;
+type EdgeMethod = keyof LocalEdgeRpc;
+type EdgeRequest<K extends EdgeMethod> = Parameters<CoreEdgeRpc[K]>[0];
+type EdgeResult<K extends EdgeMethod> = Awaited<ReturnType<CoreEdgeRpc[K]>>;
 type RpcResult<T> = { readonly value: T } | { readonly code: DomainErrorCode };
 
 export function getHead(env: LocalRuntimeEnv, tenantId: string, agentId: string) {
   return env.AGENT_HEAD.getByName(formatRecoveryAgentKey(tenantId, agentId));
 }
 
-export function createEdgeRpc(head: AgentHeadDO): EdgeAgentHeadRpc {
+export function createEdgeRpc(head: AgentHeadDO): LocalEdgeRpc {
   async function call<K extends EdgeMethod>(
     method: K,
     request: EdgeRequest<K>,
@@ -68,6 +71,7 @@ export function createEdgeRpc(head: AgentHeadDO): EdgeAgentHeadRpc {
     getTurn: (req) => call('getTurn', req),
     cancelTurn: (req) => call('cancelTurn', req),
     clearTranscript: (req) => call('clearTranscript', req),
+    deviceExecution: (req) => call('deviceExecution', req),
   };
 }
 

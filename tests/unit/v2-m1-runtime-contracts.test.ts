@@ -95,18 +95,29 @@ function createInMemoryDoStorage(): {
 }
 
 describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', () => {
-  it('installs unified A (v1) + B (v2) DO migrations idempotently and detects checksum drift', () => {
+  it('upgrades existing Agent Head storage for device execution and detects checksum drift', () => {
     const { storage, db } = createInMemoryDoStorage();
     const steps = createDefaultAgentHeadMigrations();
-    expect(steps.map((s) => s.version)).toEqual([1, 2]);
+    expect(steps.map((s) => s.version)).toEqual([1, 2, 3]);
 
-    const first = applyAgentHeadMigrations(storage, steps, 1_700_000_000_000);
+    const first = applyAgentHeadMigrations(storage, steps.slice(0, 2), 1_700_000_000_000);
     expect(first.appliedVersions).toEqual([1, 2]);
     expect(first.alreadyAppliedVersions).toEqual([]);
 
-    const second = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
-    expect(second.appliedVersions).toEqual([]);
-    expect(second.alreadyAppliedVersions).toEqual([1, 2]);
+    db.exec(`INSERT INTO tasks
+      (id, kind, input_json, digest, idempotency_key, execution_path, next_run_at_ms, created_at_ms, updated_at_ms)
+      VALUES ('existing-task', 'mock.compute', '{}', 'digest', 'existing-operation', 'standard', 0, 0, 0)`);
+
+    const upgrade = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
+    expect(upgrade.appliedVersions).toEqual([3]);
+    expect(upgrade.alreadyAppliedVersions).toEqual([1, 2]);
+    expect(
+      db.prepare("SELECT status, execution_target FROM tasks WHERE id = 'existing-task'").get(),
+    ).toEqual({ status: 'queued', execution_target: 'cloud' });
+
+    const replay = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
+    expect(replay.appliedVersions).toEqual([]);
+    expect(replay.alreadyAppliedVersions).toEqual([1, 2, 3]);
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")
@@ -129,13 +140,15 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
       'v2_schedules',
       'v2_dispatch_outbox',
       'v2_recovery_coverage',
+      'device_registrations',
+      'device_task_placements',
     ]) {
       expect(names.has(required)).toBe(true);
     }
 
     const tampered: AgentHeadMigrationStep[] = [
       { version: steps[0]!.version, name: steps[0]!.name, statements: ['SELECT 1'] },
-      steps[1]!,
+      ...steps.slice(1),
     ];
     expect(() => applyAgentHeadMigrations(storage, tampered, 1_700_000_010_000)).toThrow(
       MigrationChecksumMismatchError,

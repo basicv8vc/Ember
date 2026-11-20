@@ -8,6 +8,7 @@ import UIKit
 final class DeviceExecutorWorkbenchModel {
     let executor: DeviceTaskExecutor
     let taskStore: SessionTaskStore
+    let cloudMonitor: CloudDeviceAdapterMonitor
 
     private(set) var isRunningTask = false
     private(set) var isRunningBenchmark = false
@@ -17,12 +18,14 @@ final class DeviceExecutorWorkbenchModel {
     private(set) var statusMessage: String?
 
     init(
-        executor: DeviceTaskExecutor = DeviceTaskExecutor()
+        executor: DeviceTaskExecutor = DeviceTaskExecutor(),
+        cloudMonitor: CloudDeviceAdapterMonitor = CloudDeviceAdapterMonitor()
     ) {
         self.executor = executor
         self.taskStore = SessionTaskStore(
             repository: DeviceSessionTaskRepository(executor: executor)
         )
+        self.cloudMonitor = cloudMonitor
     }
 
     func bootstrap() async {
@@ -30,6 +33,9 @@ final class DeviceExecutorWorkbenchModel {
             let report = try await executor.recoverAndResumeIfNeeded(autoStart: true)
             lastRecoverySummary = "Queued: \(report.recoveredQueuedCount) · Interrupted: \(report.recoveredInterruptedCount) · Cancelled: \(report.convergedCancelledCount) · Terminal: \(report.restoredTerminalCount)"
             await taskStore.refreshAll()
+            if ProcessInfo.processInfo.arguments.contains("--ember-cloud-adapter-qa") {
+                await cloudMonitor.connectFromQAFileIfPresent()
+            }
         } catch {
             statusMessage = error.localizedDescription
         }
@@ -259,6 +265,38 @@ struct DeviceExecutorWorkbenchView: View {
                             UIPasteboard.general.string = report.markdownSummary()
                         }
                     }
+                }
+
+                Section("Cloud Device Adapter (M2-C2)") {
+                    LabeledContent("Status", value: model.cloudMonitor.statusLabel)
+                    if let deviceID = model.cloudMonitor.deviceID {
+                        LabeledContent("Device ID", value: deviceID.uuidString.lowercased())
+                    }
+                    if let summary = model.cloudMonitor.summary {
+                        Text("Committed: \(summary.committedCount) · Pending: \(summary.pendingCommitCount) · Fenced: \(summary.fencedCount)")
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    if let lastEvent = model.cloudMonitor.lastEvent {
+                        Text(lastEvent)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                    }
+                    Button {
+                        Task {
+                            if model.cloudMonitor.isRunning {
+                                await model.cloudMonitor.stop()
+                            } else {
+                                await model.cloudMonitor.connectFromQAFileIfPresent()
+                            }
+                        }
+                    } label: {
+                        Label(
+                            model.cloudMonitor.isRunning ? "Stop Cloud Adapter" : "Connect Local V2 Relay",
+                            systemImage: model.cloudMonitor.isRunning ? "stop.circle" : "antenna.radiowaves.left.and.right"
+                        )
+                    }
+                    .accessibilityIdentifier("cloud-adapter-toggle")
                 }
             }
             .navigationTitle("iPhone Native Executor")

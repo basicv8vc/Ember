@@ -1,9 +1,11 @@
+import CryptoKit
 import Foundation
 
 /// Deterministic, swappable Mock repository simulating B1 Session Task & Conversation persistence.
 /// Supports relaunch verification by persisting task/conversation snapshots in a dedicated file when a storage URL is supplied.
 actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
     nonisolated let isMockOnly: Bool = true
+    nonisolated let supportsPythonTaskSubmission: Bool = true
 
     static let agentID = UUID(uuidString: "00000000-0000-4000-8000-00000000b301")!
     static let notesTaskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b311")!
@@ -135,7 +137,7 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
             throw SessionTaskRepositoryError.notFound
         }
         if taskID == Self.notesTaskID {
-            let sample = "item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n"
+            let sampleData = Data("item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n".utf8)
             return TaskArtifactsListDTO(
                 taskID: taskID,
                 artifacts: [
@@ -143,10 +145,29 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
                         artifactID: UUID(uuidString: "00000000-0000-4000-8000-00000000b371")!,
                         filename: "action_items.csv",
                         mediaType: "text/csv",
-                        size: sample.utf8.count,
-                        sha256: String(repeating: "a", count: 64),
+                        size: sampleData.count,
+                        sha256: Self.sha256Hex(sampleData),
                         createdBy: .run,
                         createdAt: "2026-11-15T09:02:00Z"
+                    )
+                ]
+            )
+        }
+        if let task = state.tasks.first(where: { $0.taskID == taskID }),
+           task.kind == .pythonAgent,
+           task.status == .completed {
+            let report = Self.mockPythonArtifactData(for: task.taskID)
+            return TaskArtifactsListDTO(
+                taskID: taskID,
+                artifacts: [
+                    TaskArtifactItemDTO(
+                        artifactID: task.taskID,
+                        filename: "analysis_summary.csv",
+                        mediaType: "text/csv",
+                        size: report.count,
+                        sha256: Self.sha256Hex(report),
+                        createdBy: .run,
+                        createdAt: task.updatedAt
                     )
                 ]
             )
@@ -159,16 +180,117 @@ actor MockSessionTaskRepository: SessionTaskRepositoryProtocol {
         filename: String,
         mediaType: String
     ) async throws -> DownloadedTaskArtifact {
-        guard artifactID == UUID(uuidString: "00000000-0000-4000-8000-00000000b371")! else {
-            throw SessionTaskRepositoryError.notFound
+        if artifactID == UUID(uuidString: "00000000-0000-4000-8000-00000000b371")! {
+            let sample = Data("item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n".utf8)
+            return DownloadedTaskArtifact(
+                artifactID: artifactID,
+                filename: B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType),
+                mediaType: mediaType,
+                data: sample
+            )
         }
-        let sample = Data("item,owner,due\nConfirm App Store review checklist,Lin,2026-11-18\n".utf8)
-        return DownloadedTaskArtifact(
-            artifactID: artifactID,
-            filename: B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType),
-            mediaType: mediaType,
-            data: sample
+        if let task = state.tasks.first(where: { $0.taskID == artifactID && $0.kind == .pythonAgent && $0.status == .completed }) {
+            let report = Self.mockPythonArtifactData(for: task.taskID)
+            return DownloadedTaskArtifact(
+                artifactID: artifactID,
+                filename: B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType),
+                mediaType: mediaType,
+                data: report
+            )
+        }
+        throw SessionTaskRepositoryError.notFound
+    }
+
+    func uploadAttachment(
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> StagedUploadReceiptDTO {
+        let normalizedType = B3AttachmentLimits.normalizedMediaType(mediaType)
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: normalizedType)
+        guard B3AttachmentLimits.isSafeMediaType(normalizedType),
+              data.count <= SubmitPythonTaskRequestDTO.maxInlineArtifactBytes else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+        let now = Date().ISO8601Format()
+        return StagedUploadReceiptDTO(
+            uploadID: UUID(),
+            filename: safeFilename,
+            mediaType: normalizedType,
+            size: data.count,
+            sha256: Self.sha256Hex(data),
+            expiresAt: Date().addingTimeInterval(3600).ISO8601Format(),
+            createdAt: now
         )
+    }
+
+    func submitPythonTask(_ request: SubmitPythonTaskRequestDTO) async throws -> PythonTaskSubmitResultDTO {
+        let trimmedPrompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty,
+              trimmedPrompt.count <= SubmitPythonTaskRequestDTO.promptMaxChars else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+        let taskID = UUID()
+        let now = Date().ISO8601Format()
+        let task = SessionTaskDTO(
+            taskID: taskID,
+            agentID: Self.agentID,
+            kind: .pythonAgent,
+            title: request.title?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+                ? request.title?.trimmingCharacters(in: .whitespacesAndNewlines)
+                : "Data analysis task",
+            status: .completed,
+            currentRunID: UUID(),
+            attemptCount: 1,
+            createdAt: now,
+            updatedAt: now,
+            resultState: .available
+        )
+        let result = SessionTaskTextResult(
+            summaryText: "MOCK: Simulated Python analysis complete.",
+            detailText: "MOCK ONLY: Simulated analysis for prompt: \(trimmedPrompt)",
+            modelLabel: "mock-python-sandbox",
+            simulated: true,
+            producedAt: now
+        )
+        state.tasks.insert(task, at: 0)
+        state.resultsByTaskID[taskID.uuidString.lowercased()] = SessionTaskResultDTO(
+            taskID: taskID,
+            taskStatus: .completed,
+            resultState: .available,
+            result: result
+        )
+        state.eventsByTaskID[taskID.uuidString.lowercased()] = [
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: 1,
+                phase: .accepted,
+                occurredAt: now,
+                traceID: UUID(),
+                payload: SessionTaskEventPayloadDTO(taskKind: .pythonAgent, route: .heavy, toStatus: .queued, simulated: true)
+            ),
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: 2,
+                phase: .completed,
+                occurredAt: now,
+                traceID: UUID(),
+                payload: SessionTaskEventPayloadDTO(taskKind: .pythonAgent, attempt: 1, route: .heavy, fromStatus: .running, toStatus: .completed, runStatus: .succeeded, simulated: true)
+            ),
+        ]
+        persist()
+        return PythonTaskSubmitResultDTO(
+            task: SessionTaskDetailDTO(summary: task, result: result),
+            created: true
+        )
+    }
+
+    private static func mockPythonArtifactData(for taskID: UUID) -> Data {
+        Data("task_id,status,note\n\(taskID.uuidString.lowercased()),simulated,MOCK ONLY artifact\n".utf8)
+    }
+
+    private static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
     func cancelTask(id: UUID) async throws -> TaskCancelDTO {

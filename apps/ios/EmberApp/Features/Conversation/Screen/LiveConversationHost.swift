@@ -27,8 +27,13 @@ final class LiveConversationHostModel {
     let taskStore: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore
     let memoryStore: PersonalMemoryStore
+    let cloudDeviceMonitor: CloudDeviceAdapterMonitor?
     let isMockMode: Bool
     let environmentBadge: String
+
+    private let cloudBaseURL: URL?
+    private let deviceAuthProvider: (any AuthSessionProvider)?
+    private let deviceExecutorPreferenceKey: String?
 
     var selectedTab: RootTab = .chat
     var chatNavigationPath: [UUID] = []
@@ -44,6 +49,8 @@ final class LiveConversationHostModel {
     private(set) var isPollingPaused = false
     private(set) var isViewVisible = false
     private(set) var isSceneActive = true
+    private(set) var isDeviceExecutorEnabled = false
+    private(set) var deviceExecutorError: String?
     private(set) var command: ConversationCommandStatus = .idle
     private(set) var reply: ConversationReplyState = .idle
     private(set) var status: String?
@@ -60,6 +67,8 @@ final class LiveConversationHostModel {
         taskRepository: (any SessionTaskRepositoryProtocol)? = nil,
         scheduleRepository: (any ProactiveScheduleRepositoryProtocol)? = nil,
         memoryRepository: (any PersonalMemoryRepositoryProtocol)? = nil,
+        cloudBaseURL: URL? = nil,
+        deviceAuthProvider: (any AuthSessionProvider)? = nil,
         isMockMode: Bool = false,
         environmentBadge: String = "LIVE CLOUD",
         pollingWindow: Duration = .seconds(60),
@@ -71,6 +80,21 @@ final class LiveConversationHostModel {
         self.taskStore = SessionTaskStore(repository: taskRepository)
         self.scheduleStore = ProactiveScheduleStore(repository: scheduleRepository)
         self.memoryStore = PersonalMemoryStore(repository: memoryRepository)
+        self.cloudBaseURL = cloudBaseURL
+        self.deviceAuthProvider = deviceAuthProvider
+        if !isMockMode, let cloudBaseURL, deviceAuthProvider != nil {
+            self.cloudDeviceMonitor = CloudDeviceAdapterMonitor()
+            let hostKey = cloudBaseURL.host?.lowercased() ?? "default"
+            let prefKey = "ember.v2.deviceExecutor.enabled.\(hostKey)"
+            self.deviceExecutorPreferenceKey = prefKey
+            self.isDeviceExecutorEnabled =
+                ProcessInfo.processInfo.arguments.contains("--ember-enable-device-executor")
+                || UserDefaults.standard.bool(forKey: prefKey)
+        } else {
+            self.cloudDeviceMonitor = nil
+            self.deviceExecutorPreferenceKey = nil
+            self.isDeviceExecutorEnabled = false
+        }
         self.isMockMode = isMockMode
         self.environmentBadge = environmentBadge
         self.pollingWindow = pollingWindow
@@ -106,6 +130,7 @@ final class LiveConversationHostModel {
                     }
                 }
                 await syncTasksFromCloud(snapshot: recovered)
+                await syncCloudDeviceExecutorState()
             } catch {
                 command = .unknownAcknowledgement
                 reply = .failed(
@@ -136,6 +161,7 @@ final class LiveConversationHostModel {
             status = nil
             refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
+            await syncCloudDeviceExecutorState()
         } catch let error as AuthError where error == .appleCancelled {
             status = "Sign-in cancelled."
         } catch {
@@ -160,6 +186,7 @@ final class LiveConversationHostModel {
         if let previousTask {
             _ = await previousTask.value
         }
+        await cloudDeviceMonitor?.stop()
 
         switch await auth.logout() {
         case .revokedRemotely, .alreadyInvalidated:
@@ -173,12 +200,47 @@ final class LiveConversationHostModel {
         }
     }
 
+    func setDeviceExecutorEnabled(_ enabled: Bool) async {
+        isDeviceExecutorEnabled = enabled
+        deviceExecutorError = nil
+        if let deviceExecutorPreferenceKey {
+            UserDefaults.standard.set(enabled, forKey: deviceExecutorPreferenceKey)
+        }
+        await syncCloudDeviceExecutorState()
+    }
+
+    private func syncCloudDeviceExecutorState() async {
+        guard let cloudDeviceMonitor else { return }
+        guard isDeviceExecutorEnabled, !requiresSignIn, let profile, let cloudBaseURL, let deviceAuthProvider else {
+            await cloudDeviceMonitor.stop()
+            return
+        }
+        do {
+            let configuration = try CloudDeviceEndpointConfiguration(
+                origin: cloudBaseURL,
+                accountID: profile.consumerID
+            )
+            try await cloudDeviceMonitor.connect(
+                configuration: configuration,
+                authProvider: deviceAuthProvider,
+                autoStart: true
+            )
+            deviceExecutorError = nil
+        } catch {
+            deviceExecutorError = String(localized: "device.executor.error.connect_failed", table: "Conversation")
+        }
+    }
+
     private func clearLiveState() {
         sessionGeneration &+= 1
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
         taskObserverTask?.cancel()
         taskObserverTask = nil
+        if let monitor = cloudDeviceMonitor {
+            Task { await monitor.stop() }
+        }
+        deviceExecutorError = nil
         profile = nil
         snapshot = nil
         requiresSignIn = true
@@ -673,6 +735,9 @@ final class LiveConversationHostModel {
     }
 
     func handleScenePhase(_ phase: ScenePhase) {
+        if let cloudDeviceMonitor {
+            Task { await cloudDeviceMonitor.handleScenePhase(phase) }
+        }
         switch phase {
         case .active:
             handleSceneActive()
@@ -1205,6 +1270,13 @@ struct LiveConversationHost: View {
 
     private var signInView: some View {
         VStack(spacing: 16) {
+            Text(model.environmentBadge)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 4)
+                .background(EmberDesignTokens.cardBackground, in: Capsule())
+                .accessibilityIdentifier("live-sign-in-environment-badge")
             Text("Ember Cloud").font(.title2.bold())
             Text("Sign in to sync your conversation securely.")
                 .foregroundStyle(.secondary)
@@ -1435,9 +1507,19 @@ struct LiveConversationHost: View {
 
     private var tasksTab: some View {
         NavigationStack(path: $model.tasksNavigationPath) {
-            TaskInboxView(store: model.taskStore, scheduleStore: model.scheduleStore) { taskID in
-                model.openTaskFromInbox(taskID)
-            }
+            TaskInboxView(
+                store: model.taskStore,
+                scheduleStore: model.scheduleStore,
+                deviceMonitor: model.cloudDeviceMonitor,
+                isDeviceExecutorEnabled: model.isDeviceExecutorEnabled,
+                deviceExecutorError: model.deviceExecutorError,
+                onSetDeviceExecutorEnabled: { enabled in
+                    Task { await model.setDeviceExecutorEnabled(enabled) }
+                },
+                onOpenTask: { taskID in
+                    model.openTaskFromInbox(taskID)
+                }
+            )
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)

@@ -205,4 +205,67 @@ final class V2StagingIntegrationTests: XCTestCase {
         XCTAssertTrue(memoryStore.items.isEmpty)
         XCTAssertTrue(scheduleStore.schedules.isEmpty)
     }
+
+    func testCloudDeviceMonitorIsWiredOnlyForLiveV2AndStopsOnSignOut() async throws {
+        let stagingURL = URL(string: "https://ember-v2-staging.slowfast.dev")!
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: FakeEmberSessionAPI(),
+            transport: try EmberAuthenticatedTransport(baseURL: stagingURL, client: EmberAPIClient()),
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let hostModel = LiveConversationHostModel(
+            repository: StubLiveConversationService(),
+            auth: auth,
+            cloudBaseURL: stagingURL,
+            deviceAuthProvider: auth
+        )
+        XCTAssertNotNil(hostModel.cloudDeviceMonitor)
+        XCTAssertFalse(hostModel.isDeviceExecutorEnabled)
+
+        hostModel.handleScenePhase(.background)
+        await hostModel.signOut()
+        XCTAssertFalse(hostModel.cloudDeviceMonitor?.isRunning ?? true)
+
+        let v1Model = LiveConversationHostModel(
+            repository: StubLiveConversationService(),
+            auth: auth,
+            cloudBaseURL: nil,
+            deviceAuthProvider: nil
+        )
+        XCTAssertNil(v1Model.cloudDeviceMonitor)
+    }
+}
+
+private actor StubLiveConversationService: LiveConversationServiceProtocol {
+    func bootstrap() async throws -> EmberMeDTO {
+        EmberMeDTO(
+            consumerID: UUID(),
+            agent: .init(agentID: UUID(), displayName: "Ember"),
+            conversation: .init(conversationID: UUID(), transcriptEpoch: 1, createdAt: Date(), updatedAt: Date())
+        )
+    }
+    func load() async throws -> ConversationSnapshot {
+        ConversationSnapshot(
+            conversation: Conversation(id: ConversationID(rawValue: UUID()), createdAt: Date(), updatedAt: Date()),
+            messages: [],
+            assistantTurns: []
+        )
+    }
+    func recoverAfterRelaunch() async throws -> ConversationSnapshot { try await load() }
+    func pending() async throws -> LiveConversationJournal.Pending? { nil }
+    func activeTurn() async throws -> LiveConversationJournal.Turn? { nil }
+    func rejectedDraft() async throws -> LiveConversationJournal.Pending? { nil }
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        throw LiveB1Failure.rejected
+    }
+    func send(text: String, attachmentIDs: [UUID]) async throws -> LiveB1Receipt {
+        throw LiveB1Failure.rejected
+    }
+    func reconcilePending() async throws -> LiveB1Receipt? { nil }
+    func pollActiveTurn() async throws -> LiveB1Turn? { nil }
+    func cancelActiveTurn() async throws -> LiveB1Turn? { nil }
+    func clearOnLogout() async {}
 }

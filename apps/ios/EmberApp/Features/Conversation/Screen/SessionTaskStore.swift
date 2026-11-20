@@ -1,5 +1,13 @@
+import CryptoKit
 import Foundation
 import Observation
+
+enum PythonTaskSubmissionOutcome: Equatable, Sendable {
+    case submitted(SessionTaskDTO, created: Bool)
+    case unknownAcknowledgement
+    case endpointNotReady
+    case failed(String)
+}
 
 @MainActor @Observable
 final class SessionTaskStore {
@@ -41,6 +49,7 @@ final class SessionTaskStore {
 
     var hasRepository: Bool { repository != nil }
     var isMockOnly: Bool { repository?.isMockOnly ?? false }
+    var supportsPythonTaskSubmission: Bool { repository?.supportsPythonTaskSubmission ?? false }
 
     var orderedTasks: [SessionTaskDTO] {
         tasksByID.values.sorted { lhs, rhs in
@@ -376,6 +385,54 @@ final class SessionTaskStore {
         artifactDownloadErrorByID.removeAll()
     }
 
+    func uploadTaskAttachment(
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> StagedUploadReceiptDTO {
+        guard let repository else {
+            throw SessionTaskRepositoryError.unavailable
+        }
+        return try await repository.uploadAttachment(filename: filename, mediaType: mediaType, data: data)
+    }
+
+    func submitPythonTask(_ request: SubmitPythonTaskRequestDTO) async -> PythonTaskSubmissionOutcome {
+        guard let repository else {
+            return .failed(String(localized: "tasks.python.error.unavailable", table: "Conversation"))
+        }
+        let startGeneration = generation
+        do {
+            let result = try await repository.submitPythonTask(request)
+            guard generation == startGeneration else {
+                return .failed(String(localized: "tasks.python.error.unavailable", table: "Conversation"))
+            }
+            let summary = result.task.summary
+            tasksByID[summary.taskID] = summary
+            missingTaskIDs.remove(summary.taskID)
+            if let embeddedResult = result.task.asResultDTO {
+                resultsByTaskID[summary.taskID] = embeddedResult
+                resultErrorByTaskID[summary.taskID] = nil
+            }
+            return .submitted(summary, created: result.created)
+        } catch is CancellationError {
+            return .failed(String(localized: "tasks.python.error.unavailable", table: "Conversation"))
+        } catch SessionTaskRepositoryError.unknownAcknowledgement {
+            return .unknownAcknowledgement
+        } catch SessionTaskRepositoryError.endpointNotReady {
+            return .endpointNotReady
+        } catch SessionTaskRepositoryError.invalidInput {
+            return .failed(String(localized: "tasks.python.error.invalid_input", table: "Conversation"))
+        } catch SessionTaskRepositoryError.idempotencyConflict {
+            return .failed(String(localized: "tasks.python.error.idempotency_conflict", table: "Conversation"))
+        } catch SessionTaskRepositoryError.budgetExceeded {
+            return .failed(String(localized: "tasks.python.error.budget_exceeded", table: "Conversation"))
+        } catch SessionTaskRepositoryError.unauthenticated {
+            return .failed(String(localized: "tasks.python.error.unauthenticated", table: "Conversation"))
+        } catch {
+            return .failed(String(localized: "tasks.python.error.unavailable", table: "Conversation"))
+        }
+    }
+
     func downloadArtifact(_ item: TaskArtifactItemDTO) async {
         guard let repository, !downloadingArtifactIDs.contains(item.artifactID) else { return }
         if let existingURL = downloadedArtifactFileByID[item.artifactID],
@@ -399,6 +456,18 @@ final class SessionTaskStore {
                 mediaType: item.mediaType
             )
             guard generation == startGeneration, !Task.isCancelled else { return }
+
+            let actualSHA256 = SHA256.hash(data: downloaded.data)
+                .map { String(format: "%02x", $0) }
+                .joined()
+            guard downloaded.data.count == item.size,
+                  actualSHA256 == item.sha256.lowercased() else {
+                artifactDownloadErrorByID[item.artifactID] = String(
+                    localized: "tasks.artifacts.integrity_failed",
+                    table: "Conversation"
+                )
+                return
+            }
 
             let folder = Self.artifactsTempRoot()
                 .appendingPathComponent(item.artifactID.uuidString.lowercased(), isDirectory: true)

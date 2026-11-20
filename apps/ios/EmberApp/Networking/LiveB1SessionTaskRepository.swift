@@ -4,12 +4,17 @@ enum SessionTaskRepositoryError: Error, Equatable, Sendable {
     case unauthenticated
     case notFound
     case endpointNotReady
+    case invalidInput
+    case idempotencyConflict
+    case budgetExceeded
+    case unknownAcknowledgement
     case unavailable
     case invalidResponse
 }
 
 protocol SessionTaskRepositoryProtocol: Sendable {
     var isMockOnly: Bool { get }
+    var supportsPythonTaskSubmission: Bool { get }
     func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO
     func fetchTask(id: UUID) async throws -> SessionTaskDetailDTO
     func fetchEvents(taskID: UUID, after sequence: Int?) async throws -> SessionTaskEventPageDTO
@@ -21,20 +26,41 @@ protocol SessionTaskRepositoryProtocol: Sendable {
         mediaType: String
     ) async throws -> DownloadedTaskArtifact
     func cancelTask(id: UUID) async throws -> TaskCancelDTO
+    func uploadAttachment(
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> StagedUploadReceiptDTO
+    func submitPythonTask(_ request: SubmitPythonTaskRequestDTO) async throws -> PythonTaskSubmitResultDTO
 }
 
 extension SessionTaskRepositoryProtocol {
+    var supportsPythonTaskSubmission: Bool { false }
+
     func listTasks() async throws -> SessionTaskListDTO {
         try await listTasks(after: nil, limit: 50)
+    }
+
+    func uploadAttachment(
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> StagedUploadReceiptDTO {
+        throw SessionTaskRepositoryError.endpointNotReady
+    }
+
+    func submitPythonTask(_ request: SubmitPythonTaskRequestDTO) async throws -> PythonTaskSubmitResultDTO {
+        throw SessionTaskRepositoryError.endpointNotReady
     }
 }
 
 /// Live B1 consumer-session client for Task list, detail, events, result, and cancellation.
 /// Aligns with PR #160 B1 session routes (`GET /v1/me/tasks`, `GET /v1/me/tasks/:id`, `GET /v1/tasks/:id/result`)
-/// and keeps unimplemented consumer events/cancel under `/v1/me/tasks/:id/...` rather than legacy `tenantAuth` `/v1/tasks/*`.
+/// and V2 Python task/upload routes (`POST /v1/me/uploads`, `POST /v2/tasks/python`).
 struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
     let auth: LiveAuthSessionCoordinator
     let isMockOnly: Bool = false
+    let supportsPythonTaskSubmission: Bool = true
 
     func listTasks(after cursor: String?, limit: Int) async throws -> SessionTaskListDTO {
         let boundedLimit = min(max(limit, 1), 50)
@@ -178,6 +204,96 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         return cancelDTO
     }
 
+    func uploadAttachment(
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> StagedUploadReceiptDTO {
+        let normalizedType = B3AttachmentLimits.normalizedMediaType(mediaType)
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: normalizedType)
+        guard B3AttachmentLimits.isSafeMediaType(normalizedType),
+              data.count <= SubmitPythonTaskRequestDTO.maxInlineArtifactBytes else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+        let response: EmberAPIResponse
+        do {
+            response = try await LiveB1ConversationClient.sendMultipartUpload(
+                using: auth,
+                filename: safeFilename,
+                mediaType: normalizedType,
+                data: data
+            )
+        } catch let error as AuthError where error.requiresNewSignIn {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch {
+            throw SessionTaskRepositoryError.unavailable
+        }
+        if response.statusCode == 404 || response.statusCode == 405 || response.statusCode == 501 {
+            throw SessionTaskRepositoryError.endpointNotReady
+        }
+        guard response.statusCode == 200 || response.statusCode == 201 else {
+            throw Self.mapWriteStatusError(response.statusCode)
+        }
+        let receipt = try decode(StagedUploadReceiptDTO.self, from: response.data)
+        guard receipt.size == data.count else {
+            throw SessionTaskRepositoryError.invalidResponse
+        }
+        return receipt
+    }
+
+    func submitPythonTask(_ request: SubmitPythonTaskRequestDTO) async throws -> PythonTaskSubmitResultDTO {
+        let trimmedPrompt = request.prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty,
+              trimmedPrompt.count <= SubmitPythonTaskRequestDTO.promptMaxChars,
+              request.attachmentIDs.count <= B3AttachmentLimits.maxAttachmentsPerMessage,
+              Set(request.attachmentIDs).count == request.attachmentIDs.count else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+        if let title = request.title?.trimmingCharacters(in: .whitespacesAndNewlines),
+           title.count > SubmitPythonTaskRequestDTO.titleMaxChars {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+        if let instructions = request.instructions?.trimmingCharacters(in: .whitespacesAndNewlines),
+           instructions.count > SubmitPythonTaskRequestDTO.instructionsMaxChars {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+
+        let body: Data
+        do {
+            body = try JSONEncoder().encode(request)
+        } catch {
+            throw SessionTaskRepositoryError.invalidInput
+        }
+
+        let response: EmberAPIResponse
+        do {
+            response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
+                method: "POST",
+                pathComponents: ["v2", "tasks", "python"],
+                body: body,
+                contentType: "application/json",
+                idempotency: .nonIdempotent(
+                    clientSubmissionID: request.clientRequestID.uuidString.lowercased()
+                )
+            ))
+        } catch let error as AuthError where error.requiresNewSignIn {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch AuthError.requestRejectedBeforeExecution {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch {
+            // Transport failures, timeouts, and ambiguous outcomes must allow safe idempotent retry.
+            throw SessionTaskRepositoryError.unknownAcknowledgement
+        }
+
+        if response.statusCode == 404 || response.statusCode == 405 || response.statusCode == 501 {
+            throw SessionTaskRepositoryError.endpointNotReady
+        }
+        guard response.statusCode == 200 || response.statusCode == 201 else {
+            throw Self.mapWriteStatusError(response.statusCode)
+        }
+        return try decode(PythonTaskSubmitResultDTO.self, from: response.data)
+    }
+
     private func sendRead(
         pathComponents: [String],
         queryItems: [URLQueryItem] = []
@@ -214,6 +330,23 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
             .endpointNotReady
         case 429, 500...599:
             .unavailable
+        default:
+            .invalidResponse
+        }
+    }
+
+    private static func mapWriteStatusError(_ code: Int) -> SessionTaskRepositoryError {
+        switch code {
+        case 400, 422:
+            .invalidInput
+        case 401:
+            .unauthenticated
+        case 409:
+            .idempotencyConflict
+        case 429:
+            .budgetExceeded
+        case 500...599:
+            .unknownAcknowledgement
         default:
             .invalidResponse
         }

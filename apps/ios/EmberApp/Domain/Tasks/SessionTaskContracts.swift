@@ -6,6 +6,7 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
     public static let notesActionItems = SessionTaskKind(rawValue: "notes.action_items")!
     public static let pythonAgent = SessionTaskKind(rawValue: "python.agent")!
     public static let pythonSandbox = SessionTaskKind(rawValue: "sandbox.python")!
+    public static let deviceTextProcess = SessionTaskKind(rawValue: "device.text.process")!
     public static let mockChat = SessionTaskKind(rawValue: "mock.chat")!
     public static let mockCompute = SessionTaskKind(rawValue: "mock.compute")!
     public static let mockFile = SessionTaskKind(rawValue: "mock.file")!
@@ -45,6 +46,8 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
             String(localized: "tasks.kind.notes_action_items", table: "Conversation")
         case Self.pythonAgent.rawValue, Self.pythonSandbox.rawValue:
             String(localized: "tasks.kind.python_sandbox", table: "Conversation")
+        case Self.deviceTextProcess.rawValue:
+            String(localized: "tasks.kind.device_text", table: "Conversation")
         case Self.mockChat.rawValue:
             String(localized: "tasks.kind.mock_chat", table: "Conversation")
         case Self.mockCompute.rawValue:
@@ -1120,5 +1123,82 @@ public struct DownloadedTaskArtifact: Equatable, Sendable {
         self.filename = filename
         self.mediaType = mediaType
         self.data = data
+    }
+}
+
+/// Request payload for `POST /v2/tasks/python` (`submitPythonTaskRequestSchema`).
+public struct SubmitPythonTaskRequestDTO: Equatable, Encodable, Sendable {
+    public static let maxInlineArtifactBytes = 1_048_576
+    public static let promptMaxChars = 4_000
+    public static let instructionsMaxChars = 4_000
+    public static let titleMaxChars = 240
+
+    public let title: String?
+    public let prompt: String
+    public let instructions: String?
+    public let attachmentIDs: [UUID]
+    public let clientRequestID: UUID
+
+    public init(
+        title: String? = nil,
+        prompt: String,
+        instructions: String? = nil,
+        attachmentIDs: [UUID] = [],
+        clientRequestID: UUID = UUID()
+    ) {
+        self.title = title
+        self.prompt = prompt
+        self.instructions = instructions
+        self.attachmentIDs = attachmentIDs
+        self.clientRequestID = clientRequestID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case prompt
+        case instructions
+        case attachmentIDs = "attachment_ids"
+        case clientRequestID = "client_request_id"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let title {
+            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedTitle.isEmpty {
+                try container.encode(trimmedTitle, forKey: .title)
+            }
+        }
+        try container.encode(prompt.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .prompt)
+        if let instructions {
+            let trimmedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedInstructions.isEmpty {
+                try container.encode(trimmedInstructions, forKey: .instructions)
+            }
+        }
+        if !attachmentIDs.isEmpty {
+            try container.encode(attachmentIDs.map { $0.uuidString.lowercased() }, forKey: .attachmentIDs)
+        }
+        try container.encode(clientRequestID.uuidString.lowercased(), forKey: .clientRequestID)
+    }
+}
+
+/// Response payload for `POST /v2/tasks/python` (`V2PythonTaskSubmitResultDto`).
+public struct PythonTaskSubmitResultDTO: Codable, Equatable, Sendable {
+    public let task: SessionTaskDetailDTO
+    public let created: Bool
+
+    private static let allowedKeys: Set<String> = ["task", "created"]
+
+    public init(task: SessionTaskDetailDTO, created: Bool) {
+        self.task = task
+        self.created = created
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+        task = try container.decode(SessionTaskDetailDTO.self, forKey: SessionWireDecode.key("task"))
+        created = try container.decode(Bool.self, forKey: SessionWireDecode.key("created"))
     }
 }

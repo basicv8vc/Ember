@@ -16,9 +16,16 @@ import {
   type DurableExecutionClaimContext,
   type DurableExecutorPort,
   type FakeOrProviderJobOutcome,
+  type ProactiveScheduleList,
   type ProactiveScheduleTaskPayload,
 } from '@ember/runtime-v2';
-import { getHead, type LocalRuntimeEnv } from './runtime-head.js';
+import {
+  buildProactiveBriefPrompt,
+  loadRecentBriefMessages,
+  type BriefContextMessage,
+  type ProactiveBriefContext,
+} from './proactive-brief-context.js';
+import { createEdgeRpc, getHead, type AgentHeadDO, type LocalRuntimeEnv } from './runtime-head.js';
 
 export type V2FakeDurableGateway = Pick<
   FakeStreamingModelGateway,
@@ -27,8 +34,47 @@ export type V2FakeDurableGateway = Pick<
 
 const PROACTIVE_BRIEF_RESERVATION_MICRO_USD = 250;
 
-function buildProactiveBriefPrompt(proactive: ProactiveScheduleTaskPayload): string {
-  return `[Proactive ${proactive.kind} | ${proactive.title} | ${proactive.timezone}]\n${proactive.prompt}`;
+async function loadProactiveBriefContext(
+  head: AgentHeadDO,
+  tenantId: string,
+  agentId: string,
+  conversationId: string | undefined,
+  proactive: ProactiveScheduleTaskPayload,
+): Promise<ProactiveBriefContext> {
+  const rpc = createEdgeRpc(head);
+  let recentMessages: readonly BriefContextMessage[] = [];
+  let activeSchedules: ProactiveScheduleList['schedules'] = [];
+
+  if (conversationId !== undefined) {
+    try {
+      recentMessages = await loadRecentBriefMessages((after, limit) =>
+        rpc.readMessages({
+          tenantId,
+          agentId,
+          conversationId,
+          after,
+          limit,
+        }),
+      );
+    } catch {
+      // Best-effort context; proceed with base brief prompt if unavailable.
+    }
+  }
+
+  try {
+    const listed = await rpc.proactiveSchedule({
+      kind: 'list',
+      tenantId,
+      principalId: proactive.principalId,
+      agentId,
+      requestId: crypto.randomUUID(),
+    });
+    if ('schedules' in listed) activeSchedules = listed.schedules;
+  } catch {
+    // Best-effort context; proceed with base brief prompt if unavailable.
+  }
+
+  return { recentMessages, activeSchedules };
 }
 
 function unwrapJsonText(raw: unknown): string | null {
@@ -99,6 +145,13 @@ export function createDurableExecutor(
             reasonCode: reservation.reason,
           };
         }
+        const briefContext = await loadProactiveBriefContext(
+          head,
+          claim.tenantId,
+          claim.agentId,
+          context.conversationId,
+          proactive,
+        );
         context = {
           ...context,
           operationId: reservation.operationId,
@@ -107,12 +160,19 @@ export function createDurableExecutor(
           sendState: 'unsent',
           sendAuthorizingAtMs: null,
           sendStartedAtMs: null,
-          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive) }),
+          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive, briefContext) }),
         };
       } else if (proactive !== null) {
+        const briefContext = await loadProactiveBriefContext(
+          head,
+          claim.tenantId,
+          claim.agentId,
+          context.conversationId,
+          proactive,
+        );
         context = {
           ...context,
-          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive) }),
+          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive, briefContext) }),
         };
       }
 

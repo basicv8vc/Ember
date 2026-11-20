@@ -3,10 +3,9 @@ import type {
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
 } from '../contracts/agent-head-rpc.js';
-import {
-  personalMemorySaveTurnCommandSchema,
-  type PersonalMemoryContextItem,
-  type PersonalMemorySaveTurnCommand,
+import type {
+  PersonalMemoryContextItem,
+  PersonalMemorySaveTurnCommand,
 } from '../contracts/personal-memory.js';
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
 import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
@@ -343,6 +342,42 @@ function parsePersonalMemoryContextItems(raw: unknown[]): readonly PersonalMemor
   return items;
 }
 
+function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTurnCommand | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (prop !== 'kind' && prop !== 'content' && prop !== 'key') {
+      return null;
+    }
+  }
+  const kind = record['kind'];
+  if (kind !== 'preference' && kind !== 'fact') {
+    return null;
+  }
+  const rawContent = record['content'];
+  if (typeof rawContent !== 'string') {
+    return null;
+  }
+  const content = rawContent.trim();
+  if (content.length < 1 || content.length > 500 || /\p{Surrogate}/u.test(content)) {
+    return null;
+  }
+  const rawKey = record['key'];
+  if (rawKey === undefined) {
+    return { kind, content };
+  }
+  if (typeof rawKey !== 'string') {
+    return null;
+  }
+  const key = rawKey.trim().toLowerCase();
+  if (key.length < 1 || key.length > 64 || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(key)) {
+    return null;
+  }
+  return { kind, content, key };
+}
+
 /**
  * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
  * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
@@ -392,13 +427,11 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
             text = parsed['text'];
           }
           if (parsed['personalMemorySave'] !== undefined) {
-            const parsedMem = personalMemorySaveTurnCommandSchema.safeParse(
-              parsed['personalMemorySave'],
-            );
-            if (!parsedMem.success) {
+            const parsedMem = parsePersonalMemorySaveTurnCommand(parsed['personalMemorySave']);
+            if (parsedMem === null) {
               return { ...binding, status: 'failed', failureReason: 'internal_error' };
             }
-            personalMemorySave = parsedMem.data;
+            personalMemorySave = parsedMem;
           }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied

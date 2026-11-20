@@ -1,0 +1,67 @@
+{
+  "name": "ember-v2-m1-full-runtime-acceptance",
+  "main": "runtime-worker.ts",
+  "compatibility_date": "2026-11-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "send_metrics": false,
+  "durable_objects": {
+    "bindings": [
+      { "name": "AGENT_HEAD", "class_name": "AgentHeadDO" },
+      { "name": "GLOBAL_BUDGET", "class_name": "GlobalBudgetDO" },
+      { "name": "AUTH_SESSION", "class_name": "AuthSessionDO" },
+    ],
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["AgentHeadDO", "GlobalBudgetDO", "AuthSessionDO"],
+    },
+  ],
+  "d1_databases": [
+    {
+      "binding": "D1_RECOVERY",
+      "database_name": "ember-v2-m1-acceptance-d1",
+      "database_id": "00000000-0000-0000-0000-000000000020",
+      "migrations_dir": "migrations",
+    },
+  ],
+  "queues": {
+    "producers": [
+      { "binding": "DURABLE_TURN_QUEUE", "queue": "durable_turn" },
+      { "binding": "AGENT_TASK_QUEUE", "queue": "agent_task" },
+    ],
+    "consumers": [
+      {
+        "queue": "durable_turn",
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
+        "max_retries": 5,
+        "retry_delay": 0,
+        "dead_letter_queue": "durable_turn_dlq",
+      },
+      {
+        "queue": "agent_task",
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
+        "max_retries": 5,
+        "retry_delay": 0,
+        "dead_letter_queue": "agent_task_dlq",
+      },
+      {
+        "queue": "durable_turn_dlq",
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
+        "max_retries": 0,
+      },
+      {
+        "queue": "agent_task_dlq",
+        "max_batch_size": 5,
+        "max_batch_timeout": 0,
+        "max_retries": 0,
+      },
+    ],
+  },
+  "triggers": {
+    "crons": ["* * * * *"],
+  },
+}

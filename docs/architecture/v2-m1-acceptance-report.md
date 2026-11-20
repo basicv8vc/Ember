@@ -1,13 +1,13 @@
 # Ember V2-M1 — Runtime Integration & Acceptance Report
 
-- **Status:** **D0 PASSED | D1 HARNESS VERIFIED | D4 A+B4 EARLY INTEGRATION COMPLETE | D5 CI RESTORATION PR `#181` OPEN | FULL D2 (`F-1..F-23` / `FI-01..FI-16`) & D3 BLOCKED AWAITING A/B/E/F CONVERGENCE**
-- **Date:** 2026-11-19
+- **Status:** **M1 ACCEPTANCE: NO-GO (D6.3 EXECUTED ON REAL LOCAL `workerd` — 11/20 TEST CASES / 28 PASS, 10 FAIL, 1 N/A ACROSS 39 MATRIX ITEMS; 5 VERIFIED PRODUCT DEFECTS BLOCK RELEASE)**
+- **Date:** 2026-11-20 (historical D0/D1/D4/D5 sections below dated 2026-11-19 preserved)
 - **Role:** Performance, Integration & Reliability Engineer (V2-M1-D)
-- **Baseline `main` SHA:** `1ba860ce3cb4378ada3cdadf95aef311137c8321` (merged `#175`; prior M0 baseline `6da1b483b6a854199a0f2eef27e53abc770be6cc`)
+- **Tested `main` SHA:** `a537e4f8f3f43d69915cb51a2cf301bdd18b49f7` (post A+B+E+F merges; prior D0/D1 baseline `1ba860ce3cb4378ada3cdadf95aef311137c8321`, M0 `6da1b483b6a854199a0f2eef27e53abc770be6cc`)
 - **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
 
 > [!IMPORTANT]
-> **Evidence & Anti-Masquerading Discipline:** On `main @ 1ba860ce3cb4378ada3cdadf95aef311137c8321`, D0 (`#172`) and D1 (`#175`) are merged, while owner runtime modules remain in unmerged PRs: Agent A (`#177` @ `39ad82e`), Agent B1–B4 (`#173/#174/#176/#178` @ `2045c93`), Agent E (`#179` @ `3432745`), and Agent F (`#180` @ `0066cc4`). D4 temporarily combined A + B4 (`temp/v2-m1-ab-early-integration`, not merged to `main`) and verified the A+B4 critical path in local `workerd`; full end-to-end acceptance (`F-1..F-23`, `FI-01..FI-16`) and D3 benchmarks remain honestly **BLOCKED** until A, B, E, and F converge into an executable runtime entrypoint.
+> **D6 Full Runtime Verdict (`main @ a537e4f`):** On `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`, all Agent A, B, E, and F modules are merged and were assembled into a real local Cloudflare `workerd` (`wrangler@4.158.0`) runtime ([runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts)). Full acceptance testing ([v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts)) and full performance benchmarking ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json)) ran end-to-end. While baseline build/unit/chaos/E2E gates and single-turn durable paths are healthy with `0` safety violations on passing paths, **5 concrete product/runtime defects** cause **9/20 acceptance test cases (10/39 matrix items)** to fail and cause Edge SSE streaming (`/v2/conversations/:id/messages/stream`) and covered D1-outage durability (`F-5`) to fail. **V2-M1 Verdict: NO-GO** until Defects #1–#5 are resolved by module owners. Historical D0/D1/D4/D5 sections (§0–§5) are preserved verbatim below for audit traceability, followed by complete D6 results (§6–§12).
 
 ---
 
@@ -19,7 +19,7 @@
 | **D5 — Restore GitHub Actions CI**                      | Fixed `pnpm lint` before `pnpm build` failure (224 ESLint errors on clean runners in Run `44538871733`), formatted 2 historical Neon docs (`neon-postgres-provider-decision*.md`), added `v2-runtime` `ubuntu-latest` CI job (`pnpm build` + V2 unit + real local `workerd` M0/M1 integration tests under Fake Provider & `contents: read`), and explicitly marked full M1 E2E Gate `BLOCKED` in `$GITHUB_STEP_SUMMARY`.                                                                                                         | PR `#181` (`chore/v2-m1-d5-restore-ci` @ `b1e0677`, Run `44543133180` ✓)                                          | **OPEN (Non-Blocking CI PR)**              |
 | **D6.1 — A + B Core & Recovery Loop**                   | Uncovered + covered 3-RPC Fast Path, `budget_sync` outbox relay, D1 registration/retire, and `handoffTurnToDurable` → Queue claim/commit verified on temp A+B4 branch using `TestGlobalBudgetDO`; blocked on main by `TS2308` + B1–B4/A fixes & merges.                                                                                                                                                                                                                                                                          | Temp `workerd` pass (`1379ms`); PRs `#173/#174/#176/#177/#178`                                                    | **TEMP VERIFIED / MERGE BLOCKED ON FIXES** |
 | **D6.2 — A + B + E Global Budget Authority**            | Replace `TestGlobalBudgetDO` with Agent E's `GlobalBudgetDO` (`#179` @ `3432745e388a756336d262ffce4f257aee005faa`) once A+B merge/unblock.                                                                                                                                                                                                                                                                                                                                                                                       | PR `#179`                                                                                                         | **NEXT AFTER A+B MERGE**                   |
-| **D6.3 — A + B + E + F Full HTTP/SSE & Full M1 Matrix** | Wire Edge API / Interactive Executor (`#180` @ `0066cc4338cb7b67f839f1d3e498c7df946da203`) with `EMBER_V2_RUNTIME_CONFIG` and run full `F-1..F-23`, `FI-01..FI-16`, and D3 `1/10/25/50` + `1,000 Agent / 100 concurrency`.                                                                                                                                                                                                                                                                                                       | PR `#180`                                                                                                         | **BLOCKED (Awaiting A+B+E+F Convergence)** |
+| **D6.3 — A + B + E + F Full HTTP/SSE & Full M1 Matrix** | Wired `main @ a537e4f` A+B+E+F modules into real local `workerd` ([runtime-worker.ts](../../tests/integration/support/v2-m1-full-runtime/runtime-worker.ts)) and executed full `F-1..F-23`, `FI-01..FI-16`, and D3 `1/10/25/50` + `1,000 Agent / 100 concurrency` benchmarks.                                                                                                                                                                                                                                                    | `main @ a537e4f`; branch `test/v2-m1-full-runtime-acceptance`                                                     | **EXECUTED — NO-GO (5 Product Defects)**   |
 
 ---
 
@@ -132,3 +132,203 @@ Generated via `pnpm bench:local --suite m1-cost-reestimate --out-dir benchmarks/
 2. **Multi-Region GlobalBudgetDO RTT Risk:** As established in M0-D (`v2-m0-benchmark-report.md` §5), sequential cross-region hops (`reserve + prepare + authorize + markAttemptSent + commit + settle`) exceed `200 ms` Runtime Overhead once intra-region RTT reaches `>= 38 ms` (`apac-intra` and beyond). Once A/B M1 lands, D3 will measure exact call counts and pinpoint whether colocated batching or bounded grants are needed without weakening GlobalBudget safety gates.
 3. **DO SQLite Write & Dormant Storage Amplification:** At `10,000–100,000 MAU`, uncoalesced `>= 45 rows/event` combined with `12-month` + `2.0x` dormant retention pushes Cloud Runtime costs above ADR-0006 envelopes (`$365.34` at 10k, `$4,321.08` at 100k). Actual `rowsWritten` from A/B's `AgentHeadDO` + `GlobalBudgetDO` must be captured in D3 immediately after A/B merge.
 4. **Cloud Canary Gap:** Local `workerd` cannot measure real Cloudflare DO hibernation wakeup latency, production isolate CPU billing, or D1 multi-AZ replication lag; those remain gated on future approved Canary testing.
+
+---
+
+## 6. D6 — Post-Merge Baseline Verification (`main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`)
+
+Executed on branch `test/v2-m1-full-runtime-acceptance` branched cleanly from `main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7` (with local PostgreSQL 16 `ember_test` on `127.0.0.1:5432` and host proxy variables cleared for loopback communication):
+
+| Verification Gate               | Command / Scope                                                                      | Observed Result                                                                                                                    | Status   |
+| :------------------------------ | :----------------------------------------------------------------------------------- | :--------------------------------------------------------------------------------------------------------------------------------- | :------- |
+| Build, Typecheck, Lint & Format | `pnpm build && pnpm typecheck && pnpm lint && pnpm format:check`                     | Exit `0` across all workspaces (`tsc -b`, `tsc --noEmit`, `eslint .`, `prettier --check .`)                                        | **PASS** |
+| Unit Tests                      | `pnpm run test:unit`                                                                 | `118 passed (118)` files, `1796 passed (1796)` tests (`14.73s` post-edit)                                                          | **PASS** |
+| Chaos Tests                     | `pnpm run test:chaos` (`TEST_DATABASE_URL` set)                                      | `6 passed (6)` files, `30 passed (30)` tests                                                                                       | **PASS** |
+| Baseline Integration Tests      | `tests/integration` (56 files excluding new `v2-m1-full-runtime-acceptance.test.ts`) | `56 passed (56)` files, `604 passed \| 1 skipped (605)` (pre-existing `v2-m1-acceptance.test.ts` awaits `EMBER_V2_RUNTIME_CONFIG`) | **PASS** |
+| E2E Tests                       | `pnpm run test:e2e` (`TEST_DATABASE_URL` set)                                        | `15 passed (15)` files, `56 passed (56)` tests                                                                                     | **PASS** |
+
+---
+
+## 7. D6 — Real Local `workerd` Full Acceptance Matrix (`F-1..F-23` & `FI-01..FI-16`)
+
+Executed via [v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) against real Cloudflare `workerd` (`wrangler@4.158.0`) assembling `AgentHeadDO`, `GlobalBudgetDO`, `AuthSessionDO`, `D1_RECOVERY`, `DURABLE_TURN_QUEUE`, `AGENT_TASK_QUEUE` (+ DLQs), Cron `* * * * *`, and loopback `FakeModelGatewayServer` (`[Verified: Full Runtime workerd]`).
+
+- **Vitest Summary (`v2-m1-full-runtime-acceptance.test.ts`):** `11 passed | 9 failed (20)` (`45.90s`)
+- **39-Item Matrix Tally:** **28 PASS**, **10 FAIL**, **1 N/A (Alternative Verified)**
+- **Safety Counters (`afterAll` & benchmark runs):**
+  - Duplicate Provider Calls: `0`
+  - Duplicate Assistant Messages: `0`
+  - Duplicate Commits: `0`
+  - Lost Accepted Work (passing suite + concurrency sweep `1..50` + 1,000 agents / 100 concurrent): `0` _(Note: `F-5` / `FI-12` Covered D1-outage test stalled past 15s and risked silent turn loss in `claimDurableWork` due to Defect #3)_
+  - Budget Overcommit: `0`
+
+### 7.1 Functional Scenarios (`F-1..F-23`)
+
+| ID     | Scenario                                                                                                     | Status                         | Evidence / Root Cause                                                                                                                                              |
+| :----- | :----------------------------------------------------------------------------------------------------------- | :----------------------------- | :----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `F-1`  | Concurrent identical submission idempotency (`1x 201 + Nx 200` replay)                                       | **FAIL**                       | Received `1x 201` + `4x 503` (0 replays) due to **Defect #1**                                                                                                      |
+| `F-2`  | Same `client_submission_id` with differing payload/attachments (`409 IDEMPOTENCY_CONFLICT`)                  | **FAIL**                       | Received `503 DB_UNAVAILABLE` instead of `409 IDEMPOTENCY_CONFLICT` due to **Defect #2**                                                                           |
+| `F-3`  | `clearTranscript` interleaved with Stage 2 `prepareTurn` aborts Stage 3 (`409`) & releases hold              | **FAIL**                       | Received `503` instead of `409` across DO RPC due to **Defect #2**                                                                                                 |
+| `F-4`  | Uncovered path fails closed `503` during D1 outage; Direct reads succeed                                     | **PASS**                       | Verified HTTP `503` write fail-closed + `200` Direct reads                                                                                                         |
+| `F-5`  | Covered path executes with `0` sync D1 ops during D1 outage; Unknown-ACK converges                           | **FAIL**                       | Timed out after `15000ms` due to **Defect #3** (alarm erases coverage + pre-ACK outbox loss)                                                                       |
+| `F-6`  | GlobalBudget unavailable `503` & concurrent daily ceiling cap (`429 BUDGET_EXCEEDED`)                        | **FAIL**                       | `503` unavailable passed, concurrent burst returned `1x 201 + 5x 503` due to **Defect #1** & **Defect #2**                                                         |
+| `F-7`  | Crash after `prepareTurn` before `markAttemptSent` releases hold (`0` charge)                                | **PASS**                       | Verified `released` state and `0` micro-USD consumed                                                                                                               |
+| `F-8`  | Crash after `markAttemptSent` before provider fetch converges `unknown_billed`                               | **PASS**                       | Verified `unknown_billed` settlement and conservative billing                                                                                                      |
+| `F-9`  | `markAttemptSent` guards (`cancelled`, `fenced`, `already_sent`)                                             | **FAIL**                       | Returned `{ authorized: false, reason: 'already_sent' }` instead of `'cancelled'` due to **Defect #5**                                                             |
+| `F-10` | Client disconnect mid-stream hands off to `durable_queue`, polls handle once, commits once                   | **FAIL**                       | Edge SSE `/v2/.../messages/stream` closed immediately (`chunk.done === true`) due to **Defect #4**                                                                 |
+| `F-11` | B1 interactive fast path vs durable queue                                                                    | **N/A (Alternative Verified)** | Per frozen B1 contract, `POST /v1/conversations/:id/messages` routes via `durable_queue` (`60s` deadline, `0` interactive lease) — verified                        |
+| `F-12` | 15s interactive lease renewal + 120s handoff preserves 600s turn deadline                                    | **PASS**                       | Verified lease renewals, handoff, and single job-handle poll                                                                                                       |
+| `F-13` | `unknown_commit` on D1 ACK loss + Sweeper reconciliation                                                     | **PASS**                       | Verified D1 sync recovery and idempotent reconciliation                                                                                                            |
+| `F-14` | 7 consecutive DO Alarm failures recovered offline by Cron Sweeper `<= 5 min`                                 | **PASS**                       | Verified 7 alarm attempts before Sweeper recovery                                                                                                                  |
+| `F-15` | GlobalBudget grant expiry + cross-agent `usage_missing` halt                                                 | **FAIL (Partial)**             | **Grant Expiry sub-test PASSED** via `GlobalBudgetDO.alarm()`; **Cross-Agent Halt sub-test FAILED** (timed out `15000ms` because stream trigger hit **Defect #4**) |
+| `F-16` | Cross-tenant `404` isolation, refresh token rotation, reuse family revocation, zero prompt leak              | **FAIL**                       | Cross-tenant read returned `503` instead of `404` due to **Defect #2**                                                                                             |
+| `F-17` | Concurrent Sweeper `retireCoverage`/`postponeCoverage` raced against `prepareTurn` never erases new coverage | **PASS**                       | Verified new generation survives Sweeper race                                                                                                                      |
+| `F-18` | Durable Task multi-run retry caps (`<= 4` non-python / `<= 6` python attempts, cost caps)                    | **PASS**                       | Verified attempt and micro-USD boundary enforcement                                                                                                                |
+| `F-19` | `registering` crash repair before D1 upsert completes                                                        | **PASS**                       | Verified Sweeper repairs `registering` head cleanly                                                                                                                |
+| `F-20` | `budget_sync` recovery preserves future schedules                                                            | **PASS**                       | Verified future schedule rows survive recovery cycle                                                                                                               |
+| `F-21` | Invalid handoffs (wrong epoch / wrong lease owner / post-commit) fenced cleanly                              | **PASS**                       | Verified stale/unauthorized handoff rejection                                                                                                                      |
+| `F-22` | Forged queue envelopes / mismatched `fenceEpoch` ignored without state corruption                            | **PASS**                       | Verified strict envelope & fence validation                                                                                                                        |
+| `F-23` | `budget_sync` survives `clearTranscript`; `rev=0` vs monotonic `rev>=1` deltas applied once                  | **PASS**                       | Verified `budget_sync` revision convergence after transcript reset                                                                                                 |
+
+### 7.2 Fault-Injection Scenarios (`FI-01..FI-16`)
+
+| ID      | Fault Scenario                                                                           | Status             | Evidence / Root Cause                                                                               |
+| :------ | :--------------------------------------------------------------------------------------- | :----------------- | :-------------------------------------------------------------------------------------------------- |
+| `FI-01` | Crash after DO `pending_registration` write before D1 ACK                                | **PASS**           | Verified Sweeper convergence                                                                        |
+| `FI-02` | Crash after D1 registration before DO confirmation ACK                                   | **PASS**           | Verified generation CAS repair                                                                      |
+| `FI-03` | Stale Sweeper CAS during concurrent turn preparation                                     | **PASS**           | Verified stale generation rejection                                                                 |
+| `FI-04` | Duplicate queue delivery (`queueDuplicateCount = 2..3`)                                  | **PASS**           | Verified 0 duplicate commits or provider calls                                                      |
+| `FI-05` | Crash after `commitDurableResult` / after `queue.send` before outbox ACK                 | **PASS**           | Verified idempotent retry and convergence                                                           |
+| `FI-06` | `queueForceDlq` dead-letter convergence (`retry` exhaustion -> `dlq`)                    | **PASS**           | Verified DLQ consumer updates DO state cleanly                                                      |
+| `FI-07` | Task retry & cost boundary enforcement under provider 5xx                                | **PASS**           | Verified hard cap halt without over-spend                                                           |
+| `FI-08` | 7 consecutive alarm failures (`alarmFailCount = 7`) + backoff & Sweeper                  | **PASS**           | Verified offline detection `50s` and recovery `66s`                                                 |
+| `FI-09` | Alarm / Sweeper quarantine of corrupt agent without blocking sibling tenants             | **PASS**           | Verified healthy sibling isolation                                                                  |
+| `FI-10` | `retireCoverage` / `postponeCoverage` generation race vs new turn                        | **PASS**           | Verified generation monotonic guard                                                                 |
+| `FI-11` | `postpone` D1 timeout / uncertain D1 outcome recovery                                    | **PASS**           | Verified D1 uncertain-timeout convergence                                                           |
+| `FI-12` | D1 hard outage split (Uncovered fail-closed `503` vs Covered `0` sync D1 ops)            | **FAIL (Partial)** | Uncovered `503` fail-closed **PASSED**; Covered D1 outage execution **FAILED** due to **Defect #3** |
+| `FI-13` | `slow_handoff` interactive->durable transition at 120s deadline                          | **PASS**           | Verified seamless handoff & single job poll                                                         |
+| `FI-14` | `missing_handle_hang` timeout without provider job handle                                | **PASS**           | Verified safe failure without duplicate execution                                                   |
+| `FI-15` | `GlobalBudgetDO` `conflict_payload` retains `budget_sync` outbox row without silent drop | **PASS**           | Verified `last_error_code` retention on non-acked `budget_sync` row                                 |
+| `FI-16` | DST Spring-Forward / Fall-Back timezone schedule transitions                             | **PASS**           | Verified `DST_TRANSITION_FIXTURES` scheduling invariants                                            |
+
+---
+
+## 8. CTO Defect Report (5 Verified Runtime Defects on `main @ a537e4f`)
+
+No production runtime modules were modified on this verification branch. Exact file/line locations and reproductions are reported below:
+
+1. **Defect #1 [High] — Concurrent Uncovered `prepareTurn` Generation Race (`F-1`, `F-6`, Concurrency Contention)**
+   - **Location:** [registry.ts](../../packages/runtime-v2/src/recovery/registry.ts#L386-L427) (`inspectCoverageSync`, `confirmCoverageSync`), [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L394-L404), [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L540-L562)
+   - **Mechanism:** Each concurrent `prepareTurn` hitting an uncovered head increments `v2_recovery_coverage.generation` (`prevGen + 1`) while `coverage_state === 'registering'`. When request #1 awaits D1 upsert and returns to Stage 3 `confirmCoverageSync`, `row.generation !== cmd.generation`, causing Stage 3 to fail with `'recovery coverage lost or insufficient before commit'` (`503 DB_UNAVAILABLE`).
+   - **Reproduction:** Send 5 concurrent `POST /v1/conversations/:id/messages` requests (identical `client_submission_id` for `F-1` or distinct IDs for `F-6`) to an uncovered `AgentHeadDO` -> observed `1x 201` + `4x 503` instead of `1x 201 + 4x 200` (`F-1`).
+
+2. **Defect #2 [High] — `workerd` DO RPC Error Erasure in Edge Worker (`F-2`, `F-3`, `F-6`, `F-16`)**
+   - **Location:** [edge-worker.ts](../../apps/api/src/local-v2/edge-worker.ts#L376-L383), [errors.ts](../../packages/domain/src/errors.ts#L165-L167)
+   - **Mechanism:** Across real `workerd` Durable Object RPC, thrown `DomainError` instances lose their prototype chain (`instanceof DomainError === false`). `callRuntime()` catches the RPC error, checks `if (isDomainError(error))`, and overwrites every DO-thrown domain error (`409 IDEMPOTENCY_CONFLICT`, `409` Stage 3 abort, `429 BUDGET_EXCEEDED`, `404 NOT_FOUND`) into `503 DB_UNAVAILABLE`.
+   - **Reproduction:** Submit conflicting `client_submission_id` (`F-2`), interleave `clearTranscript` during Stage 2 (`F-3`), or read another tenant's conversation (`F-16`) against real `workerd` DO RPC -> all return HTTP `503`.
+
+3. **Defect #3 [Critical] — Covered Path D1 Postpone Race, Coverage Erasure on D1 Outage, and Pre-ACK Outbox Loss Risk (`F-5`, `FI-12`, Cost Amplification)**
+   - **Location:** [recovery-service.ts](../../packages/runtime-v2/src/agent-head/recovery-service.ts#L111-L132) (`earliestRequiredDiscoveryAtMsSync`), [recovery-service.ts](../../packages/runtime-v2/src/agent-head/recovery-service.ts#L999-L1004) (`claimDurableWork`), [registry.ts](../../packages/runtime-v2/src/recovery/registry.ts#L795-L862) (`syncPostCycleCoverage`), [turn-commit.ts](../../packages/runtime-v2/src/agent-head/turn-commit.ts#L532)
+   - **Mechanism:** (a) `earliestRequiredDiscoveryAtMsSync` adds `+45s` (`d1RecoveryGraceMs`) atop turn #1's `lease_expires_at_ms`, triggering `syncPostCycleCoverage` `postponeCoverage` during alarm processing. (b) `syncPostCycleCoverage` overwrites DO SQLite (`coverage_state = 'registering'`, `covered_recovery_at_ms = NULL`) **before** awaiting D1 `postponeCoverage`; when D1 is unavailable (`F-5`), `alarm()` throws and leaves valid coverage erased! (c) Next, `claimDurableWork` marks the outbox item `acked` **before** `executeAuthoritativeTurnCommit` (`turn-commit.ts:532`); when `commitDurableResult` throws on the D1 check due to the erased coverage, Queue retry sees an empty outbox and accepted work stalls/is lost. This also inflates steady-state D1 ops from `0` to `7.92 D1 writes/event` on covered turns.
+   - **Reproduction:** Settle turn #1 on a covered head, inject `d1Mode = 'unavailable'`, and submit turn #2 (`F-5`) -> times out at `15000ms` without completion.
+
+4. **Defect #4 [Critical] — `LoopbackFakeModelGateway` Uses `redirect: 'error'`, Rejected by `workerd` (`F-10`, `F-15` Cross-Agent Halt, `/v2/conversations/:id/messages/stream`)**
+   - **Location:** [fake-loopback.ts](../../packages/model-gateway/src/fake-loopback.ts#L156-L159)
+   - **Mechanism:** `LoopbackFakeModelGateway` calls `this.fetcher(this.origin + path, { ...init, signal, redirect: 'error' })`. Cloudflare `workerd`'s Fetch API only supports `"follow"` and `"manual"` and throws `TypeError: Invalid redirect value, must be one of "follow" or "manual"` immediately inside the Worker before reaching `FakeModelGatewayServer` (`totalCalls === 0`).
+   - **Reproduction:** Invoke `POST /v2/conversations/:id/messages/stream` in real `workerd` -> SSE stream closes with error and `0` `turn.delta` frames (`edgeSseStreamProbe.sawDeltaEvent: false`).
+
+5. **Defect #5 [Medium] — `markAttemptSent` Returns `'already_sent'` Instead of `'cancelled'` After `cancelTurn` (`F-9`)**
+   - **Location:** [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L876-L901)
+   - **Mechanism:** `cancelTurn()` sets `model_attempts.state = 'released'` and `turn.cancel_requested_at_ms`. Subsequent `markAttemptSent()` checks `attempt.send_started_at_ms !== null || attempt.state !== 'reserved'` at line 876 **before** checking `turn.cancel_requested_at_ms !== null` at line 899, returning `{ authorized: false, reason: 'already_sent' }` instead of `'cancelled'`.
+   - **Reproduction:** Call `prepareTurn` -> `cancelTurn` -> `markAttemptSent` on `AgentHeadDO`.
+
+---
+
+## 9. D6 — Performance Benchmark Raw Results (`[Measured: Local workerd]`)
+
+Executed via `pnpm bench:local --suite m1-full-runtime --enable-local-load --concurrency-levels 1,10,25,50 --requests-per-level 20 --out-dir benchmarks/v2-m1` ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), `gitSha: a537e4f8f3f43d69915cb51a2cf301bdd18b49f7`, `wrangler@4.158.0`, FakeModelGateway delay `0 ms`, cost `120` micro-USD):
+
+### 9.1 Core Path Latencies & Engineering Target Comparison
+
+| Metric                                                                          | Target                    | Local `workerd` Measured                                    | M0 Baseline                     | Status                    |
+| :------------------------------------------------------------------------------ | :------------------------ | :---------------------------------------------------------- | :------------------------------ | :------------------------ |
+| **Uncovered B1 HTTP ACK** (`POST -> 201`, `n=20`)                               | `<= 250 ms` (near-region) | P50 `12.57` / P95 **`15.94`** / P99 `19.19 ms` (`20/20` ok) | `17.66 ms` P95                  | **PASS** (local loopback) |
+| **Covered B1 HTTP ACK** (`POST -> 201`, `n=20`)                                 | `<= 250 ms` (near-region) | P50 `13.02` / P95 **`16.97`** / P99 `18.23 ms` (`20/20` ok) | `10.59 ms` P95                  | **PASS** (local loopback) |
+| **3-RPC Fast Path ACK** (`prepareTurn` RPC, `n=20`)                             | —                         | P50 `9.14` / P95 `11.18` / P99 `13.77 ms` (`20/20` ok)      | —                               | Measured                  |
+| **Runtime Overhead** (3-RPC `prepare+markSent+commit` excl. model, `n=20`)      | `<= 200 ms`               | P50 `20.99` / P95 **`25.15`** / P99 `26.57 ms` (`20/20` ok) | `31.44` cov / `38.45` uncov P95 | **PASS** (RPC fast path)  |
+| **Global Budget Reserve + Authorize** (`GlobalBudgetDO`, `n=20`)                | `<= 50 ms`                | P50 `6.15` / P95 **`7.74`** / P99 `9.87 ms` (`20/20` ok)    | `11.49 ms` P95                  | **PASS** (local DO)       |
+| **Fake Provider TTFT** (direct loopback SSE `delta`, `n=20`)                    | —                         | P50 `0.58` / P95 `1.21` / P99 `1.44 ms` (`20/20` ok)        | —                               | Measured                  |
+| **Durable Dispatch Latency** (`POST -> completed`, `n=40`)                      | `<= 3,000 ms`             | P50 `32.51` / P95 **`54.15`** / P99 `55.07 ms` (`40/40` ok) | N/A in M0                       | **PASS**                  |
+| **Edge SSE Stream** (`/v2/.../messages/stream`)                                 | Stream `turn.delta`       | HTTP `201`, **`sawDeltaEvent: false`**                      | N/A in M0                       | **FAIL** (Defect #4)      |
+| **Offline Detection / Recovery** (virtual clock + 7 alarm fails + Cron Sweeper) | `<= 2 min` / `<= 5 min`   | **`50,000 ms`** detect / **`66,000 ms`** recover            | N/A in M0                       | **PASS**                  |
+| **Concurrent Uncovered Contention** (`c=5` single head)                         | `1x 201 + 4x 200`         | `1x 201`, **`4x 503`**                                      | —                               | **FAIL** (Defect #1)      |
+
+### 9.2 Concurrency Sweep & 1,000-Agent / 100-Concurrent Scalability
+
+_(Pre-covered distinct agents used in sweep to avoid single-agent Defect #1 race; `0` duplicate provider calls / commits / assistant messages / lost work / budget overcommits across all passing runs)_
+
+| Concurrency                | Samples | Success / Err | ACK P50 / P95 / P99 (ms)   | Durable Dispatch P50 / P95 / P99 (ms) |                   Throughput (req/s) | Safety Violations   |
+| :------------------------- | ------: | ------------: | :------------------------- | :------------------------------------ | -----------------------------------: | :------------------ |
+| `c=1`                      |    `20` |      `20 / 0` | `9.38 / 18.75 / 44.47`     | `29.74 / 57.44 / 60.11`               |                              `20.10` | `0 / 0 / 0 / 0 / 0` |
+| `c=10`                     |    `20` |      `20 / 0` | `50.62 / 90.99 / 91.07`    | `532.87 / 941.51 / 990.07`            |                              `15.30` | `0 / 0 / 0 / 0 / 0` |
+| `c=25`                     |    `25` |      `25 / 0` | `149.67 / 202.20 / 202.28` | `1617.97 / 1968.68 / 1990.05`         |                              `11.38` | `0 / 0 / 0 / 0 / 0` |
+| `c=50`                     |    `50` |      `50 / 0` | `282.02 / 353.04 / 353.21` | `7113.19 / 8515.31 / 8569.71`         |                               `5.59` | `0 / 0 / 0 / 0 / 0` |
+| **`1,000 Agents / c=100`** |   `100` |     `100 / 0` | `807.10 / 944.62 / 944.91` | `4399.15 / 5240.32 / 5282.06`         | — (`9,451 ms` prov; `861.56 MB` RSS) | `0 / 0 / 0 / 0 / 0` |
+
+> [!NOTE]
+> Local Miniflare serializes `durable_turn` queue batches (`max_batch_size=5`) inside a single host worker process, explaining the `50->100` concurrent durable queue latency increase (`5.24 s` P95 at `c=100`) and host RSS (`861.56 MB`); zero errors and zero safety violations occurred across all `100/100` concurrent submissions and `1,000` provisioned `AgentHeadDO` SQLite instances.
+
+### 9.3 Regional RTT Simulation Overlay (`[Simulated: Regional RTT]` over `workerd` Measurements)
+
+Applying `DEFAULT_REGIONAL_RTT_PROFILES` (`apps/benchmark/src/rtt-simulation.ts`) on top of local `workerd` baselines (`16.97 ms` ACK P95, `25.15 ms` runtime overhead P95, `7.74 ms` GlobalBudget check P95):
+
+| Region Profile | Projected ACK P95 (ms) | Projected Runtime Overhead P95 (ms) | Projected GlobalBudget Check P95 (ms) | Notes                                                                  |
+| :------------- | ---------------------: | ----------------------------------: | ------------------------------------: | :--------------------------------------------------------------------- |
+| `near-region`  |                `40.97` |                             `53.15` |                               `23.74` | Within all M1 targets (`<= 250 / <= 200 / <= 50 ms`)                   |
+| `apac-intra`   |               `116.97` |                        **`223.15`** |                           **`91.74`** | Exceeds `200 ms` overhead & `50 ms` GlobalBudget target across regions |
+| `eu-us-east`   |               `190.97` |                        **`415.15`** |                          **`163.74`** | Transatlantic sequential DO RPC exceeds overhead budget                |
+| `apac-us-west` |           **`278.97`** |                        **`625.15`** |                          **`247.74`** | Cross-ocean RTT dominates multi-hop serial RPC                         |
+| `cross-global` |           **`411.97`** |                        **`950.15`** |                          **`377.74`** | Long-haul sequential hops                                              |
+
+### 9.4 Measured Per-Event Resource Operations (`AgentHeadDO` + `GlobalBudgetDO` + `D1` + `Queue`)
+
+| Execution Path (`n=20`)       | `AgentHead` Rows R / W | `GlobalBudget` Rows R / W |  Total DO Rows R / W |      D1 Ops (`R / W` rows) | Queue Sends | Alarm Set / Fire |
+| :---------------------------- | ---------------------: | ------------------------: | -------------------: | -------------------------: | ----------: | ---------------: |
+| **Covered 3-RPC Fast Path**   |       `166.40 / 42.00` |                   `8 / 9` |     `174.40 / 51.00` |     `2.00` (`1.00 / 3.00`) |      `0.00` |    `2.00 / 0.00` |
+| **Covered B1 Durable Path**   |       `280.65 / 55.30` |                   `8 / 9` | **`288.65 / 64.30`** | **`7.00`** (`7.00 / 8.00`) |      `1.00` |    `4.00 / 1.30` |
+| **Uncovered B1 Durable Path** |       `210.00 / 57.40` |                   `8 / 9` |     `218.00 / 66.40` |     `6.60` (`6.60 / 7.60`) |      `1.00` |    `4.00 / 1.65` |
+
+---
+
+## 10. D6 — Updated Monthly Cost Model Using Measured `workerd` Telemetry (`[Estimated: ADR-0006 Formula]`)
+
+Updated via `benchmarks/v2-m1/m1-cost-reestimation.json` using measured Covered B1 Durable means (`289` DO rowsRead/event, `64` DO rowsWritten/event, `7.92` D1 rowsWritten/event after integer scaling, `1` Queue op/event) with `6-month` + `1x` dormant retention vs ADR-0006 `20 rows/event` planning baseline. Cloud Runtime, LLM, and Daytona Sandbox costs are reported strictly separately before totals:
+
+| Scenario (`DO rowsW / D1 W / qOps / mo / dormant`)          |           MAU | Cloud Runtime / mo |           Cloud Target | LLM (Illustrative) | LLM (ZDR Flash) | Sandbox Gross | Sandbox 50% Offload | Combined Total (Ill. / ZDR+Offload) |
+| :---------------------------------------------------------- | ------------: | -----------------: | ---------------------: | -----------------: | --------------: | ------------: | ------------------: | :---------------------------------- |
+| `adr0006_planning_20rows_1k` (`20 / 0.2 / 1.2 / 0 / 0x`)    |       `1,000` |          **$9.33** |                  `$30` |        `$3,078.00` |       `$314.64` |     `$166.50` |            `$83.25` | `$3,253.83` / `$407.22`             |
+| **`m1_measured_workerd_1k` (`64 / 7.92 / 1.0 / 6 / 1x`)**   |   **`1,000`** |        **`$7.72`** |       `$30` (**PASS**) |        `$3,078.00` |       `$314.64` |     `$166.50` |            `$83.25` | **`$3,252.22` / `$405.61`**         |
+| `adr0006_planning_20rows_10k` (`20 / 0.2 / 1.2 / 0 / 0x`)   |      `10,000` |        **$176.07** |                 `$300` |       `$30,780.00` |     `$3,146.40` |   `$1,665.00` |           `$832.50` | `$32,621.07` / `$4,154.97`          |
+| **`m1_measured_workerd_10k` (`64 / 7.92 / 1.0 / 6 / 1x`)**  |  **`10,000`** |      **`$518.76`** |   `$300` (**EXCEEDS**) |       `$30,780.00` |     `$3,146.40` |   `$1,665.00` |           `$832.50` | **`$32,963.76` / `$4,497.66`**      |
+| `adr0006_planning_20rows_100k` (`20 / 0.2 / 1.2 / 0 / 0x`)  |     `100,000` |      **$2,204.80** |               `$3,500` |      `$307,800.00` |    `$31,464.00` |  `$16,650.00` |         `$8,325.00` | `$326,654.80` / `$41,993.80`        |
+| **`m1_measured_workerd_100k` (`64 / 7.92 / 1.0 / 6 / 1x`)** | **`100,000`** |    **`$6,081.66`** | `$3,500` (**EXCEEDS**) |      `$307,800.00` |    `$31,464.00` |  `$16,650.00` |         `$8,325.00` | **`$330,531.66` / `$45,870.66`**    |
+
+> [!WARNING]
+> **Cost Finding:** At `1,000 MAU`, Workers Paid included allowances (`50M` DO rowsWritten/month) absorb the measured `64` DO rowsWritten/event, keeping Cloud Runtime at **$7.72/mo**. At `10,000–100,000 MAU`, measured `64` DO rowsWritten/event (`3.2x` the ADR-0006 `20`-row assumption) plus `7.92` D1 writes/event push Cloudflare Infrastructure costs **above ADR-0006 targets** (**$518.76 vs $300** at 10k MAU; **$6,081.66 vs $3,500** at 100k MAU). Fixing Defect #3 (`0` steady-state D1 I/O on covered turns) and coalescing DO SQLite writes on the commit path are required to return Cloud Runtime within `$300 / $3,500` targets at scale.
+
+---
+
+## 11. Known Test Scope & Environment Limitations
+
+1. **Local Single-Host `workerd` vs Cloudflare Production:** All runtime numbers (`m1-full-runtime.json`) reflect single-process `wrangler createTestHarness()` (`workerd`) over loopback TCP/DO IPC (`FakeModelGatewayServer` at `0 ms` delay). Real production cold-start DO hibernation wakeup latency, global Anycast/colocation placement, production CPU billing, and D1 multi-AZ replication lag require an approved Canary Worker deploy.
+2. **GlobalBudgetDO Row Accounting:** `AgentHeadDO` SQLite rows (`166–281` read, `42–57` written) were directly metered in `workerd`; `GlobalBudgetDO` production source was unmodified per verification isolation, so its per-turn contribution (`8` rows read / `9` rows written) retains the M0-measured `GlobalBudgetAuthorityCore` count.
+3. **Edge SSE & Single-Head Concurrency Contention:** Because Defect #4 blocks `workerd` fetch with `redirect: 'error'` on `/v2/.../messages/stream` and Defect #1 fails concurrent uncovered `prepareTurn` with `503`, the 3-RPC Fast Path overhead benchmark measured DO RPC directly (`prepareTurn -> markAttemptSent -> FakeModelGateway -> commitTurn`) and the concurrency sweep (`1/10/25/50` and `1,000` agents) used pre-covered distinct agents.
+4. **Cost Model Estimates:** Section 10 cost figures use `calculateAdr0006Cost()` published pricing formulas over measured `workerd` operational counts and remain model estimates, not live Cloudflare/LLM/Daytona invoices.
+
+---
+
+## 12. Final M1 Release Verdict
+
+**Verdict: NO-GO for V2-M1 Production Release.**
+
+`main @ a537e4f8f3f43d69915cb51a2cf301bdd18b49f7` passes all static/unit/chaos/E2E gates and executes single-turn covered/uncovered durable paths, recovery alarms, Sweeper repairs, DLQ handling, DST schedules, and multi-agent load with zero duplicate commits or budget overcommits. However, **Defects #1–#5** cause **9/20 acceptance tests (10/39 matrix items)** to fail — specifically breaking Edge SSE streaming (`F-10`, `/v2/.../messages/stream`), covered-path D1-outage resilience (`F-5`, `FI-12`), concurrent uncovered idempotency/ceiling admission (`F-1`, `F-6`), HTTP domain error propagation (`F-2`, `F-3`, `F-16`), and cancellation guard reason reporting (`F-9`) — alongside `64` DO rowsWritten/event inflating Cloud costs beyond `$300` / `$3,500` targets at `10k–100k` MAU. Re-verification against real `workerd` is required after owner fixes land.

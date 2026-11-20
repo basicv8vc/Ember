@@ -9,8 +9,10 @@ import { runTimingMethodology } from './timing-methodology.js';
 import { runV1BaselineBenchmark } from './v1-baseline.js';
 import {
   runV2M1CostReestimation,
+  runV2M1FullRuntimeBenchmark,
   runV2M1HarnessSmokeBenchmark,
   type V2M1CostReestimationReport,
+  type V2M1FullRuntimeBenchmarkReport,
   type V2M1HarnessSmokeBenchmarkReport,
 } from './v2-m1/m1-benchmark.js';
 import type {
@@ -32,6 +34,7 @@ export type V2BenchmarkSuiteName =
   | 'model-routing'
   | 'm1-harness-smoke'
   | 'm1-cost-reestimate'
+  | 'm1-full-runtime'
   | 'all';
 
 export interface V2SuiteRunOptions {
@@ -66,6 +69,7 @@ export interface V2SuiteBundleResult {
   readonly modelRoutingMatrix?: ModelRoutingMatrixReport;
   readonly m1HarnessSmoke?: V2M1HarnessSmokeBenchmarkReport;
   readonly m1CostReestimation?: V2M1CostReestimationReport;
+  readonly m1FullRuntime?: V2M1FullRuntimeBenchmarkReport;
 }
 
 /**
@@ -75,12 +79,18 @@ export async function runV2BenchmarkSuite(
   options: V2SuiteRunOptions,
 ): Promise<V2SuiteBundleResult> {
   const log = options.log ?? ((msg: string) => console.log(msg));
-  const isM1Suite = options.suite === 'm1-harness-smoke' || options.suite === 'm1-cost-reestimate';
+  const isM1Suite =
+    options.suite === 'm1-harness-smoke' ||
+    options.suite === 'm1-cost-reestimate' ||
+    options.suite === 'm1-full-runtime';
   const outDir = options.outDir ?? (isM1Suite ? 'benchmarks/v2-m1' : 'benchmarks/v2-m0');
   mkdirSync(outDir, { recursive: true });
 
   const shouldRunM0 = (
-    name: Exclude<V2BenchmarkSuiteName, 'all' | 'm1-harness-smoke' | 'm1-cost-reestimate'>,
+    name: Exclude<
+      V2BenchmarkSuiteName,
+      'all' | 'm1-harness-smoke' | 'm1-cost-reestimate' | 'm1-full-runtime'
+    >,
   ): boolean => options.suite === 'all' || options.suite === name;
 
   let v1Baseline: V1BaselineReport | undefined;
@@ -92,6 +102,7 @@ export async function runV2BenchmarkSuite(
   let modelRoutingMatrix: ModelRoutingMatrixReport | undefined;
   let m1HarnessSmoke: V2M1HarnessSmokeBenchmarkReport | undefined;
   let m1CostReestimation: V2M1CostReestimationReport | undefined;
+  let m1FullRuntime: V2M1FullRuntimeBenchmarkReport | undefined;
 
   if (shouldRunM0('v1-baseline')) {
     v1Baseline = await runV1BaselineBenchmark({
@@ -210,6 +221,46 @@ export async function runV2BenchmarkSuite(
     );
   }
 
+  if (options.suite === 'm1-full-runtime') {
+    m1FullRuntime = await runV2M1FullRuntimeBenchmark({
+      configPath:
+        process.env.EMBER_V2_RUNTIME_CONFIG ??
+        'tests/integration/support/v2-m1-full-runtime/wrangler.jsonc',
+      ...(options.concurrencyLevels !== undefined
+        ? { concurrencyLevels: options.concurrencyLevels }
+        : {}),
+      ...(options.requestsPerLevel !== undefined
+        ? { requestsPerLevel: options.requestsPerLevel }
+        : {}),
+      ...(options.enableLocalLoad !== undefined
+        ? { enable1000AgentFeasibility: options.enableLocalLoad }
+        : {}),
+      log,
+    });
+    writeFileSync(
+      path.join(outDir, 'm1-full-runtime.json'),
+      JSON.stringify(m1FullRuntime, null, 2),
+      'utf8',
+    );
+    const covStats = m1FullRuntime.measuredPerEventOps.coveredB1DurablePath;
+    const uncovStats = m1FullRuntime.measuredPerEventOps.uncoveredB1DurablePath;
+    m1CostReestimation = runV2M1CostReestimation({
+      measuredAgentHeadRowsReadPerEvent: covStats.agentHeadRowsReadMean,
+      measuredAgentHeadRowsWrittenPerEvent: covStats.agentHeadRowsWrittenMean,
+      measuredGlobalBudgetRowsReadPerEvent: covStats.globalBudgetRowsReadPerTurn,
+      measuredGlobalBudgetRowsWrittenPerEvent: covStats.globalBudgetRowsWrittenPerTurn,
+      measuredD1WritesPerEvent: Number(
+        (0.8 * covStats.d1RowsWrittenMean + 0.2 * uncovStats.d1RowsWrittenMean).toFixed(2),
+      ),
+      measuredQueueOpsPerEvent: covStats.queueSendsMean,
+    });
+    writeFileSync(
+      path.join(outDir, 'm1-cost-reestimation.json'),
+      JSON.stringify(m1CostReestimation, null, 2),
+      'utf8',
+    );
+  }
+
   if (options.suite === 'm1-cost-reestimate') {
     m1CostReestimation = runV2M1CostReestimation();
     writeFileSync(
@@ -233,6 +284,7 @@ export async function runV2BenchmarkSuite(
     ...(modelRoutingMatrix !== undefined ? { modelRoutingMatrix } : {}),
     ...(m1HarnessSmoke !== undefined ? { m1HarnessSmoke } : {}),
     ...(m1CostReestimation !== undefined ? { m1CostReestimation } : {}),
+    ...(m1FullRuntime !== undefined ? { m1FullRuntime } : {}),
   };
 
   writeFileSync(

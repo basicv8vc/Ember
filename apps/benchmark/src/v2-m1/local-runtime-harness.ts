@@ -66,6 +66,15 @@ interface WranglerWorkerHandle {
     classNameOrBindingName: string,
     options: { readonly name?: string; readonly id?: string },
   ): Promise<void>;
+  getDurableObjectStorage(
+    classNameOrBindingName: string,
+    options: { readonly name?: string; readonly id?: string },
+  ): Promise<{
+    exec<T = Record<string, unknown>>(
+      sql: string,
+      ...bindings: (string | number | null)[]
+    ): Promise<T[]>;
+  }>;
   applyD1Migrations?(bindingName: string): Promise<void>;
 }
 
@@ -608,6 +617,19 @@ export class V2LocalRuntimeHarness {
     identifier: { readonly name?: string; readonly id?: string },
   ): Promise<void> {
     await this.#requireWorker().evictDurableObject(classNameOrBindingName, identifier);
+  }
+
+  async readDurableObjectRows<T = Record<string, unknown>>(
+    classNameOrBindingName: string,
+    identifier: { readonly name?: string; readonly id?: string },
+    query: `SELECT ${string}`,
+    ...bindings: (string | number | null)[]
+  ): Promise<T[]> {
+    const sql = await this.#requireWorker().getDurableObjectStorage(
+      classNameOrBindingName,
+      identifier,
+    );
+    return sql.exec<T>(query, ...bindings);
   }
 
   async dispose(): Promise<void> {

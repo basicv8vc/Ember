@@ -4,10 +4,48 @@ export const MAX_BRIEF_RECENT_MESSAGES = 8;
 export const MAX_BRIEF_ACTIVE_SCHEDULES = 6;
 export const MAX_BRIEF_ITEM_CHARS = 240;
 export const MAX_BRIEF_PROMPT_CHARS = 3_600;
+export const BRIEF_MESSAGE_PAGE_SIZE = 50;
+export const MAX_BRIEF_MESSAGE_PAGES = 20;
 
 export interface BriefContextMessage {
   readonly kind: 'user' | 'ember';
   readonly text: string;
+}
+
+export interface BriefMessagePage {
+  readonly messages: readonly (
+    { readonly kind: string; readonly text?: string } | BriefContextMessage
+  )[];
+  readonly has_more: boolean;
+  readonly next_after: number | null;
+}
+
+/**
+ * Walks ascending conversation pages (`WHERE sequence > after ORDER BY sequence ASC`)
+ * in a bounded loop and retains only the latest `maxMessages` user/ember messages.
+ */
+export async function loadRecentBriefMessages(
+  readPage: (after: number, limit: number) => Promise<BriefMessagePage>,
+  maxMessages = MAX_BRIEF_RECENT_MESSAGES,
+): Promise<readonly BriefContextMessage[]> {
+  let after = 0;
+  let tail: BriefContextMessage[] = [];
+  for (let pageIndex = 0; pageIndex < MAX_BRIEF_MESSAGE_PAGES; pageIndex += 1) {
+    const page = await readPage(after, BRIEF_MESSAGE_PAGE_SIZE);
+    for (const msg of page.messages) {
+      if ((msg.kind === 'user' || msg.kind === 'ember') && typeof msg.text === 'string') {
+        tail.push({ kind: msg.kind, text: msg.text });
+      }
+    }
+    if (tail.length > maxMessages) {
+      tail = tail.slice(-maxMessages);
+    }
+    if (!page.has_more || page.next_after === null || page.next_after <= after) {
+      break;
+    }
+    after = page.next_after;
+  }
+  return tail;
 }
 
 export interface ProactiveBriefContext {

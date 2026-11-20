@@ -20,8 +20,8 @@ import {
   type ProactiveScheduleTaskPayload,
 } from '@ember/runtime-v2';
 import {
-  MAX_BRIEF_RECENT_MESSAGES,
   buildProactiveBriefPrompt,
+  loadRecentBriefMessages,
   type BriefContextMessage,
   type ProactiveBriefContext,
 } from './proactive-brief-context.js';
@@ -42,20 +42,19 @@ async function loadProactiveBriefContext(
   proactive: ProactiveScheduleTaskPayload,
 ): Promise<ProactiveBriefContext> {
   const rpc = createEdgeRpc(head);
-  let recentMessages: BriefContextMessage[] = [];
+  let recentMessages: readonly BriefContextMessage[] = [];
   let activeSchedules: ProactiveScheduleList['schedules'] = [];
 
   if (conversationId !== undefined) {
     try {
-      const page = await rpc.readMessages({
-        tenantId,
-        agentId,
-        conversationId,
-        after: 0,
-        limit: MAX_BRIEF_RECENT_MESSAGES * 2,
-      });
-      recentMessages = page.messages.flatMap((msg): BriefContextMessage[] =>
-        msg.kind === 'user' || msg.kind === 'ember' ? [{ kind: msg.kind, text: msg.text }] : [],
+      recentMessages = await loadRecentBriefMessages((after, limit) =>
+        rpc.readMessages({
+          tenantId,
+          agentId,
+          conversationId,
+          after,
+          limit,
+        }),
       );
     } catch {
       // Best-effort context; proceed with base brief prompt if unavailable.

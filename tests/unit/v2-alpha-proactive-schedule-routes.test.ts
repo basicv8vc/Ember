@@ -18,6 +18,7 @@ import {
   MAX_BRIEF_PROMPT_CHARS,
   MAX_BRIEF_RECENT_MESSAGES,
   buildProactiveBriefPrompt,
+  loadRecentBriefMessages,
 } from '../../apps/api/src/local-v2/proactive-brief-context.js';
 import type { EdgeAgentHeadRpc } from '../../apps/api/src/local-v2/rpc.js';
 
@@ -164,6 +165,30 @@ describe('Agent E — proactive brief context builder', () => {
     expect(prompt).toContain(`Message ${MAX_BRIEF_RECENT_MESSAGES + 3}:`);
     expect(prompt).not.toContain('Message 0:');
     expect(prompt.length).toBeLessThanOrEqual(MAX_BRIEF_PROMPT_CHARS);
+  });
+
+  it('paginates ascending conversation history to retain the latest tail messages', async () => {
+    const allMessages = Array.from({ length: 120 }, (_, idx) => ({
+      seq: idx + 1,
+      kind: idx % 3 === 0 ? 'activity' : idx % 2 === 0 ? 'user' : 'ember',
+      text: `turn-${idx + 1}`,
+    }));
+
+    const calls: Array<{ after: number; limit: number }> = [];
+    const recent = await loadRecentBriefMessages((after, limit) => {
+      calls.push({ after, limit });
+      const slice = allMessages.filter((m) => m.seq > after).slice(0, limit);
+      const last = slice.at(-1);
+      const hasMore = last !== undefined && last.seq < allMessages.length;
+      return Promise.resolve({
+        messages: slice.map(({ kind, text }) => ({ kind, text })),
+        has_more: hasMore,
+        next_after: last?.seq ?? null,
+      });
+    }, 4);
+
+    expect(calls.length).toBe(3);
+    expect(recent.map((m) => m.text)).toEqual(['turn-116', 'turn-117', 'turn-119', 'turn-120']);
   });
 });
 

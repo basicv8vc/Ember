@@ -1,9 +1,9 @@
 # Ember V2 — Isolated Staging Readiness, Cost Estimate & Rollback Plan
 
-Status: **Local dry-run ready; awaiting explicit CTO/Owner approval before cloud provisioning or deployment.**  
+Status: **Local dry-run ready; final deployment authorization request submitted in [V2-STAGING-DEPLOYMENT-AUTHORIZATION.md](./V2-STAGING-DEPLOYMENT-AUTHORIZATION.md). Awaiting explicit CTO/Owner approval before cloud provisioning or deployment.**  
 Owner: Agent A (Infrastructure, Runtime Reliability & Cost)  
-Baseline: `origin/main @ 7593a03` (2026-11-20)  
-Related: [Product Alpha Roadmap](./product/PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](./adr/0006-experience-first-device-powered-runtime-v2.md), [V1 Ember Cloud](./cloud-staging.md), [M1-A7 Cost & Recovery Report](./architecture/v2-m1-a7-opt8-alarm-recovery-report.md)
+Baseline: `origin/main @ febeabc` (2026-11-20)  
+Related: [Final Deployment Authorization Request](./V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [Product Alpha Roadmap](./product/PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](./adr/0006-experience-first-device-powered-runtime-v2.md), [V1 Ember Cloud](./cloud-staging.md), [M1-A7 Cost & Recovery Report](./architecture/v2-m1-a7-opt8-alarm-recovery-report.md)
 
 ---
 

@@ -35,8 +35,12 @@ struct PersonalMemorySheetView: View {
 
                     if store.isEndpointUnavailable {
                         InlineNotice(
-                            title: LocalizedStringKey("memory.endpoint_unavailable.title"),
-                            message: LocalizedStringKey("memory.endpoint_unavailable.message"),
+                            title: LocalizedStringKey(
+                                String(localized: "memory.endpoint_unavailable.title", table: "Conversation")
+                            ),
+                            message: LocalizedStringKey(
+                                String(localized: "memory.endpoint_unavailable.message", table: "Conversation")
+                            ),
                             tone: .neutral
                         )
                         .accessibilityIdentifier("memory-endpoint-unavailable")
@@ -46,7 +50,9 @@ struct PersonalMemorySheetView: View {
 
                     if let error = store.errorMessage {
                         InlineNotice(
-                            title: LocalizedStringKey("memory.error.title"),
+                            title: LocalizedStringKey(
+                                String(localized: "memory.error.title", table: "Conversation")
+                            ),
                             message: LocalizedStringKey(error),
                             tone: .warning
                         )
@@ -58,8 +64,12 @@ struct PersonalMemorySheetView: View {
                             .accessibilityIdentifier("memory-loading")
                     } else if store.items.isEmpty && !store.isEndpointUnavailable {
                         EmptyPlaceholder(
-                            title: LocalizedStringKey("memory.empty.title"),
-                            message: LocalizedStringKey("memory.empty.message"),
+                            title: LocalizedStringKey(
+                                String(localized: "memory.empty.title", table: "Conversation")
+                            ),
+                            message: LocalizedStringKey(
+                                String(localized: "memory.empty.message", table: "Conversation")
+                            ),
                             systemImage: "brain.head.profile"
                         )
                         .accessibilityIdentifier("memory-empty")

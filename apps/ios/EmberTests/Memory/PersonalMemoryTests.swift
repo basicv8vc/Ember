@@ -115,6 +115,24 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertTrue(store.items.isEmpty)
     }
 
+    func testLiveRepository429BudgetExceededMapsToLimitReached() async throws {
+        register { _ in
+            .json(
+                statusCode: 429,
+                body: #"{"error":{"code":"BUDGET_EXCEEDED","message":"personal memory item limit reached"}}"#
+            )
+        }
+
+        let store = PersonalMemoryStore(repository: try makeLiveRepository())
+        let saved = await store.save(kind: .fact, content: "One item over the 50-item cap")
+
+        XCTAssertFalse(saved)
+        XCTAssertEqual(
+            store.errorMessage,
+            String(localized: "memory.error.limit_reached", table: "Conversation")
+        )
+    }
+
     func testStoreSaveInspectDeleteAndSignOutClear() async throws {
         let repo = InMemoryPersonalMemoryRepository(items: [])
         let store = PersonalMemoryStore(repository: repo)

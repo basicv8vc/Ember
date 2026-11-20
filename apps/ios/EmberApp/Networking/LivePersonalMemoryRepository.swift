@@ -17,7 +17,7 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             throw PersonalMemoryRepositoryError.endpointNotReady
         }
         guard response.statusCode == 200 else {
-            throw Self.mapStatusError(response.statusCode)
+            throw Self.mapStatusError(response.statusCode, data: response.data)
         }
         return try decode(PersonalMemoryListDTO.self, from: response.data)
     }
@@ -40,7 +40,7 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             throw PersonalMemoryRepositoryError.endpointNotReady
         }
         guard response.statusCode == 200 || response.statusCode == 201 else {
-            throw Self.mapStatusError(response.statusCode)
+            throw Self.mapStatusError(response.statusCode, data: response.data)
         }
         return try decode(PersonalMemorySaveResultDTO.self, from: response.data)
     }
@@ -53,7 +53,7 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             body: nil
         )
         guard response.statusCode == 200 else {
-            throw Self.mapStatusError(response.statusCode)
+            throw Self.mapStatusError(response.statusCode, data: response.data)
         }
         let result = try decode(PersonalMemoryDeleteResultDTO.self, from: response.data)
         guard result.deleted, result.memoryID == id else {
@@ -91,7 +91,20 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
         }
     }
 
-    private static func mapStatusError(_ code: Int) -> PersonalMemoryRepositoryError {
+    private struct APIErrorEnvelope: Decodable {
+        struct ErrorDetail: Decodable {
+            let code: String?
+        }
+
+        let code: String?
+        let error: ErrorDetail?
+
+        var resolvedCode: String? {
+            error?.code ?? code
+        }
+    }
+
+    private static func mapStatusError(_ code: Int, data: Data) -> PersonalMemoryRepositoryError {
         switch code {
         case 400, 422:
             .invalidInput
@@ -103,7 +116,14 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             .endpointNotReady
         case 409:
             .limitReached
-        case 429, 500...599:
+        case 429:
+            if let envelope = try? JSONDecoder().decode(APIErrorEnvelope.self, from: data),
+               envelope.resolvedCode == "BUDGET_EXCEEDED" {
+                .limitReached
+            } else {
+                .unavailable
+            }
+        case 500...599:
             .unavailable
         default:
             .invalidResponse

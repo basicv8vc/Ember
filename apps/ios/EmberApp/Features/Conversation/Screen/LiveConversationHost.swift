@@ -25,6 +25,7 @@ final class LiveConversationHostModel {
     private var sessionGeneration: UInt64 = 0
 
     let taskStore: SessionTaskStore
+    let scheduleStore: ProactiveScheduleStore
     let isMockMode: Bool
 
     var selectedTab: RootTab = .chat
@@ -55,6 +56,7 @@ final class LiveConversationHostModel {
         repository: any LiveConversationServiceProtocol,
         auth: any LiveAuthControlling,
         taskRepository: (any SessionTaskRepositoryProtocol)? = nil,
+        scheduleRepository: (any ProactiveScheduleRepositoryProtocol)? = nil,
         isMockMode: Bool = false,
         pollingWindow: Duration = .seconds(60),
         taskPollInterval: Duration = .seconds(2),
@@ -63,6 +65,7 @@ final class LiveConversationHostModel {
         self.repository = repository
         self.auth = auth
         self.taskStore = SessionTaskStore(repository: taskRepository)
+        self.scheduleStore = ProactiveScheduleStore(repository: scheduleRepository)
         self.isMockMode = isMockMode
         self.pollingWindow = pollingWindow
         self.taskPollInterval = taskPollInterval
@@ -185,6 +188,7 @@ final class LiveConversationHostModel {
         chatNavigationPath.removeAll()
         tasksNavigationPath.removeAll()
         taskStore.clear()
+        scheduleStore.clear()
     }
 
     func removeAttachment(_ attachmentID: UUID) {
@@ -1391,7 +1395,7 @@ struct LiveConversationHost: View {
 
     private var tasksTab: some View {
         NavigationStack(path: $model.tasksNavigationPath) {
-            TaskInboxView(store: model.taskStore) { taskID in
+            TaskInboxView(store: model.taskStore, scheduleStore: model.scheduleStore) { taskID in
                 model.openTaskFromInbox(taskID)
             }
             .navigationDestination(for: UUID.self) { taskID in

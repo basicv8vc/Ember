@@ -3,7 +3,7 @@ import SwiftUI
 struct TaskInboxView: View {
     private enum Mode {
         case legacyDemo(TaskJourneySession, () -> Void)
-        case sessionTasks(SessionTaskStore, (UUID) -> Void)
+        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, (UUID) -> Void)
     }
 
     private let mode: Mode
@@ -12,23 +12,29 @@ struct TaskInboxView: View {
         self.mode = .legacyDemo(session, onSelectTask)
     }
 
-    init(store: SessionTaskStore, onOpenTask: @escaping (UUID) -> Void) {
-        self.mode = .sessionTasks(store, onOpenTask)
+    init(
+        store: SessionTaskStore,
+        scheduleStore: ProactiveScheduleStore? = nil,
+        onOpenTask: @escaping (UUID) -> Void
+    ) {
+        self.mode = .sessionTasks(store, scheduleStore, onOpenTask)
     }
 
     var body: some View {
         switch mode {
         case .legacyDemo(let session, let onSelectTask):
             LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
-        case .sessionTasks(let store, let onOpenTask):
-            SessionTaskInboxContent(store: store, onOpenTask: onOpenTask)
+        case .sessionTasks(let store, let scheduleStore, let onOpenTask):
+            SessionTaskInboxContent(store: store, scheduleStore: scheduleStore, onOpenTask: onOpenTask)
         }
     }
 }
 
 private struct SessionTaskInboxContent: View {
     @Bindable var store: SessionTaskStore
+    let scheduleStore: ProactiveScheduleStore?
     let onOpenTask: (UUID) -> Void
+    @State private var isShowingSchedulesSheet = false
 
     private var needsIntervention: [SessionTaskDTO] {
         store.tasks(in: .needsIntervention)
@@ -165,6 +171,20 @@ private struct SessionTaskInboxContent: View {
             await store.refreshAll()
         }
         .toolbar {
+            if let scheduleStore, scheduleStore.hasRepository {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isShowingSchedulesSheet = true
+                    } label: {
+                        Label {
+                            Text("schedules.nav_title", tableName: "Conversation")
+                        } icon: {
+                            Image(systemName: "calendar.badge.clock")
+                        }
+                    }
+                    .accessibilityIdentifier("tasks-open-schedules")
+                }
+            }
             ToolbarItem(placement: .topBarTrailing) {
                 Button {
                     Task { await store.refreshAll() }
@@ -178,6 +198,11 @@ private struct SessionTaskInboxContent: View {
                 }
                 .disabled(store.isLoadingList)
                 .accessibilityIdentifier("tasks-refresh-button")
+            }
+        }
+        .sheet(isPresented: $isShowingSchedulesSheet) {
+            if let scheduleStore {
+                ProactiveSchedulesSheetView(store: scheduleStore)
             }
         }
     }

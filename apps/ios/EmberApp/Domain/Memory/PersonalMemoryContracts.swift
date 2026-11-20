@@ -149,6 +149,39 @@ public struct PersonalMemorySaveResultDTO: Equatable, Codable, Sendable {
     }
 }
 
+public struct UpdatePersonalMemoryRequestDTO: Equatable, Encodable, Sendable {
+    public let kind: PersonalMemoryKind?
+    public let content: String?
+
+    public init(kind: PersonalMemoryKind? = nil, content: String? = nil) {
+        self.kind = kind
+        self.content = content
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case kind
+        case content
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let kind {
+            try container.encode(kind, forKey: .kind)
+        }
+        if let content {
+            try container.encode(content, forKey: .content)
+        }
+    }
+}
+
+public struct PersonalMemoryUpdateResultDTO: Equatable, Codable, Sendable {
+    public let item: PersonalMemoryItemDTO
+
+    public init(item: PersonalMemoryItemDTO) {
+        self.item = item
+    }
+}
+
 public struct PersonalMemoryDeleteResultDTO: Equatable, Codable, Sendable {
     public let deleted: Bool
     public let memoryID: UUID
@@ -178,5 +211,6 @@ public protocol PersonalMemoryRepositoryProtocol: Sendable {
     var isMockOnly: Bool { get }
     func listMemories() async throws -> PersonalMemoryListDTO
     func saveMemory(_ request: SavePersonalMemoryRequestDTO) async throws -> PersonalMemorySaveResultDTO
+    func updateMemory(id: UUID, _ request: UpdatePersonalMemoryRequestDTO) async throws -> PersonalMemoryUpdateResultDTO
     func deleteMemory(id: UUID) async throws -> PersonalMemoryDeleteResultDTO
 }

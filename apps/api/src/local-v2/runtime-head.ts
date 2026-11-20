@@ -20,6 +20,7 @@ import {
   type GlobalBudgetBindings,
   type ObservedTurnUsage,
   type PersonalMemoryRpc,
+  type ProactiveScheduleRpc,
   type QueueLike,
   type V2DispatchEnvelope,
 } from '@ember/runtime-v2';
@@ -53,8 +54,11 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
   readonly EMBER_V2_AGENT_TASK_DLQ_NAME?: string;
 }
 
-type LocalEdgeRpc = EdgeAgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc;
-type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc;
+type LocalEdgeRpc = EdgeAgentHeadRpc &
+  DeviceExecutionRpc &
+  PersonalMemoryRpc &
+  ProactiveScheduleRpc;
+type CoreEdgeRpc = AgentHeadRpc & DeviceExecutionRpc & PersonalMemoryRpc & ProactiveScheduleRpc;
 type EdgeMethod = keyof LocalEdgeRpc;
 type EdgeRequest<K extends EdgeMethod> = Parameters<CoreEdgeRpc[K]>[0];
 type EdgeResult<K extends EdgeMethod> = Awaited<ReturnType<CoreEdgeRpc[K]>>;
@@ -87,6 +91,7 @@ export function createEdgeRpc(head: AgentHeadDO): LocalEdgeRpc {
     clearTranscript: (req) => call('clearTranscript', req),
     deviceExecution: (req) => call('deviceExecution', req),
     personalMemory: (req) => call('personalMemory', req),
+    proactiveSchedule: (req) => call('proactiveSchedule', req),
   };
 }
 
@@ -182,6 +187,10 @@ export class AgentHeadDO
 
   markAttemptSent(req: Parameters<AgentHeadRpc['markAttemptSent']>[0]) {
     return this.#load().core.markAttemptSent(req);
+  }
+
+  reserveTaskModelAttempt(req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) {
+    return this.#load().core.reserveTaskModelAttempt(req);
   }
 
   claimDurableWork(req: Parameters<AgentHeadCore['claimDurableWork']>[0]) {

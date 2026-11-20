@@ -920,7 +920,9 @@ export class AgentHeadDO extends OfficialAgentHeadDO {
     return { scheduleId: cmd.scheduleId, alarmAtMs };
   }
 
-  async reserveTaskModelAttempt(cmd: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) {
+  override async reserveTaskModelAttempt(
+    cmd: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0],
+  ) {
     await this.#refreshFaults();
     return this.#taskHarness().core.reserveTaskModelAttempt(cmd);
   }

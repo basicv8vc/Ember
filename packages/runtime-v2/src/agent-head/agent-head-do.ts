@@ -27,6 +27,10 @@ import type {
   PersonalMemoryRpc,
 } from '../contracts/personal-memory.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
+import type {
+  ProactiveScheduleCommand,
+  ProactiveScheduleRpc,
+} from '../contracts/proactive-schedules.js';
 import { applyAgentHeadMigrations, type AgentHeadMigrationStep } from '../migrations.js';
 import type {
   BudgetSyncIncidentReason,
@@ -54,6 +58,7 @@ import {
 } from './budget.js';
 import { AgentHeadDeviceService } from './device-service.js';
 import { AgentHeadMemoryService } from './memory-service.js';
+import { AgentHeadProactiveScheduleService } from './proactive-schedule-service.js';
 import { getHeadMetaSync, getTaskRowSync, sqlExecMaybe } from './queries.js';
 import { AgentHeadRecoveryService } from './recovery-service.js';
 import {
@@ -161,10 +166,12 @@ export class AgentHeadCore
     AgentHeadRecoveryPort,
     AuthoritativeBusinessPort,
     DeviceExecutionRpc,
-    PersonalMemoryRpc
+    PersonalMemoryRpc,
+    ProactiveScheduleRpc
 {
   private readonly deviceService: AgentHeadDeviceService;
   private readonly memoryService: AgentHeadMemoryService;
+  private readonly proactiveScheduleService: AgentHeadProactiveScheduleService;
   readonly recoveryService: AgentHeadRecoveryService;
   readonly turnService: AgentHeadTurnService;
 
@@ -250,6 +257,17 @@ export class AgentHeadCore
       newId: this.newId,
     });
 
+    this.proactiveScheduleService = new AgentHeadProactiveScheduleService({
+      storage: this.storage,
+      recoveryAdmission: bindings.recoveryAdmission,
+      recoveryHooks: bindings.recoveryHooks,
+      recoveryRegistry: options.recoveryRegistry,
+      earliestDiscovery: this.recoveryService,
+      eventCoordinator: bindings.eventCoordinator,
+      nowMs: this.nowMsFn,
+      newId: this.newId,
+    });
+
     this.turnService = new AgentHeadTurnService({
       storage: this.storage,
       recoveryAdmission: bindings.recoveryAdmission,
@@ -267,6 +285,10 @@ export class AgentHeadCore
 
   deviceExecution(cmd: DeviceExecutionCommand) {
     return this.deviceService.execute(cmd);
+  }
+
+  proactiveSchedule(cmd: ProactiveScheduleCommand) {
+    return this.proactiveScheduleService.execute(cmd);
   }
 
   private syncAlarmAndRelayBudget(input: {

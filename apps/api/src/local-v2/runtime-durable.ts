@@ -1,17 +1,22 @@
 import {
   buildBoundedContext,
   FAKE_MODEL_LABEL,
+  FAKE_V2_RATE_VERSION,
   isModelGatewayFailure,
   MODEL_LIMITS,
   type ContextRow,
   type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
 import {
+  PROACTIVE_SCHEDULER_MODEL_LABEL,
   executeRecoveredOrFreshDurableWork,
   parseClaimExecutionContext,
+  parseProactiveScheduleTaskInput,
   toAgentHeadDurableCommitOutcome,
+  type DurableExecutionClaimContext,
   type DurableExecutorPort,
   type FakeOrProviderJobOutcome,
+  type ProactiveScheduleTaskPayload,
 } from '@ember/runtime-v2';
 import { getHead, type LocalRuntimeEnv } from './runtime-head.js';
 
@@ -20,24 +25,102 @@ export type V2FakeDurableGateway = Pick<
   'streamConversationTurn' | 'queryConversationJob'
 >;
 
+const PROACTIVE_BRIEF_RESERVATION_MICRO_USD = 250;
+
+function buildProactiveBriefPrompt(proactive: ProactiveScheduleTaskPayload): string {
+  return `[Proactive ${proactive.kind} | ${proactive.title} | ${proactive.timezone}]\n${proactive.prompt}`;
+}
+
+function unwrapJsonText(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (typeof parsed['text'] === 'string') return parsed['text'];
+    } catch {
+      // Return raw string below.
+    }
+  }
+  return trimmed;
+}
+
 export function createDurableExecutor(
   env: LocalRuntimeEnv,
   gateway: V2FakeDurableGateway,
 ): DurableExecutorPort {
   return {
     async executeDurableWork(claim) {
-      const context = parseClaimExecutionContext(claim);
-      // Task drivers that have no model attempt use the task result contract directly.
-      // This local chat runtime has no external sandbox or task driver.
-      if (claim.targetKind === 'task' && context.attemptId === undefined) {
-        return { status: 'failed', reasonCode: 'local_task_driver_unavailable' };
+      let context: DurableExecutionClaimContext = parseClaimExecutionContext(claim);
+      const head = getHead(env, claim.tenantId, claim.agentId);
+      const proactive =
+        claim.targetKind === 'task' ? parseProactiveScheduleTaskInput(context.inputJson) : null;
+
+      if (proactive !== null && proactive.deliveryMode === 'direct_reminder') {
+        return {
+          status: 'completed',
+          summaryText: proactive.title,
+          detailText: proactive.prompt,
+          modelLabel: PROACTIVE_SCHEDULER_MODEL_LABEL,
+          simulated: false,
+          reasonCode: 'ok',
+        };
       }
+
+      if (claim.targetKind === 'task' && context.attemptId === undefined) {
+        if (proactive === null) {
+          return { status: 'failed', reasonCode: 'local_task_driver_unavailable' };
+        }
+        const rawClaim = JSON.parse(claim.contextJson) as Record<string, unknown>;
+        const runId = typeof rawClaim['runId'] === 'string' ? rawClaim['runId'] : null;
+        if (runId === null) {
+          return { status: 'failed', reasonCode: 'missing_run_id' };
+        }
+        const reservation = await head.reserveTaskModelAttempt({
+          tenantId: claim.tenantId,
+          principalId: proactive.principalId,
+          agentId: claim.agentId,
+          taskId: claim.targetId,
+          runId,
+          leaseEpoch: claim.leaseEpoch,
+          budgetMode: 'simulated_full_protocol',
+          providerId: 'fake',
+          modelLabel: FAKE_MODEL_LABEL,
+          rateVersion: FAKE_V2_RATE_VERSION,
+          estimatedMicroUsd: PROACTIVE_BRIEF_RESERVATION_MICRO_USD,
+        });
+        if (reservation.kind === 'refused') {
+          return {
+            status: 'failed',
+            summaryText: proactive.title,
+            detailText: null,
+            modelLabel: FAKE_MODEL_LABEL,
+            simulated: true,
+            reasonCode: reservation.reason,
+          };
+        }
+        context = {
+          ...context,
+          operationId: reservation.operationId,
+          attemptNo: reservation.attemptNo,
+          attemptId: String(reservation.attemptNo),
+          sendState: 'unsent',
+          sendAuthorizingAtMs: null,
+          sendStartedAtMs: null,
+          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive) }),
+        };
+      } else if (proactive !== null) {
+        context = {
+          ...context,
+          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive) }),
+        };
+      }
+
       if (context.attemptId === undefined) throw new Error('Missing authoritative model attempt');
 
       const deadlineAtMs = context.deadlineAtMs ?? claim.leaseExpiresAtMs;
       const stopAtMs = Math.min(claim.leaseExpiresAtMs, deadlineAtMs);
       const signal = AbortSignal.timeout(Math.max(0, stopAtMs - Date.now()));
-      const head = getHead(env, claim.tenantId, claim.agentId);
       const { operationId } = context;
       function unknownOutcome(handle: string | null, errorCode: string): FakeOrProviderJobOutcome {
         return {
@@ -141,13 +224,22 @@ export function createDurableExecutor(
           },
         },
       });
-      return toAgentHeadDurableCommitOutcome({
+      const commitOutcome = toAgentHeadDurableCommitOutcome({
         targetKind: claim.targetKind,
         context,
         outcome,
         modelLabel: FAKE_MODEL_LABEL,
         simulated: true,
       });
+      if (proactive !== null && commitOutcome['status'] === 'completed') {
+        const readable = unwrapJsonText(commitOutcome['detailText']);
+        return {
+          ...commitOutcome,
+          summaryText: proactive.title,
+          detailText: readable ?? proactive.prompt,
+        };
+      }
+      return commitOutcome;
     },
   };
 }

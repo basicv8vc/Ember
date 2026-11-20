@@ -751,6 +751,65 @@ export function createPersonalMemoryDoMigration(
   };
 }
 
+export const DEFAULT_AGENT_HEAD_PROACTIVE_SCHEDULES_MIGRATION_VERSION = 7;
+
+export interface ProactiveScheduleRow {
+  readonly schedule_id: string;
+  readonly principal_id: string;
+  readonly idempotency_key: string;
+  readonly kind: 'reminder' | 'brief' | 'follow_up';
+  readonly title: string;
+  readonly prompt: string;
+  readonly delivery_mode: 'direct_reminder' | 'model_brief';
+  readonly digest: string;
+  readonly created_at_ms: number;
+  readonly updated_at_ms: number;
+}
+
+export interface ProactiveScheduleRunRow {
+  readonly schedule_id: string;
+  readonly occurrence_seq: number;
+  readonly task_id: string;
+  readonly scheduled_for_ms: number;
+  readonly created_at_ms: number;
+}
+
+export const PROACTIVE_SCHEDULES_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS proactive_schedules (
+  schedule_id      TEXT    PRIMARY KEY REFERENCES v2_schedules(schedule_id) ON DELETE CASCADE,
+  principal_id     TEXT    NOT NULL,
+  idempotency_key  TEXT    NOT NULL UNIQUE,
+  kind             TEXT    NOT NULL CHECK (kind IN ('reminder', 'brief', 'follow_up')),
+  title            TEXT    NOT NULL,
+  prompt           TEXT    NOT NULL,
+  delivery_mode    TEXT    NOT NULL CHECK (delivery_mode IN ('direct_reminder', 'model_brief')),
+  digest           TEXT    NOT NULL,
+  created_at_ms    INTEGER NOT NULL,
+  updated_at_ms    INTEGER NOT NULL
+);`,
+  `CREATE INDEX IF NOT EXISTS idx_proactive_schedules_principal
+  ON proactive_schedules (principal_id, created_at_ms DESC, schedule_id DESC);`,
+  `CREATE TABLE IF NOT EXISTS proactive_schedule_runs (
+  schedule_id      TEXT    NOT NULL REFERENCES proactive_schedules(schedule_id) ON DELETE CASCADE,
+  occurrence_seq   INTEGER NOT NULL CHECK (occurrence_seq >= 1),
+  task_id          TEXT    NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
+  scheduled_for_ms INTEGER NOT NULL,
+  created_at_ms    INTEGER NOT NULL,
+  PRIMARY KEY (schedule_id, occurrence_seq)
+) WITHOUT ROWID;`,
+] as const;
+
+export function createProactiveSchedulesMigration(
+  version = DEFAULT_AGENT_HEAD_PROACTIVE_SCHEDULES_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_proactive_schedules',
+    statements: PROACTIVE_SCHEDULES_STATEMENTS,
+    checksum: computeMigrationChecksumSync(PROACTIVE_SCHEDULES_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -770,5 +829,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     },
     createAgentHeadWriteOptMigration(),
     createPersonalMemoryDoMigration(),
+    createProactiveSchedulesMigration(),
   ];
 }

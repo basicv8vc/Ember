@@ -2,10 +2,17 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   CONVERSATION_SYSTEM_PROMPT,
+  FakeModelGateway,
   MODEL_LIMITS,
+  MODEL_RATE_ROWS,
+  OpenAiModelGateway,
+  OpenRouterModelGateway,
   PERSONAL_MEMORY_CONTEXT_HEADER,
   buildBoundedPersonalMemoryContext,
   preflightConversationTurn,
+  type FetchLike,
+  type ModelRateRow,
+  type OpenRouterRoutingPolicy,
 } from '@ember/model-gateway';
 import { buildConversationTurnMessages } from '../../packages/model-gateway/src/providers/shared.js';
 import {
@@ -161,6 +168,109 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
     });
     expect(memoryPreflight.inputChars).toBeGreaterThan(basePreflight.inputChars);
     expect(memoryPreflight.inputTokens).toBeGreaterThan(basePreflight.inputTokens);
+  });
+
+  it('serializes personalMemories as a leading user context message on OpenAI, OpenRouter, and Fake gateways without mutating system role', async () => {
+    const capturedBodies: Array<{
+      readonly messages: readonly { role: string; content: string }[];
+    }> = [];
+    const stubFetch: FetchLike = (_url, init) => {
+      const parsedBody = JSON.parse(String(init.body)) as {
+        readonly model: string;
+        readonly messages: readonly { role: string; content: string }[];
+      };
+      capturedBodies.push(parsedBody);
+      const payload = {
+        model: parsedBody.model,
+        choices: [
+          {
+            message: { role: 'assistant', content: '- Item 1\n- Item 2' },
+            finish_reason: 'stop',
+          },
+        ],
+        usage: { prompt_tokens: 42, completion_tokens: 12 },
+      };
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(payload),
+        text: () => Promise.resolve(JSON.stringify(payload)),
+      });
+    };
+
+    const openaiRate: ModelRateRow = Object.freeze({
+      providerId: 'openai' as const,
+      modelId: 'gpt-5.6-luna',
+      inputMicroUsdPerMillion: 200_000,
+      outputMicroUsdPerMillion: 1_200_000,
+      rateVersion: 'test-personal-memory-rate-v1',
+      provenance: 'official_price_verified' as const,
+      source: 'test fixture',
+    });
+    const openrouterRate = MODEL_RATE_ROWS.find((row) => row.providerId === 'openrouter')!;
+    const openrouterRouting: OpenRouterRoutingPolicy = Object.freeze({
+      only: Object.freeze(['deepinfra']),
+      allowFallbacks: false,
+      dataCollection: 'deny',
+      zdr: true,
+      requireParameters: true,
+    });
+
+    const openai = new OpenAiModelGateway({
+      apiKey: 'sk-test-abcdefghijklmnopqrstuvwxyz012345',
+      modelId: openaiRate.modelId,
+      rate: openaiRate,
+      isAuthorized: () => true,
+      fetchImpl: stubFetch,
+    });
+    const openrouter = new OpenRouterModelGateway({
+      apiKey: 'sk-or-v1-test-abcdefghijklmnopqrstuvwxyz012345',
+      modelId: openrouterRate.modelId,
+      rate: openrouterRate,
+      routing: openrouterRouting,
+      isAuthorized: () => true,
+      fetchImpl: stubFetch,
+    });
+
+    const personalMemories = [
+      { kind: 'preference' as const, key: 'response_style', content: 'Always use bullet points' },
+    ];
+    const baseInput = {
+      conversationId: randomUUID(),
+      turnId: randomUUID(),
+      context: [{ role: 'user' as const, text: 'Summarize my day' }],
+      maxOutputTokens: 256,
+    };
+
+    const controller = new AbortController();
+    await openai.generateConversationTurn({ ...baseInput, personalMemories }, controller.signal);
+    await openrouter.generateConversationTurn(
+      { ...baseInput, personalMemories },
+      controller.signal,
+    );
+    await openai.generateConversationTurn(baseInput, controller.signal);
+
+    expect(capturedBodies).toHaveLength(3);
+    for (const wire of [capturedBodies[0]!, capturedBodies[1]!]) {
+      expect(wire.messages).toHaveLength(3);
+      expect(wire.messages[0]).toEqual({ role: 'system', content: CONVERSATION_SYSTEM_PROMPT });
+      expect(wire.messages[1]?.role).toBe('user');
+      expect(wire.messages[1]?.content).toContain(PERSONAL_MEMORY_CONTEXT_HEADER);
+      expect(wire.messages[1]?.content).toContain('Always use bullet points');
+      expect(wire.messages[2]).toEqual({ role: 'user', content: 'Summarize my day' });
+    }
+    expect(capturedBodies[2]?.messages).toEqual([
+      { role: 'system', content: CONVERSATION_SYSTEM_PROMPT },
+      { role: 'user', content: 'Summarize my day' },
+    ]);
+
+    const fake = new FakeModelGateway();
+    const fakeWithout = await fake.generateConversationTurn(baseInput, controller.signal);
+    const fakeWith = await fake.generateConversationTurn(
+      { ...baseInput, personalMemories },
+      controller.signal,
+    );
+    expect(fakeWith.usage!.inputTokens).toBeGreaterThan(fakeWithout.usage!.inputTokens);
   });
 });
 

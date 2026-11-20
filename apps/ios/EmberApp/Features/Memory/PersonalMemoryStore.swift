@@ -10,6 +10,7 @@ final class PersonalMemoryStore {
     private(set) var limits: PersonalMemoryLimitsDTO = .default
     private(set) var isLoading = false
     private(set) var isSaving = false
+    private(set) var updatingIDs: Set<UUID> = []
     private(set) var deletingIDs: Set<UUID> = []
     private(set) var isEndpointUnavailable = false
     private(set) var errorMessage: String?
@@ -99,6 +100,42 @@ final class PersonalMemoryStore {
         }
     }
 
+    @discardableResult
+    func update(id: UUID, kind: PersonalMemoryKind, content: String) async -> Bool {
+        guard let repository, !updatingIDs.contains(id) else { return false }
+        let trimmed = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed.count <= limits.maxContentChars else {
+            errorMessage = String(localized: "memory.error.invalid_input", table: "Conversation")
+            return false
+        }
+
+        let startGeneration = generation
+        updatingIDs.insert(id)
+        errorMessage = nil
+        defer {
+            if generation == startGeneration {
+                updatingIDs.remove(id)
+            }
+        }
+
+        do {
+            let result = try await repository.updateMemory(
+                id: id,
+                UpdatePersonalMemoryRequestDTO(kind: kind, content: trimmed)
+            )
+            guard generation == startGeneration else { return false }
+            upsertLocalItem(result.item)
+            errorMessage = nil
+            return true
+        } catch is CancellationError {
+            return false
+        } catch {
+            guard generation == startGeneration else { return false }
+            errorMessage = Self.localizedMessage(for: error)
+            return false
+        }
+    }
+
     func delete(id: UUID) async {
         guard let repository, !deletingIDs.contains(id) else { return }
         let startGeneration = generation
@@ -131,6 +168,7 @@ final class PersonalMemoryStore {
         limits = .default
         isLoading = false
         isSaving = false
+        updatingIDs.removeAll()
         deletingIDs.removeAll()
         isEndpointUnavailable = false
         errorMessage = nil

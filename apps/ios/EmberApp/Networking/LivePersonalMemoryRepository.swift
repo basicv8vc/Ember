@@ -45,6 +45,29 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
         return try decode(PersonalMemorySaveResultDTO.self, from: response.data)
     }
 
+    func updateMemory(
+        id: UUID,
+        _ request: UpdatePersonalMemoryRequestDTO
+    ) async throws -> PersonalMemoryUpdateResultDTO {
+        let bodyData: Data
+        do {
+            bodyData = try JSONEncoder().encode(request)
+        } catch {
+            throw PersonalMemoryRepositoryError.invalidInput
+        }
+
+        let response = try await sendRequest(
+            method: "PATCH",
+            pathComponents: ["v2", "memories", id.uuidString.lowercased()],
+            idempotency: .nonIdempotent(clientSubmissionID: nil),
+            body: bodyData
+        )
+        guard response.statusCode == 200 else {
+            throw Self.mapStatusError(response.statusCode, data: response.data)
+        }
+        return try decode(PersonalMemoryUpdateResultDTO.self, from: response.data)
+    }
+
     func deleteMemory(id: UUID) async throws -> PersonalMemoryDeleteResultDTO {
         let response = try await sendRequest(
             method: "DELETE",
@@ -194,6 +217,37 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
         )
         items.insert(created, at: 0)
         return PersonalMemorySaveResultDTO(item: created, created: true)
+    }
+
+    func updateMemory(
+        id: UUID,
+        _ request: UpdatePersonalMemoryRequestDTO
+    ) async throws -> PersonalMemoryUpdateResultDTO {
+        guard let index = items.firstIndex(where: { $0.memoryID == id }) else {
+            throw PersonalMemoryRepositoryError.notFound
+        }
+        let existing = items[index]
+        let nextContent: String
+        if let rawContent = request.content {
+            let trimmed = rawContent.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty, trimmed.count <= limits.maxContentChars else {
+                throw PersonalMemoryRepositoryError.invalidInput
+            }
+            nextContent = trimmed
+        } else {
+            nextContent = existing.content
+        }
+        let updated = PersonalMemoryItemDTO(
+            memoryID: existing.memoryID,
+            kind: request.kind ?? existing.kind,
+            key: existing.key,
+            content: nextContent,
+            provenance: existing.provenance,
+            createdAt: existing.createdAt,
+            updatedAt: Date().ISO8601Format()
+        )
+        items[index] = updated
+        return PersonalMemoryUpdateResultDTO(item: updated)
     }
 
     func deleteMemory(id: UUID) async throws -> PersonalMemoryDeleteResultDTO {

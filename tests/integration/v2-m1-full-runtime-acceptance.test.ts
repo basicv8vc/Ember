@@ -1240,6 +1240,49 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
     },
   );
 
+  it('D8 Defect #7: interactive SSE completes beyond the eight-message context bound', async () => {
+    const harness = await bootHarness();
+    const tenant = await createTenantSession(harness);
+    harness.fakeGateway.setDefaultRule({
+      mode: 'fast_ok',
+      replyText: 'Multi-turn response',
+      costMicroUsd: 120,
+    });
+    for (let i = 0; i < 6; i += 1) {
+      const res = await harness.fetch(
+        `/v2/conversations/${tenant.conversationId}/messages/stream`,
+        {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${tenant.accessToken}`,
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            client_submission_id: randomUUID(),
+            text: `Multi-turn request ${i + 1}`,
+            transcript_epoch: 0,
+          }),
+        },
+      );
+      expect(res.status).toBe(201);
+      const body = await res.text();
+      const frames = parseSseFrames(body);
+      expect(frames.some((f) => f.event === 'turn.delta')).toBe(true);
+      const receipt = B1SendMessageReceiptSchema.parse(
+        frames.find((f) => f.event === 'turn.accepted')!.data,
+      );
+      await waitFor(async () => {
+        const snap = await inspectAgent(harness, tenant);
+        const turn = snap.turns.find((r) => r.id === receipt.turn.turn_id);
+        return turn?.status === 'completed' ? snap : null;
+      });
+    }
+    const final = await inspectAgent(harness, tenant);
+    expect(final.messages.filter((m) => m.kind === 'ember')).toHaveLength(6);
+    expect(final.messages.filter((m) => m.kind === 'user')).toHaveLength(6);
+    expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(6);
+  });
+
   // ==========================================================================
   // Category 5: Long-Reasoning Handoff & Fencing (F-12, F-21, FI-13, FI-14)
   // ==========================================================================

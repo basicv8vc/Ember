@@ -363,7 +363,6 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         requiredDiscoveryMs,
         nowMs,
       );
-      const context = readRecentTurnContextSync(this.deps.storage.sql, req.conversationId);
 
       return {
         kind: 'proceed' as const,
@@ -372,7 +371,6 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         operationId: this.newId(),
         requiredDiscoveryMs,
         coveragePlan,
-        context,
       };
     });
 
@@ -775,15 +773,15 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           utcDay: stage1.utcDay,
           reservedMicroUsd: req.modelReservation?.estimatedMicroUsd ?? 0,
           globalGrantId,
-          context: [
-            ...stage1.context,
-            {
-              sequence,
-              kind: 'user' as const,
-              text: req.request.text,
-              ...(attachmentsMeta.length > 0 ? { attachments: attachmentsMeta } : {}),
-            },
-          ],
+          // Read the bounded context through the committed source message, just
+          // like durable claims. This includes the source within the limit and
+          // avoids a stale pre-reservation snapshot during concurrent admissions.
+          context: readRecentTurnContextSync(
+            this.deps.storage.sql,
+            req.conversationId,
+            undefined,
+            sequence,
+          ),
           attachments: attachmentsMeta,
         },
       };

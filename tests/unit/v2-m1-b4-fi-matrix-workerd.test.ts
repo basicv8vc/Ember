@@ -625,7 +625,11 @@ export class TestAgentHeadDO extends DurableObject {
               operationId: row.operation_id,
               entityKind: row.entity_kind,
               entityId: row.entity_id,
+              attemptNo: 1,
+              sendState: row.send_started_at_ms === null ? 'unsent' : 'sent',
+              sendAuthorizingAtMs: row.send_started_at_ms,
               sendStartedAtMs: row.send_started_at_ms,
+              deadlineAtMs: row.deadline_at_ms,
               providerJobHandle: row.provider_job_handle,
             }),
           };

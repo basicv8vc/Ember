@@ -12,6 +12,8 @@ import {
   type AuthoritativeBusinessPort,
   type DurableObjectStorageLike,
   type DurableProviderExecutorPort,
+  type MarkAttemptSentRequest,
+  type MarkAttemptSentResult,
   type SqlStorageCursorLike,
   type SqlStorageRow,
 } from '@ember/runtime-v2';
@@ -103,7 +105,11 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
         operationId: 'op-handoff-1',
         entityKind: 'turn',
         entityId: 'turn-1',
+        attemptNo: 1,
+        sendState: 'sent',
+        sendAuthorizingAtMs: 9_000,
         sendStartedAtMs: 10_000,
+        deadlineAtMs: 60_000,
         providerJobHandle: 'prov-job-99',
         interactiveHandoff: true,
       },
@@ -120,7 +126,11 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
         operationId: 'op-uncertain-2',
         entityKind: 'turn',
         entityId: 'turn-2',
+        attemptNo: 1,
+        sendState: 'sent',
+        sendAuthorizingAtMs: 11_000,
         sendStartedAtMs: 12_000,
+        deadlineAtMs: 60_000,
         providerJobHandle: null,
       },
       provider,
@@ -135,17 +145,74 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
     expect(startCalls).toBe(0);
 
     // 3. Clean unsent claim -> starts provider job once
-    const fresh = await executeRecoveredOrFreshDurableWork({
-      context: {
-        operationId: 'op-fresh-3',
-        entityKind: 'task',
-        entityId: 'task-3',
-        sendStartedAtMs: null,
-        providerJobHandle: null,
+    const context = {
+      operationId: 'op-fresh-3',
+      entityKind: 'task' as const,
+      entityId: 'task-3',
+      attemptNo: 1,
+      sendState: 'unsent' as const,
+      sendAuthorizingAtMs: null,
+      sendStartedAtMs: null,
+      providerJobHandle: null,
+      deadlineAtMs: 60_000,
+    };
+    let authorizationCalls = 0;
+    const sendGate = {
+      scope: { tenantId: 't1', agentId: 'a1' },
+      leaseEpoch: 3,
+      leaseOwner: 'worker-1',
+      leaseExpiresAtMs: 50_000,
+      markAttemptSent: async (req: MarkAttemptSentRequest): Promise<MarkAttemptSentResult> => {
+        await Promise.resolve();
+        expect(req).toMatchObject({
+          operationId: context.operationId,
+          subjectId: context.entityId,
+          attemptNo: 1,
+          leaseEpoch: 3,
+          leaseOwner: 'worker-1',
+        });
+        authorizationCalls += 1;
+        return authorizationCalls === 1
+          ? { authorized: true, sentAtMs: 15_000, startBeforeMs: 20_000 }
+          : { authorized: false, reason: 'already_sent' };
       },
+    };
+    const fresh = await executeRecoveredOrFreshDurableWork({
+      context,
       provider,
+      sendGate,
+      nowMs: () => 15_000,
     });
     expect(fresh.status).toBe('succeeded');
+    expect(startCalls).toBe(1);
+
+    const duplicate = await executeRecoveredOrFreshDurableWork({
+      context,
+      provider,
+      sendGate,
+      nowMs: () => 15_000,
+    });
+    expect(duplicate.status).toBe('unknown_billed');
+    const unknown = await executeRecoveredOrFreshDurableWork({
+      context: { ...context, sendState: 'authorizing_unknown', sendAuthorizingAtMs: 14_000 },
+      provider,
+      sendGate,
+    });
+    expect(unknown.status).toBe('unknown_billed');
+    expect(authorizationCalls).toBe(2);
+    await expect(executeRecoveredOrFreshDurableWork({ context, provider })).rejects.toThrow(
+      'Authoritative durable send gate required',
+    );
+    const lostAck = await executeRecoveredOrFreshDurableWork({
+      context,
+      provider,
+      nowMs: () => 15_000,
+      sendGate: {
+        ...sendGate,
+        markAttemptSent: () => Promise.reject(new Error('lost ACK')),
+      },
+    });
+    expect(lostAck.status).toBe('unknown_billed');
     expect(startCalls).toBe(1);
   });
 
@@ -279,13 +346,20 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
       contextJson: JSON.stringify({
         turnId: 'turn-a-1',
         conversationId: 'conv-1',
+        entityKind: 'turn',
+        entityId: 'turn-a-1',
+        operationId: 'op-a-1',
+        attemptNo: 1,
+        sendState: 'sent',
+        sendStartedAtMs: 10_000,
+        sendAuthorizingAtMs: 9_000,
         providerJobHandle: 'handle-a-1',
         deadlineAtMs: 120_000,
         context: [{ role: 'user', text: 'hi' }],
       }),
     });
     expect(turnClaimCtx).toMatchObject({
-      operationId: 'turn:turn-a-1:epoch:3',
+      operationId: 'op-a-1',
       entityKind: 'turn',
       entityId: 'turn-a-1',
       providerJobHandle: 'handle-a-1',
@@ -293,6 +367,7 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
 
     const mappedTurn = toAgentHeadDurableCommitOutcome({
       targetKind: 'turn',
+      context: turnClaimCtx,
       outcome: {
         status: 'succeeded',
         operationId: turnClaimCtx.operationId,
@@ -305,11 +380,29 @@ describe('V2-M1-B4 Durable Execution Integration & Handoff Guards', () => {
       simulated: true,
     });
     expect(mappedTurn).toEqual({
+      attemptNo: 1,
+      operationId: 'op-a-1',
+      settlement: {
+        state: 'settled',
+        outcomeCode: 'ok',
+        observedCostMicroUsd: 50,
+        inputTokens: 10,
+        outputTokens: 5,
+      },
       status: 'completed',
       text: 'Hello from Fake Provider',
       modelLabel: 'fake-model',
       simulated: true,
     });
+
+    expect(() =>
+      parseClaimExecutionContext({
+        targetKind: 'turn',
+        targetId: 'turn-a-1',
+        leaseEpoch: 3,
+        contextJson: JSON.stringify({ turnId: 'turn-a-1' }),
+      }),
+    ).toThrow('Invalid authoritative durable claim context');
 
     const hooks = facade.asTurnRecoveryHooks({
       globalBudget: {

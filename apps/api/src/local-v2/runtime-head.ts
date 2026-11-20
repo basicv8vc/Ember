@@ -37,6 +37,10 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
   readonly EMBER_ENV: string;
   readonly EMBER_MODEL_MODE: string;
   readonly EMBER_V2_ISOLATED_HARNESS: string;
+  readonly EMBER_V2_DURABLE_TURN_QUEUE_NAME?: string;
+  readonly EMBER_V2_DURABLE_TURN_DLQ_NAME?: string;
+  readonly EMBER_V2_AGENT_TASK_QUEUE_NAME?: string;
+  readonly EMBER_V2_AGENT_TASK_DLQ_NAME?: string;
 }
 
 type LocalEdgeRpc = EdgeAgentHeadRpc & DeviceExecutionRpc;

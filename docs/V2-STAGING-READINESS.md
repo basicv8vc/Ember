@@ -79,9 +79,9 @@ pnpm run test:unit -- tests/unit/v2-staging-preflight.test.ts
 
 `wrangler.v2-staging.jsonc` currently bundles `apps/api/src/local-v2/runtime-worker.ts` cleanly in `--dry-run`, and **intentionally fails closed** if deployed as-is. Before live deployment (after approval), these small code slices must land:
 
-1. **Health & Readiness probes (`/healthz`, `/readyz`):** Add liveness and `D1_RECOVERY` readiness probes to the V2 edge worker so deploy verification can gate rollouts and auto-rollback on failure (matching V1 `verifyApi()`).
-2. **Staging-safe host/auth guard:** Replace `localOnly` loopback enforcement and `dev` auth with an approved staging hostname check and Apple Sign In (or approved isolated staging auth), while keeping `EMBER_MODEL_MODE="fake"` fail-closed.
-3. **Configurable queue names in `runtime-worker.ts`:** Dispatch `ember-v2-staging-durable-turn` / `ember-v2-staging-agent-task` (and DLQs) instead of hardcoded local queue names.
+1. **Health & Readiness probes (`/healthz`, `/readyz`):** ✅ Implemented on V2 edge/runtime worker (`GET /healthz`, `GET /readyz` probing `D1_RECOVERY` via `SELECT 1`).
+2. **Staging-safe host/auth guard:** Replace `localOnly` loopback enforcement and `dev` auth with an approved staging hostname check and Apple Sign In (or approved isolated staging auth), while keeping `EMBER_MODEL_MODE="fake"` fail-closed. (Held until staging hostname/auth approval.)
+3. **Configurable queue names in `runtime-worker.ts`:** ✅ Implemented via `resolveV2QueueTarget` and `EMBER_V2_*_QUEUE_NAME` env vars in `wrangler.v2-staging.jsonc`.
 
 ---
 

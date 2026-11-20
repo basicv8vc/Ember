@@ -21,6 +21,9 @@ export type CrashHookPoint =
   | 'after_mark_sent_before_provider_fetch'
   | 'after_do_commit_before_queue_send'
   | 'after_queue_send_before_outbox_update'
+  | 'after_claim_before_send'
+  | 'after_claim_before_commit'
+  | 'after_commit_before_queue_ack'
   | 'alarm_exhaust_6_retries';
 
 export type ForgedEnvelopePreset =

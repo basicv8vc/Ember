@@ -17,6 +17,7 @@ const VALID_V2_SUITES = new Set<V2BenchmarkSuiteName>([
   'model-routing',
   'm1-harness-smoke',
   'm1-cost-reestimate',
+  'm1-full-runtime',
   'all',
 ]);
 
@@ -44,7 +45,7 @@ Suite Selection:
   --suite <name>            Run a V2-M0-D or V2-M1-D suite instead of legacy load benchmark:
                             v1-baseline | sqlite-probe | timing | rtt-sim |
                             cost-model | model-routing | m1-harness-smoke |
-                            m1-cost-reestimate | all
+                            m1-cost-reestimate | m1-full-runtime | all
 
 V1 Task Load Options (default mode):
   --agents <n>              Number of persistent logical agents to create (default: 1000)

@@ -148,7 +148,7 @@ describe('M1-A6 real workerd persistent pre-v4 -> v4 & GlobalBudgetDO upgrade, r
       await harness.getWorker().evictDurableObject('AGENT_HEAD', { name: 'upgrade-agent-1' });
       await harness.getWorker().evictDurableObject('GLOBAL_BUDGET', { name: 'global' });
 
-      // Phase 3: Retry real v4 + GlobalBudgetDO WITHOUT ROWID upgrade on persisted DBs!
+      // Phase 3: Retry real v4 -> current (v8) + GlobalBudgetDO WITHOUT ROWID upgrade on persisted DBs!
       const agentUp = (await (
         await harness.fetch('/agent/run?mode=upgrade_v4', { method: 'POST' })
       ).json()) as {
@@ -187,7 +187,7 @@ describe('M1-A6 real workerd persistent pre-v4 -> v4 & GlobalBudgetDO upgrade, r
       };
       expect(agentUp).toMatchObject({
         ok: true,
-        appliedVersions: [5],
+        appliedVersions: [5, 6, 7, 8],
         alreadyAppliedVersions: [1, 2, 3, 4],
         replayAppliedVersions: [],
         hasDupMsgIndex: false,

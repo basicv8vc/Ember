@@ -29,6 +29,7 @@ import {
   respondWithDomainError,
   toInternalErrorResponse,
 } from '../http/error-mapping.js';
+import type { ReadinessCheck } from '../readiness.js';
 import { createB1TurnRoutes } from '../turns/turn-routes.js';
 import { createDeviceRoutes } from './device-routes.js';
 import {
@@ -65,6 +66,10 @@ export interface ResolvedAgentHead {
 export interface LocalV2EdgeDependencies {
   /** Host supplies V1 session ports and an agent-head-backed B1 /me projection. */
   readonly sessions: B1SessionRuntime;
+  /** Optional readiness probe for GET /readyz (e.g. D1_RECOVERY SELECT 1). */
+  readonly readiness?: ReadinessCheck;
+  /** Optional clock seam for deterministic health timestamps in tests. */
+  readonly now?: () => Date;
   /** Resolve the canonical head from verified identity; request path IDs never select a head. */
   resolveAgentHead(auth: AuthContext): Promise<ResolvedAgentHead | null>;
   /** Read already-authorized local staged metadata, including attachments on accepted replays. */
@@ -183,6 +188,35 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
           ? respondWithDomainError(c, error)
           : c.json(toInternalErrorResponse(requestIdOf(c)), 500),
       );
+
+      const now = deps.now ?? (() => new Date());
+      app.get('/healthz', (c) =>
+        c.json(
+          {
+            status: 'ok',
+            service: 'ember-v2-edge',
+            checkedAt: now().toISOString(),
+          },
+          200,
+        ),
+      );
+      app.get('/readyz', async (c) => {
+        const result =
+          deps.readiness === undefined
+            ? {
+                status: 'unavailable' as const,
+                checks: { d1_recovery: { status: 'not_configured' as const } },
+              }
+            : await deps.readiness();
+        return c.json(
+          {
+            status: result.status,
+            checks: result.checks,
+            checkedAt: now().toISOString(),
+          },
+          result.status === 'ready' ? 200 : 503,
+        );
+      });
 
       app.route('/v1', createB1SessionRoutes({ runtime: { ...deps.sessions, service: sessions } }));
       app.route(

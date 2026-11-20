@@ -13,6 +13,10 @@
     "EMBER_ENV": "v2-staging",
     "EMBER_MODEL_MODE": "fake",
     "EMBER_V2_STAGING_ISOLATED": "true",
+    "EMBER_V2_DURABLE_TURN_QUEUE_NAME": "ember-v2-staging-durable-turn",
+    "EMBER_V2_DURABLE_TURN_DLQ_NAME": "ember-v2-staging-durable-turn-dlq",
+    "EMBER_V2_AGENT_TASK_QUEUE_NAME": "ember-v2-staging-agent-task",
+    "EMBER_V2_AGENT_TASK_DLQ_NAME": "ember-v2-staging-agent-task-dlq",
   },
   "durable_objects": {
     "bindings": [

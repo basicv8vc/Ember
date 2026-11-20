@@ -7,6 +7,7 @@ import {
   type QueueMessageLike,
 } from '@ember/runtime-v2';
 import { createLocalV2EdgeWorker } from './edge-worker.js';
+import { createD1RecoveryReadiness, resolveV2QueueTarget } from './runtime-config.js';
 import { createDurableExecutor } from './runtime-durable.js';
 import { createEdgeRpc, getHead, type LocalRuntimeEnv } from './runtime-head.js';
 import { createLocalSessions } from './runtime-session.js';
@@ -31,6 +32,7 @@ export default {
     const sessions = createLocalSessions(env);
     return createLocalV2EdgeWorker({
       sessions,
+      readiness: createD1RecoveryReadiness(env.D1_RECOVERY),
       async resolveAgentHead(auth) {
         const me = await sessions.me.getMeForTenant(auth.tenantId);
         if (me === null) return null;
@@ -56,29 +58,26 @@ export default {
     const gateway = localGateway(env);
     const resolve = (tenantId: string, agentId: string) => getHead(env, tenantId, agentId);
     const router = { getAgentHeadRecoveryPort: resolve, getDeadLetterPort: resolve };
-    switch (batch.queue) {
-      case 'durable_turn':
-      case 'agent_task':
-        await handleDurableQueueBatch({
-          queueName: batch.queue,
-          messages: batch.messages,
-          router,
-          workerId: crypto.randomUUID(),
-          executor: createDurableExecutor(env, gateway),
-        });
-        break;
-      case 'durable_turn_dlq':
-      case 'agent_task_dlq':
-        await handleDurableDeadLetterBatch({
-          expectedQueueName: batch.queue === 'durable_turn_dlq' ? 'durable_turn' : 'agent_task',
-          messages: batch.messages,
-          router,
-          nowMs: Date.now,
-        });
-        break;
-      default:
-        throw new Error('Unexpected local V2 queue');
+    const target = resolveV2QueueTarget(batch.queue, env);
+    if (target === null) {
+      throw new Error('Unexpected local V2 queue');
     }
+    if (target.kind === 'primary') {
+      await handleDurableQueueBatch({
+        queueName: target.logicalQueue,
+        messages: batch.messages,
+        router,
+        workerId: crypto.randomUUID(),
+        executor: createDurableExecutor(env, gateway),
+      });
+      return;
+    }
+    await handleDurableDeadLetterBatch({
+      expectedQueueName: target.expectedQueueName,
+      messages: batch.messages,
+      router,
+      nowMs: Date.now,
+    });
   },
 
   async scheduled(_event: unknown, env: LocalRuntimeEnv) {

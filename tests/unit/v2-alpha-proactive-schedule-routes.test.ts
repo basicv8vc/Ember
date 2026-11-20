@@ -15,6 +15,7 @@ import {
 import {
   MAX_BRIEF_ACTIVE_SCHEDULES,
   MAX_BRIEF_ITEM_CHARS,
+  MAX_BRIEF_PERSONAL_MEMORIES,
   MAX_BRIEF_PROMPT_CHARS,
   MAX_BRIEF_RECENT_MESSAGES,
   buildProactiveBriefPrompt,
@@ -204,6 +205,24 @@ describe('Agent E — proactive brief context builder', () => {
       }),
     );
     expect(unreachable).toEqual([]);
+  });
+
+  it('includes bounded user preferences & facts from personal memory', () => {
+    const memories = Array.from({ length: MAX_BRIEF_PERSONAL_MEMORIES + 3 }, (_, idx) => ({
+      kind: idx % 2 === 0 ? ('preference' as const) : ('fact' as const),
+      ...(idx === 0 ? { key: 'brief.style' } : {}),
+      content: `Preference ${idx}: ${'p'.repeat(MAX_BRIEF_ITEM_CHARS + 30)}`,
+    }));
+
+    const prompt = buildProactiveBriefPrompt(basePayload, {
+      personalMemories: memories,
+    });
+
+    expect(prompt).toContain('User preferences & facts:');
+    expect(prompt).toContain('[preference:brief.style] Preference 0:');
+    expect(prompt).toContain(`Preference ${MAX_BRIEF_PERSONAL_MEMORIES - 1}:`);
+    expect(prompt).not.toContain(`Preference ${MAX_BRIEF_PERSONAL_MEMORIES}:`);
+    expect(prompt.length).toBeLessThanOrEqual(MAX_BRIEF_PROMPT_CHARS);
   });
 });
 

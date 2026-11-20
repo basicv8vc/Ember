@@ -1,7 +1,12 @@
-import type { ProactiveScheduleSnapshot, ProactiveScheduleTaskPayload } from '@ember/runtime-v2';
+import type {
+  PersonalMemoryContextItem,
+  ProactiveScheduleSnapshot,
+  ProactiveScheduleTaskPayload,
+} from '@ember/runtime-v2';
 
 export const MAX_BRIEF_RECENT_MESSAGES = 8;
 export const MAX_BRIEF_ACTIVE_SCHEDULES = 6;
+export const MAX_BRIEF_PERSONAL_MEMORIES = 6;
 export const MAX_BRIEF_ITEM_CHARS = 240;
 export const MAX_BRIEF_PROMPT_CHARS = 3_600;
 export const BRIEF_MESSAGE_PAGE_SIZE = 50;
@@ -109,6 +114,7 @@ export async function loadRecentBriefMessages(
 export interface ProactiveBriefContext {
   readonly recentMessages?: readonly BriefContextMessage[];
   readonly activeSchedules?: readonly ProactiveScheduleSnapshot[];
+  readonly personalMemories?: readonly PersonalMemoryContextItem[];
 }
 
 function truncateLine(text: string, maxChars: number): string {
@@ -119,8 +125,9 @@ function truncateLine(text: string, maxChars: number): string {
 
 /**
  * Builds a bounded prompt for `model_brief` proactive schedule execution.
- * Combines the schedule instruction with optional active schedules and recent conversation turns
- * while strictly clamping total output length so model token budgets remain predictable.
+ * Combines the schedule instruction with optional personal memories, active schedules,
+ * and recent conversation turns while strictly clamping total output length so model
+ * token budgets remain predictable.
  */
 export function buildProactiveBriefPrompt(
   proactive: ProactiveScheduleTaskPayload,
@@ -129,6 +136,21 @@ export function buildProactiveBriefPrompt(
   const sections: string[] = [
     `[Proactive ${proactive.kind} | ${proactive.title} | ${proactive.timezone}]\n${proactive.prompt.trim()}`,
   ];
+
+  const memories = (context?.personalMemories ?? [])
+    .map((m) => ({
+      kind: m.kind,
+      key: m.key,
+      content: truncateLine(m.content, MAX_BRIEF_ITEM_CHARS),
+    }))
+    .filter((m) => m.content.length > 0)
+    .slice(0, MAX_BRIEF_PERSONAL_MEMORIES);
+  if (memories.length > 0) {
+    const lines = memories.map((m) =>
+      m.key !== undefined ? `- [${m.kind}:${m.key}] ${m.content}` : `- [${m.kind}] ${m.content}`,
+    );
+    sections.push(`User preferences & facts:\n${lines.join('\n')}`);
+  }
 
   const activeOthers = (context?.activeSchedules ?? [])
     .filter((s) => s.status === 'active' && s.scheduleId !== proactive.scheduleId)

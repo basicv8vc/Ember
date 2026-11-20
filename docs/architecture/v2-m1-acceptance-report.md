@@ -1,13 +1,13 @@
 # Ember V2-M1 — Runtime Integration & Acceptance Report
 
-- **Status:** **M1-D8 FINAL VERIFICATION ON `main @ d3c559c` + PR `#185` (`af93106`): ACCEPTANCE `22/22` PASS (`0` SAFETY VIOLATIONS); LATENCY & COVERED `0` D1 I/O TARGETS PASS; CONDITIONAL / NO-GO FOR `/v2/.../messages/stream` >4 TURNS (NEW DEFECT #7) & `10k/100k` CLOUD COST TARGET (`$412.53–$440.92` VS `$300`, `$4,602.85–$5,303.26` VS `$3,500`)**
-- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6/D7 sections below preserved verbatim)
+- **Status:** **M1-D9 DEFECT #7 CLOSED — FUNCTIONAL, SAFETY, LATENCY & MULTI-TURN SSE ACCEPTANCE: GO (`23/23` ACCEPTANCE TESTS PASS, `0` SAFETY VIOLATIONS, DEFECTS #1–#7 RESOLVED; `10k/100k` DO WRITE COST OPTIMIZATION DEFERRED)**
+- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6/D7/D8 sections below preserved verbatim)
 - **Role:** Performance, Integration & Reliability Engineer (V2-M1-D)
-- **Latest Tested `main` + PR `#185` Baseline:** `main @ d3c559cc107e3d445fe58fb649ee3b407510a2ba` + PR `#185` (`test/v2-m1-full-runtime-acceptance @ af93106e161d83e792c93c03b56cf6aefee364ec`; prior D7 pre-merge `main @ 1131415` + PR `#188 @ f057c3e`, D6 `main @ a537e4f`, D0/D1 `1ba860c`, M0 `6da1b48`)
+- **Latest Tested Baseline:** `main @ 7dc9719` (`#185` merged) + PR `#190` (`fc6dbf0`) + PR `#191` (`ff2235f`) + D9 20+ turn SSE regression (prior D8 `main @ d3c559c`, D7 `main @ 1131415` + `#188`, D6 `main @ a537e4f`, D0/D1 `1ba860c`, M0 `6da1b48`)
 - **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
 
 > [!IMPORTANT]
-> **M1-D8 Final Performance & Cost Verdict (`main @ d3c559c` + PR `#185` @ `af93106`):** Re-benchmarking real local `workerd` ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), [m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)) alongside the already-passed `22/22` acceptance suite (`0` safety violations) confirms: (1) **All ADR-0006 single-stream latency targets PASS** (`Covered ACK P95 = 17.42 ms`, `Runtime Overhead P95 = 25.02 ms`, `GlobalBudget Reserve+Authorize P95 = 11.17 ms`, `Durable Dispatch P95 = 55.85 ms`, `Fake Provider TTFT P95 = 0.61 ms`, `Offline Recovery = 50s detect / 66s recover`); (2) **Covered Path sync D1 I/O is verified at `0` ops (`d1OpsMean = 0`)** when coverage is held active, and drops from `7.92` (D6) to `3.90` D1 rows written/turn on isolated idle-cycling turns; (3) **Two remaining non-safety gaps prevent unconditional GA**: newly discovered **Defect #7** (`prepareTurn` returns `9` context rows on conversations with `>= 8` messages, causing `/v2/conversations/:id/messages/stream` interactive execution to fail with `internal_error` on turn 5+) and **10k/100k Cloud Runtime cost overrun** (`$412.53–$440.92` vs `$300` at 10k; `$4,602.85–$5,303.26` vs `$3,500` at 100k) driven by `57–61` DO `rowsWritten/event` vs ADR-0006's `20`-row assumption. See **§14** for complete D8 measurements and verdict.
+> **M1-D9 Final Acceptance Verdict (Defect #7 Closed):** Integrating PR `#191` (`ff2235f`, Stage 3 bounded context read `readRecentTurnContextSync(..., undefined, sequence)` in [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L779-L784) with `packages/model-gateway/src/context.ts` untouched) closes **Defect #7**: (1) `D8 Defect #7 / D9` passes on real local `workerd` (`82398ms`), verifying **20 consecutive SSE turns** (`40` messages in strict sequence `1..40`), **Turn 21 attachment metadata + ascending 8-row context window (`34..41`)** through unmodified `buildBoundedContext`, and **Turn 22 mid-stream Durable Handoff** (`client_disconnect_handoff`, single poll, `0` duplicates); (2) Re-probing `multiTurnSseContextProbe` at `42` prior messages passes (`HTTP 201, sawDeltaEvent=true, sawCommittedEvent=true, committedStatus="completed"`). Combined with D7 `22/22` acceptance and D8 latency/`0` active-covered D1 I/O verification, **Defects #1–#7 are all resolved and V2-M1 Functional/Safety/Latency is GO** (with `10k/100k` MAU DO SQLite `rowsWritten` cost coalescing tracked outside M1 scope). Historical §0–§14 are preserved below; see **§15** for D9 closure evidence.
 
 ---
 
@@ -458,3 +458,28 @@ Executed via `pnpm bench:local --suite m1-full-runtime --enable-local-load --con
 
 - **Functional, Durability & Safety Core:** **PASS (`22/22` acceptance tests, `0` duplicate provider calls/commits/messages, `0` lost accepted work, `0` budget overcommits, `0` D1 I/O on active covered turns, all ADR-0006 single-stream latency targets met).**
 - **Release Verdict:** **CONDITIONAL / NO-GO FOR UNCONDITIONAL GA** — while V2-M1 durable execution, recovery, and budget safety are verified ready, **Defect #7** breaks `/v2/conversations/:id/messages/stream` interactive SSE after 4 prior turns (`>= 8` messages), and `57–61` DO `rowsWritten/event` exceeds ADR-0006 Cloud Runtime budgets at `10k/100k` MAU (`$412–$441` vs `$300`; `$4,603–$5,303` vs `$3,500`). Fix Defect #7 before shipping multi-turn interactive SSE, and schedule DO SQLite write coalescing if strict `$300 / $3,500` Cloud Runtime targets are enforced for `10k–100k` MAU.
+
+---
+
+## 15. M1-D9 — Multi-turn SSE Defect Closure (Defect #7 Resolved)
+
+### 15.1 Fix Summary (`turn-service.ts` Stage 3 Bounded Read; Model Gateway Validation Unchanged)
+
+- **Code Change (`packages/runtime-v2` only):** Per PR `#191` (`ff2235f`, integrated on `fix/v2-m1-d9-multi-turn-sse-closure`), [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L779-L784) removes the stale Stage 1 `readRecentTurnContextSync` pre-read and reads `readRecentTurnContextSync(this.deps.storage.sql, req.conversationId, undefined, sequence)` inside Stage 3 **after** inserting the current user message (`sequence`) and `message_attachments`.
+- **Invariant Preserved:** `readRecentTurnContextSync` enforces `LIMIT maxContextMessages (8)` through `sequence`, guaranteeing at most `7` prior messages + `1` current user message (`<= 8` total rows) in strictly ascending `sequence` order with attachment metadata attached — identical to `claimDurableWork`.
+- **Model Gateway Validation Unchanged:** [context.ts](../../packages/model-gateway/src/context.ts) (`buildBoundedContext` enforcing `maxContextMessages = 8`, monotonic `sequence`, and trailing `user` row) has **0** modifications (`git diff origin/main -- packages/model-gateway/` is empty).
+
+### 15.2 Real Local `workerd` Regression & `multiTurnSseContextProbe` Re-Verification
+
+- **20+ Continuous SSE Turn + Ordering + Attachments + Durable Handoff Test ([v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) `D8 Defect #7 / D9`) — PASS (`82398ms`):**
+  1. **20 Consecutive SSE Turns (`POST /v2/conversations/:id/messages/stream`):** All 20 turns completed with `HTTP 201`, `turn.accepted`, `turn.delta`, `turn.committed`, `totalCalls === 20`, `40` messages in strict `sequence = 1..40` alternating `user`/`ember`, and every assistant reply echoing its turn's current `Multi-turn request ${i + 1}` prompt.
+  2. **Turn 21 Attachments & Context Window (`40` prior messages -> `sequence = 41`):** `prepareTurn` with `resolvedAttachments` (`d9-evidence.pdf`) returned `8` context rows (`sequence = [34..41]`) ending with the current user message (`sequence = 41`) and preserved attachment metadata, passing unmodified `buildBoundedContext()` (`8` messages) and committing `outcome = 'published'`.
+  3. **Turn 22 Durable Handoff (`>= 42` prior messages):** `slow_handoff` on `/v2/conversations/:id/messages/stream` with mid-stream client disconnect (`AbortController`) handed off cleanly (`handoff_reason = 'client_disconnect_handoff'`), polled job handle once (`jobPollCount = 1`), and committed `Turn 22 durable handoff after 20+ turns` with `totalCalls = 21` (`0` duplicate provider calls).
+- **Targeted `multiTurnSseContextProbe` Re-Verification (`42` prior messages) — PASS:**
+  - Direct `workerd` probe after `21` committed turns (`42` prior messages) followed by `POST /v2/conversations/:id/messages/stream` returned `{"priorMessagesCount":42,"status":201,"sawDeltaEvent":true,"sawCommittedEvent":true,"committedStatus":"completed"}`.
+- **Full Benchmark & Cost Optimization:** Not re-run / not modified per M1-D9 scope (`§14` measurements and `10k/100k` DO write cost variance remain as recorded).
+
+### 15.3 Updated Final M1 Verdict
+
+- **Functional, Durability, Safety, Latency & Multi-Turn SSE Acceptance:** **GO** — Defects `#1–#7` are all verified resolved, `23/23` acceptance tests in [v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) pass (`D7 22/22` + `D8/D9` 20+ turn SSE closure), `0` safety violations, and all ADR-0006 single-stream latency and active-covered `0` D1 I/O targets pass.
+- **Tracked Scale Cost Variance (Non-Functional):** `57–61` DO `rowsWritten/event` exceeds ADR-0006's `20`-row budget at `10k/100k` MAU (`$412.53–$440.92` vs `$300`; `$4,602.85–$5,303.26` vs `$3,500`) and is tracked for post-M1 DO SQLite write coalescing.

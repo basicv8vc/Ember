@@ -8,6 +8,7 @@ import {
   B1SessionResponseSchema,
   type B1SendMessageReceipt,
 } from '@ember/contracts';
+import { buildBoundedContext, type ContextRow } from '@ember/model-gateway';
 import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import {
   DST_TRANSITION_FIXTURES,
@@ -1240,16 +1241,194 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
     },
   );
 
-  it('D8 Defect #7: interactive SSE completes beyond the eight-message context bound', async () => {
-    const harness = await bootHarness();
-    const tenant = await createTenantSession(harness);
-    harness.fakeGateway.setDefaultRule({
-      mode: 'fast_ok',
-      replyText: 'Multi-turn response',
-      costMicroUsd: 120,
-    });
-    for (let i = 0; i < 6; i += 1) {
-      const res = await harness.fetch(
+  it(
+    'D8 Defect #7 / D9: 20+ consecutive SSE turns preserve context ordering, current message, attachments, and durable handoff',
+    { timeout: 145_000 },
+    async () => {
+      const harness = await bootHarness();
+      const tenant = await createTenantSession(harness);
+      // Omit replyText so FakeModelGatewayServer echoes promptText = context.at(-1).text
+      harness.fakeGateway.setDefaultRule({
+        mode: 'fast_ok',
+        costMicroUsd: 120,
+      });
+
+      // 1. 20 consecutive interactive SSE turns on the same conversation (40 messages > 8-row context bound)
+      for (let i = 0; i < 20; i += 1) {
+        const promptText = `Multi-turn request ${i + 1}`;
+        const res = await harness.fetch(
+          `/v2/conversations/${tenant.conversationId}/messages/stream`,
+          {
+            method: 'POST',
+            headers: {
+              authorization: `Bearer ${tenant.accessToken}`,
+              'content-type': 'application/json',
+            },
+            body: JSON.stringify({
+              client_submission_id: randomUUID(),
+              text: promptText,
+              transcript_epoch: 0,
+            }),
+          },
+        );
+        expect(res.status).toBe(201);
+        const body = await res.text();
+        const frames = parseSseFrames(body);
+        expect(frames.some((f) => f.event === 'turn.delta')).toBe(true);
+        const committed = frames.find((f) => f.event === 'turn.committed');
+        expect(committed).toBeDefined();
+        const receipt = B1SendMessageReceiptSchema.parse(
+          frames.find((f) => f.event === 'turn.accepted')!.data,
+        );
+        const settled = await waitFor(async () => {
+          const snap = await inspectAgent(harness, tenant);
+          const turn = snap.turns.find((r) => r.id === receipt.turn.turn_id);
+          return turn?.status === 'completed' ? snap : null;
+        });
+        const assistantMsg = settled.messages.find(
+          (m) => m.sequence === receipt.message.sequence + 1 && m.kind === 'ember',
+        );
+        expect(assistantMsg?.text).toContain(promptText);
+      }
+
+      const after20 = await inspectAgent(harness, tenant);
+      expect(after20.messages).toHaveLength(40);
+      expect(after20.messages.filter((m) => m.kind === 'user')).toHaveLength(20);
+      expect(after20.messages.filter((m) => m.kind === 'ember')).toHaveLength(20);
+      expect(after20.messages.map((m) => m.sequence)).toEqual(
+        Array.from({ length: 40 }, (_, idx) => idx + 1),
+      );
+      expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(20);
+
+      // 2. Turn 21 with attachment metadata on the >40-message conversation:
+      //    verify Stage 3 context keeps 8 rows in ascending sequence (34..41), includes current message & attachments,
+      //    and passes unmodified buildBoundedContext() without exceeding maxContextMessages (8).
+      const attId = randomUUID();
+      const attPrep = await agentRpc<{
+        kind: string;
+        turnId: string;
+        operationId: string;
+        context: readonly ContextRow[];
+        attachments: ReadonlyArray<{
+          uploadId: string;
+          filename: string;
+          mediaType: string;
+          sizeBytes: number;
+        }>;
+      }>(harness, tenant, 'prepareTurn', {
+        scope: {
+          tenantId: tenant.tenantId,
+          principalId: tenant.principalId,
+          agentId: tenant.agentId,
+          policyVersion: 1,
+          requestId: randomUUID(),
+        },
+        conversationId: tenant.conversationId,
+        request: {
+          client_submission_id: randomUUID(),
+          text: 'Turn 21 with attachment',
+          attachment_ids: [attId],
+          transcript_epoch: 0,
+        },
+        resolvedAttachments: [
+          {
+            uploadId: attId,
+            filename: 'd9-evidence.pdf',
+            mediaType: 'application/pdf',
+            sizeBytes: 2048,
+            r2Key: `uploads/${attId}`,
+            sha256: 'c'.repeat(64),
+          },
+        ],
+        workerId: 'd9-att-worker',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: {
+          budgetMode: 'simulated_full_protocol',
+          providerId: 'fake',
+          modelLabel: 'ember-fake-model-gateway-1',
+          rateVersion: 'fake-v2-2026-11',
+          maxAttempts: 1,
+          estimatedMicroUsd: 250,
+        },
+      });
+      expect(attPrep.ok).toBe(true);
+      expect(attPrep.result?.context).toHaveLength(8);
+      expect(attPrep.result?.context.map((r) => r.sequence)).toEqual([
+        34, 35, 36, 37, 38, 39, 40, 41,
+      ]);
+      const currentCtxRow = attPrep.result?.context.at(-1);
+      expect(currentCtxRow).toMatchObject({
+        sequence: 41,
+        kind: 'user',
+        text: 'Turn 21 with attachment',
+        attachments: [
+          {
+            uploadId: attId,
+            filename: 'd9-evidence.pdf',
+            mediaType: 'application/pdf',
+            sizeBytes: 2048,
+          },
+        ],
+      });
+      const bounded = buildBoundedContext(attPrep.result!.context);
+      expect(bounded.messages).toHaveLength(8);
+      expect(bounded.messages.at(-1)).toMatchObject({
+        role: 'user',
+        text: 'Turn 21 with attachment',
+        attachments: [
+          {
+            uploadId: attId,
+            filename: 'd9-evidence.pdf',
+            mediaType: 'application/pdf',
+            sizeBytes: 2048,
+          },
+        ],
+      });
+
+      // Commit Turn 21 cleanly before Durable Handoff check on Turn 22
+      const attAuth = await agentRpc<{ authorized: boolean }>(harness, tenant, 'markAttemptSent', {
+        scope: { tenantId: tenant.tenantId, agentId: tenant.agentId },
+        subjectType: 'turn',
+        subjectId: attPrep.result!.turnId,
+        attemptNo: 1,
+        operationId: attPrep.result!.operationId,
+        leaseEpoch: 1,
+        leaseOwner: 'd9-att-worker',
+      });
+      expect(attAuth.result?.authorized).toBe(true);
+      const attCommit = await agentRpc<{ outcome: string }>(harness, tenant, 'commitTurn', {
+        scope: { tenantId: tenant.tenantId, agentId: tenant.agentId },
+        conversationId: tenant.conversationId,
+        turnId: attPrep.result!.turnId,
+        leaseEpoch: 1,
+        leaseOwner: 'd9-att-worker',
+        attemptNo: 1,
+        operationId: attPrep.result!.operationId,
+        settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 120 },
+        result: {
+          status: 'completed',
+          text: 'Turn 21 attachment acknowledged',
+          modelLabel: 'ember-fake-model-gateway-1',
+          simulated: true,
+        },
+      });
+      expect(attCommit.result?.outcome).toBe('published');
+
+      // 3. Turn 22 Durable Handoff mid-stream on the 42-message conversation
+      const handoffHandle = `job_d9_${randomUUID().slice(0, 8)}`;
+      harness.fakeGateway.setDefaultRule({
+        mode: 'slow_handoff',
+        delayMs: 118_000,
+        completeOnPoll: true,
+        replyText: 'Turn 22 durable handoff after 20+ turns',
+        costMicroUsd: 145,
+        providerJobHandle: handoffHandle,
+      });
+      const connection = new AbortController();
+      const handoffRes = await harness.fetchOverHttp(
         `/v2/conversations/${tenant.conversationId}/messages/stream`,
         {
           method: 'POST',
@@ -1259,29 +1438,56 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
           },
           body: JSON.stringify({
             client_submission_id: randomUUID(),
-            text: `Multi-turn request ${i + 1}`,
+            text: 'Turn 22 handoff after 20+ turns',
             transcript_epoch: 0,
           }),
+          signal: connection.signal,
         },
       );
-      expect(res.status).toBe(201);
-      const body = await res.text();
-      const frames = parseSseFrames(body);
-      expect(frames.some((f) => f.event === 'turn.delta')).toBe(true);
-      const receipt = B1SendMessageReceiptSchema.parse(
-        frames.find((f) => f.event === 'turn.accepted')!.data,
+      expect(handoffRes.status).toBe(201);
+      const reader = (handoffRes.body as ReadableStream<Uint8Array>).getReader();
+      const decoder = new TextDecoder();
+      let seen = '';
+      while (!seen.includes('event: turn.delta')) {
+        const chunk = await reader.read();
+        expect(chunk.done).toBe(false);
+        seen += decoder.decode(chunk.value, { stream: true });
+      }
+      const handoffReceipt = B1SendMessageReceiptSchema.parse(
+        parseSseFrames(seen).find((f) => f.event === 'turn.accepted')!.data,
       );
-      await waitFor(async () => {
-        const snap = await inspectAgent(harness, tenant);
-        const turn = snap.turns.find((r) => r.id === receipt.turn.turn_id);
-        return turn?.status === 'completed' ? snap : null;
-      });
-    }
-    const final = await inspectAgent(harness, tenant);
-    expect(final.messages.filter((m) => m.kind === 'ember')).toHaveLength(6);
-    expect(final.messages.filter((m) => m.kind === 'user')).toHaveLength(6);
-    expect(harness.fakeGateway.getAuditSnapshot().totalCalls).toBe(6);
-  });
+      connection.abort();
+      await reader.cancel().catch(() => undefined);
+
+      const handoffCompleted = await waitFor(
+        async () => {
+          const s = await inspectAgent(harness, tenant);
+          const t = s.turns.find((r) => r.id === handoffReceipt.turn.turn_id);
+          return t?.status === 'completed' ? s : null;
+        },
+        130_000,
+        250,
+      );
+      expect(
+        handoffCompleted.turns.find((r) => r.id === handoffReceipt.turn.turn_id)?.handoff_reason,
+      ).toBe('client_disconnect_handoff');
+      expect(
+        handoffCompleted.messages.find(
+          (m) => m.sequence === handoffReceipt.message.sequence + 1 && m.kind === 'ember',
+        )?.text,
+      ).toBe('Turn 22 durable handoff after 20+ turns');
+      const handoffAudit = await waitFor(
+        async () => {
+          const snap = harness.fakeGateway.getAuditSnapshot();
+          return Promise.resolve(snap.totalCalls === 21 ? snap : null);
+        },
+        15_000,
+        100,
+      );
+      expect(handoffAudit.totalCalls).toBe(21);
+      expect(handoffAudit.jobPollCount).toBe(1);
+    },
+  );
 
   // ==========================================================================
   // Category 5: Long-Reasoning Handoff & Fencing (F-12, F-21, FI-13, FI-14)

@@ -3,6 +3,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { describe, expect, it } from 'vitest';
 import {
   AgentHeadCore,
+  RecoveryCoverageCoordinator,
   V2_B1_COMPAT_CONSTANTS,
   V2_BUDGET_LIMITS,
   V2_TIMING_LIMITS,
@@ -1055,6 +1056,111 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     });
     expect(second.kind).toBe('prepared');
     expect(h.recoveryRegistry.upsertCalls).toBe(upsertsBefore);
+  });
+
+  it('F-5: preserves confirmed coverage through a durable claim and commit during D1 outage', async () => {
+    const h = createHarness();
+    const coverage = new RecoveryCoverageCoordinator({
+      storage: h.doStorage.storage,
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      business: h.core,
+    });
+    const prep = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'covered durable work',
+        transcript_epoch: 0,
+      },
+      workerId: 'edge',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 22_000,
+      turnDeadlineMs: 60_000,
+      executionMode: 'durable_queue',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 250,
+      },
+    });
+    if (prep.kind !== 'prepared') throw new Error('expected prepared');
+    const before = coverage.getCoverageRowSync();
+    expect(before?.coverage_state).toBe('covered');
+    h.recoveryRegistry.mode = 'unavailable';
+    const calls = h.recoveryRegistry.upsertCalls;
+    const claim = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `turn:${prep.turnId}:epoch:1`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'turn',
+        entityId: prep.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: 1,
+      },
+      workerId: 'queue-worker',
+      leaseMs: 45_000,
+    });
+    if (claim.kind !== 'claimed') throw new Error('expected claimed');
+    expect(
+      await coverage.syncPostCycleCoverage({
+        nowMs: h.nowMs(),
+        registry: h.recoveryRegistry,
+      }),
+    ).toBe('unchanged');
+    expect(coverage.getCoverageRowSync()).toMatchObject({
+      generation: before?.generation,
+      covered_recovery_at_ms: before?.covered_recovery_at_ms,
+      coverage_state: 'covered',
+      pending_kind: null,
+    });
+    expect(h.recoveryRegistry.postponeCalls).toBe(0);
+    expect(
+      await h.core.markAttemptSent({
+        scope: { tenantId: h.tenantId, agentId: h.agentId },
+        subjectType: 'turn',
+        subjectId: prep.turnId,
+        attemptNo: 1,
+        operationId: prep.operationId,
+        leaseEpoch: claim.leaseEpoch,
+        leaseOwner: 'queue-worker',
+      }),
+    ).toMatchObject({ authorized: true });
+    expect(
+      await h.core.commitDurableResult({
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityType: 'turn',
+        entityId: prep.turnId,
+        leaseEpoch: claim.leaseEpoch,
+        workerId: 'queue-worker',
+        outcome: {
+          status: 'completed',
+          text: 'durable reply during outage',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+          attemptNo: 1,
+          operationId: prep.operationId,
+          settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 120 },
+        },
+      }),
+    ).toEqual({ accepted: true });
+    expect(h.recoveryRegistry.upsertCalls).toBe(calls);
+    expect(h.globalBudget.consumedMicroUsd).toBe(120);
+    expect(
+      await h.core.getTurn({
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        conversationId: h.conversationId,
+        turnId: prep.turnId,
+      }),
+    ).toMatchObject({ status: 'completed' });
   });
 
   it('F-13/F-19: recovers from D1 ACK loss via getCoverage and serializes concurrent uncovered registrations', async () => {

@@ -124,11 +124,36 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         WHERE status = 'active'`,
     ).m;
 
-    const candidates = [bizDue, outboxDue, schedDue].filter((v): v is number => v !== null);
+    // An accepted turn or active task run can create immediate budget_sync work at any
+    // time before its lease expires. The lease alarm is not its discovery bound.
+    const activeSince = sqlExecOne<{ readonly m: number | null }>(
+      sql,
+      `SELECT MIN(started_at_ms) AS m FROM (
+         SELECT created_at_ms AS started_at_ms FROM assistant_turns WHERE status = 'running'
+         UNION ALL
+         SELECT r.started_at_ms FROM tasks t JOIN runs r ON r.id = t.current_run_id
+          WHERE t.status = 'running' AND r.status = 'running'
+       )`,
+    ).m;
+    const candidates = [bizDue, outboxDue, schedDue, activeSince].filter(
+      (v): v is number => v !== null,
+    );
     if (candidates.length === 0) {
       return null;
     }
-    return Math.min(...candidates) + V2_TIMING_LIMITS.d1RecoveryGraceMs;
+    const required = Math.min(...candidates) + V2_TIMING_LIMITS.d1RecoveryGraceMs;
+    if (activeSince === null) return required;
+
+    // Keep the existing independently discoverable marker through the atomic transfer
+    // from dispatch outbox to live lease and final settlement. Do not postpone it
+    // just because the next lease alarm moved forward.
+    const confirmed = sqlExecMaybe<{ readonly covered_recovery_at_ms: number }>(
+      sql,
+      `SELECT covered_recovery_at_ms FROM v2_recovery_coverage
+        WHERE id = 1 AND coverage_state = 'covered' AND pending_kind IS NULL
+          AND covered_recovery_at_ms IS NOT NULL`,
+    );
+    return confirmed === null ? required : Math.min(required, confirmed.covered_recovery_at_ms);
   }
 
   listDueBusinessActionsSync(

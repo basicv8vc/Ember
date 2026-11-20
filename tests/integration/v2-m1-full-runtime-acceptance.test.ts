@@ -2091,7 +2091,7 @@ describe('V2-M1 Full A+B+E+F Real Local Workerd Acceptance Matrix (F-1..F-23 & F
       status: 'active',
       next_fire_at_ms: futureScheduleAtMs,
     });
-    expect(afterRearm.coverage[0]?.armed_alarm_at_ms).toBe(futureScheduleAtMs);
+    expect(afterRearm.alarmArmedAtMs).toBe(futureScheduleAtMs);
 
     // FI-09: Stale sweep_lease_owner CAS rejected
     const staleD1 = await harness.fetchJson<{ meta?: { changes?: number } }>('/_test/d1/exec', {

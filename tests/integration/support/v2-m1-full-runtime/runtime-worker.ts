@@ -1,35 +1,127 @@
 // eslint-disable-next-line @typescript-eslint/triple-slash-reference -- Share minimal Cloudflare Workers ambient types without DOM collisions.
 /// <reference path="../../../../packages/runtime-v2/src/global-budget/cloudflare-workers.d.ts" />
 
+import { DurableObject } from 'cloudflare:workers';
 import { DomainError } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
   D1RecoveryRegistry,
+  GLOBAL_BUDGET_OBJECT_NAME,
   RecoverySweeper,
   createAgentHeadGlobalBudgetOptions,
   getHeadMetaSync,
+  parseGlobalBudgetAuthorizeSendRequest,
+  parseGlobalBudgetRenewGrantRequest,
+  parseGlobalBudgetReserveRequest,
+  parseGlobalBudgetSettleRequest,
+  readGlobalDailyCeiling,
   type AgentHeadRpc,
   type D1DatabaseLike,
   type D1PreparedStatementLike,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
+  type GlobalBudgetAuthorizeSendRequest,
+  type GlobalBudgetRenewGrantRequest,
+  type GlobalBudgetReserveRequest,
+  type GlobalBudgetSettleRequest,
   type QueueLike,
   type QueueMessageLike,
   type SqlStorageCursorLike,
   type SqlStorageLike,
   type SqlStorageRow,
 } from '@ember/runtime-v2';
+import { GlobalBudgetAuthorityCore } from '../../../../packages/runtime-v2/src/global-budget/authority.js';
 import {
   AgentHeadDO as OfficialAgentHeadDO,
   getHead,
   type LocalRuntimeEnv,
 } from '../../../../apps/api/src/local-v2/runtime-head.js';
-import officialWorker from '../../../../apps/api/src/local-v2/runtime-worker.js';
+import officialWorker, {
+  type GlobalBudgetDO as OfficialGlobalBudgetDO,
+} from '../../../../apps/api/src/local-v2/runtime-worker.js';
 
 type DurableObjectState = ConstructorParameters<typeof OfficialAgentHeadDO>[0];
+type GlobalBudgetState = ConstructorParameters<typeof OfficialGlobalBudgetDO>[0];
+type GlobalBudgetEnv = ConstructorParameters<typeof OfficialGlobalBudgetDO>[1];
 
-export { GlobalBudgetDO } from '../../../../apps/api/src/local-v2/runtime-worker.js';
+interface GlobalBudgetSqlTelemetry {
+  statements: number;
+  rowsRead: number;
+  rowsWritten: number;
+  alarmSetCalls: number;
+  alarmDeleteCalls: number;
+}
+
+function createEmptyGlobalBudgetTelemetry(): GlobalBudgetSqlTelemetry {
+  return { statements: 0, rowsRead: 0, rowsWritten: 0, alarmSetCalls: 0, alarmDeleteCalls: 0 };
+}
+
+export class GlobalBudgetDO
+  extends DurableObject<GlobalBudgetEnv>
+  implements GlobalBudgetAuthority
+{
+  readonly #authority: GlobalBudgetAuthorityCore;
+  readonly #sqlTelemetry: GlobalBudgetSqlTelemetry;
+
+  constructor(state: GlobalBudgetState, env: GlobalBudgetEnv) {
+    super(state, env);
+    if (!state.id.equals(env.GLOBAL_BUDGET.idFromName(GLOBAL_BUDGET_OBJECT_NAME))) {
+      throw new Error('Unexpected GlobalBudgetDO instance');
+    }
+    const sqlTelemetry = createEmptyGlobalBudgetTelemetry();
+    this.#sqlTelemetry = sqlTelemetry;
+    const proxyTelemetry: AgentTelemetry = {
+      sql: sqlTelemetry,
+      d1Ops: 0,
+      d1RowsRead: 0,
+      d1RowsWritten: 0,
+      globalBudget: { reserveCalls: 0, authorizeCalls: 0, renewCalls: 0, settleCalls: 0 },
+      queueSends: 0,
+      alarmFiresObserved: 0,
+      alarmSuccessCount: 0,
+      alarmFailureCount: 0,
+    };
+    const wrappedState = wrapStorageWithTelemetry(state, proxyTelemetry);
+    this.#authority = new GlobalBudgetAuthorityCore(
+      wrappedState.storage,
+      readGlobalDailyCeiling(env),
+    );
+  }
+
+  async reserveGlobal(req: GlobalBudgetReserveRequest) {
+    return this.#authority.reserveGlobal(parseGlobalBudgetReserveRequest(req));
+  }
+
+  async authorizeGlobalSend(req: GlobalBudgetAuthorizeSendRequest) {
+    return this.#authority.authorizeGlobalSend(parseGlobalBudgetAuthorizeSendRequest(req));
+  }
+
+  async renewGlobalGrant(req: GlobalBudgetRenewGrantRequest) {
+    return this.#authority.renewGlobalGrant(parseGlobalBudgetRenewGrantRequest(req));
+  }
+
+  async settleGlobal(req: GlobalBudgetSettleRequest) {
+    return this.#authority.settleGlobal(parseGlobalBudgetSettleRequest(req));
+  }
+
+  override alarm() {
+    return this.#authority.alarm();
+  }
+
+  inspectTelemetry(): Promise<{ readonly sql: GlobalBudgetSqlTelemetry }> {
+    return Promise.resolve({ sql: { ...this.#sqlTelemetry } });
+  }
+
+  resetTelemetry(): Promise<{ readonly ok: true }> {
+    this.#sqlTelemetry.statements = 0;
+    this.#sqlTelemetry.rowsRead = 0;
+    this.#sqlTelemetry.rowsWritten = 0;
+    this.#sqlTelemetry.alarmSetCalls = 0;
+    this.#sqlTelemetry.alarmDeleteCalls = 0;
+    return Promise.resolve({ ok: true });
+  }
+}
 
 export interface FaultRuntimeEnv extends LocalRuntimeEnv {
   readonly V2_FAULT_CONTROL_URL?: string;
@@ -1095,6 +1187,18 @@ export default {
           .bind(...bindings)
           .all();
         return Response.json(res);
+      }
+
+      if (url.pathname === '/_test/global-budget/inspect') {
+        const gb = createAgentHeadGlobalBudgetOptions(env)
+          .globalBudget as unknown as GlobalBudgetDO;
+        return Response.json(await gb.inspectTelemetry());
+      }
+
+      if (url.pathname === '/_test/global-budget/reset-telemetry') {
+        const gb = createAgentHeadGlobalBudgetOptions(env)
+          .globalBudget as unknown as GlobalBudgetDO;
+        return Response.json(await gb.resetTelemetry());
       }
 
       if (url.pathname === '/_test/global-budget/rpc') {

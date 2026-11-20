@@ -1230,7 +1230,17 @@ export class TestAgentHeadDO extends DurableObject {
       const d1 = await registry.getCoverage({ tenantId: 'ten-b4', agentId: 'ag-b4' });
       const gbStub = this.env.GLOBAL_BUDGET.get(this.env.GLOBAL_BUDGET.idFromName('global'));
       const budgetTotals = await (await gbStub.fetch('http://gb/totals')).json();
-      return Response.json({ entities, outbox, schedules, coverage: cov, clock, d1, budgetTotals });
+      const platformAlarmAtMs = await this.ctx.storage.getAlarm();
+      return Response.json({
+        entities,
+        outbox,
+        schedules,
+        coverage: cov,
+        platformAlarmAtMs,
+        clock,
+        d1,
+        budgetTotals,
+      });
     }
 
     return new Response('not-found', { status: 404 });
@@ -1518,6 +1528,7 @@ export default {
         }>;
         schedules: Array<{ status: string; next_fire_at_ms: number }>;
         coverage: { armed_alarm_at_ms: number | null };
+        platformAlarmAtMs: number | null;
         clock: { provider_starts: number; provider_polls: number };
         d1: { exists: boolean; actualRecoveryAtMs: number | null };
         budgetTotals: { total_charged_micro_usd: number; halt_open: number };
@@ -1567,7 +1578,7 @@ export default {
         status: 'active',
         next_fire_at_ms: futureSchedAt,
       });
-      expect(state?.coverage.armed_alarm_at_ms).toBe(futureSchedAt);
+      expect(state?.platformAlarmAtMs).toBe(futureSchedAt);
       expect(state?.d1.actualRecoveryAtMs).toBe(futureSchedAt + 45_000);
 
       // FI-14 Silent loss reaper: active Fast Path worker loses contact (45s lease expires, uncertain missing handle)

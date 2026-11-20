@@ -72,6 +72,7 @@ private enum LiveComposition {
         )
         let taskRepository = LiveB1SessionTaskRepository(auth: auth)
         let scheduleRepository = LiveProactiveScheduleRepository(auth: auth)
+        let memoryRepository = LivePersonalMemoryRepository(auth: auth)
         // Process-local caches only: identity is re-established by `bootstrap()` on every entry, so
         // this is not the security boundary and may settle asynchronously.
         Task { await auth.registerSignOutCleanup { await repository.clearOnLogout() } }
@@ -79,7 +80,8 @@ private enum LiveComposition {
             repository: repository,
             auth: auth,
             taskRepository: taskRepository,
-            scheduleRepository: scheduleRepository
+            scheduleRepository: scheduleRepository,
+            memoryRepository: memoryRepository
         )
     }
 }
@@ -101,11 +103,13 @@ private enum MockB3Composition {
         )
         let auth = MockAuthController()
         let scheduleRepository = InMemoryProactiveScheduleRepository()
+        let memoryRepository = InMemoryPersonalMemoryRepository()
         return LiveConversationHostModel(
             repository: repository,
             auth: auth,
             taskRepository: taskRepository,
             scheduleRepository: scheduleRepository,
+            memoryRepository: memoryRepository,
             isMockMode: true
         )
     }

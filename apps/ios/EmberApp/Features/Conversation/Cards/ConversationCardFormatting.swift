@@ -23,6 +23,27 @@ enum ConversationCardFormatting {
         formatter.zeroFormattingBehavior = .dropAll
         return formatter.string(from: TimeInterval(seconds))
     }
+
+    static func attributedMarkdown(for rawText: String) -> AttributedString? {
+        guard !rawText.isEmpty else { return nil }
+        let options = AttributedString.MarkdownParsingOptions(
+            interpretedSyntax: .inlineOnlyPreservingWhitespace,
+            failurePolicy: .returnPartiallyParsedIfPossible
+        )
+        return try? AttributedString(markdown: rawText, options: options)
+    }
+}
+
+struct ConversationMarkdownText: View {
+    let text: String
+
+    var body: some View {
+        if let attributed = ConversationCardFormatting.attributedMarkdown(for: text) {
+            Text(attributed)
+        } else {
+            Text(verbatim: text)
+        }
+    }
 }
 
 struct ConversationCardSurface<Content: View>: View {

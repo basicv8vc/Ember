@@ -55,7 +55,7 @@ public struct OutcomeCard: View {
                 }
 
                 if Self.hasReadableContent(readableContent), let readableContent {
-                    Text(readableContent)
+                    ConversationMarkdownText(text: readableContent)
                         .font(.body)
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)

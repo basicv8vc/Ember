@@ -177,12 +177,18 @@ private struct ConversationMessageBubble: View {
                 .font(.caption.weight(.semibold))
                 .foregroundStyle(.secondary)
 
-                Text(message.text)
-                    .font(.body)
-                    .foregroundStyle(isUser ? Color.white : Color.primary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    if isUser {
+                        Text(verbatim: message.text)
+                    } else {
+                        ConversationMarkdownText(text: message.text)
+                    }
+                }
+                .font(.body)
+                .foregroundStyle(isUser ? Color.white : Color.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let timestamp = message.timestamp {
                     Text(timestamp.formatted(date: .omitted, time: .shortened))

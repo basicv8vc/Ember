@@ -170,6 +170,47 @@ final class ConversationCardsTests: XCTestCase {
         XCTAssertTrue(OutcomeCard.hasReadableContent("A readable result"))
     }
 
+    func testAttributedMarkdownPreservesNewlinesAndFormatsInlineSyntax() throws {
+        XCTAssertNil(ConversationCardFormatting.attributedMarkdown(for: ""))
+
+        let raw = "**Summary**\n- Item `one`\n- Item two"
+        let attributed = try XCTUnwrap(ConversationCardFormatting.attributedMarkdown(for: raw))
+        let rendered = String(attributed.characters)
+
+        XCTAssertEqual(rendered, "Summary\n- Item one\n- Item two")
+        XCTAssertTrue(rendered.contains("\n"))
+    }
+
+    func testAttributedMarkdownFallsBackGracefullyForUnclosedSyntax() throws {
+        let raw = "Unclosed **bold and `code"
+        let attributed = try XCTUnwrap(ConversationCardFormatting.attributedMarkdown(for: raw))
+        XCTAssertEqual(String(attributed.characters), raw)
+    }
+
+    func testTaskActivityFactsExposeActiveProgressSummaryAndArtifactCount() {
+        let runningFacts = TaskActivityCard.facts(
+            for: makeTask(status: .running),
+            presentation: makePresentation(connection: .connected),
+            cancelResponse: nil,
+            progressDetail: "  Analyzing dataset  ",
+            artifactCount: -2
+        )
+        XCTAssertTrue(runningFacts.isActiveProgress)
+        XCTAssertEqual(runningFacts.progressDetail, "Analyzing dataset")
+        XCTAssertEqual(runningFacts.artifactCount, 0)
+
+        let completedFacts = TaskActivityCard.facts(
+            for: makeTask(status: .completed),
+            presentation: makePresentation(connection: .connected),
+            cancelResponse: nil,
+            progressDetail: "   ",
+            artifactCount: 2
+        )
+        XCTAssertFalse(completedFacts.isActiveProgress)
+        XCTAssertNil(completedFacts.progressDetail)
+        XCTAssertEqual(completedFacts.artifactCount, 2)
+    }
+
     private func makeEvent(
         phase: TaskEventPhase,
         payload: TaskEventPayloadDTO = TaskEventPayloadDTO()

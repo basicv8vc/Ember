@@ -26,6 +26,7 @@ import type {
   RenewTurnLeaseRequest,
 } from './agent-head-rpc.js';
 import { V2_BUDGET_LIMITS } from './constants.js';
+import { personalMemorySaveTurnCommandSchema } from './personal-memory.js';
 import type {
   GlobalBudgetAuthorizeSendRequest,
   GlobalBudgetRenewGrantRequest,
@@ -282,6 +283,7 @@ const TurnCommitResultSchema = z.discriminatedUnion('status', [
     modelLabel: z.string().min(1).max(120),
     simulated: z.boolean(),
     delegation: DelegationCommandSchema.optional(),
+    personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
   }),
   z.strictObject({
     status: z.literal('failed'),
@@ -313,6 +315,7 @@ export const DurableTurnOutcomeSchema = z.strictObject({
   modelLabel: z.string().min(1).max(120).optional(),
   simulated: z.boolean().optional(),
   delegation: DelegationCommandSchema.optional(),
+  personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
   failureReason: z.enum(['timeout', 'internal_error']).optional(),
 });
 

@@ -346,6 +346,11 @@ export function createModelTurnResponder(options: ModelTurnResponderOptions): {
         controller.signal,
       );
 
+      if (result.output.kind === 'save_memory') {
+        // V1 does not support V2 Personal Memory persistence; never publish a false acknowledgement.
+        return { kind: 'failure', code: 'model_invalid_output', diagnostic: null };
+      }
+
       return {
         kind: 'success',
         output: result.output,

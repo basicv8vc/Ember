@@ -14,13 +14,13 @@ import type {
   PythonAgentStepOutput,
 } from '../types.js';
 import {
-  DELEGATION_TOOLS,
   PYTHON_AGENT_TOOLS,
   assertAuthorizedBeforeFetch,
   buildConversationTurnMessages,
   buildNotesExtractionMessages,
   buildPythonAgentMessages,
   completionMessageSchema,
+  getConversationTools,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
   parsePythonAgentStepChoice,
@@ -157,6 +157,7 @@ export class OpenAiModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
+    const allowSavePersonalMemory = input.enablePersonalMemorySaveTool === true;
     const body = JSON.stringify({
       model: this.#modelId,
       messages: buildConversationTurnMessages(input),
@@ -164,12 +165,14 @@ export class OpenAiModelGateway implements ModelGateway {
       n: 1,
       stream: false,
       store: false,
-      tools: DELEGATION_TOOLS,
+      tools: getConversationTools(allowSavePersonalMemory),
       tool_choice: 'auto',
       ...rateRequestModifiers(this.#rate, 'openai'),
     });
 
-    return await this.#sendChatCompletion(body, signal, parseConversationTurnChoice);
+    return await this.#sendChatCompletion(body, signal, (choice) =>
+      parseConversationTurnChoice(choice, { allowSavePersonalMemory }),
+    );
   }
 
   async extractNotesActionItems(

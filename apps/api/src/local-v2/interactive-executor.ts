@@ -195,6 +195,7 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
           ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
             ? { personalMemories: prepared.personalMemories }
             : {}),
+          enablePersonalMemorySaveTool: true,
           maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
         },
         operationId,
@@ -394,6 +395,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             text: reply.output.text,
             modelLabel: FAKE_MODEL_LABEL,
             simulated: true,
+            ...(reply.output.kind === 'save_memory'
+              ? { personalMemorySave: reply.output.memory.arguments }
+              : {}),
           },
     });
   } finally {

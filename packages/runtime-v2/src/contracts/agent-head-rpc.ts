@@ -11,7 +11,10 @@ import type { Id, NotesActionItemsInput } from '@ember/domain';
 import type { ModelAttemptBudgetMode, ModelAttemptProviderId } from '../agent-head/schema.js';
 import type { BudgetSyncSettlementState } from '../recovery/envelope.js';
 import type { TurnExecutionMode } from '../recovery/ports.js';
-import type { PersonalMemoryContextItem } from './personal-memory.js';
+import type {
+  PersonalMemoryContextItem,
+  PersonalMemorySaveTurnCommand,
+} from './personal-memory.js';
 
 export type { TurnExecutionMode };
 
@@ -228,6 +231,7 @@ export interface CommitTurnRequest {
         readonly modelLabel: string;
         readonly simulated: boolean;
         readonly delegation?: B2TaskDelegationCommand;
+        readonly personalMemorySave?: PersonalMemorySaveTurnCommand;
       }
     | {
         readonly status: 'failed';

@@ -51,6 +51,11 @@ export interface ConversationTurnInput {
   readonly context: readonly ModelMessage[];
   /** Bounded account-scoped user-requested preferences/facts, newest-updated first. */
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
+  /**
+   * Explicit runtime capability gate for the closed `save_personal_memory` tool.
+   * Defaults to `false` so V1 and non-conversation/scheduled executions never advertise or accept it.
+   */
+  readonly enablePersonalMemorySaveTool?: boolean;
   readonly maxOutputTokens: number;
 }
 
@@ -73,6 +78,15 @@ export type ConversationDelegationCall =
       };
     };
 
+export interface SavePersonalMemoryCall {
+  readonly toolName: 'save_personal_memory';
+  readonly arguments: {
+    readonly kind: 'preference' | 'fact';
+    readonly content: string;
+    readonly key?: string;
+  };
+}
+
 export type ConversationTurnOutput =
   | {
       readonly kind: 'reply';
@@ -85,6 +99,13 @@ export type ConversationTurnOutput =
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly delegation: ConversationDelegationCall;
+    }
+  | {
+      readonly kind: 'save_memory';
+      readonly toolName: SavePersonalMemoryCall['toolName'];
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+      readonly memory: SavePersonalMemoryCall;
     };
 
 export interface NotesActionItemsInput {

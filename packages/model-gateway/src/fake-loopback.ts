@@ -53,6 +53,9 @@ export class LoopbackFakeModelGateway {
         request.input.personalMemories.length > 0
           ? { personalMemories: request.input.personalMemories }
           : {}),
+        ...(request.input.enablePersonalMemorySaveTool === true
+          ? { enablePersonalMemorySaveTool: true }
+          : {}),
         deadlineAtMs: request.deadlineAtMs,
       }),
     });
@@ -176,19 +179,63 @@ export class LoopbackFakeModelGateway {
   }
 }
 
+function parsePersonalMemorySave(value: unknown): {
+  readonly kind: 'preference' | 'fact';
+  readonly content: string;
+  readonly key?: string;
+} | null {
+  if (!isRecord(value)) return null;
+  if ((value.kind !== 'preference' && value.kind !== 'fact') || typeof value.content !== 'string') {
+    return null;
+  }
+  const content = value.content.trim();
+  if (content.length === 0 || content.length > 500) return null;
+  if (value.key !== undefined && typeof value.key !== 'string') return null;
+  const key = typeof value.key === 'string' ? value.key.trim().toLowerCase() : undefined;
+  return {
+    kind: value.kind,
+    content,
+    ...(key !== undefined && key.length > 0 ? { key } : {}),
+  };
+}
+
 function toFakeReply(data: Record<string, unknown>) {
   const fake =
     (data.modelLabel === undefined || data.modelLabel === FAKE_MODEL_LABEL) &&
     data.simulated !== false;
+  const text =
+    fake && typeof data.text === 'string' && data.text.length <= FAKE_STREAM_MAX_REPLY_CHARS
+      ? data.text
+      : '';
+  let memorySave: {
+    readonly kind: 'preference' | 'fact';
+    readonly content: string;
+    readonly key?: string;
+  } | null = null;
+  if (fake && data.personalMemorySave !== undefined) {
+    memorySave = parsePersonalMemorySave(data.personalMemorySave);
+    if (memorySave === null) {
+      throw new ModelGatewayFailure('model_invalid_output');
+    }
+  }
   return {
-    output: {
-      kind: 'reply' as const,
-      finishReason: 'stop' as const,
-      text:
-        fake && typeof data.text === 'string' && data.text.length <= FAKE_STREAM_MAX_REPLY_CHARS
-          ? data.text
-          : '',
-    },
+    output:
+      memorySave !== null && text.trim().length > 0
+        ? {
+            kind: 'save_memory' as const,
+            toolName: 'save_personal_memory' as const,
+            finishReason: 'stop' as const,
+            text,
+            memory: {
+              toolName: 'save_personal_memory' as const,
+              arguments: memorySave,
+            },
+          }
+        : {
+            kind: 'reply' as const,
+            finishReason: 'stop' as const,
+            text,
+          },
     modelLabel: FAKE_MODEL_LABEL,
     simulated: true,
     usage: fake ? parseUsage(data.usage) : null,

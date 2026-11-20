@@ -5,6 +5,7 @@ import {
   PERSONAL_MEMORY_MAX_RETRIEVED_CHARS,
   PERSONAL_MEMORY_MAX_RETRIEVED_ITEMS,
   personalMemoryIdSchema,
+  personalMemorySaveTurnCommandSchema,
   savePersonalMemoryRequestSchema,
   updatePersonalMemoryRequestSchema,
   type PersonalMemoryCommand,
@@ -15,6 +16,7 @@ import {
   type PersonalMemoryListDto,
   type PersonalMemoryResponse,
   type PersonalMemorySaveResultDto,
+  type PersonalMemorySaveTurnCommand,
   type PersonalMemorySource,
   type PersonalMemoryUpdateResultDto,
 } from '../contracts/personal-memory.js';
@@ -95,6 +97,138 @@ export function readPersonalMemoriesForTurnSync(
   }
 
   return selected;
+}
+
+export const PERSONAL_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
+export const PERSONAL_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
+export const PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY =
+  "I couldn't save that memory because you've reached the 50-item personal memory limit. Please remove an older item in Memory settings and try again.";
+export const PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY =
+  "I couldn't save that memory right now. Please try saving it in Memory settings.";
+
+export type TurnPersonalMemorySaveOutcome =
+  | { readonly outcome: 'saved'; readonly memoryId: string; readonly created: boolean }
+  | { readonly outcome: 'budget_exceeded' };
+
+/**
+ * Atomically persist an explicitly model-requested personal memory inside the turn commit
+ * transaction, using server-verified `(conversationId, sourceMessageId)` provenance and
+ * `client_request_id = turnId` for strict idempotency on commit retries.
+ */
+export function savePersonalMemoryFromTurnSync(
+  sql: SqlStorageLike,
+  params: {
+    readonly tenantId: string;
+    readonly principalId: string;
+    readonly turnId: string;
+    readonly conversationId: string;
+    readonly sourceMessageId: string;
+    readonly input: PersonalMemorySaveTurnCommand;
+    readonly nowMs: number;
+    readonly newId: () => string;
+  },
+): TurnPersonalMemorySaveOutcome {
+  const parsed = personalMemorySaveTurnCommandSchema.parse(params.input);
+  const memoryKey = parsed.key ?? null;
+  const clientRequestId = params.turnId.toLowerCase();
+
+  const existingByTurn = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
+    sql,
+    `SELECT id
+       FROM personal_memories
+      WHERE tenant_id = ?
+        AND principal_id = ?
+        AND client_request_id = ?`,
+    params.tenantId,
+    params.principalId,
+    clientRequestId,
+  );
+  if (existingByTurn !== null) {
+    return { outcome: 'saved', memoryId: existingByTurn.id, created: false };
+  }
+
+  if (memoryKey !== null) {
+    const existingByKey = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
+      sql,
+      `SELECT id
+         FROM personal_memories
+        WHERE tenant_id = ?
+          AND principal_id = ?
+          AND memory_key = ?`,
+      params.tenantId,
+      params.principalId,
+      memoryKey,
+    );
+    if (existingByKey !== null) {
+      sql.exec(
+        `UPDATE personal_memories
+            SET kind = ?,
+                client_request_id = ?,
+                content = ?,
+                provenance_source = 'explicit_user_request',
+                source_conversation_id = ?,
+                source_message_id = ?,
+                updated_at_ms = ?
+          WHERE id = ?
+            AND tenant_id = ?
+            AND principal_id = ?`,
+        parsed.kind,
+        clientRequestId,
+        parsed.content,
+        params.conversationId,
+        params.sourceMessageId,
+        params.nowMs,
+        existingByKey.id,
+        params.tenantId,
+        params.principalId,
+      );
+      return { outcome: 'saved', memoryId: existingByKey.id, created: false };
+    }
+  }
+
+  const countRow = sqlExecMaybe<{ readonly count: number }>(
+    sql,
+    `SELECT COUNT(*) AS count
+       FROM personal_memories
+      WHERE tenant_id = ?
+        AND principal_id = ?`,
+    params.tenantId,
+    params.principalId,
+  );
+  if ((countRow?.count ?? 0) >= PERSONAL_MEMORY_MAX_ITEMS) {
+    return { outcome: 'budget_exceeded' };
+  }
+
+  const id = params.newId().toLowerCase();
+  sql.exec(
+    `INSERT INTO personal_memories (
+       id,
+       tenant_id,
+       principal_id,
+       kind,
+       memory_key,
+       client_request_id,
+       content,
+       provenance_source,
+       source_conversation_id,
+       source_message_id,
+       created_at_ms,
+       updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, 'explicit_user_request', ?, ?, ?, ?)`,
+    id,
+    params.tenantId,
+    params.principalId,
+    parsed.kind,
+    memoryKey,
+    clientRequestId,
+    parsed.content,
+    params.conversationId,
+    params.sourceMessageId,
+    params.nowMs,
+    params.nowMs,
+  );
+
+  return { outcome: 'saved', memoryId: id, created: true };
 }
 
 export interface AgentHeadMemoryServiceDeps {

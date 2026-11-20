@@ -15,13 +15,13 @@ import type {
 } from '../types.js';
 import { statusToFailureCode, type FetchLike, type FetchResponseLike } from './openai.js';
 import {
-  DELEGATION_TOOLS,
   PYTHON_AGENT_TOOLS,
   assertAuthorizedBeforeFetch,
   buildConversationTurnMessages,
   buildNotesExtractionMessages,
   buildPythonAgentMessages,
   completionMessageSchema,
+  getConversationTools,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
   parsePythonAgentStepChoice,
@@ -157,13 +157,16 @@ export class OpenRouterModelGateway implements ModelGateway {
     input: ConversationTurnInput,
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
+    const allowSavePersonalMemory = input.enablePersonalMemorySaveTool === true;
     const body = this.#serializePayload({
       messages: buildConversationTurnMessages(input),
       maxCompletionTokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
-      tools: DELEGATION_TOOLS,
+      tools: getConversationTools(allowSavePersonalMemory),
     });
 
-    return await this.#sendChatCompletion(body, signal, parseConversationTurnChoice);
+    return await this.#sendChatCompletion(body, signal, (choice) =>
+      parseConversationTurnChoice(choice, { allowSavePersonalMemory }),
+    );
   }
 
   async extractNotesActionItems(

@@ -3,7 +3,10 @@ import type {
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
 } from '../contracts/agent-head-rpc.js';
-import type { PersonalMemoryContextItem } from '../contracts/personal-memory.js';
+import type {
+  PersonalMemoryContextItem,
+  PersonalMemorySaveTurnCommand,
+} from '../contracts/personal-memory.js';
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
 import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
@@ -339,6 +342,42 @@ function parsePersonalMemoryContextItems(raw: unknown[]): readonly PersonalMemor
   return items;
 }
 
+function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTurnCommand | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (prop !== 'kind' && prop !== 'content' && prop !== 'key') {
+      return null;
+    }
+  }
+  const kind = record['kind'];
+  if (kind !== 'preference' && kind !== 'fact') {
+    return null;
+  }
+  const rawContent = record['content'];
+  if (typeof rawContent !== 'string') {
+    return null;
+  }
+  const content = rawContent.trim();
+  if (content.length < 1 || content.length > 500 || /\p{Surrogate}/u.test(content)) {
+    return null;
+  }
+  const rawKey = record['key'];
+  if (rawKey === undefined) {
+    return { kind, content };
+  }
+  if (typeof rawKey !== 'string') {
+    return null;
+  }
+  const key = rawKey.trim().toLowerCase();
+  if (key.length < 1 || key.length > 64 || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(key)) {
+    return null;
+  }
+  return { kind, content, key };
+}
+
 /**
  * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
  * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
@@ -380,11 +419,19 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
   if (cmd.targetKind === 'turn') {
     if (cmd.outcome.status === 'succeeded') {
       let text = fallbackText;
+      let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
       if (cmd.outcome.outputJson !== null) {
         try {
           const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
           if (typeof parsed['text'] === 'string' && parsed['text'].length > 0) {
             text = parsed['text'];
+          }
+          if (parsed['personalMemorySave'] !== undefined) {
+            const parsedMem = parsePersonalMemorySaveTurnCommand(parsed['personalMemorySave']);
+            if (parsedMem === null) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
+            }
+            personalMemorySave = parsedMem;
           }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied
@@ -397,6 +444,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         ...binding,
         status: 'completed',
         text,
+        ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
         ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
       };

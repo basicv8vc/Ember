@@ -1163,6 +1163,124 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     ).toMatchObject({ status: 'completed' });
   });
 
+  it('D7 Step 4A: transfers a provably unsent reservation to a new durable lease', async () => {
+    const h = createHarness();
+    const prep = await h.core.prepareTurn({
+      scope: h.makeScope(),
+      conversationId: h.conversationId,
+      request: { client_submission_id: randomUUID(), text: 'retry before send', transcript_epoch: 0 },
+      workerId: 'edge',
+      leaseMs: 45_000,
+      interactiveDeadlineMs: 22_000,
+      turnDeadlineMs: 60_000,
+      executionMode: 'durable_queue',
+      modelReservation: {
+        budgetMode: 'simulated_full_protocol',
+        providerId: 'fake',
+        modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+        rateVersion: 'v1',
+        maxAttempts: 2,
+        estimatedMicroUsd: 250,
+      },
+    });
+    if (prep.kind !== 'prepared') throw new Error('expected prepared');
+    const claim = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `turn:${prep.turnId}:epoch:1`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'turn',
+        entityId: prep.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: 1,
+      },
+      workerId: 'lost-worker',
+      leaseMs: 45_000,
+    });
+    if (claim.kind !== 'claimed') throw new Error('expected claimed');
+    h.advanceClock(46_000);
+    await h.seam.runAlarmCycle();
+
+    const attempt = h.doStorage.db
+      .prepare('SELECT * FROM model_attempts WHERE operation_id = ?')
+      .get(prep.operationId) as unknown as ModelAttemptRow;
+    expect(attempt.state).toBe('reserved');
+    expect(attempt.send_authorizing_at_ms).toBeNull();
+    expect(attempt.send_started_at_ms).toBeNull();
+    expect(h.globalBudget.reservedMicroUsd).toBe(250);
+    expect(h.globalBudget.consumedMicroUsd).toBe(0);
+
+    const gate = {
+      scope: { tenantId: h.tenantId, agentId: h.agentId },
+      subjectType: 'turn' as const,
+      subjectId: prep.turnId,
+      attemptNo: 1,
+      operationId: prep.operationId,
+    };
+    expect(
+      await h.core.markAttemptSent({
+        ...gate,
+        leaseEpoch: claim.leaseEpoch,
+        leaseOwner: 'lost-worker',
+      }),
+    ).toMatchObject({ authorized: false });
+
+    h.advanceClock(9_500);
+    await h.seam.runAlarmCycle();
+    const epoch = claim.leaseEpoch + 1;
+    const retry = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `turn:${prep.turnId}:epoch:${epoch}`,
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityKind: 'turn',
+        entityId: prep.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: epoch,
+      },
+      workerId: 'retry-worker',
+      leaseMs: 45_000,
+    });
+    if (retry.kind !== 'claimed') throw new Error('expected retry claim');
+    expect(JSON.parse(retry.contextJson)).toMatchObject({
+      operationId: prep.operationId,
+      attemptNo: 1,
+      sendState: 'unsent',
+    });
+    const retryGate = { ...gate, leaseEpoch: retry.leaseEpoch, leaseOwner: 'retry-worker' };
+    expect(await h.core.markAttemptSent(retryGate)).toMatchObject({ authorized: true });
+    expect(await h.core.markAttemptSent(retryGate)).toEqual({
+      authorized: false,
+      reason: 'already_sent',
+    });
+    expect(
+      await h.core.commitDurableResult({
+        tenantId: h.tenantId,
+        agentId: h.agentId,
+        entityType: 'turn',
+        entityId: prep.turnId,
+        leaseEpoch: retry.leaseEpoch,
+        workerId: 'retry-worker',
+        outcome: {
+          status: 'completed',
+          text: 'recovered',
+          modelLabel: V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+          simulated: true,
+          attemptNo: 1,
+          operationId: prep.operationId,
+          settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 165 },
+        },
+      }),
+    ).toEqual({ accepted: true });
+    expect(h.globalBudget.reservedMicroUsd).toBe(0);
+    expect(h.globalBudget.consumedMicroUsd).toBe(165);
+    expect(h.doStorage.db.prepare('SELECT COUNT(*) AS c FROM model_attempts').get()).toEqual({
+      c: 1,
+    });
+  });
+
   it('F-13/F-19: recovers from D1 ACK loss via getCoverage and serializes concurrent uncovered registrations', async () => {
     const h = createHarness();
     h.recoveryRegistry.mode = 'ack_loss_once';

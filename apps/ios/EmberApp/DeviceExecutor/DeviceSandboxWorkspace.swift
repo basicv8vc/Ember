@@ -8,7 +8,8 @@ public enum DeviceSandboxCrypto {
 }
 
 /// Manages strictly confined per-task workspaces inside the iOS App Sandbox.
-/// Prevents path traversal, symlink escape, active web content output, and uncommitted staging leaks.
+/// Prevents path traversal, symlink escape, same-filename overwrites (files are stored by artifactID),
+/// active web content output, and uncommitted staging leaks.
 public final class DeviceSandboxWorkspace: Sendable {
     public static let allowedOutputMediaTypes: Set<String> = [
         "text/plain",
@@ -49,7 +50,7 @@ public final class DeviceSandboxWorkspace: Sendable {
     }
 
     /// Validates filename, media type, path containment, and byte quotas, then atomically writes and
-    /// publishes the generated artifact into the task's confined workspace.
+    /// publishes the generated artifact keyed by `artifactID` inside the task's confined workspace.
     public func publishArtifact(
         taskID: UUID,
         requestedFilename: String,
@@ -72,11 +73,12 @@ public final class DeviceSandboxWorkspace: Sendable {
         }
 
         let validatedFilename = try validateSafeRelativeFilename(requestedFilename)
+        let storageFilename = artifactStorageFilename(for: artifactID)
         let workspaceDir = try taskWorkspaceURL(for: taskID)
         let stagingDir = try taskStagingURL(for: taskID)
 
         let currentWorkspaceBytes = try directoryByteSize(workspaceDir)
-        let destinationURL = try resolveConfinedURL(filename: validatedFilename, inside: workspaceDir)
+        let destinationURL = try resolveConfinedURL(filename: storageFilename, inside: workspaceDir)
         let existingSize = (try? destinationURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
         let projectedBytes = currentWorkspaceBytes - existingSize + data.count
         guard projectedBytes <= policy.maxWorkspaceBytes else {
@@ -108,25 +110,30 @@ public final class DeviceSandboxWorkspace: Sendable {
             mediaType: normalizedMediaType,
             sizeBytes: data.count,
             sha256: sha256,
-            relativePath: "\(taskID.uuidString.lowercased())/\(validatedFilename)",
+            relativePath: "\(taskID.uuidString.lowercased())/\(storageFilename)",
             createdAt: createdAt
         )
     }
 
     public func readArtifactData(for artifact: DeviceGeneratedArtifact) throws -> Data {
-        let workspaceDir = try taskWorkspaceURL(for: artifact.taskID)
-        let validated = try validateSafeRelativeFilename(artifact.filename)
-        let fileURL = try resolveConfinedURL(filename: validated, inside: workspaceDir)
+        let fileURL = try artifactFileURL(for: artifact)
         guard FileManager.default.fileExists(atPath: fileURL.path) else {
             throw DeviceExecutorError.taskNotFound(artifact.taskID)
         }
-        return try Data(contentsOf: fileURL)
+        let data = try Data(contentsOf: fileURL)
+        let actualSHA256 = DeviceSandboxCrypto.sha256Hex(data)
+        guard data.count == artifact.sizeBytes, actualSHA256 == artifact.sha256 else {
+            throw DeviceExecutorError.storageUnavailable(
+                "Artifact '\(artifact.filename)' failed SHA-256 integrity verification."
+            )
+        }
+        return data
     }
 
     public func artifactFileURL(for artifact: DeviceGeneratedArtifact) throws -> URL {
         let workspaceDir = try taskWorkspaceURL(for: artifact.taskID)
-        let validated = try validateSafeRelativeFilename(artifact.filename)
-        return try resolveConfinedURL(filename: validated, inside: workspaceDir)
+        let storageFilename = artifactStorageFilename(for: artifact.artifactID)
+        return try resolveConfinedURL(filename: storageFilename, inside: workspaceDir)
     }
 
     public func cleanupStaging(for taskID: UUID) {
@@ -152,6 +159,10 @@ public final class DeviceSandboxWorkspace: Sendable {
             throw DeviceExecutorError.sandboxPathViolation(rawFilename)
         }
         return trimmed
+    }
+
+    private func artifactStorageFilename(for artifactID: UUID) -> String {
+        "\(artifactID.uuidString.lowercased()).blob"
     }
 
     private func resolveConfinedURL(filename: String, inside workspaceDir: URL) throws -> URL {

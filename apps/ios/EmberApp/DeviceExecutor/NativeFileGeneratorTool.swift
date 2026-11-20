@@ -18,16 +18,45 @@ public struct NativeFileGeneratorTool: NativeTool {
             throw DeviceExecutorError.invalidArgument("file.generate requires a non-empty 'filename'.")
         }
 
-        let validatedFilename = try context.workspace.validateSafeRelativeFilename(rawFilename)
-        let ext = URL(fileURLWithPath: validatedFilename).pathExtension.lowercased()
+        let rawValidated = try context.workspace.validateSafeRelativeFilename(rawFilename)
+        let ext = URL(fileURLWithPath: rawValidated).pathExtension.lowercased()
         let explicitMediaType = arguments["media_type"]?.stringValue
         let inferredMediaType = ext.isEmpty ? nil : B3AttachmentLimits.mediaType(forFileExtension: ext)
-        let mediaType = B3AttachmentLimits.normalizedMediaType(explicitMediaType ?? inferredMediaType ?? "text/plain")
 
-        guard !B3AttachmentLimits.blockedMediaTypes.contains(mediaType),
-              DeviceSandboxWorkspace.allowedOutputMediaTypes.contains(mediaType)
-        else {
-            throw DeviceExecutorError.blockedMediaType(mediaType)
+        let mediaType: String
+        let validatedFilename: String
+        if let explicitMediaType {
+            mediaType = B3AttachmentLimits.normalizedMediaType(explicitMediaType)
+            guard !B3AttachmentLimits.blockedMediaTypes.contains(mediaType),
+                  DeviceSandboxWorkspace.allowedOutputMediaTypes.contains(mediaType)
+            else {
+                throw DeviceExecutorError.blockedMediaType(mediaType)
+            }
+            if !ext.isEmpty {
+                guard inferredMediaType == mediaType else {
+                    throw DeviceExecutorError.invalidArgument(
+                        "File extension '.\(ext)' does not match media_type '\(mediaType)'."
+                    )
+                }
+                validatedFilename = rawValidated
+            } else {
+                let defaultExt = B3AttachmentLimits.defaultExtension(forMediaType: mediaType)
+                validatedFilename = try context.workspace.validateSafeRelativeFilename("\(rawValidated).\(defaultExt)")
+            }
+        } else if !ext.isEmpty {
+            guard let inferredMediaType else {
+                throw DeviceExecutorError.blockedMediaType(ext)
+            }
+            mediaType = B3AttachmentLimits.normalizedMediaType(inferredMediaType)
+            guard !B3AttachmentLimits.blockedMediaTypes.contains(mediaType),
+                  DeviceSandboxWorkspace.allowedOutputMediaTypes.contains(mediaType)
+            else {
+                throw DeviceExecutorError.blockedMediaType(mediaType)
+            }
+            validatedFilename = rawValidated
+        } else {
+            mediaType = "text/plain"
+            validatedFilename = try context.workspace.validateSafeRelativeFilename("\(rawValidated).txt")
         }
 
         let title = arguments["title"]?.stringValue

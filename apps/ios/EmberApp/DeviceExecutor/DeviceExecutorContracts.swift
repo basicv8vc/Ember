@@ -250,6 +250,8 @@ public struct DeviceSandboxPolicy: Codable, Equatable, Sendable {
     public let stepTimeoutMs: Int
     public let maxConcurrentTasks: Int
     public let rejectOnCriticalThermalState: Bool
+    public let maxJournalTasks: Int
+    public let maxJournalBytes: Int
 
     public static let `default` = DeviceSandboxPolicy(
         maxInputBytes: 2 * 1024 * 1024,
@@ -260,7 +262,9 @@ public struct DeviceSandboxPolicy: Codable, Equatable, Sendable {
         maxJSONDepth: 32,
         stepTimeoutMs: 10_000,
         maxConcurrentTasks: 1,
-        rejectOnCriticalThermalState: true
+        rejectOnCriticalThermalState: true,
+        maxJournalTasks: 200,
+        maxJournalBytes: 8 * 1024 * 1024
     )
 
     public init(
@@ -272,7 +276,9 @@ public struct DeviceSandboxPolicy: Codable, Equatable, Sendable {
         maxJSONDepth: Int,
         stepTimeoutMs: Int,
         maxConcurrentTasks: Int,
-        rejectOnCriticalThermalState: Bool
+        rejectOnCriticalThermalState: Bool,
+        maxJournalTasks: Int = 200,
+        maxJournalBytes: Int = 8 * 1024 * 1024
     ) {
         self.maxInputBytes = max(1024, maxInputBytes)
         self.maxOutputTextBytes = max(1024, maxOutputTextBytes)
@@ -283,6 +289,8 @@ public struct DeviceSandboxPolicy: Codable, Equatable, Sendable {
         self.stepTimeoutMs = max(100, stepTimeoutMs)
         self.maxConcurrentTasks = max(1, maxConcurrentTasks)
         self.rejectOnCriticalThermalState = rejectOnCriticalThermalState
+        self.maxJournalTasks = max(1, maxJournalTasks)
+        self.maxJournalBytes = max(16 * 1024, maxJournalBytes)
     }
 }
 
@@ -407,6 +415,7 @@ public enum DeviceExecutorError: Error, Equatable, LocalizedError, Sendable {
     case executionTimeout(String)
     case cancelled
     case backgroundSuspended
+    case staleLease(String)
     case thermalThrottled(DeviceThermalLevel)
     case storageUnavailable(String)
     case idempotencyConflict
@@ -422,7 +431,7 @@ public enum DeviceExecutorError: Error, Equatable, LocalizedError, Sendable {
             .executionTimeout
         case .cancelled:
             .cancelled
-        case .backgroundSuspended:
+        case .backgroundSuspended, .staleLease:
             .staleLease
         case .storageUnavailable:
             .databaseUnavailable
@@ -444,6 +453,7 @@ public enum DeviceExecutorError: Error, Equatable, LocalizedError, Sendable {
         case .executionTimeout(let message): message
         case .cancelled: "Task execution was cancelled."
         case .backgroundSuspended: "Execution interrupted before completion due to background suspension."
+        case .staleLease(let message): message
         case .thermalThrottled(let level): "Device thermal state (\(level.rawValue)) throttled execution."
         case .storageUnavailable(let message): message
         case .idempotencyConflict: "Idempotency key reused with a different payload."

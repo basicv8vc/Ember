@@ -29,10 +29,10 @@ public struct NativeTextTool: NativeTool {
             return try runExtractActionItems(text: text, context: context)
         case "extract_headings":
             return try runExtractHeadings(text: text, context: context)
-        case "regex_match":
-            return try runRegexMatch(text: text, arguments: arguments, context: context)
-        case "regex_replace":
-            return try runRegexReplace(text: text, arguments: arguments, context: context)
+        case "regex_match", "regex_replace":
+            throw DeviceExecutorError.invalidArgument(
+                "Regex operations ('\(op)') are disabled in M2-C1."
+            )
         case "normalize":
             return try runNormalize(text: text, arguments: arguments, context: context)
         case "summarize_lines":
@@ -169,71 +169,6 @@ public struct NativeTextTool: NativeTool {
         )
     }
 
-    private func runRegexMatch(
-        text: String,
-        arguments: [String: DeviceJSONValue],
-        context: NativeToolExecutionContext
-    ) throws -> NativeToolOutput {
-        guard let pattern = arguments["pattern"]?.stringValue, !pattern.isEmpty else {
-            throw DeviceExecutorError.invalidArgument("regex_match requires a non-empty 'pattern' string.")
-        }
-        let maxMatches = min(max(arguments["max_matches"]?.intValue ?? 200, 1), 1000)
-        let regex = try compileRegex(pattern)
-        let nsText = text as NSString
-        let range = NSRange(location: 0, length: nsText.length)
-
-        var matches: [String] = []
-        regex.enumerateMatches(in: text, options: [], range: range) { result, _, stop in
-            if Task.isCancelled {
-                stop.pointee = true
-                return
-            }
-            guard let result else { return }
-            matches.append(nsText.substring(with: result.range))
-            if matches.count >= maxMatches {
-                stop.pointee = true
-            }
-        }
-        try context.checkCancellation()
-
-        let structured: DeviceJSONValue = .object([
-            "pattern": .string(pattern),
-            "count": .int(Int64(matches.count)),
-            "matches": .array(matches.map { .string($0) }),
-        ])
-        return NativeToolOutput(
-            summaryText: "Matched \(matches.count) occurrence(s) for pattern.",
-            outputText: boundText(matches.joined(separator: "\n"), maxBytes: context.policy.maxOutputTextBytes),
-            structuredData: structured
-        )
-    }
-
-    private func runRegexReplace(
-        text: String,
-        arguments: [String: DeviceJSONValue],
-        context: NativeToolExecutionContext
-    ) throws -> NativeToolOutput {
-        guard let pattern = arguments["pattern"]?.stringValue, !pattern.isEmpty else {
-            throw DeviceExecutorError.invalidArgument("regex_replace requires a non-empty 'pattern' string.")
-        }
-        let replacement = arguments["replacement"]?.stringValue ?? ""
-        let regex = try compileRegex(pattern)
-        let nsText = text as NSString
-        let range = NSRange(location: 0, length: nsText.length)
-        let count = regex.numberOfMatches(in: text, options: [], range: range)
-        try context.checkCancellation()
-        let updated = regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: replacement)
-
-        return NativeToolOutput(
-            summaryText: "Replaced \(count) regex match(es).",
-            outputText: boundText(updated, maxBytes: context.policy.maxOutputTextBytes),
-            structuredData: .object([
-                "replacements": .int(Int64(count)),
-                "output_utf8_bytes": .int(Int64(Data(updated.utf8).count)),
-            ])
-        )
-    }
-
     private func runNormalize(
         text: String,
         arguments: [String: DeviceJSONValue],
@@ -255,7 +190,7 @@ public struct NativeTextTool: NativeTool {
             if index % 128 == 0 {
                 try context.checkCancellation()
             }
-            let trimmedRight = rawLine.replacingOccurrences(of: "[ \\t]+$", with: "", options: .regularExpression)
+            let trimmedRight = trimTrailingSpacesAndTabs(rawLine)
             if trimmedRight.isEmpty {
                 if dropEmpty || previousBlank {
                     continue
@@ -324,25 +259,28 @@ public struct NativeTextTool: NativeTool {
         )
     }
 
-    private func compileRegex(_ pattern: String) throws -> NSRegularExpression {
-        guard pattern.count <= 512 else {
-            throw DeviceExecutorError.invalidArgument("Regex pattern exceeds 512 characters.")
+    private func trimTrailingSpacesAndTabs(_ line: String) -> String {
+        var end = line.endIndex
+        while end > line.startIndex {
+            let prev = line.index(before: end)
+            let ch = line[prev]
+            if ch == " " || ch == "\t" {
+                end = prev
+            } else {
+                break
+            }
         }
-        do {
-            return try NSRegularExpression(pattern: pattern, options: [])
-        } catch {
-            throw DeviceExecutorError.invalidArgument("Invalid regex pattern: \(error.localizedDescription)")
-        }
+        return String(line[..<end])
     }
 
     private func boundText(_ text: String, maxBytes: Int) -> String {
         let data = Data(text.utf8)
         guard data.count > maxBytes else { return text }
-        var endIndex = text.utf8.index(text.utf8.startIndex, offsetBy: maxBytes)
-        while endIndex > text.utf8.startIndex && String(text[..<endIndex]) == nil {
-            endIndex = text.utf8.index(before: endIndex)
+        var prefixCount = maxBytes
+        while prefixCount > 0 && String(data: data.prefix(prefixCount), encoding: .utf8) == nil {
+            prefixCount -= 1
         }
-        let prefix = String(text[..<endIndex]) ?? ""
+        let prefix = String(data: data.prefix(prefixCount), encoding: .utf8) ?? ""
         return prefix + "\n...[truncated at \(maxBytes) bytes]"
     }
 }

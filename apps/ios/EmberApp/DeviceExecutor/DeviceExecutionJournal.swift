@@ -48,7 +48,20 @@ public struct PersistedDeviceTaskRecord: Codable, Equatable, Sendable {
     }
 }
 
+public enum JournalCancelOutcome: Sendable {
+    case alreadyTerminal(PersistedDeviceTaskRecord)
+    case cancelledQueued(PersistedDeviceTaskRecord)
+    case markedCancelRequested(PersistedDeviceTaskRecord)
+}
+
+public enum JournalInterruptOutcome: Sendable {
+    case requeued(PersistedDeviceTaskRecord)
+    case failedMaxAttempts(PersistedDeviceTaskRecord)
+    case alreadyTerminal(PersistedDeviceTaskRecord)
+}
+
 /// Atomic, encrypted-at-rest local journal for on-device task execution & cold-start recovery.
+/// Serves as the single fenced state-transition authority for local device tasks.
 public actor DeviceExecutionJournal {
     private struct IdempotencyEntry: Codable, Equatable {
         let taskID: UUID
@@ -62,14 +75,22 @@ public actor DeviceExecutionJournal {
     }
 
     private let stateFileURL: URL
+    private let maxTasks: Int
+    private let maxJournalBytes: Int
     private var cachedState: PersistedState?
 
-    public init(directory: URL? = nil) {
+    public init(
+        directory: URL? = nil,
+        maxTasks: Int = DeviceSandboxPolicy.default.maxJournalTasks,
+        maxJournalBytes: Int = DeviceSandboxPolicy.default.maxJournalBytes
+    ) {
         let base = directory ?? FileManager.default.urls(
             for: .applicationSupportDirectory,
             in: .userDomainMask
         )[0].appendingPathComponent("EmberDeviceExecutor", isDirectory: true)
         self.stateFileURL = base.appendingPathComponent("executor-state.json")
+        self.maxTasks = max(1, maxTasks)
+        self.maxJournalBytes = max(16 * 1024, maxJournalBytes)
     }
 
     public func allRecords() throws -> [PersistedDeviceTaskRecord] {
@@ -87,12 +108,78 @@ public actor DeviceExecutionJournal {
         return state.tasksByID[key(for: taskID)]
     }
 
-    public func existingSubmission(idempotencyKey: String) throws -> (taskID: UUID, requestDigest: String)? {
-        let state = try readState()
-        guard let entry = state.idempotencyIndex[idempotencyKey] else { return nil }
-        return (entry.taskID, entry.requestDigest)
+    /// Atomically checks idempotency and inserts a new queued task if not previously seen.
+    public func insertOrReplay(
+        submission: DeviceTaskSubmission,
+        requestDigest: String,
+        title: String,
+        now: Date
+    ) throws -> (record: PersistedDeviceTaskRecord, replayed: Bool) {
+        var state = try readState()
+
+        if let existing = state.idempotencyIndex[submission.idempotencyKey] {
+            guard existing.requestDigest == requestDigest else {
+                throw DeviceExecutorError.idempotencyConflict
+            }
+            if let existingRecord = state.tasksByID[key(for: existing.taskID)] {
+                return (existingRecord, true)
+            }
+        }
+
+        let createdISO = DeviceWireDate.format(now)
+        let deadlineISO = DeviceWireDate.format(now.addingTimeInterval(submission.deadlineSeconds))
+        let taskID = UUID()
+
+        let taskDTO = SessionTaskDTO(
+            taskID: taskID,
+            agentID: submission.agentID,
+            kind: DeviceTaskSubmission.deviceTaskKind,
+            title: title,
+            status: .queued,
+            currentRunID: nil,
+            attemptCount: 0,
+            cancelRequested: false,
+            createdAt: createdISO,
+            updatedAt: createdISO,
+            deadlineAt: deadlineISO,
+            resultState: .pending
+        )
+
+        let acceptedEvent = SessionTaskEventDTO(
+            taskID: taskID,
+            sequence: 1,
+            phase: .accepted,
+            occurredAt: createdISO,
+            traceID: taskID,
+            payload: SessionTaskEventPayloadDTO(
+                taskKind: DeviceTaskSubmission.deviceTaskKind,
+                route: .fast,
+                toStatus: .queued,
+                replayed: false,
+                simulated: false
+            )
+        )
+
+        let record = PersistedDeviceTaskRecord(
+            task: taskDTO,
+            submission: submission,
+            requestDigest: requestDigest,
+            leaseEpoch: 0,
+            ownerBootSessionID: nil,
+            completedStepOutputs: [:],
+            events: [acceptedEvent]
+        )
+
+        state.tasksByID[key(for: taskID)] = record
+        state.idempotencyIndex[submission.idempotencyKey] = IdempotencyEntry(
+            taskID: taskID,
+            requestDigest: requestDigest
+        )
+        try persistState(&state)
+        return (record, false)
     }
 
+    /// Inserts a pre-constructed record (used by recovery tests).
     public func insertQueuedTask(_ record: PersistedDeviceTaskRecord) throws {
         var state = try readState()
         state.tasksByID[key(for: record.task.taskID)] = record
@@ -100,20 +187,507 @@ public actor DeviceExecutionJournal {
             taskID: record.task.taskID,
             requestDigest: record.requestDigest
         )
-        try persistState(state)
+        try persistState(&state)
     }
 
-    public func saveRecord(_ record: PersistedDeviceTaskRecord) throws {
+    /// Atomically claims a queued task for execution under a new runID and incremented leaseEpoch.
+    public func claimRun(
+        taskID: UUID,
+        runID: UUID,
+        bootSessionID: UUID,
+        now: Date
+    ) throws -> PersistedDeviceTaskRecord {
         var state = try readState()
-        state.tasksByID[key(for: record.task.taskID)] = record
-        try persistState(state)
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        guard !record.task.status.isTerminal else {
+            throw DeviceExecutorError.staleLease("Task is already terminal (\(record.task.status.rawValue)).")
+        }
+        if record.task.cancelRequested {
+            throw DeviceExecutorError.cancelled
+        }
+        if let deadlineISO = record.task.deadlineAt,
+           let deadline = DeviceWireDate.parse(deadlineISO),
+           deadline <= now {
+            throw DeviceExecutorError.executionTimeout("Task deadline exceeded before run claim.")
+        }
+        guard record.task.status == .queued else {
+            throw DeviceExecutorError.staleLease("Task status '\(record.task.status.rawValue)' is not claimable.")
+        }
+
+        let nowISO = DeviceWireDate.format(now)
+        let newAttempt = record.task.attemptCount + 1
+        let newEpoch = record.leaseEpoch + 1
+        let previousStatus = record.task.status
+
+        record.leaseEpoch = newEpoch
+        record.ownerBootSessionID = bootSessionID
+        record.task = updatingTask(
+            record.task,
+            status: .running,
+            currentRunID: .some(runID),
+            attemptCount: newAttempt,
+            updatedAt: nowISO,
+            resultState: .pending
+        )
+
+        let baseSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: baseSeq,
+                phase: .leased,
+                occurredAt: nowISO,
+                traceID: runID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: runID,
+                    attempt: newAttempt,
+                    route: .fast,
+                    fromStatus: previousStatus,
+                    toStatus: .running,
+                    runStatus: .created,
+                    simulated: false
+                )
+            )
+        )
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: baseSeq + 1,
+                phase: .started,
+                occurredAt: nowISO,
+                traceID: runID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: runID,
+                    attempt: newAttempt,
+                    route: .fast,
+                    fromStatus: previousStatus,
+                    toStatus: .running,
+                    runStatus: .running,
+                    simulated: false
+                )
+            )
+        )
+
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return record
+    }
+
+    /// Atomically persists a fenced step checkpoint.
+    public func checkpointStep(
+        taskID: UUID,
+        runID: UUID,
+        expectedLeaseEpoch: Int,
+        bootSessionID: UUID,
+        stepIndex: Int,
+        output: NativeToolOutput,
+        durationMs: Int,
+        now: Date
+    ) throws -> PersistedDeviceTaskRecord {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        try validateActiveFence(
+            record: record,
+            expectedRunID: runID,
+            expectedLeaseEpoch: expectedLeaseEpoch,
+            expectedBootSessionID: bootSessionID,
+            now: now
+        )
+
+        let nowISO = DeviceWireDate.format(now)
+        let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+
+        record.completedStepOutputs[stepIndex] = output
+        for artifact in output.generatedArtifacts {
+            if !record.artifacts.contains(where: { $0.artifactID == artifact.artifactID }) {
+                record.artifacts.append(artifact)
+            }
+        }
+        record.task = updatingTask(
+            record.task,
+            status: .running,
+            currentRunID: .some(runID),
+            updatedAt: nowISO,
+            resultState: .pending
+        )
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: nextSeq,
+                phase: .progress,
+                occurredAt: nowISO,
+                traceID: runID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: runID,
+                    attempt: record.task.attemptCount,
+                    route: .fast,
+                    fromStatus: .running,
+                    toStatus: .running,
+                    runStatus: .running,
+                    artifactID: output.generatedArtifacts.first?.artifactID,
+                    durationMs: durationMs,
+                    simulated: false
+                )
+            )
+        )
+
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return record
+    }
+
+    /// Atomically commits a completed task after verifying lease/epoch/cancel/deadline fencing.
+    public func commitCompleted(
+        taskID: UUID,
+        runID: UUID,
+        expectedLeaseEpoch: Int,
+        bootSessionID: UUID,
+        textResult: SessionTaskTextResult,
+        structuredOutput: DeviceJSONValue?,
+        metrics: DeviceExecutionMetrics,
+        now: Date
+    ) throws -> PersistedDeviceTaskRecord {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        try validateActiveFence(
+            record: record,
+            expectedRunID: runID,
+            expectedLeaseEpoch: expectedLeaseEpoch,
+            expectedBootSessionID: bootSessionID,
+            now: now
+        )
+
+        let completedISO = textResult.producedAt
+        let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+
+        record.task = updatingTask(
+            record.task,
+            status: .completed,
+            currentRunID: .some(runID),
+            updatedAt: completedISO,
+            resultState: .available
+        )
+        record.ownerBootSessionID = nil
+        record.metrics = metrics
+        record.structuredOutput = structuredOutput
+        record.result = SessionTaskResultDTO(
+            taskID: taskID,
+            taskStatus: .completed,
+            resultState: .available,
+            result: textResult
+        )
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: nextSeq,
+                phase: .completed,
+                occurredAt: completedISO,
+                traceID: runID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: runID,
+                    attempt: record.task.attemptCount,
+                    route: .fast,
+                    fromStatus: .running,
+                    toStatus: .completed,
+                    runStatus: .succeeded,
+                    artifactID: record.artifacts.first?.artifactID,
+                    durationMs: metrics.wallDurationMs,
+                    simulated: false
+                )
+            )
+        )
+
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return record
+    }
+
+    /// Atomically records a cancellation request or immediately cancels a queued task.
+    public func requestCancel(taskID: UUID, now: Date) throws -> JournalCancelOutcome {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+
+        if record.task.status.isTerminal {
+            return .alreadyTerminal(record)
+        }
+
+        let nowISO = DeviceWireDate.format(now)
+        if record.task.status == .queued {
+            let previousStatus = record.task.status
+            let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+            record.ownerBootSessionID = nil
+            record.task = updatingTask(
+                record.task,
+                status: .cancelled,
+                currentRunID: .some(nil),
+                cancelRequested: true,
+                updatedAt: nowISO,
+                resultState: .unavailable
+            )
+            record.events.append(
+                SessionTaskEventDTO(
+                    taskID: taskID,
+                    sequence: nextSeq,
+                    phase: .cancelled,
+                    occurredAt: nowISO,
+                    traceID: taskID,
+                    payload: SessionTaskEventPayloadDTO(
+                        taskKind: record.task.kind,
+                        attempt: max(1, record.task.attemptCount),
+                        route: .fast,
+                        fromStatus: previousStatus,
+                        toStatus: .cancelled,
+                        runStatus: .cancelled,
+                        errorCode: .cancelled,
+                        cancelRequested: true,
+                        simulated: false
+                    )
+                )
+            )
+            record.result = SessionTaskResultDTO(
+                taskID: taskID,
+                taskStatus: .cancelled,
+                resultState: .unavailable,
+                result: nil
+            )
+            record.lastErrorCode = .cancelled
+            record.lastErrorMessage = "Task cancelled before execution started."
+            state.tasksByID[taskKey] = record
+            try persistState(&state)
+            return .cancelledQueued(record)
+        }
+
+        record.task = updatingTask(
+            record.task,
+            status: record.task.status,
+            cancelRequested: true,
+            updatedAt: nowISO,
+            resultState: record.task.resultState
+        )
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return .markedCancelRequested(record)
+    }
+
+    /// Atomically commits cancellation under lease fencing.
+    public func commitCancelled(
+        taskID: UUID,
+        expectedLeaseEpoch: Int?,
+        reason: String,
+        now: Date
+    ) throws -> PersistedDeviceTaskRecord {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        if record.task.status.isTerminal {
+            return record
+        }
+        if let expectedLeaseEpoch, record.leaseEpoch != expectedLeaseEpoch {
+            throw DeviceExecutorError.staleLease("Lease epoch mismatch on cancel commit.")
+        }
+
+        let nowISO = DeviceWireDate.format(now)
+        let previousStatus = record.task.status
+        let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+        record.ownerBootSessionID = nil
+        record.task = updatingTask(
+            record.task,
+            status: .cancelled,
+            cancelRequested: true,
+            updatedAt: nowISO,
+            resultState: .unavailable
+        )
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: nextSeq,
+                phase: .cancelled,
+                occurredAt: nowISO,
+                traceID: record.task.currentRunID ?? taskID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: record.task.currentRunID,
+                    attempt: max(1, record.task.attemptCount),
+                    route: .fast,
+                    fromStatus: previousStatus,
+                    toStatus: .cancelled,
+                    runStatus: .cancelled,
+                    errorCode: .cancelled,
+                    cancelRequested: true,
+                    simulated: false
+                )
+            )
+        )
+        record.result = SessionTaskResultDTO(
+            taskID: taskID,
+            taskStatus: .cancelled,
+            resultState: .unavailable,
+            result: nil
+        )
+        record.lastErrorCode = .cancelled
+        record.lastErrorMessage = reason
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return record
+    }
+
+    /// Atomically commits terminal failure under lease fencing.
+    public func commitFailed(
+        taskID: UUID,
+        expectedLeaseEpoch: Int?,
+        errorCode: TaskErrorCode,
+        message: String,
+        now: Date
+    ) throws -> PersistedDeviceTaskRecord {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        if record.task.status.isTerminal {
+            return record
+        }
+        if let expectedLeaseEpoch, record.leaseEpoch != expectedLeaseEpoch {
+            throw DeviceExecutorError.staleLease("Lease epoch mismatch on failure commit.")
+        }
+
+        let nowISO = DeviceWireDate.format(now)
+        let previousStatus = record.task.status
+        let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+        record.ownerBootSessionID = nil
+        record.task = updatingTask(
+            record.task,
+            status: .failed,
+            updatedAt: nowISO,
+            resultState: .unavailable
+        )
+        record.events.append(
+            SessionTaskEventDTO(
+                taskID: taskID,
+                sequence: nextSeq,
+                phase: .failed,
+                occurredAt: nowISO,
+                traceID: record.task.currentRunID ?? taskID,
+                payload: SessionTaskEventPayloadDTO(
+                    taskKind: record.task.kind,
+                    runID: record.task.currentRunID,
+                    attempt: max(1, record.task.attemptCount),
+                    route: .fast,
+                    fromStatus: previousStatus,
+                    toStatus: .failed,
+                    runStatus: .failedTerminal,
+                    errorCode: errorCode,
+                    simulated: false
+                )
+            )
+        )
+        record.result = SessionTaskResultDTO(
+            taskID: taskID,
+            taskStatus: .failed,
+            resultState: .unavailable,
+            result: nil
+        )
+        record.lastErrorCode = errorCode
+        record.lastErrorMessage = message
+        state.tasksByID[taskKey] = record
+        try persistState(&state)
+        return record
+    }
+
+    /// Atomically handles background suspension interruption, re-queuing with cleared `currentRunID`
+    /// and incremented `leaseEpoch` or failing if `maxAttempts` is exhausted.
+    public func commitInterruptedForRetry(
+        taskID: UUID,
+        runID: UUID,
+        expectedLeaseEpoch: Int,
+        bootSessionID: UUID,
+        now: Date
+    ) throws -> JournalInterruptOutcome {
+        var state = try readState()
+        let taskKey = key(for: taskID)
+        guard var record = state.tasksByID[taskKey] else {
+            throw DeviceExecutorError.taskNotFound(taskID)
+        }
+        if record.task.status.isTerminal {
+            return .alreadyTerminal(record)
+        }
+        guard record.leaseEpoch == expectedLeaseEpoch,
+              record.task.currentRunID == runID,
+              record.ownerBootSessionID == bootSessionID
+        else {
+            throw DeviceExecutorError.staleLease("Lease mismatch on background interruption.")
+        }
+
+        let nowISO = DeviceWireDate.format(now)
+        let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
+
+        if record.task.attemptCount < record.submission.maxAttempts {
+            record.leaseEpoch += 1
+            record.ownerBootSessionID = nil
+            record.task = updatingTask(
+                record.task,
+                status: .queued,
+                currentRunID: .some(nil),
+                updatedAt: nowISO,
+                resultState: .pending
+            )
+            record.events.append(
+                SessionTaskEventDTO(
+                    taskID: taskID,
+                    sequence: nextSeq,
+                    phase: .retryScheduled,
+                    occurredAt: nowISO,
+                    traceID: taskID,
+                    payload: SessionTaskEventPayloadDTO(
+                        taskKind: record.task.kind,
+                        attempt: record.task.attemptCount,
+                        route: .fast,
+                        fromStatus: .running,
+                        toStatus: .queued,
+                        runStatus: .leaseExpired,
+                        errorCode: .staleLease,
+                        simulated: false
+                    )
+                )
+            )
+            state.tasksByID[taskKey] = record
+            try persistState(&state)
+            return .requeued(record)
+        }
+
+        let failed = try commitFailed(
+            taskID: taskID,
+            expectedLeaseEpoch: expectedLeaseEpoch,
+            errorCode: .staleLease,
+            message: "Interrupted by background suspension after max attempts.",
+            now: now
+        )
+        return .failedMaxAttempts(failed)
     }
 
     /// Reconciles durable task state across process restarts, crashes, or background suspension.
     public func recoverOnLaunch(
         currentBootSessionID: UUID,
         now: Date = Date()
-    ) throws -> (report: DeviceRecoveryReport, runnableTaskIDs: [UUID]) {
+    ) throws -> (report: DeviceRecoveryReport, runnableTaskIDs: [UUID], terminalRecords: [PersistedDeviceTaskRecord]) {
         var state = try readState()
         var didMutate = false
         var recoveredQueued = 0
@@ -122,12 +696,14 @@ public actor DeviceExecutionJournal {
         var expired = 0
         var restoredTerminal = 0
         var runnableTaskIDs: [UUID] = []
+        var terminalRecords: [PersistedDeviceTaskRecord] = []
 
         let nowISO = DeviceWireDate.format(now)
 
         for (taskKey, var record) in state.tasksByID {
             if record.task.status.isTerminal {
                 restoredTerminal += 1
+                terminalRecords.append(record)
                 continue
             }
 
@@ -137,6 +713,7 @@ public actor DeviceExecutionJournal {
                 record.task = updatingTask(
                     record.task,
                     status: .cancelled,
+                    currentRunID: .some(nil),
                     cancelRequested: true,
                     updatedAt: nowISO,
                     resultState: .unavailable
@@ -148,16 +725,16 @@ public actor DeviceExecutionJournal {
                         sequence: nextSeq,
                         phase: .cancelled,
                         occurredAt: nowISO,
-                        traceID: record.task.currentRunID ?? record.task.taskID,
+                        traceID: record.task.taskID,
                         payload: SessionTaskEventPayloadDTO(
                             taskKind: record.task.kind,
-                            runID: record.task.currentRunID,
                             attempt: max(1, record.task.attemptCount),
                             route: .fast,
                             fromStatus: previousStatus,
                             toStatus: .cancelled,
                             runStatus: .cancelled,
                             errorCode: .cancelled,
+                            cancelRequested: true,
                             simulated: false
                         )
                     )
@@ -171,6 +748,7 @@ public actor DeviceExecutionJournal {
                 record.lastErrorCode = .cancelled
                 record.lastErrorMessage = "Cancelled during recovery."
                 state.tasksByID[taskKey] = record
+                terminalRecords.append(record)
                 convergedCancelled += 1
                 didMutate = true
                 continue
@@ -184,6 +762,7 @@ public actor DeviceExecutionJournal {
                 record.task = updatingTask(
                     record.task,
                     status: .failed,
+                    currentRunID: .some(nil),
                     updatedAt: nowISO,
                     resultState: .unavailable
                 )
@@ -194,10 +773,9 @@ public actor DeviceExecutionJournal {
                         sequence: nextSeq,
                         phase: .failed,
                         occurredAt: nowISO,
-                        traceID: record.task.currentRunID ?? record.task.taskID,
+                        traceID: record.task.taskID,
                         payload: SessionTaskEventPayloadDTO(
                             taskKind: record.task.kind,
-                            runID: record.task.currentRunID,
                             attempt: max(1, record.task.attemptCount),
                             route: .fast,
                             fromStatus: previousStatus,
@@ -217,6 +795,7 @@ public actor DeviceExecutionJournal {
                 record.lastErrorCode = .deadlineExceeded
                 record.lastErrorMessage = "Task deadline expired before recovery."
                 state.tasksByID[taskKey] = record
+                terminalRecords.append(record)
                 expired += 1
                 didMutate = true
                 continue
@@ -224,7 +803,6 @@ public actor DeviceExecutionJournal {
 
             switch record.task.status {
             case .running, .retryableFailed:
-                // Only recover runs owned by a previous process/session (crash/termination), or already retryable.
                 if record.ownerBootSessionID != currentBootSessionID || record.task.status == .retryableFailed {
                     if record.task.attemptCount < record.submission.maxAttempts {
                         let nextSeq = (record.events.map(\.sequence).max() ?? 0) + 1
@@ -234,7 +812,7 @@ public actor DeviceExecutionJournal {
                         record.task = updatingTask(
                             record.task,
                             status: .queued,
-                            currentRunID: nil,
+                            currentRunID: .some(nil),
                             updatedAt: nowISO,
                             resultState: .pending
                         )
@@ -268,6 +846,7 @@ public actor DeviceExecutionJournal {
                         record.task = updatingTask(
                             record.task,
                             status: .failed,
+                            currentRunID: .some(nil),
                             updatedAt: nowISO,
                             resultState: .unavailable
                         )
@@ -277,10 +856,9 @@ public actor DeviceExecutionJournal {
                                 sequence: nextSeq,
                                 phase: .failed,
                                 occurredAt: nowISO,
-                                traceID: record.task.currentRunID ?? record.task.taskID,
+                                traceID: record.task.taskID,
                                 payload: SessionTaskEventPayloadDTO(
                                     taskKind: record.task.kind,
-                                    runID: record.task.currentRunID,
                                     attempt: record.task.attemptCount,
                                     route: .fast,
                                     fromStatus: previousStatus,
@@ -300,6 +878,7 @@ public actor DeviceExecutionJournal {
                         record.lastErrorCode = .staleLease
                         record.lastErrorMessage = "Max recovery attempts (\(record.submission.maxAttempts)) exhausted."
                         state.tasksByID[taskKey] = record
+                        terminalRecords.append(record)
                         expired += 1
                         didMutate = true
                     }
@@ -313,7 +892,7 @@ public actor DeviceExecutionJournal {
         }
 
         if didMutate {
-            try persistState(state)
+            try persistState(&state)
         }
 
         let orderedRunnable = runnableTaskIDs.sorted { lhs, rhs in
@@ -332,29 +911,61 @@ public actor DeviceExecutionJournal {
             expiredCount: expired,
             restoredTerminalCount: restoredTerminal
         )
-        return (report, orderedRunnable)
+        return (report, orderedRunnable, terminalRecords)
     }
 
     public func reset() throws {
-        try persistState(PersistedState())
+        var empty = PersistedState()
+        try persistState(&empty)
+    }
+
+    private func validateActiveFence(
+        record: PersistedDeviceTaskRecord,
+        expectedRunID: UUID,
+        expectedLeaseEpoch: Int,
+        expectedBootSessionID: UUID,
+        now: Date
+    ) throws {
+        if record.task.status == .cancelled || record.task.cancelRequested {
+            throw DeviceExecutorError.cancelled
+        }
+        guard !record.task.status.isTerminal else {
+            throw DeviceExecutorError.staleLease("Task is already terminal (\(record.task.status.rawValue)).")
+        }
+        guard record.task.status == .running,
+              record.leaseEpoch == expectedLeaseEpoch,
+              record.task.currentRunID == expectedRunID,
+              record.ownerBootSessionID == expectedBootSessionID
+        else {
+            throw DeviceExecutorError.staleLease("Stale lease or owner mismatch.")
+        }
+        if let deadlineISO = record.task.deadlineAt,
+           let deadline = DeviceWireDate.parse(deadlineISO),
+           deadline <= now {
+            throw DeviceExecutorError.executionTimeout("Task deadline exceeded.")
+        }
     }
 
     private func updatingTask(
         _ task: SessionTaskDTO,
         status: TaskStatus,
-        currentRunID: UUID? = nil,
+        currentRunID: UUID?? = nil,
         attemptCount: Int? = nil,
         cancelRequested: Bool? = nil,
         updatedAt: String,
         resultState: SessionTaskResultState?
     ) -> SessionTaskDTO {
-        SessionTaskDTO(
+        let resolvedRunID: UUID? = switch currentRunID {
+        case .none: task.currentRunID
+        case .some(let value): value
+        }
+        return SessionTaskDTO(
             taskID: task.taskID,
             agentID: task.agentID,
             kind: task.kind,
             title: task.title,
             status: status,
-            currentRunID: currentRunID ?? task.currentRunID,
+            currentRunID: resolvedRunID,
             attemptCount: attemptCount ?? task.attemptCount,
             cancelRequested: cancelRequested ?? task.cancelRequested,
             createdAt: task.createdAt,
@@ -387,7 +998,28 @@ public actor DeviceExecutionJournal {
         }
     }
 
-    private func persistState(_ state: PersistedState) throws {
+    private func persistState(_ state: inout PersistedState) throws {
+        pruneTerminalRecordsIfNeeded(&state)
+
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+
+        var data: Data
+        do {
+            data = try encoder.encode(state)
+        } catch {
+            throw DeviceExecutorError.storageUnavailable("Failed to encode journal: \(error.localizedDescription)")
+        }
+
+        while data.count > maxJournalBytes {
+            guard pruneOneOldestTerminalRecord(&state) else {
+                throw DeviceExecutorError.payloadTooLarge(
+                    "Device executor journal (\(data.count) bytes) exceeds limit \(maxJournalBytes)."
+                )
+            }
+            data = try encoder.encode(state)
+        }
+
         do {
             let directory = stateFileURL.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -396,9 +1028,6 @@ public actor DeviceExecutionJournal {
             var mutableDir = directory
             try mutableDir.setResourceValues(values)
 
-            let encoder = JSONEncoder()
-            encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(state)
             try data.write(to: stateFileURL, options: [.atomic, .completeFileProtectionUnlessOpen])
             try fsyncURL(stateFileURL)
             try fsyncURL(directory)
@@ -406,6 +1035,29 @@ public actor DeviceExecutionJournal {
         } catch {
             throw DeviceExecutorError.storageUnavailable("Failed to persist device executor journal: \(error.localizedDescription)")
         }
+    }
+
+    private func pruneTerminalRecordsIfNeeded(_ state: inout PersistedState) {
+        while state.tasksByID.count > maxTasks {
+            guard pruneOneOldestTerminalRecord(&state) else {
+                break
+            }
+        }
+    }
+
+    private func pruneOneOldestTerminalRecord(_ state: inout PersistedState) -> Bool {
+        let terminalEntries = state.tasksByID.filter { $0.value.task.status.isTerminal }
+        guard let oldest = terminalEntries.min(by: { lhs, rhs in
+            if lhs.value.task.updatedDate != rhs.value.task.updatedDate {
+                return lhs.value.task.updatedDate < rhs.value.task.updatedDate
+            }
+            return lhs.key < rhs.key
+        }) else {
+            return false
+        }
+        state.tasksByID.removeValue(forKey: oldest.key)
+        state.idempotencyIndex.removeValue(forKey: oldest.value.submission.idempotencyKey)
+        return true
     }
 
     private func fsyncURL(_ url: URL) throws {

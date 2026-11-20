@@ -31,7 +31,11 @@ final class DeviceExecutorTests: XCTestCase {
         now: @escaping @Sendable () -> Date = { Date() }
     ) -> (executor: DeviceTaskExecutor, root: URL) {
         let dir = root ?? makeSandboxRoot()
-        let journal = DeviceExecutionJournal(directory: dir)
+        let journal = DeviceExecutionJournal(
+            directory: dir,
+            maxTasks: policy.maxJournalTasks,
+            maxJournalBytes: policy.maxJournalBytes
+        )
         let workspace = DeviceSandboxWorkspace(rootDirectory: dir, policy: policy)
         let registry = NativeToolRegistry(tools: tools)
         let executor = DeviceTaskExecutor(
@@ -92,7 +96,7 @@ final class DeviceExecutorTests: XCTestCase {
         XCTAssertTrue(extractOutcome.detailText.contains("Generate local PDF report"))
     }
 
-    func testNativeTextToolNormalizeRegexAndHeadings() async throws {
+    func testNativeTextToolNormalizeHeadingsAndDisabledRegex() async throws {
         let (executor, _) = makeExecutor()
         let raw = "# Intro\r\nalpha   \r\n\r\n\r\nbeta\r\nalpha\r\n## Details\r\nOrder #42 ready"
 
@@ -115,20 +119,33 @@ final class DeviceExecutorTests: XCTestCase {
                     ]
                 ),
                 DeviceToolStep(
-                    stepID: "regex",
+                    stepID: "sum",
                     tool: .textProcess,
                     arguments: [
-                        "op": .string("regex_match"),
+                        "op": .string("summarize_lines"),
                         "text": .string("{{prev.text}}"),
-                        "pattern": .string("#\\d+"),
+                        "keyword": .string("Order #42"),
                     ]
                 ),
             ]
         ))
 
         XCTAssertEqual(outcome.status, .completed)
-        let matches = try XCTUnwrap(outcome.structuredOutput?.objectValue?["matches"]?.arrayValue)
-        XCTAssertEqual(matches, [.string("#42")])
+        XCTAssertEqual(outcome.detailText, "Order #42 ready")
+
+        for disabledOp in ["regex_match", "regex_replace"] {
+            let rejected = try await executor.executeAndWait(DeviceTaskSubmission(
+                idempotencyKey: "text-disabled-\(disabledOp)",
+                steps: [
+                    DeviceToolStep(
+                        tool: .textProcess,
+                        arguments: ["op": .string(disabledOp), "text": .string("abc"), "pattern": .string("a+")]
+                    ),
+                ]
+            ))
+            XCTAssertEqual(rejected.status, .failed)
+            XCTAssertEqual(rejected.errorCode, .invalidArgument)
+        }
     }
 
     func testNativeJSONToolQueryAggregateAndCSV() async throws {
@@ -440,6 +457,7 @@ final class DeviceExecutorTests: XCTestCase {
 
         let interruptedRecord = try await executor.record(for: receipt.taskID)
         XCTAssertEqual(interruptedRecord?.task.status, .queued)
+        XCTAssertNil(interruptedRecord?.task.currentRunID)
         XCTAssertEqual(interruptedRecord?.completedStepOutputs.count, 1)
         XCTAssertEqual(interruptedRecord?.leaseEpoch, 2)
 
@@ -595,6 +613,216 @@ final class DeviceExecutorTests: XCTestCase {
             XCTAssertLessThan(item.p95Ms, 5_000, "Benchmark case \(item.name) exceeded 5s P95")
         }
     }
+
+    func testConcurrentIdempotentSubmissionsDoNotDuplicateTasks() async throws {
+        let (executor, _) = makeExecutor()
+        let submission = DeviceTaskSubmission(
+            idempotencyKey: "concurrent-idem-1",
+            steps: [DeviceToolStep(tool: .textProcess, arguments: ["op": .string("stats"), "text": .string("concurrent")])]
+        )
+
+        let receipts = try await withThrowingTaskGroup(of: TaskReceiptDTO.self) { group in
+            for _ in 0..<8 {
+                group.addTask {
+                    try await executor.submitTask(submission, startImmediately: false)
+                }
+            }
+            var collected: [TaskReceiptDTO] = []
+            for try await receipt in group {
+                collected.append(receipt)
+            }
+            return collected
+        }
+
+        let uniqueTaskIDs = Set(receipts.map(\.taskID))
+        XCTAssertEqual(uniqueTaskIDs.count, 1)
+        XCTAssertEqual(receipts.filter { !$0.replayed }.count, 1)
+        XCTAssertEqual(receipts.filter { $0.replayed }.count, 7)
+
+        let records = try await executor.allRecords()
+        XCTAssertEqual(records.count, 1)
+    }
+
+    func testFencedJournalRejectsStaleCompletionAfterCancellation() async throws {
+        let dir = makeSandboxRoot()
+        let journal = DeviceExecutionJournal(directory: dir)
+        let bootID = UUID()
+        let submission = DeviceTaskSubmission(
+            idempotencyKey: "fence-cancel-1",
+            steps: [DeviceToolStep(tool: .textProcess, arguments: ["op": .string("stats"), "text": .string("hello")])]
+        )
+        let (inserted, _) = try await journal.insertOrReplay(
+            submission: submission,
+            requestDigest: try submission.canonicalDigest(),
+            title: "Fence Test",
+            now: Date()
+        )
+        let runID = UUID()
+        let claimed = try await journal.claimRun(
+            taskID: inserted.task.taskID,
+            runID: runID,
+            bootSessionID: bootID,
+            now: Date()
+        )
+
+        // Cancel arrives before commitCompleted
+        _ = try await journal.requestCancel(taskID: inserted.task.taskID, now: Date())
+
+        let result = SessionTaskTextResult(
+            summaryText: "stale",
+            detailText: nil,
+            modelLabel: "iphone-native-executor-v1",
+            simulated: false,
+            producedAt: DeviceWireDate.format(Date())
+        )
+        let metrics = DeviceExecutionMetrics(
+            wallDurationMs: 1,
+            cpuUserMs: 1,
+            cpuSystemMs: 0,
+            memoryFootprintBeforeBytes: 0,
+            memoryFootprintAfterBytes: 0,
+            memoryDeltaBytes: 0,
+            thermalState: .nominal,
+            isLowPowerModeEnabled: false,
+            batteryLevel: nil,
+            stepsCompleted: 1,
+            artifactsGenerated: 0,
+            deviceModelIdentifier: "test",
+            osVersion: "test"
+        )
+
+        do {
+            _ = try await journal.commitCompleted(
+                taskID: inserted.task.taskID,
+                runID: runID,
+                expectedLeaseEpoch: claimed.leaseEpoch,
+                bootSessionID: bootID,
+                textResult: result,
+                structuredOutput: nil,
+                metrics: metrics,
+                now: Date()
+            )
+            XCTFail("Expected commitCompleted to fail fencing after cancel request")
+        } catch let error as DeviceExecutorError {
+            XCTAssertEqual(error, .cancelled)
+        }
+
+        _ = try await journal.commitCancelled(
+            taskID: inserted.task.taskID,
+            expectedLeaseEpoch: claimed.leaseEpoch,
+            reason: "Fenced cancel",
+            now: Date()
+        )
+        let persisted = try await journal.record(for: inserted.task.taskID)
+        XCTAssertEqual(persisted?.task.status, .cancelled)
+    }
+
+    func testSameFilenameArtifactsPreserveBothAndVerifySHA256Integrity() async throws {
+        let (executor, _) = makeExecutor()
+        let outcome = try await executor.executeAndWait(DeviceTaskSubmission(
+            idempotencyKey: "same-name-artifacts-1",
+            steps: [
+                DeviceToolStep(
+                    stepID: "first",
+                    tool: .fileGenerate,
+                    arguments: ["filename": .string("report.txt"), "content": .string("first version")]
+                ),
+                DeviceToolStep(
+                    stepID: "second",
+                    tool: .fileGenerate,
+                    arguments: ["filename": .string("report.txt"), "content": .string("second version")]
+                ),
+            ]
+        ))
+
+        XCTAssertEqual(outcome.status, .completed)
+        XCTAssertEqual(outcome.artifacts.count, 2)
+        XCTAssertNotEqual(outcome.artifacts[0].artifactID, outcome.artifacts[1].artifactID)
+
+        let (_, firstData) = try await executor.artifactData(
+            taskID: outcome.taskID,
+            artifactID: outcome.artifacts[0].artifactID
+        )
+        let (_, secondData) = try await executor.artifactData(
+            taskID: outcome.taskID,
+            artifactID: outcome.artifacts[1].artifactID
+        )
+        XCTAssertEqual(String(data: firstData, encoding: .utf8), "first version")
+        XCTAssertEqual(String(data: secondData, encoding: .utf8), "second version")
+
+        // Corrupt first artifact blob on disk and verify integrity check fails closed
+        let firstURL = try await executor.artifactFileURL(
+            taskID: outcome.taskID,
+            artifactID: outcome.artifacts[0].artifactID
+        )
+        try Data("tampered bytes".utf8).write(to: firstURL)
+        do {
+            _ = try await executor.artifactData(
+                taskID: outcome.taskID,
+                artifactID: outcome.artifacts[0].artifactID
+            )
+            XCTFail("Expected SHA-256 integrity failure")
+        } catch let error as DeviceExecutorError {
+            XCTAssertEqual(error.taskErrorCode, .databaseUnavailable)
+        }
+    }
+
+    func testFileExtensionMIMEMismatchJournalCapacityAndOversizedStructuredOutput() async throws {
+        // 1. Extension & MIME mismatch
+        let (executor, _) = makeExecutor()
+        let mismatchOutcome = try await executor.executeAndWait(DeviceTaskSubmission(
+            idempotencyKey: "mime-mismatch-1",
+            steps: [
+                DeviceToolStep(
+                    tool: .fileGenerate,
+                    arguments: [
+                        "filename": .string("report.pdf"),
+                        "media_type": .string("text/plain"),
+                        "content": .string("not a pdf"),
+                    ]
+                ),
+            ]
+        ))
+        XCTAssertEqual(mismatchOutcome.status, .failed)
+        XCTAssertEqual(mismatchOutcome.errorCode, .invalidArgument)
+
+        // 2. Journal capacity prunes oldest terminal tasks
+        let boundedPolicy = DeviceSandboxPolicy(
+            maxInputBytes: 1024 * 1024,
+            maxOutputTextBytes: 1024,
+            maxGeneratedFileBytes: 1024 * 1024,
+            maxWorkspaceBytes: 4 * 1024 * 1024,
+            maxStepsPerTask: 8,
+            maxJSONDepth: 16,
+            stepTimeoutMs: 5000,
+            maxConcurrentTasks: 1,
+            rejectOnCriticalThermalState: false,
+            maxJournalTasks: 2,
+            maxJournalBytes: 1024 * 1024
+        )
+        let (boundedExecutor, _) = makeExecutor(
+            tools: [OversizedStructuredTool()] + NativeToolRegistry.defaultTools(),
+            policy: boundedPolicy
+        )
+
+        for idx in 1...3 {
+            let done = try await boundedExecutor.executeAndWait(DeviceTaskSubmission(
+                idempotencyKey: "cap-\(idx)",
+                steps: [DeviceToolStep(tool: .textProcess, arguments: ["op": .string("stats"), "text": .string("item \(idx)")])]
+            ))
+            XCTAssertEqual(done.status, .completed)
+        }
+        let retained = try await boundedExecutor.allRecords()
+        XCTAssertEqual(retained.count, 2)
+
+        // 3. Oversized structured output rejected
+        let oversizedOutcome = try await boundedExecutor.executeAndWait(DeviceTaskSubmission(
+            idempotencyKey: "oversized-struct-1",
+            steps: [DeviceToolStep(tool: OversizedStructuredTool.toolName)]
+        ))
+        XCTAssertEqual(oversizedOutcome.status, .failed)
+        XCTAssertEqual(oversizedOutcome.errorCode, .policyDenied)
+    }
 }
 
 private final class FakeBackgroundTaskManager: BackgroundTaskManaging, @unchecked Sendable {
@@ -679,5 +907,22 @@ private actor SlowCancellableTool: NativeTool {
         }
         try context.checkCancellation()
         return NativeToolOutput(summaryText: "Slow tool finished.", outputText: "ok")
+    }
+}
+
+private struct OversizedStructuredTool: NativeTool {
+    static let toolName = DeviceToolName(rawValue: "device.test.oversized")!
+    let name: DeviceToolName = OversizedStructuredTool.toolName
+
+    func execute(
+        context: NativeToolExecutionContext,
+        arguments: [String: DeviceJSONValue]
+    ) async throws -> NativeToolOutput {
+        let bigString = String(repeating: "x", count: 4096)
+        return NativeToolOutput(
+            summaryText: "oversized",
+            outputText: "ok",
+            structuredData: .object(["payload": .string(bigString)])
+        )
     }
 }

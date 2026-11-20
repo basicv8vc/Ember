@@ -4,6 +4,7 @@ import {
   deviceDispatchSchema,
   deviceIdSchema,
   deviceRegistrationSchema,
+  deviceRenewSchema,
   deviceResultSchema,
   type DeviceExecutionCommand,
   type DeviceExecutionResponse,
@@ -88,6 +89,15 @@ export function createDeviceRoutes(
   routes.post('/devices/:deviceId/claim', async (c) => {
     await parseBody(c, deviceClaimSchema);
     return c.json(await run({ kind: 'claim', ...(await deviceIdentity(c)) }));
+  });
+  routes.post('/devices/:deviceId/tasks/:taskId/renew', async (c) => {
+    const result = await run({
+      kind: 'renew',
+      taskId: readId(c.req.param('taskId')),
+      ...(await deviceIdentity(c)),
+      ...(await parseBody(c, deviceRenewSchema)),
+    });
+    return c.json(result, 'kind' in result && result.kind === 'fenced' ? 409 : 200);
   });
   routes.post('/devices/:deviceId/tasks/:taskId/result', async (c) => {
     const result = await run({

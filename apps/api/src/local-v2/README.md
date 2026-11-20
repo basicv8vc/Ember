@@ -77,3 +77,11 @@ device to reclaim under a higher epoch, up to three total runs within the task
 deadline. When the result acknowledgment is ambiguous, the simulator reopens its
 pending-result file and retries the original operation and Run fence. The local
 integration test uses a simulated device and dev identity.
+
+## M2-F2 native iPhone adapter
+
+See the [Cloud Device Adapter contract](../../../../docs/architecture/v2-m2-f2-device-adapter-contract.md)
+and [QA report](../../../../docs/architecture/v2-m2-f2-device-execution-report.md)
+for the native `device.text.process` v1 wire and physical-device procedure.
+The standalone debug app in `apps/ios/LocalDeviceAdapter` reaches the loopback
+Worker through a per-run QA relay on a private LAN.

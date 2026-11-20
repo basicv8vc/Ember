@@ -120,12 +120,23 @@ export async function syncAlarmAndRelayBudget(input: {
   readonly alarmAtMs: number | null | undefined;
   readonly nowMs: number;
   readonly shouldRelayBudgetSync: boolean;
+  readonly recomputeAlarmSync?: (nowMs: number) => number | null;
 }): Promise<void> {
-  if (input.alarmAtMs !== undefined && input.recoveryHooks.syncPlatformAlarm !== undefined) {
-    await input.recoveryHooks.syncPlatformAlarm(input.alarmAtMs, input.nowMs);
-  }
-  if (input.shouldRelayBudgetSync && input.recoveryHooks.relayBudgetSync !== undefined) {
-    await input.recoveryHooks.relayBudgetSync(input.nowMs);
+  let relayAttempted = false;
+  try {
+    if (input.shouldRelayBudgetSync && input.recoveryHooks.relayBudgetSync !== undefined) {
+      relayAttempted = true;
+      await input.recoveryHooks.relayBudgetSync(input.nowMs);
+    }
+  } finally {
+    if (input.alarmAtMs !== undefined && input.recoveryHooks.syncPlatformAlarm !== undefined) {
+      const targetAlarmAtMs = relayAttempted
+        ? input.recomputeAlarmSync !== undefined
+          ? input.recomputeAlarmSync(input.nowMs)
+          : null
+        : input.alarmAtMs;
+      await input.recoveryHooks.syncPlatformAlarm(targetAlarmAtMs, input.nowMs);
+    }
   }
 }
 
@@ -958,6 +969,8 @@ export async function executeAuthoritativeTurnCommit(
     alarmAtMs: tx.alarmAtMs,
     nowMs: tx.nowMs,
     shouldRelayBudgetSync: tx.hasBudgetSync,
+    recomputeAlarmSync: (ts) =>
+      deps.storage.transactionSync(() => deps.eventCoordinator.recomputeAlarmSync(ts)),
   });
   return tx.result;
 }

@@ -1264,6 +1264,7 @@ export default {
               ? payload.sweeperId
               : `sweeper-${crypto.randomUUID()}`,
           nowMs,
+          batchLimit: typeof payload.batchLimit === 'number' ? payload.batchLimit : 200,
         });
         return Response.json(res);
       }

@@ -167,6 +167,8 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       alarmAtMs: input.alarmAtMs,
       nowMs: input.nowMs,
       shouldRelayBudgetSync: input.shouldRelayBudgetSync,
+      recomputeAlarmSync: (ts) =>
+        this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
   }
 

@@ -1,0 +1,518 @@
+{
+  "scenarioId": "ember-v2-m1-full-runtime-benchmark",
+  "evidenceKind": "measured_local_workerd",
+  "gitSha": "af93106e161d83e792c93c03b56cf6aefee364ec",
+  "timestamp": "2026-11-20T04:39:28.419Z",
+  "wranglerVersion": "4.158.0",
+  "configPath": "tests/integration/support/v2-m1-full-runtime/wrangler.jsonc",
+  "engineeringTargets": {
+    "nearRegionAckP95Ms": 250,
+    "runtimeOverheadP95Ms": 200,
+    "globalBudgetCheckP95Ms": 50,
+    "durableDispatchP95Ms": 3000,
+    "offlineDetectionTargetMs": 120000,
+    "offlineRecoveryTargetMs": 300000,
+    "coveredPathSyncD1Io": 0,
+    "duplicateCommitCount": 0,
+    "silentTaskLossCount": 0,
+    "unauthorizedBudgetReserveCount": 0
+  },
+  "workloadCondition": "Local workerd via wrangler createTestHarness; FakeModelGatewayServer (delay=0ms, cost=120 micro_usd); D1_RECOVERY + GlobalBudgetDO + DURABLE_TURN_QUEUE + AgentHeadDO; HTTP proxy env vars cleared if unset by runner.",
+  "baselineMetrics": {
+    "uncoveredHttpAckMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 12.38,
+        "meanMs": 14.05,
+        "p50Ms": 13.94,
+        "p90Ms": 15.48,
+        "p95Ms": 15.85,
+        "p99Ms": 17.11,
+        "maxMs": 17.42,
+        "stdDevMs": 1.1
+      }
+    },
+    "coveredHttpAckMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 11.21,
+        "meanMs": 13.45,
+        "p50Ms": 12.7,
+        "p90Ms": 16.64,
+        "p95Ms": 17.42,
+        "p99Ms": 18.24,
+        "maxMs": 18.45,
+        "stdDevMs": 1.95
+      }
+    },
+    "durableDispatchMs": {
+      "sampleCount": 40,
+      "successCount": 40,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 40,
+        "minMs": 48.93,
+        "meanMs": 52.76,
+        "p50Ms": 52.99,
+        "p90Ms": 55.63,
+        "p95Ms": 55.85,
+        "p99Ms": 56.56,
+        "maxMs": 56.76,
+        "stdDevMs": 1.91
+      }
+    },
+    "fastPath3RpcAckMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 8.69,
+        "meanMs": 9.49,
+        "p50Ms": 9.02,
+        "p90Ms": 10.41,
+        "p95Ms": 12.89,
+        "p99Ms": 13.06,
+        "maxMs": 13.1,
+        "stdDevMs": 1.22
+      }
+    },
+    "fastPath3RpcRuntimeOverheadMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 20.41,
+        "meanMs": 21.81,
+        "p50Ms": 21.28,
+        "p90Ms": 24.78,
+        "p95Ms": 25.02,
+        "p99Ms": 25.53,
+        "maxMs": 25.66,
+        "stdDevMs": 1.49
+      }
+    },
+    "fakeProviderTtftMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 0.45,
+        "meanMs": 0.55,
+        "p50Ms": 0.5,
+        "p90Ms": 0.57,
+        "p95Ms": 0.61,
+        "p99Ms": 1.12,
+        "maxMs": 1.25,
+        "stdDevMs": 0.17
+      }
+    },
+    "globalBudgetReserveAndAuthorizeMs": {
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "successRate": 1,
+      "errorRate": 0,
+      "latencyMs": {
+        "count": 20,
+        "minMs": 7.52,
+        "meanMs": 8.36,
+        "p50Ms": 8,
+        "p90Ms": 9.21,
+        "p95Ms": 11.17,
+        "p99Ms": 11.45,
+        "maxMs": 11.52,
+        "stdDevMs": 1.05
+      }
+    },
+    "edgeSseStreamProbe": {
+      "status": 201,
+      "sawDeltaEvent": true,
+      "outcomeSummary": "SSE streamed turn.delta and committed cleanly"
+    },
+    "multiTurnSseContextProbe": {
+      "priorMessagesCount": 42,
+      "status": 201,
+      "sawDeltaEvent": false,
+      "outcomeSummary": "Failed without turn.delta (Defect #7: prepareTurn returns 9 context rows > maxContextMessages=8 -> internal_error)"
+    }
+  },
+  "measuredPerEventOps": {
+    "covered3RpcFastPath": {
+      "sampleCount": 20,
+      "agentHeadRowsReadMean": 169.4,
+      "agentHeadRowsWrittenMean": 42,
+      "agentHeadSqlStatementsMean": 102.7,
+      "globalBudgetRowsReadPerTurn": 8,
+      "globalBudgetRowsWrittenPerTurn": 9,
+      "totalDoRowsReadMean": 177.4,
+      "totalDoRowsWrittenMean": 51,
+      "d1OpsMean": 1,
+      "d1RowsReadMean": 1,
+      "d1RowsWrittenMean": 3,
+      "queueSendsMean": 0,
+      "alarmSetCallsMean": 2,
+      "alarmFiresMean": 0
+    },
+    "coveredB1DurablePath": {
+      "sampleCount": 20,
+      "agentHeadRowsReadMean": 260.9,
+      "agentHeadRowsWrittenMean": 51.75,
+      "agentHeadSqlStatementsMean": 175.15,
+      "globalBudgetRowsReadPerTurn": 8,
+      "globalBudgetRowsWrittenPerTurn": 9,
+      "totalDoRowsReadMean": 268.9,
+      "totalDoRowsWrittenMean": 60.75,
+      "d1OpsMean": 1.9,
+      "d1RowsReadMean": 1.9,
+      "d1RowsWrittenMean": 3.9,
+      "queueSendsMean": 1,
+      "alarmSetCallsMean": 4,
+      "alarmFiresMean": 1.75
+    },
+    "activeCoveredB1DurablePath": {
+      "sampleCount": 5,
+      "agentHeadRowsReadMean": 225,
+      "agentHeadRowsWrittenMean": 47.6,
+      "agentHeadSqlStatementsMean": 160.6,
+      "globalBudgetRowsReadPerTurn": 8,
+      "globalBudgetRowsWrittenPerTurn": 9,
+      "totalDoRowsReadMean": 233,
+      "totalDoRowsWrittenMean": 56.6,
+      "d1OpsMean": 0,
+      "d1RowsReadMean": 0,
+      "d1RowsWrittenMean": 0,
+      "queueSendsMean": 1,
+      "alarmSetCallsMean": 3.8,
+      "alarmFiresMean": 1.6
+    },
+    "uncoveredB1DurablePath": {
+      "sampleCount": 20,
+      "agentHeadRowsReadMean": 173.55,
+      "agentHeadRowsWrittenMean": 52.15,
+      "agentHeadSqlStatementsMean": 148.2,
+      "globalBudgetRowsReadPerTurn": 8,
+      "globalBudgetRowsWrittenPerTurn": 9,
+      "totalDoRowsReadMean": 181.55,
+      "totalDoRowsWrittenMean": 61.15,
+      "d1OpsMean": 1.05,
+      "d1RowsReadMean": 1.05,
+      "d1RowsWrittenMean": 3.05,
+      "queueSendsMean": 1,
+      "alarmSetCallsMean": 4,
+      "alarmFiresMean": 1.1
+    }
+  },
+  "concurrencySweep": [
+    {
+      "concurrency": 1,
+      "agentMode": "pre_covered_distinct_agents",
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "ackLatencyMs": {
+        "count": 20,
+        "minMs": 8.7,
+        "meanMs": 13.54,
+        "p50Ms": 11.85,
+        "p90Ms": 15.88,
+        "p95Ms": 18.25,
+        "p99Ms": 26.6,
+        "maxMs": 28.69,
+        "stdDevMs": 4.07
+      },
+      "durableDispatchLatencyMs": {
+        "count": 20,
+        "minMs": 49.15,
+        "meanMs": 53.07,
+        "p50Ms": 53.06,
+        "p90Ms": 55.53,
+        "p95Ms": 56.09,
+        "p99Ms": 58.5,
+        "maxMs": 59.11,
+        "stdDevMs": 2.11
+      },
+      "throughputReqPerSec": 15.01,
+      "safetyViolations": {
+        "duplicateProviderCalls": 0,
+        "duplicateAssistantMessages": 0,
+        "duplicateCommits": 0,
+        "lostAcceptedWork": 0,
+        "budgetOvercommit": 0
+      }
+    },
+    {
+      "concurrency": 10,
+      "agentMode": "pre_covered_distinct_agents",
+      "sampleCount": 20,
+      "successCount": 20,
+      "errorCount": 0,
+      "ackLatencyMs": {
+        "count": 20,
+        "minMs": 20.49,
+        "meanMs": 55.88,
+        "p50Ms": 50.7,
+        "p90Ms": 94.71,
+        "p95Ms": 94.89,
+        "p99Ms": 94.97,
+        "maxMs": 94.99,
+        "stdDevMs": 22.17
+      },
+      "durableDispatchLatencyMs": {
+        "count": 20,
+        "minMs": 178.78,
+        "meanMs": 599.39,
+        "p50Ms": 639.9,
+        "p90Ms": 796.04,
+        "p95Ms": 816.27,
+        "p99Ms": 858.65,
+        "maxMs": 869.25,
+        "stdDevMs": 193.26
+      },
+      "throughputReqPerSec": 13.22,
+      "safetyViolations": {
+        "duplicateProviderCalls": 0,
+        "duplicateAssistantMessages": 0,
+        "duplicateCommits": 0,
+        "lostAcceptedWork": 0,
+        "budgetOvercommit": 0
+      }
+    },
+    {
+      "concurrency": 25,
+      "agentMode": "pre_covered_distinct_agents",
+      "sampleCount": 25,
+      "successCount": 25,
+      "errorCount": 0,
+      "ackLatencyMs": {
+        "count": 25,
+        "minMs": 114.61,
+        "meanMs": 193.65,
+        "p50Ms": 190.14,
+        "p90Ms": 222.02,
+        "p95Ms": 223.73,
+        "p99Ms": 224.25,
+        "maxMs": 224.28,
+        "stdDevMs": 22.94
+      },
+      "durableDispatchLatencyMs": {
+        "count": 25,
+        "minMs": 434.52,
+        "meanMs": 1546.39,
+        "p50Ms": 1677.8,
+        "p90Ms": 2208.49,
+        "p95Ms": 2265.81,
+        "p99Ms": 2302.22,
+        "maxMs": 2309.93,
+        "stdDevMs": 576.65
+      },
+      "throughputReqPerSec": 9.86,
+      "safetyViolations": {
+        "duplicateProviderCalls": 0,
+        "duplicateAssistantMessages": 0,
+        "duplicateCommits": 0,
+        "lostAcceptedWork": 0,
+        "budgetOvercommit": 0
+      }
+    },
+    {
+      "concurrency": 50,
+      "agentMode": "pre_covered_distinct_agents",
+      "sampleCount": 50,
+      "successCount": 50,
+      "errorCount": 0,
+      "ackLatencyMs": {
+        "count": 50,
+        "minMs": 271.32,
+        "meanMs": 336.15,
+        "p50Ms": 332.84,
+        "p90Ms": 382.16,
+        "p95Ms": 382.34,
+        "p99Ms": 382.49,
+        "maxMs": 382.53,
+        "stdDevMs": 47.16
+      },
+      "durableDispatchLatencyMs": {
+        "count": 50,
+        "minMs": 842.1,
+        "meanMs": 5164.99,
+        "p50Ms": 5664.04,
+        "p90Ms": 7441.46,
+        "p95Ms": 7562.63,
+        "p99Ms": 7637.9,
+        "maxMs": 7659.43,
+        "stdDevMs": 2029.2
+      },
+      "throughputReqPerSec": 6.22,
+      "safetyViolations": {
+        "duplicateProviderCalls": 0,
+        "duplicateAssistantMessages": 0,
+        "duplicateCommits": 0,
+        "lostAcceptedWork": 0,
+        "budgetOvercommit": 0
+      }
+    }
+  ],
+  "uncoveredConcurrentContentionCheck": {
+    "concurrency": 5,
+    "statusCounts": {
+      "201": 5
+    },
+    "defectNote": "All 5 concurrent uncovered prepareTurn requests on the same AgentHeadDO succeeded (no 503 generation race)."
+  },
+  "logical1000AgentFeasibility": {
+    "totalAgentsProvisioned": 1000,
+    "provisionDurationMs": 10423.14,
+    "concurrentRequests": 100,
+    "successCount": 100,
+    "errorCount": 0,
+    "ackLatencyMs": {
+      "count": 100,
+      "minMs": 579.02,
+      "meanMs": 738.97,
+      "p50Ms": 754.34,
+      "p90Ms": 896.63,
+      "p95Ms": 897.02,
+      "p99Ms": 897.42,
+      "maxMs": 900.02,
+      "stdDevMs": 94.48
+    },
+    "durableDispatchLatencyMs": {
+      "count": 100,
+      "minMs": 1408.74,
+      "meanMs": 5428.29,
+      "p50Ms": 5648.74,
+      "p90Ms": 7778.78,
+      "p95Ms": 8067.15,
+      "p99Ms": 8198.28,
+      "maxMs": 8202.73,
+      "stdDevMs": 1954.95
+    },
+    "rssMbAfter": 901.28,
+    "safetyViolations": {
+      "duplicateProviderCalls": 0,
+      "duplicateAssistantMessages": 0,
+      "duplicateCommits": 0,
+      "lostAcceptedWork": 0,
+      "budgetOvercommit": 0
+    }
+  },
+  "offlineRecoveryTiming": {
+    "detectedAfterMs": 50000,
+    "recoveredAfterMs": 66000,
+    "meetsDetectionTarget2Min": true,
+    "meetsRecoveryTarget5Min": true
+  },
+  "rttSimulationOverlay": [
+    {
+      "evidenceKind": "simulated_synthetic",
+      "regionId": "near-region",
+      "label": "Near-Region Edge + Colocated DO/D1 (e.g. Tokyo <-> Tokyo)",
+      "ackP95Ms": 41.42,
+      "runtimeOverheadP95Ms": 53.02,
+      "globalBudgetCheckP95Ms": 27.17
+    },
+    {
+      "evidenceKind": "simulated_synthetic",
+      "regionId": "apac-intra",
+      "label": "APAC Intra-Region (e.g. Singapore <-> Tokyo)",
+      "ackP95Ms": 117.42,
+      "runtimeOverheadP95Ms": 223.02,
+      "globalBudgetCheckP95Ms": 95.17
+    },
+    {
+      "evidenceKind": "simulated_synthetic",
+      "regionId": "eu-us-east",
+      "label": "Transatlantic (e.g. Frankfurt/London <-> US-East)",
+      "ackP95Ms": 191.42,
+      "runtimeOverheadP95Ms": 415.02,
+      "globalBudgetCheckP95Ms": 167.17
+    },
+    {
+      "evidenceKind": "simulated_synthetic",
+      "regionId": "apac-us-west",
+      "label": "Transpacific (e.g. Tokyo/Seoul <-> US-West)",
+      "ackP95Ms": 279.42,
+      "runtimeOverheadP95Ms": 625.02,
+      "globalBudgetCheckP95Ms": 251.17
+    },
+    {
+      "evidenceKind": "simulated_synthetic",
+      "regionId": "cross-global",
+      "label": "Cross-Global Long Haul (e.g. Sydney/SG <-> US-East/EU)",
+      "ackP95Ms": 412.42,
+      "runtimeOverheadP95Ms": 950.02,
+      "globalBudgetCheckP95Ms": 381.17
+    }
+  ],
+  "targetComparison": [
+    {
+      "metric": "ACK P95 (local workerd, covered B1 HTTP)",
+      "target": "<= 250 ms (near-region)",
+      "measuredLocalWorkerd": "17.42 ms (uncovered: 15.85 ms)",
+      "m0Baseline": "10.59 ms (covered) / 17.66 ms (uncovered)",
+      "status": "PASS"
+    },
+    {
+      "metric": "Runtime Overhead P95 (3-RPC Fast Path, excl. model)",
+      "target": "<= 200 ms",
+      "measuredLocalWorkerd": "25.02 ms",
+      "m0Baseline": "31.44 ms (covered) / 38.45 ms (uncovered)",
+      "status": "PASS"
+    },
+    {
+      "metric": "Global Budget Reserve + Authorize P95",
+      "target": "<= 50 ms",
+      "measuredLocalWorkerd": "11.17 ms",
+      "m0Baseline": "11.49 ms (reserve 5.84 + auth 5.65)",
+      "status": "PASS"
+    },
+    {
+      "metric": "Durable Dispatch P95 (POST -> completed)",
+      "target": "<= 3,000 ms",
+      "measuredLocalWorkerd": "55.85 ms",
+      "m0Baseline": "N/A (M0 had no Queue+DO assembly)",
+      "status": "PASS"
+    },
+    {
+      "metric": "Offline Detection / Recovery",
+      "target": "<= 2 min detect / <= 5 min recover",
+      "measuredLocalWorkerd": "50s detect / 66s recover",
+      "m0Baseline": "N/A (M0 had no Sweeper integration)",
+      "status": "PASS"
+    },
+    {
+      "metric": "Edge SSE Stream (/v2/.../messages/stream)",
+      "target": "Stream delta + commit/handoff",
+      "measuredLocalWorkerd": "HTTP 201, sawDelta=true",
+      "m0Baseline": "N/A",
+      "status": "PASS"
+    }
+  ],
+  "caveats": [
+    "All measurements ran on local single-host workerd (loopback TCP/DO IPC); never claim local latencies as Cloudflare global production SLAs.",
+    "GlobalBudgetDO SQLite row counts (8 read / 9 write per turn) reflect GlobalBudgetAuthorityCore statements measured in M0 without modifying production GlobalBudgetDO.",
+    "Edge SSE /v2/conversations/:id/messages/stream streamed turn.delta cleanly; 3-RPC Fast Path overhead was additionally isolated via AgentHeadDO + GlobalBudgetDO RPC.",
+    "Pre-covered distinct agents were used in the multi-agent concurrency sweep."
+  ]
+}

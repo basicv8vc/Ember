@@ -19,6 +19,7 @@ import type { ScheduleRepository } from './schedules.js';
 export const D1_RECOVERY_GRACE_MS = 45_000;
 export const DEFAULT_ALARM_BATCH_LIMIT = 10;
 export const DEFAULT_POSTPONE_MIN_DELTA_MS = 5_000;
+export const DEFAULT_COVERAGE_IDLE_GRACE_MS = 10 * 60_000;
 
 export class RecoveryUnavailableError extends Error {
   readonly code = 'DB_UNAVAILABLE' as const;
@@ -256,6 +257,7 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
   readonly #agentId: string;
   readonly #business: Pick<AuthoritativeBusinessPort, 'earliestRequiredDiscoveryAtMsSync'>;
   readonly #graceMs: number;
+  readonly #idleGraceMs: number;
 
   constructor(cmd: {
     readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
@@ -263,6 +265,7 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
     readonly agentId: string;
     readonly business: Pick<AuthoritativeBusinessPort, 'earliestRequiredDiscoveryAtMsSync'>;
     readonly graceMs?: number;
+    readonly idleGraceMs?: number;
   }) {
     this.#sql = cmd.storage.sql;
     this.#storage = cmd.storage;
@@ -270,6 +273,7 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
     this.#agentId = cmd.agentId;
     this.#business = cmd.business;
     this.#graceMs = cmd.graceMs ?? D1_RECOVERY_GRACE_MS;
+    this.#idleGraceMs = Math.max(0, cmd.idleGraceMs ?? DEFAULT_COVERAGE_IDLE_GRACE_MS);
   }
 
   getCoverageRowSync(): V2RecoveryCoverageRow | null {
@@ -782,6 +786,7 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
     readonly nowMs: number;
     readonly registry: RecoveryRegistryPort;
     readonly postponeMinDeltaMs?: number;
+    readonly idleGraceMs?: number;
   }): Promise<'unchanged' | 'retired' | 'postponed'> {
     const plan = this.#storage.transactionSync<
       | { readonly kind: 'unchanged' }
@@ -799,6 +804,11 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
       }
       const openD = this.computeEarliestOpenDiscoveryAtMsSync(cmd.nowMs);
       if (openD === null) {
+        const effectiveIdleGraceMs = Math.max(0, cmd.idleGraceMs ?? this.#idleGraceMs);
+        const idleReferenceMs = Math.max(row.updated_at_ms, row.last_d1_sync_at_ms ?? 0);
+        if (effectiveIdleGraceMs > 0 && cmd.nowMs < idleReferenceMs + effectiveIdleGraceMs) {
+          return { kind: 'unchanged' };
+        }
         const nextGen = row.generation + 1;
         this.#sql.exec(
           `UPDATE v2_recovery_coverage

@@ -206,6 +206,7 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
       tenantId: 't1',
       agentId: 'a1',
       business,
+      idleGraceMs: 0,
     });
     const coordinator = new OutboxCoordinator(doHarness.storage.sql, {
       storage: doHarness.storage,
@@ -309,6 +310,7 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
       tenantId: 't1',
       agentId: 'a1',
       business,
+      idleGraceMs: 0,
     });
 
     let d1Calls = 0;
@@ -423,6 +425,7 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
       tenantId: 't1',
       agentId: 'a1',
       business,
+      idleGraceMs: 0,
     });
     const coordinator = new OutboxCoordinator(doHarness.storage.sql, {
       storage: doHarness.storage,
@@ -583,6 +586,7 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
       tenantId: 't1',
       agentId: 'a1',
       business,
+      idleGraceMs: 0,
     });
     const coordinator = new OutboxCoordinator(doHarness.storage.sql, {
       storage: doHarness.storage,

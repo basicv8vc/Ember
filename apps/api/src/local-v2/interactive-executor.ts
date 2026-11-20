@@ -196,6 +196,8 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             ? { personalMemories: prepared.personalMemories }
             : {}),
           enablePersonalMemorySaveTool: true,
+          enableProactiveScheduleTool: true,
+          currentTimeIso: new Date(now).toISOString(),
           maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
         },
         operationId,
@@ -397,6 +399,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             simulated: true,
             ...(reply.output.kind === 'save_memory'
               ? { personalMemorySave: reply.output.memory.arguments }
+              : {}),
+            ...(reply.output.kind === 'create_schedule'
+              ? { proactiveScheduleCreate: reply.output.schedule.arguments }
               : {}),
           },
     });

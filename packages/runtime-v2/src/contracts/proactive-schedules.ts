@@ -26,6 +26,74 @@ const isoDateTimeSchema = z
   .max(64)
   .refine((value) => Number.isFinite(Date.parse(value)), 'must be a valid ISO-8601 timestamp');
 
+const isoDateTimeWithOffsetSchema = isoDateTimeSchema.refine(
+  (value) => /(?:Z|[+-]\d{2}:\d{2})$/i.test(value),
+  'must include an explicit UTC Z or ±HH:MM timezone offset',
+);
+
+export const proactiveScheduleTurnCommandSchema = z
+  .strictObject({
+    kind: proactiveScheduleKindSchema,
+    title: z.string().trim().min(1).max(140),
+    prompt: z.string().trim().min(1).max(2_000),
+    triggerType: z.enum(['once', 'interval', 'cron']),
+    fireAt: isoDateTimeWithOffsetSchema.optional(),
+    intervalSeconds: z
+      .number()
+      .int()
+      .min(MIN_INTERVAL_SECONDS)
+      .max(MAX_INTERVAL_SECONDS)
+      .optional(),
+    cronExpr: z.string().trim().min(1).max(120).optional(),
+    timezone: z.string().trim().min(1).max(100).optional(),
+    deliveryMode: proactiveDeliveryModeSchema.optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.triggerType === 'once') {
+      if (data.fireAt === undefined) {
+        ctx.addIssue({ code: 'custom', path: ['fireAt'], message: 'fireAt required for once' });
+      }
+      if (data.intervalSeconds !== undefined || data.cronExpr !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['triggerType'],
+          message: 'intervalSeconds and cronExpr disallowed for once',
+        });
+      }
+    } else if (data.triggerType === 'interval') {
+      if (data.intervalSeconds === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['intervalSeconds'],
+          message: 'intervalSeconds required for interval',
+        });
+      }
+      if (data.cronExpr !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cronExpr'],
+          message: 'cronExpr disallowed for interval',
+        });
+      }
+    } else if (data.triggerType === 'cron') {
+      if (data.cronExpr === undefined || data.timezone === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cronExpr'],
+          message: 'cronExpr and timezone required for cron',
+        });
+      }
+      if (data.fireAt !== undefined || data.intervalSeconds !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['triggerType'],
+          message: 'fireAt and intervalSeconds disallowed for cron',
+        });
+      }
+    }
+  });
+export type ProactiveScheduleTurnCommand = z.infer<typeof proactiveScheduleTurnCommandSchema>;
+
 export const proactiveScheduleTriggerSchema = z.discriminatedUnion('type', [
   z.strictObject({
     type: z.literal('once'),

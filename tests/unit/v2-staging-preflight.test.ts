@@ -26,21 +26,7 @@ function loadRealConfigs() {
 }
 
 describe('V2 staging preflight validator', () => {
-  it('accepts the repository wrangler.v2-staging.jsonc in local dry-run mode', () => {
-    const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
-    const result = validateV2StagingConfig({
-      v2Config,
-      v1Configs,
-      migrationExists,
-      requireProvisioned: false,
-    });
-
-    expect(result.ok).toBe(true);
-    expect(result.errors).toEqual([]);
-    expect(result.notices.some((n) => n.includes('UNPROVISIONED_PLACEHOLDER'))).toBe(true);
-  });
-
-  it('blocks live deploy when D1_RECOVERY still uses the unprovisioned placeholder', () => {
+  it('accepts the repository wrangler.v2-staging.jsonc with provisioned D1', () => {
     const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
     const result = validateV2StagingConfig({
       v2Config,
@@ -49,8 +35,34 @@ describe('V2 staging preflight validator', () => {
       requireProvisioned: true,
     });
 
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes('placeholder database_id'))).toBe(true);
+    expect(result.ok).toBe(true);
+    expect(result.errors).toEqual([]);
+    expect(result.notices).toEqual([]);
+  });
+
+  it('blocks live deploy when D1_RECOVERY uses the unprovisioned placeholder', () => {
+    const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
+    const mutated = structuredClone(v2Config);
+    const d1 = mutated.d1_databases?.[0];
+    if (d1) d1.database_id = UNPROVISIONED_D1_PLACEHOLDER;
+
+    const dryRunResult = validateV2StagingConfig({
+      v2Config: mutated,
+      v1Configs,
+      migrationExists,
+      requireProvisioned: false,
+    });
+    expect(dryRunResult.ok).toBe(true);
+    expect(dryRunResult.notices.some((n) => n.includes('UNPROVISIONED_PLACEHOLDER'))).toBe(true);
+
+    const strictResult = validateV2StagingConfig({
+      v2Config: mutated,
+      v1Configs,
+      migrationExists,
+      requireProvisioned: true,
+    });
+    expect(strictResult.ok).toBe(false);
+    expect(strictResult.errors.some((e) => e.includes('placeholder database_id'))).toBe(true);
   });
 
   it('rejects any V1 resource collision (worker name, queue, route, or Hyperdrive)', () => {

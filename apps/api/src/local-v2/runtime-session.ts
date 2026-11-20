@@ -1,6 +1,13 @@
 import { DomainError } from '@ember/domain';
 import type { B1SessionRecord } from '@ember/postgres';
 import { deterministicEdgeUuid } from '@ember/runtime-v2';
+import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
+import {
+  APPLE_DEFAULT_JWKS_CACHE_MAX_AGE_MS,
+  APPLE_DEFAULT_JWKS_COOLDOWN_MS,
+  APPLE_DEFAULT_JWKS_TIMEOUT_MS,
+  APPLE_JWKS_URL,
+} from '../auth/apple-identity.js';
 import type { B1SessionRuntime } from '../auth/b1-auth-runtime.js';
 import { createDevIdentityVerifier } from '../auth/identity-verifier.js';
 import {
@@ -9,6 +16,13 @@ import {
   type B1SessionPorts,
 } from '../auth/session-service.js';
 import { getHead, type LocalRuntimeEnv } from './runtime-head.js';
+import { createStagingV2SessionRuntime } from './staging-session-store.js';
+
+const APPLE_KEY_RESOLVER: JWTVerifyGetKey = createRemoteJWKSet(new URL(APPLE_JWKS_URL), {
+  timeoutDuration: APPLE_DEFAULT_JWKS_TIMEOUT_MS,
+  cooldownDuration: APPLE_DEFAULT_JWKS_COOLDOWN_MS,
+  cacheMaxAge: APPLE_DEFAULT_JWKS_CACHE_MAX_AGE_MS,
+});
 
 interface SessionRow extends B1SessionRecord {
   readonly principalId: string;
@@ -213,4 +227,40 @@ export function createLocalSessions(env: LocalRuntimeEnv): B1SessionRuntime {
     devProvider: { evaluate: () => ({ enabled: true, deniedBy: [] }) },
     me: ports.me,
   };
+}
+
+export function createStagingV2Sessions(env: LocalRuntimeEnv): B1SessionRuntime {
+  const bundleId = env.EMBER_APPLE_BUNDLE_ID?.trim() ?? '';
+  if (bundleId.length === 0) {
+    throw new Error('EMBER_APPLE_BUNDLE_ID is required in v2-staging');
+  }
+  return createStagingV2SessionRuntime({
+    db: env.D1_RECOVERY,
+    appleBindings: {
+      EMBER_APPLE_BUNDLE_ID: bundleId,
+      ...(env.EMBER_APPLE_CLOCK_SKEW_SECONDS === undefined
+        ? {}
+        : { EMBER_APPLE_CLOCK_SKEW_SECONDS: env.EMBER_APPLE_CLOCK_SKEW_SECONDS }),
+      ...(env.EMBER_APPLE_MAX_TOKEN_AGE_SECONDS === undefined
+        ? {}
+        : { EMBER_APPLE_MAX_TOKEN_AGE_SECONDS: env.EMBER_APPLE_MAX_TOKEN_AGE_SECONDS }),
+      ...(env.EMBER_APPLE_JWKS_TIMEOUT_MS === undefined
+        ? {}
+        : { EMBER_APPLE_JWKS_TIMEOUT_MS: env.EMBER_APPLE_JWKS_TIMEOUT_MS }),
+      ...(env.EMBER_APPLE_JWKS_COOLDOWN_MS === undefined
+        ? {}
+        : { EMBER_APPLE_JWKS_COOLDOWN_MS: env.EMBER_APPLE_JWKS_COOLDOWN_MS }),
+      ...(env.EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS === undefined
+        ? {}
+        : { EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS: env.EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS }),
+    },
+    appleKeyResolver: APPLE_KEY_RESOLVER,
+    ...(env.EMBER_V2_STAGING_ALLOWED_SUBJECTS === undefined
+      ? {}
+      : { allowedSubjectsRaw: env.EMBER_V2_STAGING_ALLOWED_SUBJECTS }),
+    bootstrapHead: (scope, conversationId) =>
+      getHead(env, scope.tenantId, scope.agentId).bootstrap(scope, conversationId),
+    projectConversation: (scope) =>
+      getHead(env, scope.tenantId, scope.agentId).projectConversation(scope),
+  });
 }

@@ -4,7 +4,7 @@ import {
   isModelGatewayFailure,
   MODEL_LIMITS,
   type ContextRow,
-  type LoopbackFakeModelGateway,
+  type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
 import {
   executeRecoveredOrFreshDurableWork,
@@ -15,9 +15,14 @@ import {
 } from '@ember/runtime-v2';
 import { getHead, type LocalRuntimeEnv } from './runtime-head.js';
 
+export type V2FakeDurableGateway = Pick<
+  FakeStreamingModelGateway,
+  'streamConversationTurn' | 'queryConversationJob'
+>;
+
 export function createDurableExecutor(
   env: LocalRuntimeEnv,
-  gateway: LoopbackFakeModelGateway,
+  gateway: V2FakeDurableGateway,
 ): DurableExecutorPort {
   return {
     async executeDurableWork(claim) {

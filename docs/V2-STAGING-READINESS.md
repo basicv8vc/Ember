@@ -1,8 +1,8 @@
 # Ember V2 — Isolated Staging Readiness, Cost Estimate & Rollback Plan
 
-Status: **Local dry-run ready; final deployment authorization request submitted in [V2-STAGING-DEPLOYMENT-AUTHORIZATION.md](./V2-STAGING-DEPLOYMENT-AUTHORIZATION.md). Awaiting explicit CTO/Owner approval before cloud provisioning or deployment.**  
+Status: **Approved & deployed to isolated Cloudflare staging (`https://ember-v2-staging.slowfast.dev`, Version `0a8a0216-5daa-4300-8e6a-531aea090d8c`, `EMBER_MODEL_MODE="fake"`).**  
 Owner: Agent A (Infrastructure, Runtime Reliability & Cost)  
-Baseline: `origin/main @ febeabc` (2026-11-20)  
+Baseline: `origin/main @ 0355f66` + `feat/alpha-a4-v2-staging-deploy` (2026-11-20)  
 Related: [Final Deployment Authorization Request](./V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [Product Alpha Roadmap](./product/PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](./adr/0006-experience-first-device-powered-runtime-v2.md), [V1 Ember Cloud](./cloud-staging.md), [M1-A7 Cost & Recovery Report](./architecture/v2-m1-a7-opt8-alarm-recovery-report.md)
 
 ---
@@ -51,6 +51,8 @@ pnpm run test:unit -- tests/unit/v2-staging-preflight.test.ts
 ## 3. Cost Estimate (Measured Local Telemetry vs. Estimated Cloud Staging)
 
 > **Evidence boundary:** Local `workerd` write/read counts are **measured** ([m1-cost-reestimation.json](../benchmarks/v2-m1/m1-cost-reestimation.json)). Cloudflare monthly dollar totals are **model estimates** based on ADR-0006 pricing, not production invoices. Speculative runtime optimization is frozen per the Product Alpha roadmap.
+>
+> **Fake Gateway Recovery Limitation:** In isolated V2 staging (`EMBER_MODEL_MODE="fake"`), `createInWorkerFakeGateway()` stores synthetic job handles in an **in-process `Map`**. It does **not** persist fake provider jobs across separate Cloudflare Worker invocations (e.g., Fast Path disconnect → Queue consumer retry on another isolate). This does not block isolated staging merge or auth/conversation smoke, but **must not** be used to claim cloud Durable Recovery acceptance (which requires either a durable provider job store or a separately approved real-provider canary).
 
 ### 3.1 Isolated V2 Staging (1–5 internal testers, `< 5,000` turns/month, fake provider)
 
@@ -80,7 +82,7 @@ pnpm run test:unit -- tests/unit/v2-staging-preflight.test.ts
 `wrangler.v2-staging.jsonc` currently bundles `apps/api/src/local-v2/runtime-worker.ts` cleanly in `--dry-run`, and **intentionally fails closed** if deployed as-is. Before live deployment (after approval), these small code slices must land:
 
 1. **Health & Readiness probes (`/healthz`, `/readyz`):** ✅ Implemented on V2 edge/runtime worker (`GET /healthz`, `GET /readyz` probing `D1_RECOVERY` via `SELECT 1`).
-2. **Staging-safe host/auth guard:** Replace `localOnly` loopback enforcement and `dev` auth with an approved staging hostname check and Apple Sign In (or approved isolated staging auth), while keeping `EMBER_MODEL_MODE="fake"` fail-closed. (Held until staging hostname/auth approval.)
+2. **Staging-safe host/auth guard:** ✅ Implemented via `resolveV2AllowedHosts` (`ember-v2-staging.slowfast.dev`) and `createStagingV2Sessions` (Apple Sign In RS256 JWKS + D1 nonce replay fence + `DENY_DEV_PROVIDER` + optional `EMBER_V2_STAGING_ALLOWED_SUBJECTS`).
 3. **Configurable queue names in `runtime-worker.ts`:** ✅ Implemented via `resolveV2QueueTarget` and `EMBER_V2_*_QUEUE_NAME` env vars in `wrangler.v2-staging.jsonc`.
 
 ---

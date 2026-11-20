@@ -1,9 +1,10 @@
 # Ember V2 — Final Isolated Staging Deployment Authorization Request
 
-- **Status:** **PENDING CTO / FOUNDER APPROVAL** (no cloud resources provisioned or deployed)
+- **Status:** **APPROVED & DEPLOYED (Stage 1 — Fake-Provider Isolated Cloud Staging)**
 - **Date:** 2026-11-20
 - **Owner:** Agent A (Infrastructure, Runtime Reliability & Cost)
-- **Verified Baseline:** `origin/main @ febeabc` (`#203` V2 staging config/preflight + `#204` `/healthz`, `/readyz`, configurable queue routing)
+- **Approved Option:** Option 1 (`ember-v2-staging.slowfast.dev`) + Option A (Apple Sign In + D1 sessions + `dev` denied) + `EMBER_MODEL_MODE="fake"` (`<= $10/mo` envelope)
+- **Deployed Resource IDs:** Worker `ember-v2-staging` (Version `0a8a0216-5daa-4300-8e6a-531aea090d8c`), D1 `ember-v2-staging-recovery` (`36f975f7-c79d-4559-9729-93091d811236`, APAC, `0001_v2_recovery_registry.sql` applied), 4 isolated `ember-v2-staging-*` queues/DLQs
 - **Related:** [V2 Staging Readiness](./V2-STAGING-READINESS.md), [Product Alpha Roadmap](./product/PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](./adr/0006-experience-first-device-powered-runtime-v2.md), [V1 Ember Cloud](./cloud-staging.md)
 
 ---
@@ -25,14 +26,14 @@ This request asks the CTO / Founder to authorize **Stage 1: Isolated V2 Cloud St
 
 ## 2. Environment Specification
 
-| Property             | Value                                                                                                                                 | Notes                                                                                                       |
-| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
-| Cloud account        | Existing Cloudflare Workers Paid account                                                                                              | Shared account plan; strictly isolated bindings                                                             |
-| Environment label    | `EMBER_ENV="v2-staging"`                                                                                                              | Distinct from V1 `staging` and local `local`                                                                |
-| Isolation guard      | `EMBER_V2_STAGING_ISOLATED="true"`                                                                                                    | Verified by `infra/cloudflare/v2-staging-preflight.mjs`                                                     |
-| Model execution mode | `EMBER_MODEL_MODE="fake"`                                                                                                             | Fail-closed; zero external LLM/Daytona secrets bound                                                        |
-| Proposed hostname    | **Option 1 (Recommended):** `ember-v2-staging.slowfast.dev` (custom domain)<br>**Option 2:** `ember-v2-staging.<account>.workers.dev` | Currently disabled (`workers_dev: false`, no routes) until approved; never touches `ember-api.slowfast.dev` |
-| Local dry-run bundle | `wrangler deploy --dry-run --config wrangler.v2-staging.jsonc`                                                                        | Verified passing (`1336.40 KiB` / gzip `234.74 KiB`) on `febeabc`                                           |
+| Property             | Value                                                                                                                                 | Notes                                                                                                                                                                                                                                                  |
+| -------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Cloud account        | Existing Cloudflare Workers Paid account                                                                                              | Shared account plan; strictly isolated bindings                                                                                                                                                                                                        |
+| Environment label    | `EMBER_ENV="v2-staging"`                                                                                                              | Distinct from V1 `staging` and local `local`                                                                                                                                                                                                           |
+| Isolation guard      | `EMBER_V2_STAGING_ISOLATED="true"`                                                                                                    | Verified by `infra/cloudflare/v2-staging-preflight.mjs`                                                                                                                                                                                                |
+| Model execution mode | `EMBER_MODEL_MODE="fake"`                                                                                                             | Fail-closed; zero external LLM/Daytona secrets bound. Note: `createInWorkerFakeGateway()` uses an in-process `Map` and does **not** support cross-Worker-invocation job recovery; do not claim cloud Durable Recovery accepted from fake-gateway runs. |
+| Proposed hostname    | **Option 1 (Recommended):** `ember-v2-staging.slowfast.dev` (custom domain)<br>**Option 2:** `ember-v2-staging.<account>.workers.dev` | Currently disabled (`workers_dev: false`, no routes) until approved; never touches `ember-api.slowfast.dev`                                                                                                                                            |
+| Local dry-run bundle | `wrangler deploy --dry-run --config wrangler.v2-staging.jsonc`                                                                        | Verified passing (`1336.40 KiB` / gzip `234.74 KiB`) on `febeabc`                                                                                                                                                                                      |
 
 ---
 

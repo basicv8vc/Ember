@@ -526,6 +526,14 @@ const DEVICE_EXECUTION_STATEMENTS = [
     ON device_task_placements (principal_id, device_id, task_id)`,
 ] as const;
 
+const NATIVE_DEVICE_PLACEMENT_STATEMENTS = [
+  `ALTER TABLE device_task_placements
+     ADD COLUMN capability TEXT NOT NULL DEFAULT 'mock.compute'
+       CHECK (capability IN ('mock.compute', 'device.text.process'))`,
+  `ALTER TABLE device_task_placements
+     ADD COLUMN capability_version INTEGER NOT NULL DEFAULT 1 CHECK (capability_version = 1)`,
+] as const;
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -536,6 +544,12 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
       name: 'v2_device_execution',
       statements: DEVICE_EXECUTION_STATEMENTS,
       checksum: computeMigrationChecksumSync(DEVICE_EXECUTION_STATEMENTS),
+    },
+    {
+      version: 4,
+      name: 'v2_native_device_placement',
+      statements: NATIVE_DEVICE_PLACEMENT_STATEMENTS,
+      checksum: computeMigrationChecksumSync(NATIVE_DEVICE_PLACEMENT_STATEMENTS),
     },
   ];
 }

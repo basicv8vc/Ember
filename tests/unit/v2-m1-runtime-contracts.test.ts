@@ -98,7 +98,7 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
   it('upgrades existing Agent Head storage for device execution and detects checksum drift', () => {
     const { storage, db } = createInMemoryDoStorage();
     const steps = createDefaultAgentHeadMigrations();
-    expect(steps.map((s) => s.version)).toEqual([1, 2, 3]);
+    expect(steps.map((s) => s.version)).toEqual([1, 2, 3, 4]);
 
     const first = applyAgentHeadMigrations(storage, steps.slice(0, 2), 1_700_000_000_000);
     expect(first.appliedVersions).toEqual([1, 2]);
@@ -108,16 +108,33 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
       (id, kind, input_json, digest, idempotency_key, execution_path, next_run_at_ms, created_at_ms, updated_at_ms)
       VALUES ('existing-task', 'mock.compute', '{}', 'digest', 'existing-operation', 'standard', 0, 0, 0)`);
 
-    const upgrade = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
+    const upgrade = applyAgentHeadMigrations(storage, steps.slice(0, 3), 1_700_000_005_000);
     expect(upgrade.appliedVersions).toEqual([3]);
     expect(upgrade.alreadyAppliedVersions).toEqual([1, 2]);
     expect(
       db.prepare("SELECT status, execution_target FROM tasks WHERE id = 'existing-task'").get(),
     ).toEqual({ status: 'queued', execution_target: 'cloud' });
 
+    db.exec(`INSERT INTO tasks
+      (id, kind, input_json, digest, idempotency_key, execution_path, execution_target,
+        next_run_at_ms, created_at_ms, updated_at_ms)
+      VALUES ('existing-device-task', 'mock.compute', '{}', 'digest', 'mock-operation', 'standard', 'device', 0, 0, 0)`);
+    db.exec(`INSERT INTO device_task_placements (task_id, principal_id, device_id)
+      VALUES ('existing-device-task', 'owner', 'device')`);
+
+    const nativeUpgrade = applyAgentHeadMigrations(storage, steps, 1_700_000_006_000);
+    expect(nativeUpgrade.appliedVersions).toEqual([4]);
+    expect(
+      db
+        .prepare(
+          "SELECT capability, capability_version FROM device_task_placements WHERE task_id = 'existing-device-task'",
+        )
+        .get(),
+    ).toEqual({ capability: 'mock.compute', capability_version: 1 });
+
     const replay = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
     expect(replay.appliedVersions).toEqual([]);
-    expect(replay.alreadyAppliedVersions).toEqual([1, 2, 3]);
+    expect(replay.alreadyAppliedVersions).toEqual([1, 2, 3, 4]);
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")

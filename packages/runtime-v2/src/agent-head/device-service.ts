@@ -5,6 +5,11 @@ import {
   DEVICE_CAPABILITY_VERSION,
   DEVICE_LEASE_MS,
   DEVICE_READY_TTL_MS,
+  DEVICE_TEXT_CAPABILITY,
+  DEVICE_TEXT_LEASE_MS,
+  deviceTextInputSchema,
+  deviceTextStatsSchema,
+  type DeviceCapability,
   type DeviceClaim,
   type DeviceExecutionCommand,
   type DeviceExecutionResponse,
@@ -18,7 +23,7 @@ import {
   sqlExecMaybe,
 } from './queries.js';
 import type { AgentHeadRecoveryService } from './recovery-service.js';
-import type { TaskResultRow, TaskRow } from './schema.js';
+import type { RunRow, TaskResultRow, TaskRow } from './schema.js';
 import {
   appendTaskEventSync,
   finishTaskRunSync,
@@ -33,7 +38,7 @@ import {
 
 interface RegisteredDevice {
   readonly token_digest: string;
-  readonly capability: string;
+  readonly capability: DeviceCapability;
   readonly capability_version: number;
   readonly ready_until_ms: number;
   readonly revoked_at_ms: number | null;
@@ -41,13 +46,30 @@ interface RegisteredDevice {
 
 interface PlacedTask extends TaskRow {
   readonly device_id: string;
+  readonly capability: DeviceCapability;
+  readonly capability_version: typeof DEVICE_CAPABILITY_VERSION;
   readonly deadline_at_ms: number;
 }
 
-const PLACED_TASK = `SELECT t.*, p.device_id
+const PLACED_TASK = `SELECT t.*, p.device_id, p.capability, p.capability_version
   FROM tasks t JOIN device_task_placements p ON p.task_id = t.id
  WHERE t.execution_target = 'device' AND p.principal_id = ?`;
 const DEVICE_OPERATION_PREFIX = 'device:';
+type DeviceRunCommand = Extract<DeviceExecutionCommand, { kind: 'renew' | 'result' }>;
+
+function dispatchDigestInput(cmd: Extract<DeviceExecutionCommand, { kind: 'dispatch' }>) {
+  // Preserve the digest of previously accepted mock operations across the placement migration.
+  return cmd.capability === DEVICE_CAPABILITY
+    ? [cmd.deviceId, cmd.input.text, cmd.deadlineMs]
+    : [
+        cmd.deviceId,
+        cmd.capability,
+        cmd.version,
+        cmd.input.operation,
+        cmd.input.text,
+        cmd.deadlineMs,
+      ];
+}
 
 function operationId(task: TaskRow): string {
   return task.idempotency_key.slice(task.idempotency_key.lastIndexOf(':') + 1);
@@ -62,12 +84,16 @@ function sameCredential(stored: string, supplied: string): boolean {
   return difference === 0;
 }
 
-function isReady(device: RegisteredDevice | null, nowMs: number): boolean {
+function isReady(
+  device: RegisteredDevice | null,
+  nowMs: number,
+  capability?: DeviceCapability,
+): device is RegisteredDevice {
   return (
     device !== null &&
     device.revoked_at_ms === null &&
     device.ready_until_ms > nowMs &&
-    device.capability === DEVICE_CAPABILITY &&
+    (capability === undefined || device.capability === capability) &&
     device.capability_version === DEVICE_CAPABILITY_VERSION
   );
 }
@@ -90,7 +116,7 @@ export class AgentHeadDeviceService {
     assertHeadScopeSync(this.sql, cmd.tenantId, cmd.agentId);
     const dispatchDigest =
       cmd.kind === 'dispatch'
-        ? await sha256Hex(JSON.stringify([cmd.deviceId, cmd.input.text, cmd.deadlineMs]))
+        ? await sha256Hex(JSON.stringify(dispatchDigestInput(cmd)))
         : undefined;
     const coverage =
       cmd.kind === 'dispatch' || cmd.kind === 'claim'
@@ -104,7 +130,7 @@ export class AgentHeadDeviceService {
               if (!isReady(device, now)) return false;
               const active = this.findActive(cmd);
               return active === null
-                ? this.findClaimable(cmd, now) !== null
+                ? this.findClaimable(cmd, now, device.capability) !== null
                 : active.lease_expires_at_ms !== null && active.lease_expires_at_ms <= now;
             },
           })
@@ -141,6 +167,8 @@ export class AgentHeadDeviceService {
             return this.dispatch(cmd, now, dispatchDigest!, verifyCoverage);
           case 'claim':
             return this.claim(cmd, now, verifyCoverage);
+          case 'renew':
+            return this.renew(cmd, now);
           case 'result':
             return this.commit(cmd, now);
           case 'status':
@@ -197,7 +225,12 @@ export class AgentHeadDeviceService {
       'SELECT * FROM device_registrations WHERE id = ?',
       cmd.deviceId,
     );
-    if (existing !== null) this.requireDevice(cmd);
+    if (existing !== null) {
+      const device = this.requireDevice(cmd);
+      if (device.capability !== cmd.capability || device.capability_version !== cmd.version) {
+        throw new DomainError('IDEMPOTENCY_CONFLICT', 'device registration capability changed');
+      }
+    }
     const readyUntilMs = now + DEVICE_READY_TTL_MS;
     this.sql.exec(
       `INSERT INTO device_registrations
@@ -286,12 +319,18 @@ export class AgentHeadDeviceService {
       now,
     );
     this.sql.exec(
-      'INSERT INTO device_task_placements (task_id, principal_id, device_id) VALUES (?, ?, ?)',
+      `INSERT INTO device_task_placements (task_id, principal_id, device_id, capability, capability_version)
+       VALUES (?, ?, ?, ?, ?)`,
       taskId,
       cmd.principalId,
       cmd.deviceId,
+      cmd.capability,
+      cmd.version,
     );
-    this.event(cmd, taskId, now, 'accepted', { executionTarget: 'device' });
+    this.event(cmd, taskId, now, 'accepted', {
+      executionTarget: 'device',
+      capability: cmd.capability,
+    });
     return {
       ...this.snapshot(this.getTask(cmd.principalId, taskId), cmd.principalId, now),
       replayed: false,
@@ -310,15 +349,19 @@ export class AgentHeadDeviceService {
   private findClaimable(
     cmd: { principalId: string; deviceId: string },
     now: number,
+    capability: DeviceCapability,
   ): PlacedTask | null {
     return sqlExecMaybe<PlacedTask>(
       this.sql,
       PLACED_TASK +
-        ` AND p.device_id = ? AND t.status = 'queued' AND t.deadline_at_ms > ?
+        ` AND p.device_id = ? AND p.capability = ? AND p.capability_version = ?
+            AND t.status = 'queued' AND t.deadline_at_ms > ?
             AND t.next_run_at_ms <= ? AND t.cancel_requested_at_ms IS NULL
           ORDER BY t.created_at_ms, t.id LIMIT 1`,
       cmd.principalId,
       cmd.deviceId,
+      capability,
+      DEVICE_CAPABILITY_VERSION,
       now,
       now,
     );
@@ -329,7 +372,8 @@ export class AgentHeadDeviceService {
     now: number,
     verifyCoverage: () => void,
   ): DeviceClaim {
-    if (!isReady(this.requireDevice(cmd), now)) return { kind: 'idle' };
+    const device = this.requireDevice(cmd);
+    if (!isReady(device, now)) return { kind: 'idle' };
 
     const active = this.findActive(cmd);
     if (active !== null) {
@@ -347,7 +391,7 @@ export class AgentHeadDeviceService {
       this.deps.recovery.convergeDueBusinessItemSync('task', active.id, now);
     }
 
-    const task = this.findClaimable(cmd, now);
+    const task = this.findClaimable(cmd, now, device.capability);
     if (task === null) return { kind: 'idle' };
     verifyCoverage();
     const runId = this.deps.newId();
@@ -356,7 +400,7 @@ export class AgentHeadDeviceService {
       workerId: cmd.deviceId,
       executorKind: 'device',
       nowMs: now,
-      leaseMs: DEVICE_LEASE_MS,
+      leaseMs: task.capability === DEVICE_TEXT_CAPABILITY ? DEVICE_TEXT_LEASE_MS : DEVICE_LEASE_MS,
     });
     this.event(cmd, task.id, now, 'leased', { runId, leaseEpoch: lease.nextEpoch });
     return this.offer(task, runId, lease.nextEpoch, lease.leaseExpiresAtMs);
@@ -368,25 +412,30 @@ export class AgentHeadDeviceService {
     leaseEpoch: number,
     leaseExpiresAtMs: number,
   ): DeviceClaim {
-    return {
-      kind: 'claimed',
+    const offer = {
+      kind: 'claimed' as const,
       taskId: task.id,
       operationId: operationId(task),
       runId,
       leaseEpoch,
       leaseExpiresAtMs,
       deadlineAtMs: task.deadline_at_ms,
-      input: JSON.parse(task.input_json) as { text: string },
-      capability: DEVICE_CAPABILITY,
-      version: DEVICE_CAPABILITY_VERSION,
+      version: task.capability_version,
     };
+    const input: unknown = JSON.parse(task.input_json);
+    if (task.capability === DEVICE_TEXT_CAPABILITY) {
+      return { ...offer, capability: task.capability, input: deviceTextInputSchema.parse(input) };
+    }
+    return { ...offer, capability: task.capability, input: input as { text: string } };
   }
 
-  private commit(cmd: Extract<DeviceExecutionCommand, { kind: 'result' }>, now: number) {
-    this.requireDevice(cmd);
+  private findFencedRun(cmd: DeviceRunCommand): { task: PlacedTask; run: RunRow } | null {
+    const device = this.requireDevice(cmd);
     const task = this.getTask(cmd.principalId, cmd.taskId, cmd.deviceId);
     const run = getLatestRunForTaskSync(this.sql, task.id);
     if (
+      task.capability !== device.capability ||
+      task.capability_version !== device.capability_version ||
       task.idempotency_key !== this.key(cmd) ||
       run === null ||
       task.current_run_id !== cmd.runId ||
@@ -396,13 +445,55 @@ export class AgentHeadDeviceService {
       run.lease_epoch !== cmd.leaseEpoch ||
       task.lease_epoch !== cmd.leaseEpoch
     ) {
+      return null;
+    }
+    return { task, run };
+  }
+
+  private renew(cmd: Extract<DeviceExecutionCommand, { kind: 'renew' }>, now: number) {
+    const execution = this.findFencedRun(cmd);
+    if (
+      execution === null ||
+      execution.task.capability !== DEVICE_TEXT_CAPABILITY ||
+      !hasLiveTaskLease(execution.task, execution.run, now, {
+        executorKind: 'device',
+        workerId: cmd.deviceId,
+        leaseEpoch: cmd.leaseEpoch,
+      })
+    ) {
       return { kind: 'fenced' } as const;
     }
 
-    const text = cmd.status === 'completed' ? cmd.output.text : null;
+    const { task, run } = execution;
+    const leaseExpiresAtMs = Math.max(
+      run.leased_until_ms,
+      Math.min(now + DEVICE_TEXT_LEASE_MS, task.deadline_at_ms),
+    );
+    if (leaseExpiresAtMs > run.leased_until_ms) {
+      this.sql.exec(
+        'UPDATE runs SET leased_until_ms = ?, updated_at_ms = ? WHERE id = ?',
+        leaseExpiresAtMs,
+        now,
+        run.id,
+      );
+      this.sql.exec(
+        'UPDATE tasks SET lease_expires_at_ms = ?, updated_at_ms = ? WHERE id = ?',
+        leaseExpiresAtMs,
+        now,
+        task.id,
+      );
+    }
+    return { kind: 'renewed', leaseExpiresAtMs } as const;
+  }
+
+  private commit(cmd: Extract<DeviceExecutionCommand, { kind: 'result' }>, now: number) {
+    const execution = this.findFencedRun(cmd);
+    if (execution === null) return { kind: 'fenced' } as const;
+    const { task, run } = execution;
+    const detail = this.resultDetail(task.capability, cmd);
     const result = this.getResult(task.id);
     if (result !== null) {
-      if (task.status !== cmd.status || result.detail_text !== text) {
+      if (task.status !== cmd.status || result.detail_text !== detail) {
         throw new DomainError('IDEMPOTENCY_CONFLICT', 'device result payload changed');
       }
       return { kind: 'committed', replayed: true } as const;
@@ -421,14 +512,28 @@ export class AgentHeadDeviceService {
     finishTaskRunSync(this.sql, task, run, now, {
       status: cmd.status,
       summaryText: null,
-      detailText: text,
-      modelLabel: DEVICE_CAPABILITY,
-      simulated: true,
+      detailText: detail,
+      modelLabel: task.capability,
+      simulated: task.capability === DEVICE_CAPABILITY,
       truncated: false,
       reasonCode,
     });
     this.event(cmd, task.id, now, cmd.status, { runId: run.id, reasonCode });
     return { kind: 'committed', replayed: false } as const;
+  }
+
+  private resultDetail(
+    capability: DeviceCapability,
+    cmd: Extract<DeviceExecutionCommand, { kind: 'result' }>,
+  ): string | null {
+    if (cmd.status === 'failed') return null;
+    if (capability === DEVICE_TEXT_CAPABILITY) {
+      const stats = deviceTextStatsSchema.safeParse(cmd.output);
+      if (stats.success) return JSON.stringify(stats.data);
+    } else if ('text' in cmd.output) {
+      return cmd.output.text;
+    }
+    throw new DomainError('INVALID_ARGUMENT', 'device result does not match task capability');
   }
 
   private refresh(task: PlacedTask, principalId: string, now: number): DeviceTaskSnapshot {
@@ -437,7 +542,7 @@ export class AgentHeadDeviceService {
   }
 
   private snapshot(task: PlacedTask, principalId: string, now: number): DeviceTaskSnapshot {
-    const ready = isReady(this.getDevice(principalId, task.device_id), now);
+    const ready = isReady(this.getDevice(principalId, task.device_id), now, task.capability);
     const result = this.getResult(task.id);
     const status =
       task.status === 'waiting_approval' || task.status === 'retryable_failed'
@@ -462,7 +567,12 @@ export class AgentHeadDeviceService {
       status,
       availability: ready ? 'ready' : 'device_unavailable',
       reason,
-      result: result?.detail_text == null ? null : { text: result.detail_text },
+      result:
+        result?.detail_text == null
+          ? null
+          : task.capability === DEVICE_TEXT_CAPABILITY
+            ? deviceTextStatsSchema.parse(JSON.parse(result.detail_text))
+            : { text: result.detail_text },
     };
   }
 

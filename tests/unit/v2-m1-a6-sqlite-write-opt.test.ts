@@ -581,4 +581,106 @@ describe('M1-A6 DO SQLite Write Amplification Optimizations', () => {
 
     h.db.close();
   });
+
+  it('OPT-4 deterministic concurrency: stale null or stale later syncPlatformAlarm never deletes or postpones a concurrently committed earlier alarm', async () => {
+    const h = createSqliteDoHarness(10_000);
+    applyAgentHeadMigrations(h.storage, createDefaultAgentHeadMigrations(), 1_000);
+
+    let activeBusinessDueAtMs: number | null = null;
+    const stubBusiness: AuthoritativeBusinessPort = {
+      earliestRequiredDiscoveryAtMsSync: () => activeBusinessDueAtMs,
+      listDueBusinessActionsSync: () =>
+        activeBusinessDueAtMs === null
+          ? []
+          : [
+              {
+                targetKind: 'turn',
+                targetId: 'turn-concurrent',
+                actionKind: 'lease_expired',
+                deadlineAtMs: activeBusinessDueAtMs,
+              },
+            ],
+      inspectOutboxTargetSync: () => ({
+        exists: false,
+        targetKind: null,
+        targetId: null,
+        currentLeaseEpoch: 0,
+        deadlineAtMs: 0,
+        isTerminal: true,
+        cancelRequested: false,
+      }),
+      convergeDueBusinessItemSync: () => {},
+      materializeScheduleOccurrenceSync: () => {},
+    };
+
+    // Gate the first getAlarm() call deterministically so we can commit new work mid-flight
+    let releaseGate!: () => void;
+    let enteredGate!: () => void;
+    const gateEntered = new Promise<void>((resolve) => {
+      enteredGate = resolve;
+    });
+    const gatePromise = new Promise<void>((resolve) => {
+      releaseGate = resolve;
+    });
+    let gateArmed = false;
+
+    const gatedStorage: DurableObjectStorageLike = {
+      ...h.storage,
+      async getAlarm(): Promise<number | null> {
+        if (gateArmed) {
+          gateArmed = false;
+          enteredGate();
+          await gatePromise;
+        }
+        return h.storage.getAlarm();
+      },
+    };
+
+    const outbox = new OutboxCoordinator(gatedStorage.sql, {
+      storage: gatedStorage,
+      business: stubBusiness,
+    });
+    const schedules = new ScheduleRepository(gatedStorage.sql);
+    const coverage = new RecoveryCoverageCoordinator({
+      storage: gatedStorage,
+      tenantId: 'ten-1',
+      agentId: 'ag-1',
+      business: stubBusiness,
+    });
+    const multiplexer = new AlarmMultiplexer({
+      storage: gatedStorage,
+      business: stubBusiness,
+      coordinator: outbox,
+      schedules,
+      coverage,
+    });
+
+    // Case A: Stale `null` target vs concurrently committed obligation at 10_000
+    h.resetCounters();
+    gateArmed = true;
+    const staleDeleteCall = multiplexer.syncPlatformAlarm(null, 2_000);
+    await gateEntered;
+
+    // Concurrent task commits while stale caller is paused at getAlarm()
+    activeBusinessDueAtMs = 10_000;
+    const concurrentArmCall = multiplexer.syncPlatformAlarm(10_000, 2_000);
+    releaseGate();
+
+    await Promise.all([staleDeleteCall, concurrentArmCall]);
+    expect(h.getMetrics().armedAlarm).toBe(10_000);
+    expect(h.getMetrics().deleteAlarmCalls).toBe(0);
+
+    // Case B: Stale later target (50_000) vs concurrently committed earlier obligation (10_000)
+    const staleLaterChanged = await multiplexer.syncPlatformAlarm(50_000, 2_500);
+    expect(staleLaterChanged).toBe(false);
+    expect(h.getMetrics().armedAlarm).toBe(10_000);
+
+    // Case C: Once the DB obligation clears, null deletes the alarm cleanly
+    activeBusinessDueAtMs = null;
+    expect(await multiplexer.syncPlatformAlarm(null, 3_000)).toBe(true);
+    expect(h.getMetrics().armedAlarm).toBeNull();
+    expect(h.getMetrics().deleteAlarmCalls).toBe(1);
+
+    h.db.close();
+  });
 });

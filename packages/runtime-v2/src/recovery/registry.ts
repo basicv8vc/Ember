@@ -937,18 +937,28 @@ export class AlarmMultiplexer {
   ): Promise<boolean> {
     const run = async (): Promise<boolean> => {
       const current = await this.#storage.getAlarm();
+      const latestDbTarget = this.#storage.transactionSync(() =>
+        this.#coordinator.recomputeAlarmSync(nowMs),
+      );
+      // Never delete or postpone past an authoritative DB obligation committed concurrently.
+      const effectiveTarget =
+        targetAlarmAtMs === null
+          ? latestDbTarget
+          : latestDbTarget === null
+            ? targetAlarmAtMs
+            : Math.min(targetAlarmAtMs, latestDbTarget);
       const consumedCurrentAlarm =
         options?.forceRearmConsumed === true &&
-        targetAlarmAtMs !== null &&
+        effectiveTarget !== null &&
         current !== null &&
         current <= nowMs;
-      if (current === targetAlarmAtMs && !consumedCurrentAlarm) {
+      if (current === effectiveTarget && !consumedCurrentAlarm) {
         return false;
       }
-      if (targetAlarmAtMs === null) {
+      if (effectiveTarget === null) {
         await this.#storage.deleteAlarm();
       } else {
-        await this.#storage.setAlarm(targetAlarmAtMs);
+        await this.#storage.setAlarm(effectiveTarget);
       }
       return true;
     };

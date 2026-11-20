@@ -5,3 +5,4 @@ export * from './validation.js';
 export * from './device-execution.js';
 export * from './personal-memory.js';
 export * from './proactive-schedules.js';
+export * from './task-artifacts.js';

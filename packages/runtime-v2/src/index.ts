@@ -14,3 +14,4 @@ export * from './global-budget/platform.js';
 export * from './recovery/registry.js';
 export * from './recovery/sweeper.js';
 export * from './recovery/durable-integration.js';
+export * from './tools/fake-python-sandbox.js';

@@ -810,6 +810,42 @@ export function createProactiveSchedulesMigration(
   };
 }
 
+export const DEFAULT_V2_TASK_ARTIFACTS_MIGRATION_VERSION = 8;
+
+export const V2_TASK_ARTIFACTS_STATEMENTS = [
+  `CREATE TABLE IF NOT EXISTS v2_task_artifacts (
+  id            TEXT    PRIMARY KEY,
+  tenant_id     TEXT    NOT NULL,
+  principal_id  TEXT    NOT NULL,
+  task_id       TEXT    REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id        TEXT,
+  committed     INTEGER NOT NULL DEFAULT 0 CHECK (committed IN (0, 1)),
+  created_by    TEXT    NOT NULL CHECK (created_by IN ('user', 'run')),
+  filename      TEXT    NOT NULL,
+  media_type    TEXT    NOT NULL,
+  size_bytes    INTEGER NOT NULL CHECK (size_bytes >= 0),
+  sha256        TEXT    NOT NULL,
+  content_b64   TEXT    NOT NULL,
+  created_at_ms INTEGER NOT NULL
+);`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_task_artifacts_task
+  ON v2_task_artifacts (tenant_id, principal_id, task_id, committed, created_at_ms ASC, id ASC);`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_task_artifacts_staged
+  ON v2_task_artifacts (tenant_id, principal_id, created_at_ms DESC)
+  WHERE task_id IS NULL;`,
+] as const;
+
+export function createV2TaskArtifactsMigration(
+  version = DEFAULT_V2_TASK_ARTIFACTS_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_task_artifacts',
+    statements: V2_TASK_ARTIFACTS_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_TASK_ARTIFACTS_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -830,5 +866,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     createAgentHeadWriteOptMigration(),
     createPersonalMemoryDoMigration(),
     createProactiveSchedulesMigration(),
+    createV2TaskArtifactsMigration(),
   ];
 }

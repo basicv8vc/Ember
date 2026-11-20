@@ -118,7 +118,8 @@ export function appendTaskEventSync(
   event: {
     id: string;
     taskId: string;
-    phase: 'accepted' | 'leased' | 'completed' | 'failed' | 'cancelled' | 'retry_scheduled';
+    phase:
+      'accepted' | 'leased' | 'progress' | 'completed' | 'failed' | 'cancelled' | 'retry_scheduled';
     traceId: string;
     nowMs: number;
     payload: Record<string, unknown>;

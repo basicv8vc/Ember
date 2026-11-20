@@ -1,4 +1,15 @@
-import { B1SendMessageReceiptSchema, B1SendMessageRequestSchema, IdSchema } from '@ember/contracts';
+import {
+  B1SendMessageReceiptSchema,
+  B1SendMessageRequestSchema,
+  IdSchema,
+  type B1TaskCancelDto,
+  type B1TaskDetailDto,
+  type B1TaskEventPageDto,
+  type B1TaskListDto,
+  type B1TaskResultDto,
+  type B3StagedUploadReceiptDto,
+  type B3TaskArtifactsListDto,
+} from '@ember/contracts';
 import { DomainError, isDomainError, type AuthContext } from '@ember/domain';
 import {
   FAKE_MODEL_LABEL,
@@ -10,6 +21,11 @@ import type {
   DeviceExecutionRpc,
   PersonalMemoryRpc,
   ProactiveScheduleRpc,
+  TaskArtifactCommand,
+  TaskArtifactResponse,
+  TaskArtifactRpc,
+  V2PythonTaskSubmitResultDto,
+  V2TaskArtifactDownloadDto,
 } from '@ember/runtime-v2';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { B1SessionRuntime } from '../auth/b1-auth-runtime.js';
@@ -34,10 +50,13 @@ import {
   toInternalErrorResponse,
 } from '../http/error-mapping.js';
 import type { ReadinessCheck } from '../readiness.js';
+import { createB1TaskRoutes } from '../tasks/b1-task-routes.js';
 import { createB1TurnRoutes } from '../turns/turn-routes.js';
+import { createB3UploadArtifactRoutes } from '../uploads/b3-upload-artifact-routes.js';
 import { createDeviceRoutes } from './device-routes.js';
 import { createMemoryRoutes } from './memory-routes.js';
 import { createProactiveScheduleRoutes } from './proactive-schedule-routes.js';
+import { createPythonTaskRoutes } from './python-task-routes.js';
 import {
   INTERACTIVE_TIMING,
   executeInteractive,
@@ -69,7 +88,8 @@ export interface ResolvedAgentHead {
   readonly rpc: EdgeAgentHeadRpc &
     Partial<DeviceExecutionRpc> &
     Partial<PersonalMemoryRpc> &
-    Partial<ProactiveScheduleRpc>;
+    Partial<ProactiveScheduleRpc> &
+    Partial<TaskArtifactRpc>;
 }
 
 export interface LocalV2EdgeDependencies {
@@ -359,6 +379,137 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
             );
           },
         ),
+      );
+
+      type ScopedTaskArtifactCommand = TaskArtifactCommand extends infer T
+        ? T extends TaskArtifactCommand
+          ? Omit<T, 'tenantId' | 'principalId' | 'agentId' | 'requestId'>
+          : never
+        : never;
+
+      const runTaskArtifacts = async (
+        command: ScopedTaskArtifactCommand,
+      ): Promise<TaskArtifactResponse> => {
+        const resolved = await head();
+        const execute = resolved.rpc.taskArtifacts;
+        if (execute === undefined) throw new DomainError('NOT_FOUND');
+        return callRuntime(() =>
+          execute({
+            ...command,
+            ...resolved.auth,
+            agentId: resolved.agentId,
+            requestId,
+          }),
+        );
+      };
+
+      const encodeBytesBase64 = (bytes: Uint8Array): string => {
+        let binary = '';
+        for (let i = 0; i < bytes.byteLength; i += 1) {
+          binary += String.fromCharCode(bytes[i]!);
+        }
+        return globalThis.btoa(binary);
+      };
+
+      const decodeBytesBase64 = (encoded: string): Uint8Array => {
+        const binary = globalThis.atob(encoded);
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          bytes[i] = binary.charCodeAt(i);
+        }
+        return bytes;
+      };
+
+      app.route(
+        '/v1',
+        createB1TaskRoutes({
+          session: sessions,
+          taskResults: {
+            async getTaskResult(_tenantId, taskId) {
+              return (await runTaskArtifacts({
+                kind: 'get_task_result',
+                taskId,
+              })) as B1TaskResultDto | null;
+            },
+          },
+          taskReads: {
+            async listTasks(_tenantId, query) {
+              return (await runTaskArtifacts({
+                kind: 'list_tasks',
+                ...(query?.status === undefined ? {} : { status: query.status }),
+                ...(query?.limit === undefined ? {} : { limit: query.limit }),
+                ...(query?.after === undefined ? {} : { after: query.after }),
+              })) as B1TaskListDto;
+            },
+            async getTaskDetail(_tenantId, taskId) {
+              return (await runTaskArtifacts({
+                kind: 'get_task',
+                taskId,
+              })) as B1TaskDetailDto | null;
+            },
+            async listTaskEvents(_tenantId, taskId, after) {
+              return (await runTaskArtifacts({
+                kind: 'list_task_events',
+                taskId,
+                ...(after === undefined ? {} : { after }),
+              })) as B1TaskEventPageDto | null;
+            },
+            async cancelTask(_tenantId, taskId) {
+              return (await runTaskArtifacts({
+                kind: 'cancel_task',
+                taskId,
+              })) as B1TaskCancelDto | null;
+            },
+          },
+        }),
+      );
+
+      app.route(
+        '/v1',
+        createB3UploadArtifactRoutes({
+          session: sessions,
+          uploads: {
+            async stageUpload(_auth, input) {
+              return (await runTaskArtifacts({
+                kind: 'stage_upload',
+                filename: input.filename,
+                mediaType: input.mediaType,
+                contentBase64: encodeBytesBase64(input.bytes),
+              })) as B3StagedUploadReceiptDto;
+            },
+            async listTaskArtifacts(_auth, taskId) {
+              return (await runTaskArtifacts({
+                kind: 'list_task_artifacts',
+                taskId,
+              })) as B3TaskArtifactsListDto | null;
+            },
+            async getTaskArtifactDownload(_auth, artifactId) {
+              const downloaded = (await runTaskArtifacts({
+                kind: 'download_artifact',
+                artifactId,
+              })) as V2TaskArtifactDownloadDto | null;
+              if (downloaded === null) return null;
+              return {
+                artifactId: downloaded.artifactId,
+                filename: downloaded.filename,
+                mediaType: downloaded.mediaType,
+                sha256: downloaded.sha256,
+                size: downloaded.size,
+                bytes: decodeBytesBase64(downloaded.contentBase64),
+              };
+            },
+            sweepExpiredUnboundUploads() {
+              return Promise.resolve({ removed: 0 });
+            },
+          },
+        }),
+      );
+
+      app.route(
+        '/v2',
+        createPythonTaskRoutes(requireSessionAuth({ service: sessions }), async (command) => {
+          return (await runTaskArtifacts(command)) as V2PythonTaskSubmitResultDto;
+        }),
       );
 
       const stream = deps.stream;

@@ -240,6 +240,7 @@ describe('V2-M1 assembled runtime in local workerd', () => {
         // The Wrangler proxy may retain its upstream connection. Keep the job alive
         // through the fast-path deadline so either trigger must transfer it to Durable.
         delayMs: 118_000,
+        completeOnPoll: true,
         replyText: 'Handoff reply',
         costMicroUsd: 149,
         providerJobHandle: handle,

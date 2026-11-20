@@ -1168,7 +1168,11 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
     const prep = await h.core.prepareTurn({
       scope: h.makeScope(),
       conversationId: h.conversationId,
-      request: { client_submission_id: randomUUID(), text: 'retry before send', transcript_epoch: 0 },
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'retry before send',
+        transcript_epoch: 0,
+      },
       workerId: 'edge',
       leaseMs: 45_000,
       interactiveDeadlineMs: 22_000,

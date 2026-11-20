@@ -1271,4 +1271,122 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     expect(committedMsg.text).toBe(PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY);
     expect(committedMsg.text).not.toBe(PERSONAL_MEMORY_SAVED_REPLY);
   });
+
+  it('deduplicates unkeyed savePersonalMemoryFromTurnSync by normalized content and kind, preserving key and working at the 50-item cap', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalA = randomUUID();
+    const principalB = randomUUID();
+    const convA = randomUUID();
+    const msgA1 = randomUUID();
+    const msgA2 = randomUUID();
+    const nowMs = 1_700_000_200_000;
+    bootstrapHead(storage, tenantId, agentId);
+
+    const svc = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => nowMs,
+      newId: () => randomUUID(),
+    });
+
+    // Save a keyed preference first
+    const initial = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA1,
+      input: {
+        kind: 'preference',
+        key: 'reply_style',
+        content: 'Prefer concise bullet points',
+      },
+      nowMs,
+      newId: () => randomUUID(),
+    });
+    expect(initial.outcome).toBe('saved');
+    if (initial.outcome !== 'saved') throw new Error('expected saved');
+    expect(initial.created).toBe(true);
+
+    // Fill up to the 50-item cap for principalA
+    for (let i = 1; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      const filler = savePersonalMemoryFromTurnSync(storage.sql, {
+        tenantId,
+        principalId: principalA,
+        turnId: randomUUID(),
+        conversationId: convA,
+        sourceMessageId: msgA1,
+        input: { kind: 'fact', content: `Filler item #${i}` },
+        nowMs: nowMs + i,
+        newId: () => randomUUID(),
+      });
+      expect(filler.outcome).toBe('saved');
+    }
+
+    // Re-saving identical content without a key (different casing & whitespace) updates in-place even at 50/50
+    const deduped = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA2,
+      input: {
+        kind: 'preference',
+        content: '  prefer   CONCISE bullet points  ',
+      },
+      nowMs: nowMs + 10_000,
+      newId: () => randomUUID(),
+    });
+    expect(deduped).toEqual({
+      outcome: 'saved',
+      memoryId: initial.memoryId,
+      created: false,
+    });
+
+    const listA = await svc.execute({
+      kind: 'list',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+    });
+    if (!('items' in listA)) throw new Error('expected list response');
+    expect(listA.items).toHaveLength(PERSONAL_MEMORY_MAX_ITEMS);
+    const updatedItem = listA.items.find((item) => item.memory_id === initial.memoryId);
+    expect(updatedItem?.key).toBe('reply_style');
+    expect(updatedItem?.provenance.message_id).toBe(msgA2);
+
+    // Different principal is isolated and creates its own row
+    const otherPrincipal = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalB,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA2,
+      input: { kind: 'preference', content: 'Prefer concise bullet points' },
+      nowMs: nowMs + 11_000,
+      newId: () => randomUUID(),
+    });
+    expect(otherPrincipal.outcome).toBe('saved');
+    if (otherPrincipal.outcome !== 'saved') throw new Error('expected saved');
+    expect(otherPrincipal.created).toBe(true);
+    expect(otherPrincipal.memoryId).not.toBe(initial.memoryId);
+
+    // Different kind ('fact' vs 'preference') for principalB is NOT merged
+    const diffKind = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalB,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA2,
+      input: { kind: 'fact', content: 'Prefer concise bullet points' },
+      nowMs: nowMs + 12_000,
+      newId: () => randomUUID(),
+    });
+    expect(diffKind.outcome).toBe('saved');
+    if (diffKind.outcome !== 'saved') throw new Error('expected saved');
+    expect(diffKind.created).toBe(true);
+    expect(diffKind.memoryId).not.toBe(otherPrincipal.memoryId);
+  });
 });

@@ -51,6 +51,8 @@ pnpm run test:unit -- tests/unit/v2-staging-preflight.test.ts
 ## 3. Cost Estimate (Measured Local Telemetry vs. Estimated Cloud Staging)
 
 > **Evidence boundary:** Local `workerd` write/read counts are **measured** ([m1-cost-reestimation.json](../benchmarks/v2-m1/m1-cost-reestimation.json)). Cloudflare monthly dollar totals are **model estimates** based on ADR-0006 pricing, not production invoices. Speculative runtime optimization is frozen per the Product Alpha roadmap.
+>
+> **Fake Gateway Recovery Limitation:** In isolated V2 staging (`EMBER_MODEL_MODE="fake"`), `createInWorkerFakeGateway()` stores synthetic job handles in an **in-process `Map`**. It does **not** persist fake provider jobs across separate Cloudflare Worker invocations (e.g., Fast Path disconnect → Queue consumer retry on another isolate). This does not block isolated staging merge or auth/conversation smoke, but **must not** be used to claim cloud Durable Recovery acceptance (which requires either a durable provider job store or a separately approved real-provider canary).
 
 ### 3.1 Isolated V2 Staging (1–5 internal testers, `< 5,000` turns/month, fake provider)
 

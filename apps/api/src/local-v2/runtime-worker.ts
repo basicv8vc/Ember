@@ -23,6 +23,11 @@ import { createLocalSessions, createStagingV2Sessions } from './runtime-session.
 export { GlobalBudgetDO } from '@ember/runtime-v2/global-budget-do';
 export { AgentHeadDO } from './runtime-head.js';
 
+/**
+ * Isolated V2 staging fake gateway (`EMBER_MODEL_MODE="fake"`).
+ * NOTE: Uses an in-process Map, so synthetic provider jobs are NOT shared across separate
+ * Worker invocations/isolates. Do not treat this as cloud Durable Recovery acceptance.
+ */
 function createInWorkerFakeGateway(): V2FakeDurableGateway {
   const jobs = new Map<string, FakeConversationJob>();
   return new FakeStreamingModelGateway(

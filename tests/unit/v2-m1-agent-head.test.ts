@@ -2219,6 +2219,17 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
       conversationId: h.conversationId,
       turnId: pCancel.turnId,
     });
+    expect(
+      await h.core.markAttemptSent({
+        scope: { tenantId: h.tenantId, agentId: h.agentId },
+        subjectType: 'turn',
+        subjectId: pCancel.turnId,
+        attemptNo: 1,
+        operationId: pCancel.operationId,
+        leaseEpoch: pCancel.leaseEpoch,
+        leaseOwner: 'edge-c',
+      }),
+    ).toEqual({ authorized: false, reason: 'cancelled' });
     const lateCancel = await h.core.commitTurn({
       scope: { tenantId: h.tenantId, agentId: h.agentId },
       conversationId: h.conversationId,

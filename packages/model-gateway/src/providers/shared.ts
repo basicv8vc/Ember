@@ -2,6 +2,7 @@ import { z } from 'zod';
 import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
+  PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
@@ -119,41 +120,51 @@ export const DELEGATION_TOOLS = Object.freeze([
       }),
     }),
   }),
-  Object.freeze({
-    type: 'function' as const,
-    function: Object.freeze({
-      name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
-      description:
-        'Save a user-requested personal preference or fact to account memory. Call ONLY when the user explicitly asks Ember to remember something.',
-      parameters: Object.freeze({
-        type: 'object',
-        additionalProperties: false,
-        required: ['kind', 'content'],
-        properties: Object.freeze({
-          kind: Object.freeze({
-            type: 'string',
-            enum: Object.freeze(['preference', 'fact']),
-            description: 'Whether this is a user preference or a personal fact.',
-          }),
-          content: Object.freeze({
-            type: 'string',
-            description:
-              'Concise statement of the user-requested preference or fact to remember (1-500 characters).',
-            minLength: 1,
-            maxLength: 500,
-          }),
-          key: Object.freeze({
-            type: 'string',
-            description:
-              'Optional stable lowercase key (letters, digits, dot, underscore, hyphen; 1-64 chars) to update an existing memory in place.',
-            minLength: 1,
-            maxLength: 64,
-          }),
+]);
+
+export const SAVE_PERSONAL_MEMORY_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+    description:
+      'Save a user-requested personal preference or fact to account memory. Call ONLY when the latest actual user message explicitly asks Ember to remember something.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'content'],
+      properties: Object.freeze({
+        kind: Object.freeze({
+          type: 'string',
+          enum: Object.freeze(['preference', 'fact']),
+          description: 'Whether this is a user preference or a personal fact.',
+        }),
+        content: Object.freeze({
+          type: 'string',
+          description:
+            'Concise statement of the user-requested preference or fact to remember (1-500 characters).',
+          minLength: 1,
+          maxLength: 500,
+        }),
+        key: Object.freeze({
+          type: 'string',
+          description:
+            'Optional stable lowercase key (letters, digits, dot, underscore, hyphen; 1-64 chars) to update an existing memory in place.',
+          minLength: 1,
+          maxLength: 64,
         }),
       }),
     }),
   }),
+});
+
+export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
+  ...DELEGATION_TOOLS,
+  SAVE_PERSONAL_MEMORY_TOOL,
 ]);
+
+export function getConversationTools(enablePersonalMemorySaveTool?: boolean) {
+  return enablePersonalMemorySaveTool === true ? CONVERSATION_TOOLS_WITH_MEMORY : DELEGATION_TOOLS;
+}
 
 export const PYTHON_AGENT_TOOLS = Object.freeze([
   Object.freeze({
@@ -187,6 +198,10 @@ export const PYTHON_AGENT_TOOLS = Object.freeze([
 
 export const DELEGATION_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
   JSON.stringify(DELEGATION_TOOLS),
+);
+
+export const CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE = estimateTokensConservative(
+  JSON.stringify(CONVERSATION_TOOLS_WITH_MEMORY),
 );
 
 export const PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
@@ -357,12 +372,16 @@ function formatContextTurnMessage(
 }
 
 export function buildConversationTurnMessages(input: ConversationTurnInput): ProviderChatMessage[] {
+  const systemPrompt =
+    input.enablePersonalMemorySaveTool === true
+      ? `${CONVERSATION_SYSTEM_PROMPT} ${PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION}`
+      : CONVERSATION_SYSTEM_PROMPT;
   const memoryBlock =
     input.personalMemories !== undefined && input.personalMemories.length > 0
       ? buildBoundedPersonalMemoryContext(input.personalMemories).text
       : '';
   return [
-    { role: 'system' as const, content: CONVERSATION_SYSTEM_PROMPT },
+    { role: 'system' as const, content: systemPrompt },
     ...(memoryBlock.length > 0 ? [{ role: 'user' as const, content: memoryBlock }] : []),
     ...input.context.map(formatContextTurnMessage),
   ];
@@ -460,10 +479,15 @@ export function rateRequestModifiers(rate: ModelRateRow, provider: 'openai' | 'o
   };
 }
 
-export function parseConversationTurnChoice(choice: {
-  readonly message: z.infer<typeof completionMessageSchema>;
-  readonly finish_reason?: string | null | undefined;
-}): ConversationTurnOutput {
+export function parseConversationTurnChoice(
+  choice: {
+    readonly message: z.infer<typeof completionMessageSchema>;
+    readonly finish_reason?: string | null | undefined;
+  },
+  options?: {
+    readonly allowSavePersonalMemory?: boolean;
+  },
+): ConversationTurnOutput {
   const finishReason = choice.finish_reason === 'length' ? ('length' as const) : ('stop' as const);
   const toolCalls = choice.message.tool_calls;
 
@@ -552,6 +576,9 @@ export function parseConversationTurnChoice(choice: {
     }
 
     if (call.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME) {
+      if (options?.allowSavePersonalMemory !== true) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
       const parsedArgs = savePersonalMemoryToolArgsSchema.safeParse(rawArgs);
       if (!parsedArgs.success) {
         throw new ModelGatewayFailure('model_invalid_output');

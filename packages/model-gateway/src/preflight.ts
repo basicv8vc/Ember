@@ -1,12 +1,14 @@
 import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
+  PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
 } from './context.js';
 import { ModelInputRefused } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative, serializationOverheadTokens } from './limits.js';
 import {
+  CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE,
   DELEGATION_TOOLS_TOKEN_ESTIMATE,
   PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE,
   buildPythonAgentInitialUserText,
@@ -34,6 +36,9 @@ export const IMAGE_ATTACHMENT_TOKEN_ESTIMATE = 1_024;
 
 /** Fixed prompt and tool schema token estimates, computed once: compile-time constants. */
 const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROMPT);
+const MEMORY_SAVE_INSTRUCTION_TOKENS = estimateTokensConservative(
+  PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
+);
 const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
 const PYTHON_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(PYTHON_AGENT_SYSTEM_PROMPT);
 const OVERHEAD_TOKENS = serializationOverheadTokens();
@@ -62,6 +67,7 @@ export function preflightConversationTurn(input: {
     readonly attachments?: readonly ConversationAttachmentMetadata[];
   }[];
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
+  readonly enablePersonalMemorySaveTool?: boolean;
   readonly maxOutputTokens: number;
 }): TokenPreflight {
   if (
@@ -120,16 +126,21 @@ export function preflightConversationTurn(input: {
       ? 0
       : estimateTokensConservative(memoryBlock.text);
 
+  const memorySaveEnabled = input.enablePersonalMemorySaveTool === true;
   const inputChars =
     messageChars +
     memoryChars +
+    (memorySaveEnabled ? PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION.length + 1 : 0) +
     MODEL_LIMITS.systemPromptChars +
     MODEL_LIMITS.serializationOverheadChars;
   const inputTokens =
     messageTokens +
     memoryTokens +
     SYSTEM_PROMPT_TOKENS +
-    DELEGATION_TOOLS_TOKEN_ESTIMATE +
+    (memorySaveEnabled ? MEMORY_SAVE_INSTRUCTION_TOKENS : 0) +
+    (memorySaveEnabled
+      ? CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE
+      : DELEGATION_TOOLS_TOKEN_ESTIMATE) +
     OVERHEAD_TOKENS;
 
   if (inputTokens > MODEL_LIMITS.maxInputTokens) {

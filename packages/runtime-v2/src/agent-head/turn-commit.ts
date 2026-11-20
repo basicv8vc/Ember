@@ -25,6 +25,9 @@ import {
 } from './budget.js';
 import {
   PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
+  PERSONAL_MEMORY_SAVED_REPLY,
+  PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY,
+  PERSONAL_MEMORY_UPDATED_REPLY,
   savePersonalMemoryFromTurnSync,
 } from './memory-service.js';
 import {
@@ -926,19 +929,26 @@ export async function executeAuthoritativeTurnCommit(
     }
 
     let assistantText = publication.result.text;
-    if (publication.result.personalMemorySave !== undefined && attempt !== null) {
-      const saved = savePersonalMemoryFromTurnSync(deps.storage.sql, {
-        tenantId: cmd.tenantId,
-        principalId: attempt.principal_id,
-        turnId: turn.id,
-        conversationId: turn.conversation_id,
-        sourceMessageId: turn.source_message_id,
-        input: publication.result.personalMemorySave,
-        nowMs,
-        newId: deps.idFactory,
-      });
-      if (saved.outcome === 'budget_exceeded') {
-        assistantText = PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY;
+    if (publication.result.personalMemorySave !== undefined) {
+      if (attempt === null) {
+        assistantText = PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY;
+      } else {
+        const saved = savePersonalMemoryFromTurnSync(deps.storage.sql, {
+          tenantId: cmd.tenantId,
+          principalId: attempt.principal_id,
+          turnId: turn.id,
+          conversationId: turn.conversation_id,
+          sourceMessageId: turn.source_message_id,
+          input: publication.result.personalMemorySave,
+          nowMs,
+          newId: deps.idFactory,
+        });
+        assistantText =
+          saved.outcome === 'budget_exceeded'
+            ? PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY
+            : saved.created
+              ? PERSONAL_MEMORY_SAVED_REPLY
+              : PERSONAL_MEMORY_UPDATED_REPLY;
       }
     }
 

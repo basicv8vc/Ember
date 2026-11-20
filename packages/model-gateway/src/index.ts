@@ -52,6 +52,7 @@ export {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   PERSONAL_MEMORY_CONTEXT_HEADER,
+  PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedContext,
   buildBoundedPersonalMemoryContext,
@@ -67,6 +68,7 @@ export {
   type TokenPreflight,
 } from './preflight.js';
 export {
+  CONVERSATION_TOOLS_WITH_MEMORY,
   DELEGATE_NOTES_TOOL_NAME,
   DELEGATE_PYTHON_TOOL_NAME,
   DELEGATION_TOOLS,
@@ -75,8 +77,10 @@ export {
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   PYTHON_AGENT_TOOLS,
   RUN_PYTHON_TOOL_NAME,
+  SAVE_PERSONAL_MEMORY_TOOL,
   SAVE_PERSONAL_MEMORY_TOOL_NAME,
   formatConversationMessageText,
+  getConversationTools,
 } from './providers/shared.js';
 export {
   APPROVED_MODEL_PROVIDERS,

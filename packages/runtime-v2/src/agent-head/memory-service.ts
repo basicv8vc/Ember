@@ -99,8 +99,12 @@ export function readPersonalMemoriesForTurnSync(
   return selected;
 }
 
+export const PERSONAL_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
+export const PERSONAL_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
 export const PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY =
   "I couldn't save that memory because you've reached the 50-item personal memory limit. Please remove an older item in Memory settings and try again.";
+export const PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY =
+  "I couldn't save that memory right now. Please try saving it in Memory settings.";
 
 export type TurnPersonalMemorySaveOutcome =
   | { readonly outcome: 'saved'; readonly memoryId: string; readonly created: boolean }

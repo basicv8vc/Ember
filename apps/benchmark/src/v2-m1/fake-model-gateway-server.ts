@@ -48,6 +48,7 @@ export interface FakeGatewayCallRecord {
   readonly providerJobHandle: string | null;
   readonly statusCode: number;
   readonly personalMemories?: readonly unknown[];
+  readonly enablePersonalMemorySaveTool?: boolean;
 }
 
 export interface FakeModelGatewayAuditSnapshot {
@@ -341,6 +342,9 @@ export class FakeModelGatewayServer {
           statusCode,
           ...(Array.isArray(body.personalMemories)
             ? { personalMemories: body.personalMemories }
+            : {}),
+          ...(body.enablePersonalMemorySaveTool === true
+            ? { enablePersonalMemorySaveTool: true }
             : {}),
         });
       };

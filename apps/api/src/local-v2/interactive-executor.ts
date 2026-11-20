@@ -195,6 +195,7 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
           ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
             ? { personalMemories: prepared.personalMemories }
             : {}),
+          enablePersonalMemorySaveTool: true,
           maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
         },
         operationId,

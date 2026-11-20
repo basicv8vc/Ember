@@ -13,6 +13,7 @@ import type {
 } from '@ember/runtime-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
+import { PERSONAL_MEMORY_SAVED_REPLY } from '../../packages/runtime-v2/src/agent-head/memory-service.js';
 
 const configPath = fileURLToPath(
   new URL('../../apps/api/wrangler.local-v2.jsonc', import.meta.url),
@@ -442,6 +443,27 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(afterFast.items[0]?.provenance.conversation_id).toBe(userA.conversationId);
     expect(afterFast.items[0]?.provenance.message_id).toBeTruthy();
 
+    // Verify server-owned confirmation text was committed and capability flag was enabled
+    const messagesAfterFast = await json<{
+      readonly messages: readonly { kind: string; text: string | null }[];
+    }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${userA.conversationId}/messages?after=0&limit=10`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${userA.token}` },
+        },
+      ),
+      200,
+    );
+    expect(messagesAfterFast.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: PERSONAL_MEMORY_SAVED_REPLY,
+    });
+    expect(harness.fakeGateway.getAuditSnapshot().calls[0]?.enablePersonalMemorySaveTool).toBe(
+      true,
+    );
+
     // 2. Durable Queue turn invoking save_personal_memory
     harness.fakeGateway.enqueueRules({
       mode: 'fast_ok',
@@ -509,5 +531,55 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
       200,
     );
     expect(userBList.items).toEqual([]);
+
+    // 4. Scheduled non-conversation model_brief does NOT advertise save_personal_memory
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Morning brief summary.',
+      savePersonalMemory: {
+        kind: 'fact',
+        content: 'Must never persist from scheduled brief',
+      },
+    });
+    const scheduleRes = await harness.fetchOverHttp('/v2/schedules', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        idempotencyKey: `brief-${randomUUID()}`,
+        kind: 'brief',
+        title: 'Brief capability test',
+        prompt: 'Summarize my morning priorities',
+        trigger: {
+          type: 'once',
+          fireAt: new Date(Date.now() + 250).toISOString(),
+        },
+        timezone: 'UTC',
+        deliveryMode: 'model_brief',
+      }),
+    });
+    expect(scheduleRes.status).toBe(201);
+
+    await expect
+      .poll(() => harness.fakeGateway.getAuditSnapshot().calls.length, {
+        timeout: 10_000,
+        interval: 100,
+      })
+      .toBe(3);
+
+    const briefCall = harness.fakeGateway.getAuditSnapshot().calls[2];
+    expect(briefCall?.enablePersonalMemorySaveTool).toBeUndefined();
+
+    // Rogue save_memory from model_brief must NOT create a third memory item
+    const afterBrief = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    expect(afterBrief.items).toHaveLength(2);
   });
 });

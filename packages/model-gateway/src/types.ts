@@ -51,6 +51,11 @@ export interface ConversationTurnInput {
   readonly context: readonly ModelMessage[];
   /** Bounded account-scoped user-requested preferences/facts, newest-updated first. */
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
+  /**
+   * Explicit runtime capability gate for the closed `save_personal_memory` tool.
+   * Defaults to `false` so V1 and non-conversation/scheduled executions never advertise or accept it.
+   */
+  readonly enablePersonalMemorySaveTool?: boolean;
   readonly maxOutputTokens: number;
 }
 

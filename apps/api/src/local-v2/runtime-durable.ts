@@ -220,13 +220,16 @@ export function createDurableExecutor(
             const job = await gateway.queryConversationJob(operationId, handle, signal);
             if (job.state === 'unavailable') return unknownOutcome(handle, 'JOB_UNAVAILABLE');
             if (job.state === 'completed') {
+              if (claim.targetKind !== 'turn' && job.result.output.kind === 'save_memory') {
+                return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
+              }
               return {
                 status: 'succeeded',
                 operationId,
                 providerJobHandle: handle,
                 outputJson: JSON.stringify({
                   text: job.result.output.text,
-                  ...(job.result.output.kind === 'save_memory'
+                  ...(claim.targetKind === 'turn' && job.result.output.kind === 'save_memory'
                     ? { personalMemorySave: job.result.output.memory.arguments }
                     : {}),
                 }),
@@ -279,26 +282,31 @@ export function createDurableExecutor(
                     context.personalMemories.length > 0
                       ? { personalMemories: context.personalMemories }
                       : {}),
+                    ...(claim.targetKind === 'turn' ? { enablePersonalMemorySaveTool: true } : {}),
                     maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
                   },
                 },
                 signal,
               )) {
                 if (event.kind === 'job') handle = event.handle;
-                if (event.kind === 'result')
+                if (event.kind === 'result') {
+                  if (claim.targetKind !== 'turn' && event.result.output.kind === 'save_memory') {
+                    return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
+                  }
                   return {
                     status: 'succeeded',
                     operationId,
                     providerJobHandle: handle,
                     outputJson: JSON.stringify({
                       text: event.result.output.text,
-                      ...(event.result.output.kind === 'save_memory'
+                      ...(claim.targetKind === 'turn' && event.result.output.kind === 'save_memory'
                         ? { personalMemorySave: event.result.output.memory.arguments }
                         : {}),
                     }),
                     errorCode: null,
                     usage: event.result.usage,
                   };
+                }
               }
             } catch (error) {
               if (handle === null)

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   CONVERSATION_SYSTEM_PROMPT,
+  CONVERSATION_TOOLS_WITH_MEMORY,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
   DELEGATION_TOOLS,
   FakeModelGateway,
@@ -11,6 +12,7 @@ import {
   OpenAiModelGateway,
   OpenRouterModelGateway,
   PERSONAL_MEMORY_CONTEXT_HEADER,
+  PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   SAVE_PERSONAL_MEMORY_TOOL_NAME,
   buildBoundedPersonalMemoryContext,
   preflightConversationTurn,
@@ -24,16 +26,20 @@ import {
 } from '../../packages/model-gateway/src/providers/shared.js';
 import {
   AgentHeadMemoryService,
+  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
   PERSONAL_MEMORY_MAX_ITEMS,
+  PERSONAL_MEMORY_SAVED_REPLY,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
   parseClaimExecutionContext,
   readPersonalMemoriesForTurnSync,
   savePersonalMemoryFromTurnSync,
+  toAgentHeadDurableCommitOutcome,
   type DurableObjectStorageLike,
   type SqlStorageCursorLike,
   type SqlStorageRow,
 } from '@ember/runtime-v2';
+import { executeAuthoritativeTurnCommit } from '../../packages/runtime-v2/src/agent-head/turn-commit.js';
 import { describe, expect, it } from 'vitest';
 
 function createInMemoryDoStorage(): {
@@ -281,14 +287,18 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
     expect(fakeWith.usage!.inputTokens).toBeGreaterThan(fakeWithout.usage!.inputTokens);
   });
 
-  it('parses save_personal_memory closed tool calls, rejects invalid args and canned plain-text fakes', () => {
-    const toolSchema = DELEGATION_TOOLS.find(
+  it('gates save_personal_memory behind enablePersonalMemorySaveTool on providers and rejects disabled or invalid tool calls', async () => {
+    expect(DELEGATION_TOOLS.map((tool) => tool.function.name)).toEqual([
+      'delegate_notes_action_items',
+      'delegate_python_agent',
+    ]);
+    const toolSchema = CONVERSATION_TOOLS_WITH_MEMORY.find(
       (tool) => tool.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME,
     );
     expect(toolSchema).toBeDefined();
     expect(toolSchema?.function.parameters.additionalProperties).toBe(false);
 
-    const parsed = parseConversationTurnChoice({
+    const toolChoice = {
       message: {
         content: null,
         tool_calls: [
@@ -307,7 +317,13 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
         ],
       },
       finish_reason: 'tool_calls',
-    });
+    };
+
+    // Disabled by default (V1 / scheduled briefs / tasks) -> rejected fail-closed
+    expect(() => parseConversationTurnChoice(toolChoice)).toThrow(ModelGatewayFailure);
+
+    // Enabled explicitly (V2 user-initiated conversation turn) -> parsed cleanly
+    const parsed = parseConversationTurnChoice(toolChoice, { allowSavePersonalMemory: true });
     expect(parsed).toEqual({
       kind: 'save_memory',
       toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
@@ -323,37 +339,171 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       },
     });
 
-    // Reject invalid key or unknown extra arguments
-    expect(() =>
-      parseConversationTurnChoice({
-        message: {
-          content: null,
-          tool_calls: [
-            {
-              id: 'call_mem_bad',
-              type: 'function',
-              function: {
-                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
-                arguments: JSON.stringify({
-                  kind: 'preference',
-                  content: 'Valid content',
-                  extra_field: 'not_allowed',
-                }),
-              },
+    // Provider wire regression: default omits tool & instruction; V2-enabled advertises both
+    const capturedRequests: Array<{
+      readonly messages: readonly { role: string; content: string }[];
+      readonly tools: readonly { function: { name: string } }[];
+    }> = [];
+    const stubFetch: FetchLike = (_url, init) => {
+      const req = JSON.parse(String(init.body)) as {
+        readonly model: string;
+        readonly messages: readonly { role: string; content: string }[];
+        readonly tools: readonly { function: { name: string } }[];
+      };
+      capturedRequests.push({ messages: req.messages, tools: req.tools });
+      const payload = {
+        model: req.model,
+        choices: [
+          {
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_mem_wire',
+                  type: 'function',
+                  function: {
+                    name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                    arguments: JSON.stringify({ kind: 'fact', content: 'Based in Kyoto' }),
+                  },
+                },
+              ],
             },
-          ],
+            finish_reason: 'tool_calls',
+          },
+        ],
+        usage: { prompt_tokens: 30, completion_tokens: 15 },
+      };
+      return Promise.resolve({
+        ok: true,
+        status: 200,
+        json: () => Promise.resolve(payload),
+        text: () => Promise.resolve(JSON.stringify(payload)),
+      });
+    };
+
+    const openaiRate: ModelRateRow = Object.freeze({
+      providerId: 'openai' as const,
+      modelId: 'gpt-5.6-luna',
+      inputMicroUsdPerMillion: 200_000,
+      outputMicroUsdPerMillion: 1_200_000,
+      rateVersion: 'test-personal-memory-gate-v1',
+      provenance: 'official_price_verified' as const,
+      source: 'test fixture',
+    });
+    const openai = new OpenAiModelGateway({
+      apiKey: 'sk-test-abcdefghijklmnopqrstuvwxyz012345',
+      modelId: openaiRate.modelId,
+      rate: openaiRate,
+      isAuthorized: () => true,
+      fetchImpl: stubFetch,
+    });
+    const controller = new AbortController();
+    const baseInput = {
+      conversationId: randomUUID(),
+      turnId: randomUUID(),
+      context: [{ role: 'user' as const, text: 'Remember I live in Kyoto' }],
+      maxOutputTokens: 256,
+    };
+
+    // Default (V1 / task) does NOT advertise save_personal_memory and rejects if model emits it
+    await expect(openai.generateConversationTurn(baseInput, controller.signal)).rejects.toThrow(
+      ModelGatewayFailure,
+    );
+    expect(capturedRequests[0]?.tools.map((t) => t.function.name)).toEqual([
+      'delegate_notes_action_items',
+      'delegate_python_agent',
+    ]);
+    expect(capturedRequests[0]?.messages[0]?.content).toBe(CONVERSATION_SYSTEM_PROMPT);
+
+    // V2 user-initiated conversation enables it and scopes instruction to latest user message
+    const enabledRes = await openai.generateConversationTurn(
+      { ...baseInput, enablePersonalMemorySaveTool: true },
+      controller.signal,
+    );
+    expect(enabledRes.output.kind).toBe('save_memory');
+    expect(capturedRequests[1]?.tools.map((t) => t.function.name)).toEqual([
+      'delegate_notes_action_items',
+      'delegate_python_agent',
+      'save_personal_memory',
+    ]);
+    expect(capturedRequests[1]?.messages[0]?.content).toContain(
+      PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
+    );
+
+    // Reject invalid key or unknown extra arguments even when enabled
+    expect(() =>
+      parseConversationTurnChoice(
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_mem_bad',
+                type: 'function',
+                function: {
+                  name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                  arguments: JSON.stringify({
+                    kind: 'preference',
+                    content: 'Valid content',
+                    extra_field: 'not_allowed',
+                  }),
+                },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
         },
-        finish_reason: 'tool_calls',
-      }),
+        { allowSavePersonalMemory: true },
+      ),
     ).toThrow(ModelGatewayFailure);
 
     // Reject plain-text impersonation of the canned acknowledgement without calling the tool
     expect(() =>
-      parseConversationTurnChoice({
-        message: { content: DEFAULT_MEMORY_SAVE_ACK_TEXT },
-        finish_reason: 'stop',
-      }),
+      parseConversationTurnChoice(
+        {
+          message: { content: DEFAULT_MEMORY_SAVE_ACK_TEXT },
+          finish_reason: 'stop',
+        },
+        { allowSavePersonalMemory: true },
+      ),
     ).toThrow(ModelGatewayFailure);
+  });
+
+  it('fails closed on invalid durable personalMemorySave payload in toAgentHeadDurableCommitOutcome', () => {
+    const turnId = randomUUID();
+    const operationId = randomUUID();
+    const outcome = toAgentHeadDurableCommitOutcome({
+      targetKind: 'turn',
+      context: {
+        entityKind: 'turn',
+        entityId: turnId,
+        attemptNo: 1,
+        operationId,
+        sendState: 'sent',
+        sendAuthorizingAtMs: null,
+        sendStartedAtMs: 1_700_000_000_000,
+        deadlineAtMs: 1_700_000_060_000,
+        providerJobHandle: null,
+        interactiveHandoff: false,
+      },
+      outcome: {
+        status: 'succeeded',
+        operationId,
+        providerJobHandle: null,
+        outputJson: JSON.stringify({
+          text: "Got it — I'll remember that.",
+          personalMemorySave: { kind: 'invalid_kind', content: '' },
+        }),
+        errorCode: null,
+        usage: { inputTokens: 10, outputTokens: 5, costMicroUsd: 100 },
+      },
+      modelLabel: 'ember-fake-model-gateway-1',
+      simulated: true,
+    });
+    expect(outcome).toMatchObject({
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
   });
 });
 
@@ -920,5 +1070,205 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       newId: () => randomUUID(),
     });
     expect(overflow).toEqual({ outcome: 'budget_exceeded' });
+  });
+
+  it('enforces effect boundary on executeAuthoritativeTurnCommit: no writes on stale fence/cancel, truthful reply on cap', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalId = randomUUID();
+    const conversationId = randomUUID();
+    const cancelledTurnId = randomUUID();
+    const fencedTurnId = randomUUID();
+    const capTurnId = randomUUID();
+    const nowMs = 1_700_000_100_000;
+    bootstrapHead(storage, tenantId, agentId);
+    storage.sql.exec(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 0, 0, ?, ?)`,
+      conversationId,
+      nowMs,
+      nowMs,
+    );
+
+    let nextSeq = 0;
+    const seedTurnAndAttempt = (
+      turnId: string,
+      operationId: string,
+      cancelRequestedAtMs: number | null,
+    ) => {
+      nextSeq += 1;
+      const sourceMessageId = randomUUID();
+      storage.sql.exec(
+        `INSERT INTO conversation_messages (id, conversation_id, sequence, kind, text, client_submission_id, created_at_ms)
+         VALUES (?, ?, ?, 'user', 'Remember this', ?, ?)`,
+        sourceMessageId,
+        conversationId,
+        nextSeq,
+        randomUUID(),
+        nowMs,
+      );
+      storage.sql.exec(
+        `UPDATE conversations SET last_sequence = ? WHERE id = ?`,
+        nextSeq,
+        conversationId,
+      );
+      storage.sql.exec(
+        `INSERT INTO assistant_turns (
+           id, conversation_id, source_message_id, response_message_id, status, failure_reason,
+           execution_mode, deadline_at_ms, interactive_deadline_ms, lease_epoch, lease_owner,
+           lease_expires_at_ms, claim_count, cancel_requested_at_ms, provider_job_handle,
+           handoff_reason, linked_task_id, created_at_ms, updated_at_ms
+         ) VALUES (?, ?, ?, NULL, 'running', NULL, 'fast_interactive', ?, ?, 2, 'worker-1', ?, 1, ?, NULL, NULL, NULL, ?, ?)`,
+        turnId,
+        conversationId,
+        sourceMessageId,
+        nowMs + 60_000,
+        nowMs + 30_000,
+        nowMs + 30_000,
+        cancelRequestedAtMs,
+        nowMs,
+        nowMs,
+      );
+      storage.sql.exec(
+        `INSERT INTO model_attempts (
+           subject_type, subject_id, attempt_no, operation_id, principal_id, utc_day,
+           lease_epoch, provider_id, model_label, rate_version, budget_mode, state, outcome_code,
+           reserved_micro_usd, observed_cost_micro_usd, input_tokens, output_tokens,
+           global_grant_id, global_grant_expires_ms, send_started_at_ms, started_at_ms
+         ) VALUES ('turn', ?, 1, ?, ?, '2026-11-20', 2, 'fake', 'ember-fake-model-gateway-1', 'fake-v2-m1', 'simulated_full_protocol', 'reserved', NULL, 250, NULL, NULL, NULL, NULL, NULL, ?, ?)`,
+        turnId,
+        operationId,
+        principalId,
+        nowMs,
+        nowMs,
+      );
+      return sourceMessageId;
+    };
+
+    const makeCommitDeps = () => ({
+      storage,
+      recoveryAdmission: {
+        ensureCoverageAsync: () => Promise.resolve({ covered: true, activeGeneration: 1 }),
+        confirmCoverageSync: () => true,
+        isCoverageValidAtSync: () => true,
+      } as never,
+      eventCoordinator: {
+        enqueueDurableOutboxSync: () => undefined,
+        cancelEntityOutboxSync: () => 0,
+        recomputeAlarmSync: () => null,
+      } as never,
+      recoveryHooks: {
+        syncAlarm: () => Promise.resolve(),
+        relayBudgetSync: () => Promise.resolve(),
+        getCoverageRowSync: () => ({
+          id: 1 as const,
+          active_generation: 1,
+          actual_recovery_at_ms: nowMs + 120_000,
+          dirty: 0 as const,
+          updated_at_ms: nowMs,
+        }),
+      } as never,
+      recoveryRegistry: {} as never,
+      globalBudget: {} as never,
+      earliestDiscovery: { earliestRequiredDiscoveryAtMsSync: () => null },
+      nowMs: () => nowMs + 1_000,
+      idFactory: () => randomUUID(),
+    });
+
+    // 1. Stale lease fence -> fenced, zero memory writes
+    const fencedOp = randomUUID();
+    seedTurnAndAttempt(fencedTurnId, fencedOp, null);
+    const fencedRes = await executeAuthoritativeTurnCommit(makeCommitDeps(), {
+      tenantId,
+      agentId,
+      turnId: fencedTurnId,
+      leaseEpoch: 1, // stale epoch (current is 2)
+      leaseOwner: 'worker-1',
+      attemptNo: 1,
+      operationId: fencedOp,
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 120 },
+      result: {
+        status: 'completed',
+        text: 'Stale ack',
+        modelLabel: 'ember-fake-model-gateway-1',
+        simulated: true,
+        personalMemorySave: { kind: 'fact', content: 'Must not persist on stale fence' },
+      },
+      allowDeadlineTimeoutPublish: false,
+      throwOnScopeMismatch: false,
+    });
+    expect(fencedRes.outcome).toBe('fenced');
+    expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalId)).toEqual([]);
+
+    // 2. Cancelled turn -> reconciled_only, zero memory writes
+    const cancelOp = randomUUID();
+    seedTurnAndAttempt(cancelledTurnId, cancelOp, nowMs + 500);
+    const cancelRes = await executeAuthoritativeTurnCommit(makeCommitDeps(), {
+      tenantId,
+      agentId,
+      turnId: cancelledTurnId,
+      leaseEpoch: 2,
+      leaseOwner: 'worker-1',
+      attemptNo: 1,
+      operationId: cancelOp,
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 120 },
+      result: {
+        status: 'completed',
+        text: 'Cancelled ack',
+        modelLabel: 'ember-fake-model-gateway-1',
+        simulated: true,
+        personalMemorySave: { kind: 'fact', content: 'Must not persist on cancelled turn' },
+      },
+      allowDeadlineTimeoutPublish: false,
+      throwOnScopeMismatch: false,
+    });
+    expect(cancelRes.outcome).toBe('reconciled_only');
+    expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalId)).toEqual([]);
+
+    // 3. Budget-limit (50-item cap) -> truthful limit-exceeded assistant message, zero extra rows
+    const capOp = randomUUID();
+    const capSourceMessageId = seedTurnAndAttempt(capTurnId, capOp, null);
+    for (let i = 0; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      savePersonalMemoryFromTurnSync(storage.sql, {
+        tenantId,
+        principalId,
+        turnId: randomUUID(),
+        conversationId,
+        sourceMessageId: capSourceMessageId,
+        input: { kind: 'fact', content: `Cap filler #${i}` },
+        nowMs: nowMs + i,
+        newId: () => randomUUID(),
+      });
+    }
+    const capRes = await executeAuthoritativeTurnCommit(makeCommitDeps(), {
+      tenantId,
+      agentId,
+      turnId: capTurnId,
+      leaseEpoch: 2,
+      leaseOwner: 'worker-1',
+      attemptNo: 1,
+      operationId: capOp,
+      settlement: { state: 'settled', outcomeCode: 'ok', observedCostMicroUsd: 120 },
+      result: {
+        status: 'completed',
+        text: 'Model optimistic ack',
+        modelLabel: 'ember-fake-model-gateway-1',
+        simulated: true,
+        personalMemorySave: { kind: 'fact', content: 'Over cap item' },
+      },
+      allowDeadlineTimeoutPublish: false,
+      throwOnScopeMismatch: false,
+    });
+    expect(capRes.outcome).toBe('published');
+    if (capRes.outcome !== 'published') throw new Error('expected published');
+    const committedMsg = storage.sql
+      .exec<{ readonly text: string }>(
+        `SELECT text FROM conversation_messages WHERE id = ?`,
+        capRes.responseMessageId,
+      )
+      .one();
+    expect(committedMsg.text).toBe(PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY);
+    expect(committedMsg.text).not.toBe(PERSONAL_MEMORY_SAVED_REPLY);
   });
 });

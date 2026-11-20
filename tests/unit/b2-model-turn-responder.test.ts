@@ -1158,4 +1158,38 @@ describe('B2 responder: multimodal image hydration', () => {
     // Multimodal reserve (1024 tokens) raises reservation above minimum text reserve.
     expect(repository.reserveCommands[0]?.reservedMicroUsd).toBeGreaterThan(200);
   });
+
+  it('rejects unsupported save_memory tool output in V1 and never publishes a false acknowledgement', async () => {
+    const repository = new MemoryExecutionPort();
+    const saveMemoryGateway = new ScriptedGateway(['ok']);
+    const originalGenerate = saveMemoryGateway.generateConversationTurn.bind(saveMemoryGateway);
+    saveMemoryGateway.generateConversationTurn = async (input, signal) => {
+      const base = await originalGenerate(input, signal);
+      return {
+        ...base,
+        output: {
+          kind: 'save_memory',
+          toolName: 'save_personal_memory',
+          text: "Got it — I'll remember that.",
+          finishReason: 'stop',
+          memory: {
+            toolName: 'save_personal_memory',
+            arguments: { kind: 'preference', content: 'Prefer concise replies' },
+          },
+        },
+      };
+    };
+
+    const responder = realResponder(repository, saveMemoryGateway);
+    const summary = await responder.processOnce();
+
+    expect(summary.failed).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(saveMemoryGateway.inputs[0]?.enablePersonalMemorySaveTool).toBeUndefined();
+    expect(repository.publishes).toHaveLength(1);
+    expect(repository.publishes[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
+  });
 });

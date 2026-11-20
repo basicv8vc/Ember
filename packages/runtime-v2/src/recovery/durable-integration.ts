@@ -395,9 +395,10 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
             const parsedMem = personalMemorySaveTurnCommandSchema.safeParse(
               parsed['personalMemorySave'],
             );
-            if (parsedMem.success) {
-              personalMemorySave = parsedMem.data;
+            if (!parsedMem.success) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
             }
+            personalMemorySave = parsedMem.data;
           }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied

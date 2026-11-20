@@ -75,7 +75,10 @@ interface WranglerWorkerHandle {
 }
 
 interface DurableObjectStorageHandle {
-  exec(sql: string, ...bindings: (string | number | null)[]): Promise<unknown>;
+  exec<T = Record<string, unknown>>(
+    sql: string,
+    ...bindings: (string | number | null)[]
+  ): Promise<T[]>;
 }
 
 interface WranglerTestHarness {
@@ -632,14 +635,14 @@ export class V2LocalRuntimeHarness {
   }
 
   /** Inspect actual local DO SQLite state without adding a Worker HTTP route. */
-  async readDurableObjectRows(
+  async readDurableObjectRows<T = Record<string, unknown>>(
     bindingName: string,
     identifier: { readonly name: string } | { readonly id: string },
     query: `SELECT ${string}`,
     ...bindings: (string | number | null)[]
-  ): Promise<unknown> {
+  ): Promise<T[]> {
     const sql = await this.#requireWorker().getDurableObjectStorage(bindingName, identifier);
-    return sql.exec(query, ...bindings);
+    return sql.exec<T>(query, ...bindings);
   }
 
   async dispose(): Promise<void> {

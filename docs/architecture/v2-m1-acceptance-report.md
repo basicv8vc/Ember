@@ -1,13 +1,16 @@
 # Ember V2-M1 — Runtime Integration & Acceptance Report
 
-- **Status:** **M1-D8 FINAL VERIFICATION ON `main @ d3c559c` + PR `#185` (`af93106`): ACCEPTANCE `22/22` PASS (`0` SAFETY VIOLATIONS); LATENCY & COVERED `0` D1 I/O TARGETS PASS; CONDITIONAL / NO-GO FOR `/v2/.../messages/stream` >4 TURNS (NEW DEFECT #7) & `10k/100k` CLOUD COST TARGET (`$412.53–$440.92` VS `$300`, `$4,602.85–$5,303.26` VS `$3,500`)**
-- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6/D7 sections below preserved verbatim)
+- **Status:** **M1-D10 FINAL CONSOLIDATION COMPLETE — FUNCTIONAL, SAFETY & MULTI-TURN SSE ACCEPTANCE: `23/23` FULL `workerd` SUITE PASS (`0` FILTERED, `0` SAFETY VIOLATIONS ON `main @ b669b0e` + `#190 -> #191 -> #193`, DEFECTS #1–#7 RESOLVED); HISTORICAL D8 BENCHMARK `10k/100k` MAU COST OVERAGE RETAINED (COST OPTIMIZATION PURSUED INDEPENDENTLY BY AGENT A / `M1-A6`)**
+- **Date:** 2026-11-20 (historical D0/D1/D4/D5/D6/D7/D8/D9 sections below preserved verbatim)
 - **Role:** Performance, Integration & Reliability Engineer (V2-M1-D)
-- **Latest Tested `main` + PR `#185` Baseline:** `main @ d3c559cc107e3d445fe58fb649ee3b407510a2ba` + PR `#185` (`test/v2-m1-full-runtime-acceptance @ af93106e161d83e792c93c03b56cf6aefee364ec`; prior D7 pre-merge `main @ 1131415` + PR `#188 @ f057c3e`, D6 `main @ a537e4f`, D0/D1 `1ba860c`, M0 `6da1b48`)
-- **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
+- **Latest Consolidated Baseline:** `origin/main @ b669b0e` (`#189` M2-F1 + `#194` M1-A5 merged) + separated PR stack `#190 -> #191 -> #193` (prior D9 `main @ 7dc9719` + `#190/#191`, D8 benchmark `main @ d3c559c` + `#185`, D7 `main @ 1131415` + `#188`, D6 `main @ a537e4f`, D0/D1 `1ba860c`, M0 `6da1b48`)
+- **Related:** [A + B4 Early Integration Report (D4)](./v2-m1-ab-early-integration-report.md), [M0 Post-Merge Verification Report](./v2-m0-verification-report.md), [M1-A5 DO SQLite Write Amplification Analysis](./v2-m1-a5-do-sqlite-write-amplification-analysis.md), [V2-M0-A Contract](./v2-m0-runtime-contract.md), [V2-M0-B Contract](./v2-m0-event-recovery-contract.md), [V2-M0-D Benchmark Report](./v2-m0-benchmark-report.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md)
 
 > [!IMPORTANT]
-> **M1-D8 Final Performance & Cost Verdict (`main @ d3c559c` + PR `#185` @ `af93106`):** Re-benchmarking real local `workerd` ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), [m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)) alongside the already-passed `22/22` acceptance suite (`0` safety violations) confirms: (1) **All ADR-0006 single-stream latency targets PASS** (`Covered ACK P95 = 17.42 ms`, `Runtime Overhead P95 = 25.02 ms`, `GlobalBudget Reserve+Authorize P95 = 11.17 ms`, `Durable Dispatch P95 = 55.85 ms`, `Fake Provider TTFT P95 = 0.61 ms`, `Offline Recovery = 50s detect / 66s recover`); (2) **Covered Path sync D1 I/O is verified at `0` ops (`d1OpsMean = 0`)** when coverage is held active, and drops from `7.92` (D6) to `3.90` D1 rows written/turn on isolated idle-cycling turns; (3) **Two remaining non-safety gaps prevent unconditional GA**: newly discovered **Defect #7** (`prepareTurn` returns `9` context rows on conversations with `>= 8` messages, causing `/v2/conversations/:id/messages/stream` interactive execution to fail with `internal_error` on turn 5+) and **10k/100k Cloud Runtime cost overrun** (`$412.53–$440.92` vs `$300` at 10k; `$4,602.85–$5,303.26` vs `$3,500` at 100k) driven by `57–61` DO `rowsWritten/event` vs ADR-0006's `20`-row assumption. See **§14** for complete D8 measurements and verdict.
+> **M1-D10 Consolidated Verdict (`main @ b669b0e` + `#190 -> #191 -> #193`):**
+>
+> - **Latest D10 Functional & Safety Acceptance (Verified on Consolidated HEAD):** Executing the **complete un-filtered `23/23` `workerd` acceptance suite** ([v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts)) passes `23/23` (`0` safety violations, Defects `#1–#7` resolved), including Turn 22 post-Handoff verification (`44` messages in sequence `1..44`, `22` completed turns, `0` duplicate results/provider calls, and converged budget reservations across AgentHead & GlobalBudgetDO).
+> - **Historical D8 Performance & Cost Benchmark Data (Not Re-Run in D9/D10):** Latency, D1 I/O, and cost estimates in **§14** ([m1-full-runtime.json](../../benchmarks/v2-m1/m1-full-runtime.json), [m1-cost-reestimation.json](../../benchmarks/v2-m1/m1-cost-reestimation.json)) are **historical D8 measurements** collected on `main @ d3c559c` + `#185`. The **`10k/100k` MAU Cloud Runtime cost overage conclusion remains open** (`57–61` DO `rowsWritten/event` measured in D8 -> `$412.53–$440.92` vs `$300` @ `10k`; `$4,602.85–$5,303.26` vs `$3,500` @ `100k`), and cost optimization is **independently pursued by Agent A (`M1-A6`)**. See **§16** for full D10 consolidation details.
 
 ---
 
@@ -458,3 +461,60 @@ Executed via `pnpm bench:local --suite m1-full-runtime --enable-local-load --con
 
 - **Functional, Durability & Safety Core:** **PASS (`22/22` acceptance tests, `0` duplicate provider calls/commits/messages, `0` lost accepted work, `0` budget overcommits, `0` D1 I/O on active covered turns, all ADR-0006 single-stream latency targets met).**
 - **Release Verdict:** **CONDITIONAL / NO-GO FOR UNCONDITIONAL GA** — while V2-M1 durable execution, recovery, and budget safety are verified ready, **Defect #7** breaks `/v2/conversations/:id/messages/stream` interactive SSE after 4 prior turns (`>= 8` messages), and `57–61` DO `rowsWritten/event` exceeds ADR-0006 Cloud Runtime budgets at `10k/100k` MAU (`$412–$441` vs `$300`; `$4,603–$5,303` vs `$3,500`). Fix Defect #7 before shipping multi-turn interactive SSE, and schedule DO SQLite write coalescing if strict `$300 / $3,500` Cloud Runtime targets are enforced for `10k–100k` MAU.
+
+---
+
+## 15. M1-D9 — Multi-turn SSE Defect Closure (Defect #7 Resolved)
+
+### 15.1 Fix Summary (`turn-service.ts` Stage 3 Bounded Read; Model Gateway Validation Unchanged)
+
+- **Code Change (`packages/runtime-v2` only):** Per PR `#191` (`ff2235f`, integrated on `fix/v2-m1-d9-multi-turn-sse-closure`), [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts#L779-L784) removes the stale Stage 1 `readRecentTurnContextSync` pre-read and reads `readRecentTurnContextSync(this.deps.storage.sql, req.conversationId, undefined, sequence)` inside Stage 3 **after** inserting the current user message (`sequence`) and `message_attachments`.
+- **Invariant Preserved:** `readRecentTurnContextSync` enforces `LIMIT maxContextMessages (8)` through `sequence`, guaranteeing at most `7` prior messages + `1` current user message (`<= 8` total rows) in strictly ascending `sequence` order with attachment metadata attached — identical to `claimDurableWork`.
+- **Model Gateway Validation Unchanged:** [context.ts](../../packages/model-gateway/src/context.ts) (`buildBoundedContext` enforcing `maxContextMessages = 8`, monotonic `sequence`, and trailing `user` row) has **0** modifications (`git diff origin/main -- packages/model-gateway/` is empty).
+
+### 15.2 Real Local `workerd` Regression & `multiTurnSseContextProbe` Re-Verification
+
+- **20+ Continuous SSE Turn + Ordering + Attachments + Durable Handoff Test ([v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) `D8 Defect #7 / D9`) — PASS (`82398ms`):**
+  1. **20 Consecutive SSE Turns (`POST /v2/conversations/:id/messages/stream`):** All 20 turns completed with `HTTP 201`, `turn.accepted`, `turn.delta`, `turn.committed`, `totalCalls === 20`, `40` messages in strict `sequence = 1..40` alternating `user`/`ember`, and every assistant reply echoing its turn's current `Multi-turn request ${i + 1}` prompt.
+  2. **Turn 21 Attachments & Context Window (`40` prior messages -> `sequence = 41`):** `prepareTurn` with `resolvedAttachments` (`d9-evidence.pdf`) returned `8` context rows (`sequence = [34..41]`) ending with the current user message (`sequence = 41`) and preserved attachment metadata, passing unmodified `buildBoundedContext()` (`8` messages) and committing `outcome = 'published'`.
+  3. **Turn 22 Durable Handoff (`>= 42` prior messages):** `slow_handoff` on `/v2/conversations/:id/messages/stream` with mid-stream client disconnect (`AbortController`) handed off cleanly (`handoff_reason = 'client_disconnect_handoff'`), polled job handle once (`jobPollCount = 1`), and committed `Turn 22 durable handoff after 20+ turns` with `totalCalls = 21` (`0` duplicate provider calls).
+- **Targeted `multiTurnSseContextProbe` Re-Verification (`42` prior messages) — PASS:**
+  - Direct `workerd` probe after `21` committed turns (`42` prior messages) followed by `POST /v2/conversations/:id/messages/stream` returned `{"priorMessagesCount":42,"status":201,"sawDeltaEvent":true,"sawCommittedEvent":true,"committedStatus":"completed"}`.
+- **Full Benchmark & Cost Optimization:** Not re-run / not modified per M1-D9 scope (`§14` measurements and `10k/100k` DO write cost variance remain as recorded).
+
+### 15.3 Updated Final M1 Verdict
+
+- **Functional, Durability, Safety, Latency & Multi-Turn SSE Acceptance:** **GO** — Defects `#1–#7` are all verified resolved, `23/23` acceptance tests in [v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) pass (`D7 22/22` + `D8/D9` 20+ turn SSE closure), `0` safety violations, and all ADR-0006 single-stream latency and active-covered `0` D1 I/O targets pass.
+- **Tracked Scale Cost Variance (Non-Functional):** `57–61` DO `rowsWritten/event` exceeds ADR-0006's `20`-row budget at `10k/100k` MAU (`$412.53–$440.92` vs `$300`; `$4,602.85–$5,303.26` vs `$3,500`) and is tracked for post-M1 DO SQLite write coalescing.
+
+---
+
+## 16. M1-D10 — Final Runtime Acceptance & Consolidation
+
+### 16.1 Clean PR Stack Consolidation (`main @ b669b0e` -> `#190` -> `#191` -> `#193`)
+
+To eliminate duplicated Runtime fixes, duplicated historical benchmark commits/files, and pre-`#185` branch history against latest `main` (`origin/main @ b669b0e`, including merged PR `#189` M2-F1 device execution and PR `#194` M1-A5 write amplification analysis), the M1 deliverables are cleanly separated in linear dependency order:
+
+1. **PR `#190` (`docs/v2-m1-d8-final-benchmark`, `base: main`)**: Rebased cleanly onto `origin/main @ b669b0e`; contains only M1-D8 benchmark instrumentation, D8 JSON artifacts (`benchmarks/v2-m1/`), and D8 acceptance report updates (`§14`).
+2. **PR `#191` (`fix/v2-m1-d8-multi-turn-context`, `base: docs/v2-m1-d8-final-benchmark`)**: Contains only PR `#191`'s Defect `#7` fix in [turn-service.ts](../../packages/runtime-v2/src/agent-head/turn-service.ts) (`Stage 3` bounded read `readRecentTurnContextSync(..., undefined, sequence)`, keeping [context.ts](../../packages/model-gateway/src/context.ts) unchanged) and the initial `D8 Defect #7` SSE test.
+3. **PR `#193` (`fix/v2-m1-d9-multi-turn-sse-closure`, `base: fix/v2-m1-d8-multi-turn-context`)**: Contains only the D9 + D10 regression coverage expansion in [v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) and acceptance report consolidation in [v2-m1-acceptance-report.md](./v2-m1-acceptance-report.md) (`§15` + `§16`), with zero Runtime or Benchmark JSON file duplication.
+
+### 16.2 Explicit Separation: Historical D8 Performance Data vs. Latest D10 Functional Data
+
+| Evidence Category                                      | Tested Commit / Baseline                                             | Execution Scope                                                                                                                                   | Status / Key Finding                                                                                                                                                                                                                                                                                                 |
+| :----------------------------------------------------- | :------------------------------------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Historical D8 Performance & Cost Benchmark (`§14`)** | `main @ d3c559c` + `#185` (archived in PR `#190`)                    | Full `m1-full-runtime` workerd benchmark & `ADR-0006` cost model; **not re-run in D9/D10**                                                        | Single-stream latency & active-covered `0` D1 I/O targets passed; `10k/100k` MAU Cloud Runtime exceeded ADR-0006 budget (`$412.53–$440.92` vs `$300` @ `10k`; `$4,602.85–$5,303.26` vs `$3,500` @ `100k`).                                                                                                           |
+| **Latest D10 Functional & Safety Acceptance (`§16`)**  | Consolidated HEAD (`origin/main @ b669b0e` + `#190 -> #191 -> #193`) | Full **23/23** real local `workerd` suite (`vitest.integration.config.ts`, **no `-t` filter**), build, typecheck, lint, format check & unit tests | **`23/23` PASS (`180.81s`)**, `0` safety violations (`duplicateProviderCalls=0`, `duplicateAssistantMessages=0`, `duplicateCommits=0`, `lostAcceptedWork=0`, `budgetOvercommit=0`); Turn 22 Handoff verified with `44` messages (`sequence = 1..44`), `22` completed turns, and `0` unconverged budget reservations. |
+
+### 16.3 Turn 22 Post-Handoff Invariant & Budget Convergence Check (D10)
+
+Extending `D8 Defect #7 / D9` in [v2-m1-full-runtime-acceptance.test.ts](../../tests/integration/v2-m1-full-runtime-acceptance.test.ts) on the consolidated HEAD verifies end-to-end state convergence after Turn 22's `client_disconnect_handoff`:
+
+- **Messages & Ordering:** `44` total messages (`22` `user` + `22` `ember`), strictly ascending `sequence = [1..44]`, `44` distinct message IDs (`0` duplicate messages).
+- **Turns & Execution:** `22` turns, all `22` in `status === 'completed'`, `22` distinct turn IDs and `22` distinct `response_message_id` values; `FakeModelGateway` recorded `totalCalls === 21` (Turns `1..20` + Turn `22` SSE; Turn `21` exercised RPC attachment persistence) and `jobPollCount === 1` (`0` duplicate provider calls).
+- **Budget Reservation Convergence:** All `22` `model_attempts` reached `state === 'settled'` with `global_synced_at_ms !== null`; AgentHead `local_spend_buckets` (`reserved_micro_usd === 0`), `GlobalBudgetDO` `global_spend_days` (`reserved_micro_usd === 0`), and `global_budget_reservations` (all rows `state === 'settled'`, `0` remaining `'reserved'` holds) converged cleanly.
+
+### 16.4 Final M1 Verdict & Cost Optimization Ownership
+
+- **Runtime Functional, Durability, Security & Multi-Turn SSE Verdict:** **GO** on consolidated HEAD (`origin/main @ b669b0e` + `#190 -> #191 -> #193`, Defects `#1–#7` resolved, `23/23` full `workerd` matrix passing).
+- **10k / 100k MAU Cloud Cost Overage Conclusion Retained:** Historical D8 telemetry (`57–61` DO `rowsWritten/event`) and M1-A5's code audit ([v2-m1-a5-do-sqlite-write-amplification-analysis.md](./v2-m1-a5-do-sqlite-write-amplification-analysis.md), `58–62` including actual `10`-row `GlobalBudgetDO` writes) exceed ADR-0006's `$300 / $3,500` monthly Cloud Runtime budgets at `10k / 100k` MAU (`$412.53–$440.92` and `$4,602.85–$5,303.26` under D8). Per M1-D10 scope, cost optimization is **not modified in D10** and is tracked independently by **Agent A (`M1-A6`)**.

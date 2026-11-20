@@ -19,7 +19,7 @@ export class LoopbackFakeModelGateway {
 
   constructor(
     url: string,
-    private readonly fetcher: typeof fetch = fetch,
+    private readonly fetcher: typeof fetch = (input, init) => fetch(input, init),
   ) {
     const parsed = new URL(url);
     if (
@@ -155,7 +155,7 @@ export class LoopbackFakeModelGateway {
 
   private request(path: string, signal: AbortSignal, init?: RequestInit): Promise<Response> {
     signal.throwIfAborted();
-    return this.fetcher(this.origin + path, { ...init, signal, redirect: 'error' });
+    return this.fetcher(this.origin + path, { ...init, signal, redirect: 'manual' });
   }
 
   private async readJson(path: string, operationId: string, signal: AbortSignal) {

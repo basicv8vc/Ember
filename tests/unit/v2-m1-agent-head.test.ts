@@ -2388,6 +2388,47 @@ describe('V2-M1-A2 AgentHeadDO state machine, Lease/Epoch fencing & budget_sync 
         })
       )?.status,
     ).toBe('running');
+
+    // The former lease holder can report usage for the exact send after handoff.
+    const scope = { tenantId: h.tenantId, agentId: h.agentId };
+    const oldLease = {
+      scope,
+      conversationId: h.conversationId,
+      turnId: pActive.turnId,
+      leaseEpoch: pActive.leaseEpoch,
+      leaseOwner: 'edge-live',
+    };
+    expect(
+      await h.core.markAttemptSent({
+        scope,
+        subjectType: 'turn',
+        subjectId: pActive.turnId,
+        attemptNo: pActive.attemptNo,
+        operationId: pActive.operationId,
+        leaseEpoch: oldLease.leaseEpoch,
+        leaseOwner: oldLease.leaseOwner,
+      }),
+    ).toMatchObject({ authorized: true });
+    expect(
+      await h.core.handoffTurnToDurable({
+        ...oldLease,
+        reason: 'client_disconnect_handoff',
+        providerJobHandle: 'same-provider-job',
+      }),
+    ).toMatchObject({ outcome: 'handed_off' });
+    const usage = {
+      scope,
+      turnId: pActive.turnId,
+      attemptNo: pActive.attemptNo,
+      operationId: pActive.operationId,
+      observedCostMicroUsd: 115,
+    };
+    await h.core.turnService.recordTurnUsage(usage);
+    await h.core.turnService.recordTurnUsage(usage);
+    expect(h.globalBudget.consumedMicroUsd).toBe(750 + 400 + 115);
+    expect(
+      await h.core.getTurn({ ...scope, conversationId: h.conversationId, turnId: pActive.turnId }),
+    ).toMatchObject({ status: 'running', response_message_id: null });
   });
 
   it('P1-2: exposes sendAuthorizingAtMs & original utcDay on Durable claim, fences Task markAttemptSent worker/run, fails closed on missing global grant & binds Task settlements', async () => {

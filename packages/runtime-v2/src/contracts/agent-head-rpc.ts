@@ -236,6 +236,17 @@ export interface CommitTurnRequest {
       };
 }
 
+/** Trusted cumulative usage for an original send, independent of its publication lease. */
+export interface ObservedTurnUsage {
+  readonly scope: Pick<AgentHeadCallerScope, 'tenantId' | 'agentId'>;
+  readonly turnId: Id;
+  readonly attemptNo: number;
+  readonly operationId: Id;
+  readonly observedCostMicroUsd: number;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+}
+
 export type CommitTurnResult =
   | {
       readonly outcome: 'published';

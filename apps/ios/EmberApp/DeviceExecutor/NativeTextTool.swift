@@ -51,6 +51,10 @@ public struct NativeTextTool: NativeTool {
 
         let lines = text.isEmpty ? [] : text.components(separatedBy: .newlines)
         let nonEmptyLines = lines.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+        let unicodeScalarCount = text.unicodeScalars.count
+        let lfLineCount = text.isEmpty ? 0 : 1 + text.utf8.reduce(0) { count, byte in
+            byte == 0x0A ? count + 1 : count
+        }
 
         let wordTokenizer = NLTokenizer(unit: .word)
         wordTokenizer.string = text
@@ -77,10 +81,12 @@ public struct NativeTextTool: NativeTool {
 
         let structured: DeviceJSONValue = .object([
             "line_count": .int(Int64(lines.count)),
+            "lf_line_count": .int(Int64(lfLineCount)),
             "non_empty_line_count": .int(Int64(nonEmptyLines.count)),
             "word_count": .int(Int64(wordCount)),
             "sentence_count": .int(Int64(sentenceCount)),
             "character_count": .int(Int64(text.count)),
+            "unicode_scalars": .int(Int64(unicodeScalarCount)),
             "utf8_bytes": .int(Int64(byteCount)),
             "dominant_language": .string(language),
             "sha256": .string(sha256),

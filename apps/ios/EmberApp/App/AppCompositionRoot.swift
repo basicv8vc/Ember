@@ -10,6 +10,7 @@ struct EmberCloudTarget: Equatable, Sendable {
     let baseURL: URL
     let keychainConfiguration: KeychainSessionStore.Configuration
     let journalSubdirectory: String
+    let authFenceSubdirectory: String
     let environmentBadge: String
 
     var isV2Staging: Bool {
@@ -62,6 +63,7 @@ enum AppCompositionRoot {
                 baseURL: url,
                 keychainConfiguration: .live,
                 journalSubdirectory: "EmberConversation",
+                authFenceSubdirectory: FileSessionRecoveryFence.directoryName,
                 environmentBadge: "LIVE CLOUD"
             )
         }
@@ -74,6 +76,7 @@ enum AppCompositionRoot {
                     account: "ember.session.v2-staging"
                 ),
                 journalSubdirectory: "EmberConversation-v2-staging",
+                authFenceSubdirectory: "\(FileSessionRecoveryFence.directoryName)-v2-staging",
                 environmentBadge: "V2 STAGING"
             )
         }
@@ -90,6 +93,7 @@ enum AppCompositionRoot {
                 account: "ember.session.\(sanitizedHost)"
             ),
             journalSubdirectory: "EmberConversation-\(sanitizedHost)",
+            authFenceSubdirectory: "\(FileSessionRecoveryFence.directoryName)-\(sanitizedHost)",
             environmentBadge: "CUSTOM CLOUD"
         )
     }
@@ -145,11 +149,15 @@ private enum LiveComposition {
         let journal = LiveConversationJournal(
             directory: appSupport.appendingPathComponent(target.journalSubdirectory, isDirectory: true)
         )
+        let fence = FileSessionRecoveryFence(
+            directory: appSupport.appendingPathComponent(target.authFenceSubdirectory, isDirectory: true)
+        )
         let auth = LiveAuthSessionCoordinator(dependencies: .init(
             api: api,
             transport: transport,
             store: KeychainSessionStore(configuration: target.keychainConfiguration),
             appleSignIn: AppleSignInAuthorizer(),
+            fence: fence,
             signOutCleanupHooks: [{ try? await journal.reset() }]
         ))
         let repository = LiveConversationRepository(

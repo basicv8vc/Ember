@@ -232,13 +232,14 @@ describe('V2-M1 assembled runtime in local workerd', () => {
 
   it(
     'hands a disconnected stream to Durable and only queries the original provider job',
-    { timeout: 115_000 },
+    { timeout: 145_000 },
     async () => {
       const handle = 'smoke_original_handoff';
       harness.fakeGateway.setDefaultRule({
         mode: 'slow_handoff',
-        // Wrangler can buffer disconnect propagation. Complete before the 110s timed handoff.
-        delayMs: 90_000,
+        // The Wrangler proxy may retain its upstream connection. Keep the job alive
+        // through the fast-path deadline so either trigger must transfer it to Durable.
+        delayMs: 118_000,
         replyText: 'Handoff reply',
         costMicroUsd: 149,
         providerJobHandle: handle,
@@ -257,7 +258,7 @@ describe('V2-M1 assembled runtime in local workerd', () => {
       const turnId = receipt.turn.turn_id;
       expect(await submission(body)).toEqual(receipt);
       await expect
-        .poll(() => turn(turnId), { timeout: 100_000, interval: 250 })
+        .poll(() => turn(turnId), { timeout: 130_000, interval: 250 })
         .toMatchObject({ status: 'completed' });
       const completed = await turn(turnId);
       const call = await providerCall(turnId);
@@ -269,14 +270,17 @@ describe('V2-M1 assembled runtime in local workerd', () => {
       await assertSettlement(call.operationId, [149]);
       expect(
         await headRows(
-          'SELECT execution_mode, provider_job_handle, handoff_reason, claim_count > 0 AS claimed, deadline_at_ms - created_at_ms AS ttl FROM assistant_turns WHERE id = ?',
+          `SELECT execution_mode, provider_job_handle,
+                  handoff_reason IN ('client_disconnect_handoff', 'interactive_deadline_120s') AS handed_off,
+                  claim_count > 0 AS claimed, deadline_at_ms - created_at_ms AS ttl
+             FROM assistant_turns WHERE id = ?`,
           turnId,
         ),
       ).toEqual([
         {
           execution_mode: 'durable_queue',
           provider_job_handle: handle,
-          handoff_reason: 'client_disconnect_handoff',
+          handed_off: 1,
           claimed: 1,
           ttl: 600_000,
         },

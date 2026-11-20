@@ -7,6 +7,7 @@ import type {
   PersonalMemoryContextItem,
   PersonalMemorySaveTurnCommand,
 } from '../contracts/personal-memory.js';
+import type { ProactiveScheduleTurnCommand } from '../contracts/proactive-schedules.js';
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
 import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
@@ -378,6 +379,117 @@ function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTur
   return { kind, content, key };
 }
 
+const ALLOWED_PROACTIVE_SCHEDULE_PROPS = new Set([
+  'kind',
+  'title',
+  'prompt',
+  'triggerType',
+  'fireAt',
+  'intervalSeconds',
+  'cronExpr',
+  'timezone',
+  'deliveryMode',
+]);
+const ISO_OFFSET_REGEX = /(?:Z|[+-]\d{2}:\d{2})$/i;
+
+function parseProactiveScheduleTurnCommand(raw: unknown): ProactiveScheduleTurnCommand | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (!ALLOWED_PROACTIVE_SCHEDULE_PROPS.has(prop)) {
+      return null;
+    }
+  }
+  const kind = record['kind'];
+  if (kind !== 'reminder' && kind !== 'brief' && kind !== 'follow_up') {
+    return null;
+  }
+  const rawTitle = record['title'];
+  const rawPrompt = record['prompt'];
+  if (typeof rawTitle !== 'string' || typeof rawPrompt !== 'string') {
+    return null;
+  }
+  const title = rawTitle.trim();
+  const prompt = rawPrompt.trim();
+  if (title.length < 1 || title.length > 140 || prompt.length < 1 || prompt.length > 2_000) {
+    return null;
+  }
+  const triggerType = record['triggerType'];
+  if (triggerType !== 'once' && triggerType !== 'interval' && triggerType !== 'cron') {
+    return null;
+  }
+  const rawFireAt = record['fireAt'];
+  const rawInterval = record['intervalSeconds'];
+  const rawCron = record['cronExpr'];
+  const rawTz = record['timezone'];
+  const rawDelivery = record['deliveryMode'];
+
+  if (rawFireAt !== undefined && typeof rawFireAt !== 'string') return null;
+  if (
+    rawInterval !== undefined &&
+    (typeof rawInterval !== 'number' ||
+      !Number.isInteger(rawInterval) ||
+      rawInterval < 60 ||
+      rawInterval > 2_592_000)
+  ) {
+    return null;
+  }
+  if (rawCron !== undefined && typeof rawCron !== 'string') return null;
+  if (rawTz !== undefined && typeof rawTz !== 'string') return null;
+  if (
+    rawDelivery !== undefined &&
+    rawDelivery !== 'direct_reminder' &&
+    rawDelivery !== 'model_brief'
+  ) {
+    return null;
+  }
+
+  const fireAt = typeof rawFireAt === 'string' ? rawFireAt.trim() : undefined;
+  const cronExpr = typeof rawCron === 'string' ? rawCron.trim() : undefined;
+  const timezone = typeof rawTz === 'string' ? rawTz.trim() : undefined;
+
+  if (
+    fireAt !== undefined &&
+    (fireAt.length === 0 ||
+      fireAt.length > 64 ||
+      !ISO_OFFSET_REGEX.test(fireAt) ||
+      !Number.isFinite(Date.parse(fireAt)))
+  ) {
+    return null;
+  }
+  if (cronExpr !== undefined && (cronExpr.length === 0 || cronExpr.length > 120)) return null;
+  if (timezone !== undefined && (timezone.length === 0 || timezone.length > 100)) return null;
+
+  if (triggerType === 'once') {
+    if (fireAt === undefined || rawInterval !== undefined || cronExpr !== undefined) return null;
+  } else if (triggerType === 'interval') {
+    if (rawInterval === undefined || cronExpr !== undefined) return null;
+  } else if (triggerType === 'cron') {
+    if (
+      cronExpr === undefined ||
+      timezone === undefined ||
+      fireAt !== undefined ||
+      rawInterval !== undefined
+    ) {
+      return null;
+    }
+  }
+
+  return {
+    kind,
+    title,
+    prompt,
+    triggerType,
+    ...(fireAt !== undefined ? { fireAt } : {}),
+    ...(rawInterval !== undefined ? { intervalSeconds: rawInterval } : {}),
+    ...(cronExpr !== undefined ? { cronExpr } : {}),
+    ...(timezone !== undefined ? { timezone } : {}),
+    ...(rawDelivery !== undefined ? { deliveryMode: rawDelivery } : {}),
+  };
+}
+
 /**
  * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
  * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
@@ -420,6 +532,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
     if (cmd.outcome.status === 'succeeded') {
       let text = fallbackText;
       let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
+      let proactiveScheduleCreate: ProactiveScheduleTurnCommand | undefined;
       if (cmd.outcome.outputJson !== null) {
         try {
           const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
@@ -433,6 +546,15 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
             }
             personalMemorySave = parsedMem;
           }
+          if (parsed['proactiveScheduleCreate'] !== undefined) {
+            const parsedSched = parseProactiveScheduleTurnCommand(
+              parsed['proactiveScheduleCreate'],
+            );
+            if (parsedSched === null) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
+            }
+            proactiveScheduleCreate = parsedSched;
+          }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied
         }
@@ -445,6 +567,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         status: 'completed',
         text,
         ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
+        ...(proactiveScheduleCreate !== undefined ? { proactiveScheduleCreate } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
         ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
       };

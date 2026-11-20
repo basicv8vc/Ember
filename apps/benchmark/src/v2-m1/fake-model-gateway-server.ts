@@ -28,6 +28,17 @@ export interface FakeGatewayScriptRule {
     readonly content: string;
     readonly key?: string;
   };
+  readonly createProactiveSchedule?: {
+    readonly kind: 'reminder' | 'brief' | 'follow_up';
+    readonly title: string;
+    readonly prompt: string;
+    readonly triggerType: 'once' | 'interval' | 'cron';
+    readonly fireAt?: string;
+    readonly intervalSeconds?: number;
+    readonly cronExpr?: string;
+    readonly timezone?: string;
+    readonly deliveryMode?: 'direct_reminder' | 'model_brief';
+  };
   readonly costMicroUsd?: number;
   readonly lateRevisionCostMicroUsd?: number;
   readonly providerJobHandle?: string;
@@ -49,6 +60,8 @@ export interface FakeGatewayCallRecord {
   readonly statusCode: number;
   readonly personalMemories?: readonly unknown[];
   readonly enablePersonalMemorySaveTool?: boolean;
+  readonly enableProactiveScheduleTool?: boolean;
+  readonly currentTimeIso?: string;
 }
 
 export interface FakeModelGatewayAuditSnapshot {
@@ -66,6 +79,17 @@ interface PendingJobRecord {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
     readonly key?: string;
+  };
+  readonly createProactiveSchedule?: {
+    readonly kind: 'reminder' | 'brief' | 'follow_up';
+    readonly title: string;
+    readonly prompt: string;
+    readonly triggerType: 'once' | 'interval' | 'cron';
+    readonly fireAt?: string;
+    readonly intervalSeconds?: number;
+    readonly cronExpr?: string;
+    readonly timezone?: string;
+    readonly deliveryMode?: 'direct_reminder' | 'model_brief';
   };
   readonly inputTokens: number;
   readonly outputTokens: number;
@@ -245,6 +269,12 @@ export class FakeModelGatewayServer {
           ...common,
           status: 'completed',
           text: job.replyText,
+          ...(job.savePersonalMemory !== undefined
+            ? { personalMemorySave: job.savePersonalMemory }
+            : {}),
+          ...(job.createProactiveSchedule !== undefined
+            ? { proactiveScheduleCreate: job.createProactiveSchedule }
+            : {}),
           usage: usageOf(job),
         });
       }
@@ -346,6 +376,12 @@ export class FakeModelGatewayServer {
           ...(body.enablePersonalMemorySaveTool === true
             ? { enablePersonalMemorySaveTool: true }
             : {}),
+          ...(body.enableProactiveScheduleTool === true
+            ? { enableProactiveScheduleTool: true }
+            : {}),
+          ...(typeof body.currentTimeIso === 'string'
+            ? { currentTimeIso: body.currentTimeIso }
+            : {}),
         });
       };
 
@@ -399,6 +435,9 @@ export class FakeModelGatewayServer {
         replyText,
         ...(rule.savePersonalMemory !== undefined
           ? { savePersonalMemory: rule.savePersonalMemory }
+          : {}),
+        ...(rule.createProactiveSchedule !== undefined
+          ? { createProactiveSchedule: rule.createProactiveSchedule }
           : {}),
         inputTokens,
         outputTokens,
@@ -520,6 +559,9 @@ export class FakeModelGatewayServer {
               ...(rule.savePersonalMemory !== undefined
                 ? { personalMemorySave: rule.savePersonalMemory }
                 : {}),
+              ...(rule.createProactiveSchedule !== undefined
+                ? { proactiveScheduleCreate: rule.createProactiveSchedule }
+                : {}),
               usage,
             })}\n\n`,
           );
@@ -537,6 +579,9 @@ export class FakeModelGatewayServer {
         text: replyText,
         ...(rule.savePersonalMemory !== undefined
           ? { personalMemorySave: rule.savePersonalMemory }
+          : {}),
+        ...(rule.createProactiveSchedule !== undefined
+          ? { proactiveScheduleCreate: rule.createProactiveSchedule }
           : {}),
         usage,
       });

@@ -313,7 +313,11 @@ export function createDurableExecutor(
             const job = await gateway.queryConversationJob(operationId, handle, signal);
             if (job.state === 'unavailable') return unknownOutcome(handle, 'JOB_UNAVAILABLE');
             if (job.state === 'completed') {
-              if (claim.targetKind !== 'turn' && job.result.output.kind === 'save_memory') {
+              if (
+                claim.targetKind !== 'turn' &&
+                (job.result.output.kind === 'save_memory' ||
+                  job.result.output.kind === 'create_schedule')
+              ) {
                 return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
               }
               return {
@@ -324,6 +328,9 @@ export function createDurableExecutor(
                   text: job.result.output.text,
                   ...(claim.targetKind === 'turn' && job.result.output.kind === 'save_memory'
                     ? { personalMemorySave: job.result.output.memory.arguments }
+                    : {}),
+                  ...(claim.targetKind === 'turn' && job.result.output.kind === 'create_schedule'
+                    ? { proactiveScheduleCreate: job.result.output.schedule.arguments }
                     : {}),
                 }),
                 errorCode: null,
@@ -375,7 +382,13 @@ export function createDurableExecutor(
                     context.personalMemories.length > 0
                       ? { personalMemories: context.personalMemories }
                       : {}),
-                    ...(claim.targetKind === 'turn' ? { enablePersonalMemorySaveTool: true } : {}),
+                    ...(claim.targetKind === 'turn'
+                      ? {
+                          enablePersonalMemorySaveTool: true,
+                          enableProactiveScheduleTool: true,
+                          currentTimeIso: new Date().toISOString(),
+                        }
+                      : {}),
                     maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
                   },
                 },
@@ -383,7 +396,11 @@ export function createDurableExecutor(
               )) {
                 if (event.kind === 'job') handle = event.handle;
                 if (event.kind === 'result') {
-                  if (claim.targetKind !== 'turn' && event.result.output.kind === 'save_memory') {
+                  if (
+                    claim.targetKind !== 'turn' &&
+                    (event.result.output.kind === 'save_memory' ||
+                      event.result.output.kind === 'create_schedule')
+                  ) {
                     return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
                   }
                   return {
@@ -394,6 +411,10 @@ export function createDurableExecutor(
                       text: event.result.output.text,
                       ...(claim.targetKind === 'turn' && event.result.output.kind === 'save_memory'
                         ? { personalMemorySave: event.result.output.memory.arguments }
+                        : {}),
+                      ...(claim.targetKind === 'turn' &&
+                      event.result.output.kind === 'create_schedule'
+                        ? { proactiveScheduleCreate: event.result.output.schedule.arguments }
                         : {}),
                     }),
                     errorCode: null,

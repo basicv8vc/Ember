@@ -158,14 +158,18 @@ export class OpenRouterModelGateway implements ModelGateway {
     signal: AbortSignal,
   ): Promise<ModelCallResult<ConversationTurnOutput>> {
     const allowSavePersonalMemory = input.enablePersonalMemorySaveTool === true;
+    const allowCreateProactiveSchedule = input.enableProactiveScheduleTool === true;
     const body = this.#serializePayload({
       messages: buildConversationTurnMessages(input),
       maxCompletionTokens: Math.min(input.maxOutputTokens, MODEL_LIMITS.maxOutputTokens),
-      tools: getConversationTools(allowSavePersonalMemory),
+      tools: getConversationTools({ allowSavePersonalMemory, allowCreateProactiveSchedule }),
     });
 
     return await this.#sendChatCompletion(body, signal, (choice) =>
-      parseConversationTurnChoice(choice, { allowSavePersonalMemory }),
+      parseConversationTurnChoice(choice, {
+        allowSavePersonalMemory,
+        allowCreateProactiveSchedule,
+      }),
     );
   }
 

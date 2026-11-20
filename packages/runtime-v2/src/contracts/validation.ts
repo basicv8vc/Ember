@@ -27,6 +27,7 @@ import type {
 } from './agent-head-rpc.js';
 import { V2_BUDGET_LIMITS } from './constants.js';
 import { personalMemorySaveTurnCommandSchema } from './personal-memory.js';
+import { proactiveScheduleTurnCommandSchema } from './proactive-schedules.js';
 import type {
   GlobalBudgetAuthorizeSendRequest,
   GlobalBudgetRenewGrantRequest,
@@ -284,6 +285,7 @@ const TurnCommitResultSchema = z.discriminatedUnion('status', [
     simulated: z.boolean(),
     delegation: DelegationCommandSchema.optional(),
     personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
+    proactiveScheduleCreate: proactiveScheduleTurnCommandSchema.optional(),
   }),
   z.strictObject({
     status: z.literal('failed'),
@@ -316,6 +318,7 @@ export const DurableTurnOutcomeSchema = z.strictObject({
   simulated: z.boolean().optional(),
   delegation: DelegationCommandSchema.optional(),
   personalMemorySave: personalMemorySaveTurnCommandSchema.optional(),
+  proactiveScheduleCreate: proactiveScheduleTurnCommandSchema.optional(),
   failureReason: z.enum(['timeout', 'internal_error']).optional(),
 });
 

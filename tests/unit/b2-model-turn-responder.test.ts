@@ -1192,4 +1192,46 @@ describe('B2 responder: multimodal image hydration', () => {
       failureReason: 'internal_error',
     });
   });
+
+  it('rejects unsupported create_schedule tool output in V1 and never publishes a false acknowledgement', async () => {
+    const repository = new MemoryExecutionPort();
+    const createScheduleGateway = new ScriptedGateway(['ok']);
+    const originalGenerate =
+      createScheduleGateway.generateConversationTurn.bind(createScheduleGateway);
+    createScheduleGateway.generateConversationTurn = async (input, signal) => {
+      const base = await originalGenerate(input, signal);
+      return {
+        ...base,
+        output: {
+          kind: 'create_schedule',
+          toolName: 'create_proactive_schedule',
+          text: 'I have created your proactive schedule.',
+          finishReason: 'stop',
+          schedule: {
+            toolName: 'create_proactive_schedule',
+            arguments: {
+              kind: 'brief',
+              title: 'Morning Brief',
+              prompt: 'Daily brief',
+              triggerType: 'cron',
+              cronExpr: '0 8 * * *',
+              timezone: 'UTC',
+            },
+          },
+        },
+      };
+    };
+
+    const responder = realResponder(repository, createScheduleGateway);
+    const summary = await responder.processOnce();
+
+    expect(summary.failed).toBe(1);
+    expect(summary.completed).toBe(0);
+    expect(createScheduleGateway.inputs[0]?.enableProactiveScheduleTool).toBeUndefined();
+    expect(repository.publishes).toHaveLength(1);
+    expect(repository.publishes[0]).toMatchObject({
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
+  });
 });

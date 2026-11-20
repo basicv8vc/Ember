@@ -15,6 +15,7 @@ import type {
   PersonalMemoryContextItem,
   PersonalMemorySaveTurnCommand,
 } from './personal-memory.js';
+import type { ProactiveScheduleTurnCommand } from './proactive-schedules.js';
 
 export type { TurnExecutionMode };
 
@@ -232,6 +233,7 @@ export interface CommitTurnRequest {
         readonly simulated: boolean;
         readonly delegation?: B2TaskDelegationCommand;
         readonly personalMemorySave?: PersonalMemorySaveTurnCommand;
+        readonly proactiveScheduleCreate?: ProactiveScheduleTurnCommand;
       }
     | {
         readonly status: 'failed';

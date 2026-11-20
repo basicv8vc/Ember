@@ -31,6 +31,13 @@ import {
   savePersonalMemoryFromTurnSync,
 } from './memory-service.js';
 import {
+  PROACTIVE_SCHEDULE_INVALID_REPLY,
+  PROACTIVE_SCHEDULE_UNAVAILABLE_REPLY,
+  computeProactiveScheduleDigest,
+  createProactiveScheduleFromTurnSync,
+  toProactiveScheduleCreateInputFromTurn,
+} from './proactive-schedule-service.js';
+import {
   allocateConversationSequenceSync,
   deterministicEdgeUuid,
   getHeadMetaSync,
@@ -547,6 +554,22 @@ export async function executeAuthoritativeTurnCommit(
     );
   }
 
+  let preparedSchedule: {
+    readonly input: ReturnType<typeof toProactiveScheduleCreateInputFromTurn>;
+    readonly digest: string;
+  } | null = null;
+  if (
+    publication?.result.status === 'completed' &&
+    publication.result.proactiveScheduleCreate !== undefined
+  ) {
+    const scheduleInput = toProactiveScheduleCreateInputFromTurn(
+      cmd.turnId,
+      publication.result.proactiveScheduleCreate,
+    );
+    const digest = await computeProactiveScheduleDigest(scheduleInput);
+    preparedSchedule = { input: scheduleInput, digest };
+  }
+
   const coverageRegistration = await prepareObligationCoverageAsync(deps, {
     tenantId: cmd.tenantId,
     agentId: cmd.agentId,
@@ -555,7 +578,7 @@ export async function executeAuthoritativeTurnCommit(
       if (isCoverageValidAtSync(deps, bound)) {
         return false;
       }
-      if (preparedDelegation !== null) {
+      if (preparedDelegation !== null || preparedSchedule !== null) {
         const turn = getTurnRowSync(deps.storage.sql, cmd.turnId);
         if (turn !== null && turn.status === 'running') {
           return true;
@@ -949,6 +972,33 @@ export async function executeAuthoritativeTurnCommit(
             : saved.created
               ? PERSONAL_MEMORY_SAVED_REPLY
               : PERSONAL_MEMORY_UPDATED_REPLY;
+      }
+    }
+
+    if (preparedSchedule !== null) {
+      if (attempt === null) {
+        assistantText = PROACTIVE_SCHEDULE_UNAVAILABLE_REPLY;
+      } else {
+        confirmOrVerifyCoverageInTxSync(
+          deps,
+          coverageRegistration,
+          nowMs + V2_TIMING_LIMITS.d1RecoveryGraceMs,
+          nowMs,
+          'proactive schedule recovery coverage unavailable',
+        );
+        const created = createProactiveScheduleFromTurnSync(deps.storage.sql, {
+          tenantId: cmd.tenantId,
+          principalId: attempt.principal_id,
+          agentId: cmd.agentId,
+          input: preparedSchedule.input,
+          digest: preparedSchedule.digest,
+          nowMs,
+          newId: deps.idFactory,
+        });
+        assistantText =
+          created.outcome === 'invalid'
+            ? PROACTIVE_SCHEDULE_INVALID_REPLY
+            : created.confirmationText;
       }
     }
 

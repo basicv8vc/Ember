@@ -1,4 +1,4 @@
-import { DomainError, isTerminalTaskStatus } from '@ember/domain';
+import { DomainError, isTerminalTaskStatus, type Id } from '@ember/domain';
 import { V2_TIMING_LIMITS } from '../contracts/constants.js';
 import {
   PROACTIVE_RECENT_RUNS_LIMIT,
@@ -11,6 +11,7 @@ import {
   type ProactiveScheduleResponse,
   type ProactiveScheduleRunSnapshot,
   type ProactiveScheduleSnapshot,
+  type ProactiveScheduleTurnCommand,
 } from '../contracts/proactive-schedules.js';
 import {
   assertValidIanaTimezone,
@@ -26,6 +27,7 @@ import type {
   V2ScheduleRow,
 } from '../recovery/schema.js';
 import { ScheduleRepository } from '../recovery/schedules.js';
+import type { SqlStorageLike } from '../storage.js';
 import { assertHeadScopeSync, sha256Hex, sqlExecAll, sqlExecMaybe } from './queries.js';
 import type { ProactiveScheduleRow, TaskRow } from './schema.js';
 import { toIsoTimestamp } from './state-machine.js';
@@ -193,6 +195,218 @@ function toRunSnapshot(row: JoinedRunRow): ProactiveScheduleRunSnapshot {
     resultMessageId: row.linked_message_id,
     scheduledFor: toIsoTimestamp(row.scheduled_for_ms),
     completedAt: row.produced_at_ms !== null ? toIsoTimestamp(row.produced_at_ms) : null,
+  };
+}
+
+export const PROACTIVE_SCHEDULE_UNAVAILABLE_REPLY =
+  "I couldn't create that schedule right now because scheduling is unavailable for this turn.";
+export const PROACTIVE_SCHEDULE_INVALID_REPLY =
+  "I couldn't create that schedule because the timing or timezone was invalid. Please specify an exact future time or valid cron schedule and IANA timezone.";
+
+export function toProactiveScheduleCreateInputFromTurn(
+  turnId: string,
+  cmd: ProactiveScheduleTurnCommand,
+): ProactiveScheduleCreateInput {
+  const base = {
+    idempotencyKey: `turn:${turnId}`,
+    kind: cmd.kind,
+    title: cmd.title,
+    prompt: cmd.prompt,
+    ...(cmd.timezone === undefined ? {} : { timezone: cmd.timezone }),
+    ...(cmd.deliveryMode === undefined ? {} : { deliveryMode: cmd.deliveryMode }),
+  };
+
+  if (cmd.triggerType === 'once') {
+    if (cmd.fireAt === undefined) {
+      throw new DomainError('INVALID_ARGUMENT', 'fireAt is required for once schedule');
+    }
+    return { ...base, trigger: { type: 'once', fireAt: cmd.fireAt } };
+  }
+  if (cmd.triggerType === 'interval') {
+    if (cmd.intervalSeconds === undefined) {
+      throw new DomainError(
+        'INVALID_ARGUMENT',
+        'intervalSeconds is required for interval schedule',
+      );
+    }
+    return {
+      ...base,
+      trigger: {
+        type: 'interval',
+        intervalSeconds: cmd.intervalSeconds,
+        ...(cmd.fireAt === undefined ? {} : { firstFireAt: cmd.fireAt }),
+      },
+    };
+  }
+  if (cmd.cronExpr === undefined || cmd.timezone === undefined) {
+    throw new DomainError(
+      'INVALID_ARGUMENT',
+      'cronExpr and timezone are required for cron schedule',
+    );
+  }
+  return {
+    ...base,
+    trigger: { type: 'cron', cronExpr: cmd.cronExpr, timezone: cmd.timezone },
+  };
+}
+
+export async function computeProactiveScheduleDigest(
+  input: ProactiveScheduleCreateInput,
+): Promise<string> {
+  const deliveryMode = input.deliveryMode ?? defaultDeliveryMode(input.kind);
+  const misfirePolicy = input.misfirePolicy ?? 'coalesce_latest';
+  return sha256Hex(
+    JSON.stringify({
+      kind: input.kind,
+      title: input.title,
+      prompt: input.prompt,
+      deliveryMode,
+      trigger: input.trigger,
+      timezone: input.trigger.type === 'cron' ? input.trigger.timezone : (input.timezone ?? 'UTC'),
+      misfirePolicy,
+    }),
+  );
+}
+
+export function formatProactiveScheduleConfirmation(snapshot: {
+  readonly title: string;
+  readonly kind: ProactiveScheduleKind;
+  readonly status: string;
+  readonly nextFireAt: string | null;
+  readonly timezone: string;
+}): string {
+  const timing =
+    snapshot.nextFireAt === null
+      ? snapshot.status
+      : `next run at ${snapshot.nextFireAt} (${snapshot.timezone})`;
+  return `Scheduled "${snapshot.title}" (${snapshot.kind}) — ${timing}. You can pause or cancel it anytime in Schedules.`;
+}
+
+/**
+ * Reuses the exact `ProactiveScheduleService` SQLite creation logic inside an
+ * authoritative fenced turn-commit transaction. Caller MUST ensure D1 recovery
+ * coverage before entering the transaction and confirm coverage inside the tx.
+ */
+export function createProactiveScheduleFromTurnSync(
+  sql: SqlStorageLike,
+  cmd: {
+    readonly tenantId: Id;
+    readonly principalId: Id;
+    readonly agentId: Id;
+    readonly input: ProactiveScheduleCreateInput;
+    readonly digest: string;
+    readonly nowMs: number;
+    readonly newId: () => Id;
+  },
+):
+  | {
+      readonly outcome: 'created' | 'replayed';
+      readonly scheduleId: string;
+      readonly confirmationText: string;
+    }
+  | {
+      readonly outcome: 'invalid';
+      readonly message: string;
+    } {
+  const existing = sqlExecMaybe<ProactiveScheduleRow>(
+    sql,
+    `SELECT * FROM proactive_schedules WHERE idempotency_key = ?`,
+    cmd.input.idempotencyKey,
+  );
+  if (existing !== null) {
+    if (existing.principal_id !== cmd.principalId || existing.digest !== cmd.digest) {
+      return { outcome: 'invalid', message: 'schedule idempotencyKey conflict' };
+    }
+    const joined = sqlExecMaybe<JoinedScheduleRow>(
+      sql,
+      `${JOINED_SCHEDULE_SELECT} WHERE p.schedule_id = ? AND p.principal_id = ?`,
+      existing.schedule_id,
+      cmd.principalId,
+    );
+    if (joined === null) {
+      throw new DomainError('DB_UNAVAILABLE', 'schedule metadata inconsistent');
+    }
+    return {
+      outcome: 'replayed',
+      scheduleId: joined.schedule_id,
+      confirmationText: formatProactiveScheduleConfirmation({
+        title: joined.title,
+        kind: joined.kind,
+        status: joined.status,
+        nextFireAt:
+          joined.status === 'active' ? new Date(joined.next_fire_at_ms).toISOString() : null,
+        timezone: joined.timezone,
+      }),
+    };
+  }
+
+  let normalized: ReturnType<typeof normalizeCreateInput>;
+  try {
+    normalized = normalizeCreateInput(cmd.input, cmd.nowMs);
+  } catch (error) {
+    return {
+      outcome: 'invalid',
+      message: error instanceof Error ? error.message : 'invalid schedule input',
+    };
+  }
+
+  // Newly created chat schedules must not silently turn a past absolute timestamp into
+  // immediate catch-up work; idempotent replays of already-created schedules are handled above.
+  const hasExplicitAbsoluteFireTime =
+    cmd.input.trigger.type === 'once' ||
+    (cmd.input.trigger.type === 'interval' && cmd.input.trigger.firstFireAt !== undefined);
+  if (hasExplicitAbsoluteFireTime && normalized.firstFireAtMs <= cmd.nowMs) {
+    return {
+      outcome: 'invalid',
+      message: 'scheduled fire time must be in the future',
+    };
+  }
+
+  const scheduleId = cmd.newId();
+  const sourceKind = mapSourceKind(cmd.input.kind);
+  const schedules = new ScheduleRepository(sql);
+  schedules.upsertScheduleSync({
+    scheduleId,
+    tenantId: cmd.tenantId,
+    agentId: cmd.agentId,
+    sourceKind,
+    sourceId: scheduleId,
+    scheduleKind: normalized.scheduleKind,
+    intervalSeconds: normalized.intervalSeconds,
+    cronExpr: normalized.cronExpr,
+    timezone: normalized.timezone,
+    firstFireAtMs: normalized.firstFireAtMs,
+    misfirePolicy: normalized.misfirePolicy,
+    nowMs: cmd.nowMs,
+  });
+
+  sql.exec(
+    `INSERT INTO proactive_schedules (
+       schedule_id, principal_id, idempotency_key, kind, title, prompt,
+       delivery_mode, digest, created_at_ms, updated_at_ms
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    scheduleId,
+    cmd.principalId,
+    cmd.input.idempotencyKey,
+    cmd.input.kind,
+    cmd.input.title,
+    cmd.input.prompt,
+    normalized.deliveryMode,
+    cmd.digest,
+    cmd.nowMs,
+    cmd.nowMs,
+  );
+
+  return {
+    outcome: 'created',
+    scheduleId,
+    confirmationText: formatProactiveScheduleConfirmation({
+      title: cmd.input.title,
+      kind: cmd.input.kind,
+      status: 'active',
+      nextFireAt: new Date(normalized.firstFireAtMs).toISOString(),
+      timezone: normalized.timezone,
+    }),
   };
 }
 

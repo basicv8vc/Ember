@@ -56,6 +56,12 @@ export class LoopbackFakeModelGateway {
         ...(request.input.enablePersonalMemorySaveTool === true
           ? { enablePersonalMemorySaveTool: true }
           : {}),
+        ...(request.input.enableProactiveScheduleTool === true
+          ? { enableProactiveScheduleTool: true }
+          : {}),
+        ...(request.input.currentTimeIso !== undefined
+          ? { currentTimeIso: request.input.currentTimeIso }
+          : {}),
         deadlineAtMs: request.deadlineAtMs,
       }),
     });
@@ -199,6 +205,57 @@ function parsePersonalMemorySave(value: unknown): {
   };
 }
 
+function parseProactiveScheduleCreate(value: unknown): {
+  readonly kind: 'reminder' | 'brief' | 'follow_up';
+  readonly title: string;
+  readonly prompt: string;
+  readonly triggerType: 'once' | 'interval' | 'cron';
+  readonly fireAt?: string;
+  readonly intervalSeconds?: number;
+  readonly cronExpr?: string;
+  readonly timezone?: string;
+  readonly deliveryMode?: 'direct_reminder' | 'model_brief';
+} | null {
+  if (!isRecord(value)) return null;
+  if (
+    (value.kind !== 'reminder' && value.kind !== 'brief' && value.kind !== 'follow_up') ||
+    typeof value.title !== 'string' ||
+    typeof value.prompt !== 'string' ||
+    (value.triggerType !== 'once' &&
+      value.triggerType !== 'interval' &&
+      value.triggerType !== 'cron')
+  ) {
+    return null;
+  }
+  const title = value.title.trim();
+  const prompt = value.prompt.trim();
+  if (title.length === 0 || title.length > 140 || prompt.length === 0 || prompt.length > 2_000) {
+    return null;
+  }
+  const fireAt = typeof value.fireAt === 'string' ? value.fireAt.trim() : undefined;
+  const intervalSeconds =
+    typeof value.intervalSeconds === 'number' && Number.isInteger(value.intervalSeconds)
+      ? value.intervalSeconds
+      : undefined;
+  const cronExpr = typeof value.cronExpr === 'string' ? value.cronExpr.trim() : undefined;
+  const timezone = typeof value.timezone === 'string' ? value.timezone.trim() : undefined;
+  const deliveryMode =
+    value.deliveryMode === 'direct_reminder' || value.deliveryMode === 'model_brief'
+      ? value.deliveryMode
+      : undefined;
+  return {
+    kind: value.kind,
+    title,
+    prompt,
+    triggerType: value.triggerType,
+    ...(fireAt !== undefined && fireAt.length > 0 ? { fireAt } : {}),
+    ...(intervalSeconds !== undefined ? { intervalSeconds } : {}),
+    ...(cronExpr !== undefined && cronExpr.length > 0 ? { cronExpr } : {}),
+    ...(timezone !== undefined && timezone.length > 0 ? { timezone } : {}),
+    ...(deliveryMode !== undefined ? { deliveryMode } : {}),
+  };
+}
+
 function toFakeReply(data: Record<string, unknown>) {
   const fake =
     (data.modelLabel === undefined || data.modelLabel === FAKE_MODEL_LABEL) &&
@@ -218,6 +275,13 @@ function toFakeReply(data: Record<string, unknown>) {
       throw new ModelGatewayFailure('model_invalid_output');
     }
   }
+  let scheduleCreate: ReturnType<typeof parseProactiveScheduleCreate> = null;
+  if (fake && data.proactiveScheduleCreate !== undefined) {
+    scheduleCreate = parseProactiveScheduleCreate(data.proactiveScheduleCreate);
+    if (scheduleCreate === null) {
+      throw new ModelGatewayFailure('model_invalid_output');
+    }
+  }
   return {
     output:
       memorySave !== null && text.trim().length > 0
@@ -231,11 +295,22 @@ function toFakeReply(data: Record<string, unknown>) {
               arguments: memorySave,
             },
           }
-        : {
-            kind: 'reply' as const,
-            finishReason: 'stop' as const,
-            text,
-          },
+        : scheduleCreate !== null && text.trim().length > 0
+          ? {
+              kind: 'create_schedule' as const,
+              toolName: 'create_proactive_schedule' as const,
+              finishReason: 'stop' as const,
+              text,
+              schedule: {
+                toolName: 'create_proactive_schedule' as const,
+                arguments: scheduleCreate,
+              },
+            }
+          : {
+              kind: 'reply' as const,
+              finishReason: 'stop' as const,
+              text,
+            },
     modelLabel: FAKE_MODEL_LABEL,
     simulated: true,
     usage: fake ? parseUsage(data.usage) : null,

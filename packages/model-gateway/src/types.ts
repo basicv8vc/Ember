@@ -56,6 +56,16 @@ export interface ConversationTurnInput {
    * Defaults to `false` so V1 and non-conversation/scheduled executions never advertise or accept it.
    */
   readonly enablePersonalMemorySaveTool?: boolean;
+  /**
+   * Explicit runtime capability gate for the closed `create_proactive_schedule` tool.
+   * Defaults to `false` so V1 and non-conversation/scheduled executions never advertise or accept it.
+   */
+  readonly enableProactiveScheduleTool?: boolean;
+  /**
+   * Authoritative UTC ISO-8601 current timestamp supplied by the runtime when
+   * `enableProactiveScheduleTool` is enabled so relative scheduling requests resolve accurately.
+   */
+  readonly currentTimeIso?: string;
   readonly maxOutputTokens: number;
 }
 
@@ -87,6 +97,23 @@ export interface SavePersonalMemoryCall {
   };
 }
 
+export interface CreateProactiveScheduleToolArguments {
+  readonly kind: 'reminder' | 'brief' | 'follow_up';
+  readonly title: string;
+  readonly prompt: string;
+  readonly triggerType: 'once' | 'interval' | 'cron';
+  readonly fireAt?: string;
+  readonly intervalSeconds?: number;
+  readonly cronExpr?: string;
+  readonly timezone?: string;
+  readonly deliveryMode?: 'direct_reminder' | 'model_brief';
+}
+
+export interface CreateProactiveScheduleCall {
+  readonly toolName: 'create_proactive_schedule';
+  readonly arguments: CreateProactiveScheduleToolArguments;
+}
+
 export type ConversationTurnOutput =
   | {
       readonly kind: 'reply';
@@ -106,6 +133,13 @@ export type ConversationTurnOutput =
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly memory: SavePersonalMemoryCall;
+    }
+  | {
+      readonly kind: 'create_schedule';
+      readonly toolName: CreateProactiveScheduleCall['toolName'];
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+      readonly schedule: CreateProactiveScheduleCall;
     };
 
 export interface NotesActionItemsInput {

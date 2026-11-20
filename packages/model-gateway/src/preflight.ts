@@ -2,13 +2,16 @@ import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
+  PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
 } from './context.js';
 import { ModelInputRefused } from './errors.js';
 import { MODEL_LIMITS, estimateTokensConservative, serializationOverheadTokens } from './limits.js';
 import {
+  CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE,
   CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE,
+  CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE,
   DELEGATION_TOOLS_TOKEN_ESTIMATE,
   PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE,
   buildPythonAgentInitialUserText,
@@ -39,6 +42,9 @@ const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROM
 const MEMORY_SAVE_INSTRUCTION_TOKENS = estimateTokensConservative(
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
 );
+const PROACTIVE_SCHEDULE_INSTRUCTION_TOKENS = estimateTokensConservative(
+  `${PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION} Authoritative current UTC time: 2026-11-20T00:00:00.000Z.`,
+);
 const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
 const PYTHON_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(PYTHON_AGENT_SYSTEM_PROMPT);
 const OVERHEAD_TOKENS = serializationOverheadTokens();
@@ -68,6 +74,7 @@ export function preflightConversationTurn(input: {
   }[];
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
   readonly enablePersonalMemorySaveTool?: boolean;
+  readonly enableProactiveScheduleTool?: boolean;
   readonly maxOutputTokens: number;
 }): TokenPreflight {
   if (
@@ -127,10 +134,20 @@ export function preflightConversationTurn(input: {
       : estimateTokensConservative(memoryBlock.text);
 
   const memorySaveEnabled = input.enablePersonalMemorySaveTool === true;
+  const scheduleCreateEnabled = input.enableProactiveScheduleTool === true;
+  const toolTokens =
+    memorySaveEnabled && scheduleCreateEnabled
+      ? CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE
+      : memorySaveEnabled
+        ? CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE
+        : scheduleCreateEnabled
+          ? CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE
+          : DELEGATION_TOOLS_TOKEN_ESTIMATE;
   const inputChars =
     messageChars +
     memoryChars +
     (memorySaveEnabled ? PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION.length + 1 : 0) +
+    (scheduleCreateEnabled ? PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION.length + 64 : 0) +
     MODEL_LIMITS.systemPromptChars +
     MODEL_LIMITS.serializationOverheadChars;
   const inputTokens =
@@ -138,9 +155,8 @@ export function preflightConversationTurn(input: {
     memoryTokens +
     SYSTEM_PROMPT_TOKENS +
     (memorySaveEnabled ? MEMORY_SAVE_INSTRUCTION_TOKENS : 0) +
-    (memorySaveEnabled
-      ? CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE
-      : DELEGATION_TOOLS_TOKEN_ESTIMATE) +
+    (scheduleCreateEnabled ? PROACTIVE_SCHEDULE_INSTRUCTION_TOKENS : 0) +
+    toolTokens +
     OVERHEAD_TOKENS;
 
   if (inputTokens > MODEL_LIMITS.maxInputTokens) {

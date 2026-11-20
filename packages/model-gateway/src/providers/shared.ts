@@ -3,6 +3,7 @@ import {
   CONVERSATION_SYSTEM_PROMPT,
   NOTES_ACTION_ITEMS_SYSTEM_PROMPT,
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
+  PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
@@ -13,6 +14,7 @@ import type { ModelRateRow } from '../rates.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
+  CreateProactiveScheduleToolArguments,
   NotesActionItemsInput,
   NotesActionItemsOutput,
   PythonAgentStepInput,
@@ -22,26 +24,33 @@ import type {
 export const DELEGATE_NOTES_TOOL_NAME = 'delegate_notes_action_items' as const;
 export const DELEGATE_PYTHON_TOOL_NAME = 'delegate_python_agent' as const;
 export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
+export const CREATE_PROACTIVE_SCHEDULE_TOOL_NAME = 'create_proactive_schedule' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
   'I have started organizing these notes into action items.';
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
 export const DEFAULT_MEMORY_SAVE_ACK_TEXT = "Got it — I'll remember that.";
+export const DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT = 'I have created your proactive schedule.';
 
 const HISTORICAL_NOTES_DELEGATION_MARKER = '[Prior turn called delegate_notes_action_items.]';
 const HISTORICAL_PYTHON_DELEGATION_MARKER = '[Prior turn called delegate_python_agent.]';
 const HISTORICAL_MEMORY_SAVE_MARKER = '[Prior turn called save_personal_memory.]';
+const HISTORICAL_PROACTIVE_SCHEDULE_MARKER = '[Prior turn called create_proactive_schedule.]';
 const FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES = new Set([
   DEFAULT_DELEGATION_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
+  DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT,
   HISTORICAL_NOTES_DELEGATION_MARKER,
   HISTORICAL_PYTHON_DELEGATION_MARKER,
   HISTORICAL_MEMORY_SAVE_MARKER,
+  HISTORICAL_PROACTIVE_SCHEDULE_MARKER,
 ]);
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** Require explicit UTC `Z` or `±HH:MM` offset so floating/ambiguous timestamps are rejected. */
+const ISO_OFFSET_REGEX = /(?:Z|[+-]\d{2}:\d{2})$/i;
 
 /**
  * Closed tool definition reviewed in code. Callers never supply or modify tool schemas.
@@ -157,13 +166,108 @@ export const SAVE_PERSONAL_MEMORY_TOOL = Object.freeze({
   }),
 });
 
+export const CREATE_PROACTIVE_SCHEDULE_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: CREATE_PROACTIVE_SCHEDULE_TOOL_NAME,
+    description:
+      'Create a durable proactive schedule (one-time reminder, follow-up, or recurring brief) ONLY when the latest actual user message explicitly asks to schedule one with unambiguous timing and explicit timezone/offset.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: ['kind', 'title', 'prompt', 'trigger_type'],
+      properties: Object.freeze({
+        kind: Object.freeze({
+          type: 'string',
+          enum: Object.freeze(['reminder', 'brief', 'follow_up']),
+          description: 'Schedule category: reminder, brief, or follow_up.',
+        }),
+        title: Object.freeze({
+          type: 'string',
+          description: 'Short descriptive title for the schedule (1-140 characters).',
+          minLength: 1,
+          maxLength: 140,
+        }),
+        prompt: Object.freeze({
+          type: 'string',
+          description: 'Reminder text or brief/follow-up instructions (1-2000 characters).',
+          minLength: 1,
+          maxLength: 2000,
+        }),
+        trigger_type: Object.freeze({
+          type: 'string',
+          enum: Object.freeze(['once', 'interval', 'cron']),
+          description:
+            'Trigger type: once (ISO-8601 fire_at with explicit Z or ±HH:MM offset), interval (interval_seconds), or cron (cron_expr + IANA timezone).',
+        }),
+        fire_at: Object.freeze({
+          type: 'string',
+          description:
+            'ISO-8601 timestamp with explicit Z or ±HH:MM offset when trigger_type is once.',
+          minLength: 1,
+          maxLength: 64,
+        }),
+        interval_seconds: Object.freeze({
+          type: 'integer',
+          description: 'Interval in seconds (60-2592000) when trigger_type is interval.',
+          minimum: 60,
+          maximum: 2592000,
+        }),
+        cron_expr: Object.freeze({
+          type: 'string',
+          description: '5-field cron expression (e.g. "0 8 * * *") when trigger_type is cron.',
+          minLength: 1,
+          maxLength: 120,
+        }),
+        timezone: Object.freeze({
+          type: 'string',
+          description:
+            'Explicit IANA timezone (e.g. "America/Los_Angeles" or "UTC"); required for cron.',
+          minLength: 1,
+          maxLength: 100,
+        }),
+        delivery_mode: Object.freeze({
+          type: 'string',
+          enum: Object.freeze(['direct_reminder', 'model_brief']),
+          description: 'Optional delivery mode override (direct_reminder or model_brief).',
+        }),
+      }),
+    }),
+  }),
+});
+
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
   ...DELEGATION_TOOLS,
   SAVE_PERSONAL_MEMORY_TOOL,
 ]);
 
-export function getConversationTools(enablePersonalMemorySaveTool?: boolean) {
-  return enablePersonalMemorySaveTool === true ? CONVERSATION_TOOLS_WITH_MEMORY : DELEGATION_TOOLS;
+export const CONVERSATION_TOOLS_WITH_SCHEDULE = Object.freeze([
+  ...DELEGATION_TOOLS,
+  CREATE_PROACTIVE_SCHEDULE_TOOL,
+]);
+
+export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE = Object.freeze([
+  ...DELEGATION_TOOLS,
+  SAVE_PERSONAL_MEMORY_TOOL,
+  CREATE_PROACTIVE_SCHEDULE_TOOL,
+]);
+
+export interface ConversationToolCapabilities {
+  readonly allowSavePersonalMemory?: boolean;
+  readonly allowCreateProactiveSchedule?: boolean;
+}
+
+export function getConversationTools(capabilities?: boolean | ConversationToolCapabilities) {
+  const allowMemory =
+    typeof capabilities === 'boolean'
+      ? capabilities
+      : capabilities?.allowSavePersonalMemory === true;
+  const allowSchedule =
+    typeof capabilities === 'boolean' ? false : capabilities?.allowCreateProactiveSchedule === true;
+  if (allowMemory && allowSchedule) return CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE;
+  if (allowMemory) return CONVERSATION_TOOLS_WITH_MEMORY;
+  if (allowSchedule) return CONVERSATION_TOOLS_WITH_SCHEDULE;
+  return DELEGATION_TOOLS;
 }
 
 export const PYTHON_AGENT_TOOLS = Object.freeze([
@@ -203,6 +307,13 @@ export const DELEGATION_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
 export const CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE = estimateTokensConservative(
   JSON.stringify(CONVERSATION_TOOLS_WITH_MEMORY),
 );
+
+export const CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE = estimateTokensConservative(
+  JSON.stringify(CONVERSATION_TOOLS_WITH_SCHEDULE),
+);
+
+export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE =
+  estimateTokensConservative(JSON.stringify(CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE));
 
 export const PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
   JSON.stringify(PYTHON_AGENT_TOOLS),
@@ -262,6 +373,82 @@ const savePersonalMemoryToolArgsSchema = z.strictObject({
       message: 'invalid personal memory key',
     }),
 });
+
+const createProactiveScheduleToolArgsSchema = z
+  .strictObject({
+    kind: z.enum(['reminder', 'brief', 'follow_up']),
+    title: z.string().trim().min(1).max(140),
+    prompt: z.string().trim().min(1).max(2_000),
+    trigger_type: z.enum(['once', 'interval', 'cron']),
+    fire_at: optionalBoundedText(64),
+    interval_seconds: z.number().int().min(60).max(2_592_000).optional(),
+    cron_expr: optionalBoundedText(120),
+    timezone: optionalBoundedText(100),
+    delivery_mode: z.enum(['direct_reminder', 'model_brief']).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.trigger_type === 'once') {
+      if (
+        data.fire_at === undefined ||
+        !ISO_OFFSET_REGEX.test(data.fire_at) ||
+        !Number.isFinite(Date.parse(data.fire_at))
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['fire_at'],
+          message:
+            'valid ISO-8601 fire_at with explicit timezone offset or Z is required for once trigger',
+        });
+      }
+      if (data.interval_seconds !== undefined || data.cron_expr !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['trigger_type'],
+          message: 'interval_seconds and cron_expr are not allowed for once trigger',
+        });
+      }
+    } else if (data.trigger_type === 'interval') {
+      if (data.interval_seconds === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['interval_seconds'],
+          message: 'interval_seconds is required for interval trigger',
+        });
+      }
+      if (
+        data.fire_at !== undefined &&
+        (!ISO_OFFSET_REGEX.test(data.fire_at) || !Number.isFinite(Date.parse(data.fire_at)))
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['fire_at'],
+          message: 'fire_at must be valid ISO-8601 with explicit offset or Z',
+        });
+      }
+      if (data.cron_expr !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cron_expr'],
+          message: 'cron_expr is not allowed for interval trigger',
+        });
+      }
+    } else if (data.trigger_type === 'cron') {
+      if (data.cron_expr === undefined || data.timezone === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['cron_expr'],
+          message: 'cron_expr and explicit timezone are required for cron trigger',
+        });
+      }
+      if (data.fire_at !== undefined || data.interval_seconds !== undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['trigger_type'],
+          message: 'fire_at and interval_seconds are not allowed for cron trigger',
+        });
+      }
+    }
+  });
 
 const runPythonToolArgsSchema = z.strictObject({
   code: z
@@ -344,6 +531,9 @@ function formatContextTurnMessage(
     if (trimmed === DEFAULT_MEMORY_SAVE_ACK_TEXT) {
       return { role: 'assistant', content: HISTORICAL_MEMORY_SAVE_MARKER };
     }
+    if (trimmed === DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT) {
+      return { role: 'assistant', content: HISTORICAL_PROACTIVE_SCHEDULE_MARKER };
+    }
   }
 
   const formattedText = formatConversationMessageText(message);
@@ -372,10 +562,20 @@ function formatContextTurnMessage(
 }
 
 export function buildConversationTurnMessages(input: ConversationTurnInput): ProviderChatMessage[] {
-  const systemPrompt =
-    input.enablePersonalMemorySaveTool === true
-      ? `${CONVERSATION_SYSTEM_PROMPT} ${PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION}`
-      : CONVERSATION_SYSTEM_PROMPT;
+  const systemParts: string[] = [CONVERSATION_SYSTEM_PROMPT];
+  if (input.enablePersonalMemorySaveTool === true) {
+    systemParts.push(PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION);
+  }
+  if (input.enableProactiveScheduleTool === true) {
+    systemParts.push(PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION);
+    if (
+      typeof input.currentTimeIso === 'string' &&
+      Number.isFinite(Date.parse(input.currentTimeIso))
+    ) {
+      systemParts.push(`Authoritative current UTC time: ${input.currentTimeIso}.`);
+    }
+  }
+  const systemPrompt = systemParts.join(' ');
   const memoryBlock =
     input.personalMemories !== undefined && input.personalMemories.length > 0
       ? buildBoundedPersonalMemoryContext(input.personalMemories).text
@@ -486,6 +686,7 @@ export function parseConversationTurnChoice(
   },
   options?: {
     readonly allowSavePersonalMemory?: boolean;
+    readonly allowCreateProactiveSchedule?: boolean;
   },
 ): ConversationTurnOutput {
   const finishReason = choice.finish_reason === 'length' ? ('length' as const) : ('stop' as const);
@@ -599,6 +800,42 @@ export function parseConversationTurnChoice(
         finishReason,
         memory: Object.freeze({
           toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+          arguments: Object.freeze(cleanArgs),
+        }),
+      });
+    }
+
+    if (call.function.name === CREATE_PROACTIVE_SCHEDULE_TOOL_NAME) {
+      if (options?.allowCreateProactiveSchedule !== true) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+      const parsedArgs = createProactiveScheduleToolArgsSchema.safeParse(rawArgs);
+      if (!parsedArgs.success) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+
+      const ackText =
+        rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT;
+      const d = parsedArgs.data;
+      const cleanArgs: CreateProactiveScheduleToolArguments = {
+        kind: d.kind,
+        title: d.title,
+        prompt: d.prompt,
+        triggerType: d.trigger_type,
+        ...(d.fire_at === undefined ? {} : { fireAt: d.fire_at }),
+        ...(d.interval_seconds === undefined ? {} : { intervalSeconds: d.interval_seconds }),
+        ...(d.cron_expr === undefined ? {} : { cronExpr: d.cron_expr }),
+        ...(d.timezone === undefined ? {} : { timezone: d.timezone }),
+        ...(d.delivery_mode === undefined ? {} : { deliveryMode: d.delivery_mode }),
+      };
+
+      return Object.freeze({
+        kind: 'create_schedule' as const,
+        toolName: CREATE_PROACTIVE_SCHEDULE_TOOL_NAME,
+        text: ackText,
+        finishReason,
+        schedule: Object.freeze({
+          toolName: CREATE_PROACTIVE_SCHEDULE_TOOL_NAME,
           arguments: Object.freeze(cleanArgs),
         }),
       });

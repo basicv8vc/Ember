@@ -10,7 +10,8 @@
       "@ember/domain": ["../../packages/domain/src/index.ts"],
       "@ember/model-gateway": ["../../packages/model-gateway/src/index.ts"],
       "@ember/postgres": ["../../packages/postgres/src/index.ts"],
-      "@ember/postgres/b1-worker": ["../../packages/postgres/src/b1-worker.ts"]
+      "@ember/postgres/b1-worker": ["../../packages/postgres/src/b1-worker.ts"],
+      "@ember/sandbox-daytona": ["../../packages/sandbox-daytona/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts"]

@@ -8,7 +8,10 @@ import type {
 } from './types.js';
 
 type FakeReply = ModelCallResult<
-  Extract<ConversationTurnOutput, { kind: 'reply' | 'save_memory' | 'create_schedule' }>
+  Extract<
+    ConversationTurnOutput,
+    { kind: 'reply' | 'save_memory' | 'create_schedule' | 'delegate' }
+  >
 >;
 
 export interface FakeConversationJob {
@@ -77,7 +80,8 @@ export class FakeStreamingModelGateway extends FakeModelGateway {
     const output =
       (generated.output.kind === 'reply' ||
         generated.output.kind === 'save_memory' ||
-        generated.output.kind === 'create_schedule') &&
+        generated.output.kind === 'create_schedule' ||
+        generated.output.kind === 'delegate') &&
       generated.output.text.length <= FAKE_STREAM_MAX_REPLY_CHARS &&
       generated.output.text.trim().length > 0
         ? generated.output

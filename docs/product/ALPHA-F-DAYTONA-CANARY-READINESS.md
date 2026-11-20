@@ -1,61 +1,75 @@
-# Product Alpha — Agent F: Daytona Provider-Canary Readiness & Approval Request
+# Product Alpha — Agent F: V2 Daytona Provider-Canary Readiness & Approval Request
 
-Status: **Local fake-provider slice verified (PR #211); awaiting explicit CTO/Owner approval before any real Daytona provider-canary call.**  
+Status: **V2 real Daytona adapter & decoupled configuration implemented and locally verified (zero external spend); awaiting CTO review and separate Founder authorization before any real Daytona provider-canary call.**  
 Owner: Agent F (Tools & Execution)  
-Date: 2026-11-20  
-Related: [Product Alpha Roadmap](./PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [P0-C4 Daytona Integration Plan](../P0-C4-DAYTONA-INTEGRATION-PLAN.md), [P0-C4 Daytona Security Gap Report](../P0-C4-DAYTONA-SECURITY-GAP-REPORT.md)
+Date: 2026-11-21  
+Related: [Integrated Acceptance Plan](./PRODUCT-ALPHA-INTEGRATED-ACCEPTANCE-PLAN.md), [Product Alpha Roadmap](./PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [V2 Staging Authorization](../V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [P0-C4 Daytona Security Gap Report](../P0-C4-DAYTONA-SECURITY-GAP-REPORT.md)
 
 ---
 
 ## 1. Approval Request Summary
 
-No real Daytona sandbox has been created or billed during Product Alpha F1. This document requests **separate CTO/Owner approval** for a **single bounded Daytona provider-canary** in the isolated staging environment to close the real-provider acceptance gap for the *"Analyze data and deliver a file"* scenario:
+No real Daytona sandbox has been created or billed during Product Alpha V2 execution. This document adapts the Daytona canary readiness checklist to the **V2 isolated staging path** (`ember-v2-staging`) and requests **separate CTO review + Founder authorization** for a **single bounded V2 Daytona provider-canary** to close the real-sandbox acceptance gate for _"Analyze data and deliver a file"_:
 
-- **Requested canary scope (1–3 synthetic runs, founder/internal allowlisted tenant only):**
-  - Upload a synthetic CSV (`< 10 KiB`) via `POST /v1/me/uploads`.
-  - Delegate a `python.agent` task (`delegate_python_agent`) through the existing staging path (`apps/cloud-async-runtime` → `DaytonaSandboxProvider`).
-  - Verify bounded Python execution, progress events (`GET /v1/me/tasks/:id/events`), authorized downloadable output artifact (`GET /v1/me/tasks/:id/artifacts` + `GET /v1/me/artifacts/:artifactId`), and confirmed sandbox destruction (`0` live sandboxes after completion).
+- **Requested canary scope (1–3 synthetic runs, allowlisted internal/Founder tenant only):**
+  - Stage a synthetic CSV (`< 10 KiB`, no personal/user data) via `POST /v1/me/uploads`.
+  - Exercise both:
+    1. Natural-language chat delegation (`POST /v1/conversations/:id/messages` or `POST /v2/conversations/:id/messages/stream` with `attachment_ids` → `delegate_python_agent`), and/or
+    2. Direct bounded Python task submission (`POST /v2/tasks/python`).
+  - Execute inside `ember-v2-staging` Queue Worker (`apps/api/src/local-v2/runtime-durable.ts` → `python-agent-runner.ts` → `DaytonaSandboxProvider` / `DaytonaSdkSandboxClient`).
+  - Verify bounded Python execution, progress events (`GET /v1/me/tasks/:id/events`), authorized downloadable output artifact (`GET /v1/me/tasks/:id/artifacts` + `GET /v1/me/artifacts/:artifactId`) with SHA-256 integrity, and confirmed sandbox destruction (`0` live sandboxes after completion or cancellation).
 - **Explicitly NOT requested here:**
-  - Broad tenant rollout or production cutover.
-  - External connectors, network egress from sandboxes, or new subscriptions.
-  - Modifying V1 wire contracts or shared schemas.
+  - Broad tenant rollout or V1/V2 production cutover.
+  - External connectors, outbound network egress from sandboxes (`networkBlockAll: true`), or new subscriptions.
+  - Changing V1 wire contracts or shared schemas.
 
 ---
 
-## 2. Pre-Canary Local Evidence (Measured, Zero External Spend)
+## 2. Decoupled Configuration & Fail-Closed Guardrails
 
-The full bounded data-processing vertical slice is validated locally with fake providers in **PR #211** (`feat/alpha-f-bounded-data-task` @ `976af9d`):
+Sandbox provider selection is explicitly decoupled from LLM mode (`EMBER_MODEL_MODE`) via `resolveV2SandboxConfig(env)` in `apps/api/src/local-v2/runtime-config.ts`:
 
-| Check | Command | Measured Result |
-| --- | --- | --- |
-| Fake sandbox & handler unit tests | `pnpm exec vitest run --config vitest.unit.config.ts tests/unit/b3-fake-python-sandbox.test.ts tests/unit/b3-python-agent-executor.test.ts` | **13/13 passed** |
-| Full HTTP + Postgres E2E | `pnpm exec vitest run --config vitest.e2e.config.ts tests/e2e/b3-python-agent-http.test.ts` | **2/2 passed** (upload → delegate → bounded CSV analysis → progress events → authorized CSV download → cross-tenant 404 → transient crash retry without duplicate artifacts → clean cancellation) |
-| Build & static checks | `pnpm run build && pnpm run typecheck && pnpm exec eslint ...` | **Pass** (0 errors, 0 warnings) |
-
-*Evidence boundary:* Local fake-provider tests verify task delegation, lease/checkpoint recovery, artifact authorization headers, and tenant isolation; they are development evidence, **not** a real Daytona provider pass.
+- `EMBER_SANDBOX_MODE="fake"` (default in `wrangler.local-v2.jsonc` and `wrangler.v2-staging.jsonc`): uses the zero-spend local fake executor; enabling real LLM (`EMBER_MODEL_MODE="real"`) cannot implicitly enable paid Daytona or disable the permitted fake sandbox path.
+- `EMBER_SANDBOX_MODE="disabled"` or unset: fails closed (`sandbox_mode_unset` / `sandbox_disabled`) even if `DAYTONA_API_KEY` is bound.
+- `EMBER_SANDBOX_MODE="daytona"`: requires non-empty `DAYTONA_API_KEY` and a non-empty, validated tenant UUID allowlist (`EMBER_DAYTONA_ALLOWED_TENANTS`); fails closed (`daytona_allowlist_missing`, `daytona_allowlist_invalid`, or `sandbox_tenant_not_allowed`) before any model call or sandbox creation.
+- Model execution pairing: uses the approved `V2StreamingModelGateway.stepPythonAgent` with real `ModelRateRow`, `budgetMode: 'real'`, and `simulated: false` (no fallback to `FakeModelGateway`; fails closed with `model_gateway_unavailable` if unavailable).
 
 ---
 
-## 3. Hard Runtime & Spend Bounds (Code-Enforced)
+## 3. Hard Runtime & Spend Bounds (Code-Enforced on V2 Path)
 
-All limits below are enforced in `packages/contracts/src/task-schemas.ts` (`PYTHON_AGENT_LIMITS`), `apps/worker/src/b3/python-agent-executor.ts`, and `packages/sandbox-daytona/src/provider.ts`:
+All limits below are enforced in `packages/contracts/src/task-schemas.ts` (`PYTHON_AGENT_LIMITS`), `packages/runtime-v2/src/agent-head/task-artifact-service.ts`, `packages/runtime-v2/src/agent-head/state-machine.ts`, `apps/api/src/local-v2/python-agent-runner.ts`, and `packages/sandbox-daytona/src/provider.ts`:
 
-| Control | Enforced Bound |
-| --- | --- |
-| Sandbox profile | `daytona-small`, `sandboxClass: 'container'`, `ephemeral: true`, `networkBlockAll: true` |
-| Wall-clock lifetime / exec timeout | `sandboxLifetimeSec <= 120s`, `execTimeoutMs <= 60s`, `readyDeadlineMs <= 90s` |
-| Per-Run / Per-Task caps | `<= 1` sandbox/run (`<= 2`/task), `<= 3` Python execs/run (`<= 4`/task), `<= 4` LLM calls/run (`<= 6`/task) |
-| Model spend ceiling | `maxTaskCostMicroUsd = 30,000` (`$0.03` max per task), plus existing daily principal/tenant/global ceilings |
-| File & artifact bounds | `<= 15 MiB` per file, `<= 32 MiB` total per task, `<= 5` output artifacts, blocked active web MIME types (`text/html`, `image/svg+xml`, JS), safe ASCII filenames only |
-| Estimated Daytona compute cost (estimate) | `~$0.002–$0.005` per 1-minute `daytona-small` canary run (`< $0.05` total for the 1–3 run canary) |
+| Control                                   | Enforced Bound                                                                                                                                                                                                                                                                                                       |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sandbox profile                           | `daytona-small`, `sandboxClass: 'container'`, `ephemeral: true`, `networkBlockAll: true` (`deny-all`, verified post-create; fails closed with `POLICY_DENIED`)                                                                                                                                                       |
+| Wall-clock lifetime / exec timeout        | `sandboxLifetimeSec <= 120s`, `execTimeoutMs <= 60s`, `readyDeadlineMs <= 90s`, task `deadline_at_ms <= 120s`                                                                                                                                                                                                        |
+| Per-Run / Per-Task caps                   | `<= 1` sandbox/run, `<= 3` Python execs/run (`<= 4`/task), `<= 4` LLM calls/run (`<= 6`/task)                                                                                                                                                                                                                        |
+| Model spend ceiling                       | `maxTaskCostMicroUsd = 30,000` (`$0.03` max per task), plus DO + `GlobalBudgetDO` daily principal/tenant/global ceilings                                                                                                                                                                                             |
+| File & artifact bounds                    | `<= 1 MiB` V2 inline DO artifact cap (`V2_MAX_INLINE_ARTIFACT_BYTES`, within `15 MiB` `maxFileBytes`), `<= 32 MiB` aggregate per task (`maxTaskTotalFileBytes`), `<= 5` output artifacts, blocked active web MIME types (`text/html`, `image/svg+xml`, JS), safe ASCII filenames only, symlinks/directories rejected |
+| Estimated Daytona compute cost (estimate) | `~$0.002–$0.005` per 1-minute `daytona-small` canary run (`< $0.05` total for the 1–3 run canary)                                                                                                                                                                                                                    |
 
 ---
 
 ## 4. Canary Execution & Kill-Switch Checklist (Post-Approval Only)
 
-1. **Pre-flight:** Confirm `EMBER_ENV=staging`, `EMBER_MODEL_ALPHA_SCOPE=allowlist` (internal test tenant only), and `DAYTONA_API_KEY` scoped to staging.
-2. **Run canary:** Execute 1 synthetic CSV analysis task + 1 cancellation check; record commit SHA, task ID, artifact SHA-256, measured latency, and observed cost.
-3. **Verify zero leaked sandboxes:** Confirm `DaytonaSandboxProvider.destroy()` succeeded in logs and `DaytonaSandboxReconciler` reports `0` live sandboxes for the canary owner label.
+1. **Pre-flight:**
+   - Confirm `EMBER_ENV="v2-staging"`, `EMBER_V2_STAGING_ISOLATED="true"`, `EMBER_SANDBOX_MODE="daytona"`, `EMBER_DAYTONA_ALLOWED_TENANTS="<allowlisted-canary-tenant-uuid>"`, `EMBER_SANDBOX_OWNER="ember-v2-staging:canary"`, and `DAYTONA_API_KEY` bound as a staging secret.
+   - Verify V1 (`ember-api.slowfast.dev`) shares zero Worker, Queue, D1, Hyperdrive, or R2 resources with `ember-v2-staging`.
+2. **Run bounded canary:**
+   - Execute 1 synthetic CSV analysis task (upload -> NL or `/v2/tasks/python` -> Daytona execution -> artifact download + SHA-256 verification) + 1 in-flight cancellation check.
+   - Record deployed SHA/version, task ID, artifact SHA-256, measured latency, and observed cost.
+3. **Verify zero leaked sandboxes & zero duplicate artifacts:**
+   - Confirm `DaytonaSandboxProvider.destroy()` succeeded and `sweepOrphanedSandboxes` for `ember-v2-staging:canary` reports `0` live sandboxes.
+   - Confirm `GET /v1/me/tasks/:id/artifacts` contains only bound inputs and winning committed outputs (no duplicate/uncommitted artifacts on retry or cancel).
 4. **Immediate kill-switch / rollback:**
-   - Remove/unset `DAYTONA_API_KEY` in staging Worker secrets → `resolveCloudDaytonaConfig()` immediately returns `{ kind: 'disabled' }` (fail-closed for `python.agent` without disrupting chat turns or `notes.action_items`).
-   - Optionally set `EMBER_MODEL_EXECUTION=disabled` to halt all model execution.
+   - Set `EMBER_SANDBOX_MODE="fake"` (or `"disabled"`) in `ember-v2-staging` and/or delete `DAYTONA_API_KEY` secret → `resolveV2SandboxConfig()` immediately stops all Daytona calls without disrupting chat turns, Memory, Schedules, or V1.
+   - Or run `wrangler rollback <previous-version-id> --name ember-v2-staging --config wrangler.v2-staging.jsonc --yes`.
+
+---
+
+## 5. Cleanup Residual Risk & Bounded Lifetime Mitigation
+
+- **Best-effort `finally` cleanup:** `executeV2PythonAgentTask` invokes `DaytonaSandboxProvider.destroy(sandboxId)` and `client.close()` in `finally`, which is best-effort rather than transactional (a hard Worker isolate termination or transient Daytona delete API failure can prevent immediate deletion).
+- **Observability on cleanup failure:** If `destroy()` or `close()` fails, `python-agent-runner.ts` does not silently discard the failure: it emits a bounded, redacted structured incident (`v2_python_sandbox_cleanup_failed` with `tenantId`, `taskId`, `runId`, `owner`, `sandboxId`, and error code/name only—no secrets or raw messages) and records `sandbox_cleanup_failed` / `sandbox_close_failed` (or `:cleanup_failed` / `:close_failed` on failed runs) in `task_results.reason_code`.
+- **Bounded orphan lifetime & recovery:** Every sandbox created via `DaytonaSandboxProvider.create()` sets `ephemeral: true`, `ttlMinutes <= 2` (`maxTtlMinutes: 5`), `autoStopIntervalMinutes: 2`, and `autoDeleteIntervalMinutes: 0`, plus `ember.owner` / `ember.tenant_id` / `ember.managed` labels. Residual orphan risk on `destroy()` failure or worker crash is therefore bounded to the <= 2–5 minute vendor TTL/idle-reclaim window, and `sweepOrphanedSandboxes` supports immediate operator sweep by `ember.owner`.

@@ -17,12 +17,32 @@ export type FakeGatewayMode =
   | 'error_5xx'
   | 'rate_limited';
 
+export type FakeDelegationRule =
+  | {
+      readonly toolName: 'delegate_notes_action_items';
+      readonly arguments: {
+        readonly title?: string;
+        readonly notes: string;
+        readonly instructions?: string;
+      };
+    }
+  | {
+      readonly toolName: 'delegate_python_agent';
+      readonly arguments: {
+        readonly title?: string;
+        readonly prompt: string;
+        readonly instructions?: string;
+        readonly attachmentIds?: readonly string[];
+      };
+    };
+
 export interface FakeGatewayScriptRule {
   readonly mode: FakeGatewayMode;
   readonly delayMs?: number;
   readonly streamChunks?: number;
   readonly chunkIntervalMs?: number;
   readonly replyText?: string;
+  readonly delegation?: FakeDelegationRule;
   readonly savePersonalMemory?: {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
@@ -77,6 +97,7 @@ export interface FakeModelGatewayAuditSnapshot {
 interface PendingJobRecord {
   readonly operationId: string | null;
   readonly replyText: string;
+  readonly delegation?: FakeDelegationRule;
   readonly savePersonalMemory?: {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
@@ -271,6 +292,7 @@ export class FakeModelGatewayServer {
           ...common,
           status: 'completed',
           text: job.replyText,
+          ...(job.delegation !== undefined ? { delegation: job.delegation } : {}),
           ...(job.savePersonalMemory !== undefined
             ? { personalMemorySave: job.savePersonalMemory }
             : {}),
@@ -437,6 +459,7 @@ export class FakeModelGatewayServer {
       const job: PendingJobRecord = {
         operationId,
         replyText,
+        ...(rule.delegation !== undefined ? { delegation: rule.delegation } : {}),
         ...(rule.savePersonalMemory !== undefined
           ? { savePersonalMemory: rule.savePersonalMemory }
           : {}),
@@ -560,6 +583,7 @@ export class FakeModelGatewayServer {
               providerJobHandle: handle,
               operationId,
               text: replyText,
+              ...(rule.delegation !== undefined ? { delegation: rule.delegation } : {}),
               ...(rule.savePersonalMemory !== undefined
                 ? { personalMemorySave: rule.savePersonalMemory }
                 : {}),
@@ -581,6 +605,7 @@ export class FakeModelGatewayServer {
         simulated: true,
         providerJobHandle: handle,
         text: replyText,
+        ...(rule.delegation !== undefined ? { delegation: rule.delegation } : {}),
         ...(rule.savePersonalMemory !== undefined
           ? { personalMemorySave: rule.savePersonalMemory }
           : {}),

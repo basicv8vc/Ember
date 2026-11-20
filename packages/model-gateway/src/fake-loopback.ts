@@ -8,13 +8,16 @@ import {
   type FakeConversationUsageStatus,
 } from './fake-stream.js';
 import { FAKE_MODEL_LABEL } from './fake.js';
-import type { ModelUsage } from './types.js';
+import type { ConversationDelegationCall, ModelUsage } from './types.js';
 
 const MAX_FRAME_CHARS = 32 * 1024;
 const JOB_HANDLE = /^[a-z0-9_-]{1,128}$/i;
 
 /** Transport for D's local fake-provider server. The server owns the shared provider job store. */
 export class LoopbackFakeModelGateway {
+  readonly providerId = 'fake' as const;
+  readonly modelLabel = FAKE_MODEL_LABEL;
+  readonly simulated = true;
   private readonly origin: string;
 
   constructor(
@@ -49,6 +52,10 @@ export class LoopbackFakeModelGateway {
       },
       body: JSON.stringify({
         prompt: request.input.context.at(-1)?.text ?? '',
+        ...(request.input.context.at(-1)?.attachments !== undefined &&
+        request.input.context.at(-1)!.attachments!.length > 0
+          ? { attachments: request.input.context.at(-1)!.attachments }
+          : {}),
         ...(request.input.personalMemories !== undefined &&
         request.input.personalMemories.length > 0
           ? { personalMemories: request.input.personalMemories }
@@ -257,6 +264,55 @@ function parseProactiveScheduleCreate(value: unknown): {
   };
 }
 
+function parseDelegation(value: unknown): ConversationDelegationCall | null {
+  if (!isRecord(value)) return null;
+  if (value.toolName === 'delegate_notes_action_items' && isRecord(value.arguments)) {
+    const args = value.arguments;
+    if (typeof args.notes !== 'string' || args.notes.trim().length === 0) return null;
+    const title = typeof args.title === 'string' ? args.title.trim() : undefined;
+    const instructions =
+      typeof args.instructions === 'string' ? args.instructions.trim() : undefined;
+    return {
+      toolName: 'delegate_notes_action_items',
+      arguments: {
+        notes: args.notes.trim(),
+        ...(title !== undefined && title.length > 0 ? { title } : {}),
+        ...(instructions !== undefined && instructions.length > 0 ? { instructions } : {}),
+      },
+    };
+  }
+  if (value.toolName === 'delegate_python_agent' && isRecord(value.arguments)) {
+    const args = value.arguments;
+    if (typeof args.prompt !== 'string' || args.prompt.trim().length === 0) return null;
+    const title = typeof args.title === 'string' ? args.title.trim() : undefined;
+    const instructions =
+      typeof args.instructions === 'string' ? args.instructions.trim() : undefined;
+    let attachmentIds: string[] | undefined;
+    if (args.attachmentIds !== undefined) {
+      if (!Array.isArray(args.attachmentIds)) {
+        return null;
+      }
+      const normalized: string[] = [];
+      for (const rawId of args.attachmentIds as unknown[]) {
+        if (typeof rawId !== 'string') return null;
+        const trimmed = rawId.trim();
+        if (trimmed.length > 0) normalized.push(trimmed);
+      }
+      attachmentIds = normalized;
+    }
+    return {
+      toolName: 'delegate_python_agent',
+      arguments: {
+        prompt: args.prompt.trim(),
+        ...(title !== undefined && title.length > 0 ? { title } : {}),
+        ...(instructions !== undefined && instructions.length > 0 ? { instructions } : {}),
+        ...(attachmentIds !== undefined && attachmentIds.length > 0 ? { attachmentIds } : {}),
+      },
+    };
+  }
+  return null;
+}
+
 function toFakeReply(data: Record<string, unknown>) {
   const fake =
     (data.modelLabel === undefined || data.modelLabel === FAKE_MODEL_LABEL) &&
@@ -265,6 +321,13 @@ function toFakeReply(data: Record<string, unknown>) {
     fake && typeof data.text === 'string' && data.text.length <= FAKE_STREAM_MAX_REPLY_CHARS
       ? data.text
       : '';
+  let delegation: ConversationDelegationCall | null = null;
+  if (fake && data.delegation !== undefined) {
+    delegation = parseDelegation(data.delegation);
+    if (delegation === null) {
+      throw new ModelGatewayFailure('model_invalid_output');
+    }
+  }
   let memorySave: {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
@@ -285,33 +348,41 @@ function toFakeReply(data: Record<string, unknown>) {
   }
   return {
     output:
-      memorySave !== null && text.trim().length > 0
+      delegation !== null && text.trim().length > 0
         ? {
-            kind: 'save_memory' as const,
-            toolName: 'save_personal_memory' as const,
+            kind: 'delegate' as const,
+            toolName: delegation.toolName,
             finishReason: 'stop' as const,
             text,
-            memory: {
-              toolName: 'save_personal_memory' as const,
-              arguments: memorySave,
-            },
+            delegation,
           }
-        : scheduleCreate !== null && text.trim().length > 0
+        : memorySave !== null && text.trim().length > 0
           ? {
-              kind: 'create_schedule' as const,
-              toolName: 'create_proactive_schedule' as const,
+              kind: 'save_memory' as const,
+              toolName: 'save_personal_memory' as const,
               finishReason: 'stop' as const,
               text,
-              schedule: {
-                toolName: 'create_proactive_schedule' as const,
-                arguments: scheduleCreate,
+              memory: {
+                toolName: 'save_personal_memory' as const,
+                arguments: memorySave,
               },
             }
-          : {
-              kind: 'reply' as const,
-              finishReason: 'stop' as const,
-              text,
-            },
+          : scheduleCreate !== null && text.trim().length > 0
+            ? {
+                kind: 'create_schedule' as const,
+                toolName: 'create_proactive_schedule' as const,
+                finishReason: 'stop' as const,
+                text,
+                schedule: {
+                  toolName: 'create_proactive_schedule' as const,
+                  arguments: scheduleCreate,
+                },
+              }
+            : {
+                kind: 'reply' as const,
+                finishReason: 'stop' as const,
+                text,
+              },
     modelLabel: FAKE_MODEL_LABEL,
     simulated: true,
     usage: fake ? parseUsage(data.usage) : null,

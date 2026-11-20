@@ -239,9 +239,15 @@ export function assertSafeLocalV2RuntimeEnv(
   }
 
   const daytonaEnabled = (env.EMBER_DAYTONA_ENABLED ?? '').trim().toLowerCase();
-  if (daytonaEnabled === 'true' || daytonaEnabled === '1') {
+  const sandboxMode = (env.EMBER_SANDBOX_MODE ?? '').trim().toLowerCase();
+  if (
+    daytonaEnabled === 'true' ||
+    daytonaEnabled === '1' ||
+    sandboxMode === 'daytona' ||
+    sandboxMode === 'real'
+  ) {
     throw new Error(
-      'Unsafe EMBER_DAYTONA_ENABLED: V2 M1 harness forbids real Daytona cloud sandbox execution.',
+      'Unsafe EMBER_DAYTONA_ENABLED / EMBER_SANDBOX_MODE: V2 M1 harness forbids real Daytona cloud sandbox execution.',
     );
   }
 
@@ -274,6 +280,15 @@ function assertSafeVarsMap(varsRecord: Record<string, unknown>, contextLabel: st
       throw new Error(
         `Unsafe ${contextLabel}.EMBER_MODEL_MODE="real": real LLM mode is forbidden in M1.`,
       );
+    }
+
+    if (key === 'EMBER_SANDBOX_MODE') {
+      const lowered = valStr.toLowerCase();
+      if (lowered === 'daytona' || lowered === 'real') {
+        throw new Error(
+          `Unsafe ${contextLabel}.EMBER_SANDBOX_MODE="${lowered}": real Daytona sandbox execution is forbidden in M1.`,
+        );
+      }
     }
 
     if (key === 'EMBER_DAYTONA_ENABLED') {

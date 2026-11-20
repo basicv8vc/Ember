@@ -546,6 +546,18 @@ export class AgentHeadCore
     return this.recoveryService.commitDurableResult(cmd);
   }
 
+  renewTaskLease(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly taskId: string;
+    readonly runId: string;
+    readonly leaseEpoch: number;
+    readonly workerId: string;
+    readonly extendMs: number;
+  }) {
+    return this.recoveryService.renewTaskLease(cmd);
+  }
+
   // ---- Task Model Attempt Reservation & Settlement (V1 ceiling preservation) ----
 
   async reserveTaskModelAttempt(cmd: {

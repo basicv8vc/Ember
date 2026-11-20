@@ -223,6 +223,9 @@ importers:
       '@ember/runtime-v2':
         specifier: workspace:*
         version: link:../../packages/runtime-v2
+      '@ember/sandbox-daytona':
+        specifier: workspace:*
+        version: link:../../packages/sandbox-daytona
       '@hono/node-server':
         specifier: 2.1.5
         version: 2.1.5(hono@4.13.14)

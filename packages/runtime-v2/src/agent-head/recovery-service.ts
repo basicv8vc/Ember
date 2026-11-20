@@ -1346,6 +1346,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         task.id,
       );
       const mainConversation = getMainConversationSync(this.deps.storage.sql);
+      const ownerPrincipalId = this.resolveTaskPrincipalIdSync(task, latestTaskAttempt);
 
       return {
         res: {
@@ -1367,6 +1368,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
               kind: task.kind,
               inputJson: task.input_json,
               deadlineAtMs: task.deadline_at_ms,
+              ...(ownerPrincipalId === null ? {} : { principalId: ownerPrincipalId }),
             }),
           ),
         },
@@ -1720,6 +1722,128 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
     return { accepted: committed.accepted };
+  }
+
+  private resolveTaskPrincipalIdSync(
+    task: TaskRow,
+    latestAttempt: ModelAttemptRow | null,
+  ): string | null {
+    if (latestAttempt !== null) return latestAttempt.principal_id;
+
+    if (this.hasTaskArtifactsTableSync()) {
+      const boundInput = sqlExecMaybe<{ readonly principal_id: string }>(
+        this.deps.storage.sql,
+        `SELECT principal_id
+           FROM v2_task_artifacts
+          WHERE task_id = ? AND created_by = 'user'
+          LIMIT 1`,
+        task.id,
+      );
+      if (boundInput !== null) return boundInput.principal_id;
+    }
+
+    const linkedTurn = sqlExecMaybe<{ readonly principal_id: string }>(
+      this.deps.storage.sql,
+      `SELECT ma.principal_id
+         FROM assistant_turns t
+         JOIN model_attempts ma ON ma.subject_type = 'turn' AND ma.subject_id = t.id
+        WHERE t.linked_task_id = ?
+        ORDER BY ma.attempt_no DESC
+        LIMIT 1`,
+      task.id,
+    );
+    if (linkedTurn !== null) return linkedTurn.principal_id;
+
+    if (task.idempotency_key.startsWith('v2-python:')) {
+      const keyPart = task.idempotency_key.slice('v2-python:'.length).split(':')[0];
+      if (keyPart !== undefined && keyPart.length > 0) return keyPart;
+    }
+
+    if (this.hasProactiveSchedulesTableSync()) {
+      const proactive = sqlExecMaybe<{ readonly principal_id: string }>(
+        this.deps.storage.sql,
+        `SELECT ps.principal_id
+           FROM proactive_schedule_runs psr
+           JOIN proactive_schedules ps ON ps.schedule_id = psr.schedule_id
+          WHERE psr.task_id = ?
+          LIMIT 1`,
+        task.id,
+      );
+      if (proactive !== null) return proactive.principal_id;
+    }
+
+    return null;
+  }
+
+  async renewTaskLease(cmd: {
+    readonly tenantId: string;
+    readonly agentId: string;
+    readonly taskId: string;
+    readonly runId: string;
+    readonly leaseEpoch: number;
+    readonly workerId: string;
+    readonly extendMs: number;
+  }): Promise<{
+    readonly renewed: boolean;
+    readonly cancelRequested: boolean;
+    readonly leaseExpiresAtMs: number | null;
+  }> {
+    const tx = this.deps.storage.transactionSync(() => {
+      assertHeadScopeSync(this.deps.storage.sql, cmd.tenantId, cmd.agentId);
+      const nowMs = this.deps.nowMs();
+      const task = getTaskRowSync(this.deps.storage.sql, cmd.taskId);
+      const run = task === null ? null : getLatestRunForTaskSync(this.deps.storage.sql, task.id);
+      if (
+        task === null ||
+        run === null ||
+        run.id !== cmd.runId ||
+        !hasLiveTaskLease(task, run, nowMs, {
+          leaseEpoch: cmd.leaseEpoch,
+          workerId: cmd.workerId,
+          executorKind: 'queue_worker',
+        })
+      ) {
+        return {
+          result: {
+            renewed: false,
+            cancelRequested: task?.cancel_requested_at_ms != null,
+            leaseExpiresAtMs: task?.lease_expires_at_ms ?? null,
+          },
+          alarmAtMs: undefined as number | null | undefined,
+          nowMs,
+        };
+      }
+
+      const extendMs = Math.max(1_000, Math.trunc(cmd.extendMs));
+      const newLeaseExpiresAtMs = Math.min(nowMs + extendMs, task.deadline_at_ms ?? Infinity);
+      this.deps.storage.sql.exec(
+        `UPDATE tasks SET lease_expires_at_ms = ?, updated_at_ms = ? WHERE id = ?`,
+        newLeaseExpiresAtMs,
+        nowMs,
+        task.id,
+      );
+      this.deps.storage.sql.exec(
+        `UPDATE runs SET leased_until_ms = ?, updated_at_ms = ? WHERE id = ?`,
+        newLeaseExpiresAtMs,
+        nowMs,
+        run.id,
+      );
+      const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
+      return {
+        result: {
+          renewed: true,
+          cancelRequested: false,
+          leaseExpiresAtMs: newLeaseExpiresAtMs,
+        },
+        alarmAtMs,
+        nowMs,
+      };
+    });
+
+    if (tx.alarmAtMs !== undefined && this.deps.hooks.syncPlatformAlarm !== undefined) {
+      await this.deps.hooks.syncPlatformAlarm(tx.alarmAtMs, tx.nowMs);
+    }
+    return tx.result;
   }
 }
 

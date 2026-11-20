@@ -22,14 +22,16 @@ export type V2SandboxConfig =
       readonly apiUrl?: string;
       readonly target?: string;
       readonly owner: string;
-      readonly allowedTenants: ReadonlySet<string> | null;
+      readonly allowedTenants: ReadonlySet<string>;
     };
+
+const MAX_DAYTONA_ALLOWED_TENANTS = 100;
 
 /**
  * Resolve V2 Python sandbox execution provider independently of LLM mode (`EMBER_MODEL_MODE`).
  * Fails closed whenever `EMBER_SANDBOX_MODE` is unset/invalid or required Daytona credentials
- * or allowlist settings are missing/malformed, so enabling real LLM can never implicitly enable
- * paid Daytona or disable a permitted fake sandbox path.
+ * or nonempty validated tenant UUID allowlist settings are missing/malformed, so enabling real
+ * LLM can never implicitly enable paid Daytona or disable a permitted fake sandbox path.
  */
 export function resolveV2SandboxConfig(env: V2SandboxEnv): V2SandboxConfig {
   const rawMode = env.EMBER_SANDBOX_MODE?.trim().toLowerCase() ?? '';
@@ -53,23 +55,19 @@ export function resolveV2SandboxConfig(env: V2SandboxEnv): V2SandboxConfig {
     if (apiKey.length === 0) {
       return { kind: 'disabled', reason: 'daytona_api_key_missing' };
     }
-    let allowedTenants: ReadonlySet<string> | null = null;
     const rawAllowlist = env.EMBER_DAYTONA_ALLOWED_TENANTS?.trim() ?? '';
-    if (rawAllowlist.length > 0) {
-      const parsed = new Set<string>();
-      for (const entry of rawAllowlist.split(',')) {
-        const trimmed = entry.trim().toLowerCase();
-        if (trimmed.length === 0) continue;
-        if (!IdSchema.safeParse(trimmed).success) {
-          return { kind: 'disabled', reason: 'daytona_allowlist_invalid' };
-        }
-        parsed.add(trimmed);
-      }
-      if (parsed.size === 0) {
-        return { kind: 'disabled', reason: 'daytona_allowlist_invalid' };
-      }
-      allowedTenants = parsed;
+    if (rawAllowlist.length === 0) {
+      return { kind: 'disabled', reason: 'daytona_allowlist_missing' };
     }
+    const entries = rawAllowlist.split(',').map((entry) => entry.trim().toLowerCase());
+    if (
+      entries.length === 0 ||
+      entries.length > MAX_DAYTONA_ALLOWED_TENANTS ||
+      entries.some((entry) => entry.length === 0 || !IdSchema.safeParse(entry).success)
+    ) {
+      return { kind: 'disabled', reason: 'daytona_allowlist_invalid' };
+    }
+    const allowedTenants = new Set(entries);
     const apiUrl = env.DAYTONA_API_URL?.trim();
     const target = env.DAYTONA_TARGET?.trim();
     const owner = env.EMBER_SANDBOX_OWNER?.trim() || `ember-${env.EMBER_ENV}:v2-runtime`;

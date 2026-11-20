@@ -927,9 +927,16 @@ export class AgentHeadDO extends OfficialAgentHeadDO {
     return this.#taskHarness().core.reserveTaskModelAttempt(cmd);
   }
 
-  async settleTaskModelAttempt(cmd: Parameters<AgentHeadCore['settleTaskModelAttempt']>[0]) {
+  override async settleTaskModelAttempt(
+    cmd: Parameters<AgentHeadCore['settleTaskModelAttempt']>[0],
+  ) {
     await this.#refreshFaults();
     return this.#taskHarness().core.settleTaskModelAttempt(cmd);
+  }
+
+  override async renewTaskLease(cmd: Parameters<AgentHeadCore['renewTaskLease']>[0]) {
+    await this.#refreshFaults();
+    return this.#taskHarness().core.renewTaskLease(cmd);
   }
 
   async inspectState() {

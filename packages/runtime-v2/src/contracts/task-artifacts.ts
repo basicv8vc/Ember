@@ -14,7 +14,7 @@ import {
 } from '@ember/contracts';
 import type { TaskStatus } from '@ember/domain';
 import { z } from 'zod';
-import type { AgentHeadCallerScope } from './agent-head-rpc.js';
+import type { AgentHeadCallerScope, ResolvedMessageAttachment } from './agent-head-rpc.js';
 
 /**
  * Bounded inline artifact ceiling for DO SQLite storage in local/isolated V2.
@@ -82,6 +82,11 @@ export interface V2PublishTaskOutputsResultDto {
 export type TaskArtifactCommand = Omit<AgentHeadCallerScope, 'policyVersion'> &
   (
     | {
+        readonly kind: 'resolve_staged_uploads';
+        readonly uploadIds: readonly string[];
+        readonly clientSubmissionId?: string;
+      }
+    | {
         readonly kind: 'stage_upload';
         readonly filename: string;
         readonly mediaType: string;
@@ -116,11 +121,13 @@ export type TaskArtifactCommand = Omit<AgentHeadCallerScope, 'policyVersion'> &
         readonly runId: string;
         readonly leaseEpoch: number;
         readonly workerId: string;
+        readonly simulated?: boolean;
         readonly outputs: readonly V2TaskOutputFileInput[];
       }
   );
 
 export type TaskArtifactResponse =
+  | readonly ResolvedMessageAttachment[]
   | B3StagedUploadReceiptDto
   | V2PythonTaskSubmitResultDto
   | B1TaskListDto

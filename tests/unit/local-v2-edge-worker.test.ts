@@ -389,6 +389,7 @@ describe('local V2 Edge HTTP contracts', () => {
     expect(resolveAttachments).toHaveBeenCalledExactlyOnceWith(
       { tenantId, principalId, policyVersion: 1 },
       [uploadId],
+      payload.client_submission_id,
     );
     expect(f.rpc.prepareTurn.mock.calls[0]![0]).toMatchObject({
       conversationId,

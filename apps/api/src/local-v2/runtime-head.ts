@@ -202,6 +202,14 @@ export class AgentHeadDO
     return this.#load().core.reserveTaskModelAttempt(req);
   }
 
+  settleTaskModelAttempt(req: Parameters<AgentHeadCore['settleTaskModelAttempt']>[0]) {
+    return this.#load().core.settleTaskModelAttempt(req);
+  }
+
+  renewTaskLease(req: Parameters<AgentHeadCore['renewTaskLease']>[0]) {
+    return this.#load().core.renewTaskLease(req);
+  }
+
   claimDurableWork(req: Parameters<AgentHeadCore['claimDurableWork']>[0]) {
     return this.#load().core.claimDurableWork(req);
   }

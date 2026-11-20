@@ -27,6 +27,7 @@ import {
 import { DaytonaSandboxProvider, DaytonaSdkSandboxClient } from '@ember/sandbox-daytona';
 import { createModelTurnResponder } from '@ember/worker/b1/model-turn-responder';
 import { createNotesTaskHandler } from '@ember/worker/notes-task-handler';
+import { createFakePythonAgentSandboxFactory } from '@ember/worker/b3/fake-python-sandbox';
 import {
   executePythonAgentRun,
   type PythonAgentSandboxFactory,
@@ -258,7 +259,11 @@ export function createPythonAgentExecutor(input: {
   readonly gateway?: ModelGateway;
   readonly sandboxFactory?: PythonAgentSandboxFactory;
 }): Promise<AgentTaskExecutionPort | null> {
-  if (input.model.kind !== 'enabled' || input.daytona.kind !== 'enabled') {
+  if (input.model.kind !== 'enabled') {
+    return Promise.resolve(null);
+  }
+
+  if (input.model.mode === 'real' && input.daytona.kind !== 'enabled') {
     return Promise.resolve(null);
   }
 
@@ -281,26 +286,33 @@ export function createPythonAgentExecutor(input: {
 
   const createSandbox: PythonAgentSandboxFactory =
     input.sandboxFactory ??
-    (({ tenantId, runId, owner, signal }) => {
-      const client = new DaytonaSdkSandboxClient({
-        apiKey: daytona.apiKey,
-        ...(daytona.apiUrl === undefined ? {} : { apiUrl: daytona.apiUrl }),
-        ...(daytona.target === undefined ? {} : { target: daytona.target }),
-      });
-      const provider = new DaytonaSandboxProvider({
-        tenantId,
-        runId,
-        client,
-        snapshot: 'daytona-small',
-        sandboxClass: 'container',
-        owner,
-        signal,
-      });
-      return {
-        provider,
-        close: () => client.close(),
-      };
-    });
+    (mode === 'fake'
+      ? createFakePythonAgentSandboxFactory()
+      : ({ tenantId, runId, owner, signal }) => {
+          if (daytona.kind !== 'enabled') {
+            throw new Error('Daytona credentials are required in real mode');
+          }
+          const client = new DaytonaSdkSandboxClient({
+            apiKey: daytona.apiKey,
+            ...(daytona.apiUrl === undefined ? {} : { apiUrl: daytona.apiUrl }),
+            ...(daytona.target === undefined ? {} : { target: daytona.target }),
+          });
+          const provider = new DaytonaSandboxProvider({
+            tenantId,
+            runId,
+            client,
+            snapshot: 'daytona-small',
+            sandboxClass: 'container',
+            owner,
+            signal,
+          });
+          return {
+            provider,
+            close: () => client.close(),
+          };
+        });
+  const sandboxOwner =
+    daytona.kind === 'enabled' ? daytona.owner : 'ember-fake:cloud-async-runtime';
 
   return Promise.resolve({
     async processTask(event: B3TaskDispatchEvent) {
@@ -329,7 +341,7 @@ export function createPythonAgentExecutor(input: {
         blobStore,
         gateway,
         createSandbox,
-        sandboxOwner: daytona.owner,
+        sandboxOwner,
         policy: {
           baseDelayMs: LEASE_QUEUE_DEFAULTS.baseDelayMs,
           capDelayMs: LEASE_QUEUE_DEFAULTS.capDelayMs,

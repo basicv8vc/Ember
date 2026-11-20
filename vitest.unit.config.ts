@@ -39,6 +39,9 @@ export default defineConfig({
       '@ember/worker/b1/model-turn-responder': fileURLToPath(
         new URL('./apps/worker/src/b1/model-turn-responder.ts', import.meta.url),
       ),
+      '@ember/worker/b3/fake-python-sandbox': fileURLToPath(
+        new URL('./apps/worker/src/b3/fake-python-sandbox.ts', import.meta.url),
+      ),
       '@ember/worker/b3/python-agent-executor': fileURLToPath(
         new URL('./apps/worker/src/b3/python-agent-executor.ts', import.meta.url),
       ),

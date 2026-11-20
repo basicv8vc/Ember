@@ -210,7 +210,7 @@ async function runQueueBatch(
         });
       }
       const daytona = resolveCloudDaytonaConfig(env);
-      if (daytona.kind === 'disabled') {
+      if (daytona.kind === 'disabled' && !(model.kind === 'enabled' && model.mode === 'fake')) {
         logger.warn('Agent Task sandbox execution is disabled (DAYTONA_API_KEY missing)', {
           category: 'daytona_disabled',
         });

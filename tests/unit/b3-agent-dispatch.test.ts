@@ -12,6 +12,11 @@ import {
   publishDueAgentDispatches,
   type AgentDispatchRelayOutboxPort,
 } from '../../apps/cloud-async-runtime/src/relay.js';
+import {
+  resolveCloudDaytonaConfig,
+  resolveCloudRuntimeModelConfig,
+} from '../../apps/cloud-async-runtime/src/config.js';
+import { createPythonAgentExecutor } from '../../apps/cloud-async-runtime/src/runtime.js';
 import cloudAsyncRuntime from '../../apps/cloud-async-runtime/src/index.js';
 import type { TurnDispatchQueueMessage } from '../../apps/cloud-async-runtime/src/dispatch.js';
 
@@ -187,5 +192,52 @@ describe('Cloud Async Runtime agent dispatch & relay', () => {
       tenantId: TENANT_ID,
       taskId: TASK_ID,
     });
+  });
+
+  it('constructs fake-sandbox python.agent executor in local/test fake mode without DAYTONA_API_KEY and fails closed in real/shared environments', async () => {
+    const fakePool = {} as Parameters<typeof createPythonAgentExecutor>[0]['pool'];
+    const fakeModel = resolveCloudRuntimeModelConfig(
+      { EMBER_ENV: 'test', EMBER_MODEL_EXECUTION: 'fake' },
+      'staging_alpha',
+    );
+    expect(fakeModel.kind).toBe('enabled');
+    const disabledDaytona = resolveCloudDaytonaConfig({ EMBER_ENV: 'test' });
+    expect(disabledDaytona.kind).toBe('disabled');
+
+    const fakeExecutor = await createPythonAgentExecutor({
+      pool: fakePool,
+      model: fakeModel,
+      daytona: disabledDaytona,
+      event: makeEvent(),
+      workerId: 'cf-test-worker',
+    });
+    expect(fakeExecutor).not.toBeNull();
+
+    // Shared staging/production environments refuse EMBER_MODEL_EXECUTION=fake outright.
+    const refusedStagingFake = resolveCloudRuntimeModelConfig(
+      { EMBER_ENV: 'staging', EMBER_MODEL_EXECUTION: 'fake' },
+      'staging_alpha',
+    );
+    expect(refusedStagingFake).toEqual({
+      kind: 'refused',
+      reason: 'simulated_execution_in_shared_environment',
+    });
+
+    // Real mode without DAYTONA_API_KEY fails closed (returns null, never falls back to fake sandbox).
+    const realModel = {
+      kind: 'enabled' as const,
+      mode: 'real' as const,
+      resolution: fakeModel.kind === 'enabled' ? (fakeModel.resolution as never) : (null as never),
+      tenantScope: 'authenticated_tenants' as const,
+      onlyTenantIds: null,
+    };
+    const realWithoutDaytona = await createPythonAgentExecutor({
+      pool: fakePool,
+      model: realModel,
+      daytona: disabledDaytona,
+      event: makeEvent(),
+      workerId: 'cf-staging-worker',
+    });
+    expect(realWithoutDaytona).toBeNull();
   });
 });

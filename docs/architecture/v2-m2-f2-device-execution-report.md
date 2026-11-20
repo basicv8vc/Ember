@@ -32,7 +32,8 @@ including device-side renewal, disconnect and ACK-loss recovery, is unverified.
    pnpm exec tsx tests/integration/support/iphone-native-qa.ts <mac-private-ip> "$QA_DIR"
    ```
 
-3. Copy the generated config to the app's data container and launch the app.
+3. In a second terminal, set `QA_DIR` to the directory printed by the relay.
+   Copy the generated config to the app's data container and launch the app.
    Allow local network access on the iPhone if prompted. The relay reports
    `device_registered` when the iPhone becomes ready.
 

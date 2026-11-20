@@ -85,3 +85,20 @@ and [QA report](../../../../docs/architecture/v2-m2-f2-device-execution-report.m
 for the native `device.text.process` v1 wire and physical-device procedure.
 The standalone debug app in `apps/ios/LocalDeviceAdapter` reaches the loopback
 Worker through a per-run QA relay on a private LAN.
+
+## Product Alpha — Personal Memory (`/v2/memories`)
+
+Run the personal memory integration test against the isolated Wrangler entrypoint:
+
+```sh
+pnpm build
+pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-personal-memory-workerd.test.ts
+```
+
+All routes require the B1 bearer session and enforce strict `(tenant_id, principal_id)` isolation inside Agent Head DO SQLite. Saved items survive `DELETE /v1/me/conversation/messages` (`clearTranscript`) and are injected with strict bounds (max 20 items / 2,000 chars, newest-updated first) into both Fast Path SSE and Durable Queue turns.
+
+| Endpoint | Request and behavior |
+| --- | --- |
+| `GET /v2/memories` | Empty body, no query params. Returns `{ items, limits }` ordered by `updated_at DESC`, including `provenance` (`source`, `conversation_id`, `message_id`). |
+| `POST /v2/memories` | Send `{ kind: "preference" \| "fact", content, key?, provenance: { source: "explicit_user_request" \| "user_settings", conversation_id?, message_id? } }`. Creates a new item (`201`) or updates an existing item with the same normalized `key` (`200`). Capped at 50 items per principal (`429 BUDGET_EXCEEDED`). |
+| `DELETE /v2/memories/{memoryId}` | Empty body, no query params. Hard-deletes the item owned by the authenticated principal (`200 { deleted: true, memory_id }`). Missing or cross-account IDs return `404 NOT_FOUND`. |

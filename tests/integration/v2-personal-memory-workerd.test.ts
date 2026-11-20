@@ -242,5 +242,29 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     const callsAfterDelete = harness.fakeGateway.getAuditSnapshot().calls;
     expect(callsAfterDelete).toHaveLength(3);
     expect(callsAfterDelete[2]?.personalMemories).toBeUndefined();
+
+    // 8. Negative gates: unauthenticated 401, disallowed silent source 400, invalid UUID 400
+    const unauthRes = await harness.fetchOverHttp('/v2/memories', { method: 'GET' });
+    expect(unauthRes.status).toBe(401);
+
+    const silentSourceRes = await harness.fetchOverHttp('/v2/memories', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${userA.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'fact',
+        content: 'Inferred silently',
+        provenance: { source: 'silent_inference' },
+      }),
+    });
+    expect(silentSourceRes.status).toBe(400);
+
+    const badIdRes = await harness.fetchOverHttp('/v2/memories/not-a-uuid', {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${userA.token}` },
+    });
+    expect(badIdRes.status).toBe(400);
   });
 });

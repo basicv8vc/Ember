@@ -511,4 +511,123 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       { kind: 'preference', key: 'lang', content: 'Reply in English' },
     ]);
   });
+
+  it('updates an existing memory in place by memoryId, preserves provenance, and rejects conflicts or cross-principal edits', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalA = randomUUID();
+    const principalB = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+
+    let now = 1_700_000_020_000;
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => now,
+      newId: () => randomUUID(),
+    });
+
+    const first = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'fact',
+        content: 'Based in Tokyo',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    if (!('item' in first)) throw new Error('expected save result');
+
+    const second = await service.execute({
+      kind: 'save',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        key: 'tone',
+        content: 'Direct and concise',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    if (!('item' in second)) throw new Error('expected save result');
+
+    now += 10_000;
+    const patched = await service.execute({
+      kind: 'update',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      memoryId: first.item.memory_id,
+      input: {
+        content: 'Based in Osaka',
+        key: 'Home_City',
+      },
+    });
+    if (!('item' in patched)) throw new Error('expected update result');
+    expect(patched.item.memory_id).toBe(first.item.memory_id);
+    expect(patched.item.content).toBe('Based in Osaka');
+    expect(patched.item.key).toBe('home_city');
+    expect(patched.item.created_at).toBe(first.item.created_at);
+    expect(patched.item.updated_at).not.toBe(first.item.updated_at);
+    expect(patched.item.provenance).toEqual(first.item.provenance);
+
+    // Clearing key with null works
+    now += 5_000;
+    const clearedKey = await service.execute({
+      kind: 'update',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+      memoryId: first.item.memory_id,
+      input: { key: null },
+    });
+    if (!('item' in clearedKey)) throw new Error('expected update result');
+    expect(clearedKey.item.key).toBeNull();
+
+    // Key collision with another memory returns IDEMPOTENCY_CONFLICT
+    await expect(
+      service.execute({
+        kind: 'update',
+        tenantId,
+        principalId: principalA,
+        agentId,
+        requestId: randomUUID(),
+        memoryId: first.item.memory_id,
+        input: { key: 'tone' },
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    // Empty patch rejected
+    await expect(
+      service.execute({
+        kind: 'update',
+        tenantId,
+        principalId: principalA,
+        agentId,
+        requestId: randomUUID(),
+        memoryId: first.item.memory_id,
+        input: {},
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // Cross-principal edit returns NOT_FOUND
+    await expect(
+      service.execute({
+        kind: 'update',
+        tenantId,
+        principalId: principalB,
+        agentId,
+        requestId: randomUUID(),
+        memoryId: first.item.memory_id,
+        input: { content: 'Hijacked' },
+      }),
+    ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
 });

@@ -45,6 +45,19 @@ export const savePersonalMemoryRequestSchema = z.strictObject({
 
 export type SavePersonalMemoryRequest = z.infer<typeof savePersonalMemoryRequestSchema>;
 
+export const updatePersonalMemoryRequestSchema = z
+  .strictObject({
+    kind: personalMemoryKindSchema.optional(),
+    content: personalMemoryContentSchema.optional(),
+    key: personalMemoryKeySchema.nullable().optional(),
+  })
+  .refine(
+    (value) => value.kind !== undefined || value.content !== undefined || value.key !== undefined,
+    'at least one field must be provided',
+  );
+
+export type UpdatePersonalMemoryRequest = z.infer<typeof updatePersonalMemoryRequestSchema>;
+
 export interface PersonalMemoryProvenanceDto {
   readonly source: PersonalMemorySource;
   readonly conversation_id: string | null;
@@ -74,6 +87,10 @@ export interface PersonalMemorySaveResultDto {
   readonly created: boolean;
 }
 
+export interface PersonalMemoryUpdateResultDto {
+  readonly item: PersonalMemoryItemDto;
+}
+
 export interface PersonalMemoryDeleteResultDto {
   readonly deleted: true;
   readonly memory_id: string;
@@ -89,11 +106,19 @@ export type PersonalMemoryCommand = Omit<AgentHeadCallerScope, 'policyVersion'> 
   (
     | { readonly kind: 'list' }
     | { readonly kind: 'save'; readonly input: SavePersonalMemoryRequest }
+    | {
+        readonly kind: 'update';
+        readonly memoryId: string;
+        readonly input: UpdatePersonalMemoryRequest;
+      }
     | { readonly kind: 'delete'; readonly memoryId: string }
   );
 
 export type PersonalMemoryResponse =
-  PersonalMemoryListDto | PersonalMemorySaveResultDto | PersonalMemoryDeleteResultDto;
+  | PersonalMemoryListDto
+  | PersonalMemorySaveResultDto
+  | PersonalMemoryUpdateResultDto
+  | PersonalMemoryDeleteResultDto;
 
 export interface PersonalMemoryRpc {
   personalMemory(cmd: PersonalMemoryCommand): Promise<PersonalMemoryResponse>;

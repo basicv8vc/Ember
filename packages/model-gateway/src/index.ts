@@ -45,6 +45,7 @@ export type {
   PythonAgentStepMessage,
   PythonAgentStepOutput,
   RealModelProviderId,
+  SavePersonalMemoryCall,
   ModelUsage,
 } from './types.js';
 export {
@@ -70,9 +71,11 @@ export {
   DELEGATE_PYTHON_TOOL_NAME,
   DELEGATION_TOOLS,
   DEFAULT_DELEGATION_ACK_TEXT,
+  DEFAULT_MEMORY_SAVE_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   PYTHON_AGENT_TOOLS,
   RUN_PYTHON_TOOL_NAME,
+  SAVE_PERSONAL_MEMORY_TOOL_NAME,
   formatConversationMessageText,
 } from './providers/shared.js';
 export {

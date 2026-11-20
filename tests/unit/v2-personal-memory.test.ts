@@ -2,19 +2,26 @@ import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
   CONVERSATION_SYSTEM_PROMPT,
+  DEFAULT_MEMORY_SAVE_ACK_TEXT,
+  DELEGATION_TOOLS,
   FakeModelGateway,
   MODEL_LIMITS,
   MODEL_RATE_ROWS,
+  ModelGatewayFailure,
   OpenAiModelGateway,
   OpenRouterModelGateway,
   PERSONAL_MEMORY_CONTEXT_HEADER,
+  SAVE_PERSONAL_MEMORY_TOOL_NAME,
   buildBoundedPersonalMemoryContext,
   preflightConversationTurn,
   type FetchLike,
   type ModelRateRow,
   type OpenRouterRoutingPolicy,
 } from '@ember/model-gateway';
-import { buildConversationTurnMessages } from '../../packages/model-gateway/src/providers/shared.js';
+import {
+  buildConversationTurnMessages,
+  parseConversationTurnChoice,
+} from '../../packages/model-gateway/src/providers/shared.js';
 import {
   AgentHeadMemoryService,
   PERSONAL_MEMORY_MAX_ITEMS,
@@ -22,6 +29,7 @@ import {
   createDefaultAgentHeadMigrations,
   parseClaimExecutionContext,
   readPersonalMemoriesForTurnSync,
+  savePersonalMemoryFromTurnSync,
   type DurableObjectStorageLike,
   type SqlStorageCursorLike,
   type SqlStorageRow,
@@ -271,6 +279,81 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       controller.signal,
     );
     expect(fakeWith.usage!.inputTokens).toBeGreaterThan(fakeWithout.usage!.inputTokens);
+  });
+
+  it('parses save_personal_memory closed tool calls, rejects invalid args and canned plain-text fakes', () => {
+    const toolSchema = DELEGATION_TOOLS.find(
+      (tool) => tool.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME,
+    );
+    expect(toolSchema).toBeDefined();
+    expect(toolSchema?.function.parameters.additionalProperties).toBe(false);
+
+    const parsed = parseConversationTurnChoice({
+      message: {
+        content: null,
+        tool_calls: [
+          {
+            id: 'call_mem_1',
+            type: 'function',
+            function: {
+              name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+              arguments: JSON.stringify({
+                kind: 'preference',
+                content: '  Always reply in concise bullet points  ',
+                key: 'Response_Style',
+              }),
+            },
+          },
+        ],
+      },
+      finish_reason: 'tool_calls',
+    });
+    expect(parsed).toEqual({
+      kind: 'save_memory',
+      toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+      text: DEFAULT_MEMORY_SAVE_ACK_TEXT,
+      finishReason: 'stop',
+      memory: {
+        toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        arguments: {
+          kind: 'preference',
+          content: 'Always reply in concise bullet points',
+          key: 'response_style',
+        },
+      },
+    });
+
+    // Reject invalid key or unknown extra arguments
+    expect(() =>
+      parseConversationTurnChoice({
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_mem_bad',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'preference',
+                  content: 'Valid content',
+                  extra_field: 'not_allowed',
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      }),
+    ).toThrow(ModelGatewayFailure);
+
+    // Reject plain-text impersonation of the canned acknowledgement without calling the tool
+    expect(() =>
+      parseConversationTurnChoice({
+        message: { content: DEFAULT_MEMORY_SAVE_ACK_TEXT },
+        finish_reason: 'stop',
+      }),
+    ).toThrow(ModelGatewayFailure);
   });
 });
 
@@ -739,5 +822,103 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
         input: { content: 'Hijacked' },
       }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
+  });
+
+  it('persists savePersonalMemoryFromTurnSync idempotently with verified provenance and handles cap gracefully', async () => {
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalId = randomUUID();
+    const conversationId = randomUUID();
+    const messageId = randomUUID();
+    const turnId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+    storage.sql.exec(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 1, 0, 1700000000000, 1700000000000)`,
+      conversationId,
+    );
+    storage.sql.exec(
+      `INSERT INTO conversation_messages (id, conversation_id, sequence, kind, text, client_submission_id, created_at_ms)
+       VALUES (?, ?, 1, 'user', 'Remember I prefer dark roast coffee', ?, 1700000000000)`,
+      messageId,
+      conversationId,
+      randomUUID(),
+    );
+
+    const first = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId,
+      turnId,
+      conversationId,
+      sourceMessageId: messageId,
+      input: { kind: 'preference', key: 'coffee', content: 'Prefers dark roast coffee' },
+      nowMs: 1_700_000_030_000,
+      newId: () => randomUUID(),
+    });
+    expect(first).toMatchObject({ outcome: 'saved', created: true });
+
+    // Retrying the same turnId is strictly idempotent
+    const replay = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId,
+      turnId,
+      conversationId,
+      sourceMessageId: messageId,
+      input: { kind: 'preference', key: 'coffee', content: 'Prefers dark roast coffee' },
+      nowMs: 1_700_000_031_000,
+      newId: () => randomUUID(),
+    });
+    expect(replay).toEqual({
+      outcome: 'saved',
+      memoryId: first.outcome === 'saved' ? first.memoryId : '',
+      created: false,
+    });
+
+    const service = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => 1_700_000_032_000,
+      newId: () => randomUUID(),
+    });
+    const list = await service.execute({
+      kind: 'list',
+      tenantId,
+      principalId,
+      agentId,
+      requestId: randomUUID(),
+    });
+    if (!('items' in list)) throw new Error('expected list');
+    expect(list.items).toHaveLength(1);
+    expect(list.items[0]?.provenance).toEqual({
+      source: 'explicit_user_request',
+      conversation_id: conversationId,
+      message_id: messageId,
+    });
+
+    // Fill remaining slots to hit PERSONAL_MEMORY_MAX_ITEMS
+    for (let i = 1; i < PERSONAL_MEMORY_MAX_ITEMS; i += 1) {
+      savePersonalMemoryFromTurnSync(storage.sql, {
+        tenantId,
+        principalId,
+        turnId: randomUUID(),
+        conversationId,
+        sourceMessageId: messageId,
+        input: { kind: 'fact', content: `Turn fact #${i}` },
+        nowMs: 1_700_000_040_000 + i,
+        newId: () => randomUUID(),
+      });
+    }
+
+    const overflow = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: messageId,
+      input: { kind: 'fact', content: 'Over the cap' },
+      nowMs: 1_700_000_050_000,
+      newId: () => randomUUID(),
+    });
+    expect(overflow).toEqual({ outcome: 'budget_exceeded' });
   });
 });

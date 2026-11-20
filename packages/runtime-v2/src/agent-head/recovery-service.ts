@@ -1392,6 +1392,9 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
               modelLabel: parsed.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
               simulated: parsed.simulated ?? true,
               ...(parsed.delegation !== undefined ? { delegation: parsed.delegation } : {}),
+              ...(parsed.personalMemorySave !== undefined
+                ? { personalMemorySave: parsed.personalMemorySave }
+                : {}),
             }
           : parsed.status === 'failed'
             ? {

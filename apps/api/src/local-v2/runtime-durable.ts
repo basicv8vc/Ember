@@ -224,7 +224,12 @@ export function createDurableExecutor(
                 status: 'succeeded',
                 operationId,
                 providerJobHandle: handle,
-                outputJson: JSON.stringify({ text: job.result.output.text }),
+                outputJson: JSON.stringify({
+                  text: job.result.output.text,
+                  ...(job.result.output.kind === 'save_memory'
+                    ? { personalMemorySave: job.result.output.memory.arguments }
+                    : {}),
+                }),
                 errorCode: null,
                 usage: job.result.usage,
               };
@@ -285,7 +290,12 @@ export function createDurableExecutor(
                     status: 'succeeded',
                     operationId,
                     providerJobHandle: handle,
-                    outputJson: JSON.stringify({ text: event.result.output.text }),
+                    outputJson: JSON.stringify({
+                      text: event.result.output.text,
+                      ...(event.result.output.kind === 'save_memory'
+                        ? { personalMemorySave: event.result.output.memory.arguments }
+                        : {}),
+                    }),
                     errorCode: null,
                     usage: event.result.usage,
                   };

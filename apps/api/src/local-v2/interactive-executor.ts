@@ -394,6 +394,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             text: reply.output.text,
             modelLabel: FAKE_MODEL_LABEL,
             simulated: true,
+            ...(reply.output.kind === 'save_memory'
+              ? { personalMemorySave: reply.output.memory.arguments }
+              : {}),
           },
     });
   } finally {

@@ -45,6 +45,14 @@ export const savePersonalMemoryRequestSchema = z.strictObject({
 
 export type SavePersonalMemoryRequest = z.infer<typeof savePersonalMemoryRequestSchema>;
 
+export const personalMemorySaveTurnCommandSchema = z.strictObject({
+  kind: personalMemoryKindSchema,
+  content: personalMemoryContentSchema,
+  key: personalMemoryKeySchema.optional(),
+});
+
+export type PersonalMemorySaveTurnCommand = z.infer<typeof personalMemorySaveTurnCommandSchema>;
+
 export const updatePersonalMemoryRequestSchema = z
   .strictObject({
     kind: personalMemoryKindSchema.optional(),

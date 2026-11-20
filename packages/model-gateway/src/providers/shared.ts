@@ -20,19 +20,24 @@ import type {
 
 export const DELEGATE_NOTES_TOOL_NAME = 'delegate_notes_action_items' as const;
 export const DELEGATE_PYTHON_TOOL_NAME = 'delegate_python_agent' as const;
+export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
   'I have started organizing these notes into action items.';
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
+export const DEFAULT_MEMORY_SAVE_ACK_TEXT = "Got it — I'll remember that.";
 
 const HISTORICAL_NOTES_DELEGATION_MARKER = '[Prior turn called delegate_notes_action_items.]';
 const HISTORICAL_PYTHON_DELEGATION_MARKER = '[Prior turn called delegate_python_agent.]';
+const HISTORICAL_MEMORY_SAVE_MARKER = '[Prior turn called save_personal_memory.]';
 const FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES = new Set([
   DEFAULT_DELEGATION_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
+  DEFAULT_MEMORY_SAVE_ACK_TEXT,
   HISTORICAL_NOTES_DELEGATION_MARKER,
   HISTORICAL_PYTHON_DELEGATION_MARKER,
+  HISTORICAL_MEMORY_SAVE_MARKER,
 ]);
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -114,6 +119,40 @@ export const DELEGATION_TOOLS = Object.freeze([
       }),
     }),
   }),
+  Object.freeze({
+    type: 'function' as const,
+    function: Object.freeze({
+      name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+      description:
+        'Save a user-requested personal preference or fact to account memory. Call ONLY when the user explicitly asks Ember to remember something.',
+      parameters: Object.freeze({
+        type: 'object',
+        additionalProperties: false,
+        required: ['kind', 'content'],
+        properties: Object.freeze({
+          kind: Object.freeze({
+            type: 'string',
+            enum: Object.freeze(['preference', 'fact']),
+            description: 'Whether this is a user preference or a personal fact.',
+          }),
+          content: Object.freeze({
+            type: 'string',
+            description:
+              'Concise statement of the user-requested preference or fact to remember (1-500 characters).',
+            minLength: 1,
+            maxLength: 500,
+          }),
+          key: Object.freeze({
+            type: 'string',
+            description:
+              'Optional stable lowercase key (letters, digits, dot, underscore, hyphen; 1-64 chars) to update an existing memory in place.',
+            minLength: 1,
+            maxLength: 64,
+          }),
+        }),
+      }),
+    }),
+  }),
 ]);
 
 export const PYTHON_AGENT_TOOLS = Object.freeze([
@@ -181,6 +220,32 @@ const delegatePythonToolArgsSchema = z.strictObject({
   prompt: z.string().trim().min(1).max(8_000),
   instructions: optionalBoundedText(500),
   attachment_ids: z.array(z.string().trim().regex(UUID_REGEX, 'must be a UUID')).max(5).optional(),
+});
+
+const PERSONAL_MEMORY_KEY_REGEX = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+
+const savePersonalMemoryToolArgsSchema = z.strictObject({
+  kind: z.enum(['preference', 'fact']),
+  content: z
+    .string()
+    .trim()
+    .min(1)
+    .max(500)
+    .refine((text) => !/\p{Surrogate}/u.test(text), 'content contains invalid surrogate'),
+  key: z
+    .string()
+    .nullable()
+    .optional()
+    .transform((value) => {
+      if (value === null || value === undefined) {
+        return undefined;
+      }
+      const normalized = value.trim().toLowerCase();
+      return normalized.length === 0 ? undefined : normalized;
+    })
+    .refine((value) => value === undefined || PERSONAL_MEMORY_KEY_REGEX.test(value), {
+      message: 'invalid personal memory key',
+    }),
 });
 
 const runPythonToolArgsSchema = z.strictObject({
@@ -260,6 +325,9 @@ function formatContextTurnMessage(
     }
     if (trimmed === DEFAULT_PYTHON_DELEGATION_ACK_TEXT) {
       return { role: 'assistant', content: HISTORICAL_PYTHON_DELEGATION_MARKER };
+    }
+    if (trimmed === DEFAULT_MEMORY_SAVE_ACK_TEXT) {
+      return { role: 'assistant', content: HISTORICAL_MEMORY_SAVE_MARKER };
     }
   }
 
@@ -478,6 +546,32 @@ export function parseConversationTurnChoice(choice: {
         finishReason,
         delegation: Object.freeze({
           toolName: DELEGATE_PYTHON_TOOL_NAME,
+          arguments: Object.freeze(cleanArgs),
+        }),
+      });
+    }
+
+    if (call.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME) {
+      const parsedArgs = savePersonalMemoryToolArgsSchema.safeParse(rawArgs);
+      if (!parsedArgs.success) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+
+      const ackText =
+        rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_MEMORY_SAVE_ACK_TEXT;
+      const cleanArgs = {
+        kind: parsedArgs.data.kind,
+        content: parsedArgs.data.content,
+        ...(parsedArgs.data.key === undefined ? {} : { key: parsedArgs.data.key }),
+      };
+
+      return Object.freeze({
+        kind: 'save_memory' as const,
+        toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        text: ackText,
+        finishReason,
+        memory: Object.freeze({
+          toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
           arguments: Object.freeze(cleanArgs),
         }),
       });

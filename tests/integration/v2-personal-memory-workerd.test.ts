@@ -394,4 +394,120 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     });
     expect(badIdRes.status).toBe(400);
   });
+
+  it('persists save_personal_memory tool calls atomically on Fast Path SSE and Durable Queue turns with verified provenance', async () => {
+    const userA = await signIn();
+    const userB = await signIn();
+
+    // 1. Fast Path SSE turn invoking save_personal_memory
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: "Got it — I'll remember that you prefer JPY.",
+      savePersonalMemory: {
+        kind: 'preference',
+        key: 'currency',
+        content: 'Prefer Japanese yen (JPY) for prices.',
+      },
+    });
+    const fastRes = await harness.fetchOverHttp(
+      `/v2/conversations/${userA.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Please remember I prefer Japanese yen for prices.',
+          transcript_epoch: userA.transcriptEpoch,
+        }),
+      },
+    );
+    expect(fastRes.status).toBe(201);
+    const fastSse = await fastRes.text();
+    expect(fastSse).toContain('event: turn.committed');
+
+    const afterFast = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    expect(afterFast.items).toHaveLength(1);
+    expect(afterFast.items[0]?.key).toBe('currency');
+    expect(afterFast.items[0]?.content).toBe('Prefer Japanese yen (JPY) for prices.');
+    expect(afterFast.items[0]?.provenance.source).toBe('explicit_user_request');
+    expect(afterFast.items[0]?.provenance.conversation_id).toBe(userA.conversationId);
+    expect(afterFast.items[0]?.provenance.message_id).toBeTruthy();
+
+    // 2. Durable Queue turn invoking save_personal_memory
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: "Got it — I'll remember your city.",
+      savePersonalMemory: {
+        kind: 'fact',
+        content: 'Lives in Kyoto.',
+      },
+    });
+    const durableRes = await harness.fetchOverHttp(
+      `/v1/conversations/${userA.conversationId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${userA.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Remember that I live in Kyoto.',
+          transcript_epoch: userA.transcriptEpoch,
+        }),
+      },
+    );
+    const durableReceipt = B1SendMessageReceiptSchema.parse(await json(durableRes, 201));
+
+    await expect
+      .poll(
+        async () => {
+          const turnRes = await harness.fetchOverHttp(
+            `/v1/conversations/${userA.conversationId}/turns/${durableReceipt.turn.turn_id}`,
+            {
+              method: 'GET',
+              headers: { authorization: `Bearer ${userA.token}` },
+            },
+          );
+          const turn = await json<{ status: string }>(turnRes, 200);
+          return turn.status;
+        },
+        { timeout: 10_000, interval: 100 },
+      )
+      .toBe('completed');
+
+    const afterDurable = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userA.token}` },
+      }),
+      200,
+    );
+    expect(afterDurable.items).toHaveLength(2);
+    const kyotoItem = afterDurable.items.find((item) => item.content === 'Lives in Kyoto.');
+    expect(kyotoItem?.provenance).toEqual({
+      source: 'explicit_user_request',
+      conversation_id: userA.conversationId,
+      message_id: durableReceipt.message.message_id,
+    });
+
+    // 3. Cross-account isolation: User B sees none of User A's chat-saved memories
+    const userBList = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${userB.token}` },
+      }),
+      200,
+    );
+    expect(userBList.items).toEqual([]);
+  });
 });

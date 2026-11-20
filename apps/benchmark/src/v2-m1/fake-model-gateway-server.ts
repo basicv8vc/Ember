@@ -23,6 +23,11 @@ export interface FakeGatewayScriptRule {
   readonly streamChunks?: number;
   readonly chunkIntervalMs?: number;
   readonly replyText?: string;
+  readonly savePersonalMemory?: {
+    readonly kind: 'preference' | 'fact';
+    readonly content: string;
+    readonly key?: string;
+  };
   readonly costMicroUsd?: number;
   readonly lateRevisionCostMicroUsd?: number;
   readonly providerJobHandle?: string;
@@ -56,6 +61,11 @@ export interface FakeModelGatewayAuditSnapshot {
 interface PendingJobRecord {
   readonly operationId: string | null;
   readonly replyText: string;
+  readonly savePersonalMemory?: {
+    readonly kind: 'preference' | 'fact';
+    readonly content: string;
+    readonly key?: string;
+  };
   readonly inputTokens: number;
   readonly outputTokens: number;
   readonly costMicroUsd: number;
@@ -383,6 +393,9 @@ export class FakeModelGatewayServer {
       const job: PendingJobRecord = {
         operationId,
         replyText,
+        ...(rule.savePersonalMemory !== undefined
+          ? { savePersonalMemory: rule.savePersonalMemory }
+          : {}),
         inputTokens,
         outputTokens,
         costMicroUsd,
@@ -500,6 +513,9 @@ export class FakeModelGatewayServer {
               providerJobHandle: handle,
               operationId,
               text: replyText,
+              ...(rule.savePersonalMemory !== undefined
+                ? { personalMemorySave: rule.savePersonalMemory }
+                : {}),
               usage,
             })}\n\n`,
           );
@@ -515,6 +531,9 @@ export class FakeModelGatewayServer {
         simulated: true,
         providerJobHandle: handle,
         text: replyText,
+        ...(rule.savePersonalMemory !== undefined
+          ? { personalMemorySave: rule.savePersonalMemory }
+          : {}),
         usage,
       });
       return;

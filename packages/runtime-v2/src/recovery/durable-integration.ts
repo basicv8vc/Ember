@@ -3,7 +3,11 @@ import type {
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
 } from '../contracts/agent-head-rpc.js';
-import type { PersonalMemoryContextItem } from '../contracts/personal-memory.js';
+import {
+  personalMemorySaveTurnCommandSchema,
+  type PersonalMemoryContextItem,
+  type PersonalMemorySaveTurnCommand,
+} from '../contracts/personal-memory.js';
 import type { DurableObjectStorageLike, QueueLike } from '../storage.js';
 import { relayDueBudgetSyncBatch, type GlobalBudgetSettlePort } from './budget-sync.js';
 import type { V2DispatchEnvelope } from './envelope.js';
@@ -380,11 +384,20 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
   if (cmd.targetKind === 'turn') {
     if (cmd.outcome.status === 'succeeded') {
       let text = fallbackText;
+      let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
       if (cmd.outcome.outputJson !== null) {
         try {
           const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
           if (typeof parsed['text'] === 'string' && parsed['text'].length > 0) {
             text = parsed['text'];
+          }
+          if (parsed['personalMemorySave'] !== undefined) {
+            const parsedMem = personalMemorySaveTurnCommandSchema.safeParse(
+              parsed['personalMemorySave'],
+            );
+            if (parsedMem.success) {
+              personalMemorySave = parsedMem.data;
+            }
           }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied
@@ -397,6 +410,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         ...binding,
         status: 'completed',
         text,
+        ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
         ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
       };

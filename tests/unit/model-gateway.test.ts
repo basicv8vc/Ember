@@ -842,11 +842,13 @@ describe('openai adapter', () => {
       readonly type: string;
       readonly function: { readonly name: string };
     }>;
-    expect(tools).toHaveLength(2);
+    expect(tools).toHaveLength(3);
     expect(tools[0]?.type).toBe('function');
     expect(tools[0]?.function.name).toBe('delegate_notes_action_items');
     expect(tools[1]?.type).toBe('function');
     expect(tools[1]?.function.name).toBe('delegate_python_agent');
+    expect(tools[2]?.type).toBe('function');
+    expect(tools[2]?.function.name).toBe('save_personal_memory');
     // No caller-controlled model, temperature or stop sequence can appear.
     expect(body['temperature']).toBeUndefined();
   });

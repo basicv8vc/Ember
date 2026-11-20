@@ -73,6 +73,15 @@ export type ConversationDelegationCall =
       };
     };
 
+export interface SavePersonalMemoryCall {
+  readonly toolName: 'save_personal_memory';
+  readonly arguments: {
+    readonly kind: 'preference' | 'fact';
+    readonly content: string;
+    readonly key?: string;
+  };
+}
+
 export type ConversationTurnOutput =
   | {
       readonly kind: 'reply';
@@ -85,6 +94,13 @@ export type ConversationTurnOutput =
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly delegation: ConversationDelegationCall;
+    }
+  | {
+      readonly kind: 'save_memory';
+      readonly toolName: SavePersonalMemoryCall['toolName'];
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+      readonly memory: SavePersonalMemoryCall;
     };
 
 export interface NotesActionItemsInput {

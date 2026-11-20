@@ -7,7 +7,9 @@ import type {
   ModelUsage,
 } from './types.js';
 
-type FakeReply = ModelCallResult<Extract<ConversationTurnOutput, { kind: 'reply' }>>;
+type FakeReply = ModelCallResult<
+  Extract<ConversationTurnOutput, { kind: 'reply' | 'save_memory' }>
+>;
 
 export interface FakeConversationJob {
   readonly handle: string;
@@ -73,7 +75,7 @@ export class FakeStreamingModelGateway extends FakeModelGateway {
     signal.throwIfAborted();
     const generated = await this.generateConversationTurn(request.input, signal);
     const output =
-      generated.output.kind === 'reply' &&
+      (generated.output.kind === 'reply' || generated.output.kind === 'save_memory') &&
       generated.output.text.length <= FAKE_STREAM_MAX_REPLY_CHARS &&
       generated.output.text.trim().length > 0
         ? generated.output

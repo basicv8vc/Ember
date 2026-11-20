@@ -24,6 +24,10 @@ import {
   type LocalBudgetCeilings,
 } from './budget.js';
 import {
+  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
+  savePersonalMemoryFromTurnSync,
+} from './memory-service.js';
+import {
   allocateConversationSequenceSync,
   deterministicEdgeUuid,
   getHeadMetaSync,
@@ -921,11 +925,28 @@ export async function executeAuthoritativeTurnCommit(
       );
     }
 
+    let assistantText = publication.result.text;
+    if (publication.result.personalMemorySave !== undefined && attempt !== null) {
+      const saved = savePersonalMemoryFromTurnSync(deps.storage.sql, {
+        tenantId: cmd.tenantId,
+        principalId: attempt.principal_id,
+        turnId: turn.id,
+        conversationId: turn.conversation_id,
+        sourceMessageId: turn.source_message_id,
+        input: publication.result.personalMemorySave,
+        nowMs,
+        newId: deps.idFactory,
+      });
+      if (saved.outcome === 'budget_exceeded') {
+        assistantText = PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY;
+      }
+    }
+
     const { messageId, sequence } = insertEmberMessageSync({
       sql: deps.storage.sql,
       messageId: deps.idFactory(),
       conversationId: turn.conversation_id,
-      text: publication.result.text,
+      text: assistantText,
       modelLabel: publication.result.modelLabel,
       simulated: publication.result.simulated,
       nowMs,

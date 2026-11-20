@@ -383,6 +383,16 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
       minCandidates.push(pendingTarget);
     }
     const targetAtMs = Math.min(...minCandidates);
+    // Concurrent admissions sharing an earlier pending ensure use its generation.
+    // Creating a new generation for each waiter invalidates every preceding ACK.
+    if (
+      row.coverage_state === 'registering' &&
+      row.pending_kind === 'ensure' &&
+      row.pending_target_at_ms === targetAtMs
+    ) {
+      return { kind: 'register', generation: row.generation, targetAtMs };
+    }
+
     const prevGen = row.generation;
     const nextGen = prevGen + 1;
 
@@ -534,6 +544,22 @@ export class RecoveryCoverageCoordinator implements RecoveryAdmissionPort {
         return {
           generation: attemptGen,
           coveredRecoveryAtMs: upsertRes.actualRecoveryAtMs,
+          d1Called: true,
+        };
+      }
+
+      // Another waiter may already have confirmed the shared generation.
+      const current = this.getCoverageRowSync();
+      if (
+        current !== null &&
+        current.coverage_state === 'covered' &&
+        current.pending_kind === null &&
+        current.covered_recovery_at_ms !== null &&
+        current.covered_recovery_at_ms <= cmd.requiredRecoveryAtMs
+      ) {
+        return {
+          generation: current.generation,
+          coveredRecoveryAtMs: current.covered_recovery_at_ms,
           d1Called: true,
         };
       }

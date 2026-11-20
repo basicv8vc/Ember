@@ -875,6 +875,14 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         return { ok: false, reason: 'not_found' };
       }
 
+      const turn =
+        req.subjectType === 'turn' ? getTurnRowSync(this.deps.storage.sql, req.subjectId) : null;
+      const task =
+        req.subjectType === 'task' ? getTaskRowSync(this.deps.storage.sql, req.subjectId) : null;
+      if (turn?.cancel_requested_at_ms != null || task?.cancel_requested_at_ms != null) {
+        return { ok: false, reason: 'cancelled' };
+      }
+
       if (attempt.send_started_at_ms !== null || attempt.state !== 'reserved') {
         return { ok: false, reason: 'already_sent' };
       }
@@ -894,12 +902,8 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       let deadlineAtMs = nowMs + 1;
       let leaseExpiresAtMs: number | null = null;
       if (req.subjectType === 'turn') {
-        const turn = getTurnRowSync(this.deps.storage.sql, req.subjectId);
         if (turn === null) {
           return { ok: false, reason: 'not_found' };
-        }
-        if (turn.cancel_requested_at_ms !== null) {
-          return { ok: false, reason: 'cancelled' };
         }
         const fence = evaluateTurnFence(turn, req.leaseEpoch, req.leaseOwner, nowMs);
         if (!fence.ok) {
@@ -916,12 +920,8 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         deadlineAtMs = turn.deadline_at_ms;
         leaseExpiresAtMs = turn.lease_expires_at_ms;
       } else {
-        const task = getTaskRowSync(this.deps.storage.sql, req.subjectId);
         if (task === null) {
           return { ok: false, reason: 'not_found' };
-        }
-        if (task.cancel_requested_at_ms !== null) {
-          return { ok: false, reason: 'cancelled' };
         }
         const run =
           task.current_run_id !== null

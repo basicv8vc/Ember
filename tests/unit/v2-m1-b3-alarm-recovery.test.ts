@@ -383,6 +383,36 @@ describe('V2-M1-B3 DO Alarm Multiplexer, D1 Registry CAS, Pending Crash Self-Hea
     doHarness.db.close();
   });
 
+  it('reuses one pending ensure generation for concurrent admissions', () => {
+    const { db, storage } = createNodeDoHarness();
+    const coverage = new RecoveryCoverageCoordinator({
+      storage,
+      tenantId: 't1',
+      agentId: 'a1',
+      business: new MockBusinessState(),
+    });
+    const first = coverage.inspectCoverageSync(50_000, 1_000);
+    expect(first).toEqual({ kind: 'register', generation: 1, targetAtMs: 50_000 });
+    for (let i = 1; i <= 4; i += 1) {
+      expect(coverage.inspectCoverageSync(50_000 + i, 1_000 + i)).toEqual(first);
+    }
+    expect(
+      coverage.confirmCoverageSync({
+        generation: 1,
+        actualRecoveryAtMs: 50_000,
+        applied: true,
+        earliestRequiredRecoveryMs: 50_000,
+        nowMs: 1_010,
+      }),
+    ).toBe(true);
+    expect(coverage.inspectCoverageSync(50_010, 1_010)).toEqual({
+      kind: 'covered',
+      generation: 1,
+      coveredRecoveryAtMs: 50_000,
+    });
+    db.close();
+  });
+
   it('self-heals DO pending crash with all clients offline, preserves next_recovery_at_ms across backoff & quarantine, and costs 0 DO wakeups when idle', async () => {
     const doHarness = createNodeDoHarness();
     const d1Harness = await createNodeD1Harness();

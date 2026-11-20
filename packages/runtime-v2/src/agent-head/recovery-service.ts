@@ -1,5 +1,9 @@
 import { type Id, isTerminalTaskStatus } from '@ember/domain';
 import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants.js';
+import {
+  PROACTIVE_TASK_DEADLINE_MS,
+  type ProactiveScheduleTaskPayload,
+} from '../contracts/proactive-schedules.js';
 import { parseDurableTaskOutcome, parseDurableTurnOutcome } from '../contracts/validation.js';
 import {
   computePreDeadlineRetryAtMs,
@@ -33,6 +37,7 @@ import {
   getHeadMetaSync,
   getLatestAttemptForSubjectSync,
   getLatestRunForTaskSync,
+  getMainConversationSync,
   getTaskRowSync,
   getTurnRowSync,
   insertEmberMessageSync,
@@ -42,7 +47,13 @@ import {
   sqlExecMaybe,
   sqlExecOne,
 } from './queries.js';
-import type { ApprovalRow, AssistantTurnRow, ModelAttemptRow, TaskRow } from './schema.js';
+import type {
+  ApprovalRow,
+  AssistantTurnRow,
+  ModelAttemptRow,
+  ProactiveScheduleRow,
+  TaskRow,
+} from './schema.js';
 import { toUtcDayString } from './state-machine.js';
 import {
   appendTaskEventSync,
@@ -909,6 +920,15 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     };
   }
 
+  private hasProactiveSchedulesTableSync(): boolean {
+    return (
+      sqlExecMaybe<{ readonly name: string }>(
+        this.deps.storage.sql,
+        `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'proactive_schedules'`,
+      ) !== null
+    );
+  }
+
   materializeScheduleOccurrenceSync(
     scheduleId: string,
     occurrenceSeq: number,
@@ -920,7 +940,12 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       `SELECT * FROM v2_schedules WHERE schedule_id = ?`,
       scheduleId,
     );
-    if (sched === null || sched.status !== 'active') {
+    const isMaterializableOnce =
+      sched !== null &&
+      sched.schedule_kind === 'once' &&
+      sched.status === 'completed' &&
+      sched.occurrence_seq === occurrenceSeq;
+    if (sched === null || (sched.status !== 'active' && !isMaterializableOnce)) {
       return;
     }
 
@@ -934,31 +959,76 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       return;
     }
 
+    const proactive = this.hasProactiveSchedulesTableSync()
+      ? sqlExecMaybe<ProactiveScheduleRow>(
+          sql,
+          `SELECT * FROM proactive_schedules WHERE schedule_id = ?`,
+          scheduleId,
+        )
+      : null;
+
     const taskId = this.newId();
-    const inputJson = JSON.stringify({
-      prompt: `Scheduled execution for ${sched.source_kind}:${sched.source_id}`,
-    });
+    const scheduledForMs = sched.last_fired_at_ms ?? nowMs;
+    const taskTitle = proactive !== null ? proactive.title : `Scheduled ${sched.source_kind}`;
+    const inputJson =
+      proactive !== null
+        ? JSON.stringify({
+            prompt: proactive.prompt,
+            proactiveSchedule: {
+              scheduleId: proactive.schedule_id,
+              occurrenceSeq,
+              principalId: proactive.principal_id,
+              kind: proactive.kind,
+              title: proactive.title,
+              prompt: proactive.prompt,
+              deliveryMode: proactive.delivery_mode,
+              timezone: sched.timezone,
+              scheduledForMs,
+            } satisfies ProactiveScheduleTaskPayload,
+          })
+        : JSON.stringify({
+            prompt: `Scheduled execution for ${sched.source_kind}:${sched.source_id}`,
+          });
+    const deadlineAtMs = proactive !== null ? nowMs + PROACTIVE_TASK_DEADLINE_MS : null;
+
     sql.exec(
       `INSERT INTO tasks (
          id, kind, title, input_json, digest, idempotency_key, status,
          execution_path, execution_target, attempt_count, max_attempts,
-         lease_epoch, next_run_at_ms, created_at_ms, updated_at_ms
-       ) VALUES (?, 'mock.chat', ?, ?, ?, ?, 'queued', 'standard', 'cloud', 0, 3, 1, ?, ?, ?)`,
+         lease_epoch, next_run_at_ms, deadline_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, 'mock.chat', ?, ?, ?, ?, 'queued', 'standard', 'cloud', 0, 3, 1, ?, ?, ?, ?)`,
       taskId,
-      `Scheduled ${sched.source_kind}`,
+      taskTitle,
       inputJson,
       idempotencyKey,
       idempotencyKey,
       nowMs,
+      deadlineAtMs,
       nowMs,
       nowMs,
     );
+    if (proactive !== null) {
+      sql.exec(
+        `INSERT INTO proactive_schedule_runs (
+           schedule_id, occurrence_seq, task_id, scheduled_for_ms, created_at_ms
+         ) VALUES (?, ?, ?, ?, ?)`,
+        scheduleId,
+        occurrenceSeq,
+        taskId,
+        scheduledForMs,
+        nowMs,
+      );
+    }
     sql.exec(
       `INSERT INTO task_events (id, task_id, sequence, phase, payload_json, trace_id, occurred_at_ms)
        VALUES (?, ?, 1, 'accepted', ?, ?, ?)`,
       this.newId(),
       taskId,
-      JSON.stringify({ taskKind: 'mock.chat', replayed: false }),
+      JSON.stringify({
+        taskKind: 'mock.chat',
+        replayed: false,
+        ...(proactive !== null ? { scheduleId, occurrenceSeq, proactiveKind: proactive.kind } : {}),
+      }),
       this.newId(),
       nowMs,
     );
@@ -1531,6 +1601,43 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         truncated: parsedTask.truncated ?? false,
         reasonCode: parsedTask.reasonCode ?? (isCompleted ? 'ok' : 'internal_error'),
       });
+      if (isCompleted && task.linked_message_id === null && this.hasProactiveSchedulesTableSync()) {
+        const proactive = sqlExecMaybe<{
+          readonly title: string;
+          readonly delivery_mode: 'direct_reminder' | 'model_brief';
+        }>(
+          this.deps.storage.sql,
+          `SELECT s.title, s.delivery_mode
+             FROM proactive_schedule_runs r
+             JOIN proactive_schedules s ON s.schedule_id = r.schedule_id
+            WHERE r.task_id = ?`,
+          task.id,
+        );
+        const conv = proactive !== null ? getMainConversationSync(this.deps.storage.sql) : null;
+        if (proactive !== null && conv !== null) {
+          const messageText = formatProactiveOutcomeMessage({
+            title: proactive.title,
+            deliveryMode: proactive.delivery_mode,
+            summaryText: parsedTask.summaryText ?? null,
+            detailText: parsedTask.detailText ?? null,
+          });
+          const delivered = insertEmberMessageSync({
+            sql: this.deps.storage.sql,
+            messageId: this.newId(),
+            conversationId: conv.id,
+            text: messageText,
+            modelLabel: parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+            simulated: parsedTask.simulated ?? true,
+            nowMs,
+          });
+          this.deps.storage.sql.exec(
+            `UPDATE tasks SET linked_message_id = ?, updated_at_ms = ? WHERE id = ?`,
+            delivered.messageId,
+            nowMs,
+            task.id,
+          );
+        }
+      }
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       const alarmAtMs = this.deps.eventCoordinator.recomputeAlarmSync(nowMs);
@@ -1547,6 +1654,44 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     });
     return { accepted: committed.accepted };
   }
+}
+
+function extractReadableText(raw: string | null): string {
+  if (raw === null) return '';
+  const trimmed = raw.trim();
+  if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
+    try {
+      const parsed = JSON.parse(trimmed) as Record<string, unknown>;
+      if (typeof parsed['text'] === 'string') {
+        return parsed['text'].trim();
+      }
+    } catch {
+      // Treat as plain text.
+    }
+  }
+  return trimmed;
+}
+
+function formatProactiveOutcomeMessage(input: {
+  readonly title: string;
+  readonly deliveryMode: 'direct_reminder' | 'model_brief';
+  readonly summaryText: string | null;
+  readonly detailText: string | null;
+}): string {
+  const detail = extractReadableText(input.detailText);
+  const summary = extractReadableText(input.summaryText);
+  const body = detail.length > 0 ? detail : summary;
+  const maxTextBytes = 8_000;
+  let formatted: string;
+  if (input.deliveryMode === 'direct_reminder') {
+    formatted =
+      body.length > 0 && body !== input.title
+        ? `Reminder: ${input.title}\n\n${body}`
+        : `Reminder: ${input.title}`;
+  } else {
+    formatted = body.length > 0 ? `**${input.title}**\n\n${body}` : `**${input.title}**`;
+  }
+  return formatted.length > maxTextBytes ? `${formatted.slice(0, maxTextBytes - 1)}…` : formatted;
 }
 
 function buildClaimAttemptContextFields<TExtra extends Record<string, unknown>>(

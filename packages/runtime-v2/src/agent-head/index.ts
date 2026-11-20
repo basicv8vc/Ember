@@ -5,4 +5,5 @@ export * from './queries.js';
 export * from './memory-service.js';
 export * from './recovery-service.js';
 export * from './turn-service.js';
+export * from './proactive-schedule-service.js';
 export * from './agent-head-do.js';

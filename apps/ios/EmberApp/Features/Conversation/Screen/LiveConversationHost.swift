@@ -28,6 +28,7 @@ final class LiveConversationHostModel {
     let scheduleStore: ProactiveScheduleStore
     let memoryStore: PersonalMemoryStore
     let isMockMode: Bool
+    let environmentBadge: String
 
     var selectedTab: RootTab = .chat
     var chatNavigationPath: [UUID] = []
@@ -60,6 +61,7 @@ final class LiveConversationHostModel {
         scheduleRepository: (any ProactiveScheduleRepositoryProtocol)? = nil,
         memoryRepository: (any PersonalMemoryRepositoryProtocol)? = nil,
         isMockMode: Bool = false,
+        environmentBadge: String = "LIVE CLOUD",
         pollingWindow: Duration = .seconds(60),
         taskPollInterval: Duration = .seconds(2),
         monotonicNow: @Sendable @escaping () -> ContinuousClock.Instant = { ContinuousClock.now }
@@ -70,6 +72,7 @@ final class LiveConversationHostModel {
         self.scheduleStore = ProactiveScheduleStore(repository: scheduleRepository)
         self.memoryStore = PersonalMemoryStore(repository: memoryRepository)
         self.isMockMode = isMockMode
+        self.environmentBadge = environmentBadge
         self.pollingWindow = pollingWindow
         self.taskPollInterval = taskPollInterval
         self.monotonicNow = monotonicNow
@@ -1244,7 +1247,7 @@ struct LiveConversationHost: View {
                     .background(EmberDesignTokens.groupedBackground)
                 } else {
                     HStack(spacing: 12) {
-                        Text("LIVE CLOUD")
+                        Text(model.environmentBadge)
                             .font(.caption.weight(.semibold))
                             .accessibilityIdentifier("live-cloud-mode")
                         Spacer()

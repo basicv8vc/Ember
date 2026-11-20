@@ -27,9 +27,11 @@ import {
   type V2DispatchEnvelope,
 } from '@ember/runtime-v2';
 import { DurableObject } from 'cloudflare:workers';
+import type { V2ModelRuntimeEnv } from './model-runtime.js';
+import { resolveV2GlobalCeilingOverride, resolveV2LocalCeilings } from './model-runtime.js';
 import type { EdgeAgentHeadRpc, HeadScope } from './rpc.js';
 
-export interface LocalRuntimeEnv extends GlobalBudgetBindings {
+export interface LocalRuntimeEnv extends GlobalBudgetBindings, V2ModelRuntimeEnv {
   readonly AGENT_HEAD: {
     getByName(name: string): AgentHeadDO;
     idFromName(name: string): DurableObjectState['id'];
@@ -37,11 +39,6 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings {
   readonly D1_RECOVERY: D1DatabaseLike;
   readonly DURABLE_TURN_QUEUE: QueueLike<V2DispatchEnvelope>;
   readonly AGENT_TASK_QUEUE: QueueLike<V2DispatchEnvelope>;
-  readonly FAKE_MODEL_GATEWAY_URL?: string;
-  readonly EMBER_ENV: string;
-  readonly EMBER_MODEL_MODE: string;
-  readonly EMBER_V2_ISOLATED_HARNESS?: string;
-  readonly EMBER_V2_STAGING_ISOLATED?: string;
   readonly EMBER_V2_ALLOWED_HOST?: string;
   readonly EMBER_V2_STAGING_ALLOWED_SUBJECTS?: string;
   readonly EMBER_APPLE_BUNDLE_ID?: string;
@@ -137,11 +134,15 @@ export class AgentHeadDO
     // Core offers the business port before it needs the facade's recovery hooks.
     let events!: AgentEventRuntimeFacade;
     const registry = new D1RecoveryRegistry(this.bindings.D1_RECOVERY);
+    const localCeilings = resolveV2LocalCeilings(this.bindings);
+    resolveV2GlobalCeilingOverride(this.bindings);
+    const defaultGlobalBudgetOpts = createAgentHeadGlobalBudgetOptions(this.bindings);
     const core: AgentHeadCore = new AgentHeadCore({
       ...scope,
       storage,
       recoveryRegistry: registry,
-      ...createAgentHeadGlobalBudgetOptions(this.bindings),
+      ...defaultGlobalBudgetOpts,
+      ...(localCeilings === undefined ? {} : { localCeilings }),
       eventRuntimeFactory(business) {
         events = new AgentEventRuntimeFacade({ ...scope, storage, business });
         return {

@@ -15,7 +15,7 @@ import {
   FAKE_MODEL_LABEL,
   FAKE_V2_RATE_VERSION,
   MODEL_LIMITS,
-  type FakeStreamingModelGateway,
+  type ModelRateRow,
 } from '@ember/model-gateway';
 import type {
   DeviceExecutionRpc,
@@ -63,6 +63,7 @@ import {
   type InteractiveExecution,
   type ReportObservedTurnUsage,
 } from './interactive-executor.js';
+import type { V2StreamingModelGateway } from './model-runtime.js';
 import type { EdgeAgentHeadRpc, PrepareTurnRequest, ResolvedMessageAttachment } from './rpc.js';
 
 const LOCAL_STREAM_PATH = '/v2/conversations/:conversationId/messages/stream';
@@ -109,8 +110,14 @@ export interface LocalV2EdgeDependencies {
     ids: readonly string[],
   ): Promise<readonly ResolvedMessageAttachment[]>;
   readonly stream?: {
-    readonly gateway: Pick<FakeStreamingModelGateway, 'streamConversationTurn'>;
+    readonly gateway: Pick<V2StreamingModelGateway, 'streamConversationTurn'>;
     readonly reportObservedUsage: ReportObservedTurnUsage;
+    readonly expectedSimulated?: boolean;
+    readonly preflightRate?: ModelRateRow | null;
+    readonly authorizeModelTurn?: (auth: AuthContext) => void;
+    readonly resolveModelReservation?: (
+      auth: AuthContext,
+    ) => PrepareTurnRequest['modelReservation'];
   };
 }
 
@@ -153,6 +160,7 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         executionMode: PrepareTurnRequest['executionMode'],
       ) {
         const resolved = await head();
+        deps.stream?.authorizeModelTurn?.(resolved.auth);
         if (resolved.conversationId.toLowerCase() !== conversationId.toLowerCase()) {
           throw new DomainError('NOT_FOUND', 'conversation is not visible');
         }
@@ -188,7 +196,7 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
             leaseMs: timing.leaseMs,
             interactiveDeadlineMs: timing.interactiveDeadlineMs,
             turnDeadlineMs: timing.turnDeadlineMs,
-            modelReservation: {
+            modelReservation: deps.stream?.resolveModelReservation?.(resolved.auth) ?? {
               budgetMode: 'simulated_full_protocol',
               providerId: 'fake',
               modelLabel: FAKE_MODEL_LABEL,
@@ -561,6 +569,12 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
                         rpc: resolved.rpc,
                         gateway: stream.gateway,
                         reportObservedUsage: stream.reportObservedUsage,
+                        ...(stream.expectedSimulated === undefined
+                          ? {}
+                          : { expectedSimulated: stream.expectedSimulated }),
+                        ...(stream.preflightRate === undefined
+                          ? {}
+                          : { preflightRate: stream.preflightRate }),
                         prepared: outcome,
                         scope: { tenantId: scope.tenantId, agentId: scope.agentId },
                         conversationId: resolved.conversationId,

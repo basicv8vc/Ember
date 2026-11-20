@@ -71,6 +71,8 @@ export interface LocalV2EdgeDependencies {
   readonly readiness?: ReadinessCheck;
   /** Optional clock seam for deterministic health timestamps in tests. */
   readonly now?: () => Date;
+  /** Allowed Hostnames for incoming requests. Defaults to loopback only. */
+  readonly allowedHosts?: readonly string[];
   /** Resolve the canonical head from verified identity; request path IDs never select a head. */
   resolveAgentHead(auth: AuthContext): Promise<ResolvedAgentHead | null>;
   /** Read already-authorized local staged metadata, including attachments on accepted replays. */
@@ -175,14 +177,15 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         '*',
         requestIdMiddleware(() => requestId),
       );
-      const localOnly: MiddlewareHandler<AppBindings> = async (c, next) => {
-        if (hostname !== 'localhost' && hostname !== '127.0.0.1' && hostname !== '[::1]') {
+      const allowedHosts = deps.allowedHosts ?? ['localhost', '127.0.0.1', '[::1]'];
+      const hostGuard: MiddlewareHandler<AppBindings> = async (c, next) => {
+        if (!allowedHosts.includes(hostname.toLowerCase())) {
           return respondNotFound(c, 'local V2 entry');
         }
         c.header('Cache-Control', 'no-store');
         await next();
       };
-      app.use('*', localOnly);
+      app.use('*', hostGuard);
       app.notFound((c) => respondNotFound(c, 'unknown route'));
       app.onError((error, c) =>
         isDomainError(error)

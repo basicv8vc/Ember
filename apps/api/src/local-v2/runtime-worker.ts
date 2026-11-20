@@ -1,4 +1,8 @@
-import { LoopbackFakeModelGateway } from '@ember/model-gateway';
+import {
+  FakeStreamingModelGateway,
+  LoopbackFakeModelGateway,
+  type FakeConversationJob,
+} from '@ember/model-gateway';
 import {
   D1RecoveryRegistry,
   RecoverySweeper,
@@ -7,31 +11,67 @@ import {
   type QueueMessageLike,
 } from '@ember/runtime-v2';
 import { createLocalV2EdgeWorker } from './edge-worker.js';
-import { createD1RecoveryReadiness, resolveV2QueueTarget } from './runtime-config.js';
-import { createDurableExecutor } from './runtime-durable.js';
+import {
+  createD1RecoveryReadiness,
+  resolveV2AllowedHosts,
+  resolveV2QueueTarget,
+} from './runtime-config.js';
+import { createDurableExecutor, type V2FakeDurableGateway } from './runtime-durable.js';
 import { createEdgeRpc, getHead, type LocalRuntimeEnv } from './runtime-head.js';
-import { createLocalSessions } from './runtime-session.js';
+import { createLocalSessions, createStagingV2Sessions } from './runtime-session.js';
 
 export { GlobalBudgetDO } from '@ember/runtime-v2/global-budget-do';
 export { AgentHeadDO } from './runtime-head.js';
 
-function localGateway(env: LocalRuntimeEnv) {
-  if (
-    !['local', 'test', 'ci'].includes(env.EMBER_ENV) ||
-    env.EMBER_MODEL_MODE !== 'fake' ||
-    env.EMBER_V2_ISOLATED_HARNESS !== 'true'
-  ) {
-    throw new Error('Expected isolated V2 runtime with fake model gateway');
+function createInWorkerFakeGateway(): V2FakeDurableGateway {
+  const jobs = new Map<string, FakeConversationJob>();
+  return new FakeStreamingModelGateway(
+    {
+      create(job: FakeConversationJob) {
+        if ([...jobs.values()].some((stored) => stored.operationId === job.operationId)) {
+          return Promise.reject(new Error('operation exists'));
+        }
+        jobs.set(job.handle, job);
+        return Promise.resolve();
+      },
+      get(handle: string) {
+        return Promise.resolve(jobs.get(handle) ?? null);
+      },
+      findByOperationId(operationId: string) {
+        return Promise.resolve(
+          [...jobs.values()].find((job) => job.operationId === operationId) ?? null,
+        );
+      },
+    },
+    { reasoningMs: 0, usageCostMicroUsd: 0 },
+  );
+}
+
+function resolveFakeGateway(env: LocalRuntimeEnv): V2FakeDurableGateway {
+  if (env.EMBER_MODEL_MODE !== 'fake') {
+    throw new Error('Expected fake model mode for V2 runtime');
   }
-  return new LoopbackFakeModelGateway(env.FAKE_MODEL_GATEWAY_URL);
+  if (['local', 'test', 'ci'].includes(env.EMBER_ENV)) {
+    if (env.EMBER_V2_ISOLATED_HARNESS !== 'true' || !env.FAKE_MODEL_GATEWAY_URL) {
+      throw new Error('Expected isolated V2 runtime with fake model gateway');
+    }
+    return new LoopbackFakeModelGateway(env.FAKE_MODEL_GATEWAY_URL);
+  }
+  if (env.EMBER_ENV === 'v2-staging' && env.EMBER_V2_STAGING_ISOLATED === 'true') {
+    return createInWorkerFakeGateway();
+  }
+  throw new Error('Expected isolated V2 runtime with fake model gateway');
 }
 
 export default {
   fetch(request: Request, env: LocalRuntimeEnv, ctx: { waitUntil(work: Promise<void>): void }) {
-    const gateway = localGateway(env);
-    const sessions = createLocalSessions(env);
+    const gateway = resolveFakeGateway(env);
+    const allowedHosts = resolveV2AllowedHosts(env);
+    const sessions =
+      env.EMBER_ENV === 'v2-staging' ? createStagingV2Sessions(env) : createLocalSessions(env);
     return createLocalV2EdgeWorker({
       sessions,
+      allowedHosts,
       readiness: createD1RecoveryReadiness(env.D1_RECOVERY),
       async resolveAgentHead(auth) {
         const me = await sessions.me.getMeForTenant(auth.tenantId);
@@ -55,12 +95,12 @@ export default {
     batch: { queue: string; messages: readonly QueueMessageLike[] },
     env: LocalRuntimeEnv,
   ) {
-    const gateway = localGateway(env);
+    const gateway = resolveFakeGateway(env);
     const resolve = (tenantId: string, agentId: string) => getHead(env, tenantId, agentId);
     const router = { getAgentHeadRecoveryPort: resolve, getDeadLetterPort: resolve };
     const target = resolveV2QueueTarget(batch.queue, env);
     if (target === null) {
-      throw new Error('Unexpected local V2 queue');
+      throw new Error('Unexpected V2 queue');
     }
     if (target.kind === 'primary') {
       await handleDurableQueueBatch({
@@ -81,7 +121,7 @@ export default {
   },
 
   async scheduled(_event: unknown, env: LocalRuntimeEnv) {
-    localGateway(env);
+    resolveFakeGateway(env);
     const db = env.D1_RECOVERY;
     await new RecoverySweeper({
       db,

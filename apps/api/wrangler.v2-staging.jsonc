@@ -8,11 +8,24 @@
   "compatibility_flags": ["nodejs_compat", "enable_request_signal"],
   "workers_dev": false,
   "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "ember-v2-staging.slowfast.dev",
+      "custom_domain": true,
+    },
+  ],
   "observability": { "enabled": true },
   "vars": {
     "EMBER_ENV": "v2-staging",
     "EMBER_MODEL_MODE": "fake",
     "EMBER_V2_STAGING_ISOLATED": "true",
+    "EMBER_V2_ALLOWED_HOST": "ember-v2-staging.slowfast.dev",
+    "EMBER_APPLE_BUNDLE_ID": "com.basicv8vc.ember",
+    "EMBER_APPLE_CLOCK_SKEW_SECONDS": "300",
+    "EMBER_APPLE_MAX_TOKEN_AGE_SECONDS": "600",
+    "EMBER_APPLE_JWKS_TIMEOUT_MS": "5000",
+    "EMBER_APPLE_JWKS_COOLDOWN_MS": "30000",
+    "EMBER_APPLE_JWKS_CACHE_MAX_AGE_MS": "600000",
     "EMBER_V2_DURABLE_TURN_QUEUE_NAME": "ember-v2-staging-durable-turn",
     "EMBER_V2_DURABLE_TURN_DLQ_NAME": "ember-v2-staging-durable-turn-dlq",
     "EMBER_V2_AGENT_TASK_QUEUE_NAME": "ember-v2-staging-agent-task",
@@ -29,8 +42,7 @@
     {
       "binding": "D1_RECOVERY",
       "database_name": "ember-v2-staging-recovery",
-      // Explicit unprovisioned placeholder; preflight blocks live deploy until provisioned.
-      "database_id": "00000000-0000-0000-0000-000000000000",
+      "database_id": "36f975f7-c79d-4559-9729-93091d811236",
       "migrations_dir": "../../packages/runtime-v2/migrations",
     },
   ],

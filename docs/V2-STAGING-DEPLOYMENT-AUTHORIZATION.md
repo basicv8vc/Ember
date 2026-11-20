@@ -1,9 +1,10 @@
 # Ember V2 — Final Isolated Staging Deployment Authorization Request
 
-- **Status:** **PENDING CTO / FOUNDER APPROVAL** (no cloud resources provisioned or deployed)
+- **Status:** **APPROVED & DEPLOYED (Stage 1 — Fake-Provider Isolated Cloud Staging)**
 - **Date:** 2026-11-20
 - **Owner:** Agent A (Infrastructure, Runtime Reliability & Cost)
-- **Verified Baseline:** `origin/main @ febeabc` (`#203` V2 staging config/preflight + `#204` `/healthz`, `/readyz`, configurable queue routing)
+- **Approved Option:** Option 1 (`ember-v2-staging.slowfast.dev`) + Option A (Apple Sign In + D1 sessions + `dev` denied) + `EMBER_MODEL_MODE="fake"` (`<= $10/mo` envelope)
+- **Deployed Resource IDs:** Worker `ember-v2-staging` (Version `0a8a0216-5daa-4300-8e6a-531aea090d8c`), D1 `ember-v2-staging-recovery` (`36f975f7-c79d-4559-9729-93091d811236`, APAC, `0001_v2_recovery_registry.sql` applied), 4 isolated `ember-v2-staging-*` queues/DLQs
 - **Related:** [V2 Staging Readiness](./V2-STAGING-READINESS.md), [Product Alpha Roadmap](./product/PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](./adr/0006-experience-first-device-powered-runtime-v2.md), [V1 Ember Cloud](./cloud-staging.md)
 
 ---

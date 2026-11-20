@@ -8,6 +8,44 @@ export interface V2QueueNameEnv {
   readonly EMBER_V2_AGENT_TASK_DLQ_NAME?: string;
 }
 
+export interface V2HostPolicyEnv {
+  readonly EMBER_ENV: string;
+  readonly EMBER_V2_ALLOWED_HOST?: string;
+}
+
+const LOOPBACK_HOSTS = Object.freeze(['localhost', '127.0.0.1', '[::1]'] as const);
+
+/**
+ * Resolve allowed Hostnames for the V2 edge worker.
+ * Local/test/ci allow loopback only; v2-staging requires an explicit approved hostname.
+ */
+export function resolveV2AllowedHosts(env: V2HostPolicyEnv): readonly string[] {
+  if (['local', 'test', 'ci'].includes(env.EMBER_ENV)) {
+    return LOOPBACK_HOSTS;
+  }
+  if (env.EMBER_ENV === 'v2-staging') {
+    const host = env.EMBER_V2_ALLOWED_HOST?.trim().toLowerCase() ?? '';
+    if (host.length === 0 || host.includes('/') || host.includes(':')) {
+      throw new Error('EMBER_V2_ALLOWED_HOST must be a bare hostname in v2-staging');
+    }
+    return [host];
+  }
+  throw new Error(`Unsupported V2 EMBER_ENV: ${env.EMBER_ENV}`);
+}
+
+/**
+ * Parse an optional comma-separated Apple subject allowlist for V2 staging.
+ * Returns null when unset/blank (meaning any valid Apple account for the bundle ID is allowed).
+ */
+export function parseAllowedSubjects(raw: string | undefined): ReadonlySet<string> | null {
+  if (raw === undefined || raw.trim().length === 0) return null;
+  const subjects = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  return subjects.length === 0 ? null : new Set(subjects);
+}
+
 export type ResolvedV2QueueTarget =
   | { readonly kind: 'primary'; readonly logicalQueue: 'durable_turn' | 'agent_task' }
   | { readonly kind: 'dlq'; readonly expectedQueueName: 'durable_turn' | 'agent_task' };

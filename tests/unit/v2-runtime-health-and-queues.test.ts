@@ -4,6 +4,8 @@ import type { B1SessionRuntime } from '../../apps/api/src/auth/b1-auth-runtime.j
 import { createLocalV2EdgeWorker } from '../../apps/api/src/local-v2/edge-worker.js';
 import {
   createD1RecoveryReadiness,
+  parseAllowedSubjects,
+  resolveV2AllowedHosts,
   resolveV2QueueTarget,
 } from '../../apps/api/src/local-v2/runtime-config.js';
 
@@ -152,5 +154,50 @@ describe('V2 queue name routing', () => {
     });
     // Default local names are not accepted when overridden to staging names
     expect(resolveV2QueueTarget('durable_turn', stagingEnv)).toBeNull();
+  });
+});
+
+describe('V2 staging host and subject allowlist', () => {
+  it('resolves loopback for local envs and enforces bare hostname for v2-staging', () => {
+    expect(resolveV2AllowedHosts({ EMBER_ENV: 'local' })).toEqual([
+      'localhost',
+      '127.0.0.1',
+      '[::1]',
+    ]);
+    expect(
+      resolveV2AllowedHosts({
+        EMBER_ENV: 'v2-staging',
+        EMBER_V2_ALLOWED_HOST: 'Ember-V2-Staging.SlowFast.dev',
+      }),
+    ).toEqual(['ember-v2-staging.slowfast.dev']);
+    expect(() => resolveV2AllowedHosts({ EMBER_ENV: 'v2-staging' })).toThrow();
+    expect(() =>
+      resolveV2AllowedHosts({
+        EMBER_ENV: 'v2-staging',
+        EMBER_V2_ALLOWED_HOST: 'https://ember-v2-staging.slowfast.dev',
+      }),
+    ).toThrow();
+    expect(() => resolveV2AllowedHosts({ EMBER_ENV: 'production' })).toThrow();
+  });
+
+  it('enforces custom allowedHosts on edge worker', async () => {
+    const worker = createLocalV2EdgeWorker({
+      sessions: minimalSessions(),
+      resolveAgentHead: () => Promise.resolve(null),
+      allowedHosts: ['ember-v2-staging.slowfast.dev'],
+    });
+
+    const allowed = await worker.fetch(
+      new Request('https://ember-v2-staging.slowfast.dev/healthz'),
+    );
+    expect(allowed.status).toBe(200);
+    const blocked = await worker.fetch(new Request('https://ember-api.slowfast.dev/healthz'));
+    expect(blocked.status).toBe(404);
+  });
+
+  it('parses optional comma-separated Apple subject allowlist', () => {
+    expect(parseAllowedSubjects(undefined)).toBeNull();
+    expect(parseAllowedSubjects('   ')).toBeNull();
+    expect(parseAllowedSubjects('sub-1, sub-2 , ')).toEqual(new Set(['sub-1', 'sub-2']));
   });
 });

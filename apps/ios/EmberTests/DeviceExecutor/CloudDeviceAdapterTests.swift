@@ -1235,6 +1235,101 @@ final class CloudDeviceAdapterTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testMonitorDispatchesAndCompletesDeviceTextTaskEndToEnd() async throws {
+        let dir = try makeTempDirectory()
+        let config = try makeConfiguration(origin: "https://device-dispatch.ember.test")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-dispatch")
+
+        let transport = DispatchLoopbackCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let monitor = CloudDeviceAdapterMonitor()
+        try await monitor.connect(
+            configuration: config,
+            authProvider: auth,
+            credentialStore: creds,
+            transport: transport,
+            journal: CloudDeviceExecutionJournal(directory: dir),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir),
+            clock: clock,
+            autoStart: true
+        )
+
+        await transport.waitForRegister()
+        XCTAssertNotNil(monitor.deviceID)
+
+        await monitor.dispatchTestTextTask(text: "Hello Ember\nLine 2")
+
+        let dispatched = try XCTUnwrap(monitor.lastDispatchedTask)
+        XCTAssertEqual(dispatched.status, "completed")
+        XCTAssertEqual(dispatched.availability, "ready")
+        XCTAssertEqual(
+            dispatched.result,
+            CloudDeviceTextStats(utf8Bytes: 18, unicodeScalars: 18, lines: 2)
+        )
+        XCTAssertNil(monitor.dispatchErrorMessage)
+        await monitor.stop()
+    }
+
+    func testCloudDeviceAPIClientDispatchAndFetchDeviceTaskStatus() async throws {
+        let config = try makeConfiguration(origin: "https://device-task-api.ember.test")
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let client = CloudDeviceAPIClient(configuration: config, authProvider: auth, session: makeStubSession())
+
+        let expectedDeviceID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let expectedOpID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+        let expectedTaskID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+
+        StubCloudURLProtocol.setHandler { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST", path == "/v2/device-tasks" {
+                let json = """
+                {
+                  "taskId": "\(expectedTaskID.uuidString.lowercased())",
+                  "operationId": "\(expectedOpID.uuidString.lowercased())",
+                  "deviceId": "\(expectedDeviceID.uuidString.lowercased())",
+                  "status": "queued",
+                  "availability": "ready",
+                  "reason": null,
+                  "result": null,
+                  "replayed": false
+                }
+                """
+                return (201, Data(json.utf8))
+            }
+            if request.httpMethod == "GET", path == "/v2/device-tasks/\(expectedTaskID.uuidString.lowercased())" {
+                let json = """
+                {
+                  "taskId": "\(expectedTaskID.uuidString.lowercased())",
+                  "operationId": "\(expectedOpID.uuidString.lowercased())",
+                  "deviceId": "\(expectedDeviceID.uuidString.lowercased())",
+                  "status": "completed",
+                  "availability": "ready",
+                  "reason": null,
+                  "result": { "utf8Bytes": 5, "unicodeScalars": 5, "lines": 1 },
+                  "replayed": null
+                }
+                """
+                return (200, Data(json.utf8))
+            }
+            return (404, Data("{}".utf8))
+        }
+
+        let queued = try await client.dispatchTextTask(
+            deviceID: expectedDeviceID,
+            operationID: expectedOpID,
+            text: "hello",
+            deadlineMs: 60_000
+        )
+        XCTAssertEqual(queued.taskId, expectedTaskID)
+        XCTAssertEqual(queued.status, "queued")
+
+        let completed = try await client.fetchDeviceTaskStatus(taskID: expectedTaskID)
+        XCTAssertEqual(completed.status, "completed")
+        XCTAssertEqual(completed.result, CloudDeviceTextStats(utf8Bytes: 5, unicodeScalars: 5, lines: 1))
+    }
+
     func testJournalWriteFailureBlocksResultSubmission() async throws {
         let dir = try makeTempDirectory()
         // Place a regular file where the journal directory wants to be so persistState() throws.
@@ -2089,5 +2184,125 @@ private actor MockCloudTransport: CloudDeviceAPITransporting {
     ) async throws -> CloudDeviceCommitOutcome {
         resultSubmissions.append(submission)
         return commitOutcome
+    }
+}
+
+private actor DispatchLoopbackCloudTransport: CloudDeviceAPITransporting, CloudDeviceTaskDispatching {
+    private let readyUntilMs: Int64
+    private var isRegistered = false
+    private var registerWaiters: [CheckedContinuation<Void, Never>] = []
+    private var queuedOffers: [CloudDeviceClaimOffer] = []
+    private var snapshots: [UUID: CloudDeviceTaskSnapshot] = [:]
+
+    init(readyUntilMs: Int64) {
+        self.readyUntilMs = readyUntilMs
+    }
+
+    func waitForRegister() async {
+        if isRegistered { return }
+        await withCheckedContinuation { continuation in
+            registerWaiters.append(continuation)
+        }
+    }
+
+    func register(credential: CloudDeviceCredential) async throws -> CloudDeviceRegistrationReceipt {
+        isRegistered = true
+        let waiters = registerWaiters
+        registerWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        return CloudDeviceRegistrationReceipt(
+            deviceId: credential.id,
+            capability: CloudDeviceContract.textCapability,
+            version: CloudDeviceContract.capabilityVersion,
+            readyUntilMs: readyUntilMs
+        )
+    }
+
+    func claim(credential: CloudDeviceCredential) async throws -> CloudDeviceClaimResponse {
+        guard !queuedOffers.isEmpty else { return .idle }
+        let offer = queuedOffers.removeFirst()
+        if let existing = snapshots[offer.taskId] {
+            snapshots[offer.taskId] = CloudDeviceTaskSnapshot(
+                taskId: existing.taskId,
+                operationId: existing.operationId,
+                deviceId: existing.deviceId,
+                status: "running",
+                availability: existing.availability,
+                reason: nil,
+                result: nil,
+                replayed: existing.replayed
+            )
+        }
+        return .claimed(offer)
+    }
+
+    func renew(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        fence: CloudDeviceFence,
+        previousLeaseExpiresAtMs: Int64,
+        deadlineAtMs: Int64
+    ) async throws -> CloudDeviceRenewOutcome {
+        .renewed(leaseExpiresAtMs: deadlineAtMs)
+    }
+
+    func submitResult(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        submission: CloudDeviceResultSubmission
+    ) async throws -> CloudDeviceCommitOutcome {
+        if let existing = snapshots[taskID] {
+            snapshots[taskID] = CloudDeviceTaskSnapshot(
+                taskId: existing.taskId,
+                operationId: existing.operationId,
+                deviceId: existing.deviceId,
+                status: submission.status == .completed ? "completed" : "failed",
+                availability: "ready",
+                reason: submission.status == .completed ? nil : "executor_failed",
+                result: submission.output,
+                replayed: false
+            )
+        }
+        return .committed(replayed: false)
+    }
+
+    func dispatchTextTask(
+        deviceID: UUID,
+        operationID: UUID,
+        text: String,
+        deadlineMs: Int
+    ) async throws -> CloudDeviceTaskSnapshot {
+        let taskID = UUID()
+        let offer = CloudDeviceClaimOffer(
+            taskId: taskID,
+            operationId: operationID,
+            runId: UUID(),
+            leaseEpoch: 1,
+            leaseExpiresAtMs: readyUntilMs,
+            deadlineAtMs: readyUntilMs + Int64(deadlineMs),
+            capability: CloudDeviceContract.textCapability,
+            version: CloudDeviceContract.capabilityVersion,
+            input: CloudDeviceTextInput(operation: CloudDeviceContract.statsOperation, text: text)
+        )
+        queuedOffers.append(offer)
+        let snapshot = CloudDeviceTaskSnapshot(
+            taskId: taskID,
+            operationId: operationID,
+            deviceId: deviceID,
+            status: "queued",
+            availability: "ready",
+            reason: nil,
+            result: nil,
+            replayed: false
+        )
+        snapshots[taskID] = snapshot
+        return snapshot
+    }
+
+    func fetchDeviceTaskStatus(taskID: UUID) async throws -> CloudDeviceTaskSnapshot {
+        guard let snapshot = snapshots[taskID] else {
+            throw CloudDeviceError.httpStatus(404)
+        }
+        return snapshot
     }
 }

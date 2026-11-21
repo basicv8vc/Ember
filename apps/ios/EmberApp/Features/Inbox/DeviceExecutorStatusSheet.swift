@@ -9,6 +9,9 @@ struct DeviceExecutorStatusSheet: View {
     let onSetEnabled: (Bool) -> Void
 
     @State private var copiedDeviceID = false
+    #if DEBUG
+    @State private var qaSampleText = "Hello Ember\nLine 2"
+    #endif
 
     var body: some View {
         NavigationStack {
@@ -114,6 +117,77 @@ struct DeviceExecutorStatusSheet: View {
                         EmberDesignTokens.cardBackground,
                         in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
                     )
+
+                    #if DEBUG
+                    if monitor.deviceID != nil {
+                        VStack(alignment: .leading, spacing: 10) {
+                            Text("Internal QA — Dispatch Device Text Task")
+                                .font(.subheadline.weight(.semibold))
+
+                            TextField("Sample text", text: $qaSampleText, axis: .vertical)
+                                .textFieldStyle(.roundedBorder)
+                                .lineLimit(2...5)
+                                .accessibilityIdentifier("device-executor-qa-input")
+
+                            HStack {
+                                Button {
+                                    Task { await monitor.dispatchTestTextTask(text: qaSampleText) }
+                                } label: {
+                                    if monitor.isDispatchingTestTask {
+                                        ProgressView()
+                                            .controlSize(.small)
+                                    } else {
+                                        Text("Dispatch Test Task")
+                                    }
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(monitor.isDispatchingTestTask || qaSampleText.isEmpty)
+                                .accessibilityIdentifier("device-executor-qa-dispatch")
+
+                                if let task = monitor.lastDispatchedTask, !task.isTerminal {
+                                    Button("Refresh") {
+                                        Task { await monitor.refreshDispatchedTaskStatus() }
+                                    }
+                                    .buttonStyle(.bordered)
+                                    .accessibilityIdentifier("device-executor-qa-refresh")
+                                }
+                            }
+
+                            if let dispatchError = monitor.dispatchErrorMessage {
+                                Text(dispatchError)
+                                    .font(.caption)
+                                    .foregroundStyle(.red)
+                                    .accessibilityIdentifier("device-executor-qa-error")
+                            }
+
+                            if let task = monitor.lastDispatchedTask {
+                                Divider()
+                                VStack(alignment: .leading, spacing: 4) {
+                                    Text("Task: \(task.taskId.uuidString.lowercased())")
+                                        .font(.caption.monospaced())
+                                    Text("Status: \(task.status) · Availability: \(task.availability)")
+                                        .font(.caption.weight(.medium))
+                                    if let reason = task.reason {
+                                        Text("Reason: \(reason)")
+                                            .font(.caption)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if let stats = task.result {
+                                        Text("Result: UTF-8 \(stats.utf8Bytes) B · Scalars \(stats.unicodeScalars) · Lines \(stats.lines)")
+                                            .font(.caption.monospaced())
+                                            .foregroundStyle(Color(uiColor: .systemGreen))
+                                            .accessibilityIdentifier("device-executor-qa-result")
+                                    }
+                                }
+                            }
+                        }
+                        .padding(EmberDesignTokens.standardSpacing)
+                        .background(
+                            EmberDesignTokens.cardBackground,
+                            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+                        )
+                    }
+                    #endif
                 }
                 .padding(EmberDesignTokens.standardSpacing)
                 .frame(maxWidth: 720)

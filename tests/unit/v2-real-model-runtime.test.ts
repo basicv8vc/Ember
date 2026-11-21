@@ -10,6 +10,7 @@ import { DomainError } from '@ember/domain';
 import {
   OPENROUTER_CHAT_COMPLETIONS_URL,
   OpenRouterModelGateway,
+  SCHEDULED_BRIEF_SYSTEM_PROMPT,
   type FetchLike,
 } from '@ember/model-gateway';
 import {
@@ -19,6 +20,7 @@ import {
   createDefaultAgentHeadMigrations,
   type D1DatabaseLike,
   type DurableObjectStorageLike,
+  type ProactiveScheduleSnapshot,
   type QueueLike,
   type RecoveryRegistryPort,
   type V2DispatchEnvelope,
@@ -104,7 +106,9 @@ function createSqliteStorage(db: DatabaseSync): DurableObjectStorageLike {
   } as unknown as DurableObjectStorageLike;
 }
 
-function createInMemoryHarness(options: { globalCeilingMicroUsd?: number } = {}) {
+function createInMemoryHarness(
+  options: { globalCeilingMicroUsd?: number; nowMs?: () => number } = {},
+) {
   const headDb = new DatabaseSync(':memory:');
   const gbDb = new DatabaseSync(':memory:');
   const headStorage = createSqliteStorage(headDb);
@@ -156,6 +160,7 @@ function createInMemoryHarness(options: { globalCeilingMicroUsd?: number } = {})
     recoveryRegistry: registry,
     globalBudget,
     globalDailyCeilingMicroUsd: options.globalCeilingMicroUsd ?? 100_000,
+    ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
     eventRuntimeFactory(business) {
       events = new AgentEventRuntimeFacade({
         storage: headStorage,
@@ -187,6 +192,7 @@ function createInMemoryHarness(options: { globalCeilingMicroUsd?: number } = {})
     gbDb,
     core,
     events,
+    registry,
     globalBudget,
     sentMessages,
     queue,
@@ -988,5 +994,363 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       { content: 'Concise answers' },
     ]);
     expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('executes proactive model_brief in real mode with memory/context and without delegation tools', async () => {
+    let nowMs = Date.now();
+    const h = createInMemoryHarness({ nowMs: () => nowMs });
+    const fetchBodies: Array<Record<string, unknown>> = [];
+    const runtime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: (url, init) => {
+        expect(url).toBe(OPENROUTER_CHAT_COMPLETIONS_URL);
+        fetchBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              model: APPROVED_OPENROUTER_MODEL,
+              choices: [
+                {
+                  message: { role: 'assistant', content: 'Kyoto espresso weather check: 14C.' },
+                  finish_reason: 'stop',
+                },
+              ],
+              usage: { prompt_tokens: 95, completion_tokens: 18 },
+            }),
+        });
+      },
+    });
+    expect(runtime.estimateBriefReservation('Morning check')).toBeLessThan(
+      runtime.getTurnReservation().estimatedMicroUsd,
+    );
+
+    const headProxy = {
+      markAttemptSent: (req: Parameters<AgentHeadCore['markAttemptSent']>[0]) =>
+        h.core.markAttemptSent(req),
+      reserveTaskModelAttempt: (req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) =>
+        h.core.reserveTaskModelAttempt(req),
+      taskArtifacts: (req: Parameters<AgentHeadCore['taskArtifacts']>[0]) =>
+        h.core.taskArtifacts(req),
+      edgeRpc: async (method: string, req: unknown) => {
+        if (method === 'readMessages') {
+          return { value: await h.core.readMessages(req as never) };
+        }
+        if (method === 'proactiveSchedule') {
+          return { value: await h.core.proactiveSchedule(req as never) };
+        }
+        if (method === 'personalMemory') {
+          return { value: await h.core.personalMemory(req as never) };
+        }
+        throw new Error(`Unexpected edgeRpc method: ${method}`);
+      },
+    };
+    const env = {
+      ...baseRealEnv(),
+      AGENT_HEAD: { getByName: () => headProxy },
+      D1_RECOVERY: {} as D1DatabaseLike,
+      DURABLE_TURN_QUEUE: h.queue,
+      AGENT_TASK_QUEUE: h.queue,
+      GLOBAL_BUDGET: { getByName: () => h.globalBudget },
+    } as unknown as Parameters<typeof createDurableExecutor>[0];
+
+    await h.core.personalMemory({
+      kind: 'save',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        key: 'coffee_city',
+        content: 'Prefer Kyoto pour-over updates',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    const prepared = await h.core.prepareTurn({
+      scope: {
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        policyVersion: 1,
+        requestId: randomUUID(),
+      },
+      conversationId: CONVERSATION_A,
+      executionMode: 'fast_interactive',
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Watch morning roast availability tomorrow.',
+        transcript_epoch: 0,
+      },
+      workerId: 'edge-ctx-1',
+      leaseMs: 30_000,
+      interactiveDeadlineMs: 20_000,
+      turnDeadlineMs: 60_000,
+      modelReservation: runtime.getTurnReservation(),
+    });
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared');
+    await h.core.commitTurn({
+      scope: {
+        tenantId: TENANT_A,
+        agentId: AGENT_A,
+      },
+      conversationId: CONVERSATION_A,
+      turnId: prepared.turnId,
+      attemptNo: 1,
+      operationId: prepared.operationId,
+      leaseEpoch: 1,
+      leaseOwner: 'edge-ctx-1',
+      settlement: { state: 'released', outcomeCode: 'not_sent' },
+      result: {
+        status: 'completed',
+        text: 'Got it, tracking roast updates.',
+        modelLabel: runtime.modelLabel,
+        simulated: false,
+      },
+    });
+
+    const fireAtMs = nowMs + 60_000;
+    const created = (await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'real-brief-1',
+        kind: 'follow_up',
+        title: 'Morning Coffee Brief',
+        prompt: 'Check Kyoto roast notes and summarize.',
+        trigger: { type: 'once', fireAt: new Date(fireAtMs).toISOString() },
+        timezone: 'UTC',
+        deliveryMode: 'model_brief',
+      },
+    })) as ProactiveScheduleSnapshot;
+
+    nowMs = fireAtMs + 1_000;
+    await h.events.handleAlarm({
+      nowMs,
+      queues: { durable_turn: h.queue, agent_task: h.queue },
+      globalBudget: h.core.createGlobalBudgetSettlePort(),
+      registry: h.registry,
+    });
+    const taskEnvelope = h.sentMessages.find((msg) => msg.entityKind === 'task');
+    expect(taskEnvelope).toBeDefined();
+    if (taskEnvelope === undefined) return;
+
+    const claim = await h.core.claimDurableWork({
+      envelope: taskEnvelope,
+      workerId: 'worker-brief-real',
+      leaseMs: 30_000,
+    });
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') return;
+
+    const executor = createDurableExecutor(env, runtime.gateway, { modelRuntime: runtime });
+    const outcome = await executor.executeDurableWork({
+      ...claim,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-brief-real',
+    });
+    const committed = await h.core.commitDurableResult({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      entityType: 'task',
+      entityId: taskEnvelope.entityId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'worker-brief-real',
+      outcome,
+    });
+
+    expect(committed.accepted).toBe(true);
+    expect(fetchBodies).toHaveLength(1);
+    const wireBody = fetchBodies[0]!;
+    expect(wireBody['tools']).toBeUndefined();
+    expect(wireBody['tool_choice']).toBeUndefined();
+    const wireMessages = wireBody['messages'] as Array<{ role: string; content: string }>;
+    expect(wireMessages[0]).toEqual({ role: 'system', content: SCHEDULED_BRIEF_SYSTEM_PROMPT });
+    const promptMessage = wireMessages.at(-1)?.content ?? '';
+    expect(promptMessage).toContain('Prefer Kyoto pour-over updates');
+    expect(promptMessage).toContain('Watch morning roast availability tomorrow.');
+    expect(promptMessage).toContain('Check Kyoto roast notes and summarize.');
+
+    const msgs = await h.core.readMessages({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      conversationId: CONVERSATION_A,
+      after: 0,
+      limit: 10,
+    });
+    expect(msgs.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: '**Morning Coffee Brief**\n\nKyoto espresso weather check: 14C.',
+      model_label: APPROVED_OPENROUTER_MODEL,
+      simulated: false,
+    });
+
+    const schedules = (await h.core.proactiveSchedule({
+      kind: 'list',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+    })) as { schedules: ProactiveScheduleSnapshot[] };
+    const updatedSchedule = schedules.schedules.find((s) => s.scheduleId === created.scheduleId);
+    expect(updatedSchedule?.latestRun?.status).toBe('completed');
+    expect(updatedSchedule?.latestRun?.reasonCode).toBe('ok');
+  });
+
+  it('blocks recovered unsent proactive model_brief after tenant revocation while preserving sent recovery', async () => {
+    let nowMs = Date.now();
+    const h = createInMemoryHarness({ nowMs: () => nowMs });
+    let providerCalls = 0;
+    const revokedRuntime = resolveV2ModelRuntime(
+      baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: TENANT_B }),
+      {
+        fetchImpl: () => {
+          providerCalls += 1;
+          return Promise.reject(new Error('must not be called after tenant revocation'));
+        },
+      },
+    );
+    const markAttemptSent = vi.fn((req: Parameters<AgentHeadCore['markAttemptSent']>[0]) =>
+      h.core.markAttemptSent(req),
+    );
+    const headProxy = {
+      markAttemptSent,
+      reserveTaskModelAttempt: (req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) =>
+        h.core.reserveTaskModelAttempt(req),
+      taskArtifacts: (req: Parameters<AgentHeadCore['taskArtifacts']>[0]) =>
+        h.core.taskArtifacts(req),
+      edgeRpc: async (method: string, req: unknown) => {
+        if (method === 'readMessages') return { value: await h.core.readMessages(req as never) };
+        if (method === 'proactiveSchedule') {
+          return { value: await h.core.proactiveSchedule(req as never) };
+        }
+        if (method === 'personalMemory') {
+          return { value: await h.core.personalMemory(req as never) };
+        }
+        throw new Error(`Unexpected edgeRpc method: ${method}`);
+      },
+    };
+    const env = {
+      ...baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: TENANT_B }),
+      AGENT_HEAD: { getByName: () => headProxy },
+      D1_RECOVERY: {} as D1DatabaseLike,
+      DURABLE_TURN_QUEUE: h.queue,
+      AGENT_TASK_QUEUE: h.queue,
+      GLOBAL_BUDGET: { getByName: () => h.globalBudget },
+    } as unknown as Parameters<typeof createDurableExecutor>[0];
+
+    const fireAtMs = nowMs + 60_000;
+    await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'real-brief-revoked',
+        kind: 'follow_up',
+        title: 'Revoked Canary Brief',
+        prompt: 'Check status updates.',
+        trigger: { type: 'once', fireAt: new Date(fireAtMs).toISOString() },
+        timezone: 'UTC',
+        deliveryMode: 'model_brief',
+      },
+    });
+
+    nowMs = fireAtMs + 1_000;
+    await h.events.handleAlarm({
+      nowMs,
+      queues: { durable_turn: h.queue, agent_task: h.queue },
+      globalBudget: h.core.createGlobalBudgetSettlePort(),
+      registry: h.registry,
+    });
+    const taskEnvelope = h.sentMessages.find((msg) => msg.entityKind === 'task')!;
+    const claim = await h.core.claimDurableWork({
+      envelope: taskEnvelope,
+      workerId: 'worker-brief-revoked',
+      leaseMs: 30_000,
+    });
+    if (claim.kind !== 'claimed') throw new Error('expected claimed');
+    const rawClaim = JSON.parse(claim.contextJson) as Record<string, unknown>;
+    const reserved = await h.core.reserveTaskModelAttempt({
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      taskId: taskEnvelope.entityId,
+      runId: rawClaim['runId'] as string,
+      leaseEpoch: claim.leaseEpoch,
+      budgetMode: 'real',
+      providerId: 'openrouter',
+      modelLabel: APPROVED_OPENROUTER_MODEL,
+      rateVersion: revokedRuntime.rateVersion,
+      estimatedMicroUsd: revokedRuntime.estimateBriefReservation('Check status updates.'),
+    });
+    if (reserved.kind !== 'reserved') throw new Error('expected reserved');
+
+    const unsentRecoveredContext = {
+      ...rawClaim,
+      attemptId: String(reserved.attemptNo),
+      attemptNo: reserved.attemptNo,
+      operationId: reserved.operationId,
+      sendState: 'unsent',
+      sendAuthorizingAtMs: null,
+      sendStartedAtMs: null,
+      providerJobHandle: null,
+    };
+
+    const executor = createDurableExecutor(env, revokedRuntime.gateway, {
+      modelRuntime: revokedRuntime,
+    });
+    const unsentOutcome = await executor.executeDurableWork({
+      ...claim,
+      contextJson: JSON.stringify(unsentRecoveredContext),
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-brief-revoked',
+    });
+    expect(providerCalls).toBe(0);
+    expect(markAttemptSent).not.toHaveBeenCalled();
+    expect(unsentOutcome).toMatchObject({
+      attemptNo: reserved.attemptNo,
+      operationId: reserved.operationId,
+      settlement: { state: 'released', outcomeCode: 'not_sent' },
+      status: 'failed',
+      summaryText: 'Revoked Canary Brief',
+      reasonCode: 'model_unauthorized_tenant',
+    });
+
+    const committed = await h.core.commitDurableResult({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      entityType: 'task',
+      entityId: taskEnvelope.entityId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'worker-brief-revoked',
+      outcome: unsentOutcome,
+    });
+    expect(committed.accepted).toBe(true);
+
+    // Sent recovery still commits conservatively as unknown_billed without blind replay.
+    const sentOutcome = await executor.executeDurableWork({
+      ...claim,
+      contextJson: JSON.stringify({
+        ...unsentRecoveredContext,
+        sendState: 'sent',
+        sendStartedAtMs: nowMs,
+      }),
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-brief-revoked',
+    });
+    expect(sentOutcome).toMatchObject({
+      attemptNo: reserved.attemptNo,
+      operationId: reserved.operationId,
+      settlement: { state: 'unknown_billed' },
+      status: 'failed',
+    });
   });
 });

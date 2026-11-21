@@ -29,6 +29,7 @@ import {
 import { DurableObject } from 'cloudflare:workers';
 import type { V2ModelRuntimeEnv } from './model-runtime.js';
 import { resolveV2GlobalCeilingOverride, resolveV2LocalCeilings } from './model-runtime.js';
+import { resolveV2AllowRecurringBriefs } from './runtime-config.js';
 import type { EdgeAgentHeadRpc, HeadScope } from './rpc.js';
 
 export interface LocalRuntimeEnv extends GlobalBudgetBindings, V2ModelRuntimeEnv {
@@ -136,6 +137,7 @@ export class AgentHeadDO
     const registry = new D1RecoveryRegistry(this.bindings.D1_RECOVERY);
     const localCeilings = resolveV2LocalCeilings(this.bindings);
     resolveV2GlobalCeilingOverride(this.bindings);
+    const allowRecurringModelBriefs = resolveV2AllowRecurringBriefs(this.bindings);
     const defaultGlobalBudgetOpts = createAgentHeadGlobalBudgetOptions(this.bindings);
     const core: AgentHeadCore = new AgentHeadCore({
       ...scope,
@@ -143,6 +145,7 @@ export class AgentHeadDO
       recoveryRegistry: registry,
       ...defaultGlobalBudgetOpts,
       ...(localCeilings === undefined ? {} : { localCeilings }),
+      allowRecurringModelBriefs,
       eventRuntimeFactory(business) {
         events = new AgentEventRuntimeFacade({ ...scope, storage, business });
         return {

@@ -31,6 +31,7 @@ import {
   type ModelReservationInput,
 } from '@ember/runtime-v2';
 import {
+  resolveV2AllowRecurringBriefs,
   resolveV2AlphaTenantAllowlist,
   resolveV2SandboxConfig,
   type V2SandboxConfig,
@@ -76,6 +77,7 @@ export interface V2ModelRuntimeEnv extends V2SandboxEnv {
   readonly EMBER_MODEL_API_KEY?: string;
   readonly EMBER_MODEL_ALPHA_SCOPE?: string;
   readonly EMBER_MODEL_ALPHA_TENANT_IDS?: string;
+  readonly EMBER_MODEL_ALLOW_RECURRING_BRIEFS?: string;
   readonly EMBER_MODEL_ATTEMPT_TIMEOUT_MS?: string;
   readonly EMBER_MODEL_TURN_LEASE_MS?: string;
   readonly EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD?: string;
@@ -96,6 +98,7 @@ export interface V2ModelRuntime {
   readonly rate: ModelRateRow | null;
   readonly simulated: boolean;
   readonly budgetMode: 'simulated_full_protocol' | 'real';
+  readonly allowRecurringBriefs: boolean;
   readonly attemptTimeoutMs: number;
   readonly perAttemptCeilingMicroUsd: number;
   isTenantAuthorized(tenantId: string): boolean;
@@ -354,6 +357,7 @@ export function resolveV2ModelRuntime(
   options: ResolveV2ModelRuntimeOptions = {},
 ): V2ModelRuntime {
   const sandboxConfig = resolveV2SandboxConfig(env);
+  const allowRecurringBriefs = resolveV2AllowRecurringBriefs(env);
   const fakeReservationMicroUsd = 250;
 
   if (env.EMBER_MODEL_MODE === 'fake') {
@@ -381,6 +385,7 @@ export function resolveV2ModelRuntime(
       rate: null,
       simulated: true,
       budgetMode: 'simulated_full_protocol',
+      allowRecurringBriefs,
       attemptTimeoutMs: MODEL_LIMITS.attemptTimeoutMs,
       perAttemptCeilingMicroUsd: V2_BUDGET_LIMITS.perAttemptMicroUsd,
       isTenantAuthorized: () => true,
@@ -489,6 +494,7 @@ export function resolveV2ModelRuntime(
     rate,
     simulated: false,
     budgetMode: 'real',
+    allowRecurringBriefs,
     attemptTimeoutMs: resolution.settings.attemptTimeoutMs,
     perAttemptCeilingMicroUsd: perAttemptCeiling,
     isTenantAuthorized(tenantId: string) {

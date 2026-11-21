@@ -198,6 +198,7 @@ export interface ProactiveScheduleTaskPayload {
   readonly title: string;
   readonly prompt: string;
   readonly deliveryMode: ProactiveDeliveryMode;
+  readonly scheduleKind?: ScheduleKind;
   readonly timezone: string;
   readonly scheduledForMs: number;
 }
@@ -210,6 +211,7 @@ const proactiveScheduleTaskPayloadSchema = z.strictObject({
   title: z.string().min(1),
   prompt: z.string().min(1),
   deliveryMode: proactiveDeliveryModeSchema,
+  scheduleKind: z.enum(['once', 'interval', 'cron_tz']).optional(),
   timezone: z.string().min(1),
   scheduledForMs: z.number().int().nonnegative(),
 });

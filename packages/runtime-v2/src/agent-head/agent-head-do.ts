@@ -97,6 +97,7 @@ export type AgentHeadCoreOptions = {
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
   readonly globalDailyCeilingMicroUsd?: number;
+  readonly allowRecurringModelBriefs?: boolean;
   readonly migrations?: readonly AgentHeadMigrationStep[];
 } & (
   | AgentHeadEventRuntimeBindings
@@ -277,6 +278,9 @@ export class AgentHeadCore
       eventCoordinator: bindings.eventCoordinator,
       nowMs: this.nowMsFn,
       newId: this.newId,
+      ...(options.allowRecurringModelBriefs === undefined
+        ? {}
+        : { allowRecurringModelBriefs: options.allowRecurringModelBriefs }),
     });
 
     this.taskArtifactService = new AgentHeadTaskArtifactService({
@@ -303,6 +307,9 @@ export class AgentHeadCore
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
       globalDailyCeilingMicroUsd: this.globalDailyCeilingMicroUsd,
+      ...(options.allowRecurringModelBriefs === undefined
+        ? {}
+        : { allowRecurringModelBriefs: options.allowRecurringModelBriefs }),
     });
   }
 

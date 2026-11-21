@@ -182,6 +182,39 @@ describe('V2 staging preflight validator', () => {
     });
     expect(secretResult.ok).toBe(false);
     expect(secretResult.errors.some((e) => e.includes('Cloudflare Worker secret'))).toBe(true);
+
+    const recurringRealConfig = structuredClone(canaryConfig);
+    recurringRealConfig.vars = {
+      ...recurringRealConfig.vars,
+      EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'true',
+    };
+    const recurringRealResult = validateV2StagingConfig({
+      v2Config: recurringRealConfig,
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(recurringRealResult.ok).toBe(false);
+    expect(recurringRealResult.errors.some((e) => e.includes('recurring real-model briefs'))).toBe(
+      true,
+    );
+
+    const recurringFakeConfig = structuredClone(v2Config);
+    recurringFakeConfig.vars = {
+      ...recurringFakeConfig.vars,
+      EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'true',
+    };
+    const recurringFakeResult = validateV2StagingConfig({
+      v2Config: recurringFakeConfig,
+      v1Configs,
+      migrationExists,
+    });
+    expect(recurringFakeResult.ok).toBe(false);
+    expect(
+      recurringFakeResult.errors.some((e) =>
+        e.includes('EMBER_MODEL_ALLOW_RECURRING_BRIEFS="true"'),
+      ),
+    ).toBe(true);
   });
 
   it('rejects real Daytona or unset EMBER_SANDBOX_MODE before separate canary approval', () => {

@@ -111,6 +111,7 @@ export interface TurnServiceDeps {
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
   readonly globalDailyCeilingMicroUsd?: number;
+  readonly allowRecurringModelBriefs?: boolean;
 }
 
 interface ReplayLookupResult {
@@ -145,6 +146,9 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       nowMs: this.deps.nowMs,
       idFactory: this.newId,
       ...(this.deps.localCeilings !== undefined ? { localCeilings: this.deps.localCeilings } : {}),
+      ...(this.deps.allowRecurringModelBriefs !== undefined
+        ? { allowRecurringModelBriefs: this.deps.allowRecurringModelBriefs }
+        : {}),
     };
   }
 

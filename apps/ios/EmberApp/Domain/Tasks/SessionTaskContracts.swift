@@ -6,6 +6,7 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
     public static let notesActionItems = SessionTaskKind(rawValue: "notes.action_items")!
     public static let pythonAgent = SessionTaskKind(rawValue: "python.agent")!
     public static let pythonSandbox = SessionTaskKind(rawValue: "sandbox.python")!
+    public static let deviceTextProcess = SessionTaskKind(rawValue: "device.text.process")!
     public static let mockChat = SessionTaskKind(rawValue: "mock.chat")!
     public static let mockCompute = SessionTaskKind(rawValue: "mock.compute")!
     public static let mockFile = SessionTaskKind(rawValue: "mock.file")!
@@ -45,6 +46,8 @@ public struct SessionTaskKind: RawRepresentable, Hashable, Codable, Sendable {
             String(localized: "tasks.kind.notes_action_items", table: "Conversation")
         case Self.pythonAgent.rawValue, Self.pythonSandbox.rawValue:
             String(localized: "tasks.kind.python_sandbox", table: "Conversation")
+        case Self.deviceTextProcess.rawValue:
+            String(localized: "tasks.kind.device_text", table: "Conversation")
         case Self.mockChat.rawValue:
             String(localized: "tasks.kind.mock_chat", table: "Conversation")
         case Self.mockCompute.rawValue:
@@ -685,6 +688,16 @@ public enum B3AttachmentLimits {
         "application/javascript",
         "text/javascript",
     ]
+    public static let blockedFileExtensions: Set<String> = [
+        "html",
+        "htm",
+        "xhtml",
+        "svg",
+        "svgz",
+        "js",
+        "mjs",
+        "cjs",
+    ]
     public static let visionImageMediaTypes: Set<String> = [
         "image/jpeg",
         "image/png",
@@ -852,6 +865,13 @@ public enum B3AttachmentLimits {
         return scalars.allSatisfy { scalar in
             isAsciiAlnum(scalar) || scalar == "." || scalar == "_" || scalar == "-"
         }
+    }
+
+    public static func isSafeArtifactFilenameExtension(_ filename: String) -> Bool {
+        let ext = (filename as NSString).pathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ext.isEmpty || !blockedFileExtensions.contains(ext)
     }
 
     /// Normalizes arbitrary user-picked file names (including spaces or Unicode characters) into an ASCII
@@ -1051,13 +1071,15 @@ public struct TaskArtifactItemDTO: Identifiable, Codable, Equatable, Sendable {
 
         artifactID = try container.decode(UUID.self, forKey: SessionWireDecode.key("artifact_id"))
         let decodedFilename = try container.decodeIfPresent(String.self, forKey: SessionWireDecode.key("filename"))
-        if let decodedFilename, !B3AttachmentLimits.isSafeArtifactFilename(decodedFilename) {
+        if let decodedFilename,
+           (!B3AttachmentLimits.isSafeArtifactFilename(decodedFilename)
+                || !B3AttachmentLimits.isSafeArtifactFilenameExtension(decodedFilename)) {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact filename."))
         }
         filename = decodedFilename
 
         let decodedMediaType = try container.decode(String.self, forKey: SessionWireDecode.key("media_type"))
-        guard !decodedMediaType.isEmpty && decodedMediaType.count <= 128 else {
+        guard B3AttachmentLimits.isSafeMediaType(decodedMediaType) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact media_type."))
         }
         mediaType = decodedMediaType
@@ -1120,5 +1142,82 @@ public struct DownloadedTaskArtifact: Equatable, Sendable {
         self.filename = filename
         self.mediaType = mediaType
         self.data = data
+    }
+}
+
+/// Request payload for `POST /v2/tasks/python` (`submitPythonTaskRequestSchema`).
+public struct SubmitPythonTaskRequestDTO: Equatable, Encodable, Sendable {
+    public static let maxInlineArtifactBytes = 1_048_576
+    public static let promptMaxChars = 4_000
+    public static let instructionsMaxChars = 4_000
+    public static let titleMaxChars = 240
+
+    public let title: String?
+    public let prompt: String
+    public let instructions: String?
+    public let attachmentIDs: [UUID]
+    public let clientRequestID: UUID
+
+    public init(
+        title: String? = nil,
+        prompt: String,
+        instructions: String? = nil,
+        attachmentIDs: [UUID] = [],
+        clientRequestID: UUID = UUID()
+    ) {
+        self.title = title
+        self.prompt = prompt
+        self.instructions = instructions
+        self.attachmentIDs = attachmentIDs
+        self.clientRequestID = clientRequestID
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case title
+        case prompt
+        case instructions
+        case attachmentIDs = "attachment_ids"
+        case clientRequestID = "client_request_id"
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        if let title {
+            let trimmedTitle = title.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedTitle.isEmpty {
+                try container.encode(trimmedTitle, forKey: .title)
+            }
+        }
+        try container.encode(prompt.trimmingCharacters(in: .whitespacesAndNewlines), forKey: .prompt)
+        if let instructions {
+            let trimmedInstructions = instructions.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmedInstructions.isEmpty {
+                try container.encode(trimmedInstructions, forKey: .instructions)
+            }
+        }
+        if !attachmentIDs.isEmpty {
+            try container.encode(attachmentIDs.map { $0.uuidString.lowercased() }, forKey: .attachmentIDs)
+        }
+        try container.encode(clientRequestID.uuidString.lowercased(), forKey: .clientRequestID)
+    }
+}
+
+/// Response payload for `POST /v2/tasks/python` (`V2PythonTaskSubmitResultDto`).
+public struct PythonTaskSubmitResultDTO: Codable, Equatable, Sendable {
+    public let task: SessionTaskDetailDTO
+    public let created: Bool
+
+    private static let allowedKeys: Set<String> = ["task", "created"]
+
+    public init(task: SessionTaskDetailDTO, created: Bool) {
+        self.task = task
+        self.created = created
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: SessionWireKey.self)
+        try SessionWireDecode.check(container, allowed: Self.allowedKeys, codingPath: decoder.codingPath)
+        task = try container.decode(SessionTaskDetailDTO.self, forKey: SessionWireDecode.key("task"))
+        created = try container.decode(Bool.self, forKey: SessionWireDecode.key("created"))
     }
 }

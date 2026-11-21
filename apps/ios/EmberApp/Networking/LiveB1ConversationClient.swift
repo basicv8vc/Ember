@@ -286,20 +286,12 @@ struct LiveB1ConversationClient: Sendable {
               data.count <= B3AttachmentLimits.maxFileBytes else {
             throw LiveB1Failure.rejected
         }
-        let boundary = "EmberBoundary-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
-        let body = Self.makeMultipartUploadBody(
-            boundary: boundary,
+        let response = try await Self.sendMultipartUpload(
+            using: auth,
             filename: safeFilename,
             mediaType: normalizedType,
-            fileData: data
+            data: data
         )
-        let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
-            method: "POST",
-            pathComponents: ["v1", "me", "uploads"],
-            body: body,
-            contentType: "multipart/form-data; boundary=\(boundary)",
-            idempotency: .nonIdempotent(clientSubmissionID: nil)
-        ))
         guard response.statusCode == 200 || response.statusCode == 201 else {
             throw Self.uploadFailure(response.statusCode)
         }
@@ -308,6 +300,28 @@ struct LiveB1ConversationClient: Sendable {
             throw LiveB1Failure.invalidResponse
         }
         return receipt
+    }
+
+    static func sendMultipartUpload(
+        using auth: LiveAuthSessionCoordinator,
+        filename: String,
+        mediaType: String,
+        data: Data
+    ) async throws -> EmberAPIResponse {
+        let boundary = "EmberBoundary-\(UUID().uuidString.replacingOccurrences(of: "-", with: ""))"
+        let body = makeMultipartUploadBody(
+            boundary: boundary,
+            filename: filename,
+            mediaType: mediaType,
+            fileData: data
+        )
+        return try await auth.authorizedRequest(EmberAuthenticatedRequest(
+            method: "POST",
+            pathComponents: ["v1", "me", "uploads"],
+            body: body,
+            contentType: "multipart/form-data; boundary=\(boundary)",
+            idempotency: .nonIdempotent(clientSubmissionID: nil)
+        ))
     }
 
     private static func makeMultipartUploadBody(

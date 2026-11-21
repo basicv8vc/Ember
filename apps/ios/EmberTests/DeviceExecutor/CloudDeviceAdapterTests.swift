@@ -1066,6 +1066,175 @@ final class CloudDeviceAdapterTests: XCTestCase {
         XCTAssertFalse(monitor.isRunning)
     }
 
+    @MainActor
+    func testMonitorStopCancelsSuspendedConnectAndPreventsAdapterStart() async throws {
+        let dir1 = try makeTempDirectory()
+        let dir2 = try makeTempDirectory()
+        let auth = try StaticCloudDeviceAuthProvider(bearerToken: "session-1")
+        let creds1 = InMemoryCloudDeviceCredentialStore()
+        let creds2 = InMemoryCloudDeviceCredentialStore()
+        let config1 = try makeConfiguration(origin: "https://one.ember.test")
+        let config2 = try makeConfiguration(origin: "https://two.ember.test")
+        let clock = MutableCloudDeviceClock(nowMs: 1_700_000_000_000)
+
+        let transport1 = GatedCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+        let transport2 = RecordingCloudTransport(readyUntilMs: clock.nowMs + 30_000)
+
+        let monitor = CloudDeviceAdapterMonitor()
+        try await monitor.connect(
+            configuration: config1,
+            authProvider: auth,
+            credentialStore: creds1,
+            transport: transport1,
+            journal: CloudDeviceExecutionJournal(directory: dir1),
+            workspace: DeviceSandboxWorkspace(rootDirectory: dir1),
+            clock: clock,
+            autoStart: true
+        )
+        await transport1.waitForClaimEntry()
+
+        // Suspend a new connect() while adapter 1 is blocked inside claim().
+        let connectTask = Task {
+            try await monitor.connect(
+                configuration: config2,
+                authProvider: auth,
+                credentialStore: creds2,
+                transport: transport2,
+                journal: CloudDeviceExecutionJournal(directory: dir2),
+                workspace: DeviceSandboxWorkspace(rootDirectory: dir2),
+                clock: clock,
+                autoStart: true
+            )
+        }
+        await transport1.waitForCancellationObserved()
+
+        // Invoke stop() while connect() is still suspended awaiting adapter 1 teardown.
+        let stopTask = Task { await monitor.stop() }
+        for _ in 0..<5 {
+            await Task.yield()
+        }
+        await transport1.releaseGate()
+
+        try await connectTask.value
+        await stopTask.value
+
+        let t2Registers = await transport2.registerCount
+        let t2Claims = await transport2.claimCount
+        XCTAssertEqual(t2Registers, 0, "stop() during suspended connect() must prevent adapter registration")
+        XCTAssertEqual(t2Claims, 0, "stop() during suspended connect() must prevent adapter claiming")
+        XCTAssertFalse(monitor.isRunning)
+    }
+
+    @MainActor
+    func testCloudDeviceAPIClientRefreshesExpiredTokenAndRetriesOn401() async throws {
+        let config = try makeConfiguration(origin: "https://device-refresh.ember.test")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let credential = try creds.loadOrCreateCredential(for: config.scopeIdentifier)
+
+        let fakeAPI = FakeEmberSessionAPI()
+        fakeAPI.setRefreshResults([
+            .success(AuthFixture.sessionResponse(tokenSuffix: "fresh1", expiresIn: 3_600)),
+            .success(AuthFixture.sessionResponse(tokenSuffix: "fresh2", expiresIn: 3_600)),
+        ])
+        let stubTransport = try EmberAuthenticatedTransport(baseURL: config.origin, client: EmberAPIClient())
+        let expiredRecord = AuthFixture.record(tokenSuffix: "expired", expiresIn: -60)
+        let coordinator = LiveAuthSessionCoordinator(dependencies: .init(
+            api: fakeAPI,
+            transport: stubTransport,
+            store: InMemoryEmberSessionStore(initialRecord: expiredRecord),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+
+        let client = CloudDeviceAPIClient(
+            configuration: config,
+            authProvider: coordinator,
+            session: makeStubSession()
+        )
+
+        final class AuthHeaderBox: @unchecked Sendable {
+            private let lock = NSLock()
+            private var headers: [String] = []
+            private var rejectedClaimFresh = false
+
+            func recordRegister(_ header: String) {
+                lock.withLock { headers.append(header) }
+            }
+
+            func recordAndShouldRejectClaim(_ header: String) -> Bool {
+                lock.withLock {
+                    headers.append(header)
+                    if header == "Bearer ems_fresh1", !rejectedClaimFresh {
+                        rejectedClaimFresh = true
+                        return true
+                    }
+                    return false
+                }
+            }
+
+            var captured: [String] { lock.withLock { headers } }
+        }
+
+        let box = AuthHeaderBox()
+        let expectedDeviceID = credential.id.uuidString.lowercased()
+        let readyUntilMs: Int64 = 1_700_000_030_000
+        StubCloudURLProtocol.setHandler { request in
+            let authHeader = request.value(forHTTPHeaderField: "Authorization") ?? ""
+            let path = request.url?.path ?? ""
+            if path.hasSuffix("/register") {
+                box.recordRegister(authHeader)
+                let json = """
+                {
+                  "deviceId": "\(expectedDeviceID)",
+                  "capability": "\(CloudDeviceContract.textCapability)",
+                  "version": \(CloudDeviceContract.capabilityVersion),
+                  "readyUntilMs": \(readyUntilMs)
+                }
+                """
+                return (200, Data(json.utf8))
+            }
+            if path.hasSuffix("/claim") {
+                if box.recordAndShouldRejectClaim(authHeader) {
+                    return (401, Data("{\"error\":\"unauthorized\"}".utf8))
+                }
+                return (200, Data("{\"kind\":\"idle\"}".utf8))
+            }
+            return (404, Data("{}".utf8))
+        }
+
+        // 1. Expired local record refreshes automatically prior to register().
+        let receipt = try await client.register(credential: credential)
+        XCTAssertEqual(receipt.deviceId, credential.id)
+
+        // 2. Server 401 on claim() triggers single-flight refresh and 1 automatic retry with fresh2.
+        let claim = try await client.claim(credential: credential)
+        XCTAssertEqual(claim, .idle)
+
+        XCTAssertEqual(box.captured, [
+            "Bearer ems_fresh1",
+            "Bearer ems_fresh1",
+            "Bearer ems_fresh2",
+        ])
+        XCTAssertEqual(fakeAPI.refreshCallCount, 2)
+    }
+
+    func testCloudDeviceAPIClientReturnsRetryableSessionUnavailableOnTransientAuthState() async throws {
+        let config = try makeConfiguration(origin: "https://device-unavailable.ember.test")
+        let creds = InMemoryCloudDeviceCredentialStore()
+        let credential = try creds.loadOrCreateCredential(for: config.scopeIdentifier)
+        let mockAuth = MockAuthSessionProvider(initialState: .unavailable)
+        let client = CloudDeviceAPIClient(configuration: config, authProvider: mockAuth, session: makeStubSession())
+
+        do {
+            _ = try await client.register(credential: credential)
+            XCTFail("Expected sessionUnavailable")
+        } catch let error as CloudDeviceError {
+            XCTAssertEqual(error, .sessionUnavailable)
+            XCTAssertTrue(error.canRetry)
+        }
+    }
+
     func testJournalWriteFailureBlocksResultSubmission() async throws {
         let dir = try makeTempDirectory()
         // Place a regular file where the journal directory wants to be so persistState() throws.

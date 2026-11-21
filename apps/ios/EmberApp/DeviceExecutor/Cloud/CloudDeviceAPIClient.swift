@@ -210,13 +210,62 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
         body: Body
     ) async throws -> (Int, Data) {
         try Task.checkCancellation()
-        guard case .authenticated(let authSession) = await authProvider.currentSession() else {
-            throw CloudDeviceError.unauthenticated
-        }
         guard credential.isValidTokenFormat else {
             throw CloudDeviceError.invalidConfiguration
         }
 
+        let firstSession = try await resolveSession()
+        let encodedBody = try JSONEncoder().encode(body)
+        let (status, data) = try await sendOnce(
+            pathComponents: pathComponents,
+            credential: credential,
+            encodedBody: encodedBody,
+            accessToken: firstSession.accessToken
+        )
+
+        if status == 401, let refreshing = authProvider as? any RefreshingAuthSessionProvider {
+            switch await refreshing.recoverUnauthorizedSession(rejectedAccessToken: firstSession.accessToken) {
+            case .authenticated(let refreshed):
+                return try await sendOnce(
+                    pathComponents: pathComponents,
+                    credential: credential,
+                    encodedBody: encodedBody,
+                    accessToken: refreshed.accessToken
+                )
+            case .unavailable:
+                throw CloudDeviceError.sessionUnavailable
+            case .unauthenticated:
+                throw CloudDeviceError.unauthenticated
+            }
+        }
+
+        return (status, data)
+    }
+
+    private func resolveSession() async throws -> AuthSession {
+        let state: AuthSessionState
+        if let refreshing = authProvider as? any RefreshingAuthSessionProvider {
+            state = await refreshing.refreshedSession()
+        } else {
+            state = await authProvider.currentSession()
+        }
+        switch state {
+        case .authenticated(let session):
+            return session
+        case .unavailable:
+            throw CloudDeviceError.sessionUnavailable
+        case .unauthenticated:
+            throw CloudDeviceError.unauthenticated
+        }
+    }
+
+    private func sendOnce(
+        pathComponents: [String],
+        credential: CloudDeviceCredential,
+        encodedBody: Data,
+        accessToken: String
+    ) async throws -> (Int, Data) {
+        try Task.checkCancellation()
         var url = configuration.origin
         for segment in pathComponents {
             guard !segment.isEmpty, segment != ".", segment != ".." else {
@@ -231,12 +280,12 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
         request.cachePolicy = .reloadIgnoringLocalCacheData
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("Bearer \(authSession.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(credential.token, forHTTPHeaderField: CloudDeviceContract.deviceTokenHeader)
         if let localAccess = configuration.localAccessSecret {
             request.setValue(localAccess, forHTTPHeaderField: CloudDeviceContract.localAccessHeader)
         }
-        request.httpBody = try JSONEncoder().encode(body)
+        request.httpBody = encodedBody
 
         let (data, response) = try await session.data(for: request)
         try Task.checkCancellation()

@@ -1,9 +1,16 @@
 import SwiftUI
 
 struct TaskInboxView: View {
+    private struct DeviceExecutorWiring {
+        let monitor: CloudDeviceAdapterMonitor?
+        let isEnabled: Bool
+        let errorMessage: String?
+        let onSetEnabled: (Bool) -> Void
+    }
+
     private enum Mode {
         case legacyDemo(TaskJourneySession, () -> Void)
-        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, (UUID) -> Void)
+        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (UUID) -> Void)
     }
 
     private let mode: Mode
@@ -15,17 +22,39 @@ struct TaskInboxView: View {
     init(
         store: SessionTaskStore,
         scheduleStore: ProactiveScheduleStore? = nil,
+        deviceMonitor: CloudDeviceAdapterMonitor? = nil,
+        isDeviceExecutorEnabled: Bool = false,
+        deviceExecutorError: String? = nil,
+        onSetDeviceExecutorEnabled: @escaping (Bool) -> Void = { _ in },
         onOpenTask: @escaping (UUID) -> Void
     ) {
-        self.mode = .sessionTasks(store, scheduleStore, onOpenTask)
+        self.mode = .sessionTasks(
+            store,
+            scheduleStore,
+            DeviceExecutorWiring(
+                monitor: deviceMonitor,
+                isEnabled: isDeviceExecutorEnabled,
+                errorMessage: deviceExecutorError,
+                onSetEnabled: onSetDeviceExecutorEnabled
+            ),
+            onOpenTask
+        )
     }
 
     var body: some View {
         switch mode {
         case .legacyDemo(let session, let onSelectTask):
             LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
-        case .sessionTasks(let store, let scheduleStore, let onOpenTask):
-            SessionTaskInboxContent(store: store, scheduleStore: scheduleStore, onOpenTask: onOpenTask)
+        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenTask):
+            SessionTaskInboxContent(
+                store: store,
+                scheduleStore: scheduleStore,
+                deviceMonitor: deviceWiring.monitor,
+                isDeviceExecutorEnabled: deviceWiring.isEnabled,
+                deviceExecutorError: deviceWiring.errorMessage,
+                onSetDeviceExecutorEnabled: deviceWiring.onSetEnabled,
+                onOpenTask: onOpenTask
+            )
         }
     }
 }
@@ -33,8 +62,14 @@ struct TaskInboxView: View {
 private struct SessionTaskInboxContent: View {
     @Bindable var store: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore?
+    let deviceMonitor: CloudDeviceAdapterMonitor?
+    let isDeviceExecutorEnabled: Bool
+    let deviceExecutorError: String?
+    let onSetDeviceExecutorEnabled: (Bool) -> Void
     let onOpenTask: (UUID) -> Void
     @State private var isShowingSchedulesSheet = false
+    @State private var isShowingPythonComposer = false
+    @State private var isShowingDeviceExecutorSheet = false
 
     private var needsIntervention: [SessionTaskDTO] {
         store.tasks(in: .needsIntervention)
@@ -185,7 +220,28 @@ private struct SessionTaskInboxContent: View {
                     .accessibilityIdentifier("tasks-open-schedules")
                 }
             }
-            ToolbarItem(placement: .topBarTrailing) {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if let deviceMonitor {
+                    Button {
+                        isShowingDeviceExecutorSheet = true
+                    } label: {
+                        Image(systemName: deviceMonitor.isRunning ? "iphone.radiowaves.left.and.right" : "iphone")
+                            .foregroundStyle(deviceMonitor.isRunning ? Color(uiColor: .systemGreen) : Color.accentColor)
+                            .accessibilityLabel(Text("device.executor.nav_title", tableName: "Conversation"))
+                    }
+                    .accessibilityIdentifier("tasks-open-device-executor")
+                }
+
+                if store.hasRepository && store.supportsPythonTaskSubmission && !store.listEndpointUnavailable {
+                    Button {
+                        isShowingPythonComposer = true
+                    } label: {
+                        Image(systemName: "plus")
+                            .accessibilityLabel(Text("tasks.python.nav_title", tableName: "Conversation"))
+                    }
+                    .accessibilityIdentifier("tasks-new-python-task")
+                }
+
                 Button {
                     Task { await store.refreshAll() }
                 } label: {
@@ -203,6 +259,21 @@ private struct SessionTaskInboxContent: View {
         .sheet(isPresented: $isShowingSchedulesSheet) {
             if let scheduleStore {
                 ProactiveSchedulesSheetView(store: scheduleStore)
+            }
+        }
+        .sheet(isPresented: $isShowingPythonComposer) {
+            PythonTaskComposerSheet(store: store) { submittedTaskID in
+                onOpenTask(submittedTaskID)
+            }
+        }
+        .sheet(isPresented: $isShowingDeviceExecutorSheet) {
+            if let deviceMonitor {
+                DeviceExecutorStatusSheet(
+                    monitor: deviceMonitor,
+                    isEnabled: isDeviceExecutorEnabled,
+                    errorMessage: deviceExecutorError,
+                    onSetEnabled: onSetDeviceExecutorEnabled
+                )
             }
         }
     }

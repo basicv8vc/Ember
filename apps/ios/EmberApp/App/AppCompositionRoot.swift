@@ -23,7 +23,7 @@ enum AppCompositionRoot {
     static let defaultCloudBaseURL = "https://ember-api.slowfast.dev"
     static let v2StagingCloudBaseURL = "https://ember-v2-staging.slowfast.dev"
     static let v2StagingHost = "ember-v2-staging.slowfast.dev"
-    private static let defaultHost = "ember-api.slowfast.dev"
+    static let defaultHost = "ember-api.slowfast.dev"
 
     private static let mockLaunchArguments: Set<String> = [
         "--ember-mock-demo",
@@ -175,6 +175,8 @@ private enum LiveComposition {
             taskRepository: taskRepository,
             scheduleRepository: scheduleRepository,
             memoryRepository: memoryRepository,
+            cloudBaseURL: target.baseURL.host?.lowercased() == AppCompositionRoot.defaultHost ? nil : target.baseURL,
+            deviceAuthProvider: target.baseURL.host?.lowercased() == AppCompositionRoot.defaultHost ? nil : auth,
             environmentBadge: target.environmentBadge
         )
     }

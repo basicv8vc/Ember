@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import XCTest
 @testable import Ember
@@ -668,7 +669,9 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         let artifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000a555")!
         let agentID = "00000000-0000-4000-8000-00000000b301"
         let csvContent = "item,total\nAlpha,42\n"
-        let sha = String(repeating: "b", count: 64)
+        let sha = SHA256.hash(data: Data(csvContent.utf8))
+            .map { String(format: "%02x", $0) }
+            .joined()
 
         register { request in
             recorder.record(request)
@@ -757,6 +760,258 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
 
         store.clear()
         XCTAssertFalse(FileManager.default.fileExists(atPath: fileURL.path))
+    }
+
+    func testDownloadArtifactRejectsSHA256Mismatch() async throws {
+        let fixture = try makeRepository()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000b556")!
+        let artifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000a556")!
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let csvContent = "item,total\nAlpha,42\n"
+        let wrongSHA = String(repeating: "c", count: 64)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/me/tasks/\(taskID.uuidString.lowercased())" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "agent_id": "\(agentID)",
+                  "kind": "python.agent",
+                  "title": "Corrupted Artifact Task",
+                  "status": "completed",
+                  "attempt_count": 1,
+                  "created_at": "2026-11-16T10:00:00Z",
+                  "updated_at": "2026-11-16T10:01:00Z",
+                  "deadline_at": null,
+                  "result_state": "unavailable"
+                }
+                """)
+            }
+            if path == "/v1/me/tasks/\(taskID.uuidString.lowercased())/artifacts" {
+                return .json(statusCode: 200, body: """
+                {
+                  "task_id": "\(taskID.uuidString.lowercased())",
+                  "artifacts": [
+                    {
+                      "artifact_id": "\(artifactID.uuidString.lowercased())",
+                      "filename": "summary.csv",
+                      "media_type": "text/csv",
+                      "size": \(csvContent.utf8.count),
+                      "sha256": "\(wrongSHA)",
+                      "created_by": "run",
+                      "created_at": "2026-11-16T10:01:00Z"
+                    }
+                  ]
+                }
+                """)
+            }
+            if path == "/v1/me/artifacts/\(artifactID.uuidString.lowercased())" {
+                return URLProtocolStubResponse(
+                    statusCode: 200,
+                    headers: ["Content-Type": "text/csv"],
+                    body: Data(csvContent.utf8)
+                )
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        await store.loadDetail(taskID: taskID)
+        let artifacts = try XCTUnwrap(store.artifactsByTaskID[taskID])
+        await store.downloadArtifact(artifacts[0])
+
+        XCTAssertNil(store.downloadedArtifactFileByID[artifactID])
+        XCTAssertNotNil(store.artifactDownloadErrorByID[artifactID])
+    }
+
+    func testUploadAndSubmitPythonTaskSupportsCreateReplayAndErrorMapping() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let uploadID = UUID(uuidString: "00000000-0000-4000-8000-00000000f101")!
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000f202")!
+        let agentID = UUID(uuidString: "00000000-0000-4000-8000-00000000b301")!
+        let clientRequestID = UUID(uuidString: "00000000-0000-4000-8000-00000000f303")!
+        let csvData = Data("col,val\na,1\n".utf8)
+        let sha = SHA256.hash(data: csvData).map { String(format: "%02x", $0) }.joined()
+        let failNextSubmitWith500 = LockedBool(true)
+
+        register { request in
+            recorder.record(request)
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST" && path == "/v1/me/uploads" {
+                return .json(statusCode: 201, body: """
+                {
+                  "upload_id": "\(uploadID.uuidString.lowercased())",
+                  "filename": "data.csv",
+                  "media_type": "text/csv",
+                  "size": \(csvData.count),
+                  "sha256": "\(sha)",
+                  "expires_at": "2026-11-22T00:00:00Z",
+                  "created_at": "2026-11-21T00:00:00Z"
+                }
+                """)
+            }
+            if request.httpMethod == "POST" && path == "/v2/tasks/python" {
+                if failNextSubmitWith500.value {
+                    failNextSubmitWith500.value = false
+                    return .json(statusCode: 503, body: "{}")
+                }
+                return .json(statusCode: 201, body: """
+                {
+                  "task": {
+                    "task_id": "\(taskID.uuidString.lowercased())",
+                    "agent_id": "\(agentID.uuidString.lowercased())",
+                    "kind": "python.agent",
+                    "title": "Sales Summary",
+                    "status": "queued",
+                    "current_run_id": null,
+                    "attempt_count": 0,
+                    "cancel_requested": false,
+                    "created_at": "2026-11-21T00:00:00Z",
+                    "updated_at": "2026-11-21T00:00:00Z",
+                    "deadline_at": "2026-11-21T00:02:00Z"
+                  },
+                  "created": true
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        let uploadReceipt = try await store.uploadTaskAttachment(
+            filename: "data.csv",
+            mediaType: "text/csv",
+            data: csvData
+        )
+        XCTAssertEqual(uploadReceipt.uploadID, uploadID)
+
+        let submitRequest = SubmitPythonTaskRequestDTO(
+            title: "Sales Summary",
+            prompt: "Summarize data.csv",
+            attachmentIDs: [uploadID],
+            clientRequestID: clientRequestID
+        )
+        let firstOutcome = await store.submitPythonTask(submitRequest)
+        XCTAssertEqual(firstOutcome, .unknownAcknowledgement)
+
+        let secondOutcome = await store.submitPythonTask(submitRequest)
+        guard case .submitted(let submittedTask, let created) = secondOutcome else {
+            return XCTFail("Expected submitted outcome on idempotent retry")
+        }
+        XCTAssertTrue(created)
+        XCTAssertEqual(submittedTask.taskID, taskID)
+        XCTAssertEqual(submittedTask.kind, .pythonAgent)
+        XCTAssertEqual(store.tasksByID[taskID]?.title, "Sales Summary")
+
+        let submitRequests = recorder.requests.filter { $0.url?.path == "/v2/tasks/python" }
+        XCTAssertEqual(submitRequests.count, 2)
+    }
+
+    func testTaskArtifactRejectsBlockedActiveWebMimeTypesAndExtensions() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000f401")!
+        let htmlArtifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000f402")!
+        let smuggledArtifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000f403")!
+        let sha = String(repeating: "a", count: 64)
+
+        let htmlPayload = Data("""
+        {
+          "artifact_id": "\(htmlArtifactID.uuidString.lowercased())",
+          "filename": "report.html",
+          "media_type": "text/html",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: htmlPayload))
+
+        let svgPayload = Data("""
+        {
+          "artifact_id": "\(htmlArtifactID.uuidString.lowercased())",
+          "filename": "vector.svg",
+          "media_type": "image/svg+xml",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: svgPayload))
+
+        let smuggledExtensionPayload = Data("""
+        {
+          "artifact_id": "\(smuggledArtifactID.uuidString.lowercased())",
+          "filename": "payload.html",
+          "media_type": "text/plain",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: smuggledExtensionPayload))
+
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 200, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        let directItem = TaskArtifactItemDTO(
+            artifactID: smuggledArtifactID,
+            filename: "smuggled.html",
+            mediaType: "text/plain",
+            size: 12,
+            sha256: sha,
+            createdBy: .run,
+            createdAt: "2026-11-21T00:00:00Z"
+        )
+        await store.downloadArtifact(directItem)
+
+        XCTAssertNil(store.downloadedArtifactFileByID[smuggledArtifactID])
+        XCTAssertNotNil(store.artifactDownloadErrorByID[smuggledArtifactID])
+        XCTAssertTrue(recorder.requests.isEmpty, "Blocked artifact must not be fetched or cached on disk")
+        XCTAssertEqual(taskID, taskID)
+    }
+
+    func testUploadAttachmentMapsPreExecution401RejectionToUnauthenticated() async throws {
+        let session = StubSession.make()
+        sessions.append(session)
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let fakeAPI = FakeEmberSessionAPI()
+        fakeAPI.setRefreshResults([.failure(.offline)])
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: fakeAPI,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let repository = LiveB1SessionTaskRepository(auth: auth)
+
+        register { _ in
+            .json(statusCode: 401, body: "{}")
+        }
+
+        do {
+            _ = try await repository.uploadAttachment(
+                filename: "sales.csv",
+                mediaType: "text/csv",
+                data: Data("a,b\n1,2\n".utf8)
+            )
+            XCTFail("Expected unauthenticated on pre-execution 401 upload rejection")
+        } catch let error as SessionTaskRepositoryError {
+            XCTAssertEqual(error, .unauthenticated)
+        }
     }
 
     private func makeRepository() throws -> (repository: LiveB1SessionTaskRepository, session: URLSession) {

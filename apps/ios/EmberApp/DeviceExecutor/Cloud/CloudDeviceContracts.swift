@@ -36,6 +36,7 @@ public struct SystemCloudDeviceClock: CloudDeviceClock {
 public enum CloudDeviceError: Error, Equatable, Sendable {
     case invalidConfiguration
     case unauthenticated
+    case sessionUnavailable
     case unavailableStorage
     case invalidResponse
     case deviceRevoked
@@ -49,6 +50,8 @@ public enum CloudDeviceError: Error, Equatable, Sendable {
         switch self {
         case .httpStatus(let code):
             return code == 408 || code == 429 || code >= 500
+        case .sessionUnavailable:
+            return true
         case .unavailableStorage:
             return false
         case .invalidConfiguration, .unauthenticated, .invalidResponse,
@@ -64,6 +67,8 @@ public enum CloudDeviceError: Error, Equatable, Sendable {
             return "Cloud device endpoint configuration is invalid."
         case .unauthenticated:
             return "Ember bearer session unavailable."
+        case .sessionUnavailable:
+            return "Ember bearer session temporarily unavailable; retrying."
         case .unavailableStorage:
             return "Protected storage unavailable on device."
         case .invalidResponse:

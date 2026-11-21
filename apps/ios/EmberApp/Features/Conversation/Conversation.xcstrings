@@ -2832,6 +2832,518 @@
           }
         }
       }
+    },
+    "tasks.kind.device_text": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-Device Text"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机文本处理"
+          }
+        }
+      }
+    },
+    "tasks.artifacts.integrity_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Downloaded file failed SHA-256 integrity verification."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "下载的文件未能通过 SHA-256 完整性校验。"
+          }
+        }
+      }
+    },
+    "tasks.python.nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Analysis Task"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建分析任务"
+          }
+        }
+      }
+    },
+    "tasks.python.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Submit a bounded data or Python task with optional uploaded files and download the generated artifacts."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交受限的数据或 Python 分析任务（可附带上传文件），并在完成后下载生成的文件结果。"
+          }
+        }
+      }
+    },
+    "tasks.python.title_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Title (optional)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务标题（可选）"
+          }
+        }
+      }
+    },
+    "tasks.python.prompt_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Describe the analysis or output file you want Ember to produce…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "描述你希望 Ember 完成的数据分析或要生成的文件…"
+          }
+        }
+      }
+    },
+    "tasks.python.instructions_placeholder": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Extra instructions or output format (optional)"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "补充说明或输出格式要求（可选）"
+          }
+        }
+      }
+    },
+    "tasks.python.attachments.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Input Files"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "输入文件"
+          }
+        }
+      }
+    },
+    "tasks.python.attachments.add": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attach File"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加文件"
+          }
+        }
+      }
+    },
+    "tasks.python.attachments.empty": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Attach up to 5 files (1 MB max each for V2 inline sandbox processing)."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最多可附带 5 个文件（V2 单文件上限 1 MB）。"
+          }
+        }
+      }
+    },
+    "tasks.python.attachments.remove": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remove file"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "移除文件"
+          }
+        }
+      }
+    },
+    "tasks.python.action.submit": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Submit"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交"
+          }
+        }
+      }
+    },
+    "tasks.python.action.retry": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Retry Safely"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "安全重试"
+          }
+        }
+      }
+    },
+    "tasks.python.endpoint_unavailable.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Python task submission unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂不支持 Python 任务提交"
+          }
+        }
+      }
+    },
+    "tasks.python.endpoint_unavailable.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Connect to a V2 Ember Cloud environment to submit bounded Python analysis tasks."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接到 V2 Ember 云端环境后即可提交受限 Python 分析任务。"
+          }
+        }
+      }
+    },
+    "tasks.python.unknown_ack.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Submission status unconfirmed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "提交状态尚未确认"
+          }
+        }
+      }
+    },
+    "tasks.python.unknown_ack.message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Network interruption occurred. Retry safely to reuse the same request ID without duplicating the task."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "网络中断，点击“安全重试”将沿用同一请求 ID，不会重复创建任务。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.file_too_large": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "File exceeds the 1 MB V2 inline upload limit."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "文件超过了 V2 1 MB 的上传大小限制。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.invalid_input": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Check your prompt and attachments and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请检查任务描述和附件后重试。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.idempotency_conflict": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request ID conflicted with a different task submission."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该请求 ID 与另一项任务提交冲突。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.budget_exceeded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Task or upload budget limit reached. Try again later."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已达到任务或上传配额上限，请稍后再试。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.unauthenticated": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in again to submit analysis tasks."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请重新登录后提交分析任务。"
+          }
+        }
+      }
+    },
+    "tasks.python.error.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not submit task right now. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法提交任务，请稍后重试。"
+          }
+        }
+      }
+    },
+    "device.executor.nav_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone Executor"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "iPhone 本地执行"
+          }
+        }
+      }
+    },
+    "device.executor.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "When enabled, this iPhone claims supported text tasks while Ember is open in the foreground. Execution pauses automatically in the background."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "开启后，当 Ember 在前台打开时，这台 iPhone 会领取并执行受支持的文本任务；切到后台时会自动暂停。"
+          }
+        }
+      }
+    },
+    "device.executor.toggle.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Allow On-Device Execution"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "允许在本机执行任务"
+          }
+        }
+      }
+    },
+    "device.executor.toggle.subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Foreground only · device.text.process v1"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅限前台 · device.text.process v1"
+          }
+        }
+      }
+    },
+    "device.executor.status.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Status"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "状态"
+          }
+        }
+      }
+    },
+    "device.executor.device_id.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Device ID"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备 ID"
+          }
+        }
+      }
+    },
+    "device.executor.journal.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Committed / Pending / Fenced"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已提交 / 待提交 / 已隔离"
+          }
+        }
+      }
+    },
+    "device.executor.error.title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "On-device executor unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本机执行器不可用"
+          }
+        }
+      }
+    },
+    "device.executor.error.connect_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not initialize the cloud device executor for this session."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法为当前会话初始化云端设备执行器。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

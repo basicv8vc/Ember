@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  G3_REAL_CANARY_VARS,
   UNPROVISIONED_D1_PLACEHOLDER,
   parseJsonc,
   validateV2StagingConfig,
@@ -103,7 +104,7 @@ describe('V2 staging preflight validator', () => {
   it('allows bounded G3 real-LLM canary only with explicit flag, pinned model, allowlist, and strict caps', () => {
     const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
     const canaryConfig = structuredClone(v2Config);
-    canaryConfig.vars = { ...canaryConfig.vars, EMBER_MODEL_MODE: 'real' };
+    canaryConfig.vars = { ...canaryConfig.vars, ...G3_REAL_CANARY_VARS };
 
     const validResult = validateV2StagingConfig({
       v2Config: canaryConfig,
@@ -114,6 +115,21 @@ describe('V2 staging preflight validator', () => {
     });
     expect(validResult.ok).toBe(true);
     expect(validResult.errors).toEqual([]);
+
+    const pollutedFakeConfig = structuredClone(v2Config);
+    pollutedFakeConfig.vars = {
+      ...pollutedFakeConfig.vars,
+      GLOBAL_DAILY_CEILING_MICRO_USD: '100000',
+    };
+    const pollutedFakeResult = validateV2StagingConfig({
+      v2Config: pollutedFakeConfig,
+      v1Configs,
+      migrationExists,
+    });
+    expect(pollutedFakeResult.ok).toBe(false);
+    expect(pollutedFakeResult.errors.some((e) => e.includes('default global ledger ceiling'))).toBe(
+      true,
+    );
 
     const looseBudget = structuredClone(canaryConfig);
     looseBudget.vars = {

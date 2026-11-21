@@ -15,9 +15,10 @@ import {
 } from '../contracts/validation.js';
 import { GlobalBudgetAuthorityCore } from './authority.js';
 import {
+  GLOBAL_BUDGET_OBJECT_NAME,
   GLOBAL_BUDGET_REAL_OBJECT_NAME,
+  REAL_GLOBAL_GRANT_PREFIX,
   readGlobalDailyCeiling,
-  resolveGlobalBudgetObjectName,
   type GlobalBudgetConfig,
   type GlobalBudgetModeConfig,
 } from './platform.js';
@@ -32,19 +33,39 @@ export class GlobalBudgetDO
 {
   readonly #authority: GlobalBudgetAuthorityCore;
   readonly #objectName: string;
+  readonly #envMode: string;
 
   constructor(ctx: DurableObjectState, env: GlobalBudgetWorkerEnv) {
     super(ctx, env);
-    const objectName = resolveGlobalBudgetObjectName(env);
-    if (!ctx.id.equals(env.GLOBAL_BUDGET.idFromName(objectName))) {
+    const isFake = ctx.id.equals(env.GLOBAL_BUDGET.idFromName(GLOBAL_BUDGET_OBJECT_NAME));
+    const isReal = ctx.id.equals(env.GLOBAL_BUDGET.idFromName(GLOBAL_BUDGET_REAL_OBJECT_NAME));
+    if (!isFake && !isReal) {
       throw new Error('Unexpected GlobalBudgetDO instance');
     }
-    this.#objectName = objectName;
-    this.#authority = new GlobalBudgetAuthorityCore(ctx.storage, readGlobalDailyCeiling(env));
+    this.#objectName = isReal ? GLOBAL_BUDGET_REAL_OBJECT_NAME : GLOBAL_BUDGET_OBJECT_NAME;
+    this.#envMode = env.EMBER_MODEL_MODE?.trim().toLowerCase() ?? 'fake';
+    const newGrantId = isReal
+      ? () => `${REAL_GLOBAL_GRANT_PREFIX}${globalThis.crypto.randomUUID()}`
+      : () => globalThis.crypto.randomUUID();
+    this.#authority = new GlobalBudgetAuthorityCore(
+      ctx.storage,
+      readGlobalDailyCeiling(env),
+      Date.now,
+      newGrantId,
+    );
   }
 
   async reserveGlobal(req: GlobalBudgetReserveRequest) {
     const parsed = parseGlobalBudgetReserveRequest(req);
+    // Only admit new reservations on the ledger matching the active deploy mode;
+    // existing grants on either DO remain loadable for send auth, renewal, expiry, and settlement.
+    const wrongLedgerForMode =
+      (this.#objectName === GLOBAL_BUDGET_REAL_OBJECT_NAME && this.#envMode !== 'real') ||
+      (this.#objectName === GLOBAL_BUDGET_OBJECT_NAME && this.#envMode === 'real');
+    if (wrongLedgerForMode) {
+      return { kind: 'budget_exceeded' } as const;
+    }
+
     const result = await this.#authority.reserveGlobal(parsed);
     if (this.#objectName === GLOBAL_BUDGET_REAL_OBJECT_NAME) {
       console.log(

@@ -92,6 +92,7 @@ export type AgentHeadCoreOptions = {
   readonly agentId: Id;
   readonly recoveryRegistry: RecoveryRegistryPort;
   readonly globalBudget: GlobalBudgetAuthority;
+  readonly realGlobalBudget?: GlobalBudgetAuthority;
   readonly nowMs?: () => number;
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
@@ -189,6 +190,7 @@ export class AgentHeadCore
   private readonly eventCoordinator: EventRuntimeCoordinatorPort;
   private readonly recoveryHooks: TurnRecoverySeamHooks;
   private readonly globalBudget: GlobalBudgetAuthority;
+  private readonly realGlobalBudget: GlobalBudgetAuthority | undefined;
   private readonly nowMsFn: () => number;
   private readonly newId: () => Id;
   private readonly localCeilings: LocalBudgetCeilings | undefined;
@@ -200,6 +202,7 @@ export class AgentHeadCore
     this.tenantId = options.tenantId;
     this.agentId = options.agentId;
     this.globalBudget = options.globalBudget;
+    this.realGlobalBudget = options.realGlobalBudget;
     this.nowMsFn = options.nowMs ?? (() => Date.now());
     this.newId = options.idFactory ?? (() => globalThis.crypto.randomUUID());
     this.localCeilings = options.localCeilings;
@@ -295,6 +298,7 @@ export class AgentHeadCore
       recoveryHooks: bindings.recoveryHooks,
       recoveryRegistry: options.recoveryRegistry,
       globalBudget: this.globalBudget,
+      ...(this.realGlobalBudget !== undefined ? { realGlobalBudget: this.realGlobalBudget } : {}),
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
@@ -335,6 +339,7 @@ export class AgentHeadCore
     return createGlobalBudgetSettlePortAdapter({
       storage: this.storage,
       globalBudget: this.globalBudget,
+      ...(this.realGlobalBudget !== undefined ? { realGlobalBudget: this.realGlobalBudget } : {}),
       nowMs: this.nowMsFn,
     });
   }
@@ -674,7 +679,11 @@ export class AgentHeadCore
 
     let globalGrantId: string | null = null;
     if (cmd.budgetMode !== 'disabled_echo_only' && cmd.estimatedMicroUsd > 0) {
-      const globalRes = await this.globalBudget.reserveGlobal({
+      const targetBudget =
+        cmd.budgetMode === 'real'
+          ? (this.realGlobalBudget ?? this.globalBudget)
+          : this.globalBudget;
+      const globalRes = await targetBudget.reserveGlobal({
         tenantId: cmd.tenantId,
         principalId: cmd.principalId,
         agentId: cmd.agentId,

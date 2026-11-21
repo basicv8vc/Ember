@@ -1475,7 +1475,7 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     expect(summaryCsv).toContain('sales.csv,revenue,2,200,80,120,100');
   });
 
-  it('isolates the real-LLM GlobalBudgetDO instance from fake-mode simulated turns', () => {
+  it('binds both global and global-real DO instances while selecting new-reserve ledger by mode', () => {
     expect(resolveGlobalBudgetObjectName({})).toBe(GLOBAL_BUDGET_OBJECT_NAME);
     expect(resolveGlobalBudgetObjectName({ EMBER_MODEL_MODE: 'fake' })).toBe(
       GLOBAL_BUDGET_OBJECT_NAME,
@@ -1491,12 +1491,18 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       GLOBAL_BUDGET: {
         getByName(name: string) {
           requestedNames.push(name);
-          return {} as GlobalBudgetAuthority;
+          return { name } as unknown as GlobalBudgetAuthority;
         },
       },
     });
 
-    expect(requestedNames).toEqual([GLOBAL_BUDGET_REAL_OBJECT_NAME]);
+    expect(requestedNames).toEqual([GLOBAL_BUDGET_OBJECT_NAME, GLOBAL_BUDGET_REAL_OBJECT_NAME]);
+    expect((options.globalBudget as unknown as { name: string }).name).toBe(
+      GLOBAL_BUDGET_OBJECT_NAME,
+    );
+    expect((options.realGlobalBudget as unknown as { name: string }).name).toBe(
+      GLOBAL_BUDGET_REAL_OBJECT_NAME,
+    );
     expect(options.globalDailyCeilingMicroUsd).toBe(100_000);
   });
 });

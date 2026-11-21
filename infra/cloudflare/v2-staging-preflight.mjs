@@ -20,6 +20,22 @@ export const REQUIRED_REAL_CANARY_SECRETS = Object.freeze([
   'EMBER_MODEL_ALPHA_TENANT_IDS',
   'EMBER_V2_STAGING_ALLOWED_SUBJECTS',
 ]);
+export const G3_REAL_CANARY_VARS = Object.freeze({
+  EMBER_MODEL_MODE: 'real',
+  EMBER_MODEL_PROVIDER: G3_APPROVED_PROVIDER,
+  EMBER_MODEL_ID: G3_APPROVED_MODEL_ID,
+  EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+  EMBER_MODEL_ATTEMPT_TIMEOUT_MS: '20000',
+  EMBER_MODEL_TURN_LEASE_MS: '30000',
+  EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.perAttemptMicroUsd),
+  EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD: String(
+    G3_MAX_BUDGET_CEILINGS.principalDailyMicroUsd,
+  ),
+  EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.tenantDailyMicroUsd),
+  EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.globalDailyMicroUsd),
+  GLOBAL_DAILY_CEILING_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.globalDailyMicroUsd),
+  EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: String(G3_MAX_BUDGET_CEILINGS.principalDailyTurns),
+});
 const FORBIDDEN_PLAINTEXT_SECRET_VARS = Object.freeze([
   ...REQUIRED_REAL_CANARY_SECRETS,
   'DAYTONA_API_KEY',
@@ -256,6 +272,11 @@ export function validateV2StagingConfig({
         `V2 staging must keep vars.EMBER_SANDBOX_MODE === "fake" until separate Daytona canary approval (got ${JSON.stringify(vars.EMBER_SANDBOX_MODE)})`,
       );
     }
+    if (vars.GLOBAL_DAILY_CEILING_MICRO_USD !== undefined) {
+      errors.push(
+        `V2 fake staging must preserve default global ledger ceiling (unset GLOBAL_DAILY_CEILING_MICRO_USD, got ${JSON.stringify(vars.GLOBAL_DAILY_CEILING_MICRO_USD)})`,
+      );
+    }
   }
   if (vars.EMBER_V2_STAGING_ISOLATED !== 'true') {
     errors.push('expected vars.EMBER_V2_STAGING_ISOLATED === "true"');
@@ -441,7 +462,10 @@ async function main() {
 
   const v2Config = parseJsonc(v2Source);
   if (modelModeReal) {
-    v2Config.vars = { ...(v2Config.vars ?? {}), EMBER_MODEL_MODE: 'real' };
+    v2Config.vars = {
+      ...(v2Config.vars ?? {}),
+      ...(allowRealLlmCanary ? G3_REAL_CANARY_VARS : { EMBER_MODEL_MODE: 'real' }),
+    };
   }
 
   const result = validateV2StagingConfig({
@@ -476,6 +500,13 @@ async function main() {
 
   if (!skipWrangler) {
     process.stdout.write('Running local Wrangler bundle dry-run (no cloud resources touched)...\n');
+    const canaryVarFlags =
+      modelModeReal && allowRealLlmCanary
+        ? Object.entries(G3_REAL_CANARY_VARS).flatMap(([key, value]) => [
+            '--var',
+            `${key}:${value}`,
+          ])
+        : [];
     await runCommand(
       'pnpm',
       [
@@ -487,7 +518,7 @@ async function main() {
         '--dry-run',
         '--config',
         'wrangler.v2-staging.jsonc',
-        ...(modelModeReal ? ['--var', 'EMBER_MODEL_MODE:real'] : []),
+        ...canaryVarFlags,
       ],
       repoRoot,
     );

@@ -9,6 +9,7 @@ export const G3_MAX_BUDGET_CEILINGS: Readonly<{
   principalDailyTurns: number;
 }>;
 export const REQUIRED_REAL_CANARY_SECRETS: readonly string[];
+export const G3_REAL_CANARY_VARS: Readonly<Record<string, string>>;
 
 export interface WranglerV2StagingConfig {
   name?: string;

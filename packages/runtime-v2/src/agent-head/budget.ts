@@ -1,6 +1,7 @@
 import { DomainError, type Id } from '@ember/domain';
 import { V2_BUDGET_LIMITS } from '../contracts/constants.js';
 import type { GlobalBudgetAuthority } from '../contracts/global-budget.js';
+import { isRealGlobalGrantId } from '../global-budget/platform.js';
 import {
   BUDGET_SYNC_PAYLOAD_SCHEMA_VERSION,
   type BudgetSyncIncidentReason,
@@ -1004,13 +1005,34 @@ export interface AgentBudgetSettleBridgeResult {
 export function createGlobalBudgetSettlePortAdapter(input: {
   readonly storage: Pick<DurableObjectStorageLike, 'sql' | 'transactionSync'>;
   readonly globalBudget: GlobalBudgetAuthority;
+  readonly realGlobalBudget?: GlobalBudgetAuthority;
   readonly nowMs: () => number;
 }): {
   settleGlobal(payload: BudgetSyncOutboxPayload): Promise<AgentBudgetSettleBridgeResult>;
 } {
+  function selectAuthority(payload: BudgetSyncOutboxPayload): GlobalBudgetAuthority {
+    if (input.realGlobalBudget === undefined) {
+      return input.globalBudget;
+    }
+    const attempt = input.storage.sql
+      .exec<{ readonly budget_mode: ModelAttemptBudgetMode }>(
+        `SELECT budget_mode
+           FROM model_attempts
+          WHERE operation_id = ?
+          LIMIT 1`,
+        payload.operationId,
+      )
+      .toArray()[0];
+    if (attempt !== undefined) {
+      return attempt.budget_mode === 'real' ? input.realGlobalBudget : input.globalBudget;
+    }
+    return isRealGlobalGrantId(payload.globalGrantId) ? input.realGlobalBudget : input.globalBudget;
+  }
+
   return {
     async settleGlobal(payload: BudgetSyncOutboxPayload): Promise<AgentBudgetSettleBridgeResult> {
-      const res = await input.globalBudget.settleGlobal({
+      const authority = selectAuthority(payload);
+      const res = await authority.settleGlobal({
         tenantId: payload.tenantId,
         operationId: payload.operationId,
         settlementRevision: payload.settlementRevision,

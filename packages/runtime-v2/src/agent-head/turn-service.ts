@@ -106,6 +106,7 @@ export interface TurnServiceDeps {
   readonly recoveryHooks: TurnRecoverySeamHooks;
   readonly recoveryRegistry: RecoveryRegistryPort;
   readonly globalBudget: GlobalBudgetAuthority;
+  readonly realGlobalBudget?: GlobalBudgetAuthority;
   readonly nowMs: () => number;
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
@@ -125,6 +126,12 @@ export class AgentHeadTurnService implements AgentHeadRpc {
     this.newId = deps.idFactory ?? (() => globalThis.crypto.randomUUID());
     this.globalDailyCeilingMicroUsd =
       deps.globalDailyCeilingMicroUsd ?? V2_BUDGET_LIMITS.globalDailyMicroUsd;
+  }
+
+  private globalBudgetForMode(budgetMode: ModelAttemptRow['budget_mode']): GlobalBudgetAuthority {
+    return budgetMode === 'real'
+      ? (this.deps.realGlobalBudget ?? this.deps.globalBudget)
+      : this.deps.globalBudget;
   }
 
   private toTurnCommitDeps(): TurnCommitDeps {
@@ -415,7 +422,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
 
       let reserveRes;
       try {
-        reserveRes = await this.deps.globalBudget.reserveGlobal({
+        reserveRes = await this.globalBudgetForMode(budgetMode).reserveGlobal({
           tenantId: req.scope.tenantId,
           principalId: req.scope.principalId,
           agentId: req.scope.agentId,
@@ -807,7 +814,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
 
       if (globalGrantId !== null && !stage3Outcome.durableCompensationEnqueued) {
         try {
-          await this.deps.globalBudget.settleGlobal({
+          await this.globalBudgetForMode(budgetMode).settleGlobal({
             tenantId: req.scope.tenantId,
             operationId: stage1.operationId,
             settlementRevision: 0,
@@ -1016,7 +1023,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
       }
       let authRes;
       try {
-        authRes = await this.deps.globalBudget.authorizeGlobalSend({
+        authRes = await this.globalBudgetForMode(pre.budgetMode).authorizeGlobalSend({
           tenantId: req.scope.tenantId,
           operationId: req.operationId,
           globalGrantId: pre.globalGrantId,
@@ -1110,6 +1117,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           activeAttempt.global_grant_id !== null &&
           activeAttempt.budget_mode !== 'disabled_echo_only'
             ? {
+                budgetMode: activeAttempt.budget_mode,
                 operationId: activeAttempt.operation_id,
                 globalGrantId: activeAttempt.global_grant_id,
                 newExpiresAtMs:
@@ -1132,7 +1140,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
 
     if (localResult.grantToRenew !== null) {
       try {
-        await this.deps.globalBudget.renewGlobalGrant({
+        await this.globalBudgetForMode(localResult.grantToRenew.budgetMode).renewGlobalGrant({
           tenantId: req.scope.tenantId,
           operationId: localResult.grantToRenew.operationId,
           globalGrantId: localResult.grantToRenew.globalGrantId,

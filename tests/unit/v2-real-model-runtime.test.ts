@@ -17,11 +17,16 @@ import {
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
+  GLOBAL_BUDGET_OBJECT_NAME,
+  GLOBAL_BUDGET_REAL_OBJECT_NAME,
   applyAgentHeadMigrations,
+  createAgentHeadGlobalBudgetOptions,
   createDefaultAgentHeadMigrations,
+  resolveGlobalBudgetObjectName,
   runV2FakePythonSandbox,
   type D1DatabaseLike,
   type DurableObjectStorageLike,
+  type GlobalBudgetAuthority,
   type ProactiveScheduleSnapshot,
   type QueueLike,
   type RecoveryRegistryPort,
@@ -1468,5 +1473,36 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     expect(bomSandbox.outputFiles[0]?.filename).toBe('analysis-summary.csv');
     const summaryCsv = new TextDecoder().decode(bomSandbox.outputFiles[0]!.bytes);
     expect(summaryCsv).toContain('sales.csv,revenue,2,200,80,120,100');
+  });
+
+  it('binds both global and global-real DO instances while selecting new-reserve ledger by mode', () => {
+    expect(resolveGlobalBudgetObjectName({})).toBe(GLOBAL_BUDGET_OBJECT_NAME);
+    expect(resolveGlobalBudgetObjectName({ EMBER_MODEL_MODE: 'fake' })).toBe(
+      GLOBAL_BUDGET_OBJECT_NAME,
+    );
+    expect(resolveGlobalBudgetObjectName({ EMBER_MODEL_MODE: 'real' })).toBe(
+      GLOBAL_BUDGET_REAL_OBJECT_NAME,
+    );
+
+    const requestedNames: string[] = [];
+    const options = createAgentHeadGlobalBudgetOptions({
+      EMBER_MODEL_MODE: 'real',
+      GLOBAL_DAILY_CEILING_MICRO_USD: '100000',
+      GLOBAL_BUDGET: {
+        getByName(name: string) {
+          requestedNames.push(name);
+          return { name } as unknown as GlobalBudgetAuthority;
+        },
+      },
+    });
+
+    expect(requestedNames).toEqual([GLOBAL_BUDGET_OBJECT_NAME, GLOBAL_BUDGET_REAL_OBJECT_NAME]);
+    expect((options.globalBudget as unknown as { name: string }).name).toBe(
+      GLOBAL_BUDGET_OBJECT_NAME,
+    );
+    expect((options.realGlobalBudget as unknown as { name: string }).name).toBe(
+      GLOBAL_BUDGET_REAL_OBJECT_NAME,
+    );
+    expect(options.globalDailyCeilingMicroUsd).toBe(100_000);
   });
 });

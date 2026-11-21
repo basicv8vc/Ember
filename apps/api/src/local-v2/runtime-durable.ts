@@ -430,6 +430,22 @@ export function createDurableExecutor(
           claim.targetKind === 'turn' && output.kind === 'delegate'
             ? toV2DelegationCommand(output)
             : undefined;
+        if (!callResult.simulated) {
+          console.log(
+            JSON.stringify({
+              event: 'v2.model_attempt',
+              path: 'durable',
+              targetKind: claim.targetKind,
+              operationId,
+              modelLabel,
+              simulated: callResult.simulated,
+              outputKind: output.kind,
+              observedCostMicroUsd: callResult.usage?.costMicroUsd ?? null,
+              inputTokens: callResult.usage?.inputTokens ?? null,
+              outputTokens: callResult.usage?.outputTokens ?? null,
+            }),
+          );
+        }
         return {
           status: 'succeeded',
           operationId,

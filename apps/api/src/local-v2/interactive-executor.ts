@@ -427,6 +427,23 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             ...(inputTokens === undefined ? {} : { inputTokens }),
             ...(outputTokens === undefined ? {} : { outputTokens }),
           };
+    if (!reply.simulated) {
+      console.log(
+        JSON.stringify({
+          event: 'v2.model_attempt',
+          path: 'interactive',
+          operationId,
+          modelLabel: reply.modelLabel,
+          simulated: reply.simulated,
+          outputKind: reply.output.kind,
+          settlementState: settlement.state,
+          outcomeCode: settlement.outcomeCode,
+          observedCostMicroUsd: observedCostMicroUsd ?? null,
+          inputTokens: inputTokens ?? null,
+          outputTokens: outputTokens ?? null,
+        }),
+      );
+    }
     await publish({
       ...attempt,
       settlement,

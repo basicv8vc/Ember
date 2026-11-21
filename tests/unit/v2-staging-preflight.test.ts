@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
+  G3_REAL_CANARY_VARS,
   UNPROVISIONED_D1_PLACEHOLDER,
   parseJsonc,
   validateV2StagingConfig,
@@ -98,6 +99,88 @@ describe('V2 staging preflight validator', () => {
 
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes('EMBER_MODEL_MODE === "fake"'))).toBe(true);
+  });
+
+  it('allows bounded G3 real-LLM canary only with explicit flag, pinned model, allowlist, and strict caps', () => {
+    const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
+    const canaryConfig = structuredClone(v2Config);
+    canaryConfig.vars = { ...canaryConfig.vars, ...G3_REAL_CANARY_VARS };
+
+    const validResult = validateV2StagingConfig({
+      v2Config: canaryConfig,
+      v1Configs,
+      migrationExists,
+      requireProvisioned: true,
+      allowRealLlmCanary: true,
+    });
+    expect(validResult.ok).toBe(true);
+    expect(validResult.errors).toEqual([]);
+
+    const pollutedFakeConfig = structuredClone(v2Config);
+    pollutedFakeConfig.vars = {
+      ...pollutedFakeConfig.vars,
+      GLOBAL_DAILY_CEILING_MICRO_USD: '100000',
+    };
+    const pollutedFakeResult = validateV2StagingConfig({
+      v2Config: pollutedFakeConfig,
+      v1Configs,
+      migrationExists,
+    });
+    expect(pollutedFakeResult.ok).toBe(false);
+    expect(pollutedFakeResult.errors.some((e) => e.includes('default global ledger ceiling'))).toBe(
+      true,
+    );
+
+    const looseBudget = structuredClone(canaryConfig);
+    looseBudget.vars = {
+      ...looseBudget.vars,
+      EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD: '250000',
+      GLOBAL_DAILY_CEILING_MICRO_USD: '250000',
+    };
+    const looseResult = validateV2StagingConfig({
+      v2Config: looseBudget,
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(looseResult.ok).toBe(false);
+    expect(looseResult.errors.some((e) => e.includes('exceeds G3 canary ceiling'))).toBe(true);
+
+    const broadScope = structuredClone(canaryConfig);
+    broadScope.vars = { ...broadScope.vars, EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' };
+    const broadScopeResult = validateV2StagingConfig({
+      v2Config: broadScope,
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(broadScopeResult.ok).toBe(false);
+    expect(broadScopeResult.errors.some((e) => e.includes('EMBER_MODEL_ALPHA_SCOPE'))).toBe(true);
+
+    const daytonaCanary = structuredClone(canaryConfig);
+    daytonaCanary.vars = { ...daytonaCanary.vars, EMBER_SANDBOX_MODE: 'daytona' };
+    const daytonaResult = validateV2StagingConfig({
+      v2Config: daytonaCanary,
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(daytonaResult.ok).toBe(false);
+    expect(daytonaResult.errors.some((e) => e.includes('EMBER_SANDBOX_MODE'))).toBe(true);
+
+    const plaintextSecret = structuredClone(canaryConfig);
+    plaintextSecret.vars = {
+      ...plaintextSecret.vars,
+      EMBER_MODEL_API_KEY: 'sk-or-v1-must-never-be-plaintext',
+    };
+    const secretResult = validateV2StagingConfig({
+      v2Config: plaintextSecret,
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(secretResult.ok).toBe(false);
+    expect(secretResult.errors.some((e) => e.includes('Cloudflare Worker secret'))).toBe(true);
   });
 
   it('rejects real Daytona or unset EMBER_SANDBOX_MODE before separate canary approval', () => {

@@ -959,7 +959,7 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     });
     expect(outcome).toEqual({
       status: 'failed',
-      reasonCode: 'sandbox_provider_unavailable',
+      reasonCode: 'sandbox_mode_unset',
     });
   });
 

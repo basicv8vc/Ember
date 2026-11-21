@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { setTimeout } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import {
@@ -194,6 +194,9 @@ describe('V2 Tools & Execution: Python Sandbox & Artifact Delivery in workerd', 
     expect(csvBody).toContain('source_file,column,count,sum,min,max,mean');
     expect(csvBody).toContain('sales.csv,revenue,3,400,79.50,200,133.33');
     expect(csvBody).toContain('sales.csv,units,3,30,5,15,10');
+    expect(createHash('sha256').update(Buffer.from(csvBody, 'utf-8')).digest('hex')).toBe(
+      outputArtifact!.sha256,
+    );
 
     // 7. Cross-tenant isolation: Tenant B receives 404 on every Task & Artifact route.
     for (const path of [
@@ -215,5 +218,112 @@ describe('V2 Tools & Execution: Python Sandbox & Artifact Delivery in workerd', 
     expect(cancelRes.status).toBe(200);
     const cancelled = B1TaskCancelDtoSchema.parse(await cancelRes.json());
     expect(cancelled.terminal).toBe(true);
+  });
+
+  it('connects chat upload -> natural-language delegate_python_agent -> durable queue -> downloadable SHA-256 artifact', async () => {
+    const token = await signIn(harness, `v2-alpha-f-nl-${randomUUID()}`);
+    const meRes = await harness.fetchOverHttp('/v1/me', { headers: authHeaders(token) });
+    expect(meRes.status).toBe(200);
+    const me = B1MeResponseSchema.parse(await meRes.json());
+    const conversationId = me.conversation.conversation_id;
+
+    // 1. Stage CSV upload for chat attachment.
+    const uploadRes = await harness.fetchOverHttp('/v1/me/uploads', {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        filename: 'nl-sales.csv',
+        media_type: 'text/csv',
+        content: SALES_CSV,
+      }),
+    });
+    expect(uploadRes.status).toBe(201);
+    const upload = B3StagedUploadReceiptDtoSchema.parse(await uploadRes.json());
+
+    // 2. Script the loopback gateway to emit a delegate_python_agent tool delegation without
+    //    manually specifying attachmentIds — runtime turn-commit binds the message's upload.
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'I have started a Python analysis task for your uploaded CSV.',
+      delegation: {
+        toolName: 'delegate_python_agent',
+        arguments: {
+          title: 'NL Sales Summary',
+          prompt: 'Analyze nl-sales.csv\n# output: nl-summary.csv',
+        },
+      },
+    });
+
+    // 3. Send natural-language chat message with attachment_ids (B1 durable path -> DO commitTurn).
+    const msgRes = await harness.fetchOverHttp(`/v1/conversations/${conversationId}/messages`, {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        client_submission_id: randomUUID(),
+        text: 'Please analyze the attached CSV and produce a summary table.',
+        transcript_epoch: me.conversation.transcript_epoch,
+        attachment_ids: [upload.upload_id],
+      }),
+    });
+    expect(msgRes.status).toBe(201);
+
+    // 4. Locate the delegated python.agent task created for this principal and wait for completion.
+    let delegatedTaskId: string | undefined;
+    let completed = false;
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      const listRes = await harness.fetchOverHttp('/v1/me/tasks', {
+        headers: authHeaders(token),
+      });
+      expect(listRes.status).toBe(200);
+      const tasks = B1TaskListDtoSchema.parse(await listRes.json()).tasks;
+      const pyTask = tasks.find((t) => t.kind === 'python.agent');
+      if (pyTask) {
+        delegatedTaskId = pyTask.task_id;
+        if (pyTask.status === 'completed') {
+          completed = true;
+          break;
+        }
+      }
+      await setTimeout(100);
+    }
+    expect(delegatedTaskId).toBeDefined();
+    expect(completed).toBe(true);
+
+    // 5. Transcript contains a task_reference card pointing to the delegated task.
+    const pageRes = await harness.fetchOverHttp(`/v1/conversations/${conversationId}/messages`, {
+      headers: authHeaders(token),
+    });
+    expect(pageRes.status).toBe(200);
+    const page = B1ConversationPageSchema.parse(await pageRes.json());
+    expect(
+      page.messages.some((m) => m.kind === 'task_reference' && m.task_id === delegatedTaskId),
+    ).toBe(true);
+
+    // 6. Both uploaded input and generated output artifact are accessible and SHA-256 verified.
+    const artifactsRes = await harness.fetchOverHttp(`/v1/me/tasks/${delegatedTaskId}/artifacts`, {
+      headers: authHeaders(token),
+    });
+    expect(artifactsRes.status).toBe(200);
+    const artifacts = B3TaskArtifactsListDtoSchema.parse(await artifactsRes.json()).artifacts;
+    const inputArtifact = artifacts.find(
+      (a) => a.created_by === 'user' && a.filename === 'nl-sales.csv',
+    );
+    const outputArtifact = artifacts.find(
+      (a) => a.created_by === 'run' && a.filename === 'nl-summary.csv',
+    );
+    expect(inputArtifact).toBeDefined();
+    expect(outputArtifact).toBeDefined();
+
+    const downloadRes = await harness.fetchOverHttp(
+      `/v1/me/artifacts/${outputArtifact!.artifact_id}`,
+      { headers: authHeaders(token) },
+    );
+    expect(downloadRes.status).toBe(200);
+    const csvBody = await downloadRes.text();
+    expect(csvBody).toContain('nl-sales.csv,revenue,3,400,79.50,200,133.33');
+    expect(createHash('sha256').update(Buffer.from(csvBody, 'utf-8')).digest('hex')).toBe(
+      outputArtifact!.sha256,
+    );
   });
 });

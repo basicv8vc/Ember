@@ -108,6 +108,7 @@ export interface LocalV2EdgeDependencies {
   resolveAttachments?(
     auth: AuthContext,
     ids: readonly string[],
+    clientSubmissionId?: string,
   ): Promise<readonly ResolvedMessageAttachment[]>;
   readonly stream?: {
     readonly gateway: Pick<V2StreamingModelGateway, 'streamConversationTurn'>;
@@ -176,7 +177,11 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
                     'staged attachments are unavailable in the local runtime',
                   );
                 }
-                return deps.resolveAttachments(resolved.auth, attachmentIds);
+                return deps.resolveAttachments(
+                  resolved.auth,
+                  attachmentIds,
+                  message.client_submission_id.toLowerCase(),
+                );
               });
         const workerId = crypto.randomUUID();
         const timing =

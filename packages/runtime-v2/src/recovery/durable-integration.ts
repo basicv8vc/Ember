@@ -1,4 +1,5 @@
 import type {
+  B2TaskDelegationCommand,
   CommitTurnSettlementInput,
   MarkAttemptSentRequest,
   MarkAttemptSentResult,
@@ -490,6 +491,93 @@ function parseProactiveScheduleTurnCommand(raw: unknown): ProactiveScheduleTurnC
   };
 }
 
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const DELEGATION_OUTER_PROPS = new Set(['toolName', 'title', 'input']);
+const NOTES_INPUT_PROPS = new Set(['notes', 'instructions']);
+const PYTHON_INPUT_PROPS = new Set(['prompt', 'instructions', 'attachmentIds']);
+
+function readBoundedTrimmedString(raw: unknown, maxChars: number): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed.length >= 1 && trimmed.length <= maxChars ? trimmed : null;
+}
+
+function parseDelegationCommand(raw: unknown): B2TaskDelegationCommand | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (!DELEGATION_OUTER_PROPS.has(prop)) {
+      return null;
+    }
+  }
+  let title: string | undefined;
+  if (record['title'] !== undefined) {
+    const parsedTitle = readBoundedTrimmedString(record['title'], 128);
+    if (parsedTitle === null) return null;
+    title = parsedTitle;
+  }
+  const rawInput = record['input'];
+  if (rawInput === null || typeof rawInput !== 'object' || Array.isArray(rawInput)) {
+    return null;
+  }
+  const inputRecord = rawInput as Record<string, unknown>;
+
+  if (record['toolName'] === 'delegate_notes_action_items') {
+    for (const prop of Object.keys(inputRecord)) {
+      if (!NOTES_INPUT_PROPS.has(prop)) return null;
+    }
+    const notes = readBoundedTrimmedString(inputRecord['notes'], 8_000);
+    if (notes === null) return null;
+    let instructions: string | undefined;
+    if (inputRecord['instructions'] !== undefined) {
+      instructions = readBoundedTrimmedString(inputRecord['instructions'], 500) ?? undefined;
+      if (instructions === undefined) return null;
+    }
+    return {
+      toolName: 'delegate_notes_action_items',
+      ...(title !== undefined ? { title } : {}),
+      input: { notes, ...(instructions !== undefined ? { instructions } : {}) },
+    };
+  }
+
+  if (record['toolName'] === 'delegate_python_agent') {
+    for (const prop of Object.keys(inputRecord)) {
+      if (!PYTHON_INPUT_PROPS.has(prop)) return null;
+    }
+    const prompt = readBoundedTrimmedString(inputRecord['prompt'], 8_000);
+    if (prompt === null) return null;
+    let instructions: string | undefined;
+    if (inputRecord['instructions'] !== undefined) {
+      instructions = readBoundedTrimmedString(inputRecord['instructions'], 500) ?? undefined;
+      if (instructions === undefined) return null;
+    }
+    let attachmentIds: readonly string[] | undefined;
+    if (inputRecord['attachmentIds'] !== undefined) {
+      if (
+        !Array.isArray(inputRecord['attachmentIds']) ||
+        inputRecord['attachmentIds'].length > 5 ||
+        inputRecord['attachmentIds'].some((id) => typeof id !== 'string' || !UUID_REGEX.test(id))
+      ) {
+        return null;
+      }
+      attachmentIds = inputRecord['attachmentIds'] as readonly string[];
+    }
+    return {
+      toolName: 'delegate_python_agent',
+      ...(title !== undefined ? { title } : {}),
+      input: {
+        prompt,
+        ...(instructions !== undefined ? { instructions } : {}),
+        ...(attachmentIds !== undefined ? { attachmentIds } : {}),
+      },
+    };
+  }
+
+  return null;
+}
+
 /**
  * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
  * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
@@ -531,6 +619,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
   if (cmd.targetKind === 'turn') {
     if (cmd.outcome.status === 'succeeded') {
       let text = fallbackText;
+      let delegation: B2TaskDelegationCommand | undefined;
       let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
       let proactiveScheduleCreate: ProactiveScheduleTurnCommand | undefined;
       if (cmd.outcome.outputJson !== null) {
@@ -538,6 +627,13 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
           const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
           if (typeof parsed['text'] === 'string' && parsed['text'].length > 0) {
             text = parsed['text'];
+          }
+          if (parsed['delegation'] !== undefined) {
+            const parsedDelegation = parseDelegationCommand(parsed['delegation']);
+            if (parsedDelegation === null) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
+            }
+            delegation = parsedDelegation;
           }
           if (parsed['personalMemorySave'] !== undefined) {
             const parsedMem = parsePersonalMemorySaveTurnCommand(parsed['personalMemorySave']);
@@ -566,6 +662,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         ...binding,
         status: 'completed',
         text,
+        ...(delegation !== undefined ? { delegation } : {}),
         ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
         ...(proactiveScheduleCreate !== undefined ? { proactiveScheduleCreate } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),

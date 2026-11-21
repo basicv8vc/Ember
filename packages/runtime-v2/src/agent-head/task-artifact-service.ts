@@ -24,6 +24,7 @@ import {
   type V2TaskArtifactDownloadDto,
   type V2TaskInputFileDto,
 } from '../contracts/task-artifacts.js';
+import type { ResolvedMessageAttachment } from '../contracts/agent-head-rpc.js';
 import type { V2DispatchEnvelope } from '../recovery/envelope.js';
 import type { EventRuntimeCoordinatorPort } from '../recovery/ports.js';
 import type { DurableObjectStorageLike, SqlStorageLike } from '../storage.js';
@@ -175,6 +176,8 @@ export class AgentHeadTaskArtifactService {
     assertHeadScopeSync(this.sql, cmd.tenantId, cmd.agentId);
 
     switch (cmd.kind) {
+      case 'resolve_staged_uploads':
+        return this.resolveStagedUploads(cmd);
       case 'stage_upload':
         return this.stageUpload(cmd);
       case 'submit_python_task':
@@ -198,6 +201,102 @@ export class AgentHeadTaskArtifactService {
       case 'publish_task_outputs':
         return this.publishTaskOutputs(cmd);
     }
+  }
+
+  private resolveStagedUploads(
+    cmd: Extract<TaskArtifactCommand, { kind: 'resolve_staged_uploads' }>,
+  ): readonly ResolvedMessageAttachment[] {
+    if (cmd.uploadIds.length > PYTHON_AGENT_LIMITS.maxAttachmentsPerMessage) {
+      throw new DomainError('INVALID_ARGUMENT', 'too many attachment_ids');
+    }
+    if (cmd.uploadIds.length === 0) {
+      return [];
+    }
+
+    const now = this.deps.nowMs();
+    const expiryCutoffMs = now - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+    const replayAttachedIds = new Set<string>();
+    if (cmd.clientSubmissionId !== undefined) {
+      const normalizedSubmissionId = cmd.clientSubmissionId.trim().toLowerCase();
+      const existingRows = sqlExecAll<{ readonly upload_id: string }>(
+        this.sql,
+        `SELECT ma.upload_id
+           FROM conversation_messages cm
+           JOIN message_attachments ma ON ma.message_id = cm.id
+          WHERE cm.client_submission_id = ?`,
+        normalizedSubmissionId,
+      );
+      for (const row of existingRows) {
+        replayAttachedIds.add(row.upload_id);
+      }
+    }
+
+    const seen = new Set<string>();
+    const resolved: ResolvedMessageAttachment[] = [];
+    for (const rawId of cmd.uploadIds) {
+      const parsedId = v2TaskIdSchema.safeParse(rawId);
+      if (!parsedId.success) {
+        throw new DomainError('INVALID_ARGUMENT', 'invalid attachment_id');
+      }
+      const uploadId = parsedId.data;
+      if (seen.has(uploadId)) {
+        throw new DomainError('INVALID_ARGUMENT', 'duplicate attachment_id');
+      }
+      seen.add(uploadId);
+
+      const row = sqlExecMaybe<
+        Pick<
+          V2TaskArtifactRow,
+          'id' | 'task_id' | 'filename' | 'media_type' | 'size_bytes' | 'sha256' | 'created_at_ms'
+        >
+      >(
+        this.sql,
+        `SELECT id, task_id, filename, media_type, size_bytes, sha256, created_at_ms
+           FROM v2_task_artifacts
+          WHERE id = ? AND tenant_id = ? AND principal_id = ? AND created_by = 'user' AND committed = 1`,
+        uploadId,
+        cmd.tenantId,
+        cmd.principalId,
+      );
+      if (row === null || row.created_at_ms <= expiryCutoffMs) {
+        throw new DomainError(
+          'INVALID_ARGUMENT',
+          'attachment_id is missing, expired, or not visible to this account',
+        );
+      }
+
+      const isReplayOwned = replayAttachedIds.has(uploadId);
+      if (!isReplayOwned) {
+        if (row.task_id !== null) {
+          throw new DomainError(
+            'INVALID_ARGUMENT',
+            'attachment_id is already bound to another task',
+          );
+        }
+        const alreadyAttached = sqlExecMaybe<{ readonly hit: number }>(
+          this.sql,
+          `SELECT 1 AS hit FROM message_attachments WHERE upload_id = ? LIMIT 1`,
+          uploadId,
+        );
+        if (alreadyAttached !== null) {
+          throw new DomainError(
+            'INVALID_ARGUMENT',
+            'attachment_id is already attached to another message',
+          );
+        }
+      }
+
+      resolved.push({
+        uploadId: row.id,
+        filename: row.filename,
+        mediaType: row.media_type,
+        sizeBytes: row.size_bytes,
+        r2Key: `v2-inline:${row.id}`,
+        sha256: row.sha256,
+      });
+    }
+
+    return resolved;
   }
 
   private async stageUpload(
@@ -926,16 +1025,30 @@ export class AgentHeadTaskArtifactService {
         throw new DomainError('POLICY_DENIED', 'task file budget exceeded');
       }
 
-      // Resolve owning principal from bound input artifacts or idempotency key.
+      // Resolve owning principal from bound input artifacts, linked turn attempt, or idempotency key.
       const boundInput = sqlExecMaybe<{ readonly principal_id: string }>(
         this.sql,
         `SELECT principal_id FROM v2_task_artifacts WHERE task_id = ? AND created_by = 'user' LIMIT 1`,
         task.id,
       );
+      const linkedTurnAttempt = sqlExecMaybe<{ readonly principal_id: string }>(
+        this.sql,
+        `SELECT ma.principal_id
+           FROM assistant_turns t
+           JOIN model_attempts ma ON ma.subject_type = 'turn' AND ma.subject_id = t.id
+          WHERE t.linked_task_id = ?
+          ORDER BY ma.attempt_no DESC
+          LIMIT 1`,
+        task.id,
+      );
       const keyParts = task.idempotency_key.startsWith(PYTHON_TASK_IDEMPOTENCY_PREFIX)
         ? task.idempotency_key.slice(PYTHON_TASK_IDEMPOTENCY_PREFIX.length).split(':')
         : [];
-      const ownerPrincipalId = boundInput?.principal_id ?? keyParts[0] ?? cmd.principalId;
+      const ownerPrincipalId =
+        boundInput?.principal_id ??
+        linkedTurnAttempt?.principal_id ??
+        keyParts[0] ??
+        cmd.principalId;
 
       // Replace any prior uncommitted staging rows for this specific run (idempotent re-stage).
       // Rows stay `committed = 0` until `commitDurableResult` atomically commits this winning run.
@@ -979,7 +1092,7 @@ export class AgentHeadTaskArtifactService {
             runId: run.id,
             attempt: run.attempt,
             artifactId,
-            simulated: true,
+            simulated: cmd.simulated ?? true,
           },
         });
       }

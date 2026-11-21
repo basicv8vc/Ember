@@ -1,3 +1,4 @@
+import { PYTHON_AGENT_LIMITS } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants.js';
 import type {
@@ -39,7 +40,6 @@ import {
 } from './proactive-schedule-service.js';
 import {
   allocateConversationSequenceSync,
-  deterministicEdgeUuid,
   getHeadMetaSync,
   getTurnRowSync,
   insertEmberMessageSync,
@@ -50,6 +50,7 @@ import {
 import { evaluateTurnFence } from './state-machine.js';
 
 export const SIMULATED_LABEL_PATTERN = /-(fake|echo)-/;
+const DEFAULT_PYTHON_TASK_DEADLINE_MS = 120_000;
 
 export interface TurnCommitRecoveryHooks {
   readonly reconcileCoverageSync: (cmd: {
@@ -98,6 +99,7 @@ interface PreparedDelegationPayload {
   readonly idempotencyKey: string;
   readonly traceId: Id;
   readonly executionPath: 'standard' | 'heavy';
+  readonly attachmentIds: readonly Id[];
 }
 
 export function readCoverageRowSync(deps: {
@@ -368,15 +370,13 @@ async function prepareDelegationCommand(
       idempotencyKey,
       traceId: newId(),
       executionPath: 'standard',
+      attachmentIds: [],
     };
   }
 
-  const attachmentIds = delegation.input.attachmentIds ?? [];
-  const inputArtifactIds = await Promise.all(
-    attachmentIds.map((uploadId) =>
-      deterministicEdgeUuid(`ember.artifact:${tenantId}:${turnId}:${uploadId}`),
-    ),
-  );
+  const attachmentIds = [
+    ...new Set((delegation.input.attachmentIds ?? []).map((id) => id.toLowerCase())),
+  ];
   const prepared = await prepareEdgeSafeTaskCommand({
     agentId,
     idempotencyKey,
@@ -387,7 +387,7 @@ async function prepareDelegationCommand(
       ...(delegation.input.instructions !== undefined
         ? { instructions: delegation.input.instructions }
         : {}),
-      ...(inputArtifactIds.length > 0 ? { inputArtifactIds } : {}),
+      ...(attachmentIds.length > 0 ? { inputArtifactIds: attachmentIds } : {}),
     },
   });
   return {
@@ -398,12 +398,14 @@ async function prepareDelegationCommand(
     idempotencyKey,
     traceId: newId(),
     executionPath: 'heavy',
+    attachmentIds,
   };
 }
 
 function createOrReuseDelegatedTaskSync(
   deps: TurnCommitDeps,
   tenantId: Id,
+  principalId: Id | null,
   agentId: Id,
   conversationId: Id,
   prepared: PreparedDelegationPayload,
@@ -428,12 +430,63 @@ function createOrReuseDelegatedTaskSync(
     taskId = existing.id;
   } else {
     taskId = deps.idFactory();
+    const deadlineAtMs =
+      prepared.kind === 'python.agent' ? nowMs + DEFAULT_PYTHON_TASK_DEADLINE_MS : null;
+    if (prepared.kind === 'python.agent' && prepared.attachmentIds.length > 0) {
+      const hasArtifactsTable =
+        sql
+          .exec<{ readonly name: string }>(
+            `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_task_artifacts'`,
+          )
+          .toArray().length > 0;
+      if (hasArtifactsTable) {
+        if (principalId === null) {
+          throw new DomainError(
+            'INVALID_ARGUMENT',
+            'principal is required to bind uploaded attachments',
+          );
+        }
+        const expiryCutoffMs = nowMs - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+        let totalAttachmentBytes = 0;
+        for (const uploadId of prepared.attachmentIds) {
+          const upload = sqlExecMaybe<{
+            readonly id: string;
+            readonly task_id: string | null;
+            readonly size_bytes: number;
+            readonly created_at_ms: number;
+          }>(
+            sql,
+            `SELECT id, task_id, size_bytes, created_at_ms
+               FROM v2_task_artifacts
+              WHERE id = ? AND tenant_id = ? AND principal_id = ? AND created_by = 'user' AND committed = 1`,
+            uploadId,
+            tenantId,
+            principalId,
+          );
+          if (
+            upload === null ||
+            upload.task_id !== null ||
+            upload.created_at_ms <= expiryCutoffMs
+          ) {
+            throw new DomainError(
+              'INVALID_ARGUMENT',
+              'attachment_id is missing, expired, or already bound',
+            );
+          }
+          totalAttachmentBytes += upload.size_bytes;
+        }
+        if (totalAttachmentBytes > PYTHON_AGENT_LIMITS.maxTaskTotalFileBytes) {
+          throw new DomainError('INVALID_ARGUMENT', 'attachments exceed task file budget');
+        }
+      }
+    }
+
     sql.exec(
       `INSERT INTO tasks (
          id, kind, title, input_json, digest, idempotency_key, status,
          execution_path, execution_target, attempt_count, max_attempts,
-         lease_epoch, next_run_at_ms, created_at_ms, updated_at_ms
-       ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 'cloud', 0, 3, 1, ?, ?, ?)`,
+         lease_epoch, next_run_at_ms, deadline_at_ms, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, ?, ?, ?, 'queued', ?, 'cloud', 0, 3, 1, ?, ?, ?, ?)`,
       taskId,
       prepared.kind,
       prepared.title ?? null,
@@ -442,9 +495,36 @@ function createOrReuseDelegatedTaskSync(
       prepared.idempotencyKey,
       prepared.executionPath,
       nowMs,
+      deadlineAtMs,
       nowMs,
       nowMs,
     );
+
+    if (
+      prepared.kind === 'python.agent' &&
+      prepared.attachmentIds.length > 0 &&
+      principalId !== null
+    ) {
+      const hasArtifactsTable =
+        sql
+          .exec<{ readonly name: string }>(
+            `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_task_artifacts'`,
+          )
+          .toArray().length > 0;
+      if (hasArtifactsTable) {
+        for (const uploadId of prepared.attachmentIds) {
+          sql.exec(
+            `UPDATE v2_task_artifacts
+                SET task_id = ?
+              WHERE id = ? AND tenant_id = ? AND principal_id = ? AND task_id IS NULL`,
+            taskId,
+            uploadId,
+            tenantId,
+            principalId,
+          );
+        }
+      }
+    }
     sql.exec(
       `INSERT INTO task_events (
          id, task_id, sequence, phase, payload_json, trace_id, occurred_at_ms
@@ -545,11 +625,36 @@ export async function executeAuthoritativeTurnCommit(
 
   let preparedDelegation: PreparedDelegationPayload | null = null;
   if (publication?.result.status === 'completed' && publication.result.delegation !== undefined) {
+    let delegation = publication.result.delegation;
+    if (
+      delegation.toolName === 'delegate_python_agent' &&
+      (delegation.input.attachmentIds === undefined || delegation.input.attachmentIds.length === 0)
+    ) {
+      const attachedRows = deps.storage.sql
+        .exec<{ readonly upload_id: string }>(
+          `SELECT ma.upload_id
+             FROM assistant_turns t
+             JOIN message_attachments ma ON ma.message_id = t.source_message_id
+            WHERE t.id = ?
+            ORDER BY ma.position ASC`,
+          cmd.turnId,
+        )
+        .toArray();
+      if (attachedRows.length > 0) {
+        delegation = {
+          ...delegation,
+          input: {
+            ...delegation.input,
+            attachmentIds: attachedRows.map((row) => row.upload_id),
+          },
+        };
+      }
+    }
     preparedDelegation = await prepareDelegationCommand(
       cmd.tenantId,
       cmd.agentId,
       cmd.turnId,
-      publication.result.delegation,
+      delegation,
       deps.idFactory,
     );
   }
@@ -944,6 +1049,7 @@ export async function executeAuthoritativeTurnCommit(
       delegatedTaskId = createOrReuseDelegatedTaskSync(
         deps,
         cmd.tenantId,
+        attempt?.principal_id ?? null,
         cmd.agentId,
         turn.conversation_id,
         preparedDelegation,

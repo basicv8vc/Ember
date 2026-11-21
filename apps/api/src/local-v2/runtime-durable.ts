@@ -13,7 +13,6 @@ import {
   executeRecoveredOrFreshDurableWork,
   parseClaimExecutionContext,
   parseProactiveScheduleTaskInput,
-  runV2FakePythonSandbox,
   toAgentHeadDurableCommitOutcome,
   type DurableExecutionClaimContext,
   type DurableExecutorPort,
@@ -21,8 +20,6 @@ import {
   type PersonalMemoryContextItem,
   type ProactiveScheduleList,
   type ProactiveScheduleTaskPayload,
-  type V2PublishTaskOutputsResultDto,
-  type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
 import {
   toV2DelegationCommand,
@@ -35,33 +32,24 @@ import {
   type BriefContextMessage,
   type ProactiveBriefContext,
 } from './proactive-brief-context.js';
+import {
+  executeV2PythonAgentTask,
+  type V2PythonSandboxFactory,
+  type V2PythonStepGateway,
+} from './python-agent-runner.js';
 import { resolveV2SandboxConfig } from './runtime-config.js';
 import { createEdgeRpc, getHead, type AgentHeadDO, type LocalRuntimeEnv } from './runtime-head.js';
-
-function decodeBase64ToBytes(encoded: string): Uint8Array {
-  const binary = globalThis.atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function encodeBytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += 1) {
-    binary += String.fromCharCode(bytes[i]!);
-  }
-  return globalThis.btoa(binary);
-}
 
 export type V2FakeDurableGateway = Pick<
   V2StreamingModelGateway,
   'streamConversationTurn' | 'queryConversationJob'
->;
+> &
+  Partial<V2PythonStepGateway>;
 
 export interface CreateDurableExecutorOptions {
   readonly modelRuntime?: V2ModelRuntime;
+  /** Test-only sandbox factory seam; production always constructs DaytonaSandboxProvider from env. */
+  readonly pythonSandboxFactory?: V2PythonSandboxFactory;
 }
 
 const PROACTIVE_BRIEF_RESERVATION_MICRO_USD = 250;
@@ -175,75 +163,55 @@ export function createDurableExecutor(
         };
       }
 
-      if (claim.targetKind === 'task' && context.attemptId === undefined && proactive === null) {
+      if (claim.targetKind === 'task' && proactive === null) {
         const rawContext = JSON.parse(claim.contextJson) as {
           readonly kind?: string;
           readonly runId?: string;
-          readonly inputJson?: string;
         };
         if (rawContext.kind === 'python.agent' && rawContext.runId !== undefined) {
-          if (sandboxConfig.kind !== 'fake') {
-            return { status: 'failed', reasonCode: 'sandbox_provider_unavailable' };
+          if (sandboxConfig.kind === 'disabled') {
+            return { status: 'failed', reasonCode: sandboxConfig.reason };
           }
-          const taskInput = JSON.parse(rawContext.inputJson ?? '{}') as {
-            readonly prompt?: string;
-            readonly instructions?: string;
-          };
-          const loadedInputs = (await head.taskArtifacts({
-            kind: 'load_task_inputs',
-            tenantId: claim.tenantId,
-            principalId: claim.agentId,
-            agentId: claim.agentId,
-            requestId: crypto.randomUUID(),
-            taskId: claim.targetId,
-            runId: rawContext.runId,
-            leaseEpoch: claim.leaseEpoch,
-            workerId: claim.workerId,
-          })) as readonly V2TaskInputFileDto[];
-
-          const sandboxResult = runV2FakePythonSandbox({
-            prompt: taskInput.prompt ?? '',
-            ...(taskInput.instructions === undefined
+          if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
+            return { status: 'failed', reasonCode: 'model_unauthorized_tenant' };
+          }
+          const allowFakeFastPathOnly =
+            sandboxConfig.kind === 'fake' && simulated && runtime?.mode !== 'real';
+          if (
+            !allowFakeFastPathOnly &&
+            (gateway.stepPythonAgent === undefined ||
+              gateway.providerId === undefined ||
+              gateway.modelLabel === undefined ||
+              gateway.simulated === undefined ||
+              (runtime?.mode === 'real' && (gateway.simulated !== false || rate === null)))
+          ) {
+            return { status: 'failed', reasonCode: 'model_gateway_unavailable' };
+          }
+          return executeV2PythonAgentTask({
+            env,
+            claim,
+            gateway:
+              allowFakeFastPathOnly && gateway.stepPythonAgent === undefined
+                ? {
+                    providerId: 'fake',
+                    modelLabel,
+                    simulated: true,
+                  }
+                : {
+                    providerId: gateway.providerId!,
+                    modelLabel: gateway.modelLabel!,
+                    simulated: gateway.simulated!,
+                    stepPythonAgent: gateway.stepPythonAgent!.bind(gateway),
+                  },
+            modelRate: rate,
+            budgetMode,
+            ...(runtime === undefined
               ? {}
-              : { instructions: taskInput.instructions }),
-            inputFiles: loadedInputs.map((file) => ({
-              filename: file.filename,
-              mediaType: file.mediaType,
-              bytes: decodeBase64ToBytes(file.contentBase64),
-            })),
+              : { perAttemptCeilingMicroUsd: runtime.perAttemptCeilingMicroUsd }),
+            ...(options.pythonSandboxFactory === undefined
+              ? {}
+              : { sandboxFactory: options.pythonSandboxFactory }),
           });
-
-          if (sandboxResult.outputFiles.length > 0) {
-            const published = (await head.taskArtifacts({
-              kind: 'publish_task_outputs',
-              tenantId: claim.tenantId,
-              principalId: claim.agentId,
-              agentId: claim.agentId,
-              requestId: crypto.randomUUID(),
-              taskId: claim.targetId,
-              runId: rawContext.runId,
-              leaseEpoch: claim.leaseEpoch,
-              workerId: claim.workerId,
-              outputs: sandboxResult.outputFiles.map((file) => ({
-                filename: file.filename,
-                mediaType: file.mediaType,
-                contentBase64: encodeBytesToBase64(file.bytes),
-              })),
-            })) as V2PublishTaskOutputsResultDto;
-            if (!published.accepted) {
-              return { status: 'failed', reasonCode: 'lease_lost' };
-            }
-          }
-
-          return {
-            status: 'completed',
-            summaryText: sandboxResult.summaryText,
-            detailText: sandboxResult.detailText,
-            modelLabel: FAKE_MODEL_LABEL,
-            simulated: true,
-            truncated: false,
-            reasonCode: 'ok',
-          };
         }
         return { status: 'failed', reasonCode: 'local_task_driver_unavailable' };
       }

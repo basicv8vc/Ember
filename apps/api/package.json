@@ -17,6 +17,7 @@
     "@ember/model-gateway": "workspace:*",
     "@ember/postgres": "workspace:*",
     "@ember/runtime-v2": "workspace:*",
+    "@ember/sandbox-daytona": "workspace:*",
     "@hono/node-server": "2.1.5",
     "hono": "4.13.14",
     "jose": "6.1.3",

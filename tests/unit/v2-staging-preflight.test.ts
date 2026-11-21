@@ -100,19 +100,32 @@ describe('V2 staging preflight validator', () => {
     expect(result.errors.some((e) => e.includes('EMBER_MODEL_MODE === "fake"'))).toBe(true);
   });
 
-  it('rejects real Daytona sandbox mode before separate Daytona canary approval', () => {
+  it('rejects real Daytona or unset EMBER_SANDBOX_MODE before separate canary approval', () => {
     const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
-    const mutated = structuredClone(v2Config);
-    mutated.vars = { ...mutated.vars, EMBER_SANDBOX_MODE: 'daytona' };
 
-    const result = validateV2StagingConfig({
-      v2Config: mutated,
+    const daytonaConfig = structuredClone(v2Config);
+    daytonaConfig.vars = { ...daytonaConfig.vars, EMBER_SANDBOX_MODE: 'daytona' };
+    const daytonaResult = validateV2StagingConfig({
+      v2Config: daytonaConfig,
       v1Configs,
       migrationExists,
     });
+    expect(daytonaResult.ok).toBe(false);
+    expect(daytonaResult.errors.some((e) => e.includes('EMBER_SANDBOX_MODE === "fake"'))).toBe(
+      true,
+    );
 
-    expect(result.ok).toBe(false);
-    expect(result.errors.some((e) => e.includes('EMBER_SANDBOX_MODE === "fake"'))).toBe(true);
+    const unsetConfig = structuredClone(v2Config);
+    if (unsetConfig.vars) {
+      delete unsetConfig.vars.EMBER_SANDBOX_MODE;
+    }
+    const unsetResult = validateV2StagingConfig({
+      v2Config: unsetConfig,
+      v1Configs,
+      migrationExists,
+    });
+    expect(unsetResult.ok).toBe(false);
+    expect(unsetResult.errors.some((e) => e.includes('EMBER_SANDBOX_MODE === "fake"'))).toBe(true);
   });
 
   it('accepts a provisioned D1 database_id when --require-provisioned is set', () => {

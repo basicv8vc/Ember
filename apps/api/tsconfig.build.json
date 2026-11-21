@@ -12,7 +12,8 @@
     { "path": "../../packages/contracts/tsconfig.build.json" },
     { "path": "../../packages/model-gateway/tsconfig.build.json" },
     { "path": "../../packages/postgres/tsconfig.build.json" },
-    { "path": "../../packages/runtime-v2/tsconfig.build.json" }
+    { "path": "../../packages/runtime-v2/tsconfig.build.json" },
+    { "path": "../../packages/sandbox-daytona/tsconfig.build.json" }
   ],
   "include": ["src/**/*.ts", "../../packages/runtime-v2/src/global-budget/cloudflare-workers.d.ts"]
 }

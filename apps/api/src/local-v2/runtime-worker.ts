@@ -5,6 +5,7 @@ import {
   handleDurableDeadLetterBatch,
   handleDurableQueueBatch,
   type QueueMessageLike,
+  type ResolvedMessageAttachment,
 } from '@ember/runtime-v2';
 import { createLocalV2EdgeWorker } from './edge-worker.js';
 import { resolveV2ModelRuntime } from './model-runtime.js';
@@ -39,6 +40,20 @@ export default {
           conversationId: me.conversation.conversation_id,
           rpc: createEdgeRpc(getHead(env, auth.tenantId, agentId)),
         };
+      },
+      async resolveAttachments(auth, uploadIds, clientSubmissionId) {
+        const me = await sessions.me.getMeForTenant(auth.tenantId);
+        if (me === null) return [];
+        const rpc = createEdgeRpc(getHead(env, auth.tenantId, me.agent.agent_id));
+        return (await rpc.taskArtifacts({
+          kind: 'resolve_staged_uploads',
+          tenantId: auth.tenantId,
+          principalId: auth.principalId,
+          agentId: me.agent.agent_id,
+          requestId: crypto.randomUUID(),
+          uploadIds,
+          ...(clientSubmissionId === undefined ? {} : { clientSubmissionId }),
+        })) as readonly ResolvedMessageAttachment[];
       },
       stream: {
         gateway: modelRuntime.gateway,

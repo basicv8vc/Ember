@@ -201,7 +201,7 @@ export class FakeModelGateway implements ModelGateway {
         : (() => {
             const hasPriorToolResult = input.messages.some((message) => message.role === 'tool');
             if (!hasPriorToolResult && input.remainingPythonCalls > 0) {
-              const code = `print("ember-fake-python-ok")`;
+              const code = buildFakePythonScript(input);
               return Object.freeze({
                 kind: 'tool_call' as const,
                 toolCallId: `fake_call_${input.messages.length + 1}`,
@@ -280,4 +280,63 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
     };
     signal.addEventListener('abort', onAbort, { once: true });
   });
+}
+
+const FAKE_OUTPUT_DIRECTIVE_PATTERN = /^#\s*output:\s*([A-Za-z0-9][A-Za-z0-9._-]{0,127})\s*$/m;
+
+function buildFakePythonScript(input: PythonAgentStepInput): string {
+  const directiveSource = `${input.prompt}\n${input.instructions ?? ''}`;
+  const directiveMatch = FAKE_OUTPUT_DIRECTIVE_PATTERN.exec(directiveSource);
+  const requestedOutput = directiveMatch?.[1];
+  const hasCsvInput = input.inputFiles.some((file) => file.filename.toLowerCase().endsWith('.csv'));
+
+  if (input.inputFiles.length === 0 && requestedOutput === undefined) {
+    return `print("ember-fake-python-ok")`;
+  }
+
+  const outputName =
+    requestedOutput ?? (hasCsvInput ? 'analysis-summary.csv' : 'analysis-summary.json');
+  return [
+    'import csv, json, os',
+    'os.makedirs("/home/daytona/ember/outputs", exist_ok=True)',
+    'inputs_dir = "/home/daytona/ember/inputs"',
+    'files = sorted(f for f in os.listdir(inputs_dir) if os.path.isfile(os.path.join(inputs_dir, f)))',
+    'csv_files = [f for f in files if f.lower().endswith(".csv")]',
+    `out_path = os.path.join("/home/daytona/ember/outputs", ${JSON.stringify(outputName)})`,
+    'if csv_files:',
+    '    src = csv_files[0]',
+    '    with open(os.path.join(inputs_dir, src), "r", encoding="utf-8", errors="replace", newline="") as fh:',
+    '        rows = list(csv.reader(fh))',
+    '    headers = [h.strip() for h in rows[0]] if rows else []',
+    '    data_rows = rows[1:10001] if len(rows) > 1 else []',
+    '    stats = {}',
+    '    for r in data_rows:',
+    '        for i, h in enumerate(headers):',
+    '            if i >= len(r): continue',
+    '            raw = r[i].strip()',
+    '            if not raw: continue',
+    '            try: val = float(raw)',
+    '            except ValueError: continue',
+    '            s = stats.setdefault(i, {"name": h or f"col_{i+1}", "count": 0, "sum": 0.0, "min": val, "max": val})',
+    '            s["count"] += 1; s["sum"] += val',
+    '            if val < s["min"]: s["min"] = val',
+    '            if val > s["max"]: s["max"] = val',
+    '    with open(out_path, "w", encoding="utf-8", newline="") as out:',
+    '        w = csv.writer(out)',
+    '        w.writerow(["source_file", "column", "count", "sum", "min", "max", "mean"])',
+    '        if stats:',
+    '            for i in sorted(stats):',
+    '                s = stats[i]',
+    '                mean = s["sum"] / s["count"]',
+    '                fmt = lambda v: str(int(v)) if v.is_integer() else f"{v:.2f}"',
+    '                w.writerow([src, s["name"], str(s["count"]), fmt(s["sum"]), fmt(s["min"]), fmt(s["max"]), fmt(mean)])',
+    '        else:',
+    '            w.writerow([src, "rows", str(len(data_rows)), "0", "0", "0", "0"])',
+    '    print(f"Processed {src} ({len(data_rows)} rows). Wrote outputs/{os.path.basename(out_path)}.")',
+    'else:',
+    '    summary = {"simulated": True, "processed_files": len(files), "files": [{"filename": f, "bytes": os.path.getsize(os.path.join(inputs_dir, f))} for f in files]}',
+    '    with open(out_path, "w", encoding="utf-8") as out:',
+    '        json.dump(summary, out, indent=2); out.write("\\n")',
+    '    print(f"Processed {len(files)} input file(s). Wrote outputs/{os.path.basename(out_path)}.")',
+  ].join('\n');
 }

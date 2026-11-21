@@ -194,6 +194,10 @@ final class PersonalMemoryStore {
         }
     }
 
+    func clearError() {
+        errorMessage = nil
+    }
+
     func clear() {
         generation &+= 1
         pendingSave = nil

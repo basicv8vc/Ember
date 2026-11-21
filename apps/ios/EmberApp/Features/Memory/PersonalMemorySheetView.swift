@@ -52,14 +52,7 @@ struct PersonalMemorySheetView: View {
                     }
 
                     if let error = store.errorMessage {
-                        InlineNotice(
-                            title: LocalizedStringKey(
-                                String(localized: "memory.error.title", table: "Conversation")
-                            ),
-                            message: LocalizedStringKey(error),
-                            tone: .warning
-                        )
-                        .accessibilityIdentifier("memory-error-notice")
+                        errorNoticeBanner(error, identifier: "memory-error-notice")
                     }
 
                     if store.isLoading && store.items.isEmpty {
@@ -195,6 +188,14 @@ struct PersonalMemorySheetView: View {
                 .disabled(!canSave)
                 .accessibilityIdentifier("memory-composer-save")
             }
+
+            if store.isAtCapacity && store.errorMessage == nil {
+                Text("memory.error.limit_reached", tableName: "Conversation")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("memory-capacity-notice")
+            }
         }
         .padding(EmberDesignTokens.standardSpacing)
         .background(
@@ -230,6 +231,7 @@ struct PersonalMemorySheetView: View {
                 Spacer(minLength: 8)
 
                 Button {
+                    store.clearError()
                     editSelectedKind = item.kind
                     editDraftContent = item.content
                     editingItem = item
@@ -335,6 +337,11 @@ struct PersonalMemorySheetView: View {
                         )
                     Spacer()
                 }
+
+                if let error = store.errorMessage {
+                    errorNoticeBanner(error, identifier: "memory-edit-error-notice")
+                }
+
                 Spacer()
             }
             .padding(EmberDesignTokens.standardSpacing)
@@ -344,6 +351,7 @@ struct PersonalMemorySheetView: View {
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button {
+                        store.clearError()
                         editingItem = nil
                     } label: {
                         Text("conversation.live.cancel", tableName: "Conversation")
@@ -354,7 +362,12 @@ struct PersonalMemorySheetView: View {
                         let nextKind = editSelectedKind
                         let nextContent = trimmed
                         Task {
-                            if await store.update(id: item.memoryID, kind: nextKind, content: nextContent) {
+                            let updated = await store.update(
+                                id: item.memoryID,
+                                kind: nextKind,
+                                content: nextContent
+                            )
+                            if updated || !store.items.contains(where: { $0.memoryID == item.memoryID }) {
                                 editingItem = nil
                             }
                         }
@@ -373,5 +386,16 @@ struct PersonalMemorySheetView: View {
             }
         }
         .presentationDetents([.medium])
+    }
+
+    private func errorNoticeBanner(_ error: String, identifier: String) -> some View {
+        InlineNotice(
+            title: LocalizedStringKey(
+                String(localized: "memory.error.title", table: "Conversation")
+            ),
+            message: LocalizedStringKey(error),
+            tone: .warning
+        )
+        .accessibilityIdentifier(identifier)
     }
 }

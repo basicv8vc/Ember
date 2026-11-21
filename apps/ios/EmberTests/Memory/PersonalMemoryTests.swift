@@ -275,6 +275,65 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertFalse(store.items.contains(where: { $0.memoryID == memoryID }))
     }
 
+    func testLiveRepositoryWrite401MapsRequestRejectedBeforeExecutionToUnauthenticated() async throws {
+        let memoryID = UUID(uuidString: "77777777-8888-4999-8000-111111111111")!
+        let memoryIDLower = memoryID.uuidString.lowercased()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET" && path == "/v2/memories" {
+                return .json(statusCode: 200, body: """
+                {
+                  "items": [
+                    {
+                      "memory_id": "\(memoryIDLower)",
+                      "kind": "preference",
+                      "key": null,
+                      "content": "Existing memory",
+                      "provenance": {
+                        "source": "user_settings",
+                        "conversation_id": null,
+                        "message_id": null
+                      },
+                      "created_at": "2026-11-21T00:00:00Z",
+                      "updated_at": "2026-11-21T00:00:00Z"
+                    }
+                  ],
+                  "limits": {
+                    "max_items": 50,
+                    "max_content_chars": 500
+                  }
+                }
+                """)
+            }
+            return .json(statusCode: 401, body: #"{"error":{"code":"UNAUTHENTICATED"}}"#)
+        }
+
+        let repo = try makeLiveRepository()
+        let store = PersonalMemoryStore(repository: repo)
+        await store.refresh()
+        XCTAssertEqual(store.items.count, 1)
+
+        let expectedUnauthMessage = String(localized: "memory.error.unauthenticated", table: "Conversation")
+
+        let saveSucceeded = await store.save(kind: .fact, content: "Should require sign in")
+        XCTAssertFalse(saveSucceeded)
+        XCTAssertEqual(store.errorMessage, expectedUnauthMessage)
+
+        store.clearError()
+        XCTAssertNil(store.errorMessage)
+
+        let updateSucceeded = await store.update(id: memoryID, kind: .preference, content: "Updated")
+        XCTAssertFalse(updateSucceeded)
+        XCTAssertEqual(store.errorMessage, expectedUnauthMessage)
+        XCTAssertEqual(store.items.count, 1)
+
+        store.clearError()
+        await store.delete(id: memoryID)
+        XCTAssertEqual(store.errorMessage, expectedUnauthMessage)
+        XCTAssertEqual(store.items.count, 1)
+    }
+
     private func makeLiveRepository() throws -> LivePersonalMemoryRepository {
         let session = StubSession.make()
         sessions.append(session)

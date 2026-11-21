@@ -53,6 +53,7 @@ export class LoopbackFakeModelGateway {
         request.input.personalMemories.length > 0
           ? { personalMemories: request.input.personalMemories }
           : {}),
+        ...(request.input.allowDelegationTools === false ? { allowDelegationTools: false } : {}),
         ...(request.input.enablePersonalMemorySaveTool === true
           ? { enablePersonalMemorySaveTool: true }
           : {}),

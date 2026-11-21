@@ -5,6 +5,7 @@ import {
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
+  SCHEDULED_BRIEF_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
 } from '../context.js';
@@ -236,6 +237,8 @@ export const CREATE_PROACTIVE_SCHEDULE_TOOL = Object.freeze({
   }),
 });
 
+export const NO_CONVERSATION_TOOLS = Object.freeze([] as const);
+
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
   ...DELEGATION_TOOLS,
   SAVE_PERSONAL_MEMORY_TOOL,
@@ -253,21 +256,31 @@ export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE = Object.freeze([
 ]);
 
 export interface ConversationToolCapabilities {
+  readonly allowDelegation?: boolean;
   readonly allowSavePersonalMemory?: boolean;
   readonly allowCreateProactiveSchedule?: boolean;
 }
 
 export function getConversationTools(capabilities?: boolean | ConversationToolCapabilities) {
+  const allowDelegation =
+    typeof capabilities === 'boolean' ? true : capabilities?.allowDelegation !== false;
   const allowMemory =
     typeof capabilities === 'boolean'
       ? capabilities
       : capabilities?.allowSavePersonalMemory === true;
   const allowSchedule =
     typeof capabilities === 'boolean' ? false : capabilities?.allowCreateProactiveSchedule === true;
-  if (allowMemory && allowSchedule) return CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE;
-  if (allowMemory) return CONVERSATION_TOOLS_WITH_MEMORY;
-  if (allowSchedule) return CONVERSATION_TOOLS_WITH_SCHEDULE;
-  return DELEGATION_TOOLS;
+  if (!allowDelegation && !allowMemory && !allowSchedule) return NO_CONVERSATION_TOOLS;
+  if (allowDelegation) {
+    if (allowMemory && allowSchedule) return CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE;
+    if (allowMemory) return CONVERSATION_TOOLS_WITH_MEMORY;
+    if (allowSchedule) return CONVERSATION_TOOLS_WITH_SCHEDULE;
+    return DELEGATION_TOOLS;
+  }
+  return Object.freeze([
+    ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL] : []),
+    ...(allowSchedule ? [CREATE_PROACTIVE_SCHEDULE_TOOL] : []),
+  ]);
 }
 
 export const PYTHON_AGENT_TOOLS = Object.freeze([
@@ -562,7 +575,11 @@ function formatContextTurnMessage(
 }
 
 export function buildConversationTurnMessages(input: ConversationTurnInput): ProviderChatMessage[] {
-  const systemParts: string[] = [CONVERSATION_SYSTEM_PROMPT];
+  const systemParts: string[] = [
+    input.allowDelegationTools === false
+      ? SCHEDULED_BRIEF_SYSTEM_PROMPT
+      : CONVERSATION_SYSTEM_PROMPT,
+  ];
   if (input.enablePersonalMemorySaveTool === true) {
     systemParts.push(PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION);
   }
@@ -685,6 +702,7 @@ export function parseConversationTurnChoice(
     readonly finish_reason?: string | null | undefined;
   },
   options?: {
+    readonly allowDelegation?: boolean;
     readonly allowSavePersonalMemory?: boolean;
     readonly allowCreateProactiveSchedule?: boolean;
   },
@@ -712,6 +730,9 @@ export function parseConversationTurnChoice(
     const rawText = typeof choice.message.content === 'string' ? choice.message.content.trim() : '';
 
     if (call.function.name === DELEGATE_NOTES_TOOL_NAME) {
+      if (options?.allowDelegation === false) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
       const parsedArgs = delegateNotesToolArgsSchema.safeParse(rawArgs);
       if (!parsedArgs.success) {
         throw new ModelGatewayFailure('model_invalid_output');
@@ -741,6 +762,9 @@ export function parseConversationTurnChoice(
     }
 
     if (call.function.name === DELEGATE_PYTHON_TOOL_NAME) {
+      if (options?.allowDelegation === false) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
       const parsedArgs = delegatePythonToolArgsSchema.safeParse(rawArgs);
       if (!parsedArgs.success) {
         throw new ModelGatewayFailure('model_invalid_output');

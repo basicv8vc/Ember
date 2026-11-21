@@ -4,6 +4,7 @@ import {
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
+  SCHEDULED_BRIEF_SYSTEM_PROMPT,
   buildBoundedPersonalMemoryContext,
 } from './context.js';
 import { ModelInputRefused } from './errors.js';
@@ -39,6 +40,9 @@ export const IMAGE_ATTACHMENT_TOKEN_ESTIMATE = 1_024;
 
 /** Fixed prompt and tool schema token estimates, computed once: compile-time constants. */
 const SYSTEM_PROMPT_TOKENS = estimateTokensConservative(CONVERSATION_SYSTEM_PROMPT);
+const SCHEDULED_BRIEF_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(
+  SCHEDULED_BRIEF_SYSTEM_PROMPT,
+);
 const MEMORY_SAVE_INSTRUCTION_TOKENS = estimateTokensConservative(
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
 );
@@ -73,6 +77,7 @@ export function preflightConversationTurn(input: {
     readonly attachments?: readonly ConversationAttachmentMetadata[];
   }[];
   readonly personalMemories?: readonly PersonalMemoryContextItem[];
+  readonly allowDelegationTools?: boolean;
   readonly enablePersonalMemorySaveTool?: boolean;
   readonly enableProactiveScheduleTool?: boolean;
   readonly maxOutputTokens: number;
@@ -133,16 +138,19 @@ export function preflightConversationTurn(input: {
       ? 0
       : estimateTokensConservative(memoryBlock.text);
 
+  const allowDelegation = input.allowDelegationTools !== false;
   const memorySaveEnabled = input.enablePersonalMemorySaveTool === true;
   const scheduleCreateEnabled = input.enableProactiveScheduleTool === true;
   const toolTokens =
-    memorySaveEnabled && scheduleCreateEnabled
-      ? CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE
-      : memorySaveEnabled
-        ? CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE
-        : scheduleCreateEnabled
-          ? CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE
-          : DELEGATION_TOOLS_TOKEN_ESTIMATE;
+    !allowDelegation && !memorySaveEnabled && !scheduleCreateEnabled
+      ? 0
+      : memorySaveEnabled && scheduleCreateEnabled
+        ? CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE
+        : memorySaveEnabled
+          ? CONVERSATION_TOOLS_WITH_MEMORY_TOKEN_ESTIMATE
+          : scheduleCreateEnabled
+            ? CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE
+            : DELEGATION_TOOLS_TOKEN_ESTIMATE;
   const inputChars =
     messageChars +
     memoryChars +
@@ -153,7 +161,7 @@ export function preflightConversationTurn(input: {
   const inputTokens =
     messageTokens +
     memoryTokens +
-    SYSTEM_PROMPT_TOKENS +
+    (allowDelegation ? SYSTEM_PROMPT_TOKENS : SCHEDULED_BRIEF_SYSTEM_PROMPT_TOKENS) +
     (memorySaveEnabled ? MEMORY_SAVE_INSTRUCTION_TOKENS : 0) +
     (scheduleCreateEnabled ? PROACTIVE_SCHEDULE_INSTRUCTION_TOKENS : 0) +
     toolTokens +

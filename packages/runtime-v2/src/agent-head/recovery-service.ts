@@ -1345,6 +1345,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         'task',
         task.id,
       );
+      const mainConversation = getMainConversationSync(this.deps.storage.sql);
 
       return {
         res: {
@@ -1359,6 +1360,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
               entityId: task.id,
               fallbackOperationId: `${task.id}:run:${runId}`,
               providerJobHandle: task.provider_job_handle,
+              ...(mainConversation !== null ? { conversationId: mainConversation.id } : {}),
               taskId: task.id,
               runId,
               attempt: nextAttempt,

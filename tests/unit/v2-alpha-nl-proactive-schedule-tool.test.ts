@@ -1,8 +1,15 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  MODEL_LIMITS,
+  MODEL_RATE_ROWS,
   ModelGatewayFailure,
+  OpenAiModelGateway,
+  OpenRouterModelGateway,
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
+  SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  findRateRow,
+  preflightConversationTurn,
 } from '@ember/model-gateway';
 import {
   AgentEventRuntimeFacade,
@@ -21,6 +28,9 @@ import {
 import { describe, expect, it } from 'vitest';
 import {
   CREATE_PROACTIVE_SCHEDULE_TOOL_NAME,
+  DELEGATE_NOTES_TOOL_NAME,
+  DELEGATE_PYTHON_TOOL_NAME,
+  NO_CONVERSATION_TOOLS,
   buildConversationTurnMessages,
   getConversationTools,
   parseConversationTurnChoice,
@@ -927,5 +937,144 @@ describe('Agent E — create_proactive_schedule capability gate, V1 safety & ato
     expect(emberAfterRetry[0]?.kind === 'ember' ? emberAfterRetry[0].text : '').toContain(
       'Scheduled "Review PRs"',
     );
+  });
+
+  it('omits and rejects all conversation-only side-effect tools on non-conversation scheduled executions', async () => {
+    expect(SCHEDULED_BRIEF_SYSTEM_PROMPT.length).toBeLessThanOrEqual(
+      MODEL_LIMITS.systemPromptChars,
+    );
+    expect(getConversationTools({ allowDelegation: false })).toBe(NO_CONVERSATION_TOOLS);
+    expect(getConversationTools({ allowDelegation: false })).toEqual([]);
+
+    const briefMessages = buildConversationTurnMessages({
+      conversationId: 'sched-1',
+      turnId: 'task-1',
+      context: [
+        { role: 'user', text: '[Proactive brief | Morning Brief | UTC]\nSummarize today.' },
+      ],
+      allowDelegationTools: false,
+      maxOutputTokens: 256,
+    });
+    expect(briefMessages[0]).toEqual({ role: 'system', content: SCHEDULED_BRIEF_SYSTEM_PROMPT });
+
+    const interactivePreflight = preflightConversationTurn({
+      messages: [{ role: 'user', text: 'Summarize today.' }],
+      maxOutputTokens: 256,
+    });
+    const briefPreflight = preflightConversationTurn({
+      messages: [{ role: 'user', text: 'Summarize today.' }],
+      allowDelegationTools: false,
+      maxOutputTokens: 256,
+    });
+    expect(briefPreflight.inputTokens).toBeLessThan(interactivePreflight.inputTokens);
+
+    const capturedBodies: Array<Record<string, unknown>> = [];
+    const rate = findRateRow(MODEL_RATE_ROWS, 'openai', 'gpt-5.6-luna');
+    if (rate === null) throw new Error('missing openai rate row');
+
+    const openAi = new OpenAiModelGateway({
+      apiKey: 'sk-test-123',
+      modelId: rate.modelId,
+      rate,
+      isAuthorized: () => true,
+      fetchImpl: (_url, init) => {
+        capturedBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              choices: [{ message: { content: 'Morning brief ready.' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 20, completion_tokens: 5 },
+            }),
+        });
+      },
+    });
+    await openAi.generateConversationTurn(
+      {
+        conversationId: 'sched-1',
+        turnId: 'task-1',
+        context: [{ role: 'user', text: 'Morning Brief' }],
+        allowDelegationTools: false,
+        maxOutputTokens: 256,
+      },
+      new AbortController().signal,
+    );
+
+    const openRouterRate = findRateRow(
+      MODEL_RATE_ROWS,
+      'openrouter',
+      'deepseek/deepseek-v4.1-flash-1017',
+    );
+    if (openRouterRate === null) throw new Error('missing openrouter rate row');
+    const openRouter = new OpenRouterModelGateway({
+      apiKey: 'or-test-123',
+      modelId: openRouterRate.modelId,
+      rate: openRouterRate,
+      routing: {
+        only: ['deepinfra/fp8'],
+        allowFallbacks: false,
+        dataCollection: 'deny',
+        zdr: true,
+        requireParameters: true,
+      },
+      isAuthorized: () => true,
+      fetchImpl: (_url, init) => {
+        capturedBodies.push(JSON.parse(init.body) as Record<string, unknown>);
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              model: openRouterRate.modelId,
+              choices: [{ message: { content: 'Morning brief ready.' }, finish_reason: 'stop' }],
+              usage: { prompt_tokens: 20, completion_tokens: 5 },
+            }),
+        });
+      },
+    });
+    await openRouter.generateConversationTurn(
+      {
+        conversationId: 'sched-1',
+        turnId: 'task-1',
+        context: [{ role: 'user', text: 'Morning Brief' }],
+        allowDelegationTools: false,
+        maxOutputTokens: 256,
+      },
+      new AbortController().signal,
+    );
+
+    expect(capturedBodies).toHaveLength(2);
+    for (const body of capturedBodies) {
+      expect(body['tools']).toBeUndefined();
+      expect(body['tool_choice']).toBeUndefined();
+      expect((body['messages'] as Array<{ content: string }>)[0]?.content).toBe(
+        SCHEDULED_BRIEF_SYSTEM_PROMPT,
+      );
+    }
+
+    for (const [toolName, args] of [
+      [DELEGATE_NOTES_TOOL_NAME, { notes: 'Do something' }],
+      [DELEGATE_PYTHON_TOOL_NAME, { prompt: 'print(1)' }],
+    ] as const) {
+      expect(() =>
+        parseConversationTurnChoice(
+          {
+            finish_reason: 'tool_calls',
+            message: {
+              content: null,
+              tool_calls: [
+                {
+                  id: 'call_disallowed',
+                  type: 'function',
+                  function: { name: toolName, arguments: JSON.stringify(args) },
+                },
+              ],
+            },
+          },
+          { allowDelegation: false },
+        ),
+      ).toThrow(ModelGatewayFailure);
+    }
   });
 });

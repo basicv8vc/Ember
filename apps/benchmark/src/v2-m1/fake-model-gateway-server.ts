@@ -59,9 +59,11 @@ export interface FakeGatewayCallRecord {
   readonly providerJobHandle: string | null;
   readonly statusCode: number;
   readonly personalMemories?: readonly unknown[];
+  readonly allowDelegationTools?: boolean;
   readonly enablePersonalMemorySaveTool?: boolean;
   readonly enableProactiveScheduleTool?: boolean;
   readonly currentTimeIso?: string;
+  readonly prompt?: string;
 }
 
 export interface FakeModelGatewayAuditSnapshot {
@@ -373,6 +375,7 @@ export class FakeModelGatewayServer {
           ...(Array.isArray(body.personalMemories)
             ? { personalMemories: body.personalMemories }
             : {}),
+          ...(body.allowDelegationTools === false ? { allowDelegationTools: false } : {}),
           ...(body.enablePersonalMemorySaveTool === true
             ? { enablePersonalMemorySaveTool: true }
             : {}),
@@ -382,6 +385,7 @@ export class FakeModelGatewayServer {
           ...(typeof body.currentTimeIso === 'string'
             ? { currentTimeIso: body.currentTimeIso }
             : {}),
+          ...(typeof body.prompt === 'string' ? { prompt: body.prompt } : {}),
         });
       };
 

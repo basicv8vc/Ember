@@ -347,6 +347,79 @@ describe('Agent E — V2 proactive schedules in local workerd', () => {
     const lastCall = postBriefAudit.calls.at(-1);
     expect(lastCall?.enableProactiveScheduleTool).toBeUndefined();
     expect(lastCall?.enablePersonalMemorySaveTool).toBeUndefined();
+    expect(lastCall?.allowDelegationTools).toBe(false);
     expect(durableFireAt).toBeTruthy();
+  });
+
+  it('incorporates stored Personal Memory and recent conversation context into follow_up model_brief without advertising delegation tools', async () => {
+    // 1. Save a personal memory item
+    const memRes = await api('/v2/memories', {
+      body: {
+        kind: 'preference',
+        key: 'brief_style',
+        content: 'Keep morning briefs to 3 concise bullets.',
+        provenance: {
+          source: 'user_settings',
+        },
+      },
+    });
+    expect(memRes.status).toBe(201);
+
+    // 2. Have a conversation turn so recent conversation context exists
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Got it, I noted the Q4 budget review.',
+    });
+    const chatRes = await api(`/v2/conversations/${conversationId}/messages/stream`, {
+      method: 'POST',
+      body: {
+        client_submission_id: randomUUID(),
+        text: 'Please track the Q4 budget sign-off with finance.',
+        transcript_epoch: 0,
+      },
+    });
+    expect(chatRes.status).toBe(201);
+    await chatRes.text();
+
+    // 3. Schedule a follow_up (model_brief) and wait for durable execution
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: '- Finance sign-off reminder prepared concisely.',
+    });
+    const followUpRes = await api('/v2/schedules', {
+      body: {
+        idempotencyKey: `followup-ctx-${randomUUID()}`,
+        kind: 'follow_up',
+        title: 'Q4 Budget Follow-up',
+        prompt: 'Follow up on the Q4 budget review.',
+        trigger: { type: 'once', fireAt: new Date(Date.now() + 250).toISOString() },
+        timezone: 'America/Los_Angeles',
+        deliveryMode: 'model_brief',
+      },
+    });
+    const followUp = await json<ProactiveScheduleSnapshot>(followUpRes, 201);
+
+    await expect
+      .poll(
+        async () => {
+          const detail = await json<ProactiveScheduleDetail>(
+            await api(`/v2/schedules/${followUp.scheduleId}`),
+            200,
+          );
+          return detail.latestRun?.status;
+        },
+        { timeout: 15_000, interval: 150 },
+      )
+      .toBe('completed');
+
+    const audit = harness.fakeGateway.getAuditSnapshot();
+    const scheduledCall = audit.calls.at(-1);
+    expect(scheduledCall?.allowDelegationTools).toBe(false);
+    expect(scheduledCall?.enablePersonalMemorySaveTool).toBeUndefined();
+    expect(scheduledCall?.enableProactiveScheduleTool).toBeUndefined();
+    expect(scheduledCall?.prompt).toContain('User preferences & facts:');
+    expect(scheduledCall?.prompt).toContain('Keep morning briefs to 3 concise bullets.');
+    expect(scheduledCall?.prompt).toContain('Recent conversation:');
+    expect(scheduledCall?.prompt).toContain('Please track the Q4 budget sign-off with finance.');
   });
 });

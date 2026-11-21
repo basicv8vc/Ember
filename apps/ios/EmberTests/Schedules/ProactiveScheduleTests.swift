@@ -182,6 +182,163 @@ final class ProactiveScheduleTests: XCTestCase {
         XCTAssertEqual(briefReq.trigger, .cron(cronExpr: "30 8 * * *", timezone: "America/Los_Angeles"))
     }
 
+    func testNextFireAtFormatsInScheduleTimezoneRatherThanDeviceTimezone() throws {
+        // 2026-11-22T13:00:00Z = 08:00 AM America/New_York = 09:00 PM Asia/Shanghai.
+        let instant = try XCTUnwrap(ConversationCardFormatting.date(from: "2026-11-22T13:00:00Z"))
+        let usLocale = Locale(identifier: "en_US_POSIX")
+        let shanghaiFallback = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+
+        let nyFormatted = ProactiveSchedulesSheetView.formatNextFireAt(
+            instant,
+            timezoneID: "America/New_York",
+            locale: usLocale,
+            fallbackTimeZone: shanghaiFallback
+        )
+        XCTAssertTrue(nyFormatted.contains("8:00"), "Expected 8:00 AM in America/New_York, got: \(nyFormatted)")
+        XCTAssertTrue(nyFormatted.contains("AM"), "Expected AM in America/New_York, got: \(nyFormatted)")
+
+        let shanghaiFormatted = ProactiveSchedulesSheetView.formatNextFireAt(
+            instant,
+            timezoneID: "Asia/Shanghai",
+            locale: usLocale,
+            fallbackTimeZone: shanghaiFallback
+        )
+        XCTAssertTrue(shanghaiFormatted.contains("9:00"), "Expected 9:00 PM in Asia/Shanghai, got: \(shanghaiFormatted)")
+        XCTAssertTrue(shanghaiFormatted.contains("PM"), "Expected PM in Asia/Shanghai, got: \(shanghaiFormatted)")
+
+        let invalidFallback = ProactiveSchedulesSheetView.formatNextFireAt(
+            instant,
+            timezoneID: "Invalid/Zone",
+            locale: usLocale,
+            fallbackTimeZone: shanghaiFallback
+        )
+        XCTAssertEqual(invalidFallback, shanghaiFormatted)
+    }
+
+    func testLiveHostColdLaunchAndForegroundReturnSurfaceAppClosedProactiveDeliveries() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ember-proactive-relaunch-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let session = StubSession.make()
+        sessions.append(session)
+        let api = FakeEmberSessionAPI()
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: api,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let journal = LiveConversationJournal(directory: directory)
+        let repo = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth),
+            journal: journal
+        )
+
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let reminderID = "aaaaaaaa-1111-4111-8111-111111111111"
+        let briefID = "bbbbbbbb-2222-4222-8222-222222222222"
+        let pageCalls = LockedCounter()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me" {
+                return .json(statusCode: 200, body: AuthFixture.meJSON)
+            }
+            guard request.httpMethod == "GET",
+                  path == "/v1/conversations/\(conversationID)/messages" else {
+                return .json(statusCode: 404, body: "{}")
+            }
+            let callIndex = pageCalls.increment()
+            if callIndex == 1 {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id": "\(conversationID)",
+                  "transcript_epoch": 0,
+                  "messages": [
+                    {
+                      "message_id": "\(reminderID)",
+                      "sequence": 1,
+                      "created_at": "2026-11-21T08:00:00Z",
+                      "kind": "ember",
+                      "text": "Reminder: Call Alex\\n\\nCheck Q4 invoice receipt.",
+                      "model_label": "ember-proactive-scheduler",
+                      "simulated": false
+                    }
+                  ],
+                  "next_after": 1,
+                  "has_more": false
+                }
+                """)
+            }
+            return .json(statusCode: 200, body: """
+            {
+              "conversation_id": "\(conversationID)",
+              "transcript_epoch": 0,
+              "messages": [
+                {
+                  "message_id": "\(reminderID)",
+                  "sequence": 1,
+                  "created_at": "2026-11-21T08:00:00Z",
+                  "kind": "ember",
+                  "text": "Reminder: Call Alex\\n\\nCheck Q4 invoice receipt.",
+                  "model_label": "ember-proactive-scheduler",
+                  "simulated": false
+                },
+                {
+                  "message_id": "\(briefID)",
+                  "sequence": 2,
+                  "created_at": "2026-11-21T08:05:00Z",
+                  "kind": "ember",
+                  "text": "**Morning Brief**\\n\\nTop priority: sign-off meeting at 10 AM.",
+                  "model_label": "fake-model",
+                  "simulated": true
+                }
+              ],
+              "next_after": 2,
+              "has_more": false
+            }
+            """)
+        }
+
+        let host = LiveConversationHostModel(repository: repo, auth: auth)
+        defer { host.suspendForDisappearance() }
+        host.handleScenePhase(.active)
+        host.handleViewAppeared()
+        await host.start()
+
+        let coldLaunchTexts = host.screen.timeline.compactMap { entry -> String? in
+            if case .message(let msg) = entry, msg.author == .ember { return msg.text }
+            return nil
+        }
+        XCTAssertTrue(coldLaunchTexts.contains(where: { $0.contains("Reminder: Call Alex") }))
+
+        // Simulate app going to background while cloud executes Morning Brief, then returning active.
+        host.handleScenePhase(.background)
+        host.handleScenePhase(.active)
+        for _ in 0..<50 {
+            let texts = host.screen.timeline.compactMap { entry -> String? in
+                if case .message(let msg) = entry, msg.author == .ember { return msg.text }
+                return nil
+            }
+            if texts.contains(where: { $0.contains("**Morning Brief**") }) { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+
+        let resumedTexts = host.screen.timeline.compactMap { entry -> String? in
+            if case .message(let msg) = entry, msg.author == .ember { return msg.text }
+            return nil
+        }
+        XCTAssertTrue(resumedTexts.contains(where: { $0.contains("Reminder: Call Alex") }))
+        XCTAssertTrue(resumedTexts.contains(where: { $0.contains("**Morning Brief**") }))
+    }
+
     private func makeLiveRepository() throws -> LiveProactiveScheduleRepository {
         let session = StubSession.make()
         sessions.append(session)
@@ -202,5 +359,17 @@ final class ProactiveScheduleTests: XCTestCase {
 
     private func register(_ handler: @escaping StubURLProtocol.Handler) {
         registrations.append(StubURLProtocol.register(handler, forHost: AuthFixture.baseURL.host!))
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func increment() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
     }
 }

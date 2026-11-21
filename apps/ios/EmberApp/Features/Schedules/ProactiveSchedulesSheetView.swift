@@ -232,6 +232,21 @@ struct ProactiveSchedulesSheetView: View {
         kind == .reminder ? .directReminder : .modelBrief
     }
 
+    static func formatNextFireAt(
+        _ date: Date,
+        timezoneID: String,
+        locale: Locale = .current,
+        fallbackTimeZone: TimeZone = .current
+    ) -> String {
+        let timeZone = TimeZone(identifier: timezoneID) ?? fallbackTimeZone
+        return Date.FormatStyle(locale: locale, timeZone: timeZone)
+            .month(.abbreviated)
+            .day()
+            .hour()
+            .minute()
+            .format(date)
+    }
+
     static func makeCreateRequest(
         kind: ProactiveScheduleKind,
         title: String,
@@ -317,7 +332,7 @@ struct ProactiveSchedulesSheetView: View {
                     Image(systemName: "clock")
                         .font(.caption2)
                     Text("schedules.next_run", tableName: "Conversation")
-                    Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
+                    Text(Self.formatNextFireAt(date, timezoneID: schedule.timezone))
                     Text("(\(schedule.timezone))")
                 }
                 .font(.caption)

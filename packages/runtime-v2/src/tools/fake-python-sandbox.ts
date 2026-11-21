@@ -46,6 +46,7 @@ function formatNumber(value: number): string {
 
 function summarizeCsv(filename: string, text: string) {
   const lines = text
+    .replace(/^\uFEFF/, '')
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);

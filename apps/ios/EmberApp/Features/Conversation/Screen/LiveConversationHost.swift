@@ -33,7 +33,15 @@ final class LiveConversationHostModel {
 
     private let cloudBaseURL: URL?
     private let deviceAuthProvider: (any AuthSessionProvider)?
-    private let deviceExecutorPreferenceKey: String?
+    private let userDefaults: UserDefaults
+    private let isDeviceExecutorLaunchOverride: Bool
+    private let deviceExecutorTransport: (any CloudDeviceAPITransporting)?
+    private let deviceExecutorCredentialStore: (any CloudDeviceCredentialStoring)?
+    private let deviceExecutorJournal: CloudDeviceExecutionJournal?
+    private let deviceExecutorWorkspace: DeviceSandboxWorkspace?
+    private let deviceExecutorClock: (any CloudDeviceClock)?
+    private var deviceExecutorPreferenceKey: String?
+    private var deviceExecutorLifecycleTask: Task<Void, Never>?
 
     var selectedTab: RootTab = .chat
     var chatNavigationPath: [UUID] = []
@@ -69,6 +77,12 @@ final class LiveConversationHostModel {
         memoryRepository: (any PersonalMemoryRepositoryProtocol)? = nil,
         cloudBaseURL: URL? = nil,
         deviceAuthProvider: (any AuthSessionProvider)? = nil,
+        userDefaults: UserDefaults = .standard,
+        deviceExecutorTransport: (any CloudDeviceAPITransporting)? = nil,
+        deviceExecutorCredentialStore: (any CloudDeviceCredentialStoring)? = nil,
+        deviceExecutorJournal: CloudDeviceExecutionJournal? = nil,
+        deviceExecutorWorkspace: DeviceSandboxWorkspace? = nil,
+        deviceExecutorClock: (any CloudDeviceClock)? = nil,
         isMockMode: Bool = false,
         environmentBadge: String = "LIVE CLOUD",
         pollingWindow: Duration = .seconds(60),
@@ -82,19 +96,22 @@ final class LiveConversationHostModel {
         self.memoryStore = PersonalMemoryStore(repository: memoryRepository)
         self.cloudBaseURL = cloudBaseURL
         self.deviceAuthProvider = deviceAuthProvider
-        if !isMockMode, let cloudBaseURL, deviceAuthProvider != nil {
+        self.userDefaults = userDefaults
+        self.deviceExecutorTransport = deviceExecutorTransport
+        self.deviceExecutorCredentialStore = deviceExecutorCredentialStore
+        self.deviceExecutorJournal = deviceExecutorJournal
+        self.deviceExecutorWorkspace = deviceExecutorWorkspace
+        self.deviceExecutorClock = deviceExecutorClock
+        if !isMockMode, cloudBaseURL != nil, deviceAuthProvider != nil {
             self.cloudDeviceMonitor = CloudDeviceAdapterMonitor()
-            let hostKey = cloudBaseURL.host?.lowercased() ?? "default"
-            let prefKey = "ember.v2.deviceExecutor.enabled.\(hostKey)"
-            self.deviceExecutorPreferenceKey = prefKey
-            self.isDeviceExecutorEnabled =
+            self.isDeviceExecutorLaunchOverride =
                 ProcessInfo.processInfo.arguments.contains("--ember-enable-device-executor")
-                || UserDefaults.standard.bool(forKey: prefKey)
         } else {
             self.cloudDeviceMonitor = nil
-            self.deviceExecutorPreferenceKey = nil
-            self.isDeviceExecutorEnabled = false
+            self.isDeviceExecutorLaunchOverride = false
         }
+        self.deviceExecutorPreferenceKey = nil
+        self.isDeviceExecutorEnabled = false
         self.isMockMode = isMockMode
         self.environmentBadge = environmentBadge
         self.pollingWindow = pollingWindow
@@ -109,8 +126,10 @@ final class LiveConversationHostModel {
         do {
             // Bootstrap identity first: an unresolved outbox lookup may fail offline, but the
             // signed-in user must still see the Live UI and a recovery action, not an empty Mock.
-            profile = try await repository.bootstrap()
+            let bootstrapProfile = try await repository.bootstrap()
+            profile = bootstrapProfile
             requiresSignIn = false
+            applyStoredDeviceExecutorPreference(for: bootstrapProfile)
             do {
                 let recovered = try await repository.recoverAfterRelaunch()
                 snapshot = recovered
@@ -154,10 +173,12 @@ final class LiveConversationHostModel {
         defer { isSigningIn = false }
         do {
             try await auth.signInWithApple()
-            profile = try await repository.bootstrap()
+            let bootstrapProfile = try await repository.bootstrap()
+            profile = bootstrapProfile
             let loaded = try await repository.load()
             snapshot = loaded
             requiresSignIn = false
+            applyStoredDeviceExecutorPreference(for: bootstrapProfile)
             status = nil
             refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
@@ -186,7 +207,9 @@ final class LiveConversationHostModel {
         if let previousTask {
             _ = await previousTask.value
         }
-        await cloudDeviceMonitor?.stop()
+        await enqueueDeviceExecutorOperation { [weak self] in
+            await self?.cloudDeviceMonitor?.stop()
+        }
 
         switch await auth.logout() {
         case .revokedRemotely, .alreadyInvalidated:
@@ -203,32 +226,101 @@ final class LiveConversationHostModel {
     func setDeviceExecutorEnabled(_ enabled: Bool) async {
         isDeviceExecutorEnabled = enabled
         deviceExecutorError = nil
-        if let deviceExecutorPreferenceKey {
-            UserDefaults.standard.set(enabled, forKey: deviceExecutorPreferenceKey)
+        if let profile, let cloudBaseURL, cloudDeviceMonitor != nil {
+            let key = Self.makeDeviceExecutorPreferenceKey(host: cloudBaseURL, consumerID: profile.consumerID)
+            deviceExecutorPreferenceKey = key
+            userDefaults.set(enabled, forKey: key)
         }
         await syncCloudDeviceExecutorState()
     }
 
     private func syncCloudDeviceExecutorState() async {
+        await enqueueDeviceExecutorOperation { [weak self] in
+            await self?.performSyncCloudDeviceExecutorState()
+        }
+    }
+
+    private func performSyncCloudDeviceExecutorState() async {
         guard let cloudDeviceMonitor else { return }
-        guard isDeviceExecutorEnabled, !requiresSignIn, let profile, let cloudBaseURL, let deviceAuthProvider else {
+        guard !isSigningOut,
+              isDeviceExecutorEnabled,
+              !requiresSignIn,
+              let profile,
+              let cloudBaseURL,
+              let deviceAuthProvider else {
             await cloudDeviceMonitor.stop()
             return
         }
+        let targetConsumerID = profile.consumerID
         do {
             let configuration = try CloudDeviceEndpointConfiguration(
                 origin: cloudBaseURL,
-                accountID: profile.consumerID
+                accountID: targetConsumerID
             )
             try await cloudDeviceMonitor.connect(
                 configuration: configuration,
                 authProvider: deviceAuthProvider,
-                autoStart: true
+                credentialStore: deviceExecutorCredentialStore ?? KeychainCloudDeviceCredentialStore(),
+                transport: deviceExecutorTransport,
+                journal: deviceExecutorJournal,
+                workspace: deviceExecutorWorkspace,
+                clock: deviceExecutorClock ?? SystemCloudDeviceClock(),
+                autoStart: false
             )
+            guard !isSigningOut,
+                  isDeviceExecutorEnabled,
+                  !requiresSignIn,
+                  self.profile?.consumerID == targetConsumerID else {
+                await cloudDeviceMonitor.stop()
+                return
+            }
+            await cloudDeviceMonitor.start()
+            guard !isSigningOut,
+                  isDeviceExecutorEnabled,
+                  !requiresSignIn,
+                  self.profile?.consumerID == targetConsumerID else {
+                await cloudDeviceMonitor.stop()
+                return
+            }
             deviceExecutorError = nil
         } catch {
+            guard !isSigningOut,
+                  isDeviceExecutorEnabled,
+                  !requiresSignIn,
+                  self.profile?.consumerID == targetConsumerID else {
+                await cloudDeviceMonitor.stop()
+                return
+            }
             deviceExecutorError = String(localized: "device.executor.error.connect_failed", table: "Conversation")
         }
+    }
+
+    private func enqueueDeviceExecutorOperation(
+        _ operation: @escaping @MainActor () async -> Void
+    ) async {
+        let previous = deviceExecutorLifecycleTask
+        let next = Task { @MainActor in
+            _ = await previous?.value
+            await operation()
+        }
+        deviceExecutorLifecycleTask = next
+        await next.value
+    }
+
+    private func applyStoredDeviceExecutorPreference(for profile: EmberMeDTO) {
+        guard cloudDeviceMonitor != nil, let cloudBaseURL else {
+            deviceExecutorPreferenceKey = nil
+            isDeviceExecutorEnabled = false
+            return
+        }
+        let key = Self.makeDeviceExecutorPreferenceKey(host: cloudBaseURL, consumerID: profile.consumerID)
+        deviceExecutorPreferenceKey = key
+        isDeviceExecutorEnabled = isDeviceExecutorLaunchOverride || userDefaults.bool(forKey: key)
+    }
+
+    private static func makeDeviceExecutorPreferenceKey(host: URL, consumerID: UUID) -> String {
+        let hostKey = host.host?.lowercased() ?? "default"
+        return "ember.v2.deviceExecutor.enabled.\(hostKey).\(consumerID.uuidString.lowercased())"
     }
 
     private func clearLiveState() {
@@ -237,8 +329,14 @@ final class LiveConversationHostModel {
         conversationRefreshTask = nil
         taskObserverTask?.cancel()
         taskObserverTask = nil
+        deviceExecutorPreferenceKey = nil
+        isDeviceExecutorEnabled = false
         if let monitor = cloudDeviceMonitor {
-            Task { await monitor.stop() }
+            Task { @MainActor [weak self] in
+                await self?.enqueueDeviceExecutorOperation {
+                    await monitor.stop()
+                }
+            }
         }
         deviceExecutorError = nil
         profile = nil
@@ -736,7 +834,16 @@ final class LiveConversationHostModel {
 
     func handleScenePhase(_ phase: ScenePhase) {
         if let cloudDeviceMonitor {
-            Task { await cloudDeviceMonitor.handleScenePhase(phase) }
+            Task { @MainActor [weak self] in
+                await self?.enqueueDeviceExecutorOperation { [weak self] in
+                    guard let self else { return }
+                    guard !self.isSigningOut, !self.requiresSignIn, self.isDeviceExecutorEnabled else {
+                        await cloudDeviceMonitor.stop()
+                        return
+                    }
+                    await cloudDeviceMonitor.handleScenePhase(phase)
+                }
+            }
         }
         switch phase {
         case .active:

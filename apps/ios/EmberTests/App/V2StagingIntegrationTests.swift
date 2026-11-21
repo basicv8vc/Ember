@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Ember
 
@@ -236,6 +237,187 @@ final class V2StagingIntegrationTests: XCTestCase {
             deviceAuthProvider: nil
         )
         XCTAssertNil(v1Model.cloudDeviceMonitor)
+    }
+
+    func testDeviceExecutorLifecycleEnableStartScenePhaseDisableSignOutAndPerAccountIsolation() async throws {
+        let stagingURL = URL(string: "https://ember-v2-staging.slowfast.dev")!
+        let suiteName = "ember.v2.staging.test.\(UUID().uuidString.lowercased())"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        defaults.removePersistentDomain(forName: suiteName)
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ember-v2-device-lifecycle-\(UUID().uuidString.lowercased())", isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+
+        let accountA = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let accountB = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
+        let service = SwitchableAccountConversationService(consumerID: accountA)
+        let transport = StagingStubCloudDeviceTransport()
+        let credStore = InMemoryCloudDeviceCredentialStore()
+        let journal = CloudDeviceExecutionJournal(directory: tempDir)
+        let workspace = DeviceSandboxWorkspace(rootDirectory: tempDir)
+
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: FakeEmberSessionAPI(),
+            transport: try EmberAuthenticatedTransport(baseURL: stagingURL, client: EmberAPIClient()),
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+
+        let hostModel = LiveConversationHostModel(
+            repository: service,
+            auth: auth,
+            cloudBaseURL: stagingURL,
+            deviceAuthProvider: auth,
+            userDefaults: defaults,
+            deviceExecutorTransport: transport,
+            deviceExecutorCredentialStore: credStore,
+            deviceExecutorJournal: journal,
+            deviceExecutorWorkspace: workspace
+        )
+
+        // 1. Account A starts with opt-in disabled.
+        await hostModel.start()
+        XCTAssertFalse(hostModel.isDeviceExecutorEnabled)
+        XCTAssertFalse(hostModel.cloudDeviceMonitor?.isRunning ?? true)
+
+        // 2. Enabling starts and registers the live CloudDeviceAdapterMonitor.
+        await hostModel.setDeviceExecutorEnabled(true)
+        await transport.waitForClaimEntry()
+        XCTAssertTrue(hostModel.isDeviceExecutorEnabled)
+        XCTAssertTrue(hostModel.cloudDeviceMonitor?.isRunning ?? false)
+        let regAfterEnable = await transport.registerCount
+        XCTAssertGreaterThanOrEqual(regAfterEnable, 1)
+
+        // 3. Rapid background -> active transitions stay serialized cleanly.
+        hostModel.handleScenePhase(.background)
+        hostModel.handleScenePhase(.active)
+        await Task.yield()
+        await hostModel.setDeviceExecutorEnabled(false)
+        XCTAssertFalse(hostModel.isDeviceExecutorEnabled)
+        XCTAssertFalse(hostModel.cloudDeviceMonitor?.isRunning ?? true)
+
+        // 4. Re-enable then sign out: executor stops and preference clears in memory for next account.
+        await hostModel.setDeviceExecutorEnabled(true)
+        await transport.waitForSecondClaimOrStopSafe()
+        await hostModel.signOut()
+        XCTAssertFalse(hostModel.isDeviceExecutorEnabled)
+        XCTAssertFalse(hostModel.cloudDeviceMonitor?.isRunning ?? true)
+
+        // 5. Account B signs in on the SAME staging host: must NOT inherit Account A's opt-in.
+        await service.setConsumerID(accountB)
+        await hostModel.start()
+        XCTAssertFalse(hostModel.isDeviceExecutorEnabled)
+        XCTAssertFalse(hostModel.cloudDeviceMonitor?.isRunning ?? true)
+
+        // 6. Switching back to Account A remembers Account A's saved opt-in.
+        await service.setConsumerID(accountA)
+        await hostModel.start()
+        XCTAssertTrue(hostModel.isDeviceExecutorEnabled)
+        await hostModel.setDeviceExecutorEnabled(false)
+    }
+}
+
+private actor SwitchableAccountConversationService: LiveConversationServiceProtocol {
+    private var consumerID: UUID
+
+    init(consumerID: UUID) {
+        self.consumerID = consumerID
+    }
+
+    func setConsumerID(_ id: UUID) {
+        consumerID = id
+    }
+
+    func bootstrap() async throws -> EmberMeDTO {
+        EmberMeDTO(
+            consumerID: consumerID,
+            agent: .init(agentID: UUID(), displayName: "Ember"),
+            conversation: .init(conversationID: UUID(), transcriptEpoch: 1, createdAt: Date(), updatedAt: Date())
+        )
+    }
+    func load() async throws -> ConversationSnapshot {
+        ConversationSnapshot(
+            conversation: Conversation(id: ConversationID(rawValue: UUID()), createdAt: Date(), updatedAt: Date()),
+            messages: [],
+            assistantTurns: []
+        )
+    }
+    func recoverAfterRelaunch() async throws -> ConversationSnapshot { try await load() }
+    func pending() async throws -> LiveConversationJournal.Pending? { nil }
+    func activeTurn() async throws -> LiveConversationJournal.Turn? { nil }
+    func rejectedDraft() async throws -> LiveConversationJournal.Pending? { nil }
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        throw LiveB1Failure.rejected
+    }
+    func send(text: String, attachmentIDs: [UUID]) async throws -> LiveB1Receipt {
+        throw LiveB1Failure.rejected
+    }
+    func reconcilePending() async throws -> LiveB1Receipt? { nil }
+    func pollActiveTurn() async throws -> LiveB1Turn? { nil }
+    func cancelActiveTurn() async throws -> LiveB1Turn? { nil }
+    func clearOnLogout() async {}
+}
+
+private actor StagingStubCloudDeviceTransport: CloudDeviceAPITransporting {
+    private(set) var registerCount = 0
+    private(set) var claimCount = 0
+    private var claimWaiters: [CheckedContinuation<Void, Never>] = []
+
+    func waitForClaimEntry() async {
+        if claimCount > 0 { return }
+        await withCheckedContinuation { continuation in
+            claimWaiters.append(continuation)
+        }
+    }
+
+    func waitForSecondClaimOrStopSafe() async {
+        let target = claimCount + 1
+        while claimCount < target {
+            await withCheckedContinuation { continuation in
+                claimWaiters.append(continuation)
+            }
+        }
+    }
+
+    func register(credential: CloudDeviceCredential) async throws -> CloudDeviceRegistrationReceipt {
+        registerCount += 1
+        return CloudDeviceRegistrationReceipt(
+            deviceId: credential.id,
+            capability: CloudDeviceContract.textCapability,
+            version: CloudDeviceContract.capabilityVersion,
+            readyUntilMs: Int64(Date().timeIntervalSince1970 * 1000) + 30_000
+        )
+    }
+
+    func claim(credential: CloudDeviceCredential) async throws -> CloudDeviceClaimResponse {
+        claimCount += 1
+        let waiters = claimWaiters
+        claimWaiters.removeAll()
+        for waiter in waiters { waiter.resume() }
+        return .idle
+    }
+
+    func renew(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        fence: CloudDeviceFence,
+        previousLeaseExpiresAtMs: Int64,
+        deadlineAtMs: Int64
+    ) async throws -> CloudDeviceRenewOutcome {
+        .renewed(leaseExpiresAtMs: deadlineAtMs)
+    }
+
+    func submitResult(
+        credential: CloudDeviceCredential,
+        taskID: UUID,
+        submission: CloudDeviceResultSubmission
+    ) async throws -> CloudDeviceCommitOutcome {
+        .committed(replayed: false)
     }
 }
 

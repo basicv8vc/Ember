@@ -688,6 +688,16 @@ public enum B3AttachmentLimits {
         "application/javascript",
         "text/javascript",
     ]
+    public static let blockedFileExtensions: Set<String> = [
+        "html",
+        "htm",
+        "xhtml",
+        "svg",
+        "svgz",
+        "js",
+        "mjs",
+        "cjs",
+    ]
     public static let visionImageMediaTypes: Set<String> = [
         "image/jpeg",
         "image/png",
@@ -855,6 +865,13 @@ public enum B3AttachmentLimits {
         return scalars.allSatisfy { scalar in
             isAsciiAlnum(scalar) || scalar == "." || scalar == "_" || scalar == "-"
         }
+    }
+
+    public static func isSafeArtifactFilenameExtension(_ filename: String) -> Bool {
+        let ext = (filename as NSString).pathExtension
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        return ext.isEmpty || !blockedFileExtensions.contains(ext)
     }
 
     /// Normalizes arbitrary user-picked file names (including spaces or Unicode characters) into an ASCII
@@ -1054,13 +1071,15 @@ public struct TaskArtifactItemDTO: Identifiable, Codable, Equatable, Sendable {
 
         artifactID = try container.decode(UUID.self, forKey: SessionWireDecode.key("artifact_id"))
         let decodedFilename = try container.decodeIfPresent(String.self, forKey: SessionWireDecode.key("filename"))
-        if let decodedFilename, !B3AttachmentLimits.isSafeArtifactFilename(decodedFilename) {
+        if let decodedFilename,
+           (!B3AttachmentLimits.isSafeArtifactFilename(decodedFilename)
+                || !B3AttachmentLimits.isSafeArtifactFilenameExtension(decodedFilename)) {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact filename."))
         }
         filename = decodedFilename
 
         let decodedMediaType = try container.decode(String.self, forKey: SessionWireDecode.key("media_type"))
-        guard !decodedMediaType.isEmpty && decodedMediaType.count <= 128 else {
+        guard B3AttachmentLimits.isSafeMediaType(decodedMediaType) else {
             throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid artifact media_type."))
         }
         mediaType = decodedMediaType

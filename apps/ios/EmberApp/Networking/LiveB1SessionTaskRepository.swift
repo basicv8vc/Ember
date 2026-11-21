@@ -155,17 +155,25 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
         filename: String,
         mediaType: String
     ) async throws -> DownloadedTaskArtifact {
+        let normalizedType = B3AttachmentLimits.normalizedMediaType(mediaType)
+        guard B3AttachmentLimits.isSafeMediaType(normalizedType),
+              B3AttachmentLimits.isSafeArtifactFilenameExtension(filename) else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
         let response = try await sendRead(pathComponents: [
             "v1", "me", "artifacts", artifactID.uuidString.lowercased(),
         ])
         guard response.statusCode == 200 else {
             throw Self.mapStatusError(response.statusCode)
         }
-        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: mediaType)
+        let safeFilename = B3AttachmentLimits.safeUploadFilename(filename, mediaType: normalizedType)
+        guard B3AttachmentLimits.isSafeArtifactFilenameExtension(safeFilename) else {
+            throw SessionTaskRepositoryError.invalidInput
+        }
         return DownloadedTaskArtifact(
             artifactID: artifactID,
             filename: safeFilename,
-            mediaType: mediaType,
+            mediaType: normalizedType,
             data: response.data
         )
     }
@@ -179,6 +187,8 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
                 idempotency: .nonIdempotent(clientSubmissionID: nil)
             ))
         } catch let error as AuthError where error.requiresNewSignIn {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch AuthError.requestRejectedBeforeExecution {
             throw SessionTaskRepositoryError.unauthenticated
         } catch {
             throw SessionTaskRepositoryError.unavailable
@@ -224,6 +234,8 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
                 data: data
             )
         } catch let error as AuthError where error.requiresNewSignIn {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch AuthError.requestRejectedBeforeExecution {
             throw SessionTaskRepositoryError.unauthenticated
         } catch {
             throw SessionTaskRepositoryError.unavailable
@@ -306,6 +318,8 @@ struct LiveB1SessionTaskRepository: SessionTaskRepositoryProtocol {
                 queryItems: queryItems
             ))
         } catch let error as AuthError where error.requiresNewSignIn {
+            throw SessionTaskRepositoryError.unauthenticated
+        } catch AuthError.requestRejectedBeforeExecution {
             throw SessionTaskRepositoryError.unauthenticated
         } catch {
             throw SessionTaskRepositoryError.unavailable

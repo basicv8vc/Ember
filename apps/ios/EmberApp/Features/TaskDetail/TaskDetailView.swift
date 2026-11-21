@@ -543,7 +543,10 @@ private struct SessionTaskDetailContent: View {
                 Spacer(minLength: 8)
             }
 
-            if let downloadedURL {
+            if let downloadedURL,
+               B3AttachmentLimits.isSafeMediaType(item.mediaType),
+               B3AttachmentLimits.isSafeArtifactFilenameExtension(item.displayFilename),
+               B3AttachmentLimits.isSafeArtifactFilenameExtension(downloadedURL.lastPathComponent) {
                 HStack(spacing: 8) {
                     Button {
                         if let previewText {

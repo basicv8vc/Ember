@@ -45,7 +45,7 @@ import Foundation
 ///   and is cleared only once a replacement is persisted or the failure proves the token untouched, so
 ///   the next launch destroys the credential instead of replaying it. If the fence cannot be persisted,
 ///   the rotation is not attempted at all.
-public actor LiveAuthSessionCoordinator: AuthSessionProvider {
+public actor LiveAuthSessionCoordinator: RefreshingAuthSessionProvider {
     public struct Dependencies: Sendable {
         public let api: EmberSessionAPI
         public let transport: EmberAuthenticatedTransport
@@ -167,6 +167,47 @@ public actor LiveAuthSessionCoordinator: AuthSessionProvider {
             return .unavailable
         }
         return .authenticated(session)
+    }
+
+    public func refreshedSession() async -> AuthSessionState {
+        do {
+            let refreshed = try await refreshSessionIfNeeded()
+            guard let session = AuthSession(accessToken: refreshed.accessToken.rawValue) else {
+                return .unavailable
+            }
+            return .authenticated(session)
+        } catch let error as AuthError where error == .superseded {
+            return await currentSession()
+        } catch let error as AuthError where error.requiresNewSignIn {
+            return .unauthenticated
+        } catch {
+            return .unavailable
+        }
+    }
+
+    public func recoverUnauthorizedSession(rejectedAccessToken: String) async -> AuthSessionState {
+        if !didAttemptRestore {
+            try? restoreRecordIfNeeded()
+        }
+        guard !isLoggingOut, let current = record else {
+            return .unauthenticated
+        }
+        if current.accessToken.rawValue != rejectedAccessToken {
+            return await refreshedSession()
+        }
+        do {
+            let rotated = try await performRefresh(expectedGeneration: generation)
+            guard let session = AuthSession(accessToken: rotated.accessToken.rawValue) else {
+                return .unavailable
+            }
+            return .authenticated(session)
+        } catch let error as AuthError where error == .superseded {
+            return await currentSession()
+        } catch let error as AuthError where error.requiresNewSignIn {
+            return .unauthenticated
+        } catch {
+            return .unavailable
+        }
     }
 
     // MARK: - Sign in

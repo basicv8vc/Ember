@@ -61,6 +61,13 @@ public protocol AuthSessionProvider: Sendable {
     func currentSession() async -> AuthSessionState
 }
 
+/// Optional capability for session providers that can rotate an expired or rejected
+/// bearer credential safely before or after an authenticated API request.
+public protocol RefreshingAuthSessionProvider: AuthSessionProvider {
+    func refreshedSession() async -> AuthSessionState
+    func recoverUnauthorizedSession(rejectedAccessToken: String) async -> AuthSessionState
+}
+
 /// Deterministic in-memory provider for previews and unit tests. No network or disk I/O.
 public actor MockAuthSessionProvider: AuthSessionProvider {
     private var state: AuthSessionState

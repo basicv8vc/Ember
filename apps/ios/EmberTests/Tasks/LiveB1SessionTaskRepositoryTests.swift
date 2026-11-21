@@ -909,6 +909,111 @@ final class LiveB1SessionTaskRepositoryTests: XCTestCase {
         XCTAssertEqual(submitRequests.count, 2)
     }
 
+    func testTaskArtifactRejectsBlockedActiveWebMimeTypesAndExtensions() async throws {
+        let fixture = try makeRepository()
+        let recorder = RequestRecorder()
+        let taskID = UUID(uuidString: "00000000-0000-4000-8000-00000000f401")!
+        let htmlArtifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000f402")!
+        let smuggledArtifactID = UUID(uuidString: "00000000-0000-4000-8000-00000000f403")!
+        let sha = String(repeating: "a", count: 64)
+
+        let htmlPayload = Data("""
+        {
+          "artifact_id": "\(htmlArtifactID.uuidString.lowercased())",
+          "filename": "report.html",
+          "media_type": "text/html",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: htmlPayload))
+
+        let svgPayload = Data("""
+        {
+          "artifact_id": "\(htmlArtifactID.uuidString.lowercased())",
+          "filename": "vector.svg",
+          "media_type": "image/svg+xml",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: svgPayload))
+
+        let smuggledExtensionPayload = Data("""
+        {
+          "artifact_id": "\(smuggledArtifactID.uuidString.lowercased())",
+          "filename": "payload.html",
+          "media_type": "text/plain",
+          "size": 12,
+          "sha256": "\(sha)",
+          "created_by": "run",
+          "created_at": "2026-11-21T00:00:00Z"
+        }
+        """.utf8)
+        XCTAssertThrowsError(try JSONDecoder().decode(TaskArtifactItemDTO.self, from: smuggledExtensionPayload))
+
+        register { request in
+            recorder.record(request)
+            return .json(statusCode: 200, body: "{}")
+        }
+
+        let store = SessionTaskStore(repository: fixture.repository)
+        let directItem = TaskArtifactItemDTO(
+            artifactID: smuggledArtifactID,
+            filename: "smuggled.html",
+            mediaType: "text/plain",
+            size: 12,
+            sha256: sha,
+            createdBy: .run,
+            createdAt: "2026-11-21T00:00:00Z"
+        )
+        await store.downloadArtifact(directItem)
+
+        XCTAssertNil(store.downloadedArtifactFileByID[smuggledArtifactID])
+        XCTAssertNotNil(store.artifactDownloadErrorByID[smuggledArtifactID])
+        XCTAssertTrue(recorder.requests.isEmpty, "Blocked artifact must not be fetched or cached on disk")
+        XCTAssertEqual(taskID, taskID)
+    }
+
+    func testUploadAttachmentMapsPreExecution401RejectionToUnauthenticated() async throws {
+        let session = StubSession.make()
+        sessions.append(session)
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let fakeAPI = FakeEmberSessionAPI()
+        fakeAPI.setRefreshResults([.failure(.offline)])
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: fakeAPI,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let repository = LiveB1SessionTaskRepository(auth: auth)
+
+        register { _ in
+            .json(statusCode: 401, body: "{}")
+        }
+
+        do {
+            _ = try await repository.uploadAttachment(
+                filename: "sales.csv",
+                mediaType: "text/csv",
+                data: Data("a,b\n1,2\n".utf8)
+            )
+            XCTFail("Expected unauthenticated on pre-execution 401 upload rejection")
+        } catch let error as SessionTaskRepositoryError {
+            XCTAssertEqual(error, .unauthenticated)
+        }
+    }
+
     private func makeRepository() throws -> (repository: LiveB1SessionTaskRepository, session: URLSession) {
         let session = StubSession.make()
         sessions.append(session)

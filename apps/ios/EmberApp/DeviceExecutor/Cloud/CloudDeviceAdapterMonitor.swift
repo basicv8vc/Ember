@@ -168,24 +168,31 @@ public final class CloudDeviceAdapterMonitor {
         guard let adapter else { return }
         let myGeneration = connectionGeneration
         await adapter.start()
-        guard connectionGeneration == myGeneration else { return }
+        guard connectionGeneration == myGeneration else {
+            await adapter.stop()
+            return
+        }
         if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
             applySnapshot(snapshot)
         }
     }
 
     public func stop() async {
-        isRunning = false
-        guard let adapter else {
-            while let stopTask = pendingStopTask {
-                await stopTask.value
-            }
-            return
-        }
+        connectionGeneration &+= 1
         let myGeneration = connectionGeneration
-        await adapter.stop()
-        guard connectionGeneration == myGeneration else { return }
-        if let snapshot = try? await adapter.currentSnapshot(), connectionGeneration == myGeneration {
+        isRunning = false
+        let currentAdapter = adapter
+        adapter = nil
+        if let currentAdapter {
+            enqueueAdapterStop(currentAdapter)
+        }
+        while let stopTask = pendingStopTask {
+            await stopTask.value
+            guard connectionGeneration == myGeneration else { return }
+        }
+        if let currentAdapter,
+           let snapshot = try? await currentAdapter.currentSnapshot(),
+           connectionGeneration == myGeneration {
             applySnapshot(snapshot)
         }
     }

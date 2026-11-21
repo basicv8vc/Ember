@@ -435,6 +435,14 @@ final class SessionTaskStore {
 
     func downloadArtifact(_ item: TaskArtifactItemDTO) async {
         guard let repository, !downloadingArtifactIDs.contains(item.artifactID) else { return }
+        guard B3AttachmentLimits.isSafeMediaType(item.mediaType),
+              B3AttachmentLimits.isSafeArtifactFilenameExtension(item.displayFilename) else {
+            artifactDownloadErrorByID[item.artifactID] = String(
+                localized: "tasks.artifacts.download_failed",
+                table: "Conversation"
+            )
+            return
+        }
         if let existingURL = downloadedArtifactFileByID[item.artifactID],
            FileManager.default.fileExists(atPath: existingURL.path) {
             return
@@ -456,6 +464,14 @@ final class SessionTaskStore {
                 mediaType: item.mediaType
             )
             guard generation == startGeneration, !Task.isCancelled else { return }
+            guard B3AttachmentLimits.isSafeMediaType(downloaded.mediaType),
+                  B3AttachmentLimits.isSafeArtifactFilenameExtension(downloaded.filename) else {
+                artifactDownloadErrorByID[item.artifactID] = String(
+                    localized: "tasks.artifacts.download_failed",
+                    table: "Conversation"
+                )
+                return
+            }
 
             let actualSHA256 = SHA256.hash(data: downloaded.data)
                 .map { String(format: "%02x", $0) }

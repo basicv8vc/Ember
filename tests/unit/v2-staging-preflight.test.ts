@@ -5,6 +5,7 @@ import {
   G3_REAL_CANARY_VARS,
   UNPROVISIONED_D1_PLACEHOLDER,
   parseJsonc,
+  validateRealCanarySecretNames,
   validateV2StagingConfig,
 } from '../../infra/cloudflare/v2-staging-preflight.mjs';
 
@@ -228,5 +229,43 @@ describe('V2 staging preflight validator', () => {
     expect(result.ok).toBe(true);
     expect(result.errors).toEqual([]);
     expect(result.notices).toEqual([]);
+  });
+
+  it('validates G3 real-canary secret names with optional EMBER_V2_STAGING_ALLOWED_SUBJECTS', () => {
+    const withoutSubjects = validateRealCanarySecretNames([
+      'EMBER_MODEL_API_KEY',
+      'EMBER_MODEL_ALPHA_TENANT_IDS',
+    ]);
+    expect(withoutSubjects.ok).toBe(true);
+    expect(withoutSubjects.errors).toEqual([]);
+    expect(
+      withoutSubjects.notices.some((n) => n.includes('EMBER_V2_STAGING_ALLOWED_SUBJECTS')),
+    ).toBe(true);
+
+    const withAllThree = validateRealCanarySecretNames([
+      'EMBER_MODEL_API_KEY',
+      'EMBER_MODEL_ALPHA_TENANT_IDS',
+      'EMBER_V2_STAGING_ALLOWED_SUBJECTS',
+    ]);
+    expect(withAllThree.ok).toBe(true);
+    expect(withAllThree.notices).toEqual([]);
+
+    const missingTenantAllowlist = validateRealCanarySecretNames(['EMBER_MODEL_API_KEY']);
+    expect(missingTenantAllowlist.ok).toBe(false);
+    expect(
+      missingTenantAllowlist.errors.some((e) => e.includes('EMBER_MODEL_ALPHA_TENANT_IDS')),
+    ).toBe(true);
+
+    const missingApiKey = validateRealCanarySecretNames(['EMBER_MODEL_ALPHA_TENANT_IDS']);
+    expect(missingApiKey.ok).toBe(false);
+    expect(missingApiKey.errors.some((e) => e.includes('EMBER_MODEL_API_KEY'))).toBe(true);
+
+    const withDaytona = validateRealCanarySecretNames([
+      'EMBER_MODEL_API_KEY',
+      'EMBER_MODEL_ALPHA_TENANT_IDS',
+      'DAYTONA_API_KEY',
+    ]);
+    expect(withDaytona.ok).toBe(false);
+    expect(withDaytona.errors.some((e) => e.includes('DAYTONA_API_KEY'))).toBe(true);
   });
 });

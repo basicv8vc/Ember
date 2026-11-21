@@ -18,8 +18,8 @@ export const G3_MAX_BUDGET_CEILINGS = Object.freeze({
 export const REQUIRED_REAL_CANARY_SECRETS = Object.freeze([
   'EMBER_MODEL_API_KEY',
   'EMBER_MODEL_ALPHA_TENANT_IDS',
-  'EMBER_V2_STAGING_ALLOWED_SUBJECTS',
 ]);
+export const OPTIONAL_REAL_CANARY_SECRETS = Object.freeze(['EMBER_V2_STAGING_ALLOWED_SUBJECTS']);
 export const G3_REAL_CANARY_VARS = Object.freeze({
   EMBER_MODEL_MODE: 'real',
   EMBER_MODEL_PROVIDER: G3_APPROVED_PROVIDER,
@@ -38,6 +38,7 @@ export const G3_REAL_CANARY_VARS = Object.freeze({
 });
 const FORBIDDEN_PLAINTEXT_SECRET_VARS = Object.freeze([
   ...REQUIRED_REAL_CANARY_SECRETS,
+  ...OPTIONAL_REAL_CANARY_SECRETS,
   'DAYTONA_API_KEY',
 ]);
 const SAFE_INT_REGEX = /^\d+$/;
@@ -404,6 +405,30 @@ function runCommand(commandName, args, cwd, { capture = false } = {}) {
   });
 }
 
+/**
+ * Validate bound secret names for G3 real-LLM canary.
+ * EMBER_V2_STAGING_ALLOWED_SUBJECTS is optional because real-mode login enforces
+ * the derived-tenant allowlist against EMBER_MODEL_ALPHA_TENANT_IDS.
+ */
+export function validateRealCanarySecretNames(secretNames) {
+  const names = new Set(secretNames);
+  const errors = [];
+  const notices = [];
+  const missing = REQUIRED_REAL_CANARY_SECRETS.filter((name) => !names.has(name));
+  if (missing.length > 0) {
+    errors.push(`Missing required G3 staging secrets: ${missing.join(', ')}`);
+  }
+  if (names.has('DAYTONA_API_KEY')) {
+    errors.push('DAYTONA_API_KEY must NOT be bound during G3 real-LLM canary');
+  }
+  if (!names.has('EMBER_V2_STAGING_ALLOWED_SUBJECTS')) {
+    notices.push(
+      'EMBER_V2_STAGING_ALLOWED_SUBJECTS is not bound; G3 real-mode login enforces derived-tenant allowlist via EMBER_MODEL_ALPHA_TENANT_IDS.',
+    );
+  }
+  return { ok: errors.length === 0, errors, notices };
+}
+
 async function verifyRealCanarySecrets(repoRoot) {
   const { stdout } = await runCommand(
     'pnpm',
@@ -426,13 +451,13 @@ async function verifyRealCanarySecrets(repoRoot) {
   if (!Array.isArray(parsed)) {
     throw new Error('Unexpected wrangler secret list output');
   }
-  const names = new Set(parsed.map((entry) => entry?.name).filter(Boolean));
-  const missing = REQUIRED_REAL_CANARY_SECRETS.filter((name) => !names.has(name));
-  if (missing.length > 0) {
-    throw new Error(`Missing required G3 staging secrets: ${missing.join(', ')}`);
+  const names = parsed.map((entry) => entry?.name).filter(Boolean);
+  const result = validateRealCanarySecretNames(names);
+  for (const notice of result.notices) {
+    process.stdout.write(`[notice] ${notice}\n`);
   }
-  if (names.has('DAYTONA_API_KEY')) {
-    throw new Error('DAYTONA_API_KEY must NOT be bound during G3 real-LLM canary');
+  if (!result.ok) {
+    throw new Error(result.errors.join('; '));
   }
 }
 

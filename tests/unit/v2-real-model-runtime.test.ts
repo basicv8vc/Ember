@@ -268,10 +268,21 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       ),
     ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
     expect(() =>
+      resolveV2ModelRuntime(
+        baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: `${TENANT_A},${TENANT_B}` }),
+      ),
+    ).toThrow(/at most 1 tenant/);
+    expect(() =>
       resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' })),
-    ).toThrow(/allowlist/);
+    ).toThrow(/EMBER_MODEL_ALPHA_SCOPE=allowlist is required/);
     expect(() => resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'all' }))).toThrow(
-      /allowlist/,
+      /EMBER_MODEL_ALPHA_SCOPE=allowlist is required/,
+    );
+    expect(() =>
+      resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: undefined })),
+    ).toThrow(/EMBER_MODEL_ALPHA_SCOPE=allowlist is required/);
+    expect(() => resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: '   ' }))).toThrow(
+      /EMBER_MODEL_ALPHA_SCOPE=allowlist is required/,
     );
     expect(() =>
       resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ID: 'openai/gpt-4o-mini' })),

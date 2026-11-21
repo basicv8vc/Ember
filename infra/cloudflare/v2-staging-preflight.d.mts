@@ -9,6 +9,7 @@ export const G3_MAX_BUDGET_CEILINGS: Readonly<{
   principalDailyTurns: number;
 }>;
 export const REQUIRED_REAL_CANARY_SECRETS: readonly string[];
+export const OPTIONAL_REAL_CANARY_SECRETS: readonly string[];
 export const G3_REAL_CANARY_VARS: Readonly<Record<string, string>>;
 
 export interface WranglerV2StagingConfig {
@@ -44,6 +45,10 @@ export interface V2StagingValidationResult {
 }
 
 export function parseJsonc(source: string): WranglerV2StagingConfig;
+
+export function validateRealCanarySecretNames(
+  secretNames: Iterable<string>,
+): V2StagingValidationResult;
 
 export function validateV2StagingConfig(input: {
   v2Config: WranglerV2StagingConfig;

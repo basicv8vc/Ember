@@ -26,6 +26,61 @@ export type V2SandboxConfig =
     };
 
 const MAX_DAYTONA_ALLOWED_TENANTS = 100;
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const MAX_ALPHA_TENANTS = 100;
+
+export interface V2AlphaTenantAllowlistEnv {
+  readonly EMBER_MODEL_ALPHA_SCOPE?: string;
+  readonly EMBER_MODEL_ALPHA_TENANT_IDS?: string;
+}
+
+/**
+ * Shared parser for `EMBER_MODEL_ALPHA_SCOPE` + `EMBER_MODEL_ALPHA_TENANT_IDS` in V2 real mode.
+ * Fails closed on unsupported scopes, missing/empty lists, malformed UUIDs, or excess tenants.
+ */
+export function resolveV2AlphaTenantAllowlist(
+  env: V2AlphaTenantAllowlistEnv,
+  options: { readonly maxTenants?: number } = {},
+): { readonly scope: 'allowlist'; readonly tenantIds: ReadonlySet<string> } {
+  const rawScope = env.EMBER_MODEL_ALPHA_SCOPE?.trim().toLowerCase();
+  if (rawScope !== 'allowlist') {
+    throw new Error('EMBER_MODEL_ALPHA_SCOPE=allowlist is required for V2 real canary');
+  }
+  const rawIds = env.EMBER_MODEL_ALPHA_TENANT_IDS?.trim() ?? '';
+  if (rawIds.length === 0) {
+    throw new Error(
+      'EMBER_MODEL_ALPHA_TENANT_IDS is required when EMBER_MODEL_ALPHA_SCOPE=allowlist',
+    );
+  }
+  const ids = rawIds.split(',').map((entry) => entry.trim().toLowerCase());
+  const maxTenants = options.maxTenants ?? MAX_ALPHA_TENANTS;
+  if (
+    ids.length === 0 ||
+    ids.length > MAX_ALPHA_TENANTS ||
+    ids.some((id) => !UUID_REGEX.test(id))
+  ) {
+    throw new Error('Invalid UUID in EMBER_MODEL_ALPHA_TENANT_IDS');
+  }
+  const tenantIds = new Set(ids);
+  if (ids.length > maxTenants || tenantIds.size > maxTenants) {
+    throw new Error(
+      `EMBER_MODEL_ALPHA_TENANT_IDS permits at most ${maxTenants} tenant(s) in this mode`,
+    );
+  }
+  return { scope: 'allowlist', tenantIds };
+}
+
+/**
+ * Resolve the derived-tenant login allowlist for V2 staging sessions.
+ * Active only when EMBER_MODEL_MODE=real; preserves Fake/G2 staging behavior otherwise.
+ */
+export function resolveV2StagingSessionAllowedTenants(
+  env: V2AlphaTenantAllowlistEnv & { readonly EMBER_MODEL_MODE?: string },
+): ReadonlySet<string> | undefined {
+  const modelMode = env.EMBER_MODEL_MODE?.trim().toLowerCase() ?? 'fake';
+  if (modelMode !== 'real') return undefined;
+  return resolveV2AlphaTenantAllowlist(env, { maxTenants: 1 }).tenantIds;
+}
 
 /**
  * Resolve V2 Python sandbox execution provider independently of LLM mode (`EMBER_MODEL_MODE`).

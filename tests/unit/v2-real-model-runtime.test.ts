@@ -11,6 +11,7 @@ import {
   OPENROUTER_CHAT_COMPLETIONS_URL,
   OpenRouterModelGateway,
   SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  type FakeStreamingModelGateway,
   type FetchLike,
 } from '@ember/model-gateway';
 import {
@@ -18,6 +19,7 @@ import {
   AgentHeadCore,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
+  runV2FakePythonSandbox,
   type D1DatabaseLike,
   type DurableObjectStorageLike,
   type ProactiveScheduleSnapshot,
@@ -1352,5 +1354,119 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       settlement: { state: 'unknown_billed' },
       status: 'failed',
     });
+  });
+
+  it('delegates CSV attachments to delegate_python_agent in isolated v2-staging fake mode while preserving image/proactive reply behavior', async () => {
+    const runtime = resolveV2ModelRuntime({
+      EMBER_ENV: 'v2-staging',
+      EMBER_V2_STAGING_ISOLATED: 'true',
+      EMBER_MODEL_MODE: 'fake',
+      EMBER_SANDBOX_MODE: 'fake',
+    });
+    expect(runtime.mode).toBe('fake');
+    expect(runtime.sandboxConfig).toEqual({ kind: 'fake' });
+    const fakeGateway = runtime.gateway as unknown as FakeStreamingModelGateway;
+
+    const csvUploadId = randomUUID();
+    const delegated = await fakeGateway.generateConversationTurn(
+      {
+        conversationId: CONVERSATION_A,
+        turnId: randomUUID(),
+        context: [
+          {
+            role: 'user',
+            text: 'Analyze sales.csv and summarize total revenue.',
+            attachments: [
+              {
+                uploadId: csvUploadId,
+                filename: 'sales.csv',
+                mediaType: 'text/csv',
+                sizeBytes: 34,
+              },
+            ],
+          },
+        ],
+        maxOutputTokens: 512,
+      },
+      new AbortController().signal,
+    );
+    expect(delegated.simulated).toBe(true);
+    expect(delegated.output).toMatchObject({
+      kind: 'delegate',
+      toolName: 'delegate_python_agent',
+      delegation: {
+        toolName: 'delegate_python_agent',
+        arguments: {
+          title: 'Analyze sales.csv',
+          prompt: 'Analyze sales.csv and summarize total revenue.',
+          attachmentIds: [csvUploadId],
+        },
+      },
+    });
+
+    // Image-only attachments and proactive briefs (allowDelegationTools: false) do not delegate.
+    const imageTurn = await fakeGateway.generateConversationTurn(
+      {
+        conversationId: CONVERSATION_A,
+        turnId: randomUUID(),
+        context: [
+          {
+            role: 'user',
+            text: 'What is in this image?',
+            attachments: [
+              {
+                uploadId: randomUUID(),
+                filename: 'photo.jpg',
+                mediaType: 'image/jpeg',
+                sizeBytes: 1200,
+              },
+            ],
+          },
+        ],
+        maxOutputTokens: 512,
+      },
+      new AbortController().signal,
+    );
+    expect(imageTurn.output.kind).toBe('reply');
+
+    const disabledDelegation = await fakeGateway.generateConversationTurn(
+      {
+        conversationId: CONVERSATION_A,
+        turnId: randomUUID(),
+        context: [
+          {
+            role: 'user',
+            text: 'Summarize CSV without delegation tools.',
+            attachments: [
+              {
+                uploadId: csvUploadId,
+                filename: 'sales.csv',
+                mediaType: 'text/csv',
+                sizeBytes: 34,
+              },
+            ],
+          },
+        ],
+        allowDelegationTools: false,
+        maxOutputTokens: 512,
+      },
+      new AbortController().signal,
+    );
+    expect(disabledDelegation.output.kind).toBe('reply');
+
+    // BOM-prefixed CSVs exported from Excel/Numbers still summarize numeric columns cleanly.
+    const bomSandbox = runV2FakePythonSandbox({
+      prompt: 'Analyze sales.csv',
+      inputFiles: [
+        {
+          filename: 'sales.csv',
+          mediaType: 'text/csv',
+          bytes: new TextEncoder().encode('\uFEFFregion,revenue\nnorth,120\nsouth,80\n'),
+        },
+      ],
+    });
+    expect(bomSandbox.outputFiles[0]?.filename).toBe('analysis-summary.csv');
+    const summaryCsv = new TextDecoder().decode(bomSandbox.outputFiles[0]!.bytes);
+    expect(summaryCsv).toContain('sales.csv,revenue,2,200,80,120,100');
   });
 });

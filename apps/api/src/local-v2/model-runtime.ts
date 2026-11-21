@@ -1,6 +1,7 @@
 import { DomainError } from '@ember/domain';
 import {
   FAKE_MODEL_LABEL,
+  FAKE_REPLY_PREFIX,
   FAKE_V2_RATE_VERSION,
   FakeStreamingModelGateway,
   LoopbackFakeModelGateway,
@@ -10,6 +11,7 @@ import {
   estimateCostMicroUsd,
   preflightConversationTurn,
   resolveModelExecution,
+  type ConversationTurnInput,
   type ConversationTurnOutput,
   type FakeConversationJob,
   type FakeConversationJobStatus,
@@ -109,6 +111,52 @@ export interface ResolveV2ModelRuntimeOptions {
   readonly now?: () => Date;
 }
 
+/**
+ * Deterministic in-worker fake turn router for isolated V2 staging (`EMBER_MODEL_MODE=fake`):
+ * delegates non-image uploaded files (such as CSVs) to `delegate_python_agent` when delegation
+ * tools are enabled so iPhone and API smoke runs can exercise upload -> NL delegation -> artifact
+ * download end-to-end with zero paid provider spend.
+ */
+function resolveInWorkerFakeTurnOutput(
+  input: ConversationTurnInput,
+): ConversationTurnOutput | undefined {
+  if (input.allowDelegationTools === false) {
+    return undefined;
+  }
+  const lastMessage = input.context.at(-1);
+  if (lastMessage === undefined || lastMessage.role !== 'user') {
+    return undefined;
+  }
+  const dataAttachments = (lastMessage.attachments ?? []).filter(
+    (attachment) => !attachment.mediaType.toLowerCase().startsWith('image/'),
+  );
+  if (dataAttachments.length === 0) {
+    return undefined;
+  }
+
+  const filenames = dataAttachments.map((attachment) => attachment.filename).join(', ');
+  const trimmedPrompt = lastMessage.text.trim();
+  const prompt = (trimmedPrompt.length > 0 ? trimmedPrompt : `Analyze ${filenames}`).slice(
+    0,
+    8_000,
+  );
+  const title = `Analyze ${dataAttachments[0]!.filename}`.slice(0, 128);
+  return {
+    kind: 'delegate',
+    toolName: 'delegate_python_agent',
+    text: `${FAKE_REPLY_PREFIX}Started bounded Python task for ${filenames}.`.slice(0, 2_000),
+    finishReason: 'stop',
+    delegation: {
+      toolName: 'delegate_python_agent',
+      arguments: {
+        title,
+        prompt,
+        attachmentIds: dataAttachments.map((attachment) => attachment.uploadId),
+      },
+    },
+  };
+}
+
 function createInWorkerFakeGateway(): V2StreamingModelGateway {
   const jobs = new Map<string, FakeConversationJob>();
   return new FakeStreamingModelGateway(
@@ -129,7 +177,11 @@ function createInWorkerFakeGateway(): V2StreamingModelGateway {
         );
       },
     },
-    { reasoningMs: 0, usageCostMicroUsd: 0 },
+    {
+      reasoningMs: 0,
+      usageCostMicroUsd: 0,
+      onConversationTurn: resolveInWorkerFakeTurnOutput,
+    },
   );
 }
 

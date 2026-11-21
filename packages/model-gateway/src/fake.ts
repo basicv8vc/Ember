@@ -40,7 +40,9 @@ export interface FakeModelGatewayOptions {
   /** Deterministic failure injection: no provider, no network, same closed taxonomy. */
   readonly failure?: 'model_timeout' | 'model_unavailable' | 'model_rate_limited';
   /** Test-only callback to script a reply or controlled delegation output without keywords. */
-  readonly onConversationTurn?: (input: ConversationTurnInput) => ConversationTurnOutput;
+  readonly onConversationTurn?: (
+    input: ConversationTurnInput,
+  ) => ConversationTurnOutput | undefined;
   /** Test-only callback to script deterministic notes extraction output. */
   readonly onExtractNotesActionItems?: (input: NotesActionItemsInput) => NotesActionItemsOutput;
   /** Test-only callback to script deterministic Python agent steps. */
@@ -90,10 +92,10 @@ export class FakeModelGateway implements ModelGateway {
         : '';
     const memoryTokens = memoryText.length > 0 ? estimateTokensConservative(memoryText) : 0;
 
-    if (this.#onConversationTurn !== undefined) {
-      const output = this.#onConversationTurn(input);
+    const customOutput = this.#onConversationTurn?.(input);
+    if (customOutput !== undefined) {
       return Object.freeze({
-        output,
+        output: customOutput,
         modelLabel: FAKE_MODEL_LABEL,
         simulated: true as const,
         usage: Object.freeze({
@@ -102,7 +104,7 @@ export class FakeModelGateway implements ModelGateway {
               (total, message) => total + estimateTokensConservative(message.text),
               0,
             ) + memoryTokens,
-          outputTokens: Math.max(1, estimateTokensConservative(output.text)),
+          outputTokens: Math.max(1, estimateTokensConservative(customOutput.text)),
           costMicroUsd: 0,
           rateVersion: 'fake-zero-cost',
         }),

@@ -100,6 +100,21 @@ describe('V2 staging preflight validator', () => {
     expect(result.errors.some((e) => e.includes('EMBER_MODEL_MODE === "fake"'))).toBe(true);
   });
 
+  it('rejects real Daytona sandbox mode before separate Daytona canary approval', () => {
+    const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
+    const mutated = structuredClone(v2Config);
+    mutated.vars = { ...mutated.vars, EMBER_SANDBOX_MODE: 'daytona' };
+
+    const result = validateV2StagingConfig({
+      v2Config: mutated,
+      v1Configs,
+      migrationExists,
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.errors.some((e) => e.includes('EMBER_SANDBOX_MODE === "fake"'))).toBe(true);
+  });
+
   it('accepts a provisioned D1 database_id when --require-provisioned is set', () => {
     const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
     const mutated = structuredClone(v2Config);

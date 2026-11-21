@@ -9,6 +9,7 @@
   "vars": {
     "EMBER_ENV": "local",
     "EMBER_MODEL_MODE": "fake",
+    "EMBER_SANDBOX_MODE": "fake",
     "EMBER_V2_ISOLATED_HARNESS": "true",
   },
   "durable_objects": {

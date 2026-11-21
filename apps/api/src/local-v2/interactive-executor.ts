@@ -3,14 +3,20 @@ export type { ObservedTurnUsage } from '@ember/runtime-v2';
 import { B1AssistantTurnDtoSchema, IdSchema } from '@ember/contracts';
 import {
   buildBoundedContext,
-  FAKE_MODEL_LABEL,
+  estimateCostMicroUsd,
   FAKE_STREAM_MAX_REPLY_CHARS,
+  isModelAuthorizationRefused,
   isModelGatewayFailure,
   MODEL_LIMITS,
   ModelGatewayFailure,
-  type FakeConversationStreamEvent,
-  type FakeStreamingModelGateway,
+  preflightConversationTurn,
+  type ModelRateRow,
 } from '@ember/model-gateway';
+import {
+  toV2DelegationCommand,
+  type V2ConversationStreamEvent,
+  type V2StreamingModelGateway,
+} from './model-runtime.js';
 import type { CommitTurnRequest, EdgeAgentHeadRpc, HeadScope, PreparedTurn } from './rpc.js';
 
 export const INTERACTIVE_TIMING = {
@@ -29,7 +35,7 @@ const INTERRUPTED_RPC_TIMEOUT_MS = 2_500;
 
 type StopReason = 'disconnect' | 'handoff_window' | 'provider_idle' | 'lease_lost' | 'phase_ended';
 type SendState = 'unsent' | 'unknown' | 'authorized';
-type StreamResult = Extract<FakeConversationStreamEvent, { kind: 'result' }>['result'];
+type StreamResult = Extract<V2ConversationStreamEvent, { kind: 'result' }>['result'];
 type ExecutorRpc = Pick<
   EdgeAgentHeadRpc,
   'markAttemptSent' | 'renewTurnLease' | 'handoffTurnToDurable' | 'commitTurn'
@@ -44,13 +50,15 @@ export type ReportObservedTurnUsage = (receipt: ObservedTurnUsage) => Promise<vo
 
 export interface InteractiveExecution {
   readonly rpc: ExecutorRpc;
-  readonly gateway: Pick<FakeStreamingModelGateway, 'streamConversationTurn'>;
+  readonly gateway: Pick<V2StreamingModelGateway, 'streamConversationTurn'>;
   readonly reportObservedUsage: ReportObservedTurnUsage;
   readonly prepared: PreparedTurn;
   readonly scope: HeadScope;
   readonly conversationId: string;
   readonly workerId: string;
   readonly signal: AbortSignal;
+  readonly expectedSimulated?: boolean;
+  readonly preflightRate?: ModelRateRow | null;
   emit(
     this: void,
     event: 'turn.delta' | 'turn.committed' | 'turn.handed_off',
@@ -90,8 +98,10 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
   let sendState: SendState = 'unsent';
   let observedUsage: ObservedTurnUsage | undefined;
   let usageReportStarted = false;
-  let pendingProviderRead: Promise<IteratorResult<FakeConversationStreamEvent, void>> | undefined;
+  let pendingProviderRead: Promise<IteratorResult<V2ConversationStreamEvent, void>> | undefined;
   let invalidOutput = false;
+  const expectedSimulated = execution.expectedSimulated ?? true;
+  const preflightRate = execution.preflightRate ?? null;
 
   const stop = new AbortController();
   const phase = new AbortController();
@@ -157,6 +167,38 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
       return;
     }
     const context = buildBoundedContext(prepared.context);
+    const currentTimeIso = new Date().toISOString();
+    const turnInput = {
+      conversationId,
+      turnId,
+      context: context.messages,
+      ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
+        ? { personalMemories: prepared.personalMemories }
+        : {}),
+      enablePersonalMemorySaveTool: true,
+      enableProactiveScheduleTool: true,
+      currentTimeIso,
+      maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+    };
+    if (preflightRate !== null) {
+      const preflight = preflightConversationTurn({
+        messages: context.messages,
+        ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
+          ? { personalMemories: prepared.personalMemories }
+          : {}),
+        enablePersonalMemorySaveTool: true,
+        enableProactiveScheduleTool: true,
+        maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+      });
+      const estimatedMicroUsd = estimateCostMicroUsd(
+        preflightRate,
+        preflight.inputTokens,
+        preflight.maxOutputTokens,
+      );
+      if (estimatedMicroUsd > prepared.reservedMicroUsd) {
+        throw new Error('Model preflight estimate exceeds reservation');
+      }
+    }
     sendState = 'unknown';
     const authorization = await untilAbort(
       rpc.markAttemptSent({
@@ -188,18 +230,7 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     resetIdleTimer();
     const provider = gateway.streamConversationTurn(
       {
-        input: {
-          conversationId,
-          turnId,
-          context: context.messages,
-          ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
-            ? { personalMemories: prepared.personalMemories }
-            : {}),
-          enablePersonalMemorySaveTool: true,
-          enableProactiveScheduleTool: true,
-          currentTimeIso: new Date(now).toISOString(),
-          maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
-        },
+        input: { ...turnInput, currentTimeIso: new Date(now).toISOString() },
         operationId,
         deadlineAtMs,
       },
@@ -310,28 +341,35 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     if (phase.signal.aborted || Date.now() >= Math.min(phaseEndsAt, leaseExpiresAt, deadlineAtMs)) {
       return;
     }
+    const provablyNotSent =
+      sendState === 'unsent' ||
+      isModelAuthorizationRefused(error) ||
+      (isModelGatewayFailure(error) && error.code === 'not_sent');
     const timedOut =
-      reason === 'provider_idle' ||
-      reason === 'handoff_window' ||
-      (isModelGatewayFailure(error) && error.code === 'model_timeout');
-    const outcomeCode = disconnected
-      ? 'client_cancelled'
-      : timedOut
-        ? 'model_timeout'
-        : isModelGatewayFailure(error)
-          ? error.code
-          : 'model_unavailable';
+      !provablyNotSent &&
+      (reason === 'provider_idle' ||
+        reason === 'handoff_window' ||
+        (isModelGatewayFailure(error) && error.code === 'model_timeout'));
+    const outcomeCode = provablyNotSent
+      ? 'not_sent'
+      : disconnected
+        ? 'client_cancelled'
+        : timedOut
+          ? 'model_timeout'
+          : isModelGatewayFailure(error)
+            ? error.code
+            : 'model_unavailable';
 
     await publish(
       {
         ...attempt,
-        settlement:
-          sendState === 'unsent'
-            ? { state: 'released', outcomeCode: 'not_sent' }
-            : { state: 'unknown_billed', outcomeCode },
-        result: disconnected
-          ? { status: 'aborted_for_retry_or_reconcile' }
-          : { status: 'failed', failureReason: timedOut ? 'timeout' : 'internal_error' },
+        settlement: provablyNotSent
+          ? { state: 'released', outcomeCode: 'not_sent' }
+          : { state: 'unknown_billed', outcomeCode },
+        result:
+          disconnected && !provablyNotSent
+            ? { status: 'aborted_for_retry_or_reconcile' }
+            : { status: 'failed', failureReason: timedOut ? 'timeout' : 'internal_error' },
       },
       true,
     );
@@ -375,7 +413,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     invalidOutput ||=
       reply.output.text.length > FAKE_STREAM_MAX_REPLY_CHARS ||
       reply.output.text.trim().length === 0 ||
-      !reply.simulated;
+      reply.simulated !== expectedSimulated;
+    const delegation =
+      reply.output.kind === 'delegate' ? toV2DelegationCommand(reply.output) : undefined;
     const { observedCostMicroUsd, inputTokens, outputTokens } = observedUsage ?? {};
     const settlement: CommitTurnRequest['settlement'] =
       observedCostMicroUsd === undefined
@@ -395,8 +435,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
         : {
             status: 'completed',
             text: reply.output.text,
-            modelLabel: FAKE_MODEL_LABEL,
-            simulated: true,
+            modelLabel: reply.modelLabel,
+            simulated: reply.simulated,
+            ...(delegation === undefined ? {} : { delegation }),
             ...(reply.output.kind === 'save_memory'
               ? { personalMemorySave: reply.output.memory.arguments }
               : {}),

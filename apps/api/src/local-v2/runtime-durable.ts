@@ -1,11 +1,12 @@
 import {
   buildBoundedContext,
+  estimateCostMicroUsd,
   FAKE_MODEL_LABEL,
   FAKE_V2_RATE_VERSION,
   isModelGatewayFailure,
   MODEL_LIMITS,
+  preflightConversationTurn,
   type ContextRow,
-  type FakeStreamingModelGateway,
 } from '@ember/model-gateway';
 import {
   PROACTIVE_SCHEDULER_MODEL_LABEL,
@@ -24,11 +25,17 @@ import {
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
 import {
+  toV2DelegationCommand,
+  type V2ModelRuntime,
+  type V2StreamingModelGateway,
+} from './model-runtime.js';
+import {
   buildProactiveBriefPrompt,
   loadRecentBriefMessages,
   type BriefContextMessage,
   type ProactiveBriefContext,
 } from './proactive-brief-context.js';
+import { resolveV2SandboxConfig } from './runtime-config.js';
 import { createEdgeRpc, getHead, type AgentHeadDO, type LocalRuntimeEnv } from './runtime-head.js';
 
 function decodeBase64ToBytes(encoded: string): Uint8Array {
@@ -49,9 +56,13 @@ function encodeBytesToBase64(bytes: Uint8Array): string {
 }
 
 export type V2FakeDurableGateway = Pick<
-  FakeStreamingModelGateway,
+  V2StreamingModelGateway,
   'streamConversationTurn' | 'queryConversationJob'
 >;
+
+export interface CreateDurableExecutorOptions {
+  readonly modelRuntime?: V2ModelRuntime;
+}
 
 const PROACTIVE_BRIEF_RESERVATION_MICRO_USD = 250;
 
@@ -135,7 +146,17 @@ function unwrapJsonText(raw: unknown): string | null {
 export function createDurableExecutor(
   env: LocalRuntimeEnv,
   gateway: V2FakeDurableGateway,
+  options: CreateDurableExecutorOptions = {},
 ): DurableExecutorPort {
+  const runtime = options.modelRuntime;
+  const sandboxConfig = runtime?.sandboxConfig ?? resolveV2SandboxConfig(env);
+  const modelLabel = runtime?.modelLabel ?? FAKE_MODEL_LABEL;
+  const simulated = runtime?.simulated ?? true;
+  const budgetMode = runtime?.budgetMode ?? 'simulated_full_protocol';
+  const providerId = runtime?.providerId ?? 'fake';
+  const rateVersion = runtime?.rateVersion ?? FAKE_V2_RATE_VERSION;
+  const rate = runtime?.rate ?? null;
+
   return {
     async executeDurableWork(claim) {
       let context: DurableExecutionClaimContext = parseClaimExecutionContext(claim);
@@ -161,7 +182,7 @@ export function createDurableExecutor(
           readonly inputJson?: string;
         };
         if (rawContext.kind === 'python.agent' && rawContext.runId !== undefined) {
-          if (env.EMBER_MODEL_MODE !== 'fake') {
+          if (sandboxConfig.kind !== 'fake') {
             return { status: 'failed', reasonCode: 'sandbox_provider_unavailable' };
           }
           const taskInput = JSON.parse(rawContext.inputJson ?? '{}') as {
@@ -231,33 +252,20 @@ export function createDurableExecutor(
         if (proactive === null) {
           return { status: 'failed', reasonCode: 'local_task_driver_unavailable' };
         }
-        const rawClaim = JSON.parse(claim.contextJson) as Record<string, unknown>;
-        const runId = typeof rawClaim['runId'] === 'string' ? rawClaim['runId'] : null;
-        if (runId === null) {
-          return { status: 'failed', reasonCode: 'missing_run_id' };
-        }
-        const reservation = await head.reserveTaskModelAttempt({
-          tenantId: claim.tenantId,
-          principalId: proactive.principalId,
-          agentId: claim.agentId,
-          taskId: claim.targetId,
-          runId,
-          leaseEpoch: claim.leaseEpoch,
-          budgetMode: 'simulated_full_protocol',
-          providerId: 'fake',
-          modelLabel: FAKE_MODEL_LABEL,
-          rateVersion: FAKE_V2_RATE_VERSION,
-          estimatedMicroUsd: PROACTIVE_BRIEF_RESERVATION_MICRO_USD,
-        });
-        if (reservation.kind === 'refused') {
+        if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
           return {
             status: 'failed',
             summaryText: proactive.title,
             detailText: null,
-            modelLabel: FAKE_MODEL_LABEL,
-            simulated: true,
-            reasonCode: reservation.reason,
+            modelLabel,
+            simulated,
+            reasonCode: 'model_unauthorized_tenant',
           };
+        }
+        const rawClaim = JSON.parse(claim.contextJson) as Record<string, unknown>;
+        const runId = typeof rawClaim['runId'] === 'string' ? rawClaim['runId'] : null;
+        if (runId === null) {
+          return { status: 'failed', reasonCode: 'missing_run_id' };
         }
         const briefContext = await loadProactiveBriefContext(
           head,
@@ -266,6 +274,45 @@ export function createDurableExecutor(
           context.conversationId,
           proactive,
         );
+        const briefPrompt = buildProactiveBriefPrompt(proactive, briefContext);
+        let estimatedMicroUsd = PROACTIVE_BRIEF_RESERVATION_MICRO_USD;
+        if (runtime !== undefined) {
+          try {
+            estimatedMicroUsd = runtime.estimateBriefReservation(briefPrompt);
+          } catch {
+            return {
+              status: 'failed',
+              summaryText: proactive.title,
+              detailText: null,
+              modelLabel,
+              simulated,
+              reasonCode: 'budget_exceeded',
+            };
+          }
+        }
+        const reservation = await head.reserveTaskModelAttempt({
+          tenantId: claim.tenantId,
+          principalId: proactive.principalId,
+          agentId: claim.agentId,
+          taskId: claim.targetId,
+          runId,
+          leaseEpoch: claim.leaseEpoch,
+          budgetMode,
+          providerId,
+          modelLabel,
+          rateVersion,
+          estimatedMicroUsd,
+        });
+        if (reservation.kind === 'refused') {
+          return {
+            status: 'failed',
+            summaryText: proactive.title,
+            detailText: null,
+            modelLabel,
+            simulated,
+            reasonCode: reservation.reason,
+          };
+        }
         context = {
           ...context,
           operationId: reservation.operationId,
@@ -274,7 +321,7 @@ export function createDurableExecutor(
           sendState: 'unsent',
           sendAuthorizingAtMs: null,
           sendStartedAtMs: null,
-          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive, briefContext) }),
+          inputJson: JSON.stringify({ prompt: briefPrompt }),
         };
       } else if (proactive !== null) {
         const briefContext = await loadProactiveBriefContext(
@@ -292,6 +339,56 @@ export function createDurableExecutor(
 
       if (context.attemptId === undefined) throw new Error('Missing authoritative model attempt');
 
+      if (
+        claim.targetKind === 'turn' &&
+        context.sendState === 'unsent' &&
+        context.providerJobHandle === null
+      ) {
+        if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
+          return {
+            attemptNo: context.attemptNo,
+            operationId: context.operationId,
+            settlement: { state: 'released', outcomeCode: 'not_sent' },
+            status: 'failed',
+            failureReason: 'internal_error',
+          };
+        }
+        if (rate !== null) {
+          try {
+            const input: unknown = JSON.parse(context.inputJson ?? 'null');
+            const messages = buildBoundedContext(input as readonly ContextRow[]).messages;
+            const preflight = preflightConversationTurn({
+              messages,
+              ...(context.personalMemories !== undefined && context.personalMemories.length > 0
+                ? { personalMemories: context.personalMemories }
+                : {}),
+              enablePersonalMemorySaveTool: true,
+              enableProactiveScheduleTool: true,
+              maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+            });
+            const rawClaim = JSON.parse(claim.contextJson) as {
+              readonly reservedMicroUsd?: unknown;
+            };
+            const reservedMicroUsd =
+              typeof rawClaim.reservedMicroUsd === 'number' ? rawClaim.reservedMicroUsd : 0;
+            if (
+              estimateCostMicroUsd(rate, preflight.inputTokens, preflight.maxOutputTokens) >
+              reservedMicroUsd
+            ) {
+              throw new Error('Model preflight estimate exceeds reservation');
+            }
+          } catch {
+            return {
+              attemptNo: context.attemptNo,
+              operationId: context.operationId,
+              settlement: { state: 'released', outcomeCode: 'not_sent' },
+              status: 'failed',
+              failureReason: 'internal_error',
+            };
+          }
+        }
+      }
+
       const deadlineAtMs = context.deadlineAtMs ?? claim.leaseExpiresAtMs;
       const stopAtMs = Math.min(claim.leaseExpiresAtMs, deadlineAtMs);
       const signal = AbortSignal.timeout(Math.max(0, stopAtMs - Date.now()));
@@ -307,31 +404,51 @@ export function createDurableExecutor(
         };
       }
 
+      function toProviderSuccessOutcome(
+        handle: string | null,
+        callResult: {
+          readonly output: Parameters<typeof toV2DelegationCommand>[0];
+          readonly simulated: boolean;
+          readonly usage: FakeOrProviderJobOutcome['usage'];
+        },
+      ): FakeOrProviderJobOutcome {
+        const { output } = callResult;
+        if (
+          callResult.simulated !== simulated ||
+          (claim.targetKind !== 'turn' && output.kind !== 'reply')
+        ) {
+          return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
+        }
+        const delegation =
+          claim.targetKind === 'turn' && output.kind === 'delegate'
+            ? toV2DelegationCommand(output)
+            : undefined;
+        return {
+          status: 'succeeded',
+          operationId,
+          providerJobHandle: handle,
+          outputJson: JSON.stringify({
+            text: output.text,
+            ...(delegation !== undefined ? { delegation } : {}),
+            ...(claim.targetKind === 'turn' && output.kind === 'save_memory'
+              ? { personalMemorySave: output.memory.arguments }
+              : {}),
+            ...(claim.targetKind === 'turn' && output.kind === 'create_schedule'
+              ? { proactiveScheduleCreate: output.schedule.arguments }
+              : {}),
+          }),
+          errorCode: null,
+          usage: callResult.usage,
+        };
+      }
+
       async function poll(handle: string): Promise<FakeOrProviderJobOutcome> {
         try {
           while (!signal.aborted && Date.now() < stopAtMs) {
             const job = await gateway.queryConversationJob(operationId, handle, signal);
             if (job.state === 'unavailable') return unknownOutcome(handle, 'JOB_UNAVAILABLE');
             if (job.state === 'completed') {
-              if (claim.targetKind !== 'turn' && job.result.output.kind !== 'reply') {
-                return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
-              }
-              return {
-                status: 'succeeded',
-                operationId,
-                providerJobHandle: handle,
-                outputJson: JSON.stringify({
-                  text: job.result.output.text,
-                  ...(claim.targetKind === 'turn' && job.result.output.kind === 'save_memory'
-                    ? { personalMemorySave: job.result.output.memory.arguments }
-                    : {}),
-                  ...(claim.targetKind === 'turn' && job.result.output.kind === 'create_schedule'
-                    ? { proactiveScheduleCreate: job.result.output.schedule.arguments }
-                    : {}),
-                }),
-                errorCode: null,
-                usage: job.result.usage,
-              };
+              return toProviderSuccessOutcome(handle, job.result);
             }
             await new Promise((resolve) =>
               setTimeout(resolve, Math.min(250, Math.max(0, stopAtMs - Date.now()))),
@@ -392,26 +509,7 @@ export function createDurableExecutor(
               )) {
                 if (event.kind === 'job') handle = event.handle;
                 if (event.kind === 'result') {
-                  if (claim.targetKind !== 'turn' && event.result.output.kind !== 'reply') {
-                    return unknownOutcome(handle, 'MODEL_INVALID_OUTPUT');
-                  }
-                  return {
-                    status: 'succeeded',
-                    operationId,
-                    providerJobHandle: handle,
-                    outputJson: JSON.stringify({
-                      text: event.result.output.text,
-                      ...(claim.targetKind === 'turn' && event.result.output.kind === 'save_memory'
-                        ? { personalMemorySave: event.result.output.memory.arguments }
-                        : {}),
-                      ...(claim.targetKind === 'turn' &&
-                      event.result.output.kind === 'create_schedule'
-                        ? { proactiveScheduleCreate: event.result.output.schedule.arguments }
-                        : {}),
-                    }),
-                    errorCode: null,
-                    usage: event.result.usage,
-                  };
+                  return toProviderSuccessOutcome(handle, event.result);
                 }
               }
             } catch (error) {
@@ -433,9 +531,23 @@ export function createDurableExecutor(
         targetKind: claim.targetKind,
         context,
         outcome,
-        modelLabel: FAKE_MODEL_LABEL,
-        simulated: true,
+        modelLabel,
+        simulated,
       });
+      if (
+        claim.targetKind === 'turn' &&
+        commitOutcome['status'] === 'completed' &&
+        outcome.outputJson !== null
+      ) {
+        try {
+          const parsed = JSON.parse(outcome.outputJson) as Record<string, unknown>;
+          if (parsed['delegation'] !== undefined) {
+            commitOutcome['delegation'] = parsed['delegation'];
+          }
+        } catch {
+          // Ignore non-JSON outputs.
+        }
+      }
       if (proactive !== null && commitOutcome['status'] === 'completed') {
         const readable = unwrapJsonText(commitOutcome['detailText']);
         return {

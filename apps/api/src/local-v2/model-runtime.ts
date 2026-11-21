@@ -31,12 +31,12 @@ import {
   type ModelReservationInput,
 } from '@ember/runtime-v2';
 import {
+  resolveV2AlphaTenantAllowlist,
   resolveV2SandboxConfig,
   type V2SandboxConfig,
   type V2SandboxEnv,
 } from './runtime-config.js';
 
-const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SAFE_INT_REGEX = /^\d+$/;
 
 export type V2ConversationStreamEvent =
@@ -296,28 +296,6 @@ export function resolveV2GlobalCeilingOverride(
   return platformCeiling;
 }
 
-function resolveTenantAllowlist(
-  env: Pick<V2ModelRuntimeEnv, 'EMBER_MODEL_ALPHA_SCOPE' | 'EMBER_MODEL_ALPHA_TENANT_IDS'>,
-): { readonly scope: 'allowlist'; readonly tenantIds: ReadonlySet<string> } {
-  const rawScope = env.EMBER_MODEL_ALPHA_SCOPE?.trim().toLowerCase();
-  if (rawScope !== undefined && rawScope.length > 0 && rawScope !== 'allowlist') {
-    throw new Error(
-      `EMBER_MODEL_ALPHA_SCOPE=${JSON.stringify(env.EMBER_MODEL_ALPHA_SCOPE)} is refused for V2 real canary; only "allowlist" is permitted`,
-    );
-  }
-  const rawIds = env.EMBER_MODEL_ALPHA_TENANT_IDS?.trim() ?? '';
-  if (rawIds.length === 0) {
-    throw new Error(
-      'EMBER_MODEL_ALPHA_TENANT_IDS is required when EMBER_MODEL_ALPHA_SCOPE=allowlist',
-    );
-  }
-  const ids = rawIds.split(',').map((entry) => entry.trim().toLowerCase());
-  if (ids.length === 0 || ids.length > 100 || ids.some((id) => !UUID_REGEX.test(id))) {
-    throw new Error('Invalid UUID in EMBER_MODEL_ALPHA_TENANT_IDS');
-  }
-  return { scope: 'allowlist', tenantIds: new Set(ids) };
-}
-
 /**
  * Wrap a single-shot `ModelGateway` (`OpenAiModelGateway` / `OpenRouterModelGateway`) into the
  * V2 streaming/durable gateway interface without inventing a fake provider job handle.
@@ -435,7 +413,7 @@ export function resolveV2ModelRuntime(
     throw new Error('V2 real model execution refused in production NODE_ENV');
   }
 
-  const tenantAllowlist = resolveTenantAllowlist(env);
+  const tenantAllowlist = resolveV2AlphaTenantAllowlist(env, { maxTenants: 1 });
   const localCeilings = resolveV2LocalCeilings(env);
   const globalCeiling = resolveV2GlobalCeilingOverride(env);
   const attemptTimeoutMs = parseBoundedInt(

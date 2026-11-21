@@ -268,6 +268,11 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       ),
     ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
     expect(() =>
+      resolveV2ModelRuntime(
+        baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: `${TENANT_A},${TENANT_B}` }),
+      ),
+    ).toThrow(/at most 1 tenant/);
+    expect(() =>
       resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' })),
     ).toThrow(/allowlist/);
     expect(() => resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'all' }))).toThrow(

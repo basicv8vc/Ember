@@ -1,9 +1,26 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
-import { DomainError } from '@ember/domain';
-import type { D1DatabaseLike, D1PreparedStatementLike, D1ResultLike } from '@ember/runtime-v2';
+import { DomainError, isDomainError } from '@ember/domain';
+import {
+  deterministicEdgeUuid,
+  type D1DatabaseLike,
+  type D1PreparedStatementLike,
+  type D1ResultLike,
+} from '@ember/runtime-v2';
+import { Hono } from 'hono';
 import { createLocalJWKSet, exportJWK, generateKeyPair, SignJWT } from 'jose';
 import { describe, expect, it, vi } from 'vitest';
+import { createB1SessionRoutes } from '../../apps/api/src/auth/session-routes.js';
+import {
+  generateRequestId,
+  requestIdMiddleware,
+  type AppBindings,
+} from '../../apps/api/src/http/app-context.js';
+import { respondWithDomainError } from '../../apps/api/src/http/error-mapping.js';
+import {
+  resolveV2AlphaTenantAllowlist,
+  resolveV2StagingSessionAllowedTenants,
+} from '../../apps/api/src/local-v2/runtime-config.js';
 import { createStagingV2SessionRuntime } from '../../apps/api/src/local-v2/staging-session-store.js';
 
 const APPLE_BUNDLE_ID = 'com.basicv8vc.ember';
@@ -80,8 +97,9 @@ async function createAppleTestSigner() {
 function createFixture(
   keyResolver: ReturnType<typeof createLocalJWKSet>,
   allowedSubjectsRaw?: string,
+  allowedTenantIds?: ReadonlySet<string> | null,
 ) {
-  const { d1 } = createNodeSqliteD1();
+  const { db, d1 } = createNodeSqliteD1();
   const conversations = new Map<string, string>();
   const bootstrapHead = vi.fn(
     (scope: { readonly tenantId: string; readonly agentId: string }, conversationId: string) => {
@@ -102,16 +120,38 @@ function createFixture(
     },
   );
 
-  const runtime = createStagingV2SessionRuntime({
-    db: d1,
-    appleBindings: { EMBER_APPLE_BUNDLE_ID: APPLE_BUNDLE_ID },
-    appleKeyResolver: keyResolver,
+  const buildRuntime = (opts?: {
+    readonly allowedSubjectsRaw?: string;
+    readonly allowedTenantIds?: ReadonlySet<string> | null;
+  }) =>
+    createStagingV2SessionRuntime({
+      db: d1,
+      appleBindings: { EMBER_APPLE_BUNDLE_ID: APPLE_BUNDLE_ID },
+      appleKeyResolver: keyResolver,
+      ...(opts?.allowedSubjectsRaw === undefined
+        ? {}
+        : { allowedSubjectsRaw: opts.allowedSubjectsRaw }),
+      ...(opts?.allowedTenantIds === undefined ? {} : { allowedTenantIds: opts.allowedTenantIds }),
+      bootstrapHead,
+      projectConversation,
+    });
+
+  const buildApp = (runtime: ReturnType<typeof createStagingV2SessionRuntime>) => {
+    const app = new Hono<AppBindings>();
+    app.use('*', requestIdMiddleware(generateRequestId));
+    app.onError((error, c) =>
+      isDomainError(error) ? respondWithDomainError(c, error) : c.json({ error }, 500),
+    );
+    app.route('/v1', createB1SessionRoutes({ runtime }));
+    return app;
+  };
+
+  const runtime = buildRuntime({
     ...(allowedSubjectsRaw === undefined ? {} : { allowedSubjectsRaw }),
-    bootstrapHead,
-    projectConversation,
+    ...(allowedTenantIds === undefined ? {} : { allowedTenantIds }),
   });
 
-  return { runtime, bootstrapHead, projectConversation };
+  return { db, d1, runtime, buildRuntime, buildApp, bootstrapHead, projectConversation };
 }
 
 describe('V2 staging D1 session runtime (Apple Sign In, rotation, replay, tenant isolation)', () => {
@@ -242,5 +282,222 @@ describe('V2 staging D1 session runtime (Apple Sign In, rotation, replay, tenant
     expect((await runtime.service.resolveActiveSession(sessionB.access_token))?.auth.tenantId).toBe(
       tenantB,
     );
+  });
+
+  it('enforces derived-tenant login guard in G3 real allowlist mode without requiring EMBER_V2_STAGING_ALLOWED_SUBJECTS', async () => {
+    const { keyResolver, signIdentityToken } = await createAppleTestSigner();
+    const founderSub = 'founder-apple-sub-001';
+    const otherSub = 'other-apple-sub-002';
+    const founderTenantId = await deterministicEdgeUuid(`v2-staging:tenant:${founderSub}`);
+    const allowlist = resolveV2AlphaTenantAllowlist(
+      {
+        EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+        EMBER_MODEL_ALPHA_TENANT_IDS: founderTenantId,
+      },
+      { maxTenants: 1 },
+    );
+
+    const { db, buildRuntime, buildApp, bootstrapHead } = createFixture(
+      keyResolver,
+      undefined,
+      allowlist.tenantIds,
+    );
+    const app = buildApp(buildRuntime({ allowedTenantIds: allowlist.tenantIds }));
+
+    const postAppleLogin = async (subject: string, nonce: string) =>
+      app.request('/v1/auth/session', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'apple',
+          identity_token: await signIdentityToken(subject, nonce),
+          nonce,
+        }),
+      });
+
+    // Allowed Apple JWT succeeds (201) -> creates one session and bootstraps one head for derived tenant.
+    const allowedResp = await postAppleLogin(founderSub, 'nonce-allow-0001-0000000000000000');
+    expect(allowedResp.status).toBe(201);
+    const allowedDto = (await allowedResp.json()) as { access_token: string; consumer_id: string };
+    expect(bootstrapHead).toHaveBeenCalledTimes(1);
+    expect(bootstrapHead.mock.calls[0]?.[0].tenantId).toBe(founderTenantId);
+
+    const meResp = await app.request('/v1/me', {
+      headers: { authorization: `Bearer ${allowedDto.access_token}` },
+    });
+    expect(meResp.status).toBe(200);
+
+    // Other valid Apple JWT is rejected (403 POLICY_DENIED) with no session or AgentHead created.
+    const deniedResp = await postAppleLogin(otherSub, 'nonce-deny-0002-0000000000000000');
+    expect(deniedResp.status).toBe(403);
+    const deniedBody = (await deniedResp.json()) as { error: { code: string } };
+    expect(deniedBody.error.code).toBe('POLICY_DENIED');
+    expect(bootstrapHead).toHaveBeenCalledTimes(1);
+
+    const sessionRows = db.prepare('SELECT tenantId FROM v2_staging_sessions').all() as Array<{
+      tenantId: string;
+    }>;
+    expect(sessionRows).toEqual([{ tenantId: founderTenantId }]);
+  });
+
+  it('blocks pre-existing Fake-mode non-allowlisted sessions on Real read and refresh without mutating idle TTL or creating successor sessions', async () => {
+    const { keyResolver, signIdentityToken } = await createAppleTestSigner();
+    const founderSub = 'founder-fake-to-real';
+    const otherSub = 'other-fake-to-real';
+    const founderTenantId = await deterministicEdgeUuid(`v2-staging:tenant:${founderSub}`);
+    const otherTenantId = await deterministicEdgeUuid(`v2-staging:tenant:${otherSub}`);
+
+    const { db, buildRuntime, buildApp } = createFixture(keyResolver);
+
+    // 1. In Fake mode (no tenant allowlist), both users log in and obtain bearer sessions.
+    const fakeApp = buildApp(buildRuntime());
+    const login = async (app: Hono<AppBindings>, subject: string, nonce: string) => {
+      const res = await app.request('/v1/auth/session', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'apple',
+          identity_token: await signIdentityToken(subject, nonce),
+          nonce,
+        }),
+      });
+      expect(res.status).toBe(201);
+      return (await res.json()) as { access_token: string; session_id: string };
+    };
+    const founderFake = await login(fakeApp, founderSub, 'nonce-f1-00000000000000000000');
+    const otherFake = await login(fakeApp, otherSub, 'nonce-f2-00000000000000000000');
+
+    // Backdate otherFake's idleExpiresAt by 2 hours (still active) so a leaky findActiveSession would slide it.
+    const staleIdle = new Date(Date.now() + 12 * 24 * 60 * 60 * 1000).toISOString();
+    db.prepare('UPDATE v2_staging_sessions SET idleExpiresAt = ? WHERE sessionId = ?').run(
+      staleIdle,
+      otherFake.session_id,
+    );
+
+    // 2. Switch to Real allowlist mode sharing the same D1 database.
+    const realApp = buildApp(buildRuntime({ allowedTenantIds: new Set([founderTenantId]) }));
+
+    // Pre-existing unauthorized bearer session is rejected (401) on GET /v1/me with zero idle update.
+    const otherMe = await realApp.request('/v1/me', {
+      headers: { authorization: `Bearer ${otherFake.access_token}` },
+    });
+    expect(otherMe.status).toBe(401);
+    const afterMeRow = db
+      .prepare(
+        'SELECT idleExpiresAt, revokedAt, rotatedTo FROM v2_staging_sessions WHERE sessionId = ?',
+      )
+      .get(otherFake.session_id) as {
+      idleExpiresAt: string;
+      revokedAt: string | null;
+      rotatedTo: string | null;
+    };
+    expect(afterMeRow.idleExpiresAt).toBe(staleIdle);
+    expect(afterMeRow.revokedAt).toBeNull();
+    expect(afterMeRow.rotatedTo).toBeNull();
+
+    // Pre-existing unauthorized bearer session is rejected (401) on refresh with zero rotation/successor.
+    const otherRefresh = await realApp.request('/v1/auth/session/refresh', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${otherFake.access_token}` },
+    });
+    expect(otherRefresh.status).toBe(401);
+    const otherRowsAfterRefresh = db
+      .prepare('SELECT sessionId, rotatedTo FROM v2_staging_sessions WHERE tenantId = ?')
+      .all(otherTenantId) as Array<{ sessionId: string; rotatedTo: string | null }>;
+    expect(otherRowsAfterRefresh).toEqual([{ sessionId: otherFake.session_id, rotatedTo: null }]);
+
+    // Pre-existing Founder bearer session continues working on read and refresh in Real mode.
+    const founderMe = await realApp.request('/v1/me', {
+      headers: { authorization: `Bearer ${founderFake.access_token}` },
+    });
+    expect(founderMe.status).toBe(200);
+    const founderRefresh = await realApp.request('/v1/auth/session/refresh', {
+      method: 'POST',
+      headers: { authorization: `Bearer ${founderFake.access_token}` },
+    });
+    expect(founderRefresh.status).toBe(200);
+  });
+
+  it('requires intersection when both EMBER_V2_STAGING_ALLOWED_SUBJECTS and derived-tenant allowlist are configured', async () => {
+    const { keyResolver } = await createAppleTestSigner();
+    const founderSub = 'founder-intersection';
+    const subjectOnlySub = 'subject-only-sub';
+    const founderTenantId = await deterministicEdgeUuid(`v2-staging:tenant:${founderSub}`);
+
+    const { runtime, bootstrapHead } = createFixture(
+      keyResolver,
+      `${founderSub}, ${subjectOnlySub}`,
+      new Set([founderTenantId]),
+    );
+
+    // Subject allowed, derived tenant NOT allowed -> POLICY_DENIED.
+    await expect(
+      runtime.service.createSession({ provider: 'apple', providerSubject: subjectOnlySub }),
+    ).rejects.toThrow(DomainError);
+
+    // Derived tenant allowed, subject NOT allowed -> POLICY_DENIED.
+    const { runtime: tenantOnlyMatch } = createFixture(
+      keyResolver,
+      subjectOnlySub,
+      new Set([founderTenantId]),
+    );
+    await expect(
+      tenantOnlyMatch.service.createSession({ provider: 'apple', providerSubject: founderSub }),
+    ).rejects.toThrow(DomainError);
+
+    // Intersection passes when both match.
+    const allowed = await runtime.service.createSession({
+      provider: 'apple',
+      providerSubject: founderSub,
+    });
+    expect(allowed.access_token.length).toBeGreaterThan(20);
+    expect(bootstrapHead).toHaveBeenCalledTimes(1);
+  });
+
+  it('fails closed in resolveV2StagingSessionAllowedTenants on invalid/missing/multi-tenant allowlists in real mode while preserving fake mode', () => {
+    // Fake mode preserves multi-tenant staging even without EMBER_MODEL_ALPHA_TENANT_IDS.
+    expect(resolveV2StagingSessionAllowedTenants({ EMBER_MODEL_MODE: 'fake' })).toBeUndefined();
+
+    const validTenant = '11111111-1111-4111-8111-111111111111';
+    const secondTenant = '22222222-2222-4222-8222-222222222222';
+
+    expect(
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+        EMBER_MODEL_ALPHA_TENANT_IDS: validTenant,
+      }),
+    ).toEqual(new Set([validTenant]));
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+      }),
+    ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+        EMBER_MODEL_ALPHA_TENANT_IDS: 'not-a-uuid',
+      }),
+    ).toThrow(/Invalid UUID/);
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+        EMBER_MODEL_ALPHA_TENANT_IDS: `${validTenant},${secondTenant}`,
+      }),
+    ).toThrow(/at most 1 tenant/);
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants',
+        EMBER_MODEL_ALPHA_TENANT_IDS: validTenant,
+      }),
+    ).toThrow(/allowlist/);
   });
 });

@@ -51,6 +51,7 @@ export interface StagingV2SessionStoreDeps {
   readonly appleBindings: CloudflareAppleVerifierBindings;
   readonly appleKeyResolver: JWTVerifyGetKey;
   readonly allowedSubjectsRaw?: string;
+  readonly allowedTenantIds?: ReadonlySet<string> | null;
   bootstrapHead(
     scope: { readonly tenantId: string; readonly agentId: string },
     conversationId: string,
@@ -69,11 +70,23 @@ export interface StagingV2SessionStoreDeps {
  * - Real Apple Sign In verification (RS256 JWKS + D1 SHA-256 nonce replay fence)
  * - Strictly denies the dev identity provider
  * - Optional EMBER_V2_STAGING_ALLOWED_SUBJECTS comma-separated allowlist
+ * - Optional derived-tenant allowlist (enforced in G3 real mode via EMBER_MODEL_ALPHA_TENANT_IDS)
  * - Isolated D1 tables (v2_staging_sessions, v2_staging_apple_nonce_replays)
  */
 export function createStagingV2SessionRuntime(deps: StagingV2SessionStoreDeps): B1SessionRuntime {
   const { db } = deps;
   const allowedSubjects = parseAllowedSubjects(deps.allowedSubjectsRaw);
+  const allowedTenantIds =
+    deps.allowedTenantIds === undefined || deps.allowedTenantIds === null
+      ? null
+      : new Set(Array.from(deps.allowedTenantIds, (id) => id.trim().toLowerCase()));
+  if (allowedTenantIds !== null && allowedTenantIds.size === 0) {
+    throw new Error('allowedTenantIds must not be empty when tenant allowlist guard is enabled');
+  }
+
+  function isTenantAllowed(tenantId: string): boolean {
+    return allowedTenantIds === null || allowedTenantIds.has(tenantId.trim().toLowerCase());
+  }
 
   let initialized: Promise<unknown> | undefined;
   function ensureTables() {
@@ -152,10 +165,15 @@ export function createStagingV2SessionRuntime(deps: StagingV2SessionStoreDeps): 
         if (allowedSubjects !== null && !allowedSubjects.has(command.providerSubject)) {
           throw new DomainError('POLICY_DENIED');
         }
+        const tenantId = await deterministicEdgeUuid(
+          `v2-staging:tenant:${command.providerSubject}`,
+        );
+        if (!isTenantAllowed(tenantId)) {
+          throw new DomainError('POLICY_DENIED');
+        }
         await ensureTables();
-        const [consumerId, tenantId, principalId, agentId, conversationId] = await Promise.all([
+        const [consumerId, principalId, agentId, conversationId] = await Promise.all([
           deterministicEdgeUuid(`v2-staging:consumer:${command.providerSubject}`),
-          deterministicEdgeUuid(`v2-staging:tenant:${command.providerSubject}`),
           deterministicEdgeUuid(`v2-staging:principal:${command.providerSubject}`),
           deterministicEdgeUuid(`v2-staging:agent:${command.providerSubject}`),
           deterministicEdgeUuid(`v2-staging:conversation:${command.providerSubject}`),
@@ -207,6 +225,9 @@ export function createStagingV2SessionRuntime(deps: StagingV2SessionStoreDeps): 
           await revokeIfReused(digest, now);
           return null;
         }
+        if (!isTenantAllowed(session.tenantId)) {
+          return null;
+        }
         const idleExpiresAt = new Date(Date.now() + SESSION_IDLE_TTL_MS).toISOString();
         const nextIdle = idleExpiresAt < session.expiresAt ? idleExpiresAt : session.expiresAt;
         if (Date.parse(nextIdle) > Date.parse(session.idleExpiresAt) + 3_600_000) {
@@ -230,6 +251,15 @@ export function createStagingV2SessionRuntime(deps: StagingV2SessionStoreDeps): 
       async rotateSession(command) {
         await ensureTables();
         const current = sessionDigest(command.currentTokenDigest);
+        if (allowedTenantIds !== null) {
+          const existing = await db
+            .prepare('SELECT tenantId FROM v2_staging_sessions WHERE digest = ?')
+            .bind(current)
+            .first<Pick<SessionRow, 'tenantId'>>();
+          if (existing === null || !isTenantAllowed(existing.tenantId)) {
+            return { kind: 'inactive' };
+          }
+        }
         const next = sessionDigest(command.newTokenDigest);
         const now = new Date().toISOString();
         const [, created] = await db.batch<SessionRow>([
@@ -273,6 +303,7 @@ export function createStagingV2SessionRuntime(deps: StagingV2SessionStoreDeps): 
     },
     me: {
       async getMeForTenant(tenantId) {
+        if (!isTenantAllowed(tenantId)) return null;
         await ensureTables();
         const identity = await db
           .prepare('SELECT consumerId, agentId FROM v2_staging_sessions WHERE tenantId = ? LIMIT 1')

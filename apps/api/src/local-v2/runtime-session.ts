@@ -15,6 +15,7 @@ import {
   SESSION_IDLE_TTL_MS,
   type B1SessionPorts,
 } from '../auth/session-service.js';
+import { resolveV2StagingSessionAllowedTenants } from './runtime-config.js';
 import { getHead, type LocalRuntimeEnv } from './runtime-head.js';
 import { createStagingV2SessionRuntime } from './staging-session-store.js';
 
@@ -234,6 +235,7 @@ export function createStagingV2Sessions(env: LocalRuntimeEnv): B1SessionRuntime 
   if (bundleId.length === 0) {
     throw new Error('EMBER_APPLE_BUNDLE_ID is required in v2-staging');
   }
+  const allowedTenantIds = resolveV2StagingSessionAllowedTenants(env);
   return createStagingV2SessionRuntime({
     db: env.D1_RECOVERY,
     appleBindings: {
@@ -258,6 +260,7 @@ export function createStagingV2Sessions(env: LocalRuntimeEnv): B1SessionRuntime 
     ...(env.EMBER_V2_STAGING_ALLOWED_SUBJECTS === undefined
       ? {}
       : { allowedSubjectsRaw: env.EMBER_V2_STAGING_ALLOWED_SUBJECTS }),
+    ...(allowedTenantIds === undefined ? {} : { allowedTenantIds }),
     bootstrapHead: (scope, conversationId) =>
       getHead(env, scope.tenantId, scope.agentId).bootstrap(scope, conversationId),
     projectConversation: (scope) =>

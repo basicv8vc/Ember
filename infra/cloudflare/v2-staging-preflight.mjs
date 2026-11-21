@@ -25,6 +25,7 @@ export const G3_REAL_CANARY_VARS = Object.freeze({
   EMBER_MODEL_PROVIDER: G3_APPROVED_PROVIDER,
   EMBER_MODEL_ID: G3_APPROVED_MODEL_ID,
   EMBER_MODEL_ALPHA_SCOPE: 'allowlist',
+  EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'false',
   EMBER_MODEL_ATTEMPT_TIMEOUT_MS: '20000',
   EMBER_MODEL_TURN_LEASE_MS: '30000',
   EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.perAttemptMicroUsd),
@@ -210,6 +211,14 @@ export function validateV2StagingConfig({
         `V2 real-LLM canary requires vars.EMBER_MODEL_ALPHA_SCOPE === "allowlist" (got ${JSON.stringify(vars.EMBER_MODEL_ALPHA_SCOPE)})`,
       );
     }
+    if (
+      vars.EMBER_MODEL_ALLOW_RECURRING_BRIEFS !== undefined &&
+      vars.EMBER_MODEL_ALLOW_RECURRING_BRIEFS !== 'false'
+    ) {
+      errors.push(
+        `V2 real-LLM canary must disable recurring real-model briefs (expected vars.EMBER_MODEL_ALLOW_RECURRING_BRIEFS === "false" or unset, got ${JSON.stringify(vars.EMBER_MODEL_ALLOW_RECURRING_BRIEFS)})`,
+      );
+    }
 
     const perAttempt = parseBoundedPositiveInt(
       vars.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD,
@@ -276,6 +285,11 @@ export function validateV2StagingConfig({
     if (vars.GLOBAL_DAILY_CEILING_MICRO_USD !== undefined) {
       errors.push(
         `V2 fake staging must preserve default global ledger ceiling (unset GLOBAL_DAILY_CEILING_MICRO_USD, got ${JSON.stringify(vars.GLOBAL_DAILY_CEILING_MICRO_USD)})`,
+      );
+    }
+    if (vars.EMBER_MODEL_ALLOW_RECURRING_BRIEFS === 'true') {
+      errors.push(
+        'V2 fake staging must not enable EMBER_MODEL_ALLOW_RECURRING_BRIEFS="true" in checked-in config',
       );
     }
   }

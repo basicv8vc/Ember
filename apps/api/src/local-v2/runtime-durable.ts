@@ -230,6 +230,20 @@ export function createDurableExecutor(
             reasonCode: 'model_unauthorized_tenant',
           };
         }
+        if (
+          runtime?.mode === 'real' &&
+          !runtime.allowRecurringBriefs &&
+          proactive.scheduleKind !== 'once'
+        ) {
+          return {
+            status: 'failed',
+            summaryText: proactive.title,
+            detailText: null,
+            modelLabel,
+            simulated,
+            reasonCode: 'recurring_real_model_unauthorized',
+          };
+        }
         const rawClaim = JSON.parse(claim.contextJson) as Record<string, unknown>;
         const runId = typeof rawClaim['runId'] === 'string' ? rawClaim['runId'] : null;
         if (runId === null) {
@@ -314,6 +328,13 @@ export function createDurableExecutor(
           });
           if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
             return releaseBriefBeforeSend('model_unauthorized_tenant');
+          }
+          if (
+            runtime?.mode === 'real' &&
+            !runtime.allowRecurringBriefs &&
+            proactive.scheduleKind !== 'once'
+          ) {
+            return releaseBriefBeforeSend('recurring_real_model_unauthorized');
           }
           if (rate !== null) {
             try {

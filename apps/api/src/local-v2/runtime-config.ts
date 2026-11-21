@@ -43,10 +43,8 @@ export function resolveV2AlphaTenantAllowlist(
   options: { readonly maxTenants?: number } = {},
 ): { readonly scope: 'allowlist'; readonly tenantIds: ReadonlySet<string> } {
   const rawScope = env.EMBER_MODEL_ALPHA_SCOPE?.trim().toLowerCase();
-  if (rawScope !== undefined && rawScope.length > 0 && rawScope !== 'allowlist') {
-    throw new Error(
-      `EMBER_MODEL_ALPHA_SCOPE=${JSON.stringify(env.EMBER_MODEL_ALPHA_SCOPE)} is refused for V2 real canary; only "allowlist" is permitted`,
-    );
+  if (rawScope !== 'allowlist') {
+    throw new Error('EMBER_MODEL_ALPHA_SCOPE=allowlist is required for V2 real canary');
   }
   const rawIds = env.EMBER_MODEL_ALPHA_TENANT_IDS?.trim() ?? '';
   if (rawIds.length === 0) {

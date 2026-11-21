@@ -498,6 +498,21 @@ describe('V2 staging D1 session runtime (Apple Sign In, rotation, replay, tenant
         EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants',
         EMBER_MODEL_ALPHA_TENANT_IDS: validTenant,
       }),
-    ).toThrow(/allowlist/);
+    ).toThrow(/EMBER_MODEL_ALPHA_SCOPE=allowlist is required/);
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_TENANT_IDS: validTenant,
+      }),
+    ).toThrow(/EMBER_MODEL_ALPHA_SCOPE=allowlist is required/);
+
+    expect(() =>
+      resolveV2StagingSessionAllowedTenants({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALPHA_SCOPE: '   ',
+        EMBER_MODEL_ALPHA_TENANT_IDS: validTenant,
+      }),
+    ).toThrow(/EMBER_MODEL_ALPHA_SCOPE=allowlist is required/);
   });
 });

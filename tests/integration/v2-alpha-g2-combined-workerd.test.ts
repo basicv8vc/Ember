@@ -163,7 +163,13 @@ describe('Product Alpha G2 — Combined 5-Scenario Cross-Feature Verification in
     expect(sseRes.status).toBe(201);
     await sseRes.text();
     const sseCall = harness.fakeGateway.getAuditSnapshot().calls.at(-1);
-    expect(sseCall?.prompt).toContain('Kyoto');
+    expect(sseCall?.personalMemories).toEqual([
+      {
+        kind: 'preference',
+        key: 'coffee_city',
+        content: 'Always send Kyoto coffee briefings in concise bullets.',
+      },
+    ]);
 
     // Scenario 3A: iOS-exact multipart/form-data upload + NL attachment_ids -> delegate_python_agent
     const csvData = 'city,cups\nKyoto,4\nTokyo,2\n';

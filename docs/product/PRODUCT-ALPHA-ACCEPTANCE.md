@@ -53,7 +53,7 @@
 
 - `pnpm --filter @ember/api exec wrangler deployments list --name ember-v2-staging --config wrangler.v2-staging.jsonc` → Active `52bf0212-12a8-4239-85d5-385d43d5c741` (`main @ 620aec2`, `2026-11-21T01:22:10.436Z`), previous `afa0c7a2-7c26-48e6-89c2-b66320931e12` (`cd6f5a8`).
 - `node infra/cloudflare/v2-staging-smoke.mjs` (against `52bf0212`) → **PASS** (`EMBER_V2_STAGING_SMOKE_OK`, V2 `/readyz` 10ms, V1 `/readyz` 14ms) + unauthenticated `POST /v1/me/uploads`, `/v2/tasks/python`, `/v2/device-tasks` → `401`.
-- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-alpha-g2-combined-workerd.test.ts` (`620aec2`) → **PASS (1/1, `3541ms`)** + `tsc`, `prettier --check`, `eslint` PASS.
+- `pnpm exec vitest run --config vitest.integration.config.ts tests/integration/v2-alpha-g2-combined-workerd.test.ts` (`620aec2`) → **PASS (1/1, `2994ms`)** + `tsc`, `prettier --check`, `eslint` PASS.
 - `xcodebuild build -project Ember.xcodeproj -scheme Ember -destination 'generic/platform=iOS' SWIFT_STRICT_CONCURRENCY=complete CODE_SIGNING_ALLOWED=NO` (`620aec2`) → **BUILD SUCCEEDED**.
 - `xcrun devicectl list devices` → `Haha🎀` (`00008101-000E0D923E01001E`, `iPhone 12 Pro Max`) `available (paired)`.
 

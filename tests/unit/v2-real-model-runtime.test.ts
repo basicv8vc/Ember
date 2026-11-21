@@ -32,9 +32,9 @@ import {
   resolveV2GlobalCeilingOverride,
   resolveV2LocalCeilings,
   resolveV2ModelRuntime,
-  resolveV2SandboxMode,
   type V2ModelRuntimeEnv,
 } from '../../apps/api/src/local-v2/model-runtime.js';
+import { resolveV2SandboxConfig } from '../../apps/api/src/local-v2/runtime-config.js';
 import { createDurableExecutor } from '../../apps/api/src/local-v2/runtime-durable.js';
 
 const APPROVED_OPENROUTER_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
@@ -208,27 +208,58 @@ function baseRealEnv(overrides: Partial<V2ModelRuntimeEnv> = {}): V2ModelRuntime
 }
 
 describe('V2 real model runtime & sandbox capability decoupling', () => {
-  it('decouples EMBER_SANDBOX_MODE from EMBER_MODEL_MODE and fails closed by default in real mode', () => {
-    expect(resolveV2SandboxMode({ EMBER_MODEL_MODE: 'fake' })).toBe('fake');
-    expect(resolveV2SandboxMode({ EMBER_MODEL_MODE: 'real' })).toBe('disabled');
-    expect(resolveV2SandboxMode({ EMBER_MODEL_MODE: 'real', EMBER_SANDBOX_MODE: 'fake' })).toBe(
-      'fake',
-    );
-    expect(resolveV2SandboxMode({ EMBER_MODEL_MODE: 'real', EMBER_SANDBOX_MODE: 'daytona' })).toBe(
-      'daytona',
-    );
-    expect(() =>
-      resolveV2SandboxMode({ EMBER_MODEL_MODE: 'fake', EMBER_SANDBOX_MODE: 'invalid' }),
-    ).toThrow(/EMBER_SANDBOX_MODE/);
+  it('decouples EMBER_SANDBOX_MODE from EMBER_MODEL_MODE and fails closed by default', () => {
+    expect(resolveV2SandboxConfig({ EMBER_ENV: 'local' })).toEqual({
+      kind: 'disabled',
+      reason: 'sandbox_mode_unset',
+    });
+    expect(resolveV2SandboxConfig({ EMBER_ENV: 'local', EMBER_SANDBOX_MODE: 'disabled' })).toEqual({
+      kind: 'disabled',
+      reason: 'sandbox_disabled',
+    });
+    expect(resolveV2SandboxConfig({ EMBER_ENV: 'local', EMBER_SANDBOX_MODE: 'fake' })).toEqual({
+      kind: 'fake',
+    });
+    expect(
+      resolveV2SandboxConfig({
+        EMBER_ENV: 'v2-staging',
+        EMBER_V2_STAGING_ISOLATED: 'true',
+        EMBER_SANDBOX_MODE: 'fake',
+      }),
+    ).toEqual({ kind: 'fake' });
+    expect(
+      resolveV2SandboxConfig({ EMBER_ENV: 'v2-staging', EMBER_SANDBOX_MODE: 'daytona' }),
+    ).toEqual({
+      kind: 'disabled',
+      reason: 'daytona_api_key_missing',
+    });
+    expect(resolveV2SandboxConfig({ EMBER_ENV: 'local', EMBER_SANDBOX_MODE: 'invalid' })).toEqual({
+      kind: 'disabled',
+      reason: 'sandbox_mode_invalid',
+    });
   });
 
-  it('refuses real mode when allowlist, credential, model, or isolated environment is invalid', () => {
+  it('refuses real mode when allowlist, broad scope, credential, model, or isolated environment is invalid', () => {
     expect(() => resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_API_KEY: undefined }))).toThrow(
       /credential/,
     );
     expect(() =>
       resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: undefined })),
     ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
+    expect(() =>
+      resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: ' , ' })),
+    ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
+    expect(() =>
+      resolveV2ModelRuntime(
+        baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: `${TENANT_A},not-a-uuid` }),
+      ),
+    ).toThrow(/EMBER_MODEL_ALPHA_TENANT_IDS/);
+    expect(() =>
+      resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'authenticated_tenants' })),
+    ).toThrow(/allowlist/);
+    expect(() => resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ALPHA_SCOPE: 'all' }))).toThrow(
+      /allowlist/,
+    );
     expect(() =>
       resolveV2ModelRuntime(baseRealEnv({ EMBER_MODEL_ID: 'openai/gpt-4o-mini' })),
     ).toThrow(/model_not_approved/);
@@ -253,7 +284,7 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     const runtime = resolveV2ModelRuntime(env, { fetchImpl });
 
     expect(runtime.mode).toBe('real');
-    expect(runtime.sandboxMode).toBe('disabled');
+    expect(runtime.sandboxConfig).toEqual({ kind: 'disabled', reason: 'sandbox_mode_unset' });
     expect(runtime.providerId).toBe('openrouter');
     expect(runtime.modelLabel).toBe(APPROVED_OPENROUTER_MODEL);
     expect(runtime.simulated).toBe(false);
@@ -673,6 +704,199 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       text: 'Durable real reply.',
       model_label: APPROVED_OPENROUTER_MODEL,
       simulated: false,
+    });
+  });
+
+  it('blocks a fresh durable turn send if the tenant is revoked between enqueue and execution without altering sent recovery', async () => {
+    const h = createInMemoryHarness();
+    let providerCalls = 0;
+    const revokedRuntime = resolveV2ModelRuntime(
+      baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: TENANT_B }),
+      {
+        fetchImpl: () => {
+          providerCalls += 1;
+          return Promise.reject(new Error('must not be called after tenant revocation'));
+        },
+      },
+    );
+    const markAttemptSent = vi.fn((req: Parameters<AgentHeadCore['markAttemptSent']>[0]) =>
+      h.core.markAttemptSent(req),
+    );
+    const env = {
+      ...baseRealEnv({ EMBER_MODEL_ALPHA_TENANT_IDS: TENANT_B }),
+      AGENT_HEAD: {
+        getByName: () => ({
+          markAttemptSent,
+          reserveTaskModelAttempt: (req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) =>
+            h.core.reserveTaskModelAttempt(req),
+          taskArtifacts: (req: Parameters<AgentHeadCore['taskArtifacts']>[0]) =>
+            h.core.taskArtifacts(req),
+          edgeRpc: vi.fn(),
+        }),
+      },
+      D1_RECOVERY: {} as D1DatabaseLike,
+      DURABLE_TURN_QUEUE: h.queue,
+      AGENT_TASK_QUEUE: h.queue,
+      GLOBAL_BUDGET: { getByName: () => h.globalBudget },
+    } as unknown as Parameters<typeof createDurableExecutor>[0];
+
+    const prepared = await h.core.prepareTurn({
+      scope: {
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        policyVersion: 1,
+        requestId: randomUUID(),
+      },
+      conversationId: CONVERSATION_A,
+      executionMode: 'durable_queue',
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Queued while allowlisted, executed after revocation',
+        transcript_epoch: 0,
+      },
+      workerId: 'edge-1',
+      leaseMs: 30_000,
+      interactiveDeadlineMs: 120_000,
+      turnDeadlineMs: 600_000,
+      modelReservation: revokedRuntime.getTurnReservation(),
+    });
+    if (prepared.kind !== 'prepared') throw new Error('expected prepared');
+
+    const claim = await h.core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `turn:${prepared.turnId}:epoch:1`,
+        tenantId: TENANT_A,
+        agentId: AGENT_A,
+        entityKind: 'turn',
+        entityId: prepared.turnId,
+        queueName: 'durable_turn',
+        fenceEpoch: 1,
+      },
+      workerId: 'worker-revoked-1',
+      leaseMs: 30_000,
+    });
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') return;
+
+    const executor = createDurableExecutor(env, revokedRuntime.gateway, {
+      modelRuntime: revokedRuntime,
+    });
+    const outcome = await executor.executeDurableWork({
+      ...claim,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-revoked-1',
+    });
+
+    expect(providerCalls).toBe(0);
+    expect(markAttemptSent).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      attemptNo: 1,
+      operationId: prepared.operationId,
+      settlement: { state: 'released', outcomeCode: 'not_sent' },
+      status: 'failed',
+      failureReason: 'internal_error',
+    });
+
+    const committed = await h.core.commitDurableResult({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      entityType: 'turn',
+      entityId: prepared.turnId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'worker-revoked-1',
+      outcome,
+    });
+    expect(committed.accepted).toBe(true);
+
+    // Already-sent claims must preserve conservative unknown_billed rather than returning not_sent.
+    const sentClaimContext = JSON.parse(claim.contextJson) as Record<string, unknown>;
+    sentClaimContext['sendState'] = 'sent';
+    sentClaimContext['sendStartedAtMs'] = Date.now();
+    const sentOutcome = await executor.executeDurableWork({
+      ...claim,
+      contextJson: JSON.stringify(sentClaimContext),
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-revoked-1',
+    });
+    expect(sentOutcome).toMatchObject({
+      attemptNo: 1,
+      operationId: prepared.operationId,
+      settlement: { state: 'unknown_billed' },
+      status: 'failed',
+    });
+  });
+
+  it('exposes real stepPythonAgent from OpenRouterModelGateway without fake fallback', async () => {
+    const fetchCalls: string[] = [];
+    const runtime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: (url, init) => {
+        fetchCalls.push(url);
+        const body = JSON.parse(init.body) as Record<string, unknown>;
+        expect(body['model']).toBe(APPROVED_OPENROUTER_MODEL);
+        return Promise.resolve({
+          status: 200,
+          ok: true,
+          json: () =>
+            Promise.resolve({
+              model: APPROVED_OPENROUTER_MODEL,
+              choices: [
+                {
+                  message: {
+                    role: 'assistant',
+                    content: null,
+                    tool_calls: [
+                      {
+                        id: 'call_py_1',
+                        type: 'function',
+                        function: {
+                          name: 'run_python_script',
+                          arguments: JSON.stringify({
+                            code: 'print(400)',
+                            purpose: 'Summarize sales.csv',
+                          }),
+                        },
+                      },
+                    ],
+                  },
+                  finish_reason: 'tool_calls',
+                },
+              ],
+              usage: { prompt_tokens: 150, completion_tokens: 30, cost: 0.000024 },
+            }),
+        });
+      },
+    });
+
+    expect(runtime.gateway.providerId).toBe('openrouter');
+    expect(runtime.gateway.modelLabel).toBe(APPROVED_OPENROUTER_MODEL);
+    expect(runtime.gateway.simulated).toBe(false);
+    expect(typeof runtime.gateway.stepPythonAgent).toBe('function');
+
+    const stepResult = await runtime.gateway.stepPythonAgent!(
+      {
+        taskId: randomUUID(),
+        prompt: 'Analyze sales.csv',
+        inputFiles: [
+          { artifactId: randomUUID(), filename: 'sales.csv', mediaType: 'text/csv', sizeBytes: 42 },
+        ],
+        messages: [],
+        maxOutputTokens: 1_536,
+        remainingPythonCalls: 2,
+      },
+      new AbortController().signal,
+    );
+    expect(fetchCalls).toEqual([OPENROUTER_CHAT_COMPLETIONS_URL]);
+    expect(stepResult.simulated).toBe(false);
+    expect(stepResult.modelLabel).toBe(APPROVED_OPENROUTER_MODEL);
+    expect(stepResult.output).toMatchObject({
+      kind: 'tool_call',
+      toolCallId: 'call_py_1',
+      code: 'print(400)',
+      purpose: 'Summarize sales.csv',
     });
   });
 

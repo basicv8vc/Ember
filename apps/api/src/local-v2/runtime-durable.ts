@@ -25,7 +25,6 @@ import {
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
 import {
-  resolveV2SandboxMode,
   toV2DelegationCommand,
   type V2ModelRuntime,
   type V2StreamingModelGateway,
@@ -36,6 +35,7 @@ import {
   type BriefContextMessage,
   type ProactiveBriefContext,
 } from './proactive-brief-context.js';
+import { resolveV2SandboxConfig } from './runtime-config.js';
 import { createEdgeRpc, getHead, type AgentHeadDO, type LocalRuntimeEnv } from './runtime-head.js';
 
 function decodeBase64ToBytes(encoded: string): Uint8Array {
@@ -149,7 +149,7 @@ export function createDurableExecutor(
   options: CreateDurableExecutorOptions = {},
 ): DurableExecutorPort {
   const runtime = options.modelRuntime;
-  const sandboxMode = runtime?.sandboxMode ?? resolveV2SandboxMode(env);
+  const sandboxConfig = runtime?.sandboxConfig ?? resolveV2SandboxConfig(env);
   const modelLabel = runtime?.modelLabel ?? FAKE_MODEL_LABEL;
   const simulated = runtime?.simulated ?? true;
   const budgetMode = runtime?.budgetMode ?? 'simulated_full_protocol';
@@ -182,7 +182,7 @@ export function createDurableExecutor(
           readonly inputJson?: string;
         };
         if (rawContext.kind === 'python.agent' && rawContext.runId !== undefined) {
-          if (sandboxMode !== 'fake') {
+          if (sandboxConfig.kind !== 'fake') {
             return { status: 'failed', reasonCode: 'sandbox_provider_unavailable' };
           }
           const taskInput = JSON.parse(rawContext.inputJson ?? '{}') as {
@@ -342,31 +342,9 @@ export function createDurableExecutor(
       if (
         claim.targetKind === 'turn' &&
         context.sendState === 'unsent' &&
-        context.providerJobHandle === null &&
-        rate !== null
+        context.providerJobHandle === null
       ) {
-        try {
-          const input: unknown = JSON.parse(context.inputJson ?? 'null');
-          const messages = buildBoundedContext(input as readonly ContextRow[]).messages;
-          const preflight = preflightConversationTurn({
-            messages,
-            ...(context.personalMemories !== undefined && context.personalMemories.length > 0
-              ? { personalMemories: context.personalMemories }
-              : {}),
-            enablePersonalMemorySaveTool: true,
-            enableProactiveScheduleTool: true,
-            maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
-          });
-          const rawClaim = JSON.parse(claim.contextJson) as { readonly reservedMicroUsd?: unknown };
-          const reservedMicroUsd =
-            typeof rawClaim.reservedMicroUsd === 'number' ? rawClaim.reservedMicroUsd : 0;
-          if (
-            estimateCostMicroUsd(rate, preflight.inputTokens, preflight.maxOutputTokens) >
-            reservedMicroUsd
-          ) {
-            throw new Error('Model preflight estimate exceeds reservation');
-          }
-        } catch {
+        if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
           return {
             attemptNo: context.attemptNo,
             operationId: context.operationId,
@@ -374,6 +352,40 @@ export function createDurableExecutor(
             status: 'failed',
             failureReason: 'internal_error',
           };
+        }
+        if (rate !== null) {
+          try {
+            const input: unknown = JSON.parse(context.inputJson ?? 'null');
+            const messages = buildBoundedContext(input as readonly ContextRow[]).messages;
+            const preflight = preflightConversationTurn({
+              messages,
+              ...(context.personalMemories !== undefined && context.personalMemories.length > 0
+                ? { personalMemories: context.personalMemories }
+                : {}),
+              enablePersonalMemorySaveTool: true,
+              enableProactiveScheduleTool: true,
+              maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+            });
+            const rawClaim = JSON.parse(claim.contextJson) as {
+              readonly reservedMicroUsd?: unknown;
+            };
+            const reservedMicroUsd =
+              typeof rawClaim.reservedMicroUsd === 'number' ? rawClaim.reservedMicroUsd : 0;
+            if (
+              estimateCostMicroUsd(rate, preflight.inputTokens, preflight.maxOutputTokens) >
+              reservedMicroUsd
+            ) {
+              throw new Error('Model preflight estimate exceeds reservation');
+            }
+          } catch {
+            return {
+              attemptNo: context.attemptNo,
+              operationId: context.operationId,
+              settlement: { state: 'released', outcomeCode: 'not_sent' },
+              status: 'failed',
+              failureReason: 'internal_error',
+            };
+          }
         }
       }
 

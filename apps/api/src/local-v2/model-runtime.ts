@@ -19,6 +19,8 @@ import {
   type ModelCallResult,
   type ModelGateway,
   type ModelRateRow,
+  type PythonAgentStepInput,
+  type PythonAgentStepOutput,
 } from '@ember/model-gateway';
 import {
   V2_BUDGET_LIMITS,
@@ -26,12 +28,14 @@ import {
   type LocalBudgetCeilings,
   type ModelReservationInput,
 } from '@ember/runtime-v2';
-import { z } from 'zod';
+import {
+  resolveV2SandboxConfig,
+  type V2SandboxConfig,
+  type V2SandboxEnv,
+} from './runtime-config.js';
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const SAFE_INT_REGEX = /^\d+$/;
-
-export type V2SandboxMode = 'disabled' | 'fake' | 'daytona';
 
 export type V2ConversationStreamEvent =
   | { readonly kind: 'job'; readonly handle: string }
@@ -40,6 +44,9 @@ export type V2ConversationStreamEvent =
   | { readonly kind: 'result'; readonly result: ModelCallResult<ConversationTurnOutput> };
 
 export interface V2StreamingModelGateway {
+  readonly providerId?: 'fake' | 'openai' | 'openrouter';
+  readonly modelLabel?: string;
+  readonly simulated?: boolean;
   streamConversationTurn(
     request: FakeConversationStreamRequest,
     signal: AbortSignal,
@@ -49,13 +56,16 @@ export interface V2StreamingModelGateway {
     handle: string,
     signal: AbortSignal,
   ): Promise<FakeConversationJobStatus>;
+  stepPythonAgent?(
+    input: PythonAgentStepInput,
+    signal: AbortSignal,
+  ): Promise<ModelCallResult<PythonAgentStepOutput>>;
 }
 
-export interface V2ModelRuntimeEnv {
+export interface V2ModelRuntimeEnv extends V2SandboxEnv {
   readonly EMBER_ENV: string;
   readonly NODE_ENV?: string;
   readonly EMBER_MODEL_MODE: string;
-  readonly EMBER_SANDBOX_MODE?: string;
   readonly EMBER_V2_ISOLATED_HARNESS?: string;
   readonly EMBER_V2_STAGING_ISOLATED?: string;
   readonly FAKE_MODEL_GATEWAY_URL?: string;
@@ -76,7 +86,7 @@ export interface V2ModelRuntimeEnv {
 
 export interface V2ModelRuntime {
   readonly mode: 'fake' | 'real';
-  readonly sandboxMode: V2SandboxMode;
+  readonly sandboxConfig: V2SandboxConfig;
   readonly gateway: V2StreamingModelGateway;
   readonly providerId: 'fake' | 'openai' | 'openrouter';
   readonly modelLabel: string;
@@ -121,23 +131,6 @@ function createInWorkerFakeGateway(): V2StreamingModelGateway {
     },
     { reasoningMs: 0, usageCostMicroUsd: 0 },
   );
-}
-
-/**
- * Decouple V2 sandbox mode from `EMBER_MODEL_MODE` with fail-closed defaults:
- * enabling `real` LLM inference never implicitly enables fake or paid Daytona sandboxes.
- */
-export function resolveV2SandboxMode(
-  env: Pick<V2ModelRuntimeEnv, 'EMBER_MODEL_MODE' | 'EMBER_SANDBOX_MODE'>,
-): V2SandboxMode {
-  const raw = env.EMBER_SANDBOX_MODE?.trim().toLowerCase();
-  if (raw === undefined || raw.length === 0) {
-    return env.EMBER_MODEL_MODE === 'fake' ? 'fake' : 'disabled';
-  }
-  if (raw === 'disabled' || raw === 'fake' || raw === 'daytona') {
-    return raw;
-  }
-  throw new Error(`Invalid EMBER_SANDBOX_MODE: ${env.EMBER_SANDBOX_MODE}`);
 }
 
 function parseBoundedInt(
@@ -251,19 +244,14 @@ export function resolveV2GlobalCeilingOverride(
   return platformCeiling;
 }
 
-const alphaScopeSchema = z.enum(['allowlist', 'authenticated_tenants']).default('allowlist');
-
 function resolveTenantAllowlist(
   env: Pick<V2ModelRuntimeEnv, 'EMBER_MODEL_ALPHA_SCOPE' | 'EMBER_MODEL_ALPHA_TENANT_IDS'>,
-):
-  | { readonly scope: 'allowlist'; readonly tenantIds: ReadonlySet<string> }
-  | { readonly scope: 'authenticated_tenants' } {
-  const scopeParsed = alphaScopeSchema.safeParse(env.EMBER_MODEL_ALPHA_SCOPE?.trim() || undefined);
-  if (!scopeParsed.success) {
-    throw new Error('Invalid EMBER_MODEL_ALPHA_SCOPE');
-  }
-  if (scopeParsed.data === 'authenticated_tenants') {
-    return { scope: 'authenticated_tenants' };
+): { readonly scope: 'allowlist'; readonly tenantIds: ReadonlySet<string> } {
+  const rawScope = env.EMBER_MODEL_ALPHA_SCOPE?.trim().toLowerCase();
+  if (rawScope !== undefined && rawScope.length > 0 && rawScope !== 'allowlist') {
+    throw new Error(
+      `EMBER_MODEL_ALPHA_SCOPE=${JSON.stringify(env.EMBER_MODEL_ALPHA_SCOPE)} is refused for V2 real canary; only "allowlist" is permitted`,
+    );
   }
   const rawIds = env.EMBER_MODEL_ALPHA_TENANT_IDS?.trim() ?? '';
   if (rawIds.length === 0) {
@@ -283,6 +271,7 @@ function resolveTenantAllowlist(
  * V2 streaming/durable gateway interface without inventing a fake provider job handle.
  * Never yields `{ kind: 'job' }`, so interrupted in-flight requests retain conservative
  * unknown-outcome handling and are never blindly replayed.
+ * Also exposes `stepPythonAgent` from the real `ModelGateway` for F's runner.
  */
 export function adaptModelGatewayForV2(
   gateway: ModelGateway,
@@ -294,6 +283,9 @@ export function adaptModelGatewayForV2(
     );
   }
   return {
+    providerId: gateway.providerId,
+    modelLabel: gateway.modelLabel,
+    simulated: false,
     async *streamConversationTurn(request, signal) {
       signal.throwIfAborted();
       const remainingMs = request.deadlineAtMs - Date.now();
@@ -315,6 +307,11 @@ export function adaptModelGatewayForV2(
       // Single-shot Chat Completions has no resumable provider-side job handle.
       return Promise.resolve({ state: 'unavailable' });
     },
+    stepPythonAgent(input, signal) {
+      signal.throwIfAborted();
+      const combinedSignal = AbortSignal.any([signal, AbortSignal.timeout(attemptTimeoutMs)]);
+      return gateway.stepPythonAgent(input, combinedSignal);
+    },
   };
 }
 
@@ -326,7 +323,7 @@ export function resolveV2ModelRuntime(
   env: V2ModelRuntimeEnv,
   options: ResolveV2ModelRuntimeOptions = {},
 ): V2ModelRuntime {
-  const sandboxMode = resolveV2SandboxMode(env);
+  const sandboxConfig = resolveV2SandboxConfig(env);
   const fakeReservationMicroUsd = 250;
 
   if (env.EMBER_MODEL_MODE === 'fake') {
@@ -346,7 +343,7 @@ export function resolveV2ModelRuntime(
 
     return {
       mode: 'fake',
-      sandboxMode,
+      sandboxConfig,
       gateway,
       providerId: 'fake',
       modelLabel: FAKE_MODEL_LABEL,
@@ -454,7 +451,7 @@ export function resolveV2ModelRuntime(
 
   return {
     mode: 'real',
-    sandboxMode,
+    sandboxConfig,
     gateway,
     providerId,
     modelLabel: modelId,
@@ -465,7 +462,6 @@ export function resolveV2ModelRuntime(
     attemptTimeoutMs: resolution.settings.attemptTimeoutMs,
     perAttemptCeilingMicroUsd: perAttemptCeiling,
     isTenantAuthorized(tenantId: string) {
-      if (tenantAllowlist.scope === 'authenticated_tenants') return true;
       return tenantAllowlist.tenantIds.has(tenantId.trim().toLowerCase());
     },
     getTurnReservation() {

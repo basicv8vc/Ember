@@ -129,6 +129,11 @@ export function validateV2StagingConfig({
       `V2 staging must keep vars.EMBER_MODEL_MODE === "fake" until separate provider-canary approval (got ${JSON.stringify(v2Config.vars?.EMBER_MODEL_MODE)})`,
     );
   }
+  if (v2Config.vars?.EMBER_SANDBOX_MODE !== 'fake') {
+    errors.push(
+      `V2 staging must keep vars.EMBER_SANDBOX_MODE === "fake" until separate Daytona canary approval (got ${JSON.stringify(v2Config.vars?.EMBER_SANDBOX_MODE)})`,
+    );
+  }
   if (v2Config.vars?.EMBER_V2_STAGING_ISOLATED !== 'true') {
     errors.push('expected vars.EMBER_V2_STAGING_ISOLATED === "true"');
   }

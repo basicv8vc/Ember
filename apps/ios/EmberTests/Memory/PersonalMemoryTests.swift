@@ -202,6 +202,79 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertFalse(store.isEndpointUnavailable)
     }
 
+    func testStoreSaveReusesClientRequestIDAcrossRetryAfterUnknownOutcomeAndRemovesNotFoundOnUpdate() async throws {
+        let attempts = LockedInt(0)
+        let capturedClientRequestIDs = LockedStringArray()
+        let memoryID = UUID(uuidString: "55555555-6666-4777-8888-999999999999")!
+        let memoryIDLower = memoryID.uuidString.lowercased()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "POST" && path == "/v2/memories" {
+                let count = attempts.increment()
+                if let body = request.httpBody,
+                   let json = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+                   let reqID = json["client_request_id"] as? String {
+                    capturedClientRequestIDs.append(reqID)
+                }
+                if count == 1 {
+                    return .json(statusCode: 503, body: #"{"error":{"code":"DB_UNAVAILABLE"}}"#)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "item": {
+                    "memory_id": "\(memoryIDLower)",
+                    "kind": "preference",
+                    "key": null,
+                    "content": "Prefer brief answers",
+                    "provenance": {
+                      "source": "user_settings",
+                      "conversation_id": null,
+                      "message_id": null
+                    },
+                    "created_at": "2026-11-21T00:00:00Z",
+                    "updated_at": "2026-11-21T00:00:00Z"
+                  },
+                  "created": false
+                }
+                """)
+            }
+            if request.httpMethod == "PATCH" && path == "/v2/memories/\(memoryIDLower)" {
+                return .json(statusCode: 404, body: #"{"error":{"code":"NOT_FOUND"}}"#)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let store = PersonalMemoryStore(repository: try makeLiveRepository())
+
+        let firstTry = await store.save(kind: .preference, content: "Prefer brief answers")
+        XCTAssertFalse(firstTry)
+        XCTAssertNotNil(store.errorMessage)
+
+        let secondTry = await store.save(kind: .preference, content: "Prefer brief answers")
+        XCTAssertTrue(secondTry)
+        XCTAssertEqual(store.items.count, 1)
+        let ids = capturedClientRequestIDs.values
+        XCTAssertEqual(ids.count, 2)
+        XCTAssertEqual(ids[0], ids[1])
+        XCTAssertEqual(ids[0], ids[0].lowercased())
+
+        // A subsequent different save uses a fresh client_request_id.
+        _ = await store.save(kind: .fact, content: "Based in Kyoto")
+        let allIDs = capturedClientRequestIDs.values
+        XCTAssertEqual(allIDs.count, 3)
+        XCTAssertNotEqual(allIDs[2], allIDs[0])
+
+        // Updating a memory deleted remotely removes the stale row locally.
+        let updateMissing = await store.update(
+            id: memoryID,
+            kind: .preference,
+            content: "Prefer 2-bullet answers"
+        )
+        XCTAssertFalse(updateMissing)
+        XCTAssertFalse(store.items.contains(where: { $0.memoryID == memoryID }))
+    }
+
     private func makeLiveRepository() throws -> LivePersonalMemoryRepository {
         let session = StubSession.make()
         sessions.append(session)
@@ -236,5 +309,34 @@ private final class LockedString: @unchecked Sendable {
     var value: String {
         get { lock.withLock { storage } }
         set { lock.withLock { storage = newValue } }
+    }
+}
+
+private final class LockedInt: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: Int
+
+    init(_ initial: Int) {
+        self.storage = initial
+    }
+
+    func increment() -> Int {
+        lock.withLock {
+            storage += 1
+            return storage
+        }
+    }
+}
+
+private final class LockedStringArray: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storage: [String] = []
+
+    var values: [String] {
+        lock.withLock { storage }
+    }
+
+    func append(_ value: String) {
+        lock.withLock { storage.append(value) }
     }
 }

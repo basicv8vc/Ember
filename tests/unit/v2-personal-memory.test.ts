@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  COMMITTED_MEMORY_SAVED_REPLY,
+  COMMITTED_MEMORY_UPDATED_REPLY,
   CONVERSATION_SYSTEM_PROMPT,
   CONVERSATION_TOOLS_WITH_MEMORY,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
@@ -29,6 +31,7 @@ import {
   PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
   PERSONAL_MEMORY_MAX_ITEMS,
   PERSONAL_MEMORY_SAVED_REPLY,
+  PERSONAL_MEMORY_UPDATED_REPLY,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
   parseClaimExecutionContext,
@@ -457,16 +460,47 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       ),
     ).toThrow(ModelGatewayFailure);
 
-    // Reject plain-text impersonation of the canned acknowledgement without calling the tool
-    expect(() =>
-      parseConversationTurnChoice(
-        {
-          message: { content: DEFAULT_MEMORY_SAVE_ACK_TEXT },
-          finish_reason: 'stop',
-        },
-        { allowSavePersonalMemory: true },
-      ),
-    ).toThrow(ModelGatewayFailure);
+    // Reject plain-text impersonation of the canned acknowledgements without calling the tool
+    expect(COMMITTED_MEMORY_SAVED_REPLY).toBe(PERSONAL_MEMORY_SAVED_REPLY);
+    expect(COMMITTED_MEMORY_UPDATED_REPLY).toBe(PERSONAL_MEMORY_UPDATED_REPLY);
+    for (const canned of [
+      DEFAULT_MEMORY_SAVE_ACK_TEXT,
+      PERSONAL_MEMORY_SAVED_REPLY,
+      PERSONAL_MEMORY_UPDATED_REPLY,
+    ]) {
+      expect(() =>
+        parseConversationTurnChoice(
+          {
+            message: { content: canned },
+            finish_reason: 'stop',
+          },
+          { allowSavePersonalMemory: true },
+        ),
+      ).toThrow(ModelGatewayFailure);
+    }
+
+    // Neutralize committed save/update confirmations in prior assistant messages
+    const multiTurnMessages = buildConversationTurnMessages({
+      conversationId: randomUUID(),
+      turnId: randomUUID(),
+      enablePersonalMemorySaveTool: true,
+      context: [
+        { role: 'user', text: 'Remember I prefer concise replies.' },
+        { role: 'assistant', text: PERSONAL_MEMORY_SAVED_REPLY },
+        { role: 'user', text: 'Update my preference to bullet points.' },
+        { role: 'assistant', text: PERSONAL_MEMORY_UPDATED_REPLY },
+        { role: 'user', text: 'Remember I live in Kyoto.' },
+      ],
+      maxOutputTokens: 256,
+    });
+    expect(multiTurnMessages[2]).toEqual({
+      role: 'assistant',
+      content: '[Prior turn called save_personal_memory.]',
+    });
+    expect(multiTurnMessages[4]).toEqual({
+      role: 'assistant',
+      content: '[Prior turn called save_personal_memory.]',
+    });
   });
 
   it('fails closed on invalid durable personalMemorySave payload in toAgentHeadDurableCommitOutcome', () => {
@@ -1422,5 +1456,39 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     if (diffKind.outcome !== 'saved') throw new Error('expected saved');
     expect(diffKind.created).toBe(true);
     expect(diffKind.memoryId).not.toBe(pathUpper.memoryId);
+
+    // 4. Keyed repeat of an existing unkeyed memory attaches the key in place even at 50/50 cap
+    const keyedRepeat = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId: convA,
+      sourceMessageId: msgA2,
+      input: {
+        kind: 'preference',
+        key: 'response_style',
+        content: 'Prefer concise bullet points',
+      },
+      nowMs: nowMs + 14_000,
+      newId: () => randomUUID(),
+    });
+    expect(keyedRepeat).toEqual({
+      outcome: 'saved',
+      memoryId: originalMemoryId,
+      created: false,
+    });
+
+    const listAAfterKeyed = await svc.execute({
+      kind: 'list',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+    });
+    if (!('items' in listAAfterKeyed)) throw new Error('expected list response');
+    expect(listAAfterKeyed.items).toHaveLength(PERSONAL_MEMORY_MAX_ITEMS);
+    expect(listAAfterKeyed.items.find((item) => item.memory_id === originalMemoryId)?.key).toBe(
+      'response_style',
+    );
   });
 });

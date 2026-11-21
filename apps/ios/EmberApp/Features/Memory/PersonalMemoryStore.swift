@@ -3,8 +3,16 @@ import Observation
 
 @MainActor @Observable
 final class PersonalMemoryStore {
+    private struct PendingSaveAttempt: Equatable {
+        let kind: PersonalMemoryKind
+        let content: String
+        let key: String?
+        let clientRequestID: UUID
+    }
+
     private let repository: (any PersonalMemoryRepositoryProtocol)?
     private var generation: UInt64 = 0
+    private var pendingSave: PendingSaveAttempt?
 
     private(set) var items: [PersonalMemoryItemDTO] = []
     private(set) var limits: PersonalMemoryLimitsDTO = .default
@@ -72,16 +80,35 @@ final class PersonalMemoryStore {
         }
 
         let normalizedKey = key?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let resolvedKey = normalizedKey?.isEmpty == false ? normalizedKey : nil
+        let attempt: PendingSaveAttempt
+        if let pendingSave,
+           pendingSave.kind == kind,
+           pendingSave.content == trimmed,
+           pendingSave.key == resolvedKey {
+            attempt = pendingSave
+        } else {
+            attempt = PendingSaveAttempt(
+                kind: kind,
+                content: trimmed,
+                key: resolvedKey,
+                clientRequestID: UUID()
+            )
+            pendingSave = attempt
+        }
+
         let request = SavePersonalMemoryRequestDTO(
             kind: kind,
             content: trimmed,
-            key: normalizedKey?.isEmpty == false ? normalizedKey : nil,
+            key: resolvedKey,
+            clientRequestID: attempt.clientRequestID,
             provenance: PersonalMemoryProvenanceDTO(source: .userSettings)
         )
 
         do {
             let result = try await repository.saveMemory(request)
             guard generation == startGeneration else { return false }
+            pendingSave = nil
             upsertLocalItem(result.item)
             isEndpointUnavailable = false
             errorMessage = nil
@@ -129,6 +156,11 @@ final class PersonalMemoryStore {
             return true
         } catch is CancellationError {
             return false
+        } catch PersonalMemoryRepositoryError.notFound {
+            guard generation == startGeneration else { return false }
+            items.removeAll { $0.memoryID == id }
+            errorMessage = String(localized: "memory.error.unavailable", table: "Conversation")
+            return false
         } catch {
             guard generation == startGeneration else { return false }
             errorMessage = Self.localizedMessage(for: error)
@@ -164,6 +196,7 @@ final class PersonalMemoryStore {
 
     func clear() {
         generation &+= 1
+        pendingSave = nil
         items.removeAll()
         limits = .default
         isLoading = false

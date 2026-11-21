@@ -488,6 +488,7 @@ export function resolveV2ModelRuntime(
     estimateBriefReservation(prompt: string) {
       const preflight = preflightConversationTurn({
         messages: [{ role: 'user', text: prompt }],
+        allowDelegationTools: false,
         maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
       });
       const estimatedMicroUsd = estimateCostMicroUsd(

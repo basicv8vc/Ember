@@ -299,9 +299,48 @@ export function createDurableExecutor(
           context.conversationId,
           proactive,
         );
+        const briefPrompt = buildProactiveBriefPrompt(proactive, briefContext);
+        if (context.sendState === 'unsent' && context.providerJobHandle === null) {
+          const releaseBriefBeforeSend = (reasonCode: string): Record<string, unknown> => ({
+            attemptNo: context.attemptNo,
+            operationId: context.operationId,
+            settlement: { state: 'released', outcomeCode: 'not_sent' },
+            status: 'failed',
+            summaryText: proactive.title,
+            detailText: null,
+            modelLabel,
+            simulated,
+            reasonCode,
+          });
+          if (runtime !== undefined && !runtime.isTenantAuthorized(claim.tenantId)) {
+            return releaseBriefBeforeSend('model_unauthorized_tenant');
+          }
+          if (rate !== null) {
+            try {
+              const preflight = preflightConversationTurn({
+                messages: [{ role: 'user', text: briefPrompt }],
+                allowDelegationTools: false,
+                maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+              });
+              const rawClaim = JSON.parse(claim.contextJson) as {
+                readonly reservedMicroUsd?: unknown;
+              };
+              const reservedMicroUsd =
+                typeof rawClaim.reservedMicroUsd === 'number' ? rawClaim.reservedMicroUsd : 0;
+              if (
+                estimateCostMicroUsd(rate, preflight.inputTokens, preflight.maxOutputTokens) >
+                reservedMicroUsd
+              ) {
+                return releaseBriefBeforeSend('budget_exceeded');
+              }
+            } catch {
+              return releaseBriefBeforeSend('budget_exceeded');
+            }
+          }
+        }
         context = {
           ...context,
-          inputJson: JSON.stringify({ prompt: buildProactiveBriefPrompt(proactive, briefContext) }),
+          inputJson: JSON.stringify({ prompt: briefPrompt }),
         };
       }
 

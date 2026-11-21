@@ -16,7 +16,7 @@ final class V2StagingIntegrationTests: XCTestCase {
         try await super.tearDown()
     }
 
-    func testResolveCloudTargetIsolatesV2StagingFromV1AndFailsClosedOnHTTP() {
+    func testResolveCloudTargetIsolatesV2StagingFromV1AndFailsClosedOnHTTP() throws {
         let v1 = AppCompositionRoot.resolveCloudTarget(arguments: [], environment: [:])
         XCTAssertEqual(v1?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
         XCTAssertEqual(v1?.keychainConfiguration, .live)
@@ -48,6 +48,62 @@ final class V2StagingIntegrationTests: XCTestCase {
             environment: ["EMBER_CLOUD_BASE_URL": "http://ember-v2-staging.slowfast.dev"]
         )
         XCTAssertNil(insecure, "Non-HTTPS cloud URL must fail closed")
+
+        let suiteName = "ember.v2.target.persist.\(UUID().uuidString.lowercased())"
+        let isolatedDefaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        isolatedDefaults.removePersistentDomain(forName: suiteName)
+        defer { isolatedDefaults.removePersistentDomain(forName: suiteName) }
+
+        // Default clean UserDefaults resolves V1 even in Debug builds.
+        let cleanDefault = AppCompositionRoot.resolveCloudTarget(
+            arguments: [],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertEqual(cleanDefault?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
+        XCTAssertEqual(cleanDefault?.keychainConfiguration, .live)
+
+        // Ephemeral --ember-v2-staging must not persist on its own.
+        _ = AppCompositionRoot.resolveCloudTarget(
+            arguments: ["--ember-v2-staging"],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertFalse(isolatedDefaults.bool(forKey: AppCompositionRoot.persistedV2StagingDefaultsKey))
+
+        // --ember-v2-staging + --ember-persist-v2-staging (or Debug toggle) persists V2 Staging across empty-arg relaunches.
+        let persisted = AppCompositionRoot.resolveCloudTarget(
+            arguments: ["--ember-v2-staging", "--ember-persist-v2-staging"],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertEqual(persisted?.baseURL.absoluteString, AppCompositionRoot.v2StagingCloudBaseURL)
+        let desktopRelaunch = AppCompositionRoot.resolveCloudTarget(
+            arguments: [],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertEqual(desktopRelaunch?.baseURL.absoluteString, AppCompositionRoot.v2StagingCloudBaseURL)
+        XCTAssertEqual(desktopRelaunch?.keychainConfiguration.account, "ember.session.v2-staging")
+        XCTAssertEqual(desktopRelaunch?.journalSubdirectory, "EmberConversation-v2-staging")
+        XCTAssertEqual(desktopRelaunch?.environmentBadge, "V2 STAGING")
+
+        // Explicit --ember-live-cloud still forces V1 even when V2 Staging is persisted.
+        let forcedV1 = AppCompositionRoot.resolveCloudTarget(
+            arguments: ["--ember-live-cloud"],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertEqual(forcedV1?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
+        XCTAssertEqual(forcedV1?.keychainConfiguration, .live)
+
+        AppCompositionRoot.setPersistedV2Staging(false, userDefaults: isolatedDefaults)
+        let resetToV1 = AppCompositionRoot.resolveCloudTarget(
+            arguments: [],
+            environment: [:],
+            userDefaults: isolatedDefaults
+        )
+        XCTAssertEqual(resetToV1?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
     }
 
     func testSessionRecoveryFenceIsolationBetweenV1AndV2Staging() throws {

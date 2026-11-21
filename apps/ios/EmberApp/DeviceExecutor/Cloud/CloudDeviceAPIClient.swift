@@ -29,6 +29,10 @@ private final class CloudDeviceRedirectBlocker: NSObject, URLSessionTaskDelegate
     }
 }
 
+#if DEBUG
+extension CloudDeviceAPIClient: CloudDeviceTaskDispatching {}
+#endif
+
 /// Typed wire client implementing the M2-F2 Cloud Device Adapter HTTP contract:
 /// - `POST /v2/devices/{deviceId}/register`
 /// - `POST /v2/devices/{deviceId}/claim`
@@ -202,6 +206,63 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
         return .committed(replayed: replayed)
     }
 
+    #if DEBUG
+    public func dispatchTextTask(
+        deviceID: UUID,
+        operationID: UUID = UUID(),
+        text: String,
+        deadlineMs: Int = 60_000
+    ) async throws -> CloudDeviceTaskSnapshot {
+        guard !text.isEmpty,
+              text.utf8.count <= CloudDeviceContract.maxTextUTF8Bytes,
+              (100...120_000).contains(deadlineMs) else {
+            throw CloudDeviceError.invalidConfiguration
+        }
+        let payload = CloudDeviceTaskDispatchRequest(
+            deviceID: deviceID,
+            operationID: operationID,
+            text: text,
+            deadlineMs: deadlineMs
+        )
+        let encodedBody = try JSONEncoder().encode(payload)
+        let (status, data) = try await authorizedSend(
+            method: "POST",
+            pathComponents: ["v2", "device-tasks"],
+            deviceToken: nil,
+            encodedBody: encodedBody
+        )
+        if status == 400 || status == 422 {
+            throw CloudDeviceError.invalidConfiguration
+        }
+        if status == 409 {
+            throw CloudDeviceError.resultConflict
+        }
+        if status == 401 {
+            throw CloudDeviceError.unauthenticated
+        }
+        guard status == 200 || status == 201 else {
+            throw CloudDeviceError.httpStatus(status)
+        }
+        return try decode(CloudDeviceTaskSnapshot.self, from: data)
+    }
+
+    public func fetchDeviceTaskStatus(taskID: UUID) async throws -> CloudDeviceTaskSnapshot {
+        let (status, data) = try await authorizedSend(
+            method: "GET",
+            pathComponents: ["v2", "device-tasks", taskID.uuidString.lowercased()],
+            deviceToken: nil,
+            encodedBody: nil
+        )
+        if status == 401 {
+            throw CloudDeviceError.unauthenticated
+        }
+        guard status == 200 else {
+            throw CloudDeviceError.httpStatus(status)
+        }
+        return try decode(CloudDeviceTaskSnapshot.self, from: data)
+    }
+    #endif
+
     // MARK: - Helpers
 
     private func post<Body: Encodable>(
@@ -213,12 +274,27 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
         guard credential.isValidTokenFormat else {
             throw CloudDeviceError.invalidConfiguration
         }
-
-        let firstSession = try await resolveSession()
         let encodedBody = try JSONEncoder().encode(body)
-        let (status, data) = try await sendOnce(
+        return try await authorizedSend(
+            method: "POST",
             pathComponents: pathComponents,
-            credential: credential,
+            deviceToken: credential.token,
+            encodedBody: encodedBody
+        )
+    }
+
+    private func authorizedSend(
+        method: String,
+        pathComponents: [String],
+        deviceToken: String?,
+        encodedBody: Data?
+    ) async throws -> (Int, Data) {
+        try Task.checkCancellation()
+        let firstSession = try await resolveSession()
+        let (status, data) = try await sendOnce(
+            method: method,
+            pathComponents: pathComponents,
+            deviceToken: deviceToken,
             encodedBody: encodedBody,
             accessToken: firstSession.accessToken
         )
@@ -227,8 +303,9 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
             switch await refreshing.recoverUnauthorizedSession(rejectedAccessToken: firstSession.accessToken) {
             case .authenticated(let refreshed):
                 return try await sendOnce(
+                    method: method,
                     pathComponents: pathComponents,
-                    credential: credential,
+                    deviceToken: deviceToken,
                     encodedBody: encodedBody,
                     accessToken: refreshed.accessToken
                 )
@@ -260,9 +337,10 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
     }
 
     private func sendOnce(
+        method: String,
         pathComponents: [String],
-        credential: CloudDeviceCredential,
-        encodedBody: Data,
+        deviceToken: String?,
+        encodedBody: Data?,
         accessToken: String
     ) async throws -> (Int, Data) {
         try Task.checkCancellation()
@@ -275,13 +353,17 @@ public final class CloudDeviceAPIClient: CloudDeviceAPITransporting, @unchecked 
         }
 
         var request = URLRequest(url: url)
-        request.httpMethod = "POST"
+        request.httpMethod = method
         request.timeoutInterval = configuration.requestTimeout
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if encodedBody != nil {
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(credential.token, forHTTPHeaderField: CloudDeviceContract.deviceTokenHeader)
+        if let deviceToken {
+            request.setValue(deviceToken, forHTTPHeaderField: CloudDeviceContract.deviceTokenHeader)
+        }
         if let localAccess = configuration.localAccessSecret {
             request.setValue(localAccess, forHTTPHeaderField: CloudDeviceContract.localAccessHeader)
         }

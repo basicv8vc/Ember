@@ -428,3 +428,55 @@ public struct CloudDeviceResultSubmission: Codable, Equatable, Sendable {
         }
     }
 }
+
+#if DEBUG
+/// Request payload for `POST /v2/device-tasks` (`deviceDispatchSchema`, `device.text.process` v1).
+public struct CloudDeviceTaskDispatchRequest: Encodable, Equatable, Sendable {
+    public let deviceId: String
+    public let operationId: String
+    public let capability: String
+    public let version: Int
+    public let input: CloudDeviceTextInput
+    public let deadlineMs: Int
+
+    public init(
+        deviceID: UUID,
+        operationID: UUID = UUID(),
+        text: String,
+        deadlineMs: Int = 60_000
+    ) {
+        self.deviceId = deviceID.uuidString.lowercased()
+        self.operationId = operationID.uuidString.lowercased()
+        self.capability = CloudDeviceContract.textCapability
+        self.version = CloudDeviceContract.capabilityVersion
+        self.input = CloudDeviceTextInput(operation: CloudDeviceContract.statsOperation, text: text)
+        self.deadlineMs = deadlineMs
+    }
+}
+
+/// Snapshot returned by `POST /v2/device-tasks` and `GET /v2/device-tasks/{taskId}`.
+public struct CloudDeviceTaskSnapshot: Decodable, Equatable, Sendable {
+    public let taskId: UUID
+    public let operationId: UUID
+    public let deviceId: UUID
+    public let status: String
+    public let availability: String
+    public let reason: String?
+    public let result: CloudDeviceTextStats?
+    public let replayed: Bool?
+
+    public var isTerminal: Bool {
+        status == "completed" || status == "failed" || status == "cancelled"
+    }
+}
+
+public protocol CloudDeviceTaskDispatching: Sendable {
+    func dispatchTextTask(
+        deviceID: UUID,
+        operationID: UUID,
+        text: String,
+        deadlineMs: Int
+    ) async throws -> CloudDeviceTaskSnapshot
+    func fetchDeviceTaskStatus(taskID: UUID) async throws -> CloudDeviceTaskSnapshot
+}
+#endif

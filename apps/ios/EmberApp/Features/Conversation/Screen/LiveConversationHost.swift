@@ -1295,13 +1295,24 @@ struct LiveConversationHost: View {
     @State private var isShowingCamera = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
 
+    #if DEBUG
+    private let debugUseV2Staging: Binding<Bool>?
+    #endif
+
     private static var allowedAttachmentTypes: [UTType] {
         [.item]
     }
 
+    #if DEBUG
+    init(model: LiveConversationHostModel, debugUseV2Staging: Binding<Bool>? = nil) {
+        _model = State(initialValue: model)
+        self.debugUseV2Staging = debugUseV2Staging
+    }
+    #else
     init(model: LiveConversationHostModel) {
         _model = State(initialValue: model)
     }
+    #endif
 
     var body: some View {
         Group {
@@ -1396,6 +1407,17 @@ struct LiveConversationHost: View {
             if let status = model.status {
                 Text(status).font(.footnote).foregroundStyle(.secondary)
             }
+            #if DEBUG
+            if let debugUseV2Staging,
+               (ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"] ?? "").isEmpty {
+                Toggle("V2 Staging (Internal QA)", isOn: debugUseV2Staging)
+                    .toggleStyle(.switch)
+                    .font(.caption)
+                    .frame(maxWidth: 260)
+                    .padding(.top, 8)
+                    .accessibilityIdentifier("debug-v2-staging-toggle")
+            }
+            #endif
         }
         .padding()
     }

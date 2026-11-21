@@ -83,11 +83,20 @@ public final class CloudDeviceAdapterMonitor {
     public private(set) var lastEvent: String?
     public private(set) var summary: CloudDeviceJournalSummary?
     public private(set) var isRunning = false
+    #if DEBUG
+    public private(set) var lastDispatchedTask: CloudDeviceTaskSnapshot?
+    public private(set) var isDispatchingTestTask = false
+    public private(set) var dispatchErrorMessage: String?
+    #endif
 
     private var adapter: CloudDeviceExecutorAdapter?
     private var connectionGeneration: UInt64 = 0
     private var pendingStopTask: Task<Void, Never>?
     private var pendingStopID: UInt64 = 0
+    #if DEBUG
+    private var taskDispatcher: (any CloudDeviceTaskDispatching)?
+    private var activeClock: (any CloudDeviceClock)?
+    #endif
 
     public init() {}
 
@@ -121,6 +130,12 @@ public final class CloudDeviceAdapterMonitor {
         let previousAdapter = adapter
         adapter = nil
         isRunning = false
+        #if DEBUG
+        taskDispatcher = nil
+        activeClock = nil
+        lastDispatchedTask = nil
+        dispatchErrorMessage = nil
+        #endif
 
         if let previousAdapter {
             enqueueAdapterStop(previousAdapter)
@@ -130,6 +145,12 @@ public final class CloudDeviceAdapterMonitor {
             guard connectionGeneration == myGeneration else { return }
         }
         guard connectionGeneration == myGeneration else { return }
+
+        #if DEBUG
+        let resolvedDispatcher: any CloudDeviceTaskDispatching =
+            (transport as? any CloudDeviceTaskDispatching)
+            ?? CloudDeviceAPIClient(configuration: configuration, authProvider: authProvider)
+        #endif
 
         let created = try CloudDeviceExecutorAdapter(
             configuration: configuration,
@@ -153,6 +174,10 @@ public final class CloudDeviceAdapterMonitor {
             return
         }
         self.adapter = created
+        #if DEBUG
+        self.taskDispatcher = resolvedDispatcher
+        self.activeClock = clock
+        #endif
         let snapshot = try await created.currentSnapshot()
         guard connectionGeneration == myGeneration else {
             await created.stop()
@@ -183,6 +208,13 @@ public final class CloudDeviceAdapterMonitor {
         isRunning = false
         let currentAdapter = adapter
         adapter = nil
+        #if DEBUG
+        taskDispatcher = nil
+        activeClock = nil
+        lastDispatchedTask = nil
+        dispatchErrorMessage = nil
+        isDispatchingTestTask = false
+        #endif
         if let currentAdapter {
             enqueueAdapterStop(currentAdapter)
         }
@@ -196,6 +228,73 @@ public final class CloudDeviceAdapterMonitor {
             applySnapshot(snapshot)
         }
     }
+
+    #if DEBUG
+    public func dispatchTestTextTask(text: String) async {
+        guard let deviceID, let taskDispatcher, !isDispatchingTestTask else { return }
+        guard !text.isEmpty, text.utf8.count <= CloudDeviceContract.maxTextUTF8Bytes else {
+            dispatchErrorMessage = "Text must be 1...\(CloudDeviceContract.maxTextUTF8Bytes) UTF-8 bytes."
+            return
+        }
+
+        let myGeneration = connectionGeneration
+        isDispatchingTestTask = true
+        dispatchErrorMessage = nil
+        defer {
+            if connectionGeneration == myGeneration {
+                isDispatchingTestTask = false
+            }
+        }
+
+        do {
+            var latest = try await taskDispatcher.dispatchTextTask(
+                deviceID: deviceID,
+                operationID: UUID(),
+                text: text,
+                deadlineMs: 60_000
+            )
+            guard connectionGeneration == myGeneration else { return }
+            lastDispatchedTask = latest
+
+            let sleepClock = activeClock ?? SystemCloudDeviceClock()
+            for _ in 0..<24 {
+                if latest.isTerminal || connectionGeneration != myGeneration || Task.isCancelled {
+                    break
+                }
+                try? await sleepClock.sleep(for: .milliseconds(250))
+                guard connectionGeneration == myGeneration, !Task.isCancelled else { break }
+                if let polled = try? await taskDispatcher.fetchDeviceTaskStatus(taskID: latest.taskId) {
+                    guard connectionGeneration == myGeneration else { break }
+                    latest = polled
+                    lastDispatchedTask = polled
+                }
+            }
+        } catch let error as CloudDeviceError {
+            guard connectionGeneration == myGeneration else { return }
+            dispatchErrorMessage = error.statusDescription
+        } catch {
+            guard connectionGeneration == myGeneration else { return }
+            dispatchErrorMessage = error.localizedDescription
+        }
+    }
+
+    public func refreshDispatchedTaskStatus() async {
+        guard let taskID = lastDispatchedTask?.taskId, let taskDispatcher else { return }
+        let myGeneration = connectionGeneration
+        do {
+            let latest = try await taskDispatcher.fetchDeviceTaskStatus(taskID: taskID)
+            guard connectionGeneration == myGeneration else { return }
+            lastDispatchedTask = latest
+            dispatchErrorMessage = nil
+        } catch let error as CloudDeviceError {
+            guard connectionGeneration == myGeneration else { return }
+            dispatchErrorMessage = error.statusDescription
+        } catch {
+            guard connectionGeneration == myGeneration else { return }
+            dispatchErrorMessage = error.localizedDescription
+        }
+    }
+    #endif
 
     private func enqueueAdapterStop(_ previousAdapter: CloudDeviceExecutorAdapter) {
         let priorStop = pendingStopTask

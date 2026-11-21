@@ -6,6 +6,25 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const UNPROVISIONED_D1_PLACEHOLDER = '00000000-0000-0000-0000-000000000000';
+export const G3_APPROVED_PROVIDER = 'openrouter';
+export const G3_APPROVED_MODEL_ID = 'deepseek/deepseek-v4.1-flash-1017';
+export const G3_MAX_BUDGET_CEILINGS = Object.freeze({
+  perAttemptMicroUsd: 5_000,
+  principalDailyMicroUsd: 50_000,
+  tenantDailyMicroUsd: 50_000,
+  globalDailyMicroUsd: 100_000,
+  principalDailyTurns: 20,
+});
+export const REQUIRED_REAL_CANARY_SECRETS = Object.freeze([
+  'EMBER_MODEL_API_KEY',
+  'EMBER_MODEL_ALPHA_TENANT_IDS',
+  'EMBER_V2_STAGING_ALLOWED_SUBJECTS',
+]);
+const FORBIDDEN_PLAINTEXT_SECRET_VARS = Object.freeze([
+  ...REQUIRED_REAL_CANARY_SECRETS,
+  'DAYTONA_API_KEY',
+]);
+const SAFE_INT_REGEX = /^\d+$/;
 const REQUIRED_V2_DO_CLASSES = new Map([
   ['AGENT_HEAD', 'AgentHeadDO'],
   ['GLOBAL_BUDGET', 'GlobalBudgetDO'],
@@ -104,6 +123,19 @@ function collectResourceNames(config) {
   };
 }
 
+function parseBoundedPositiveInt(raw, name, max, errors) {
+  if (typeof raw !== 'string' || !SAFE_INT_REGEX.test(raw.trim())) {
+    errors.push(`real-LLM canary requires integer vars.${name} in [1, ${max}]`);
+    return null;
+  }
+  const parsed = Number(raw.trim());
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > max) {
+    errors.push(`vars.${name}=${parsed} exceeds G3 canary ceiling [1, ${max}]`);
+    return null;
+  }
+  return parsed;
+}
+
 /**
  * Validate an isolated V2 staging Wrangler config against V1 staging configs.
  */
@@ -112,29 +144,120 @@ export function validateV2StagingConfig({
   v1Configs,
   migrationExists = true,
   requireProvisioned = false,
+  allowRealLlmCanary = false,
 }) {
   const errors = [];
   const notices = [];
+  const vars = v2Config.vars ?? {};
 
   if (v2Config.name !== 'ember-v2-staging') {
     errors.push(`expected worker name "ember-v2-staging", got ${JSON.stringify(v2Config.name)}`);
   }
-  if (v2Config.vars?.EMBER_ENV !== 'v2-staging') {
+  if (vars.EMBER_ENV !== 'v2-staging') {
+    errors.push(`expected vars.EMBER_ENV === "v2-staging", got ${JSON.stringify(vars.EMBER_ENV)}`);
+  }
+  if (vars.EMBER_V2_ALLOWED_HOST !== 'ember-v2-staging.slowfast.dev') {
     errors.push(
-      `expected vars.EMBER_ENV === "v2-staging", got ${JSON.stringify(v2Config.vars?.EMBER_ENV)}`,
+      `expected vars.EMBER_V2_ALLOWED_HOST === "ember-v2-staging.slowfast.dev", got ${JSON.stringify(vars.EMBER_V2_ALLOWED_HOST)}`,
     );
   }
-  if (v2Config.vars?.EMBER_MODEL_MODE !== 'fake') {
-    errors.push(
-      `V2 staging must keep vars.EMBER_MODEL_MODE === "fake" until separate provider-canary approval (got ${JSON.stringify(v2Config.vars?.EMBER_MODEL_MODE)})`,
-    );
+  for (const secretVar of FORBIDDEN_PLAINTEXT_SECRET_VARS) {
+    if (vars[secretVar] !== undefined) {
+      errors.push(`vars.${secretVar} must be a Cloudflare Worker secret, never plaintext config`);
+    }
   }
-  if (v2Config.vars?.EMBER_SANDBOX_MODE !== 'fake') {
-    errors.push(
-      `V2 staging must keep vars.EMBER_SANDBOX_MODE === "fake" until separate Daytona canary approval (got ${JSON.stringify(v2Config.vars?.EMBER_SANDBOX_MODE)})`,
+
+  if (allowRealLlmCanary) {
+    if (vars.EMBER_MODEL_MODE !== 'fake' && vars.EMBER_MODEL_MODE !== 'real') {
+      errors.push(
+        `V2 real-LLM canary requires vars.EMBER_MODEL_MODE === "fake" or "real" (got ${JSON.stringify(vars.EMBER_MODEL_MODE)})`,
+      );
+    }
+    if (vars.EMBER_SANDBOX_MODE !== 'fake' && vars.EMBER_SANDBOX_MODE !== 'disabled') {
+      errors.push(
+        `V2 real-LLM canary requires vars.EMBER_SANDBOX_MODE === "fake" or "disabled" until separate Daytona approval (got ${JSON.stringify(vars.EMBER_SANDBOX_MODE)})`,
+      );
+    }
+    if (vars.EMBER_MODEL_PROVIDER !== G3_APPROVED_PROVIDER) {
+      errors.push(
+        `V2 real-LLM canary requires vars.EMBER_MODEL_PROVIDER === "${G3_APPROVED_PROVIDER}" (got ${JSON.stringify(vars.EMBER_MODEL_PROVIDER)})`,
+      );
+    }
+    if (vars.EMBER_MODEL_ID !== G3_APPROVED_MODEL_ID) {
+      errors.push(
+        `V2 real-LLM canary requires vars.EMBER_MODEL_ID === "${G3_APPROVED_MODEL_ID}" (got ${JSON.stringify(vars.EMBER_MODEL_ID)})`,
+      );
+    }
+    if (vars.EMBER_MODEL_ALPHA_SCOPE !== 'allowlist') {
+      errors.push(
+        `V2 real-LLM canary requires vars.EMBER_MODEL_ALPHA_SCOPE === "allowlist" (got ${JSON.stringify(vars.EMBER_MODEL_ALPHA_SCOPE)})`,
+      );
+    }
+
+    const perAttempt = parseBoundedPositiveInt(
+      vars.EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD,
+      'EMBER_MODEL_BUDGET_PER_ATTEMPT_MICRO_USD',
+      G3_MAX_BUDGET_CEILINGS.perAttemptMicroUsd,
+      errors,
     );
+    const principalDaily = parseBoundedPositiveInt(
+      vars.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD,
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_MICRO_USD',
+      G3_MAX_BUDGET_CEILINGS.principalDailyMicroUsd,
+      errors,
+    );
+    const tenantDaily = parseBoundedPositiveInt(
+      vars.EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD,
+      'EMBER_MODEL_BUDGET_TENANT_DAILY_MICRO_USD',
+      G3_MAX_BUDGET_CEILINGS.tenantDailyMicroUsd,
+      errors,
+    );
+    const globalDaily = parseBoundedPositiveInt(
+      vars.EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD,
+      'EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD',
+      G3_MAX_BUDGET_CEILINGS.globalDailyMicroUsd,
+      errors,
+    );
+    const platformGlobalDaily = parseBoundedPositiveInt(
+      vars.GLOBAL_DAILY_CEILING_MICRO_USD,
+      'GLOBAL_DAILY_CEILING_MICRO_USD',
+      G3_MAX_BUDGET_CEILINGS.globalDailyMicroUsd,
+      errors,
+    );
+    parseBoundedPositiveInt(
+      vars.EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS,
+      'EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS',
+      G3_MAX_BUDGET_CEILINGS.principalDailyTurns,
+      errors,
+    );
+
+    if (principalDaily !== null && tenantDaily !== null && principalDaily > tenantDaily) {
+      errors.push('principal daily budget ceiling cannot exceed tenant daily budget ceiling');
+    }
+    if (tenantDaily !== null && globalDaily !== null && tenantDaily > globalDaily) {
+      errors.push('tenant daily budget ceiling cannot exceed global daily budget ceiling');
+    }
+    if (platformGlobalDaily !== null && globalDaily !== null && platformGlobalDaily > globalDaily) {
+      errors.push(
+        'GLOBAL_DAILY_CEILING_MICRO_USD cannot exceed EMBER_MODEL_BUDGET_GLOBAL_DAILY_MICRO_USD',
+      );
+    }
+    if (perAttempt !== null && principalDaily !== null && perAttempt > principalDaily) {
+      errors.push('per-attempt budget ceiling cannot exceed principal daily budget ceiling');
+    }
+  } else {
+    if (vars.EMBER_MODEL_MODE !== 'fake') {
+      errors.push(
+        `V2 staging must keep vars.EMBER_MODEL_MODE === "fake" until separate provider-canary approval (got ${JSON.stringify(vars.EMBER_MODEL_MODE)})`,
+      );
+    }
+    if (vars.EMBER_SANDBOX_MODE !== 'fake') {
+      errors.push(
+        `V2 staging must keep vars.EMBER_SANDBOX_MODE === "fake" until separate Daytona canary approval (got ${JSON.stringify(vars.EMBER_SANDBOX_MODE)})`,
+      );
+    }
   }
-  if (v2Config.vars?.EMBER_V2_STAGING_ISOLATED !== 'true') {
+  if (vars.EMBER_V2_STAGING_ISOLATED !== 'true') {
     errors.push('expected vars.EMBER_V2_STAGING_ISOLATED === "true"');
   }
   if (v2Config.workers_dev !== false || v2Config.preview_urls !== false) {
@@ -233,27 +356,72 @@ export function validateV2StagingConfig({
   return { ok: errors.length === 0, errors, notices };
 }
 
-function runCommand(commandName, args, cwd) {
+function runCommand(commandName, args, cwd, { capture = false } = {}) {
   return new Promise((resolveCommand, rejectCommand) => {
     const child = spawn(commandName, args, {
       cwd,
-      stdio: 'inherit',
+      stdio: capture ? ['ignore', 'pipe', 'pipe'] : 'inherit',
     });
+    let stdout = '';
+    let stderr = '';
+    if (capture) {
+      child.stdout.setEncoding('utf8').on('data', (chunk) => {
+        stdout += chunk;
+      });
+      child.stderr.setEncoding('utf8').on('data', (chunk) => {
+        stderr += chunk;
+      });
+    }
     child.once('error', rejectCommand);
     child.once('close', (code) => {
       if (code !== 0) {
         rejectCommand(new Error(`${commandName} exited with status ${code ?? 'unknown'}`));
         return;
       }
-      resolveCommand();
+      resolveCommand({ stdout, stderr });
     });
   });
+}
+
+async function verifyRealCanarySecrets(repoRoot) {
+  const { stdout } = await runCommand(
+    'pnpm',
+    [
+      '--filter',
+      '@ember/api',
+      'exec',
+      'wrangler',
+      'secret',
+      'list',
+      '--name',
+      'ember-v2-staging',
+      '--config',
+      'wrangler.v2-staging.jsonc',
+    ],
+    repoRoot,
+    { capture: true },
+  );
+  const parsed = JSON.parse(stdout);
+  if (!Array.isArray(parsed)) {
+    throw new Error('Unexpected wrangler secret list output');
+  }
+  const names = new Set(parsed.map((entry) => entry?.name).filter(Boolean));
+  const missing = REQUIRED_REAL_CANARY_SECRETS.filter((name) => !names.has(name));
+  if (missing.length > 0) {
+    throw new Error(`Missing required G3 staging secrets: ${missing.join(', ')}`);
+  }
+  if (names.has('DAYTONA_API_KEY')) {
+    throw new Error('DAYTONA_API_KEY must NOT be bound during G3 real-LLM canary');
+  }
 }
 
 async function main() {
   const args = new Set(process.argv.slice(2));
   const skipWrangler = args.has('--skip-wrangler');
   const requireProvisioned = args.has('--require-provisioned');
+  const allowRealLlmCanary = args.has('--allow-real-llm-canary');
+  const modelModeReal = args.has('--model-mode=real');
+  const verifySecrets = args.has('--verify-secrets');
   const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
 
   const v2Path = resolve(repoRoot, 'apps/api/wrangler.v2-staging.jsonc');
@@ -271,11 +439,17 @@ async function main() {
     ...v1Paths.map((p) => readFile(p, 'utf8')),
   ]);
 
+  const v2Config = parseJsonc(v2Source);
+  if (modelModeReal) {
+    v2Config.vars = { ...(v2Config.vars ?? {}), EMBER_MODEL_MODE: 'real' };
+  }
+
   const result = validateV2StagingConfig({
-    v2Config: parseJsonc(v2Source),
+    v2Config,
     v1Configs: v1Sources.map(parseJsonc),
     migrationExists: existsSync(migrationPath),
     requireProvisioned,
+    allowRealLlmCanary,
   });
 
   for (const notice of result.notices) {
@@ -292,6 +466,14 @@ async function main() {
 
   process.stdout.write('V2 staging config isolation and safety checks passed.\n');
 
+  if (verifySecrets) {
+    if (!allowRealLlmCanary) {
+      throw new Error('--verify-secrets requires --allow-real-llm-canary');
+    }
+    await verifyRealCanarySecrets(repoRoot);
+    process.stdout.write('V2 staging G3 canary secret bindings verified.\n');
+  }
+
   if (!skipWrangler) {
     process.stdout.write('Running local Wrangler bundle dry-run (no cloud resources touched)...\n');
     await runCommand(
@@ -305,6 +487,7 @@ async function main() {
         '--dry-run',
         '--config',
         'wrangler.v2-staging.jsonc',
+        ...(modelModeReal ? ['--var', 'EMBER_MODEL_MODE:real'] : []),
       ],
       repoRoot,
     );

@@ -1,4 +1,14 @@
 export const UNPROVISIONED_D1_PLACEHOLDER: string;
+export const G3_APPROVED_PROVIDER: string;
+export const G3_APPROVED_MODEL_ID: string;
+export const G3_MAX_BUDGET_CEILINGS: Readonly<{
+  perAttemptMicroUsd: number;
+  principalDailyMicroUsd: number;
+  tenantDailyMicroUsd: number;
+  globalDailyMicroUsd: number;
+  principalDailyTurns: number;
+}>;
+export const REQUIRED_REAL_CANARY_SECRETS: readonly string[];
 
 export interface WranglerV2StagingConfig {
   name?: string;
@@ -39,4 +49,5 @@ export function validateV2StagingConfig(input: {
   v1Configs: readonly WranglerV2StagingConfig[];
   migrationExists?: boolean;
   requireProvisioned?: boolean;
+  allowRealLlmCanary?: boolean;
 }): V2StagingValidationResult;

@@ -422,4 +422,103 @@ describe('Agent E — V2 proactive schedules in local workerd', () => {
     expect(scheduledCall?.prompt).toContain('Recent conversation:');
     expect(scheduledCall?.prompt).toContain('Please track the Q4 budget sign-off with finance.');
   });
+
+  it('persists app-closed executions across relaunch, respects cron timezones, and prevents extra runs after cancel', async () => {
+    // 1. Timezone accuracy: 08:00 in Asia/Shanghai (UTC+8) must resolve to 00:00:00Z, never 08:00:00Z
+    const shanghaiCron = await json<ProactiveScheduleSnapshot>(
+      await api('/v2/schedules', {
+        body: {
+          idempotencyKey: `tz-shanghai-${randomUUID()}`,
+          kind: 'brief',
+          title: 'Shanghai Morning Brief',
+          prompt: 'Morning check-in in CST.',
+          trigger: {
+            type: 'cron',
+            cronExpr: '0 8 * * *',
+            timezone: 'Asia/Shanghai',
+          },
+        },
+      }),
+      201,
+    );
+    expect(shanghaiCron.nextFireAt).not.toBeNull();
+    const shanghaiDate = new Date(shanghaiCron.nextFireAt!);
+    expect(shanghaiDate.getUTCHours()).toBe(0);
+    expect(shanghaiDate.getUTCMinutes()).toBe(0);
+
+    // 2. Interval brief fires once without an open chat/SSE client, then cancel prevents a 2nd occurrence
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'First brief while app was closed.',
+    });
+    const intervalSched = await json<ProactiveScheduleSnapshot>(
+      await api('/v2/schedules', {
+        body: {
+          idempotencyKey: `interval-cancel-${randomUUID()}`,
+          kind: 'brief',
+          title: 'Closed-App Brief',
+          prompt: 'Deliver brief while client is disconnected.',
+          trigger: {
+            type: 'interval',
+            intervalSeconds: 60,
+            firstFireAt: new Date(Date.now() + 250).toISOString(),
+          },
+          timezone: 'Asia/Shanghai',
+          deliveryMode: 'model_brief',
+        },
+      }),
+      201,
+    );
+
+    await expect
+      .poll(
+        async () => {
+          const detail = await json<ProactiveScheduleDetail>(
+            await api(`/v2/schedules/${intervalSched.scheduleId}`),
+            200,
+          );
+          return detail.latestRun?.status;
+        },
+        { timeout: 15_000, interval: 150 },
+      )
+      .toBe('completed');
+
+    const cancelled = await json<ProactiveScheduleSnapshot>(
+      await api(`/v2/schedules/${intervalSched.scheduleId}/cancel`, { method: 'POST' }),
+      200,
+    );
+    expect(cancelled.status).toBe('cancelled');
+    expect(cancelled.nextFireAt).toBeNull();
+
+    // Idempotent second cancel returns cancelled without creating an extra occurrence
+    const cancelledAgain = await json<ProactiveScheduleSnapshot>(
+      await api(`/v2/schedules/${intervalSched.scheduleId}/cancel`, { method: 'POST' }),
+      200,
+    );
+    expect(cancelledAgain.status).toBe('cancelled');
+
+    const beforeWaitMsgs = B1ConversationPageSchema.parse(
+      await json(await api(`/v1/conversations/${conversationId}/messages`), 200),
+    );
+    await new Promise((r) => setTimeout(r, 400));
+
+    // 3. Simulated cold app relaunch (fresh read with session token) sees single persisted outcome
+    const relaunchedDetail = await json<ProactiveScheduleDetail>(
+      await api(`/v2/schedules/${intervalSched.scheduleId}`),
+      200,
+    );
+    expect(relaunchedDetail.status).toBe('cancelled');
+    expect(relaunchedDetail.occurrenceCount).toBe(1);
+    expect(relaunchedDetail.recentRuns).toHaveLength(1);
+
+    const relaunchedMsgs = B1ConversationPageSchema.parse(
+      await json(await api(`/v1/conversations/${conversationId}/messages`), 200),
+    );
+    expect(relaunchedMsgs.messages).toHaveLength(beforeWaitMsgs.messages.length);
+    expect(
+      relaunchedMsgs.messages.filter(
+        (m) => m.kind === 'ember' && m.text.includes('Closed-App Brief'),
+      ),
+    ).toHaveLength(1);
+  });
 });

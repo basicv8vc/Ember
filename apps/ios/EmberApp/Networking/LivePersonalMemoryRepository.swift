@@ -101,6 +101,8 @@ struct LivePersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             ))
         } catch let error as AuthError where error.requiresNewSignIn {
             throw PersonalMemoryRepositoryError.unauthenticated
+        } catch AuthError.requestRejectedBeforeExecution {
+            throw PersonalMemoryRepositoryError.unauthenticated
         } catch {
             throw PersonalMemoryRepositoryError.unavailable
         }

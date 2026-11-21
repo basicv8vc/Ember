@@ -1,7 +1,9 @@
 import { type Id, isTerminalTaskStatus } from '@ember/domain';
 import { V2_B1_COMPAT_CONSTANTS, V2_TIMING_LIMITS } from '../contracts/constants.js';
 import {
+  PROACTIVE_SCHEDULER_MODEL_LABEL,
   PROACTIVE_TASK_DEADLINE_MS,
+  type ProactiveScheduleKind,
   type ProactiveScheduleTaskPayload,
 } from '../contracts/proactive-schedules.js';
 import { parseDurableTaskOutcome, parseDurableTurnOutcome } from '../contracts/validation.js';
@@ -687,6 +689,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
+      this.recordAndDeliverProactiveFailureSync(task, 'model_timeout', nowMs);
       this.purgeUncommittedTaskOutputsSync(task.id);
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
@@ -731,6 +734,11 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             WHERE id = ?`,
           nowMs,
           task.id,
+        );
+        this.recordAndDeliverProactiveFailureSync(
+          task,
+          anyUncertain ? 'model_unavailable' : 'lease_expired',
+          nowMs,
         );
         this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
         this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
@@ -1632,6 +1640,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       }
 
       const isCompleted = parsedTask.status !== 'failed';
+      const reasonCode = parsedTask.reasonCode ?? (isCompleted ? 'ok' : 'internal_error');
       finishTaskRunSync(this.deps.storage.sql, task, run, nowMs, {
         status: isCompleted ? 'completed' : 'failed',
         summaryText: parsedTask.summaryText ?? null,
@@ -1639,45 +1648,24 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         modelLabel: parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
         simulated: parsedTask.simulated ?? true,
         truncated: parsedTask.truncated ?? false,
-        reasonCode: parsedTask.reasonCode ?? (isCompleted ? 'ok' : 'internal_error'),
+        reasonCode,
       });
-      if (isCompleted && task.linked_message_id === null && this.hasProactiveSchedulesTableSync()) {
-        const proactive = sqlExecMaybe<{
-          readonly title: string;
-          readonly delivery_mode: 'direct_reminder' | 'model_brief';
-        }>(
-          this.deps.storage.sql,
-          `SELECT s.title, s.delivery_mode
-             FROM proactive_schedule_runs r
-             JOIN proactive_schedules s ON s.schedule_id = r.schedule_id
-            WHERE r.task_id = ?`,
-          task.id,
-        );
-        const conv = proactive !== null ? getMainConversationSync(this.deps.storage.sql) : null;
-        if (proactive !== null && conv !== null) {
-          const messageText = formatProactiveOutcomeMessage({
-            title: proactive.title,
-            deliveryMode: proactive.delivery_mode,
-            summaryText: parsedTask.summaryText ?? null,
-            detailText: parsedTask.detailText ?? null,
-          });
-          const delivered = insertEmberMessageSync({
-            sql: this.deps.storage.sql,
-            messageId: this.newId(),
-            conversationId: conv.id,
-            text: messageText,
-            modelLabel: parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
-            simulated: parsedTask.simulated ?? true,
-            nowMs,
-          });
-          this.deps.storage.sql.exec(
-            `UPDATE tasks SET linked_message_id = ?, updated_at_ms = ? WHERE id = ?`,
-            delivered.messageId,
-            nowMs,
-            task.id,
-          );
-        }
-      }
+      this.deliverProactiveTerminalOutcomeSync(
+        task,
+        isCompleted
+          ? {
+              status: 'completed',
+              summaryText: parsedTask.summaryText ?? null,
+              detailText: parsedTask.detailText ?? null,
+              modelLabel: parsedTask.modelLabel ?? V2_B1_COMPAT_CONSTANTS.simulatedModelLabel,
+              simulated: parsedTask.simulated ?? true,
+            }
+          : {
+              status: 'failed',
+              reasonCode,
+            },
+        nowMs,
+      );
 
       // Atomically commit only the winning run's staged output artifacts and purge uncommitted
       // rows from any other/failed attempts inside the same SQLite transaction as task completion.
@@ -1723,6 +1711,116 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
     return { accepted: committed.accepted };
+  }
+
+  private findProactiveRunScheduleSync(taskId: string): {
+    readonly title: string;
+    readonly kind: ProactiveScheduleKind;
+    readonly delivery_mode: 'direct_reminder' | 'model_brief';
+    readonly schedule_status: V2ScheduleRow['status'];
+  } | null {
+    if (!this.hasProactiveSchedulesTableSync()) return null;
+    return sqlExecMaybe<{
+      readonly title: string;
+      readonly kind: ProactiveScheduleKind;
+      readonly delivery_mode: 'direct_reminder' | 'model_brief';
+      readonly schedule_status: V2ScheduleRow['status'];
+    }>(
+      this.deps.storage.sql,
+      `SELECT ps.title, ps.kind, ps.delivery_mode, s.status AS schedule_status
+         FROM proactive_schedule_runs r
+         JOIN proactive_schedules ps ON ps.schedule_id = r.schedule_id
+         JOIN v2_schedules s ON s.schedule_id = ps.schedule_id
+        WHERE r.task_id = ?`,
+      taskId,
+    );
+  }
+
+  private deliverProactiveTerminalOutcomeSync(
+    task: TaskRow,
+    outcome:
+      | {
+          readonly status: 'completed';
+          readonly summaryText: string | null;
+          readonly detailText: string | null;
+          readonly modelLabel: string;
+          readonly simulated: boolean;
+        }
+      | {
+          readonly status: 'failed';
+          readonly reasonCode: string;
+        },
+    nowMs: number,
+  ): void {
+    if (task.linked_message_id !== null || task.cancel_requested_at_ms !== null) {
+      return;
+    }
+    const proactive = this.findProactiveRunScheduleSync(task.id);
+    if (proactive === null || proactive.schedule_status === 'cancelled') {
+      return;
+    }
+    const conv = getMainConversationSync(this.deps.storage.sql);
+    if (conv === null) {
+      return;
+    }
+
+    const messageText =
+      outcome.status === 'completed'
+        ? formatProactiveOutcomeMessage({
+            title: proactive.title,
+            deliveryMode: proactive.delivery_mode,
+            summaryText: outcome.summaryText,
+            detailText: outcome.detailText,
+          })
+        : formatProactiveFailureMessage({
+            title: proactive.title,
+            kind: proactive.kind,
+            reasonCode: outcome.reasonCode,
+          });
+
+    const delivered = insertEmberMessageSync({
+      sql: this.deps.storage.sql,
+      messageId: this.newId(),
+      conversationId: conv.id,
+      text: messageText,
+      modelLabel: outcome.status === 'completed' ? outcome.modelLabel : PROACTIVE_SCHEDULER_MODEL_LABEL,
+      simulated: outcome.status === 'completed' ? outcome.simulated : false,
+      nowMs,
+    });
+    this.deps.storage.sql.exec(
+      `UPDATE tasks SET linked_message_id = ?, updated_at_ms = ? WHERE id = ?`,
+      delivered.messageId,
+      nowMs,
+      task.id,
+    );
+  }
+
+  private recordAndDeliverProactiveFailureSync(
+    task: TaskRow,
+    reasonCode: string,
+    nowMs: number,
+  ): void {
+    if (task.cancel_requested_at_ms !== null) return;
+    const proactive = this.findProactiveRunScheduleSync(task.id);
+    if (proactive === null || proactive.schedule_status === 'cancelled') {
+      return;
+    }
+    this.deps.storage.sql.exec(
+      `INSERT INTO task_results (
+        task_id, summary_text, detail_text, model_label, simulated, truncated, reason_code, produced_at_ms
+      ) VALUES (?, ?, NULL, ?, 0, 0, ?, ?)
+      ON CONFLICT (task_id) DO NOTHING`,
+      task.id,
+      proactive.title,
+      PROACTIVE_SCHEDULER_MODEL_LABEL,
+      reasonCode,
+      nowMs,
+    );
+    this.deliverProactiveTerminalOutcomeSync(
+      task,
+      { status: 'failed', reasonCode },
+      nowMs,
+    );
   }
 
   private resolveTaskPrincipalIdSync(
@@ -1884,6 +1982,39 @@ function formatProactiveOutcomeMessage(input: {
     formatted = body.length > 0 ? `**${input.title}**\n\n${body}` : `**${input.title}**`;
   }
   return formatted.length > maxTextBytes ? `${formatted.slice(0, maxTextBytes - 1)}…` : formatted;
+}
+
+function describeProactiveFailureReason(reasonCode: string): string {
+  switch (reasonCode) {
+    case 'budget_exceeded':
+    case 'budget_halted':
+      return 'the daily model budget limit was reached';
+    case 'model_unauthorized_tenant':
+      return 'model execution is not enabled for this account';
+    case 'model_timeout':
+    case 'TIMEOUT':
+    case 'lease_expired':
+      return 'execution timed out before completing';
+    case 'model_unavailable':
+    case 'PROVIDER_UNAVAILABLE':
+    case 'model_gateway_unavailable':
+    case 'JOB_UNAVAILABLE':
+      return 'the model provider was temporarily unavailable';
+    default:
+      return 'execution did not complete';
+  }
+}
+
+function formatProactiveFailureMessage(input: {
+  readonly title: string;
+  readonly kind: ProactiveScheduleKind;
+  readonly reasonCode: string;
+}): string {
+  const kindLabel =
+    input.kind === 'follow_up' ? 'follow-up' : input.kind === 'brief' ? 'brief' : 'reminder';
+  const reasonText = describeProactiveFailureReason(input.reasonCode);
+  const formatted = `Could not deliver "**${input.title}**" — ${reasonText}. Open Schedules to review or reschedule this ${kindLabel}.`;
+  return formatted.length > 8_000 ? `${formatted.slice(0, 7_999)}…` : formatted;
 }
 
 function buildClaimAttemptContextFields<TExtra extends Record<string, unknown>>(

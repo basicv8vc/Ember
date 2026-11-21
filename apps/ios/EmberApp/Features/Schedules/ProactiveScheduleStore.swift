@@ -20,6 +20,24 @@ final class ProactiveScheduleStore {
     var hasRepository: Bool { repository != nil }
     var isMockOnly: Bool { repository?.isMockOnly ?? false }
 
+    var activeCount: Int {
+        schedules.filter { $0.status == .active }.count
+    }
+
+    var hasInFlightRun: Bool {
+        schedules.contains {
+            let status = $0.latestRun?.status
+            return status == "queued" || status == "running"
+        }
+    }
+
+    var nextActiveFireDate: Date? {
+        schedules
+            .filter { $0.status == .active }
+            .compactMap { $0.nextFireAt.flatMap(ConversationCardFormatting.date(from:)) }
+            .min()
+    }
+
     func refresh() async {
         guard let repository else { return }
         let startGeneration = generation
@@ -168,6 +186,8 @@ final class ProactiveScheduleStore {
             String(localized: "schedules.error.invalid_input", table: "Conversation")
         case .limitReached:
             String(localized: "schedules.error.limit_reached", table: "Conversation")
+        case .conflict:
+            String(localized: "schedules.error.conflict", table: "Conversation")
         case .unauthenticated:
             String(localized: "schedules.error.unauthenticated", table: "Conversation")
         default:

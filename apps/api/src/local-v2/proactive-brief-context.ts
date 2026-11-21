@@ -123,6 +123,25 @@ function truncateLine(text: string, maxChars: number): string {
   return `${normalized.slice(0, Math.max(0, maxChars - 1)).trimEnd()}…`;
 }
 
+function formatTimeInTimezone(ms: number, timezone: string): string {
+  if (!Number.isFinite(ms)) return 'unknown';
+  const iso = new Date(ms).toISOString();
+  try {
+    const local = new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(new Date(ms));
+    return `${local} (${timezone})`;
+  } catch {
+    return iso;
+  }
+}
+
 /**
  * Builds a bounded prompt for `model_brief` proactive schedule execution.
  * Combines the schedule instruction with optional personal memories, active schedules,
@@ -133,8 +152,12 @@ export function buildProactiveBriefPrompt(
   proactive: ProactiveScheduleTaskPayload,
   context?: ProactiveBriefContext,
 ): string {
+  const scheduledLocal = formatTimeInTimezone(proactive.scheduledForMs, proactive.timezone);
+  const scheduledUtc = Number.isFinite(proactive.scheduledForMs)
+    ? new Date(proactive.scheduledForMs).toISOString()
+    : 'unknown';
   const sections: string[] = [
-    `[Proactive ${proactive.kind} | ${proactive.title} | ${proactive.timezone}]\n${proactive.prompt.trim()}`,
+    `[Proactive ${proactive.kind} | ${proactive.title} | ${proactive.timezone}]\nScheduled time: ${scheduledLocal} [${scheduledUtc}]\n${proactive.prompt.trim()}`,
   ];
 
   const memories = (context?.personalMemories ?? [])
@@ -157,7 +180,12 @@ export function buildProactiveBriefPrompt(
     .slice(0, MAX_BRIEF_ACTIVE_SCHEDULES);
   if (activeOthers.length > 0) {
     const lines = activeOthers.map((s) => {
-      const next = s.nextFireAt === null ? 'unscheduled' : s.nextFireAt;
+      const next =
+        s.nextFireAt === null
+          ? 'unscheduled'
+          : Number.isFinite(Date.parse(s.nextFireAt))
+            ? formatTimeInTimezone(Date.parse(s.nextFireAt), s.timezone)
+            : s.nextFireAt;
       return `- [${s.kind}] ${truncateLine(s.title, MAX_BRIEF_ITEM_CHARS)} (next: ${next})`;
     });
     sections.push(`Active schedules:\n${lines.join('\n')}`);

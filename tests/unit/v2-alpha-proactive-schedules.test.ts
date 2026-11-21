@@ -7,6 +7,7 @@ import {
   PROACTIVE_SCHEDULER_MODEL_LABEL,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
+  formatProactiveScheduleConfirmation,
   parseProactiveScheduleTaskInput,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
@@ -740,5 +741,152 @@ describe('Agent E — V2 proactive schedules runtime', () => {
       code: 'INVALID_ARGUMENT',
       diagnostic: 'scheduled fire time must not be in the past',
     });
+  });
+
+  it('formats schedule confirmations in local schedule timezone and delivers at-most-once failure notices on terminal failure or timeout', async () => {
+    const confirmation = formatProactiveScheduleConfirmation({
+      title: 'Shanghai Brief',
+      kind: 'brief',
+      status: 'active',
+      nextFireAt: '2026-11-22T00:00:00.000Z',
+      timezone: 'Asia/Shanghai',
+    });
+    expect(confirmation).toContain('Scheduled "Shanghai Brief" (brief)');
+    expect(confirmation).toContain('08:00');
+    expect(confirmation).toContain('(Asia/Shanghai)');
+    expect(confirmation).not.toContain('2026-11-22T00:00:00.000Z');
+
+    // 1. Worker terminal failure (budget_exceeded) posts one visible failure notice in Chat
+    const h = createHarness(Date.parse('2026-11-20T08:00:00.000Z'));
+    const fireAt1 = '2026-11-20T08:05:00.000Z';
+    const sched1 = (await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: h.tenantId,
+      principalId: h.principalId,
+      agentId: h.agentId,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'fail-budget-1',
+        kind: 'follow_up',
+        title: 'Q4 Finance Follow-up',
+        prompt: 'Check finance approval status.',
+        trigger: { type: 'once', fireAt: fireAt1 },
+        timezone: 'Asia/Shanghai',
+        deliveryMode: 'model_brief',
+      },
+    })) as ProactiveScheduleSnapshot;
+
+    h.setNow(Date.parse(fireAt1));
+    await h.runAlarm();
+    const env1 = h.agentTaskQueue.sent[0]!;
+    const worker1 = randomUUID();
+    const claim1 = await h.core.claimDurableWork({ envelope: env1, workerId: worker1, leaseMs: 30_000 });
+    if (claim1.kind !== 'claimed') throw new Error('expected claimed');
+
+    const failCommit = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'task',
+      entityId: claim1.targetId,
+      leaseEpoch: claim1.leaseEpoch,
+      workerId: worker1,
+      outcome: {
+        status: 'failed',
+        summaryText: sched1.title,
+        detailText: null,
+        modelLabel: 'openrouter/deepseek',
+        simulated: false,
+        reasonCode: 'budget_exceeded',
+      },
+    });
+    expect(failCommit.accepted).toBe(true);
+
+    // Duplicate late commit must be rejected without posting a second message
+    const dupFailCommit = await h.core.commitDurableResult({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      entityType: 'task',
+      entityId: claim1.targetId,
+      leaseEpoch: claim1.leaseEpoch,
+      workerId: worker1,
+      outcome: {
+        status: 'failed',
+        summaryText: sched1.title,
+        detailText: null,
+        modelLabel: 'openrouter/deepseek',
+        simulated: false,
+        reasonCode: 'budget_exceeded',
+      },
+    });
+    expect(dupFailCommit.accepted).toBe(false);
+
+    const detail1 = (await h.core.proactiveSchedule({
+      kind: 'get',
+      tenantId: h.tenantId,
+      principalId: h.principalId,
+      agentId: h.agentId,
+      requestId: randomUUID(),
+      scheduleId: sched1.scheduleId,
+    })) as ProactiveScheduleDetail;
+    expect(detail1.latestRun?.status).toBe('failed');
+    expect(detail1.latestRun?.reasonCode).toBe('budget_exceeded');
+    expect(detail1.latestRun?.resultMessageId).toBeTruthy();
+
+    // 2. Deadline timeout convergence records task_results(model_timeout) and delivers one failure notice
+    const fireAt2 = '2026-11-20T09:00:00.000Z';
+    const sched2 = (await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: h.tenantId,
+      principalId: h.principalId,
+      agentId: h.agentId,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'fail-timeout-2',
+        kind: 'brief',
+        title: 'Midday Brief',
+        prompt: 'Summarize midday priorities.',
+        trigger: { type: 'once', fireAt: fireAt2 },
+        timezone: 'UTC',
+        deliveryMode: 'model_brief',
+      },
+    })) as ProactiveScheduleSnapshot;
+
+    h.setNow(Date.parse(fireAt2));
+    await h.runAlarm();
+    const env2 = h.agentTaskQueue.sent[1]!;
+    const worker2 = randomUUID();
+    const claim2 = await h.core.claimDurableWork({ envelope: env2, workerId: worker2, leaseMs: 30_000 });
+    if (claim2.kind !== 'claimed') throw new Error('expected claimed');
+
+    // Advance past PROACTIVE_TASK_DEADLINE_MS (300_000 ms) so DO alarm converges the timed-out task
+    h.setNow(Date.parse(fireAt2) + 310_000);
+    await h.runAlarm();
+
+    const detail2 = (await h.core.proactiveSchedule({
+      kind: 'get',
+      tenantId: h.tenantId,
+      principalId: h.principalId,
+      agentId: h.agentId,
+      requestId: randomUUID(),
+      scheduleId: sched2.scheduleId,
+    })) as ProactiveScheduleDetail;
+    expect(detail2.latestRun?.status).toBe('failed');
+    expect(detail2.latestRun?.reasonCode).toBe('model_timeout');
+    expect(detail2.latestRun?.completedAt).toBeTruthy();
+    expect(detail2.latestRun?.resultMessageId).toBeTruthy();
+
+    const page = await h.core.readMessages({
+      tenantId: h.tenantId,
+      agentId: h.agentId,
+      conversationId: h.conversationId,
+      after: 0,
+      limit: 20,
+    });
+    expect(page.messages).toHaveLength(2);
+    const texts = page.messages.map((m) => (m.kind === 'ember' ? m.text : ''));
+    expect(texts[0]).toContain('Q4 Finance Follow-up');
+    expect(texts[0]).toContain('daily model budget limit');
+    expect(texts[1]).toContain('Midday Brief');
+    expect(texts[1]).toContain('timed out');
   });
 });

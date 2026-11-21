@@ -521,4 +521,58 @@ describe('Agent E — V2 proactive schedules in local workerd', () => {
       ),
     ).toHaveLength(1);
   });
+
+  it('delivers an honest visible notice when a model_brief follow-up fails terminally in workerd', async () => {
+    // Queue a 5xx provider failure on fakeGateway so the model_brief run fails terminally
+    harness.fakeGateway.enqueueRules({
+      mode: 'error_5xx',
+    });
+
+    const fireAt = new Date(Date.now() + 250).toISOString();
+    const sched = await json<ProactiveScheduleSnapshot>(
+      await api('/v2/schedules', {
+        body: {
+          idempotencyKey: `fail-brief-${randomUUID()}`,
+          kind: 'follow_up',
+          title: 'Vendor Quote Follow-up',
+          prompt: 'Check vendor quote response.',
+          trigger: { type: 'once', fireAt },
+          timezone: 'Asia/Shanghai',
+          deliveryMode: 'model_brief',
+        },
+      }),
+      201,
+    );
+
+    await expect
+      .poll(
+        async () => {
+          const detail = await json<ProactiveScheduleDetail>(
+            await api(`/v2/schedules/${sched.scheduleId}`),
+            200,
+          );
+          return detail.latestRun?.status;
+        },
+        { timeout: 15_000, interval: 150 },
+      )
+      .toBe('failed');
+
+    const failedDetail = await json<ProactiveScheduleDetail>(
+      await api(`/v2/schedules/${sched.scheduleId}`),
+      200,
+    );
+    expect(failedDetail.latestRun?.resultMessageId).toBeTruthy();
+
+    const msgs = B1ConversationPageSchema.parse(
+      await json(await api(`/v1/conversations/${conversationId}/messages`), 200),
+    );
+    const notice = msgs.messages.find(
+      (m) => m.kind === 'ember' && m.message_id === failedDetail.latestRun?.resultMessageId,
+    );
+    expect(notice?.kind).toBe('ember');
+    if (notice?.kind === 'ember') {
+      expect(notice.text).toContain('Vendor Quote Follow-up');
+      expect(notice.text).toContain('Could not deliver');
+    }
+  });
 });

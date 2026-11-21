@@ -21,6 +21,7 @@ final class LiveConversationHostModel {
     private var pollTask: Task<Void, Never>?
     private var taskObserverTask: Task<Void, Never>?
     private var conversationRefreshTask: Task<Void, Never>?
+    private var scheduleArrivalTask: Task<Void, Never>?
     private var currentPollSessionID = UUID()
     private var sessionGeneration: UInt64 = 0
 
@@ -150,6 +151,7 @@ final class LiveConversationHostModel {
                 }
                 await syncTasksFromCloud(snapshot: recovered)
                 await syncCloudDeviceExecutorState()
+                await refreshSchedulesAndArmArrival()
             } catch {
                 command = .unknownAcknowledgement
                 reply = .failed(
@@ -183,6 +185,7 @@ final class LiveConversationHostModel {
             refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
             await syncCloudDeviceExecutorState()
+            await refreshSchedulesAndArmArrival()
         } catch let error as AuthError where error == .appleCancelled {
             status = "Sign-in cancelled."
         } catch {
@@ -202,6 +205,8 @@ final class LiveConversationHostModel {
         taskObserverTask = nil
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -327,6 +332,8 @@ final class LiveConversationHostModel {
         sessionGeneration &+= 1
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
         taskObserverTask?.cancel()
         taskObserverTask = nil
         deviceExecutorPreferenceKey = nil
@@ -656,6 +663,8 @@ final class LiveConversationHostModel {
         taskObserverTask = nil
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
         isPollingPaused = false
         currentPollSessionID = UUID()
         if let previousTask {
@@ -730,11 +739,13 @@ final class LiveConversationHostModel {
     }
 
     private var canPerformBackgroundRefresh: Bool {
+        !isLoading && !isSigningIn && canArmScheduleArrival
+    }
+
+    private var canArmScheduleArrival: Bool {
         profile != nil
             && !requiresSignIn
-            && !isLoading
             && !isSubmitting
-            && !isSigningIn
             && !isSigningOut
             && pollTask == nil
             && !isPollingPaused
@@ -755,7 +766,10 @@ final class LiveConversationHostModel {
         }
     }
 
-    private func performControlledConversationRefresh(expectedGeneration: UInt64) async {
+    private func performControlledConversationRefresh(
+        expectedGeneration: UInt64,
+        rearmSchedules: Bool = true
+    ) async {
         guard sessionGeneration == expectedGeneration, canPerformBackgroundRefresh else { return }
         do {
             let loaded = try await repository.load()
@@ -769,12 +783,98 @@ final class LiveConversationHostModel {
                 reply = .idle
             }
             await syncTasksFromCloud(snapshot: loaded)
+            if rearmSchedules {
+                await refreshSchedulesAndArmArrival()
+            }
         } catch is CancellationError {
             return
         } catch {
             guard sessionGeneration == expectedGeneration else { return }
             refreshErrorMessage = String(localized: "conversation.live.refresh_unavailable", table: "Conversation")
             await syncTasksFromCloud(snapshot: snapshot)
+        }
+    }
+
+    func handleSchedulesSheetDismissed() async {
+        if canPerformBackgroundRefresh {
+            await refreshConversationAndTasks()
+        } else {
+            await refreshSchedulesAndArmArrival()
+        }
+    }
+
+    private func refreshSchedulesAndArmArrival() async {
+        guard !requiresSignIn, !isMockMode, scheduleStore.hasRepository else { return }
+        await scheduleStore.refresh()
+        armScheduleArrivalRefreshIfNeeded()
+    }
+
+    private func armScheduleArrivalRefreshIfNeeded(allowImmediatePastDue: Bool = true) {
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
+        guard isViewVisible,
+              isSceneActive,
+              !isMockMode,
+              scheduleStore.hasRepository,
+              canArmScheduleArrival else { return }
+
+        let now = Date()
+        let initialDelaySeconds: TimeInterval
+        if scheduleStore.hasInFlightRun {
+            initialDelaySeconds = 2.0
+        } else if let nextFire = scheduleStore.nextActiveFireDate {
+            if nextFire <= now && !allowImmediatePastDue {
+                return
+            }
+            let delta = nextFire.timeIntervalSince(now) + 2.0
+            guard delta <= 300 else { return }
+            initialDelaySeconds = max(1.0, delta)
+        } else {
+            return
+        }
+
+        let expectedGeneration = sessionGeneration
+        scheduleArrivalTask = Task { [weak self] in
+            do {
+                try await Task.sleep(for: .seconds(initialDelaySeconds))
+            } catch {
+                return
+            }
+            guard let self else { return }
+            for attempt in 0..<4 {
+                guard !Task.isCancelled,
+                      self.sessionGeneration == expectedGeneration,
+                      self.isViewVisible,
+                      self.isSceneActive,
+                      self.canPerformBackgroundRefresh else { return }
+
+                await self.scheduleStore.refresh()
+                await self.performControlledConversationRefresh(
+                    expectedGeneration: expectedGeneration,
+                    rearmSchedules: false
+                )
+
+                guard !Task.isCancelled,
+                      self.sessionGeneration == expectedGeneration,
+                      self.isViewVisible,
+                      self.isSceneActive,
+                      self.canPerformBackgroundRefresh else { return }
+
+                let stillExpectingArrival =
+                    self.scheduleStore.hasInFlightRun
+                    || (self.scheduleStore.nextActiveFireDate.map { $0 <= Date() } ?? false)
+                guard stillExpectingArrival, attempt < 3 else { break }
+
+                do {
+                    try await Task.sleep(for: .seconds(2.5))
+                } catch {
+                    return
+                }
+            }
+            if self.sessionGeneration == expectedGeneration {
+                self.scheduleArrivalTask = nil
+                self.armScheduleArrivalRefreshIfNeeded(allowImmediatePastDue: false)
+            }
         }
     }
 
@@ -863,6 +963,8 @@ final class LiveConversationHostModel {
         taskObserverTask = nil
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
     }
 
     var screen: ConversationScreenState {
@@ -1147,6 +1249,8 @@ final class LiveConversationHostModel {
         taskObserverTask = nil
         conversationRefreshTask?.cancel()
         conversationRefreshTask = nil
+        scheduleArrivalTask?.cancel()
+        scheduleArrivalTask = nil
         isPollingPaused = false
 
         let sessionID = UUID()
@@ -1168,11 +1272,12 @@ final class LiveConversationHostModel {
                 }
 
                 do {
-                    guard let turn = try await repository.pollActiveTurn() else {
+                        guard let turn = try await repository.pollActiveTurn() else {
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         reply = .idle
                         pollTask = nil
                         isPollingPaused = false
+                        await refreshSchedulesAndArmArrival()
                         return
                     }
                     guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
@@ -1194,6 +1299,7 @@ final class LiveConversationHostModel {
                         pollTask = nil
                         isPollingPaused = false
                         await syncTasksFromCloud(snapshot: loaded)
+                        await refreshSchedulesAndArmArrival()
                         return
                     case .failed:
                         let loaded = try await repository.load()
@@ -1203,6 +1309,7 @@ final class LiveConversationHostModel {
                         pollTask = nil
                         isPollingPaused = false
                         await syncTasksFromCloud(snapshot: loaded)
+                        await refreshSchedulesAndArmArrival()
                         return
                     case .cancelled:
                         let loaded = try await repository.load()
@@ -1213,6 +1320,7 @@ final class LiveConversationHostModel {
                         pollTask = nil
                         isPollingPaused = false
                         await syncTasksFromCloud(snapshot: loaded)
+                        await refreshSchedulesAndArmArrival()
                         return
                     }
                 } catch is CancellationError {
@@ -1290,6 +1398,7 @@ struct LiveConversationHost: View {
     @State private var draft = ""
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
+    @State private var isShowingSchedulesSheet = false
     @State private var isShowingFileImporter = false
     @State private var isShowingPhotoPicker = false
     @State private var isShowingCamera = false
@@ -1428,6 +1537,19 @@ struct LiveConversationHost: View {
                 if model.isMockMode {
                     HStack(spacing: 12) {
                         MockOnlyBanner()
+                        if model.scheduleStore.hasRepository {
+                            Button {
+                                isShowingSchedulesSheet = true
+                            } label: {
+                                Label {
+                                    Text("schedules.nav_title", tableName: "Conversation")
+                                } icon: {
+                                    Image(systemName: "calendar.badge.clock")
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                            .accessibilityIdentifier("live-conversation-open-schedules")
+                        }
                         if model.memoryStore.hasRepository {
                             Button {
                                 isShowingMemorySheet = true
@@ -1452,6 +1574,23 @@ struct LiveConversationHost: View {
                             .font(.caption.weight(.semibold))
                             .accessibilityIdentifier("live-cloud-mode")
                         Spacer()
+                        if model.scheduleStore.hasRepository {
+                            Button {
+                                isShowingSchedulesSheet = true
+                            } label: {
+                                HStack(spacing: 4) {
+                                    Image(systemName: "calendar.badge.clock")
+                                    Text("schedules.nav_title", tableName: "Conversation")
+                                    if model.scheduleStore.activeCount > 0 {
+                                        Text("(\(model.scheduleStore.activeCount))")
+                                            .monospacedDigit()
+                                    }
+                                }
+                                .font(.caption.weight(.semibold))
+                            }
+                            .disabled(model.isSigningOut || model.isLoading)
+                            .accessibilityIdentifier("live-conversation-open-schedules")
+                        }
                         if model.memoryStore.hasRepository {
                             Button {
                                 isShowingMemorySheet = true
@@ -1631,6 +1770,17 @@ struct LiveConversationHost: View {
             .sheet(isPresented: $isShowingMemorySheet) {
                 PersonalMemorySheetView(store: model.memoryStore)
             }
+            .sheet(isPresented: $isShowingSchedulesSheet) {
+                ProactiveSchedulesSheetView(
+                    store: model.scheduleStore,
+                    onOpenChat: { isShowingSchedulesSheet = false }
+                )
+            }
+            .onChange(of: isShowingSchedulesSheet) { _, isShowing in
+                if !isShowing {
+                    Task { await model.handleSchedulesSheetDismissed() }
+                }
+            }
         }
     }
 
@@ -1644,6 +1794,9 @@ struct LiveConversationHost: View {
                 deviceExecutorError: model.deviceExecutorError,
                 onSetDeviceExecutorEnabled: { enabled in
                     Task { await model.setDeviceExecutorEnabled(enabled) }
+                },
+                onOpenChat: {
+                    model.selectedTab = .chat
                 },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)

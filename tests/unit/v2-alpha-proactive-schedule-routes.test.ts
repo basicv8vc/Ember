@@ -127,11 +127,36 @@ describe('Agent E — proactive brief context builder', () => {
     scheduledForMs: Date.parse('2026-11-20T16:00:00.000Z'),
   };
 
-  it('builds base prompt when no context is supplied', () => {
+  it('builds base prompt with scheduled local and UTC time when no context is supplied', () => {
     const prompt = buildProactiveBriefPrompt(basePayload);
     expect(prompt).toBe(
-      '[Proactive brief | Morning Brief | America/Los_Angeles]\nSummarize priorities and open follow-ups.',
+      '[Proactive brief | Morning Brief | America/Los_Angeles]\nScheduled time: Nov 20, 2026, 08:00 (America/Los_Angeles) [2026-11-20T16:00:00.000Z]\nSummarize priorities and open follow-ups.',
     );
+  });
+
+  it('formats other active schedules in their own timezones', () => {
+    const prompt = buildProactiveBriefPrompt(
+      {
+        ...basePayload,
+        timezone: 'Asia/Shanghai',
+        scheduledForMs: Date.parse('2026-11-21T00:00:00.000Z'),
+      },
+      {
+        activeSchedules: [
+          makeSnapshot({
+            scheduleId: 'sched-other',
+            kind: 'follow_up',
+            title: 'NYC Check-in',
+            timezone: 'America/New_York',
+            nextFireAt: '2026-11-22T13:00:00.000Z',
+          }),
+        ],
+      },
+    );
+    expect(prompt).toContain(
+      'Scheduled time: Nov 21, 2026, 08:00 (Asia/Shanghai) [2026-11-21T00:00:00.000Z]',
+    );
+    expect(prompt).toContain('NYC Check-in (next: Nov 22, 2026, 08:00 (America/New_York))');
   });
 
   it('includes only other active schedules and bounded recent conversation turns', () => {

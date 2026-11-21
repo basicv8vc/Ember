@@ -10,7 +10,7 @@ struct TaskInboxView: View {
 
     private enum Mode {
         case legacyDemo(TaskJourneySession, () -> Void)
-        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (UUID) -> Void)
+        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (() -> Void)?, (UUID) -> Void)
     }
 
     private let mode: Mode
@@ -26,6 +26,7 @@ struct TaskInboxView: View {
         isDeviceExecutorEnabled: Bool = false,
         deviceExecutorError: String? = nil,
         onSetDeviceExecutorEnabled: @escaping (Bool) -> Void = { _ in },
+        onOpenChat: (() -> Void)? = nil,
         onOpenTask: @escaping (UUID) -> Void
     ) {
         self.mode = .sessionTasks(
@@ -37,6 +38,7 @@ struct TaskInboxView: View {
                 errorMessage: deviceExecutorError,
                 onSetEnabled: onSetDeviceExecutorEnabled
             ),
+            onOpenChat,
             onOpenTask
         )
     }
@@ -45,7 +47,7 @@ struct TaskInboxView: View {
         switch mode {
         case .legacyDemo(let session, let onSelectTask):
             LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
-        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenTask):
+        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenChat, let onOpenTask):
             SessionTaskInboxContent(
                 store: store,
                 scheduleStore: scheduleStore,
@@ -53,6 +55,7 @@ struct TaskInboxView: View {
                 isDeviceExecutorEnabled: deviceWiring.isEnabled,
                 deviceExecutorError: deviceWiring.errorMessage,
                 onSetDeviceExecutorEnabled: deviceWiring.onSetEnabled,
+                onOpenChat: onOpenChat,
                 onOpenTask: onOpenTask
             )
         }
@@ -66,6 +69,7 @@ private struct SessionTaskInboxContent: View {
     let isDeviceExecutorEnabled: Bool
     let deviceExecutorError: String?
     let onSetDeviceExecutorEnabled: (Bool) -> Void
+    let onOpenChat: (() -> Void)?
     let onOpenTask: (UUID) -> Void
     @State private var isShowingSchedulesSheet = false
     @State private var isShowingPythonComposer = false
@@ -258,7 +262,15 @@ private struct SessionTaskInboxContent: View {
         }
         .sheet(isPresented: $isShowingSchedulesSheet) {
             if let scheduleStore {
-                ProactiveSchedulesSheetView(store: scheduleStore)
+                ProactiveSchedulesSheetView(
+                    store: scheduleStore,
+                    onOpenChat: onOpenChat.map { openChat in
+                        {
+                            isShowingSchedulesSheet = false
+                            openChat()
+                        }
+                    }
+                )
             }
         }
         .sheet(isPresented: $isShowingPythonComposer) {

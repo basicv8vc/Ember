@@ -12,30 +12,29 @@
 
 **Product Philosophy:** *Remember what matters. Show what's next.*
 
-Today, both [`PersonalMemorySheetView.swift`](../../apps/ios/EmberApp/Features/Memory/PersonalMemorySheetView.swift) and [`ProactiveSchedulesSheetView.swift`](../../apps/ios/EmberApp/Features/Schedules/ProactiveSchedulesSheetView.swift) open with **developer-oriented creation forms at the top of the screen**, pushing the user's saved memories and existing schedules below the fold. On a 320pt iPhone SE or with large Dynamic Type, a user opening Memory or Schedules to check *"What does Ember remember about me?"* or *"What will Ember do next?"* must scroll past segmented pickers, text inputs, and date pickers before seeing any personal content.
+Today, both [`PersonalMemorySheetView.swift`](../../apps/ios/EmberApp/Features/Memory/PersonalMemorySheetView.swift) and [`ProactiveSchedulesSheetView.swift`](../../apps/ios/EmberApp/Features/Schedules/ProactiveSchedulesSheetView.swift) open with **developer-oriented creation forms at the top of the screen**, pushing the user's saved memories and existing schedules below the fold. On a `320pt` iPhone SE or with large Dynamic Type, a user opening Memory or Schedules to check *"What does Ember remember about me?"* or *"What will Ember do next?"* must scroll past segmented pickers, text inputs, and date pickers before seeing any personal content.
 
 This proposal shifts both sheets from **form-first** to **content-first** while:
 
 1. **Zero new backend capabilities or API contracts:** Reuses existing `PersonalMemoryContracts.swift`, `PersonalMemoryStore.swift`, `ProactiveScheduleContracts.swift`, and `ProactiveScheduleStore.swift`.
-2. **Strict truthfulness:** Never fabricates inferred memories, next execution times, task completion for in-flight `once` triggers, or exact chat scroll claims unless wired to authoritative `resultMessageId`.
-3. **Calm, native SwiftUI language (coordinated with UX-04 / PR #274):** Aligns with Agent A's *Warm, Quiet, Competent* Chat redesign (`docs/design/UX04_CHAT_EXPERIENCE_REDESIGN.md`, PR `#274`) and `EmberDesignTokens` — clean typography, reduced card density (single-surface `16pt` cards with soft inline result wells rather than nested bordered boxes), `44×44pt` hit targets, `ViewThatFits` narrow-width adaptation at `320pt`, hidden raw internal `key` strings on Memory cards, and preserved V1 `.endpointNotReady` and `MockOnlyBanner` honesty. Note that UX-04 moves the Chat-tab entry points for Memory and Schedules into the compact `⋯` header menu (complementing the `Tasks`-tab toolbar button), so these redesigned sheets act as focused, content-first destinations.
+2. **Strict truthfulness:** Never fabricates inferred memories, next execution times, task completion for in-flight `once` triggers, cloud execution guarantees in `MOCK ONLY` / V1 modes, or exact chat scroll claims.
+3. **Calm, native SwiftUI language (coordinated with UX-04 / PR `#274`):** Aligns with Agent A's *Warm, Quiet, Competent* Chat redesign (`docs/design/UX04_CHAT_EXPERIENCE_REDESIGN.md`, PR `#274`) and `EmberDesignTokens` — clean typography, reduced card density (single-surface `16pt` cards with soft inline result wells rather than nested bordered boxes), **`≥44×44pt` touch targets**, `ViewThatFits` narrow-width adaptation at `320pt`, hidden raw internal `key` strings on Memory cards, and preserved V1 `.endpointNotReady` and `MockOnlyBanner` honesty. Note that UX-04 moves the Chat-tab entry points for Memory and Schedules into the compact `⋯` header menu (complementing the `Tasks`-tab toolbar button), so these redesigned sheets act as focused, content-first destinations.
 
 ---
 
 ## Before / After Structural Comparison
 
-### Summary of Changes
-
 | Surface | Before (`main` @ `f37ffc6`) | After (UX-06 Proposal) |
 | --- | --- | --- |
-| **Memory Sheet Top** | Subtitle → inline `composerCard` (Type picker + multiline TextField + char count + Save) → Saved list below | Toolbar `+ Add` + `Close` → concise subtitle → **Saved Memory list first** (Empty / Loading / Error / Items) |
-| **Memory Creation** | Always occupies top ~220pt above saved items | Secondary entry (`+ Add` in toolbar; primary CTA in Empty state) opens a focused `AddMemorySheet` |
-| **Memory Row Content** | Shows `[Preference/Fact pill] [monospaced raw key] [pencil] [trash]`, content, `source · updatedAt` | **Hides raw `key` from primary card**; shows `[Preference/Fact pill]`, `44×44pt` Edit/Delete actions, readable `content`, truthful `source · updatedAt` |
+| **Memory Sheet Top** | Subtitle → inline `composerCard` (~220pt tall: Type picker + multiline TextField + char count + Save) → Saved list below | Toolbar `+ Add` + `Close` → environment-accurate subtitle → **Saved Memory list first** (Empty / Loading / Error / Items) |
+| **Memory Creation** | Always occupies top ~220pt above saved items | Secondary entry (`+ Add` in toolbar; primary CTA in Empty state) opens a focused modal `AddMemorySheet` |
+| **Memory Row Content** | Shows `[Preference/Fact pill] [monospaced raw key] [pencil] [trash]`, content, `source · updatedAt`; small icon buttons without `44×44pt` min frame | **Hides raw `key` from primary card**; shows `[Preference/Fact pill]`, **`44×44pt` Edit/Delete actions**, readable `content`, truthful `source · updatedAt` |
 | **Memory Copy Honesty** | Empty state refers to `"Add a preference or fact above..."` | Empty state refers to `"Add Memory"`; subtitle and delete alert remain explicit that editing/deleting only affects future conversations and never alters past chat history |
-| **Schedules Sheet Top** | Subtitle → tall `composerCard` (Kind + Title + Prompt + Frequency + DatePicker + 4 preset chips + Timezone + Create) → flat schedule list below | Toolbar `+ New` + `Close` → concise subtitle → **Existing Schedules first**, grouped lightly by **Active ("Up next")**, **Paused**, and **Recent History** |
-| **Schedule Creation** | Always occupies top ~360–420pt above existing schedules | Secondary entry (`+ New` in toolbar; primary CTA in Empty state) opens a focused `CreateScheduleSheet` |
-| **Schedule Status Truth** | `once` schedule shows `Completed` pill while `latestRun.status` is still `queued`/`running`; `Cancel` hidden when `schedule.status.isTerminal`; `waiting_approval`/`cancelled` run states fall into generic branch | **Authoritative paired status**: a `once` schedule whose `latestRun` is still `queued`, `running`, or `waiting_approval` displays `Queued` / `In progress` / `Needs confirmation` (never premature `Completed`) and keeps `Cancel` enabled; handles all 7 backend `ProactiveScheduleRunSnapshot.status` values |
-| **Schedule Next / Last Run** | Displays `Next: <date> (Asia/Shanghai)` with raw IANA string in parens; `"View in Chat"` only dismisses sheet | Displays `Next: <date>` in `schedule.timezone` (showing timezone name cleanly when it differs from device timezone or in secondary metadata); `"View in Chat"` either scrolls to authoritative `resultMessageId` (Decision #1) or uses honest `"Open Chat"` copy |
+| **Schedules Sheet Top** | Subtitle → tall `composerCard` (~360–420pt: Kind + Title + Prompt + Frequency + DatePicker + 4 preset chips + Timezone + Create) → flat schedule list below | Toolbar `+ New` + `Close` → environment-honest subtitle → **Existing Schedules first**, grouped lightly by **Active ("Up next")**, **Paused**, and **Recent History** |
+| **Schedule Creation** | Always occupies top ~360–420pt above existing schedules | Secondary entry (`+ New` in toolbar; primary CTA in Empty state) opens a focused modal `CreateScheduleSheet` |
+| **Schedule Subtitle Honesty** | Unconditionally displays `"Ember runs them in the cloud even when the app is closed"` even in `MOCK ONLY` and V1 `endpointNotReady` states | Cloud-execution copy shown **only** when supported on a real V2 environment; `MOCK ONLY` displays local-preview copy and V1 `endpointNotReady` displays neutral availability copy |
+| **Schedule State vs Run State** | `once` schedule shows `Completed` pill while `latestRun.status` is still `queued`/`running`; `Cancel` hidden when `schedule.status.isTerminal`; `waiting_approval`/`cancelled` run states fall into generic branch | **Preserves separate Schedule State vs Latest Run State:** recurring active schedules remain `Active` even if a historical run failed (latest run separately shows `Last run failed`), while fired `once` schedules pair `schedule.status` + `latestRun?.status` so in-flight runs read `Triggered · In progress` (never premature `Completed`) and remain cancellable; handles all 7 backend run states |
+| **Schedule Actions & Chat Link** | `"View in Chat"` only dismisses sheet / switches tab; raw `(Asia/Shanghai)` in parens next to Next date | Renames **`View in Chat` → `Open Chat`** (Decision #1 — honest tab-switch + sheet-dismiss without implying `resultMessageId` scroll); all action buttons enforce **`≥44pt` height** and wrap cleanly at `320pt`; timezone shown cleanly when different from device timezone |
 
 ---
 
@@ -44,20 +43,23 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 ### 1. Information Hierarchy
 
 1. **Navigation Bar:**
-   - **Leading:** `+ Add` (`accessibilityIdentifier: "memory-add-button"`, disabled when `store.isEndpointUnavailable || store.isAtCapacity`)
+   - **Leading:** `+ Add` (`accessibilityIdentifier: "memory-add-button"`, `≥44pt` tap target, disabled when `store.isEndpointUnavailable || store.isAtCapacity`)
    - **Title:** `Memory` / `记忆` (`.inline`)
    - **Trailing:** `Close` (`"memory-sheet-close"`)
-2. **Environment & Status Context (top of scroll, only when active):**
-   - `MockOnlyBanner` if `store.isMockOnly`
-   - Quiet 2-line subtitle explaining persistence scope (explicit items carry into future conversations; past chat transcript is unchanged)
+2. **Environment & Status Context (top of scroll, strictly gated to actual state):**
+   - `MockOnlyBanner` if `store.isMockOnly` (clearly distinguishes simulated local preview from Live Cloud)
+   - Quiet 2-line context subtitle:
+     - **Live V2:** `"Explicit preferences and facts Ember uses in future conversations. Past chat history stays unchanged."`
+     - **Mock Only:** `"Local preview items used only in this simulated session. Past chat history stays unchanged."`
+     - **V1 Unavailable:** Omitted or neutral `"Personal memory requires a V2 Ember Cloud environment."`
    - `InlineNotice` (`"memory-endpoint-unavailable"`) if V1 backend returns `.endpointNotReady`
-   - `InlineNotice` (`"memory-error-notice"`) if `store.errorMessage != nil` (plus inline Retry button when items are empty)
+   - `InlineNotice` (`"memory-error-notice"`) if `store.errorMessage != nil` (or `ErrorPlaceholder` with Retry when `items.isEmpty`)
    - `InlineNotice` (`"memory-capacity-notice"`) if `store.isAtCapacity` (`items.count >= limits.maxItems`)
 3. **Primary Content — Saved Memories ("What Ember remembers"):**
-   - Section header: `Saved Memory` + compact count (`3 / 50`)
+   - Section header: `Saved Memory` + compact count (`2 / 50`)
    - Ordered newest-updated first (`PersonalMemoryStore.sortItems`)
    - Each card (`"memory-item-<uuid>"`):
-     1. **Header:** Kind badge (`Preference` / `Fact`) + Edit (`44×44pt` min hit area) + Delete (`44×44pt` min hit area)
+     1. **Header:** Kind badge (`Preference` / `Fact`) + Edit (`44×44pt` hit area) + Delete (`44×44pt` hit area)
      2. **Body:** Human-readable `item.content` (`.body`, `.primary`, selectable)
      3. **Footer:** Truthful provenance icon + label (`Saved from chat` vs `Saved in Memory`) + `·` + formatted `updatedAt`
 4. **Secondary Creation / Editing Surfaces (Modal Sub-Sheets):**
@@ -80,111 +82,103 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 
 ### 3. Main User Flows
 
-1. **Inspect what Ember remembers:** Open Memory sheet from Chat header → `store.refresh()` loads `GET /v2/memories` → user immediately sees saved preferences/facts with source and timestamp.
-2. **Add a memory:** Tap `+ Add` in toolbar (or `Add Memory` button in Empty state) → `AddMemorySheet` opens → choose `Preference` or `Fact`, enter text → tap `Save` → `store.save(...)` waits for server `200/201` confirmation (with idempotent `clientRequestID` retry if needed) → sheet dismisses on success and new item appears at top of list. On error, sheet stays open and displays `store.errorMessage` inside the sheet.
-3. **Edit a memory:** Tap Edit (`pencil`) on a card → `EditMemorySheet` opens pre-filled with `item.kind` and `item.content`, plus read-only provenance footnote → tap `Save` → `store.update(id:kind:content:)` awaits server `200` → sheet dismisses (or if `404 notFound`, removes stale item and surfaces localized message).
-4. **Delete a memory:** Tap Delete (`trash`) on a card → native `.alert` asks `"Delete this memory?"` explaining Ember will stop using it in **future** conversations (without claiming past chats are deleted) → confirm `Delete` → `store.delete(id:)` awaits server `200` → row removed.
+1. **Inspect what Ember remembers:** Open Memory sheet → `store.refresh()` loads `GET /v2/memories` → user immediately sees saved preferences/facts with source and timestamp.
+2. **Add a memory:** Tap `+ Add` in toolbar (or `Add Memory` button in Empty state) → `AddMemorySheet` opens → choose `Preference` or `Fact`, enter text → tap `Save` → `store.save(...)` waits for server `200/201` confirmation (with idempotent `clientRequestID` retry if needed) → sheet dismisses on success and new item appears at top of list. On error, sheet stays open, preserves draft, and displays `store.errorMessage` inside the sheet.
+3. **Edit a memory:** Tap Edit (`pencil`, `44×44pt`) on a card → `EditMemorySheet` opens pre-filled with `item.kind` and `item.content`, plus read-only provenance footnote → tap `Save` → `store.update(id:kind:content:)` awaits server `200` → sheet dismisses (or if `404 notFound`, removes stale item and surfaces localized message).
+4. **Delete a memory:** Tap Delete (`trash`, `44×44pt`) on a card → native `.alert` asks `"Delete this memory?"` explaining Ember will stop using it in **future** conversations (without claiming past chats are deleted) → confirm `Delete` → `store.delete(id:)` awaits server `200` → row removed.
 
-### 4. Memory Wireframes (320pt / 375pt / 393pt)
+### 4. Memory Before / After Wireframes (`320pt` Side-by-Side + `375pt` / `393pt` Adaptation)
 
-#### State M1: Saved Items Present
+#### State M1: Saved Items Present (`320pt` Side-by-Side — Live V2 vs Mock Distinction)
 
-**320pt (iPhone SE — Compact width)**
 ```text
+BEFORE (320pt — Current main, Live V2)         AFTER (320pt — Redesigned, Live V2)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                    Memory  Close │            │ + Add        Memory        Close │ <- 44pt nav actions
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Explicit preferences and facts   │            │ Explicit items Ember uses in new │
+│ Ember remembers across new...    │            │ chats. Past chats stay unchanged.│
+│ ┌──────────────────────────────┐ │            │                                  │
+│ │ [ Preference ]  [   Fact   ] │ │            │ Saved Memory              2 / 50 │ <- Content first!
+│ │ ┌──────────────────────────┐ │ │            │ ┌──────────────────────────────┐ │
+│ │ │ e.g. Keep morning briefs │ │ │            │ │ [Preference]       [✎]  [🗑] │ │ <- Raw key hidden;
+│ │ │                          │ │ │            │ │ Keep morning briefs concise  │ │    44x44pt buttons
+│ │ └──────────────────────────┘ │ │            │ │ with bullet points and clear │ │
+│ │ 0 / 500             [ Save ] │ │            │ │ next steps.                  │ │
+│ └──────────────────────────────┘ │            │ │ 💬 Saved from chat · Nov 20  │ │
+│                                  │            │ └──────────────────────────────┘ │
+│ Saved Memory              2 / 50 │            │ ┌──────────────────────────────┐ │
+│ ┌──────────────────────────────┐ │            │ │ [Fact]             [✎]  [🗑] │ │
+│ │ [Preference] brief.fmt [✎][🗑]│ │ <- raw key │ │ Based in Shanghai (UTC+8);   │ │
+│ │ Keep morning briefs concise  │ │    clutter │ │ prefer metric units.         │ │
+│ │ with bullet points...        │ │            │ │ ✎ Saved in Memory · Nov 21   │ │
+│ │ Saved from chat · Nov 20     │ │            │ └──────────────────────────────┘ │
+└─┴──────────────────────────────┴─┘            └──────────────────────────────────┘
+
+Mock Prototype Mode Distinction (when store.isMockOnly == true):
 ┌──────────────────────────────────┐
-│ + Add       Memory         Close │  <- 320pt inline nav bar
+│ + Add        Memory        Close │
 ├──────────────────────────────────┤
-│ Explicit items Ember uses in new │
-│ chats. Past chats stay unchanged.│
-│                                  │
-│ Saved Memory               2 / 50│
 │ ┌──────────────────────────────┐ │
-│ │ [Preference]        [✎] [🗑] │ │  <- No raw key! 44x44pt buttons
-│ │ Keep morning briefs concise  │ │
-│ │ with bullet points and clear │ │
-│ │ next steps.                  │ │
-│ │ 💬 Saved from chat · Nov 20  │ │
-│ └──────────────────────────────┘ │
-│ ┌──────────────────────────────┐ │
-│ │ [Fact]              [✎] [🗑] │ │
-│ │ Based in Shanghai (UTC+8);   │ │
-│ │ prefer metric units.         │ │
-│ │ ✎ Saved in Memory · Nov 21   │ │
-│ └──────────────────────────────┘ │
-└──────────────────────────────────┘
+│ │ 🧪 MOCK ONLY                 │ │ <- Persistent orange MockOnlyBanner
+│ │ Simulated preview data...    │ │    clearly separates local demo
+│ └──────────────────────────────┘ │    from Live Cloud persistence
+│ Local preview items used only in │
+│ this simulated session...        │
+│ Saved Memory              1 / 50 │
+│ ...                              │
 ```
 
-**375pt (iPhone 13 mini / SE 3rd) & 393pt (iPhone 15/16)**
+#### State M2: Empty (`320pt` Side-by-Side)
+
 ```text
-┌───────────────────────────────────────────┐  (375pt / 393pt: wider line measure,
-│ + Add             Memory            Close │   same single-column 16pt inset,
-├───────────────────────────────────────────┤   capped at maxWidth: 720pt on iPad)
-│ Explicit preferences and facts Ember      │
-│ remembers across new conversations.       │
-│                                           │
-│ Saved Memory                        2 / 50│
-│ ┌───────────────────────────────────────┐ │
-│ │ [Preference]                 [✎] [🗑] │ │
-│ │ Keep morning briefs concise with      │ │
-│ │ bullet points and clear next steps.   │ │
-│ │ 💬 Saved from chat · Nov 20, 08:00    │ │
-│ └───────────────────────────────────────┘ │
-│ ┌───────────────────────────────────────┐ │
-│ │ [Fact]                       [✎] [🗑] │ │
-│ │ Based in Shanghai (UTC+8); prefer     │ │
-│ │ metric units.                         │ │
-│ │ ✎ Saved in Memory · Nov 21, 09:15     │ │
-│ └───────────────────────────────────────┘ │
-└───────────────────────────────────────────┘
+BEFORE (320pt — Current main)                   AFTER (320pt — Redesigned)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                    Memory  Close │            │ + Add        Memory        Close │
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Explicit preferences and facts   │            │ Explicit items Ember uses in new │
+│ Ember remembers across new...    │            │ chats. Past chats stay unchanged.│
+│ ┌──────────────────────────────┐ │            │                                  │
+│ │ [ Preference ]  [   Fact   ] │ │            │ ┌──────────────────────────────┐ │
+│ │ ┌──────────────────────────┐ │ │            │ │          [🧠 icon]           │ │
+│ │ │ e.g. Keep morning briefs │ │ │            │ │    No saved memories yet     │ │
+│ │ └──────────────────────────┘ │ │            │ │ Save a preference or fact so │ │
+│ │ 0 / 500             [ Save ] │ │            │ │ Ember can use it in future   │ │
+│ └──────────────────────────────┘ │            │ │ conversations.               │ │
+│ ┌──────────────────────────────┐ │            │ │                              │ │
+│ │          [🧠 icon]           │ │            │ │       [ + Add Memory ]       │ │ <- ≥44pt primary CTA
+│ │    No saved memories yet     │ │            │ └──────────────────────────────┘ │
+│ │ Add a preference or fact     │ │            │                                  │
+│ │ above so Ember can carry...  │ │ <- "above" │                                  │
+└─┴──────────────────────────────┴─┘            └──────────────────────────────────┘
 ```
 
-#### State M2: Empty
+#### State M3: Adding Memory (`320pt` Side-by-Side — Inline Form vs Modal Sub-Sheet)
+
 ```text
-┌──────────────────────────────────┐  (320pt; scales cleanly to 375/393pt)
-│ + Add       Memory         Close │
-├──────────────────────────────────┤
-│ Explicit items Ember uses in new │
-│ chats. Past chats stay unchanged.│
-│                                  │
-│ ┌──────────────────────────────┐ │
-│ │          [🧠 icon]           │ │
-│ │    No saved memories yet     │ │
-│ │ Save a preference or fact so │ │
-│ │ Ember can use it in future   │ │
-│ │ conversations.               │ │
-│ │                              │ │
-│ │       [ + Add Memory ]       │ │  <- .borderedProminent primary CTA
-│ └──────────────────────────────┘ │
-└──────────────────────────────────┘
+BEFORE (320pt — Inline Top Form)                AFTER (320pt — Focused AddMemorySheet)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                    Memory  Close │            │ Cancel     Add Memory       Save │ <- Save shows spinner
+├──────────────────────────────────┤            ├──────────────────────────────────┤    while saving
+│ (Subtitle + form share scroll    │            │ ┌──────────────┬───────────────┐ │
+│  above existing items; keyboard  │            │ │  Preference  │     Fact      │ │ <- Segmented picker
+│  pushes saved list off-screen)   │            │ └──────────────┴───────────────┘ │
+│ ┌──────────────────────────────┐ │            │ ┌──────────────────────────────┐ │
+│ │ [ Preference ]  [   Fact   ] │ │            │ │ e.g. Keep morning briefs     │ │
+│ │ [TextField                 ] │ │            │ │ concise with bullet points   │ │
+│ │ 14 / 500            [ Save ] │ │            │ │                              │ │
+│ └──────────────────────────────┘ │            │ └──────────────────────────────┘ │
+│ Saved Memory              2 / 50 │            │ 0 / 500                          │
+│ ...                              │            │ Ember will use this in future    │
+│                                  │            │ chats. Past chats stay unchanged.│
+│                                  │            │ [Error InlineNotice if failed;   │
+│                                  │            │  draft stays preserved on error] │
+└──────────────────────────────────┘            └──────────────────────────────────┘
 ```
 
-#### State M3: Adding Memory (`AddMemorySheet`)
-```text
-┌──────────────────────────────────┐
-│ Cancel     Add Memory       Save │  <- Save disabled until valid; shows
-├──────────────────────────────────┤     spinner while store.isSaving
-│ ┌──────────────┬───────────────┐ │
-│ │  Preference  │     Fact      │ │  <- Segmented picker
-│ └──────────────┴───────────────┘ │
-│ ┌──────────────────────────────┐ │
-│ │ e.g. Keep morning briefs     │ │
-│ │ concise with bullet points   │ │
-│ │                              │ │
-│ └──────────────────────────────┘ │
-│ 0 / 500                          │
-│                                  │
-│ Ember will use this in future    │
-│ conversations. You can edit or   │
-│ delete it anytime.               │
-│                                  │
-│ (Error InlineNotice shown here   │
-│  if store.save() fails)          │
-└──────────────────────────────────┘
-```
-
-#### State M4: Editing & Deleting
-- **Editing (`EditMemorySheet`):** Identical structure to `AddMemorySheet` with title `Edit Memory`, pre-populated `kind` + `content`, `Save` disabled when unchanged or invalid (`trimmed == item.content && editSelectedKind == item.kind`), plus read-only footer: `Source: Saved from chat · Past chat messages stay unchanged.`
-- **Deleting (Confirmation Alert over Memory Sheet):**
+#### State M4: Editing & Deleting (`320pt`)
+- **Editing (`EditMemorySheet`):** Identical sheet chrome to `AddMemorySheet` (`Cancel` / `Edit Memory` / `Save`), pre-filled with `item.kind` + `item.content`, `Save` disabled until changed and valid (`trimmed != item.content || editSelectedKind != item.kind`), plus read-only provenance footnote: `Source: Saved from chat · Past chat messages stay unchanged.`
+- **Deleting (Confirmation Alert over Saved List):**
 ```text
       ┌────────────────────────────┐
       │    Delete this memory?     │
@@ -197,26 +191,48 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
       └─────────────┴──────────────┘
 ```
 
-#### State M5: Loading / Error / Unavailable
-- **Loading (`isLoading && items.isEmpty`):** `LoadingPlaceholder("Loading…")` centered below subtitle; `+ Add` stays secondary/disabled only if unavailable.
-- **Error when list empty (`!isLoading && items.isEmpty && errorMessage != nil`):** `ErrorPlaceholder` with `store.errorMessage` and `[ Try Again ]` button calling `store.refresh()`.
-- **Error when items cached (`!items.isEmpty && errorMessage != nil`):** `InlineNotice(.warning)` above the saved list so cached items remain visible and inspectable, with dismiss or pull-to-refresh recovery.
-- **V1 Server Unavailable (`isEndpointUnavailable`):**
+#### State M5: Loading / Error / Unavailable (`320pt` Side-by-Side)
+
 ```text
-┌──────────────────────────────────┐
-│             Memory         Close │  <- + Add hidden/disabled
-├──────────────────────────────────┤
-│ ┌──────────────────────────────┐ │
-│ │ ⓘ Memory is not enabled on   │ │
-│ │   this server                │ │
-│ │   Connect to a V2 Ember      │ │
-│ │   Cloud environment to       │ │
-│ │   inspect and manage         │ │
-│ │   personal memory.           │ │
-│ └──────────────────────────────┘ │
-└──────────────────────────────────┘
+BEFORE (320pt — V1 Unavailable)                 AFTER (320pt — V1 Unavailable / Error)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                    Memory  Close │            │              Memory        Close │ <- + Add omitted/disabled
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Explicit preferences and facts   │            │ Personal memory requires a V2    │
+│ Ember remembers across new...    │            │ Ember Cloud environment.         │
+│ ┌──────────────────────────────┐ │            │ ┌──────────────────────────────┐ │
+│ │ ⓘ Memory is not enabled on   │ │            │ │ ⓘ Memory is not enabled on   │ │
+│ │   this server                │ │            │ │   this server                │ │
+│ │   Connect to a V2 Ember...   │ │            │ │   Connect to a V2 Ember      │ │
+│ └──────────────────────────────┘ │            │ │   Cloud environment to       │ │
+│ (Empty state hidden, no items)   │            │ │   inspect and manage memory. │ │
+└──────────────────────────────────┘            │ └──────────────────────────────┘ │
+                                                │                                  │
+  (Loading: LoadingPlaceholder centered;        │ (Error + Empty: ErrorPlaceholder │
+   Error + Items: InlineNotice above list)      │  with [ Try Again ] 44pt button) │
+                                                └──────────────────────────────────┘
 ```
-- **Mock Mode (`isMockOnly`):** `MockOnlyBanner` pinned at top of scroll view (`MOCK ONLY` orange disclosure).
+
+#### `375pt` & `393pt` Adaptation Evidence (Memory)
+
+```text
+AFTER (375pt / 393pt — Standard iPhone, Live V2)
+┌───────────────────────────────────────────┐  Width rules:
+│ + Add             Memory            Close │  - 16pt horizontal padding; single-column
+├───────────────────────────────────────────┤    card list capped at maxWidth: 720pt.
+│ Explicit preferences and facts Ember      │  - At 375pt (content width 343pt) and 393pt
+│ uses in future conversations. Past chat   │    (content width 361pt), provenance + time
+│ history stays unchanged.                  │    fit on one line:
+│                                           │    "💬 Saved from chat · Nov 20, 08:00".
+│ Saved Memory                        2 / 50│  - At AX3+ Dynamic Type, card header uses
+│ ┌───────────────────────────────────────┐ │    ViewThatFits so [Preference] wraps above
+│ │ [Preference]                [✎]  [🗑] │ │    the 44×44pt [Edit] [Delete] buttons cleanly
+│ │ Keep morning briefs concise with      │ │    without truncating labels.
+│ │ bullet points and clear next steps.   │ │
+│ │ 💬 Saved from chat · Nov 20, 08:00    │ │
+│ └───────────────────────────────────────┘ │
+└───────────────────────────────────────────┘
+```
 
 ---
 
@@ -225,106 +241,210 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 ### 1. Information Hierarchy
 
 1. **Navigation Bar:**
-   - **Leading:** `+ New` (`"schedules-add-button"`, disabled when `store.isEndpointUnavailable`)
+   - **Leading:** `+ New` (`"schedules-add-button"`, `≥44pt` tap target, disabled when `store.isEndpointUnavailable`)
    - **Title:** `Schedules` / `定时任务` (`.inline`)
    - **Trailing:** `Close` (`"schedules-sheet-close"`)
-2. **Environment & Status Context:**
+2. **Environment & Status Context (strictly truthful per active mode):**
    - `MockOnlyBanner` if `store.isMockOnly`
-   - Quiet 2-line subtitle (`schedules.subtitle`)
+   - Environment-scoped subtitle:
+     - **Real Live V2 (`!store.isMockOnly && !store.isEndpointUnavailable`):** `"Recurring morning briefs and one-time follow-ups run in Ember Cloud even when the app is closed."`
+     - **Mock Only (`store.isMockOnly`):** `"Preview proactive schedules in local demo mode. Nothing here runs in Ember Cloud."`
+     - **V1 Unavailable (`store.isEndpointUnavailable`):** `"Proactive schedules require a V2 Ember Cloud environment."`
    - `InlineNotice` (`"schedules-endpoint-unavailable"`) if V1 server returns `.endpointNotReady`
-   - `InlineNotice` (`"schedules-error-notice"`) if `store.errorMessage != nil`
+   - `InlineNotice` (`"schedules-error-notice"`) if `store.errorMessage != nil` (or `ErrorPlaceholder` with Retry when `schedules.isEmpty`)
 3. **Primary Content — Existing Schedules First (Lightweight Grouping):**
    - **Group 1 — Active & In-Flight (`Active` / `进行中`):**
-     - Includes `status == .active`, **plus** any `once` schedule where `status == .completed` while `latestRun?.status` is still `"queued"`, `"running"`, or `"waiting_approval"` (so an active follow-up never prematurely disappears into History!).
-     - Ordered by soonest authoritative `nextFireAt` ascending (in-flight / `nil` `nextFireAt` sorted before or after? In-flight first, then soonest `nextFireAt` ascending, then `updatedDate` descending).
+     - Includes `status == .active`, **plus** any `once` schedule where `status == .completed` while `latestRun?.status` is still `"queued"`, `"running"`, or `"waiting_approval"` (so an active follow-up never prematurely disappears into History).
+     - Ordered with in-flight runs / soonest authoritative `nextFireAt` ascending, then `updatedDate` descending.
    - **Group 2 — Paused (`Paused` / `已暂停`):**
      - Shown only when `paused` schedules exist.
-   - **Group 3 — History (`Completed & Cancelled` / `历史记录`):**
-     - Shown only when terminal schedules with non-in-flight runs exist. Keep compact (collapsed prompt to 1–2 lines, concise last-run status).
+   - **Group 3 — History (`Recent History` / `历史记录`):**
+     - Shown only when terminal schedules with non-in-flight runs exist. Keep compact.
 4. **Schedule Card Anatomy (`"schedule-item-<uuid>"`):**
-   1. **Meta Row:** `[Kind label + icon]` · `[Effective Status Capsule]` · `[Spacer]` · `[Cadence label]`
+   1. **Meta Row:** `[Kind label + icon]` · `[Schedule Status Capsule]` · `[Spacer]` · `[Cadence label]`
    2. **Title:** `schedule.title` (`.body.weight(.semibold)`)
-   3. **Instructions (`schedule.prompt`):** `.subheadline`, `.secondary` (capped to 3 lines with `"Show more"` toggle on long prompts to keep cards scannable, or full text if <= 3 lines)
-   4. **Next Execution ("What's next"):** Only rendered when `schedule.nextFireAt != nil` and parseable. Shows clock icon + `Next: <formatted in schedule.timezone>` (+ timezone identifier when it differs from `TimeZone.current.identifier`, or as subtle caption). **Never fabricated for paused/cancelled/completed or missing `nextFireAt`.**
-   5. **Latest Run ("What happened recently"):** Rendered when `schedule.latestRun != nil`. Truthfully displays all 7 run states (`queued`, `running`, `waiting_approval`, `completed`, `failed`, `retryable_failed`, `cancelled`) + `displayResultText` preview box when present.
-   6. **Actions Row (wrapping cleanly on 320pt via `ViewThatFits` / adaptive `HStack`):**
+   3. **Instructions (`schedule.prompt`):** `.subheadline`, `.secondary` (cleanly bounded/expandable on long prompts so cards stay scannable)
+   4. **Next Execution ("What's next"):** Rendered **only** when `schedule.nextFireAt != nil` and parseable. Shows clock icon + `Next: <formatted in schedule.timezone>` (+ timezone identifier when it differs from `TimeZone.current.identifier`). **Never fabricated for paused/cancelled/completed or missing `nextFireAt`.**
+   5. **Latest Run ("What happened recently"):** Rendered independently of the Schedule Status pill when `schedule.latestRun != nil`. Truthfully displays all 7 run states (`queued`, `running`, `waiting_approval`, `completed`, `failed`, `retryable_failed`, `cancelled`) + soft `displayResultText` well when present.
+   6. **Actions Row (`≥44pt` button height, wrapping cleanly at `320pt`):**
       - `Pause` (when `status == .active`) / `Resume` (when `status == .paused`)
       - `Cancel` (when `!schedule.status.isTerminal || isLatestRunInFlight`) with confirmation `.alert`
-      - `View in Chat` / `Open Chat` (when `schedule.latestRun?.resultMessageId != nil && onOpenChat != nil`)
+      - **`Open Chat`** (renamed from `"View in Chat"` per Decision #1 — shown when `schedule.latestRun?.resultMessageId != nil && onOpenChat != nil`; dismisses the sheet and switches to Chat without claiming exact message scroll)
 5. **Secondary Creation Surface (`CreateScheduleSheet`):**
    - Presented via `.sheet(isPresented: $isShowingCreateSheet)`.
-   - Reuses existing `ProactiveSchedulesSheetView` form controls (`Kind` picker, `Title`, `Prompt`, `Frequency: One-time | Daily`, `DatePicker`, 4 preset chips, timezone indicator, `Create` button) with `Cancel` in `.cancellationAction`.
+   - Reuses existing `ProactiveSchedulesSheetView` form controls (`Kind` picker, `Title`, `Prompt`, `Frequency: One-time | Daily`, `DatePicker`, 4 preset chips, timezone indicator, `Create` button) with `Cancel` in `.cancellationAction` and in-sheet error preservation.
 
-### 2. Authoritative Data Fields & Truthfulness Rules
+### 2. Authoritative Data Fields & Schedule vs. Run Truth Matrix
 
-| `ProactiveScheduleDTO` / `ProactiveScheduleRunDTO` | Authoritative Backend Semantics | UX-06 Display Rule |
-| --- | --- | --- |
-| `status` (`active`, `paused`, `completed`, `cancelled`) + `latestRun?.status` | In `packages/runtime-v2`, a `once` schedule transitions `status` to `completed` **at materialization**, while `latestRun.status` can still be `queued`, `running`, `waiting_approval`, `failed`, `retryable_failed`, or `cancelled`. | **Never equate `schedule.status == .completed` with downstream task success.** Derive an **effective badge**: e.g. `completed` + `running` → `In progress`; `completed` + `queued` → `Queued`; `completed` + `waiting_approval` → `Needs confirmation`; `completed` + `failed`/`retryable_failed` → `Run failed`; `completed` + `cancelled` → `Run cancelled`; `completed` + `completed` → `Completed`; `completed` + `latestRun == nil` → `Triggered`. |
-| `nextFireAt: String?` | Backend sets `nextFireAt` only when `status == 'active'`; `null` otherwise. | Render `Next:` **only** when `nextFireAt` parses via `ConversationCardFormatting.date(from:)`. Never compute cron/interval dates locally. |
-| `timezone: String` | IANA zone (e.g. `Asia/Shanghai`, `America/New_York`). | Always format `nextFireAt` and `completedAt` in `schedule.timezone` (`Self.formatNextFireAt`). Show `schedule.timezone` explicitly whenever `schedule.timezone != TimeZone.current.identifier` (and include in VoiceOver label). |
-| `scheduleKind` (`once`, `interval`, `cron_tz`), `cronExpr`, `intervalSeconds` | Recurrence metadata. | Reuse `Self.formattedCadence(for:)` (`Daily 08:00`, `Every 2h`, `Every 15m`, raw cron fallback, or `One-time` badge). |
-| `latestRun.reasonCode` | Failure reason code (`budget_exceeded`, `model_unauthorized_tenant`, `recurring_real_model_unauthorized`, `model_timeout`, etc.). | Reuse `Self.localizedFailureReason(for:)`. |
-| `latestRun.resultMessageId` | Linked `conversation_messages.id` when the proactive run committed a message. | Button shown only when `resultMessageId != nil && onOpenChat != nil`. Must not claim exact message scroll unless wired to `ScrollViewReader` (see Decision #1). |
-| `status.isTerminal` vs `latestRun` in-flight | Backend `POST /v2/schedules/:id/cancel` allows cancelling a `completed` `once` schedule if a linked task is still non-terminal (`proactive-schedule-service.ts#L817-L830`). | Keep `Cancel` action available when `!schedule.status.isTerminal || isLatestRunInFlight`. |
+**Critical invariant:** Keep **Schedule State** (whether future occurrences remain armed) strictly separate from **Latest Run State** (the outcome of the most recent occurrence). A failed historical run on a recurring active schedule **never** turns the schedule's own status into `Cancelled` or `Completed`; the schedule remains `Active` while the `Latest Run` block surfaces the orange failure notice. Only `once` schedules (which have no future occurrence after firing) combine `schedule.status == .completed` + `latestRun?.status` in the badge so an in-flight task is never falsely labeled `Completed`.
 
-### 3. Schedules Wireframes (320pt / 375pt / 393pt)
+| `schedule.status` | `scheduleKind` | `latestRun?.status` | Schedule Badge | Latest Run Block | Allowed Actions |
+| --- | --- | --- | --- | --- | --- |
+| `.active` | any | `nil` or `completed` | **Active** (green) | `✓ Last run: <date>` + soft result well (if `latestRun != nil`) | `Pause`, `Cancel`, (`Open Chat` if `resultMessageId != nil`) |
+| `.active` | `cron_tz` / `interval` | `failed` / `retryable_failed` | **Active** (green — still scheduled!) | `⚠ Last run failed · <date>` + `localizedFailureReason` | `Pause`, `Cancel` |
+| `.active` | any | `queued` / `running` | **Active** (green) | `◌ Queued…` / `◌ Running in Ember Cloud…` | `Pause`, `Cancel` |
+| `.active` | any | `waiting_approval` | **Active** (green) | `✋ Waiting for your confirmation` | `Pause`, `Cancel` |
+| `.paused` | any | any | **Paused** (orange) | Reflects latest run truthfully (if present) | `Resume`, `Cancel`, (`Open Chat` if `resultMessageId != nil`) |
+| `.completed` | `once` | `queued` / `running` | **Triggered · In progress** (indigo) | `◌ Queued…` / `◌ Running in Ember Cloud…` | `Cancel` (enabled! backend cancels in-flight linked task) |
+| `.completed` | `once` | `waiting_approval` | **Triggered · Needs confirmation** (orange) | `✋ Waiting for your confirmation` | `Cancel` |
+| `.completed` | `once` | `failed` / `retryable_failed` | **Triggered · Run failed** (orange) | `⚠ Last run failed · <date>` + `localizedFailureReason` | (`Open Chat` if `resultMessageId != nil`) |
+| `.completed` | `once` | `cancelled` | **Triggered · Run cancelled** (secondary) | `Run was cancelled` | — |
+| `.completed` | `once` | `completed` | **Completed** (secondary/green) | `✓ Last run: <date>` + soft result well | (`Open Chat` if `resultMessageId != nil`) |
+| `.completed` | `once` | `nil` | **Triggered** (secondary) | — | — |
+| `.cancelled` | any | any | **Cancelled** (red/secondary) | Reflects latest run truthfully (if present) | (`Open Chat` if `resultMessageId != nil`) |
 
-#### State S1: Active & Paused Schedules + Latest Run Available
+Additional DTO rules:
+- **`nextFireAt: String?`:** Rendered **only** when non-`nil` and parseable (`schedule.status == .active`). Always formatted in `schedule.timezone` via `Self.formatNextFireAt`. If `schedule.timezone != TimeZone.current.identifier`, display `schedule.timezone` explicitly beside the timestamp (and always include timezone in VoiceOver readout).
+- **`schedule.latestRun?.resultMessageId`:** Gates visibility of **`Open Chat`**. Never implies scrolling directly to that message ID.
 
-**320pt (iPhone SE)**
+### 3. Schedules Before / After Wireframes (`320pt` Side-by-Side + `375pt` / `393pt` Adaptation)
+
+#### State S1: Active & Paused Schedules + Latest Run Available (`320pt` Side-by-Side — Live V2)
+
 ```text
-┌──────────────────────────────────┐
-│ + New      Schedules       Close │
-├──────────────────────────────────┤
-│ Ember runs these in the cloud    │
-│ even when the app is closed.     │
-│                                  │
-│ Active                           │
-│ ┌──────────────────────────────┐ │
-│ │ ☀ Brief · [Active]   Daily   │ │
-│ │ Morning Brief         08:00  │ │  <- Clean wrap on 320pt
-│ │ Summarize today's priorities │ │
-│ │ and open follow-ups…         │ │
-│ │ 🕒 Next: Nov 23, 08:00       │ │
-│ │ ✓ Last run: Nov 22, 08:00    │ │
-│ │ ┌──────────────────────────┐ │ │
-│ │ │ Top 3 priorities today:  │ │ │
-│ │ │ 1. Review UX-06 PR…      │ │ │
-│ │ └──────────────────────────┘ │ │
-│ │ [Pause] [Cancel]             │ │
-│ │ [View in Chat]               │ │  <- Wraps cleanly on 320pt
-│ └──────────────────────────────┘ │
-│                                  │
-│ ┌──────────────────────────────┐ │
-│ │ ↪ Follow-up · [In progress]  │ │  <- once schedule fired,
-│ │ Check flight gate   One-time │ │     task still running!
-│ │ Look up Terminal 2 gate info │ │
-│ │ ◌ Running in Ember Cloud…    │ │
-│ │ [Cancel]                     │ │  <- Still cancellable!
-│ └──────────────────────────────┘ │
-│                                  │
-│ Paused                           │
-│ ┌──────────────────────────────┐ │
-│ │ 🔔 Reminder · [Paused]       │ │
-│ │ Weekly review      Every 7d  │ │
-│ │ [Resume] [Cancel]            │ │
-│ └──────────────────────────────┘ │
+BEFORE (320pt — Current main, Live V2)         AFTER (320pt — Redesigned, Live V2)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                 Schedules  Close │            │ + New       Schedules      Close │ <- 44pt nav actions
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Set up recurring morning briefs  │            │ Recurring briefs and follow-ups  │
+│ or one-time follow-ups. Ember    │            │ run in Ember Cloud even when the │
+│ runs them in the cloud even...   │            │ app is closed.                   │
+│ ┌──────────────────────────────┐ │            │                                  │
+│ │ [Brief][Follow-up][Reminder] │ │            │ Active                           │ <- Existing first!
+│ │ [Title (e.g. Morning Brief)] │ │            │ ┌──────────────────────────────┐ │
+│ │ [What should Ember prepare?] │ │            │ │ ☀ Brief · [Active]           │ │
+│ │ [  One-time  ][   Daily    ] │ │            │ │               Daily 08:00    │ │
+│ │ Run at    [Nov 22, 17:30 ▾]  │ │            │ │ Morning Brief                │ │
+│ │ [In 1m][In 15m][In 1h][9:00] │ │            │ │ Summarize today's priorities │ │
+│ │ Asia/Shanghai     [ Create ] │ │            │ │ and open follow-ups…         │ │
+│ └──────────────────────────────┘ │            │ │ 🕒 Next: Nov 23, 08:00       │ │
+│                                  │            │ │ ✓ Last run: Nov 22, 08:00    │ │
+│ Your Schedules                   │ <- pushed  │ │ ┌──────────────────────────┐ │ │
+│ ┌──────────────────────────────┐ │    ~400pt  │ │ │ Top 3 priorities today:  │ │ │ <- Soft result well
+│ │ [Morning Brief] [Active]     │ │    below   │ │ │ 1. Review UX-06 PR…      │ │ │    (no heavy border)
+│ │ ...                          │ │    fold!   │ │ └──────────────────────────┘ │ │
+│ └──────────────────────────────┘ │            │ │ [  Pause  ]   [  Cancel  ]   │ │ <- ≥44pt height;
+│                                  │            │ │ [      Open Chat       ]     │ │    wraps cleanly
+└──────────────────────────────────┘            │ └──────────────────────────────┘ │
+                                                │                                  │
+Mock Prototype Mode Distinction:                │ ┌──────────────────────────────┐ │
+- Displays MockOnlyBanner at top AND            │ │ ↪ Follow-up · [Triggered ·   │ │ <- once fired, task
+  neutral subtitle ("Preview proactive          │ │                In progress]  │ │    still running!
+  schedules in local demo mode. Nothing         │ │ Check flight gate   One-time │ │
+  here runs in Ember Cloud.") so demo           │ │ ◌ Running in Ember Cloud…    │ │
+  data never claims real cloud runs.            │ │ [  Cancel  ]                 │ │ <- Cancel stays active
+                                                │ └──────────────────────────────┘ │
+                                                │                                  │
+                                                │ Paused                           │
+                                                │ ┌──────────────────────────────┐ │
+                                                │ │ 🔔 Reminder · [Paused]       │ │
+                                                │ │ Weekly review      Every 7d  │ │
+                                                │ │ [  Resume  ]  [  Cancel  ]   │ │
+                                                │ └──────────────────────────────┘ │
+                                                └──────────────────────────────────┘
+```
+
+#### State S2: Empty (`320pt` Side-by-Side)
+
+```text
+BEFORE (320pt — Current main)                   AFTER (320pt — Redesigned)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                 Schedules  Close │            │ + New       Schedules      Close │
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Set up recurring morning briefs  │            │ Recurring briefs and follow-ups  │
+│ or one-time follow-ups...        │            │ run in Ember Cloud even when the │
+│ ┌──────────────────────────────┐ │            │ app is closed.                   │
+│ │ [Brief][Follow-up][Reminder] │ │            │                                  │
+│ │ [Title] / [Prompt] / [Time]  │ │            │ ┌──────────────────────────────┐ │
+│ │ ... (~360pt form above)      │ │            │ │         [📅⏰ icon]          │ │
+│ └──────────────────────────────┘ │            │ │       No schedules yet       │ │
+│ ┌──────────────────────────────┐ │            │ │ Create a daily morning brief │ │
+│ │         [📅⏰ icon]          │ │            │ │ or one-time follow-up so     │ │
+│ │       No schedules yet       │ │            │ │ Ember can act on time.       │ │
+│ │ Create a daily morning brief │ │            │ │                              │ │
+│ │ or follow-up reminder above. │ │ <- "above" │ │      [ + New Schedule ]      │ │ <- ≥44pt primary CTA
+└─┴──────────────────────────────┴─┘            └─┴──────────────────────────────┴─┘
+```
+
+#### State S3: Creating a Schedule (`320pt` Side-by-Side — Inline Form vs Modal Sub-Sheet)
+
+```text
+BEFORE (320pt — Inline Top Form)                AFTER (320pt — Focused CreateScheduleSheet)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                 Schedules  Close │            │ Cancel    New Schedule    Create │ <- Create spinner
+├──────────────────────────────────┤            ├──────────────────────────────────┤    while creating
+│ (Tall form competes with list,   │            │ ┌──────────┬──────────┬────────┐ │
+│  presets clip horizontally,      │            │ │  Brief   │Follow-up │Reminder│ │
+│  keyboard covers Create button)  │            │ └──────────┴──────────┴────────┘ │
+│ ┌──────────────────────────────┐ │            │ [ Title (e.g. Morning Brief)   ] │
+│ │ [Brief][Follow-up][Reminder] │ │            │ ┌──────────────────────────────┐ │
+│ │ [Title]                      │ │            │ │ What should Ember prepare or │ │
+│ │ [Prompt]                     │ │            │ │ follow up on?                │ │
+│ │ [One-time][Daily]            │ │            │ └──────────────────────────────┘ │
+│ │ Run at [Nov 22, 17:30]       │ │            │ ┌──────────────┬───────────────┐ │
+│ │ [In 1m][In 15m][In 1h]...    │ │            │ │   One-time   │     Daily     │ │ <- Hidden for Follow-up
+│ │ Asia/Shanghai     [ Create ] │ │            │ └──────────────┴───────────────┘ │
+│ └──────────────────────────────┘ │            │ Run at      [Nov 22, 17:30 ▾]    │
+│                                  │            │ [In 1m] [In 15m] [In 1h] [9:00]  │ <- Horizontal scroll
+│                                  │            │ Timezone: Asia/Shanghai          │
+│                                  │            │ [403 policyDenied / validation   │
+│                                  │            │  InlineNotice shown here without │
+│                                  │            │  losing typed Title/Prompt]      │
+└──────────────────────────────────┘            └──────────────────────────────────┘
+```
+
+#### State S4: Latest Run Failed / Needs Confirmation (`320pt` — Schedule State vs Run State Separation)
+
+```text
+Recurring Active Schedule + Failed Run:         One-time Triggered + Failed Run:
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│ ☀ Brief · [Active]   Daily 08:00 │ <- STILL   │ ↪ Follow-up · [Triggered ·       │ <- NOT "Completed"!
+│ Morning Brief                    │    Active! │                  Run failed]     │
+│ 🕒 Next: Nov 23, 08:00           │            │ Check Q4 PDF                     │
+│ ⚠ Last run failed · Nov 22, 08:00│            │ ⚠ Last run failed · Nov 22, 14:00│
+│   Daily model budget limit was   │            │   Execution timed out before     │
+│   reached before this run.       │            │   completing.                    │
+│ [  Pause  ]   [  Cancel  ]       │            └──────────────────────────────────┘
 └──────────────────────────────────┘
 ```
 
-**375pt / 393pt (Standard iPhone)**
+#### State S5: Loading / Error / Unavailable (`320pt` Side-by-Side)
+
 ```text
-┌───────────────────────────────────────────┐
-│ + New           Schedules           Close │
-├───────────────────────────────────────────┤
-│ Ember runs briefs and reminders in the    │
-│ cloud even when the app is closed.        │
-│                                           │
-│ Active                                    │
-│ ┌───────────────────────────────────────┐ │
-│ │ ☀ Morning Brief · [Active] Daily 08:00│ │
-│ │ Morning Brief                         │ │
-│ │ Summarize today's priorities and open │ │
+BEFORE (320pt — V1 Unavailable)                 AFTER (320pt — V1 Unavailable / Error)
+┌──────────────────────────────────┐            ┌──────────────────────────────────┐
+│                 Schedules  Close │            │             Schedules      Close │ <- + New hidden/disabled
+├──────────────────────────────────┤            ├──────────────────────────────────┤
+│ Ember runs them in the cloud     │ <- false   │ Proactive schedules require a V2 │ <- honest V1 copy!
+│ even when the app is closed.     │    promise │ Ember Cloud environment.         │    No cloud-run claim
+│ ┌──────────────────────────────┐ │    on V1!  │ ┌──────────────────────────────┐ │
+│ │ ⓘ Schedules are not enabled  │ │            │ │ ⓘ Schedules are not enabled  │ │
+│ │   on this server             │ │            │ │   on this server             │ │
+│ │   Connect to a V2 Ember...   │ │            │ │   Connect to a V2 Ember      │ │
+│ └──────────────────────────────┘ │            │ │   Cloud environment...       │ │
+└──────────────────────────────────┘            │ └──────────────────────────────┘ │
+                                                │ (Loading: LoadingPlaceholder;    │
+                                                │  Error+Empty: ErrorPlaceholder   │
+                                                │  with [ Try Again ] 44pt button) │
+                                                └──────────────────────────────────┘
+```
+
+#### `375pt` & `393pt` Adaptation Evidence (Schedules)
+
+```text
+AFTER (375pt / 393pt — Standard iPhone, Live V2)
+┌───────────────────────────────────────────┐  Width adaptation rules:
+│ + New           Schedules           Close │  - 16pt horizontal padding; single-column
+├───────────────────────────────────────────┤    card list capped at maxWidth: 720pt.
+│ Recurring morning briefs and one-time     │  - At 375pt (content width 343pt) and 393pt
+│ follow-ups run in Ember Cloud even when   │    (content width 361pt), card meta header
+│ the app is closed.                        │    fits on 1 line:
+│                                           │    "☀ Morning Brief · [Active]   Daily 08:00".
+│ Active                                    │  - Action bar uses ViewThatFits / wrapping flow:
+│ ┌───────────────────────────────────────┐ │    at 375pt/393pt, [Pause] [Cancel] [Open Chat]
+│ │ ☀ Morning Brief · [Active] Daily 08:00│ │    sit on 1 row (44pt min height); at 320pt or
+│ │ Morning Brief                         │ │    large Dynamic Type, [Open Chat] wraps cleanly
+│ │ Summarize today's priorities and open │ │    onto row 2 without label truncation.
 │ │ follow-ups in 3 concise bullets.      │ │
 │ │ 🕒 Next: Nov 23, 08:00                │ │
 │ │ ✓ Last run: Nov 22, 08:00             │ │
@@ -332,88 +452,17 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 │ │ │ Top 3 priorities today: 1. Review │ │ │
 │ │ │ UX-06 PR…                         │ │ │
 │ │ └───────────────────────────────────┘ │ │
-│ │ [Pause]  [Cancel]  [View in Chat]     │ │
+│ │ [  Pause  ]  [  Cancel  ] [Open Chat] │ │ <- All buttons minHeight: 44pt
 │ └───────────────────────────────────────┘ │
 │                                           │
 │ Paused                                    │
 │ ┌───────────────────────────────────────┐ │
 │ │ 🔔 Reminder · [Paused]     Every 24h  │ │
 │ │ Evening Check-in                      │ │
-│ │ [Resume]  [Cancel]                    │ │
-│ └───────────────────────────────────────┘ │
-│                                           │
-│ Recent History                            │
-│ ┌───────────────────────────────────────┐ │
-│ │ 🔔 Reminder · [Completed]   One-time  │ │
-│ │ Drink water                           │ │
-│ │ ✓ Last run: Nov 21, 15:00             │ │
-│ │ [View in Chat]                        │ │
+│ │ [  Resume  ]  [  Cancel  ]            │ │
 │ └───────────────────────────────────────┘ │
 └───────────────────────────────────────────┘
 ```
-
-#### State S2: Empty
-```text
-┌──────────────────────────────────┐
-│ + New      Schedules       Close │
-├──────────────────────────────────┤
-│ Ember runs briefs and reminders  │
-│ in the cloud even when closed.   │
-│                                  │
-│ ┌──────────────────────────────┐ │
-│ │         [📅⏰ icon]          │ │
-│ │       No schedules yet       │ │
-│ │ Create a daily morning brief │ │
-│ │ or one-time follow-up so     │ │
-│ │ Ember can act on time.       │ │
-│ │                              │ │
-│ │      [ + New Schedule ]      │ │  <- .borderedProminent primary CTA
-│ └──────────────────────────────┘ │
-└──────────────────────────────────┘
-```
-
-#### State S3: Creating a Schedule (`CreateScheduleSheet`)
-```text
-┌──────────────────────────────────┐
-│ Cancel    New Schedule    Create │  <- Create disabled until valid;
-├──────────────────────────────────┤     spinner while store.isCreating
-│ ┌──────────┬──────────┬────────┐ │
-│ │  Brief   │Follow-up │Reminder│ │
-│ └──────────┴──────────┴────────┘ │
-│ [ Title (e.g. Morning Brief)   ] │
-│ ┌──────────────────────────────┐ │
-│ │ What should Ember prepare or │ │
-│ │ follow up on?                │ │
-│ └──────────────────────────────┘ │
-│ ┌──────────────┬───────────────┐ │
-│ │   One-time   │     Daily     │ │  <- Hidden for Follow-up
-│ └──────────────┴───────────────┘ │
-│ Run at      [Nov 22, 15:35 ▾]    │
-│ [In 1m] [In 15m] [In 1h] [9:00]  │  <- Horizontal scroll presets
-│                                  │
-│ Timezone: Asia/Shanghai          │
-│                                  │
-│ (403 policyDenied / validation   │
-│  InlineNotice shown right here   │
-│  without losing typed draft)     │
-└──────────────────────────────────┘
-```
-
-#### State S4: Latest Run Failed / Result Edge States
-- **Failed run (`failed` / `retryable_failed`):**
-  - Effective status capsule on a `once` schedule reads `Run failed` (orange), NOT `Completed`.
-  - Shows `⚠ Last run failed · Nov 22, 08:00` + localized `reasonCode` explanation (e.g., daily budget limit reached, recurring AI brief not enabled for account, model timeout, provider unavailable).
-- **Waiting approval (`waiting_approval`):**
-  - Effective status capsule reads `Needs confirmation` (orange), with helper line `"Check Tasks or Chat to review and approve this run."`
-- **Cancelled run (`cancelled`):**
-  - Effective status capsule reads `Run cancelled` (secondary).
-
-#### State S5: Loading / Error / Unavailable
-- **Loading (`isLoading && schedules.isEmpty`):** `LoadingPlaceholder("Loading…")`.
-- **Error when empty (`!isLoading && schedules.isEmpty && errorMessage != nil`):** `ErrorPlaceholder` with Retry calling `store.refresh()`.
-- **Error when list non-empty:** `InlineNotice(.warning)` above the grouped list (`schedules-error-notice`).
-- **V1 Server Unavailable (`isEndpointUnavailable`):** `InlineNotice(.neutral)` (`schedules-endpoint-unavailable`: `"Schedules are not enabled on this server — Connect to a V2 Ember Cloud environment..."`); `+ New` disabled/hidden.
-- **Mock Mode (`isMockOnly`):** `MockOnlyBanner` pinned at top.
 
 ---
 
@@ -422,7 +471,8 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 | Edge Case | Expected Behavior |
 | --- | --- |
 | **Account isolation / sign-out** | `LiveConversationHostModel` calls `memoryStore.clear()` and `scheduleStore.clear()` on sign-out (`generation &+= 1`). Re-entering sheet refreshes from current authenticated session only. |
-| **V1 default server (`ember-api.slowfast.dev`)** | `404`/`405`/`501` maps to `.endpointNotReady` → shows honest neutral `InlineNotice`; hides/disables creation CTA. Never fakes empty success. |
+| **V1 default server (`ember-api.slowfast.dev`)** | `404`/`405`/`501` maps to `.endpointNotReady` → shows honest neutral `InlineNotice`; hides/disables creation CTA; omits `"runs in the cloud"` subtitle promise. Never fakes empty success. |
+| **Mock Mode (`store.isMockOnly`)** | Shows `MockOnlyBanner` and neutral local-preview subtitle copy (never implies real cloud execution). |
 | **Memory capacity limit (`50 / 50`)** | Disables `+ Add` / `Add Memory`, displays `memory-capacity-notice`, keeps Edit & Delete fully enabled so user can prune items. |
 | **Save/Create failure with draft** | Modal composer sheet remains open, preserves user input, shows `store.errorMessage` inside the sheet, and keeps `PendingSaveAttempt.clientRequestID` / `idempotencyKey` safety intact. |
 | **Recurring `model_brief` 403 policy denial** | `CreateScheduleSheet` stays open, preserves title/prompt, displays `schedules.error.policy_denied` prompting user to switch to `One-time` or `Reminder`. |
@@ -437,73 +487,60 @@ This proposal shifts both sheets from **form-first** to **content-first** while:
 
 - **Dynamic Type (`.large` through `.accessibility5`):**
   - No fixed-height card containers; all multi-line text uses `.fixedSize(horizontal: false, vertical: true)`.
-  - Memory card header (`Kind` pill + `Edit`/`Delete` buttons) and Schedule card header/action bars use `ViewThatFits` or `AnyLayout` (`HStackLayout` -> `VStackLayout` when `dynamicTypeSize.isAccessibilitySize`) so labels never truncate or collide at 320pt + AX3.
+  - Memory card header (`Kind` pill + `Edit`/`Delete` buttons) and Schedule card header/action bars use `ViewThatFits` or `AnyLayout` (`HStackLayout` → `VStackLayout` when `dynamicTypeSize.isAccessibilitySize`) so labels never truncate or collide at `320pt` + AX3.
   - Composer sub-sheets use `.presentationDetents([.medium, .large])` and internal `ScrollView` so fields remain reachable when keyboard is open at large font sizes.
-- **Touch Targets:**
+- **Touch Targets (`≥44×44pt` everywhere):**
   - Memory `Edit` and `Delete` icon buttons enforce `.frame(minWidth: 44, minHeight: 44)` and `.contentShape(Rectangle())`.
-  - Schedule action buttons use `.bordered` style with `.frame(minHeight: 36)` / accessible spacing and wrap cleanly onto a second row at 320pt.
+  - Schedule action buttons (`Pause`, `Resume`, `Cancel`, `Open Chat`) and Empty-state primary CTAs (`Add Memory`, `New Schedule`) enforce `.frame(minHeight: 44)` and wrap cleanly across rows on `320pt`.
 - **VoiceOver:**
   - Decorative SF Symbols use `.accessibilityHidden(true)`.
   - Toolbar `+ Add` / `+ New` buttons have explicit `.accessibilityLabel` (`"Add Memory"`, `"New Schedule"`).
-  - Memory `Edit` / `Delete` buttons include item context or clear labels (`"Edit"`, `"Delete"`) inside `.accessibilityElement(children: .contain)` cards (`memory-item-<uuid>`).
+  - Memory `Edit` / `Delete` buttons include clear labels (`"Edit"`, `"Delete"`) inside `.accessibilityElement(children: .contain)` cards (`memory-item-<uuid>`).
   - Schedule `Next:` line includes full formatted date and timezone in VoiceOver readout; `In progress` spinner announces `"Running in Ember Cloud"` rather than `"Completed"`.
 - **Dark Mode:**
   - Uses `EmberDesignTokens.groupedBackground`, `EmberDesignTokens.cardBackground`, `EmberDesignTokens.separator`, and semantic `Color(uiColor: .systemGreen/.systemOrange/.systemRed/.systemBlue)` — no hardcoded light-only colors.
 - **Localization (`en` & `zh-Hans`):**
   - All new strings go into `apps/ios/EmberApp/Features/Conversation/Conversation.xcstrings` (table `"Conversation"`), coordinated with Agent A/B to avoid key collisions.
-  - Existing `memory.*` and `schedules.*` keys are reused where copy remains valid; `memory.empty.message` and `schedules.empty.message` are updated so they no longer say `"above"` (`在上方`).
+  - Existing `memory.*` and `schedules.*` keys are reused where copy remains valid; `memory.empty.message` and `schedules.empty.message` are updated so they no longer say `"above"` (`在上方`); `schedules.action.view_in_chat` is updated to `"Open Chat"` / `"打开对话"`.
 
 ---
 
 ## Smallest Possible Implementation Breakdown (Phase 2)
 
-After UI/UX Lead & CTO approval, implement in **two independent PRs**:
+After UI/UX Lead & CTO merge approval of this design PR, implement in **two independent PRs**:
 
 ### PR 1 — Memory Redesign (`feat/ios-ux06-memory-redesign`)
 - **Scope:**
   - [`PersonalMemorySheetView.swift`](../../apps/ios/EmberApp/Features/Memory/PersonalMemorySheetView.swift)
   - [`Conversation.xcstrings`](../../apps/ios/EmberApp/Features/Conversation/Conversation.xcstrings) (only `memory.*` keys)
   - [`PersonalMemoryTests.swift`](../../apps/ios/EmberTests/Memory/PersonalMemoryTests.swift)
-  - [`B3ChatTasksIntegrationUITests.swift`](../../apps/ios/EmberUITests/Integration/B3ChatTasksIntegrationUITests.swift) (update `testMemorySheetSaveEditDeleteInMockConversation` to tap `"memory-add-button"` before filling `"memory-composer-input"`, and assert saved list visibility before creation)
+  - [`B3ChatTasksIntegrationUITests.swift`](../../apps/ios/EmberUITests/Integration/B3ChatTasksIntegrationUITests.swift) (update `testMemorySheetSaveEditDeleteInMockConversation` to tap `"memory-add-button"` before filling `"memory-composer-input"`, preserving full save/edit/delete coverage)
 - **Changes:**
   1. Reorder `PersonalMemorySheetView` body so saved memories render first (`EmptyPlaceholder` + `+ Add Memory` CTA when empty).
-  2. Move creation composer into `AddMemorySheet` triggered by `+ Add` (`memory-add-button`) / empty-state CTA, preserving `memory-composer-input` and `memory-composer-save` identifiers inside the sheet.
-  3. Remove raw `item.key` from `memoryRow`; enlarge `Edit` / `Delete` hit areas (`44×44pt`); refine `EditMemorySheet` provenance note & error isolation.
+  2. Move creation composer into `AddMemorySheet` triggered by `+ Add` (`memory-add-button`) / empty-state CTA, preserving `memory-composer-input` and `memory-composer-save` identifiers inside the sheet, with draft preservation on failure.
+  3. Remove raw `item.key` from `memoryRow`; enforce `44×44pt` `Edit` / `Delete` hit areas; refine `EditMemorySheet` provenance note & error isolation; keep environment-honest subtitle copy.
   4. Add `ErrorPlaceholder` retry when initial load fails with empty list.
 - **Risk:** Low–Medium (localized UI restructuring, zero store/API changes; requires updating 1 UI test flow).
 
 ### PR 2 — Proactive Schedules Redesign (`feat/ios-ux06-schedules-redesign`)
 - **Scope:**
   - [`ProactiveSchedulesSheetView.swift`](../../apps/ios/EmberApp/Features/Schedules/ProactiveSchedulesSheetView.swift)
-  - [`ProactiveScheduleStore.swift`](../../apps/ios/EmberApp/Features/Schedules/ProactiveScheduleStore.swift) (optional grouping/sorting helper only if needed — keeping `activeCount`, `hasInFlightRun`, `nextActiveFireDate` semantics intact)
+  - [`ProactiveScheduleStore.swift`](../../apps/ios/EmberApp/Features/Schedules/ProactiveScheduleStore.swift) (optional grouping/sorting helper only, keeping `activeCount`, `hasInFlightRun`, `nextActiveFireDate` semantics intact)
   - [`Conversation.xcstrings`](../../apps/ios/EmberApp/Features/Conversation/Conversation.xcstrings) (only `schedules.*` keys)
   - [`ProactiveScheduleTests.swift`](../../apps/ios/EmberTests/Schedules/ProactiveScheduleTests.swift)
-  - (Optional, per Decision #1) [`LiveConversationHost.swift`](../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift) & [`ConversationTimelineView.swift`](../../apps/ios/EmberApp/Features/Conversation/Transcript/ConversationTimelineView.swift) if wiring `resultMessageId` scroll.
+  - **No edits** to `LiveConversationHost.swift` or `ConversationTimelineView.swift`.
 - **Changes:**
   1. Reorder `ProactiveSchedulesSheetView` body so existing schedules render first, grouped into **Active** (including in-flight `once` triggers), **Paused**, and **Recent History**.
-  2. Move creation form into `CreateScheduleSheet` triggered by `+ New` (`schedules-add-button`) / empty-state CTA.
-  3. Implement truthful **effective status** derivation (`status` + `latestRun?.status`) so in-flight or failed `once` runs never render as `Completed` and remain cancellable while in-flight.
-  4. Handle all 7 `latestRun.status` values (`waiting_approval`, `cancelled`, etc.) and clean timezone display.
-  5. Resolve `"View in Chat"` behavior per Decision #1 below.
-- **Risk:** Medium (status truthfulness + schedule grouping + optional timeline scroll hook; independent of PR 1).
+  2. Scope subtitle copy honestly to real V2 cloud vs `MOCK ONLY` vs V1 `endpointNotReady`.
+  3. Move creation form into `CreateScheduleSheet` triggered by `+ New` (`schedules-add-button`) / empty-state CTA, preserving drafts on failed submit.
+  4. Implement separate **Schedule State** vs **Latest Run State** truth mapping (`once` + in-flight/failed never renders as `Completed` and keeps `Cancel` enabled; recurring `Active` schedule stays `Active` when `latestRun` failed).
+  5. Handle all 7 `latestRun.status` values, enforce `≥44pt` wrapping action buttons, clean timezone display, and rename `"View in Chat"` → `"Open Chat"`.
+- **Risk:** Medium (status truthfulness + schedule grouping + 320pt wrapping layout; independent of PR 1).
 
 ---
 
-## Data Limitations & Decisions Requiring Approval
+## Resolved Decisions (Per UI/UX Lead Review on PR #275)
 
-### Verified Data Limitations (Baseline `f37ffc6`)
-1. **No client-side `nextFireAt` calculation:** `ProactiveScheduleDTO.nextFireAt` is `nil` whenever `status != .active`; cron/interval next-fire previews cannot and must not be synthesized locally.
-2. **One-time schedule `completed` vs task completion:** Backend `ScheduleRepository` sets `v2_schedules.status = 'completed'` as soon as a `once` trigger materializes its task, even while `latestRun.status` is `queued` or `running`. UI must combine `schedule.status` and `latestRun?.status` to avoid false completion.
-3. **`"View in Chat"` does not currently scroll to `resultMessageId`:** In [`LiveConversationHost.swift#L2257`](../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift#L2257) and [`TaskInboxView.swift#L274`](../../apps/ios/EmberApp/Features/Inbox/TaskInboxView.swift#L274), `onOpenChat` only dismisses the sheet / switches to the Chat tab; `ConversationTimelineView` does not currently accept a target message ID scroll request.
-4. **Proactive schedule editing not supported by API:** `/v2/schedules` exposes create, list, get, pause, resume, cancel — there is no `PATCH /v2/schedules/:id`. Redesign must not imply inline editing of existing schedules.
-5. **Memory key preservation:** `UpdatePersonalMemoryRequestDTO` sends `{ kind, content }` without `key`; hiding `key` in UI preserves existing backend deduplication keys without altering API behavior.
-
-### Decisions Requested from UI/UX Lead & CTO
-
-1. **Decision #1 — `"View in Chat"` Navigation Target (PR 2):**
-   - **Option A (Recommended):** Wire `onOpenScheduleResult(UUID)` from `ProactiveSchedulesSheetView` → `LiveConversationHostModel` → `ConversationTimelineView` (`ScrollViewProxy.scrollTo("conversation-message-\(resultMessageId.lowercased())")`) when the message is present in `state.timeline`, falling back gracefully to opening the Chat tab if the message was cleared or outside the loaded window. Keep label `"View in Chat"`.
-   - **Option B:** Keep `onOpenChat` as tab-switch + sheet-dismiss only, and rename the button label honestly to `"Open Chat"` (so it never implies exact message scrolling).
-2. **Decision #2 — Composer Presentation (`Modal Sub-Sheet` vs `Inline Expandable`):**
-   - **Recommendation:** Dedicated modal `.sheet` (`AddMemorySheet` / `CreateScheduleSheet`) triggered from toolbar `+ Add` / `+ New` and empty-state CTA. Keeps the 320pt viewport dedicated to saved items/schedules without scrolling past a tall form. Confirm preference before Phase 2 implementation.
-3. **Decision #3 — `B3ChatTasksIntegrationUITests` Update Scope (PR 1):**
-   - Approve updating `testMemorySheetSaveEditDeleteInMockConversation` in PR 1 so it opens `memory-add-button` before interacting with `memory-composer-input`.
+1. **Decision #1 — `"Open Chat"` Label & Scope (PR 2):** **Option B approved.** Rename `"View in Chat"` → `"Open Chat"` (`打开对话`). It only dismisses the sheet and switches to Chat without deep-linking to `resultMessageId`. Do not modify `LiveConversationHost` or `ConversationTimelineView` in UX-06.
+2. **Decision #2 — Modal Sub-Sheets (`AddMemorySheet` / `CreateScheduleSheet`):** **Approved**, with accessible dismissal, draft preservation on failed save/create, and keyboard + `320pt` verification.
+3. **Decision #3 — `B3ChatTasksIntegrationUITests` Update (PR 1):** **Approved** to tap `memory-add-button` first while preserving the rest of the save/edit/delete coverage.

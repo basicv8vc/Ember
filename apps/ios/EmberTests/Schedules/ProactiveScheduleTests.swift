@@ -735,6 +735,193 @@ final class ProactiveScheduleTests: XCTestCase {
         XCTAssertEqual(host.scheduleStore.schedules.first?.status, .completed)
     }
 
+    func testEffectiveBadgeAndCancellationSeparateOnceInFlightFromRecurringFailures() {
+        let onceRunning = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .followUp,
+            title: "Check flight gate",
+            prompt: "Look up Terminal 2 gate",
+            deliveryMode: .modelBrief,
+            status: .completed,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            nextFireAt: nil,
+            createdAt: "2026-11-22T08:00:00Z",
+            updatedAt: "2026-11-22T08:00:00Z",
+            latestRun: ProactiveScheduleRunDTO(
+                occurrenceSeq: 1,
+                taskId: UUID().uuidString.lowercased(),
+                status: "running",
+                scheduledFor: "2026-11-22T08:00:00Z"
+            )
+        )
+        let onceBadge = ProactiveSchedulesSheetView.effectiveBadge(for: onceRunning)
+        XCTAssertEqual(onceBadge.tone, .inFlight)
+        XCTAssertEqual(
+            String(localized: onceBadge.titleKey, table: "Conversation"),
+            String(localized: "schedules.status.triggered_running", table: "Conversation")
+        )
+        XCTAssertTrue(ProactiveSchedulesSheetView.canCancelSchedule(onceRunning))
+        XCTAssertEqual(ProactiveSchedulesSheetView.sectionKind(for: onceRunning), .active)
+
+        let onceWaitingApproval = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .followUp,
+            title: "Confirm action",
+            prompt: "Wait for user confirmation",
+            deliveryMode: .modelBrief,
+            status: .completed,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-22T08:00:00Z",
+            updatedAt: "2026-11-22T08:00:00Z",
+            latestRun: ProactiveScheduleRunDTO(
+                occurrenceSeq: 1,
+                taskId: UUID().uuidString.lowercased(),
+                status: "waiting_approval",
+                scheduledFor: "2026-11-22T08:00:00Z"
+            )
+        )
+        XCTAssertEqual(ProactiveSchedulesSheetView.effectiveBadge(for: onceWaitingApproval).tone, .warning)
+        XCTAssertTrue(ProactiveSchedulesSheetView.canCancelSchedule(onceWaitingApproval))
+
+        let onceFailed = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .followUp,
+            title: "Check Q4 PDF",
+            prompt: "Inspect Q4 PDF",
+            deliveryMode: .modelBrief,
+            status: .completed,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-22T08:00:00Z",
+            updatedAt: "2026-11-22T08:00:00Z",
+            latestRun: ProactiveScheduleRunDTO(
+                occurrenceSeq: 1,
+                taskId: UUID().uuidString.lowercased(),
+                status: "failed",
+                reasonCode: "model_timeout",
+                scheduledFor: "2026-11-22T08:00:00Z",
+                completedAt: "2026-11-22T08:01:00Z"
+            )
+        )
+        XCTAssertEqual(
+            String(localized: ProactiveSchedulesSheetView.effectiveBadge(for: onceFailed).titleKey, table: "Conversation"),
+            String(localized: "schedules.status.triggered_failed", table: "Conversation")
+        )
+        XCTAssertFalse(ProactiveSchedulesSheetView.canCancelSchedule(onceFailed))
+        XCTAssertEqual(ProactiveSchedulesSheetView.sectionKind(for: onceFailed), .history)
+
+        // Active recurring schedule stays Active even when a historical run failed.
+        let recurringActiveFailedRun = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .brief,
+            title: "Morning Brief",
+            prompt: "Daily priorities",
+            deliveryMode: .modelBrief,
+            status: .active,
+            scheduleKind: .cronTZ,
+            cronExpr: "0 8 * * *",
+            timezone: "Asia/Shanghai",
+            nextFireAt: "2026-11-23T00:00:00Z",
+            createdAt: "2026-11-20T08:00:00Z",
+            updatedAt: "2026-11-22T00:01:00Z",
+            latestRun: ProactiveScheduleRunDTO(
+                occurrenceSeq: 1,
+                taskId: UUID().uuidString.lowercased(),
+                status: "retryable_failed",
+                reasonCode: "budget_exceeded",
+                scheduledFor: "2026-11-22T00:00:00Z",
+                completedAt: "2026-11-22T00:01:00Z"
+            )
+        )
+        let recurringBadge = ProactiveSchedulesSheetView.effectiveBadge(for: recurringActiveFailedRun)
+        XCTAssertEqual(recurringBadge.tone, .active)
+        XCTAssertEqual(
+            String(localized: recurringBadge.titleKey, table: "Conversation"),
+            String(localized: "schedules.status.active", table: "Conversation")
+        )
+        XCTAssertEqual(ProactiveSchedulesSheetView.sectionKind(for: recurringActiveFailedRun), .active)
+    }
+
+    func testGroupedSchedulesOrdersActiveSoonestAndSeparatesPausedAndHistory() {
+        let laterActive = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .reminder,
+            title: "Later reminder",
+            prompt: "Later",
+            deliveryMode: .directReminder,
+            status: .active,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            nextFireAt: "2026-11-24T10:00:00Z",
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+        let soonActive = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .reminder,
+            title: "Soon reminder",
+            prompt: "Soon",
+            deliveryMode: .directReminder,
+            status: .active,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            nextFireAt: "2026-11-23T09:00:00Z",
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+        let paused = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .brief,
+            title: "Paused brief",
+            prompt: "Paused",
+            deliveryMode: .modelBrief,
+            status: .paused,
+            scheduleKind: .cronTZ,
+            cronExpr: "0 8 * * *",
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+        let cancelled = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .reminder,
+            title: "Cancelled reminder",
+            prompt: "Cancelled",
+            deliveryMode: .directReminder,
+            status: .cancelled,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+
+        let active = ProactiveSchedulesSheetView.groupedSchedules(
+            from: [laterActive, paused, cancelled, soonActive],
+            in: .active
+        )
+        XCTAssertEqual(active.map(\.title), ["Soon reminder", "Later reminder"])
+
+        let pausedList = ProactiveSchedulesSheetView.groupedSchedules(
+            from: [laterActive, paused, cancelled, soonActive],
+            in: .paused
+        )
+        XCTAssertEqual(pausedList.map(\.title), ["Paused brief"])
+
+        let history = ProactiveSchedulesSheetView.groupedSchedules(
+            from: [laterActive, paused, cancelled, soonActive],
+            in: .history
+        )
+        XCTAssertEqual(history.map(\.title), ["Cancelled reminder"])
+    }
+
+    func testShouldDisplayTimezoneOnlyWhenDifferentFromCurrent() throws {
+        let shanghai = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        XCTAssertFalse(ProactiveSchedulesSheetView.shouldDisplayTimezone("Asia/Shanghai", currentTimeZone: shanghai))
+        XCTAssertTrue(ProactiveSchedulesSheetView.shouldDisplayTimezone("America/New_York", currentTimeZone: shanghai))
+    }
+
     private func makeLiveRepository() throws -> LiveProactiveScheduleRepository {
         let session = StubSession.make()
         sessions.append(session)

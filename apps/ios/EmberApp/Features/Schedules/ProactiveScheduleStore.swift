@@ -126,6 +126,10 @@ final class ProactiveScheduleStore {
         await runMutation(id: id) { try await $0.cancelSchedule(id: id) }
     }
 
+    func clearError() {
+        errorMessage = nil
+    }
+
     func clear() {
         generation &+= 1
         schedules.removeAll()

@@ -5,12 +5,42 @@ enum ProactiveScheduleFrequency: String, CaseIterable, Sendable {
     case daily
 }
 
+enum ProactiveScheduleSectionKind: Equatable, Sendable {
+    case active
+    case paused
+    case history
+}
+
+struct ProactiveScheduleEffectiveBadge: Equatable, Sendable {
+    enum Tone: Equatable, Sendable {
+        case active
+        case inFlight
+        case warning
+        case completed
+        case neutral
+    }
+
+    let titleKey: String.LocalizationValue
+    let tone: Tone
+
+    var color: Color {
+        switch tone {
+        case .active: Color(uiColor: .systemGreen)
+        case .inFlight: Color(uiColor: .systemIndigo)
+        case .warning: Color(uiColor: .systemOrange)
+        case .completed: Color.secondary
+        case .neutral: Color(uiColor: .systemRed)
+        }
+    }
+}
+
 struct ProactiveSchedulesSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Bindable var store: ProactiveScheduleStore
     var onOpenChat: (() -> Void)? = nil
 
+    @State private var isShowingCreateSheet = false
     @State private var selectedKind: ProactiveScheduleKind = .brief
     @State private var selectedFrequency: ProactiveScheduleFrequency = .once
     @State private var titleText = ""
@@ -18,35 +48,27 @@ struct ProactiveSchedulesSheetView: View {
     @State private var dailyTime = Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var oneTimeFireAt = Date().addingTimeInterval(3600)
     @State private var pendingCancelSchedule: ProactiveScheduleDTO?
-    @FocusState private var focusedField: ComposerField?
 
-    private enum ComposerField {
-        case title
-        case prompt
+    private var subtitleKey: String.LocalizationValue {
+        if store.isEndpointUnavailable {
+            return "schedules.subtitle.unavailable"
+        }
+        if store.isMockOnly {
+            return "schedules.subtitle.mock"
+        }
+        return "schedules.subtitle"
     }
 
-    private var effectiveFrequency: ProactiveScheduleFrequency {
-        selectedKind == .followUp ? .once : selectedFrequency
+    private var activeSchedules: [ProactiveScheduleDTO] {
+        Self.groupedSchedules(from: store.schedules, in: .active)
     }
 
-    private var trimmedTitle: String {
-        titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var pausedSchedules: [ProactiveScheduleDTO] {
+        Self.groupedSchedules(from: store.schedules, in: .paused)
     }
 
-    private var trimmedPrompt: String {
-        promptText.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private var isOneTimeInPast: Bool {
-        effectiveFrequency == .once && oneTimeFireAt <= Date()
-    }
-
-    private var canCreate: Bool {
-        !trimmedTitle.isEmpty
-            && !trimmedPrompt.isEmpty
-            && !isOneTimeInPast
-            && !store.isCreating
-            && !store.isEndpointUnavailable
+    private var historySchedules: [ProactiveScheduleDTO] {
+        Self.groupedSchedules(from: store.schedules, in: .history)
     }
 
     var body: some View {
@@ -57,10 +79,11 @@ struct ProactiveSchedulesSheetView: View {
                         MockOnlyBanner()
                     }
 
-                    Text("schedules.subtitle", tableName: "Conversation")
+                    Text(String(localized: subtitleKey, table: "Conversation"))
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("schedules-subtitle")
 
                     if store.isEndpointUnavailable {
                         InlineNotice(
@@ -74,43 +97,11 @@ struct ProactiveSchedulesSheetView: View {
                         )
                         .accessibilityIdentifier("schedules-endpoint-unavailable")
                     } else {
-                        composerCard
-                    }
-
-                    if let error = store.errorMessage {
-                        InlineNotice(
-                            title: LocalizedStringKey(
-                                String(localized: "schedules.error.title", table: "Conversation")
-                            ),
-                            message: LocalizedStringKey(error),
-                            tone: .warning
-                        )
-                        .accessibilityIdentifier("schedules-error-notice")
-                    }
-
-                    if store.isLoading && store.schedules.isEmpty {
-                        LoadingPlaceholder(title: "placeholder.loading")
-                            .accessibilityIdentifier("schedules-loading")
-                    } else if store.schedules.isEmpty && !store.isEndpointUnavailable {
-                        EmptyPlaceholder(
-                            title: LocalizedStringKey(
-                                String(localized: "schedules.empty.title", table: "Conversation")
-                            ),
-                            message: LocalizedStringKey(
-                                String(localized: "schedules.empty.message", table: "Conversation")
-                            ),
-                            systemImage: "calendar.badge.clock"
-                        )
-                        .accessibilityIdentifier("schedules-empty")
-                    } else if !store.schedules.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            Text("schedules.list.section_title", tableName: "Conversation")
-                                .font(.headline)
-
-                            ForEach(store.schedules) { schedule in
-                                scheduleRow(schedule)
-                            }
+                        if let error = store.errorMessage, !store.schedules.isEmpty {
+                            ScheduleErrorBanner(message: error, identifier: "schedules-error-notice")
                         }
+
+                        primaryContent
                     }
                 }
                 .padding(EmberDesignTokens.standardSpacing)
@@ -132,15 +123,24 @@ struct ProactiveSchedulesSheetView: View {
                     Task { await store.refresh() }
                 }
             }
-            .onChange(of: selectedKind) { _, newKind in
-                if newKind == .followUp {
-                    selectedFrequency = .once
-                }
-                if effectiveFrequency == .once && oneTimeFireAt <= Date().addingTimeInterval(30) {
-                    oneTimeFireAt = Date().addingTimeInterval(3600)
-                }
-            }
             .toolbar {
+                if !store.isEndpointUnavailable {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            openCreateSheet()
+                        } label: {
+                            Label {
+                                Text("schedules.add.short", tableName: "Conversation")
+                                    .font(.subheadline.weight(.semibold))
+                            } icon: {
+                                Image(systemName: "plus")
+                            }
+                        }
+                        .accessibilityLabel(Text("schedules.add.action", tableName: "Conversation"))
+                        .accessibilityIdentifier("schedules-add-button")
+                    }
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         dismiss()
@@ -160,7 +160,7 @@ struct ProactiveSchedulesSheetView: View {
                 Button(role: .cancel) {
                     pendingCancelSchedule = nil
                 } label: {
-                    Text("conversation.live.cancel", tableName: "Conversation")
+                    Text("schedules.cancel.keep", tableName: "Conversation")
                 }
                 Button(role: .destructive) {
                     if let target = pendingCancelSchedule {
@@ -168,148 +168,577 @@ struct ProactiveSchedulesSheetView: View {
                         Task { await store.cancel(id: target.scheduleId) }
                     }
                 } label: {
-                    Text("schedules.action.cancel", tableName: "Conversation")
+                    Text("schedules.cancel.confirm_action", tableName: "Conversation")
                 }
             } message: {
                 Text("schedules.cancel.confirm_message", tableName: "Conversation")
             }
+            .sheet(isPresented: $isShowingCreateSheet) {
+                CreateScheduleSheet(
+                    store: store,
+                    selectedKind: $selectedKind,
+                    selectedFrequency: $selectedFrequency,
+                    titleText: $titleText,
+                    promptText: $promptText,
+                    dailyTime: $dailyTime,
+                    oneTimeFireAt: $oneTimeFireAt,
+                    onCancel: {
+                        store.clearError()
+                        isShowingCreateSheet = false
+                    },
+                    onCreated: {
+                        titleText = ""
+                        promptText = ""
+                        if oneTimeFireAt <= Date().addingTimeInterval(60) {
+                            oneTimeFireAt = Date().addingTimeInterval(3600)
+                        }
+                        isShowingCreateSheet = false
+                    }
+                )
+            }
         }
     }
 
-    private var composerCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker(
-                String(localized: "schedules.kind.label", table: "Conversation"),
-                selection: $selectedKind
+    @ViewBuilder
+    private var primaryContent: some View {
+        if store.isLoading && store.schedules.isEmpty {
+            LoadingPlaceholder(title: "placeholder.loading")
+                .accessibilityIdentifier("schedules-loading")
+        } else if let error = store.errorMessage, store.schedules.isEmpty {
+            ErrorPlaceholder(
+                title: LocalizedStringKey(
+                    String(localized: "schedules.error.title", table: "Conversation")
+                ),
+                message: LocalizedStringKey(error),
+                retryTitle: LocalizedStringKey("placeholder.retry")
             ) {
-                Text("schedules.kind.brief", tableName: "Conversation")
-                    .tag(ProactiveScheduleKind.brief)
-                Text("schedules.kind.follow_up", tableName: "Conversation")
-                    .tag(ProactiveScheduleKind.followUp)
-                Text("schedules.kind.reminder", tableName: "Conversation")
-                    .tag(ProactiveScheduleKind.reminder)
+                Task { await store.refresh() }
             }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("schedules-kind-picker")
-
-            TextField(
-                String(localized: "schedules.composer.title_placeholder", table: "Conversation"),
-                text: $titleText
-            )
-            .textFieldStyle(.roundedBorder)
-            .focused($focusedField, equals: .title)
-            .submitLabel(.next)
-            .onSubmit {
-                focusedField = .prompt
-            }
-            .accessibilityIdentifier("schedules-title-input")
-
-            TextField(
-                String(localized: "schedules.composer.prompt_placeholder", table: "Conversation"),
-                text: $promptText,
-                axis: .vertical
-            )
-            .lineLimit(2...4)
-            .textFieldStyle(.roundedBorder)
-            .focused($focusedField, equals: .prompt)
-            .accessibilityIdentifier("schedules-prompt-input")
-
-            if selectedKind != .followUp {
-                Picker(
-                    String(localized: "schedules.frequency.once", table: "Conversation"),
-                    selection: $selectedFrequency
-                ) {
-                    Text("schedules.frequency.once", tableName: "Conversation")
-                        .tag(ProactiveScheduleFrequency.once)
-                    Text("schedules.frequency.daily", tableName: "Conversation")
-                        .tag(ProactiveScheduleFrequency.daily)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityIdentifier("schedules-frequency-picker")
-            }
-
-            if effectiveFrequency == .daily {
-                DatePicker(
-                    String(localized: "schedules.composer.daily_time", table: "Conversation"),
-                    selection: $dailyTime,
-                    displayedComponents: .hourAndMinute
+            .accessibilityIdentifier("schedules-error-placeholder")
+        } else if store.schedules.isEmpty {
+            VStack(spacing: EmberDesignTokens.standardSpacing) {
+                EmptyPlaceholder(
+                    title: LocalizedStringKey(
+                        String(localized: "schedules.empty.title", table: "Conversation")
+                    ),
+                    message: LocalizedStringKey(
+                        String(localized: "schedules.empty.message", table: "Conversation")
+                    ),
+                    systemImage: "calendar.badge.clock"
                 )
-                .font(.subheadline)
-            } else {
-                VStack(alignment: .leading, spacing: 8) {
-                    DatePicker(
-                        String(localized: "schedules.composer.fire_at", table: "Conversation"),
-                        selection: $oneTimeFireAt,
-                        in: Date()...,
-                        displayedComponents: [.date, .hourAndMinute]
-                    )
-                    .font(.subheadline)
+                .accessibilityIdentifier("schedules-empty")
 
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            presetChip(titleKey: "schedules.preset.1m", identifier: "schedules-preset-1m") {
-                                oneTimeFireAt = Date().addingTimeInterval(65)
-                            }
-                            presetChip(titleKey: "schedules.preset.15m", identifier: "schedules-preset-15m") {
-                                oneTimeFireAt = Date().addingTimeInterval(15 * 60)
-                            }
-                            presetChip(titleKey: "schedules.preset.1h", identifier: "schedules-preset-1h") {
-                                oneTimeFireAt = Date().addingTimeInterval(3600)
-                            }
-                            presetChip(
-                                titleKey: "schedules.preset.tomorrow_9am",
-                                identifier: "schedules-preset-tomorrow-9am"
-                            ) {
-                                oneTimeFireAt = Self.nextMorningNineAM()
-                            }
-                        }
-                    }
-
-                    if isOneTimeInPast {
-                        Text("schedules.composer.past_time_hint", tableName: "Conversation")
-                            .font(.caption)
-                            .foregroundStyle(Color(uiColor: .systemOrange))
-                            .accessibilityIdentifier("schedules-past-time-hint")
-                    }
-                }
-            }
-
-            HStack {
-                Text(TimeZone.current.identifier)
-                    .font(.caption.monospaced())
-                    .foregroundStyle(.secondary)
-                Spacer()
                 Button {
-                    focusedField = nil
-                    let request = buildCreateRequest()
-                    Task {
-                        if await store.create(request) {
-                            titleText = ""
-                            promptText = ""
-                            if oneTimeFireAt <= Date().addingTimeInterval(60) {
-                                oneTimeFireAt = Date().addingTimeInterval(3600)
-                            }
-                        }
-                    }
+                    openCreateSheet()
                 } label: {
-                    if store.isCreating {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("schedules.composer.create", tableName: "Conversation")
+                    Label {
+                        Text("schedules.add.action", tableName: "Conversation")
                             .font(.subheadline.weight(.semibold))
+                    } icon: {
+                        Image(systemName: "plus")
                     }
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 12)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canCreate)
-                .accessibilityIdentifier("schedules-create-button")
+                .accessibilityIdentifier("schedules-empty-add-button")
+            }
+        } else {
+            VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                if !activeSchedules.isEmpty {
+                    scheduleSection(
+                        titleKey: "schedules.section.active",
+                        schedules: activeSchedules,
+                        identifier: "schedules-section-active"
+                    )
+                }
+                if !pausedSchedules.isEmpty {
+                    scheduleSection(
+                        titleKey: "schedules.section.paused",
+                        schedules: pausedSchedules,
+                        identifier: "schedules-section-paused"
+                    )
+                }
+                if !historySchedules.isEmpty {
+                    scheduleSection(
+                        titleKey: "schedules.section.history",
+                        schedules: historySchedules,
+                        identifier: "schedules-section-history"
+                    )
+                }
             }
         }
-        .padding(EmberDesignTokens.standardSpacing)
+    }
+
+    private func openCreateSheet() {
+        store.clearError()
+        if oneTimeFireAt <= Date().addingTimeInterval(30) {
+            oneTimeFireAt = Date().addingTimeInterval(3600)
+        }
+        isShowingCreateSheet = true
+    }
+
+    private func scheduleSection(
+        titleKey: String.LocalizationValue,
+        schedules: [ProactiveScheduleDTO],
+        identifier: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(String(localized: titleKey, table: "Conversation"))
+                .font(.headline)
+
+            ForEach(schedules) { schedule in
+                scheduleRow(schedule)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
+    }
+
+    private func scheduleRow(_ schedule: ProactiveScheduleDTO) -> some View {
+        let isMutating = store.mutatingIDs.contains(schedule.scheduleId)
+        let idSuffix = schedule.scheduleId.uuidString.lowercased()
+        let badge = Self.effectiveBadge(for: schedule)
+        let cadence = Self.formattedCadence(for: schedule)
+        let canCancel = Self.canCancelSchedule(schedule)
+        let hasChatLink = schedule.latestRun?.resultMessageId != nil && onOpenChat != nil
+        let showsActions = schedule.status == .active || schedule.status == .paused || canCancel || hasChatLink
+
+        return VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 8) {
+                    kindHeaderLabel(schedule.kind)
+                    statusBadgePill(badge, idSuffix: idSuffix)
+                    Spacer(minLength: 8)
+                    if let cadence {
+                        cadenceLabel(cadence, idSuffix: idSuffix)
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        kindHeaderLabel(schedule.kind)
+                        statusBadgePill(badge, idSuffix: idSuffix)
+                    }
+                    if let cadence {
+                        cadenceLabel(cadence, idSuffix: idSuffix)
+                    }
+                }
+            }
+
+            Text(schedule.title)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            Text(schedule.prompt)
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
+
+            if let nextFireAt = schedule.nextFireAt,
+               let date = ConversationCardFormatting.date(from: nextFireAt) {
+                let formattedDate = Self.formatNextFireAt(date, timezoneID: schedule.timezone)
+                let showsTZ = Self.shouldDisplayTimezone(schedule.timezone)
+                HStack(alignment: .firstTextBaseline, spacing: 5) {
+                    Image(systemName: "clock")
+                        .font(.caption2)
+                        .accessibilityHidden(true)
+                    Text(
+                        showsTZ
+                            ? "\(String(localized: "schedules.next_run", table: "Conversation")) \(formattedDate) (\(schedule.timezone))"
+                            : "\(String(localized: "schedules.next_run", table: "Conversation")) \(formattedDate)"
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel(
+                    Text(verbatim: "\(String(localized: "schedules.next_run", table: "Conversation")) \(formattedDate), \(schedule.timezone)")
+                )
+            }
+
+            if let latestRun = schedule.latestRun {
+                latestRunView(latestRun, for: schedule, idSuffix: idSuffix)
+            }
+
+            if showsActions {
+                actionRow(
+                    for: schedule,
+                    idSuffix: idSuffix,
+                    isMutating: isMutating,
+                    canCancel: canCancel,
+                    hasChatLink: hasChatLink
+                )
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(
             EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
         )
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("schedule-item-\(idSuffix)")
+    }
+
+    private func kindHeaderLabel(_ kind: ProactiveScheduleKind) -> some View {
+        Label {
+            Text(kindLabel(kind), tableName: "Conversation")
+                .font(.caption.weight(.semibold))
+        } icon: {
+            Image(systemName: Self.kindSymbol(for: kind))
+                .font(.caption)
+        }
+        .foregroundStyle(.secondary)
+    }
+
+    private func statusBadgePill(_ badge: ProactiveScheduleEffectiveBadge, idSuffix: String) -> some View {
+        Text(String(localized: badge.titleKey, table: "Conversation"))
+            .font(.caption2.weight(.semibold))
+            .foregroundStyle(badge.color)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(badge.color.opacity(0.12), in: Capsule())
+            .accessibilityIdentifier("schedule-status-\(idSuffix)")
+    }
+
+    private func cadenceLabel(_ cadence: String, idSuffix: String) -> some View {
+        Text(cadence)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            .accessibilityIdentifier("schedule-cadence-\(idSuffix)")
+    }
+
+    @ViewBuilder
+    private func latestRunView(
+        _ latestRun: ProactiveScheduleRunDTO,
+        for schedule: ProactiveScheduleDTO,
+        idSuffix: String
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch latestRun.status {
+            case "queued", "running":
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text(
+                        latestRun.status == "queued"
+                            ? String(localized: "schedules.run.queued", table: "Conversation")
+                            : String(localized: "schedules.run.running", table: "Conversation")
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+                .foregroundStyle(Color.accentColor)
+                .accessibilityIdentifier("schedule-run-in-flight-\(idSuffix)")
+
+            case "waiting_approval":
+                HStack(spacing: 5) {
+                    Image(systemName: "hand.raised")
+                        .font(.caption2)
+                        .accessibilityHidden(true)
+                    Text("schedules.run.waiting_approval", tableName: "Conversation")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+                .foregroundStyle(Color(uiColor: .systemOrange))
+                .accessibilityIdentifier("schedule-run-waiting-approval-\(idSuffix)")
+
+            case "failed", "retryable_failed":
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.caption2)
+                            .accessibilityHidden(true)
+                        Text("schedules.last_run_failed", tableName: "Conversation")
+                        if let completedAt = latestRun.completedAt,
+                           let completedDate = ConversationCardFormatting.date(from: completedAt) {
+                            Text("·")
+                            Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
+                        }
+                    }
+                    if let failureDetail = Self.localizedFailureReason(for: latestRun.reasonCode) {
+                        Text(failureDetail)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .font(.caption)
+                .foregroundStyle(Color(uiColor: .systemOrange))
+                .accessibilityIdentifier("schedule-run-failed-\(idSuffix)")
+
+            case "cancelled":
+                HStack(spacing: 5) {
+                    Image(systemName: "minus.circle")
+                        .font(.caption2)
+                        .accessibilityHidden(true)
+                    Text("schedules.run.cancelled", tableName: "Conversation")
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("schedule-run-cancelled-\(idSuffix)")
+
+            default:
+                if let completedAt = latestRun.completedAt,
+                   let completedDate = ConversationCardFormatting.date(from: completedAt) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "checkmark.circle")
+                            .font(.caption2)
+                            .accessibilityHidden(true)
+                        Text("schedules.last_run", tableName: "Conversation")
+                        Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                }
+            }
+
+            if let resultText = Self.displayResultText(for: schedule, run: latestRun) {
+                Text(resultText)
+                    .font(.caption)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(10)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(
+                        EmberDesignTokens.groupedBackground,
+                        in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    )
+                    .accessibilityIdentifier("schedule-result-\(idSuffix)")
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func actionRow(
+        for schedule: ProactiveScheduleDTO,
+        idSuffix: String,
+        isMutating: Bool,
+        canCancel: Bool,
+        hasChatLink: Bool
+    ) -> some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 8) {
+                primaryStatusActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating)
+                cancelActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating, canCancel: canCancel)
+                openChatActionButton(idSuffix: idSuffix, hasChatLink: hasChatLink)
+                if isMutating {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    primaryStatusActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating)
+                    cancelActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating, canCancel: canCancel)
+                    if isMutating {
+                        ProgressView()
+                            .controlSize(.mini)
+                    }
+                }
+                openChatActionButton(idSuffix: idSuffix, hasChatLink: hasChatLink)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                primaryStatusActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating)
+                cancelActionButton(for: schedule, idSuffix: idSuffix, isMutating: isMutating, canCancel: canCancel)
+                openChatActionButton(idSuffix: idSuffix, hasChatLink: hasChatLink)
+                if isMutating {
+                    ProgressView()
+                        .controlSize(.mini)
+                }
+            }
+        }
+        .padding(.top, 2)
+    }
+
+    @ViewBuilder
+    private func primaryStatusActionButton(
+        for schedule: ProactiveScheduleDTO,
+        idSuffix: String,
+        isMutating: Bool
+    ) -> some View {
+        if schedule.status == .active {
+            Button {
+                Task { await store.pause(id: schedule.scheduleId) }
+            } label: {
+                Text("schedules.action.pause", tableName: "Conversation")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isMutating)
+            .accessibilityIdentifier("schedule-pause-\(idSuffix)")
+        } else if schedule.status == .paused {
+            Button {
+                Task { await store.resume(id: schedule.scheduleId) }
+            } label: {
+                Text("schedules.action.resume", tableName: "Conversation")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isMutating)
+            .accessibilityIdentifier("schedule-resume-\(idSuffix)")
+        }
+    }
+
+    @ViewBuilder
+    private func cancelActionButton(
+        for schedule: ProactiveScheduleDTO,
+        idSuffix: String,
+        isMutating: Bool,
+        canCancel: Bool
+    ) -> some View {
+        if canCancel {
+            Button(role: .destructive) {
+                pendingCancelSchedule = schedule
+            } label: {
+                Text("schedules.action.cancel", tableName: "Conversation")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isMutating)
+            .accessibilityIdentifier("schedule-cancel-\(idSuffix)")
+        }
+    }
+
+    @ViewBuilder
+    private func openChatActionButton(idSuffix: String, hasChatLink: Bool) -> some View {
+        if hasChatLink, let onOpenChat {
+            Button {
+                onOpenChat()
+            } label: {
+                Text("schedules.action.view_in_chat", tableName: "Conversation")
+                    .font(.caption.weight(.semibold))
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 4)
+            }
+            .buttonStyle(.bordered)
+            .accessibilityIdentifier("schedule-open-chat-\(idSuffix)")
+        }
+    }
+
+    private func kindLabel(_ kind: ProactiveScheduleKind) -> LocalizedStringKey {
+        switch kind {
+        case .brief: "schedules.kind.brief"
+        case .followUp: "schedules.kind.follow_up"
+        case .reminder: "schedules.kind.reminder"
+        }
+    }
+
+    static func kindSymbol(for kind: ProactiveScheduleKind) -> String {
+        switch kind {
+        case .brief: "sun.horizon"
+        case .followUp: "arrow.turn.up.right"
+        case .reminder: "bell"
+        }
+    }
+
+    static func isLatestRunInFlight(_ schedule: ProactiveScheduleDTO) -> Bool {
+        guard let status = schedule.latestRun?.status else { return false }
+        return status == "queued" || status == "running" || status == "waiting_approval"
+    }
+
+    static func canCancelSchedule(_ schedule: ProactiveScheduleDTO) -> Bool {
+        if !schedule.status.isTerminal {
+            return true
+        }
+        return schedule.status == .completed && isLatestRunInFlight(schedule)
+    }
+
+    static func effectiveBadge(for schedule: ProactiveScheduleDTO) -> ProactiveScheduleEffectiveBadge {
+        switch schedule.status {
+        case .active:
+            return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.active", tone: .active)
+        case .paused:
+            return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.paused", tone: .warning)
+        case .cancelled:
+            return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.cancelled", tone: .neutral)
+        case .completed:
+            switch schedule.latestRun?.status {
+            case "queued":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered_queued", tone: .inFlight)
+            case "running":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered_running", tone: .inFlight)
+            case "waiting_approval":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered_waiting_approval", tone: .warning)
+            case "failed", "retryable_failed":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered_failed", tone: .warning)
+            case "cancelled":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered_cancelled", tone: .completed)
+            case "completed":
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.completed", tone: .completed)
+            default:
+                return ProactiveScheduleEffectiveBadge(titleKey: "schedules.status.triggered", tone: .completed)
+            }
+        }
+    }
+
+    static func sectionKind(for schedule: ProactiveScheduleDTO) -> ProactiveScheduleSectionKind {
+        switch schedule.status {
+        case .active:
+            return .active
+        case .paused:
+            return .paused
+        case .completed:
+            return isLatestRunInFlight(schedule) ? .active : .history
+        case .cancelled:
+            return .history
+        }
+    }
+
+    static func groupedSchedules(
+        from schedules: [ProactiveScheduleDTO],
+        in section: ProactiveScheduleSectionKind
+    ) -> [ProactiveScheduleDTO] {
+        let filtered = schedules.filter { sectionKind(for: $0) == section }
+        guard section == .active else {
+            return filtered.sorted { lhs, rhs in
+                if lhs.updatedDate != rhs.updatedDate {
+                    return lhs.updatedDate > rhs.updatedDate
+                }
+                return lhs.scheduleId.uuidString < rhs.scheduleId.uuidString
+            }
+        }
+        return filtered.sorted { lhs, rhs in
+            let lhsInFlight = isLatestRunInFlight(lhs)
+            let rhsInFlight = isLatestRunInFlight(rhs)
+            if lhsInFlight != rhsInFlight {
+                return lhsInFlight
+            }
+            let lhsNext = lhs.nextFireAt.flatMap(ConversationCardFormatting.date(from:))
+            let rhsNext = rhs.nextFireAt.flatMap(ConversationCardFormatting.date(from:))
+            switch (lhsNext, rhsNext) {
+            case let (l?, r?) where l != r:
+                return l < r
+            case (_?, nil):
+                return true
+            case (nil, _?):
+                return false
+            default:
+                if lhs.updatedDate != rhs.updatedDate {
+                    return lhs.updatedDate > rhs.updatedDate
+                }
+                return lhs.scheduleId.uuidString < rhs.scheduleId.uuidString
+            }
+        }
+    }
+
+    static func shouldDisplayTimezone(_ timezoneID: String, currentTimeZone: TimeZone = .current) -> Bool {
+        timezoneID != currentTimeZone.identifier
     }
 
     static func defaultDeliveryMode(for kind: ProactiveScheduleKind) -> ProactiveDeliveryMode {
@@ -364,233 +793,6 @@ struct ProactiveSchedulesSheetView: View {
             misfirePolicy: .coalesceLatest,
             deliveryMode: deliveryMode
         )
-    }
-
-    private func buildCreateRequest() -> CreateProactiveScheduleRequestDTO {
-        Self.makeCreateRequest(
-            kind: selectedKind,
-            title: trimmedTitle,
-            prompt: trimmedPrompt,
-            dailyTime: dailyTime,
-            oneTimeFireAt: oneTimeFireAt,
-            frequency: effectiveFrequency
-        )
-    }
-
-    private func scheduleRow(_ schedule: ProactiveScheduleDTO) -> some View {
-        let isMutating = store.mutatingIDs.contains(schedule.scheduleId)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                Text(kindLabel(schedule.kind), tableName: "Conversation")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(Color.accentColor.opacity(0.12), in: Capsule())
-
-                Text(statusLabel(schedule.status), tableName: "Conversation")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(statusColor(schedule.status))
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(statusColor(schedule.status).opacity(0.12), in: Capsule())
-
-                Spacer(minLength: 8)
-
-                if let cadence = Self.formattedCadence(for: schedule) {
-                    Text(cadence)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("schedule-cadence-\(schedule.scheduleId.uuidString.lowercased())")
-                }
-            }
-
-            Text(schedule.title)
-                .font(.body.weight(.semibold))
-                .foregroundStyle(.primary)
-
-            Text(schedule.prompt)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            if let nextFireAt = schedule.nextFireAt,
-               let date = ConversationCardFormatting.date(from: nextFireAt) {
-                HStack(spacing: 4) {
-                    Image(systemName: "clock")
-                        .font(.caption2)
-                    Text("schedules.next_run", tableName: "Conversation")
-                    Text(Self.formatNextFireAt(date, timezoneID: schedule.timezone))
-                    Text("(\(schedule.timezone))")
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            }
-
-            if let latestRun = schedule.latestRun {
-                if latestRun.status == "queued" || latestRun.status == "running" {
-                    HStack(spacing: 6) {
-                        ProgressView()
-                            .controlSize(.mini)
-                        Text(
-                            latestRun.status == "queued"
-                                ? String(localized: "schedules.run.queued", table: "Conversation")
-                                : String(localized: "schedules.run.running", table: "Conversation")
-                        )
-                    }
-                    .font(.caption)
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityIdentifier("schedule-run-in-flight-\(schedule.scheduleId.uuidString.lowercased())")
-                } else if latestRun.status == "failed" || latestRun.status == "retryable_failed" {
-                    VStack(alignment: .leading, spacing: 3) {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle")
-                                .font(.caption2)
-                            Text("schedules.last_run_failed", tableName: "Conversation")
-                            if let completedAt = latestRun.completedAt,
-                               let completedDate = ConversationCardFormatting.date(from: completedAt) {
-                                Text("·")
-                                Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
-                            }
-                        }
-                        if let failureDetail = Self.localizedFailureReason(for: latestRun.reasonCode) {
-                            Text(failureDetail)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(Color(uiColor: .systemOrange))
-                } else if let completedAt = latestRun.completedAt,
-                          let completedDate = ConversationCardFormatting.date(from: completedAt) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "checkmark.circle")
-                            .font(.caption2)
-                        Text("schedules.last_run", tableName: "Conversation")
-                        Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                }
-
-                if let resultText = Self.displayResultText(for: schedule, run: latestRun) {
-                    Text(resultText)
-                        .font(.caption)
-                        .foregroundStyle(.primary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(8)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 8))
-                        .accessibilityIdentifier("schedule-result-\(schedule.scheduleId.uuidString.lowercased())")
-                }
-            }
-
-            if !schedule.status.isTerminal || (schedule.latestRun?.resultMessageId != nil && onOpenChat != nil) {
-                HStack(spacing: 8) {
-                    if schedule.status == .active {
-                        Button {
-                            Task { await store.pause(id: schedule.scheduleId) }
-                        } label: {
-                            Text("schedules.action.pause", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isMutating)
-                        .accessibilityIdentifier("schedule-pause-\(schedule.scheduleId.uuidString.lowercased())")
-                    } else if schedule.status == .paused {
-                        Button {
-                            Task { await store.resume(id: schedule.scheduleId) }
-                        } label: {
-                            Text("schedules.action.resume", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isMutating)
-                        .accessibilityIdentifier("schedule-resume-\(schedule.scheduleId.uuidString.lowercased())")
-                    }
-
-                    if !schedule.status.isTerminal {
-                        Button(role: .destructive) {
-                            pendingCancelSchedule = schedule
-                        } label: {
-                            Text("schedules.action.cancel", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(isMutating)
-                        .accessibilityIdentifier("schedule-cancel-\(schedule.scheduleId.uuidString.lowercased())")
-                    }
-
-                    if schedule.latestRun?.resultMessageId != nil, let onOpenChat {
-                        Button {
-                            onOpenChat()
-                        } label: {
-                            Text("schedules.action.view_in_chat", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .accessibilityIdentifier("schedule-open-chat-\(schedule.scheduleId.uuidString.lowercased())")
-                    }
-
-                    if isMutating {
-                        ProgressView()
-                            .controlSize(.mini)
-                    }
-                }
-            }
-        }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("schedule-item-\(schedule.scheduleId.uuidString.lowercased())")
-    }
-
-    private func kindLabel(_ kind: ProactiveScheduleKind) -> LocalizedStringKey {
-        switch kind {
-        case .brief: "schedules.kind.brief"
-        case .followUp: "schedules.kind.follow_up"
-        case .reminder: "schedules.kind.reminder"
-        }
-    }
-
-    private func statusLabel(_ status: ProactiveScheduleStatus) -> LocalizedStringKey {
-        switch status {
-        case .active: "schedules.status.active"
-        case .paused: "schedules.status.paused"
-        case .completed: "schedules.status.completed"
-        case .cancelled: "schedules.status.cancelled"
-        }
-    }
-
-    private func statusColor(_ status: ProactiveScheduleStatus) -> Color {
-        switch status {
-        case .active: Color(uiColor: .systemGreen)
-        case .paused: Color(uiColor: .systemOrange)
-        case .completed: Color.secondary
-        case .cancelled: Color(uiColor: .systemRed)
-        }
-    }
-
-    private func presetChip(
-        titleKey: String.LocalizationValue,
-        identifier: String,
-        action: @escaping () -> Void
-    ) -> some View {
-        Button(action: action) {
-            Text(String(localized: titleKey, table: "Conversation"))
-                .font(.caption.weight(.medium))
-        }
-        .buttonStyle(.bordered)
-        .controlSize(.small)
-        .accessibilityIdentifier(identifier)
     }
 
     static func formattedCadence(for schedule: ProactiveScheduleDTO) -> String? {
@@ -655,5 +857,246 @@ struct ProactiveSchedulesSheetView: View {
         default:
             return "\(String(localized: "schedules.failure.generic", table: "Conversation")) (\(raw))"
         }
+    }
+}
+
+private struct CreateScheduleSheet: View {
+    @Bindable var store: ProactiveScheduleStore
+    @Binding var selectedKind: ProactiveScheduleKind
+    @Binding var selectedFrequency: ProactiveScheduleFrequency
+    @Binding var titleText: String
+    @Binding var promptText: String
+    @Binding var dailyTime: Date
+    @Binding var oneTimeFireAt: Date
+    let onCancel: () -> Void
+    let onCreated: () -> Void
+
+    @FocusState private var focusedField: ComposerField?
+
+    private enum ComposerField {
+        case title
+        case prompt
+    }
+
+    private var effectiveFrequency: ProactiveScheduleFrequency {
+        selectedKind == .followUp ? .once : selectedFrequency
+    }
+
+    private var trimmedTitle: String {
+        titleText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedPrompt: String {
+        promptText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var isOneTimeInPast: Bool {
+        effectiveFrequency == .once && oneTimeFireAt <= Date()
+    }
+
+    private var canCreate: Bool {
+        !trimmedTitle.isEmpty
+            && !trimmedPrompt.isEmpty
+            && !isOneTimeInPast
+            && !store.isCreating
+            && !store.isEndpointUnavailable
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                    Picker(
+                        String(localized: "schedules.kind.label", table: "Conversation"),
+                        selection: $selectedKind
+                    ) {
+                        Text("schedules.kind.brief", tableName: "Conversation")
+                            .tag(ProactiveScheduleKind.brief)
+                        Text("schedules.kind.follow_up", tableName: "Conversation")
+                            .tag(ProactiveScheduleKind.followUp)
+                        Text("schedules.kind.reminder", tableName: "Conversation")
+                            .tag(ProactiveScheduleKind.reminder)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("schedules-kind-picker")
+
+                    TextField(
+                        String(localized: "schedules.composer.title_placeholder", table: "Conversation"),
+                        text: $titleText
+                    )
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .title)
+                    .submitLabel(.next)
+                    .onSubmit {
+                        focusedField = .prompt
+                    }
+                    .accessibilityIdentifier("schedules-title-input")
+
+                    TextField(
+                        String(localized: "schedules.composer.prompt_placeholder", table: "Conversation"),
+                        text: $promptText,
+                        axis: .vertical
+                    )
+                    .lineLimit(2...4)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focusedField, equals: .prompt)
+                    .accessibilityIdentifier("schedules-prompt-input")
+
+                    if selectedKind != .followUp {
+                        Picker(
+                            String(localized: "schedules.frequency.once", table: "Conversation"),
+                            selection: $selectedFrequency
+                        ) {
+                            Text("schedules.frequency.once", tableName: "Conversation")
+                                .tag(ProactiveScheduleFrequency.once)
+                            Text("schedules.frequency.daily", tableName: "Conversation")
+                                .tag(ProactiveScheduleFrequency.daily)
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("schedules-frequency-picker")
+                    }
+
+                    if effectiveFrequency == .daily {
+                        DatePicker(
+                            String(localized: "schedules.composer.daily_time", table: "Conversation"),
+                            selection: $dailyTime,
+                            displayedComponents: .hourAndMinute
+                        )
+                        .font(.subheadline)
+                    } else {
+                        VStack(alignment: .leading, spacing: 8) {
+                            DatePicker(
+                                String(localized: "schedules.composer.fire_at", table: "Conversation"),
+                                selection: $oneTimeFireAt,
+                                in: Date()...,
+                                displayedComponents: [.date, .hourAndMinute]
+                            )
+                            .font(.subheadline)
+
+                            ScrollView(.horizontal, showsIndicators: false) {
+                                HStack(spacing: 8) {
+                                    presetChip(titleKey: "schedules.preset.1m", identifier: "schedules-preset-1m") {
+                                        oneTimeFireAt = Date().addingTimeInterval(65)
+                                    }
+                                    presetChip(titleKey: "schedules.preset.15m", identifier: "schedules-preset-15m") {
+                                        oneTimeFireAt = Date().addingTimeInterval(15 * 60)
+                                    }
+                                    presetChip(titleKey: "schedules.preset.1h", identifier: "schedules-preset-1h") {
+                                        oneTimeFireAt = Date().addingTimeInterval(3600)
+                                    }
+                                    presetChip(
+                                        titleKey: "schedules.preset.tomorrow_9am",
+                                        identifier: "schedules-preset-tomorrow-9am"
+                                    ) {
+                                        oneTimeFireAt = ProactiveSchedulesSheetView.nextMorningNineAM()
+                                    }
+                                }
+                            }
+
+                            if isOneTimeInPast {
+                                Text("schedules.composer.past_time_hint", tableName: "Conversation")
+                                    .font(.caption)
+                                    .foregroundStyle(Color(uiColor: .systemOrange))
+                                    .accessibilityIdentifier("schedules-past-time-hint")
+                            }
+                        }
+                    }
+
+                    Text(TimeZone.current.identifier)
+                        .font(.caption.monospaced())
+                        .foregroundStyle(.secondary)
+
+                    if let error = store.errorMessage {
+                        ScheduleErrorBanner(message: error, identifier: "schedules-create-error-notice")
+                    }
+                }
+                .padding(EmberDesignTokens.standardSpacing)
+            }
+            .scrollDismissesKeyboard(.interactively)
+            .background(EmberDesignTokens.groupedBackground)
+            .navigationTitle(Text("schedules.add.action", tableName: "Conversation"))
+            .navigationBarTitleDisplayMode(.inline)
+            .onChange(of: selectedKind) { _, newKind in
+                if newKind == .followUp {
+                    selectedFrequency = .once
+                }
+                if effectiveFrequency == .once && oneTimeFireAt <= Date().addingTimeInterval(30) {
+                    oneTimeFireAt = Date().addingTimeInterval(3600)
+                }
+            }
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button(action: onCancel) {
+                        Text("conversation.live.cancel", tableName: "Conversation")
+                    }
+                    .accessibilityIdentifier("schedules-create-cancel")
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button {
+                        focusedField = nil
+                        let request = ProactiveSchedulesSheetView.makeCreateRequest(
+                            kind: selectedKind,
+                            title: trimmedTitle,
+                            prompt: trimmedPrompt,
+                            dailyTime: dailyTime,
+                            oneTimeFireAt: oneTimeFireAt,
+                            frequency: effectiveFrequency
+                        )
+                        Task {
+                            if await store.create(request) {
+                                onCreated()
+                            }
+                        }
+                    } label: {
+                        if store.isCreating {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else {
+                            Text("schedules.composer.create", tableName: "Conversation")
+                                .fontWeight(.semibold)
+                        }
+                    }
+                    .disabled(!canCreate)
+                    .accessibilityIdentifier("schedules-create-button")
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .onDisappear {
+            if !store.isCreating {
+                store.clearError()
+            }
+        }
+    }
+
+    private func presetChip(
+        titleKey: String.LocalizationValue,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(String(localized: titleKey, table: "Conversation"))
+                .font(.caption.weight(.medium))
+                .frame(minWidth: 44, minHeight: 44)
+                .padding(.horizontal, 4)
+        }
+        .buttonStyle(.bordered)
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+private struct ScheduleErrorBanner: View {
+    let message: String
+    let identifier: String
+
+    var body: some View {
+        InlineNotice(
+            title: LocalizedStringKey(
+                String(localized: "schedules.error.title", table: "Conversation")
+            ),
+            message: LocalizedStringKey(message),
+            tone: .warning
+        )
+        .accessibilityIdentifier(identifier)
     }
 }

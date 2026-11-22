@@ -1003,6 +1003,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
               title: proactive.title,
               prompt: proactive.prompt,
               deliveryMode: proactive.delivery_mode,
+              scheduleKind: sched.schedule_kind,
               timezone: sched.timezone,
               scheduledForMs,
             } satisfies ProactiveScheduleTaskPayload,

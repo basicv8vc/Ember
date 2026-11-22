@@ -89,6 +89,7 @@ export interface TurnCommitDeps extends CoverageHelperDeps {
   readonly eventCoordinator: EventRuntimeCoordinatorPort;
   readonly idFactory: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
+  readonly allowRecurringModelBriefs?: boolean;
 }
 
 interface PreparedDelegationPayload {
@@ -1098,13 +1099,19 @@ export async function executeAuthoritativeTurnCommit(
           agentId: cmd.agentId,
           input: preparedSchedule.input,
           digest: preparedSchedule.digest,
-          nowMs,
+          nowMs: nowMs,
           newId: deps.idFactory,
+          ...(deps.allowRecurringModelBriefs === undefined
+            ? {}
+            : { allowRecurringModelBriefs: deps.allowRecurringModelBriefs }),
         });
-        assistantText =
-          created.outcome === 'invalid'
-            ? PROACTIVE_SCHEDULE_INVALID_REPLY
-            : created.confirmationText;
+        if (created.outcome === 'invalid') {
+          assistantText = PROACTIVE_SCHEDULE_INVALID_REPLY;
+        } else if (created.outcome === 'policy_denied') {
+          assistantText = created.message;
+        } else {
+          assistantText = created.confirmationText;
+        }
       }
     }
 

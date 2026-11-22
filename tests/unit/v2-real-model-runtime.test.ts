@@ -19,6 +19,7 @@ import {
   AgentHeadCore,
   GLOBAL_BUDGET_OBJECT_NAME,
   GLOBAL_BUDGET_REAL_OBJECT_NAME,
+  PROACTIVE_SCHEDULE_RECURRING_REAL_MODEL_DENIED_REPLY,
   applyAgentHeadMigrations,
   createAgentHeadGlobalBudgetOptions,
   createDefaultAgentHeadMigrations,
@@ -43,7 +44,10 @@ import {
   resolveV2ModelRuntime,
   type V2ModelRuntimeEnv,
 } from '../../apps/api/src/local-v2/model-runtime.js';
-import { resolveV2SandboxConfig } from '../../apps/api/src/local-v2/runtime-config.js';
+import {
+  resolveV2AllowRecurringBriefs,
+  resolveV2SandboxConfig,
+} from '../../apps/api/src/local-v2/runtime-config.js';
 import { createDurableExecutor } from '../../apps/api/src/local-v2/runtime-durable.js';
 
 const APPROVED_OPENROUTER_MODEL = 'deepseek/deepseek-v4.1-flash-1017';
@@ -114,7 +118,11 @@ function createSqliteStorage(db: DatabaseSync): DurableObjectStorageLike {
 }
 
 function createInMemoryHarness(
-  options: { globalCeilingMicroUsd?: number; nowMs?: () => number } = {},
+  options: {
+    globalCeilingMicroUsd?: number;
+    nowMs?: () => number;
+    allowRecurringModelBriefs?: boolean;
+  } = {},
 ) {
   const headDb = new DatabaseSync(':memory:');
   const gbDb = new DatabaseSync(':memory:');
@@ -167,6 +175,9 @@ function createInMemoryHarness(
     recoveryRegistry: registry,
     globalBudget,
     globalDailyCeilingMicroUsd: options.globalCeilingMicroUsd ?? 100_000,
+    ...(options.allowRecurringModelBriefs === undefined
+      ? {}
+      : { allowRecurringModelBriefs: options.allowRecurringModelBriefs }),
     ...(options.nowMs === undefined ? {} : { nowMs: options.nowMs }),
     eventRuntimeFactory(business) {
       events = new AgentEventRuntimeFacade({
@@ -1515,5 +1526,356 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       GLOBAL_BUDGET_REAL_OBJECT_NAME,
     );
     expect(options.globalDailyCeilingMicroUsd).toBe(100_000);
+  });
+
+  it('blocks unauthorized recurring real-model briefs across config, creation/resume/NL tool, and durable execution', async () => {
+    expect(resolveV2AllowRecurringBriefs({ EMBER_MODEL_MODE: 'fake' })).toBe(true);
+    expect(resolveV2AllowRecurringBriefs({ EMBER_MODEL_MODE: 'real' })).toBe(false);
+    expect(
+      resolveV2AllowRecurringBriefs({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'false',
+      }),
+    ).toBe(false);
+    expect(
+      resolveV2AllowRecurringBriefs({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'true',
+      }),
+    ).toBe(true);
+    expect(() =>
+      resolveV2AllowRecurringBriefs({
+        EMBER_MODEL_MODE: 'real',
+        EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'yes',
+      }),
+    ).toThrow(/EMBER_MODEL_ALLOW_RECURRING_BRIEFS/);
+
+    let providerCalls = 0;
+    const runtime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: () => {
+        providerCalls += 1;
+        return Promise.reject(new Error('recurring real-model brief must not call OpenRouter'));
+      },
+    });
+    expect(runtime.allowRecurringBriefs).toBe(false);
+
+    // 1. AgentHeadCore with allowRecurringModelBriefs=false blocks recurring model_brief creation & resume,
+    //    while allowing recurring direct_reminder and one-time model_brief.
+    let nowMs = Date.now();
+    const h = createInMemoryHarness({ nowMs: () => nowMs, allowRecurringModelBriefs: false });
+
+    await expect(
+      h.core.proactiveSchedule({
+        kind: 'create',
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        requestId: randomUUID(),
+        input: {
+          idempotencyKey: 'recurring-brief-denied',
+          kind: 'brief',
+          title: 'Daily Real Brief',
+          prompt: 'Summarize morning priorities.',
+          trigger: { type: 'interval', intervalSeconds: 300 },
+          timezone: 'UTC',
+          deliveryMode: 'model_brief',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+
+    const reminder = (await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'recurring-reminder-allowed',
+        kind: 'reminder',
+        title: 'Standup Reminder',
+        prompt: 'Standup in 5 minutes',
+        trigger: { type: 'interval', intervalSeconds: 300 },
+        timezone: 'UTC',
+        deliveryMode: 'direct_reminder',
+      },
+    })) as ProactiveScheduleSnapshot;
+    expect(reminder.status).toBe('active');
+
+    // NL create_proactive_schedule tool refuses recurring model_brief cleanly without creating a schedule.
+    const preparedTurn = await h.core.prepareTurn({
+      scope: {
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        policyVersion: 1,
+        requestId: randomUUID(),
+      },
+      conversationId: CONVERSATION_A,
+      executionMode: 'fast_interactive',
+      request: {
+        client_submission_id: randomUUID(),
+        text: 'Send me a brief every hour',
+        transcript_epoch: 0,
+      },
+      workerId: 'edge-nl-1',
+      leaseMs: 30_000,
+      interactiveDeadlineMs: 20_000,
+      turnDeadlineMs: 60_000,
+      modelReservation: runtime.getTurnReservation(),
+    });
+    if (preparedTurn.kind !== 'prepared') throw new Error('expected prepared');
+    await h.core.commitTurn({
+      scope: { tenantId: TENANT_A, agentId: AGENT_A },
+      conversationId: CONVERSATION_A,
+      turnId: preparedTurn.turnId,
+      attemptNo: 1,
+      operationId: preparedTurn.operationId,
+      leaseEpoch: 1,
+      leaseOwner: 'edge-nl-1',
+      settlement: { state: 'released', outcomeCode: 'not_sent' },
+      result: {
+        status: 'completed',
+        text: 'Creating recurring brief.',
+        modelLabel: runtime.modelLabel,
+        simulated: false,
+        proactiveScheduleCreate: {
+          kind: 'brief',
+          title: 'Hourly AI Brief',
+          prompt: 'Give me an hourly brief.',
+          triggerType: 'interval',
+          intervalSeconds: 3_600,
+          deliveryMode: 'model_brief',
+        },
+      },
+    });
+    const nlMessages = await h.core.readMessages({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      conversationId: CONVERSATION_A,
+      after: 0,
+      limit: 10,
+    });
+    expect(nlMessages.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: PROACTIVE_SCHEDULE_RECURRING_REAL_MODEL_DENIED_REPLY,
+    });
+
+    // 2. Simulate an interval model_brief that was created previously in fake mode (allowRecurringModelBriefs=true),
+    //    paused, and then evaluated after switching to real mode.
+    const legacyHarness = createInMemoryHarness({
+      nowMs: () => nowMs,
+      allowRecurringModelBriefs: true,
+    });
+    const preExisting = (await legacyHarness.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'fake-mode-recurring-brief',
+        kind: 'brief',
+        title: 'Pre-existing Fake Recurring Brief',
+        prompt: 'Should never call real LLM when recurring is disallowed.',
+        trigger: { type: 'interval', intervalSeconds: 300 },
+        timezone: 'UTC',
+        deliveryMode: 'model_brief',
+      },
+    })) as ProactiveScheduleSnapshot;
+
+    nowMs += 305_000;
+    await legacyHarness.events.handleAlarm({
+      nowMs,
+      queues: { durable_turn: legacyHarness.queue, agent_task: legacyHarness.queue },
+      globalBudget: legacyHarness.core.createGlobalBudgetSettlePort(),
+      registry: legacyHarness.registry,
+    });
+    const taskEnvelope = legacyHarness.sentMessages.find((msg) => msg.entityKind === 'task');
+    expect(taskEnvelope).toBeDefined();
+    if (taskEnvelope === undefined) return;
+
+    const claim = await legacyHarness.core.claimDurableWork({
+      envelope: taskEnvelope,
+      workerId: 'worker-recurring-guard',
+      leaseMs: 30_000,
+    });
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') return;
+
+    const reserveTaskModelAttempt = vi.fn(
+      (req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) =>
+        legacyHarness.core.reserveTaskModelAttempt(req),
+    );
+    const executorEnv = {
+      ...baseRealEnv(),
+      AGENT_HEAD: {
+        getByName: () => ({
+          markAttemptSent: (req: Parameters<AgentHeadCore['markAttemptSent']>[0]) =>
+            legacyHarness.core.markAttemptSent(req),
+          reserveTaskModelAttempt,
+          taskArtifacts: (req: Parameters<AgentHeadCore['taskArtifacts']>[0]) =>
+            legacyHarness.core.taskArtifacts(req),
+          edgeRpc: vi.fn(),
+        }),
+      },
+      D1_RECOVERY: {} as D1DatabaseLike,
+      DURABLE_TURN_QUEUE: legacyHarness.queue,
+      AGENT_TASK_QUEUE: legacyHarness.queue,
+      GLOBAL_BUDGET: { getByName: () => legacyHarness.globalBudget },
+    } as unknown as Parameters<typeof createDurableExecutor>[0];
+
+    const executor = createDurableExecutor(executorEnv, runtime.gateway, { modelRuntime: runtime });
+    const outcome = await executor.executeDurableWork({
+      ...claim,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-recurring-guard',
+    });
+    expect(outcome).toEqual({
+      status: 'failed',
+      summaryText: preExisting.title,
+      detailText: null,
+      modelLabel: runtime.modelLabel,
+      simulated: false,
+      reasonCode: 'recurring_real_model_unauthorized',
+    });
+    expect(reserveTaskModelAttempt).not.toHaveBeenCalled();
+    expect(providerCalls).toBe(0);
+
+    // Legacy payload missing scheduleKind also fails closed when recurring real-model briefs are disabled.
+    const legacyCtx = JSON.parse(claim.contextJson) as Record<string, unknown>;
+    const legacyInput = JSON.parse(legacyCtx['inputJson'] as string) as {
+      proactiveSchedule: Record<string, unknown>;
+    };
+    delete legacyInput.proactiveSchedule['scheduleKind'];
+    legacyCtx['inputJson'] = JSON.stringify(legacyInput);
+    const legacyOutcome = await executor.executeDurableWork({
+      ...claim,
+      contextJson: JSON.stringify(legacyCtx),
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-recurring-guard',
+    });
+    expect(legacyOutcome).toMatchObject({
+      status: 'failed',
+      reasonCode: 'recurring_real_model_unauthorized',
+    });
+    expect(providerCalls).toBe(0);
+
+    // 3. Resume of a paused recurring model_brief is denied when allowRecurringModelBriefs=false.
+    const paused = (await legacyHarness.core.proactiveSchedule({
+      kind: 'pause',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      scheduleId: preExisting.scheduleId,
+    })) as ProactiveScheduleSnapshot;
+    expect(paused.status).toBe('paused');
+
+    const guardedResumeCore = new AgentHeadCore({
+      storage: (legacyHarness.core as unknown as { storage: DurableObjectStorageLike }).storage,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      recoveryRegistry: legacyHarness.registry,
+      globalBudget: legacyHarness.globalBudget,
+      globalDailyCeilingMicroUsd: 100_000,
+      allowRecurringModelBriefs: false,
+      eventRuntimeFactory: (business) => {
+        const events = new AgentEventRuntimeFacade({
+          storage: (legacyHarness.core as unknown as { storage: DurableObjectStorageLike }).storage,
+          tenantId: TENANT_A,
+          agentId: AGENT_A,
+          business,
+        });
+        return {
+          recoveryAdmission: events.coverage,
+          eventCoordinator: events.outbox,
+          recoveryHooks: events.asTurnRecoveryHooks({
+            globalBudget: { settleGlobal: () => Promise.resolve({ accepted: true }) },
+          }),
+        };
+      },
+    });
+    await expect(
+      guardedResumeCore.proactiveSchedule({
+        kind: 'resume',
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        requestId: randomUUID(),
+        scheduleId: preExisting.scheduleId,
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+  });
+
+  it('blocks un-allowlisted tenants on POST /v2/tasks/python at HTTP ingress', async () => {
+    const runtime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: () => Promise.reject(new Error('must not be called')),
+    });
+    const taskArtifacts = vi.fn();
+    const sessions: B1SessionRuntime = {
+      service: {
+        createSession: vi.fn(),
+        refreshSession: vi.fn(),
+        logout: vi.fn(),
+        resolveActiveSession: vi.fn().mockResolvedValue({
+          session: {
+            sessionId: randomUUID(),
+            consumerId: randomUUID(),
+            tenantId: TENANT_B,
+            expiresAt: new Date(Date.now() + 60_000).toISOString(),
+            idleExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+            revokedAt: null,
+          },
+          auth: {
+            tenantId: TENANT_B,
+            principalId: PRINCIPAL_A,
+            policyVersion: 1,
+          },
+        }),
+      },
+      appleVerifier: { provider: 'apple', verify: () => Promise.resolve(null) },
+      devVerifier: { provider: 'dev', verify: () => Promise.resolve(null) },
+      devProvider: { evaluate: () => ({ enabled: false, deniedBy: [] }) },
+      me: { getMeForTenant: () => Promise.resolve(null) },
+    };
+
+    const worker = createLocalV2EdgeWorker({
+      sessions,
+      allowedHosts: ['ember-v2-staging.slowfast.dev'],
+      resolveAgentHead: () =>
+        Promise.resolve({
+          agentId: AGENT_A,
+          conversationId: CONVERSATION_A,
+          rpc: { taskArtifacts } as never,
+        }),
+      stream: {
+        gateway: runtime.gateway,
+        expectedSimulated: runtime.simulated,
+        preflightRate: runtime.rate,
+        authorizeModelTurn: (auth) => {
+          if (!runtime.isTenantAuthorized(auth.tenantId)) {
+            throw new DomainError('POLICY_DENIED', 'tenant not allowlisted');
+          }
+        },
+        resolveModelReservation: () => runtime.getTurnReservation(),
+        reportObservedUsage: vi.fn(),
+      },
+    });
+
+    const res = await worker.fetch(
+      new Request('https://ember-v2-staging.slowfast.dev/v2/tasks/python', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ems_${'a'.repeat(43)}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ prompt: 'Run python' }),
+      }),
+    );
+
+    expect(res.status).toBe(403);
+    expect(taskArtifacts).not.toHaveBeenCalled();
   });
 });

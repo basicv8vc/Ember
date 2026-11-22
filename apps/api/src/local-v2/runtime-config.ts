@@ -2,6 +2,26 @@ import { IdSchema } from '@ember/contracts';
 import type { D1DatabaseLike } from '@ember/runtime-v2';
 import type { ReadinessCheck } from '../readiness.js';
 
+export interface V2RecurringBriefPolicyEnv {
+  readonly EMBER_MODEL_MODE?: string;
+  readonly EMBER_MODEL_ALLOW_RECURRING_BRIEFS?: string;
+}
+
+/**
+ * Resolve whether recurring `model_brief` proactive schedules are authorized.
+ * Fake/non-real modes always permit recurring simulated briefs ($0 model spend);
+ * `EMBER_MODEL_MODE=real` fails closed unless `EMBER_MODEL_ALLOW_RECURRING_BRIEFS=true`.
+ */
+export function resolveV2AllowRecurringBriefs(env: V2RecurringBriefPolicyEnv): boolean {
+  const rawFlag = env.EMBER_MODEL_ALLOW_RECURRING_BRIEFS?.trim().toLowerCase();
+  if (rawFlag !== undefined && rawFlag.length > 0 && rawFlag !== 'true' && rawFlag !== 'false') {
+    throw new Error('EMBER_MODEL_ALLOW_RECURRING_BRIEFS must be "true" or "false" when set');
+  }
+  const modelMode = env.EMBER_MODEL_MODE?.trim().toLowerCase() ?? 'fake';
+  if (modelMode !== 'real') return true;
+  return rawFlag === 'true';
+}
+
 export interface V2SandboxEnv {
   readonly EMBER_ENV: string;
   readonly EMBER_V2_STAGING_ISOLATED?: string;

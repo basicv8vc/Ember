@@ -202,6 +202,17 @@ export const PROACTIVE_SCHEDULE_UNAVAILABLE_REPLY =
   "I couldn't create that schedule right now because scheduling is unavailable for this turn.";
 export const PROACTIVE_SCHEDULE_INVALID_REPLY =
   "I couldn't create that schedule because the timing or timezone was invalid. Please specify an exact future time or valid cron schedule and IANA timezone.";
+export const PROACTIVE_SCHEDULE_RECURRING_REAL_MODEL_DENIED_REPLY =
+  "I can't create a recurring AI brief right now because recurring real-model schedules are disabled. You can create a one-time brief or a direct reminder instead.";
+
+export function isRecurringModelBriefSchedule(input: {
+  readonly kind: ProactiveScheduleKind;
+  readonly triggerType: 'once' | 'interval' | 'cron' | 'cron_tz';
+  readonly deliveryMode?: ProactiveDeliveryMode;
+}): boolean {
+  const deliveryMode = input.deliveryMode ?? defaultDeliveryMode(input.kind);
+  return input.triggerType !== 'once' && deliveryMode === 'model_brief';
+}
 
 export function toProactiveScheduleCreateInputFromTurn(
   turnId: string,
@@ -297,6 +308,7 @@ export function createProactiveScheduleFromTurnSync(
     readonly digest: string;
     readonly nowMs: number;
     readonly newId: () => Id;
+    readonly allowRecurringModelBriefs?: boolean;
   },
 ):
   | {
@@ -306,6 +318,10 @@ export function createProactiveScheduleFromTurnSync(
     }
   | {
       readonly outcome: 'invalid';
+      readonly message: string;
+    }
+  | {
+      readonly outcome: 'policy_denied';
       readonly message: string;
     } {
   const existing = sqlExecMaybe<ProactiveScheduleRow>(
@@ -337,6 +353,20 @@ export function createProactiveScheduleFromTurnSync(
           joined.status === 'active' ? new Date(joined.next_fire_at_ms).toISOString() : null,
         timezone: joined.timezone,
       }),
+    };
+  }
+
+  if (
+    cmd.allowRecurringModelBriefs === false &&
+    isRecurringModelBriefSchedule({
+      kind: cmd.input.kind,
+      triggerType: cmd.input.trigger.type,
+      ...(cmd.input.deliveryMode === undefined ? {} : { deliveryMode: cmd.input.deliveryMode }),
+    })
+  ) {
+    return {
+      outcome: 'policy_denied',
+      message: PROACTIVE_SCHEDULE_RECURRING_REAL_MODEL_DENIED_REPLY,
     };
   }
 
@@ -412,14 +442,17 @@ export function createProactiveScheduleFromTurnSync(
 
 export class AgentHeadProactiveScheduleService {
   private readonly schedules: ScheduleRepository;
+  private readonly allowRecurringModelBriefs: boolean;
 
   constructor(
     private readonly deps: CoverageHelperDeps & {
       readonly eventCoordinator: EventRuntimeCoordinatorPort;
       readonly newId: () => string;
+      readonly allowRecurringModelBriefs?: boolean;
     },
   ) {
     this.schedules = new ScheduleRepository(deps.storage.sql);
+    this.allowRecurringModelBriefs = deps.allowRecurringModelBriefs ?? true;
   }
 
   private get sql() {
@@ -474,6 +507,19 @@ export class AgentHeadProactiveScheduleService {
     cmd: Extract<ProactiveScheduleCommand, { kind: 'create' }>,
   ): Promise<ProactiveScheduleSnapshot> {
     const { storage, eventCoordinator, recoveryHooks, nowMs } = this.deps;
+    if (
+      !this.allowRecurringModelBriefs &&
+      isRecurringModelBriefSchedule({
+        kind: cmd.input.kind,
+        triggerType: cmd.input.trigger.type,
+        ...(cmd.input.deliveryMode === undefined ? {} : { deliveryMode: cmd.input.deliveryMode }),
+      })
+    ) {
+      throw new DomainError(
+        'POLICY_DENIED',
+        'recurring model_brief schedules require explicit recurring real-model authorization',
+      );
+    }
     const preNow = nowMs();
     // Validate input & timezone/cron eagerly before coverage I/O.
     const preNormalized = normalizeCreateInput(cmd.input, preNow);
@@ -665,6 +711,19 @@ export class AgentHeadProactiveScheduleService {
         throw new DomainError(
           'INVALID_STATE_TRANSITION',
           `cannot resume schedule in status '${row.status}'`,
+        );
+      }
+      if (
+        !this.allowRecurringModelBriefs &&
+        isRecurringModelBriefSchedule({
+          kind: row.kind,
+          triggerType: row.schedule_kind,
+          deliveryMode: row.delivery_mode,
+        })
+      ) {
+        throw new DomainError(
+          'POLICY_DENIED',
+          'recurring model_brief schedules require explicit recurring real-model authorization',
         );
       }
 

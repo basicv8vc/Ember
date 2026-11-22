@@ -521,6 +521,8 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
       app.route(
         '/v2',
         createPythonTaskRoutes(requireSessionAuth({ service: sessions }), async (command) => {
+          const resolved = await head();
+          deps.stream?.authorizeModelTurn?.(resolved.auth);
           return (await runTaskArtifacts(command)) as V2PythonTaskSubmitResultDto;
         }),
       );

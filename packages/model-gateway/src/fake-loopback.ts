@@ -8,7 +8,12 @@ import {
   type FakeConversationUsageStatus,
 } from './fake-stream.js';
 import { FAKE_MODEL_LABEL } from './fake.js';
-import type { ConversationDelegationCall, ModelUsage } from './types.js';
+import type {
+  ConversationDelegationCall,
+  ConversationTurnOutput,
+  ModelCallResult,
+  ModelUsage,
+} from './types.js';
 
 const MAX_FRAME_CHARS = 32 * 1024;
 const JOB_HANDLE = /^[a-z0-9_-]{1,128}$/i;
@@ -197,6 +202,7 @@ function parsePersonalMemorySave(value: unknown): {
   readonly kind: 'preference' | 'fact';
   readonly content: string;
   readonly key?: string;
+  readonly replaceId?: string;
 } | null {
   if (!isRecord(value)) return null;
   if ((value.kind !== 'preference' && value.kind !== 'fact') || typeof value.content !== 'string') {
@@ -206,11 +212,63 @@ function parsePersonalMemorySave(value: unknown): {
   if (content.length === 0 || content.length > 500) return null;
   if (value.key !== undefined && typeof value.key !== 'string') return null;
   const key = typeof value.key === 'string' ? value.key.trim().toLowerCase() : undefined;
+  if (value.replaceId !== undefined && typeof value.replaceId !== 'string') return null;
+  const replaceId =
+    typeof value.replaceId === 'string'
+      ? value.replaceId.trim().replace(/^#+/, '').toLowerCase()
+      : undefined;
   return {
     kind: value.kind,
     content,
     ...(key !== undefined && key.length > 0 ? { key } : {}),
+    ...(replaceId !== undefined && /^[0-9a-f][0-9a-f-]{3,63}$/.test(replaceId)
+      ? { replaceId }
+      : {}),
   };
+}
+
+function parsePersonalMemoryDelete(value: unknown): {
+  readonly targets: readonly {
+    readonly memoryId?: string;
+    readonly key?: string;
+    readonly contentMatch?: string;
+  }[];
+} | null {
+  if (!isRecord(value) || !Array.isArray(value.targets) || value.targets.length === 0) return null;
+  if (value.targets.length > 10) return null;
+  const targets: {
+    readonly memoryId?: string;
+    readonly key?: string;
+    readonly contentMatch?: string;
+  }[] = [];
+  for (const entry of value.targets as unknown[]) {
+    if (!isRecord(entry)) return null;
+    const memoryId =
+      typeof entry.memoryId === 'string'
+        ? entry.memoryId.trim().replace(/^#+/, '').toLowerCase()
+        : undefined;
+    const key = typeof entry.key === 'string' ? entry.key.trim().toLowerCase() : undefined;
+    const contentMatch =
+      typeof entry.contentMatch === 'string' ? entry.contentMatch.trim() : undefined;
+    if (
+      (entry.memoryId !== undefined &&
+        (memoryId === undefined || !/^[0-9a-f][0-9a-f-]{3,63}$/.test(memoryId))) ||
+      (entry.key !== undefined && (key === undefined || key.length === 0 || key.length > 64)) ||
+      (entry.contentMatch !== undefined &&
+        (contentMatch === undefined || contentMatch.length === 0 || contentMatch.length > 200))
+    ) {
+      return null;
+    }
+    if (memoryId === undefined && key === undefined && contentMatch === undefined) {
+      return null;
+    }
+    targets.push({
+      ...(memoryId !== undefined ? { memoryId } : {}),
+      ...(key !== undefined ? { key } : {}),
+      ...(contentMatch !== undefined ? { contentMatch } : {}),
+    });
+  }
+  return { targets };
 }
 
 function parseProactiveScheduleCreate(value: unknown): {
@@ -313,7 +371,7 @@ function parseDelegation(value: unknown): ConversationDelegationCall | null {
   return null;
 }
 
-function toFakeReply(data: Record<string, unknown>) {
+function toFakeReply(data: Record<string, unknown>): ModelCallResult<ConversationTurnOutput> {
   const fake =
     (data.modelLabel === undefined || data.modelLabel === FAKE_MODEL_LABEL) &&
     data.simulated !== false;
@@ -328,14 +386,17 @@ function toFakeReply(data: Record<string, unknown>) {
       throw new ModelGatewayFailure('model_invalid_output');
     }
   }
-  let memorySave: {
-    readonly kind: 'preference' | 'fact';
-    readonly content: string;
-    readonly key?: string;
-  } | null = null;
+  let memorySave: ReturnType<typeof parsePersonalMemorySave> = null;
   if (fake && data.personalMemorySave !== undefined) {
     memorySave = parsePersonalMemorySave(data.personalMemorySave);
     if (memorySave === null) {
+      throw new ModelGatewayFailure('model_invalid_output');
+    }
+  }
+  let memoryDelete: ReturnType<typeof parsePersonalMemoryDelete> = null;
+  if (fake && data.personalMemoryDelete !== undefined) {
+    memoryDelete = parsePersonalMemoryDelete(data.personalMemoryDelete);
+    if (memoryDelete === null) {
       throw new ModelGatewayFailure('model_invalid_output');
     }
   }
@@ -367,7 +428,18 @@ function toFakeReply(data: Record<string, unknown>) {
                 arguments: memorySave,
               },
             }
-          : scheduleCreate !== null && text.trim().length > 0
+          : memoryDelete !== null && text.trim().length > 0
+            ? {
+                kind: 'delete_memory' as const,
+                toolName: 'delete_personal_memory' as const,
+                finishReason: 'stop' as const,
+                text,
+                memory: {
+                  toolName: 'delete_personal_memory' as const,
+                  arguments: memoryDelete,
+                },
+              }
+            : scheduleCreate !== null && text.trim().length > 0
             ? {
                 kind: 'create_schedule' as const,
                 toolName: 'create_proactive_schedule' as const,

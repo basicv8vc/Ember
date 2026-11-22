@@ -178,6 +178,60 @@ export function preflightConversationTurn(input: {
   });
 }
 
+export type ConversationTurnPreflightInput = Parameters<typeof preflightConversationTurn>[0];
+
+function tryPreflightIfUnderCap(input: ConversationTurnPreflightInput): TokenPreflight | null {
+  try {
+    return preflightConversationTurn(input);
+  } catch (error) {
+    if (error instanceof ModelInputRefused && error.reason === 'input_tokens_over_cap') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+/**
+ * Fit a conversation turn input within `MODEL_LIMITS.maxInputTokens` without lowering conservative
+ * token safety bounds. Drops oldest non-source messages first, then lowest-priority trailing
+ * personal memories if the latest message + memories still exceeds the cap. Fails closed if the
+ * single latest user message alone exceeds the cap.
+ */
+export function fitConversationTurnInputToCap<T extends ConversationTurnPreflightInput>(
+  input: T,
+): { readonly input: T; readonly preflight: TokenPreflight } {
+  const initial = tryPreflightIfUnderCap(input);
+  if (initial !== null) {
+    return { input, preflight: initial };
+  }
+
+  let messages = input.messages;
+  while (messages.length > 1) {
+    messages = messages.slice(1);
+    const candidate = { ...input, messages };
+    const preflight = tryPreflightIfUnderCap(candidate);
+    if (preflight !== null) {
+      return { input: candidate, preflight };
+    }
+  }
+
+  let memories = input.personalMemories ?? [];
+  while (memories.length > 0) {
+    memories = memories.slice(0, memories.length - 1);
+    const candidate = {
+      ...input,
+      messages,
+      personalMemories: memories.length > 0 ? memories : undefined,
+    };
+    const preflight = tryPreflightIfUnderCap(candidate);
+    if (preflight !== null) {
+      return { input: candidate, preflight };
+    }
+  }
+
+  throw new ModelInputRefused('input_tokens_over_cap');
+}
+
 export function preflightNotesActionItems(input: {
   readonly notes: string;
   readonly instructions?: string;

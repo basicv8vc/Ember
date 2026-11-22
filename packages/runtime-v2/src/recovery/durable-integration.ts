@@ -6,6 +6,7 @@ import type {
 } from '../contracts/agent-head-rpc.js';
 import type {
   PersonalMemoryContextItem,
+  PersonalMemoryDeleteTurnCommand,
   PersonalMemorySaveTurnCommand,
 } from '../contracts/personal-memory.js';
 import type { ProactiveScheduleTurnCommand } from '../contracts/proactive-schedules.js';
@@ -326,6 +327,7 @@ function parsePersonalMemoryContextItems(raw: unknown[]): readonly PersonalMemor
       continue;
     }
     const record = entry as Record<string, unknown>;
+    const id = record['id'];
     const kind = record['kind'];
     const content = record['content'];
     const key = record['key'];
@@ -335,6 +337,7 @@ function parsePersonalMemoryContextItems(raw: unknown[]): readonly PersonalMemor
       content.length > 0
     ) {
       items.push({
+        ...(typeof id === 'string' && id.length > 0 ? { id } : {}),
         kind,
         ...(typeof key === 'string' && key.length > 0 ? { key } : {}),
         content,
@@ -350,7 +353,7 @@ function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTur
   }
   const record = raw as Record<string, unknown>;
   for (const prop of Object.keys(record)) {
-    if (prop !== 'kind' && prop !== 'content' && prop !== 'key') {
+    if (prop !== 'kind' && prop !== 'content' && prop !== 'key' && prop !== 'replaceId') {
       return null;
     }
   }
@@ -366,18 +369,109 @@ function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTur
   if (content.length < 1 || content.length > 500 || /\p{Surrogate}/u.test(content)) {
     return null;
   }
+  let key: string | undefined;
   const rawKey = record['key'];
-  if (rawKey === undefined) {
-    return { kind, content };
+  if (rawKey !== undefined) {
+    if (typeof rawKey !== 'string') {
+      return null;
+    }
+    const trimmedKey = rawKey.trim().toLowerCase();
+    if (
+      trimmedKey.length < 1 ||
+      trimmedKey.length > 64 ||
+      !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(trimmedKey)
+    ) {
+      return null;
+    }
+    key = trimmedKey;
   }
-  if (typeof rawKey !== 'string') {
+  let replaceId: string | undefined;
+  const rawReplaceId = record['replaceId'];
+  if (rawReplaceId !== undefined) {
+    if (typeof rawReplaceId !== 'string') {
+      return null;
+    }
+    const normalizedRef = rawReplaceId.trim().replace(/^#+/, '').toLowerCase();
+    if (!/^[0-9a-f][0-9a-f-]{3,63}$/.test(normalizedRef)) {
+      return null;
+    }
+    replaceId = normalizedRef;
+  }
+  return {
+    kind,
+    content,
+    ...(key === undefined ? {} : { key }),
+    ...(replaceId === undefined ? {} : { replaceId }),
+  };
+}
+
+function parsePersonalMemoryDeleteTurnCommand(raw: unknown): PersonalMemoryDeleteTurnCommand | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
-  const key = rawKey.trim().toLowerCase();
-  if (key.length < 1 || key.length > 64 || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(key)) {
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (prop !== 'targets') {
+      return null;
+    }
+  }
+  if (!Array.isArray(record['targets']) || record['targets'].length < 1 || record['targets'].length > 10) {
     return null;
   }
-  return { kind, content, key };
+  const targets: PersonalMemoryDeleteTurnCommand['targets'][number][] = [];
+  for (const entry of record['targets']) {
+    if (entry === null || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+    const targetRecord = entry as Record<string, unknown>;
+    for (const prop of Object.keys(targetRecord)) {
+      if (prop !== 'memoryId' && prop !== 'key' && prop !== 'contentMatch') {
+        return null;
+      }
+    }
+    let memoryId: string | undefined;
+    if (targetRecord['memoryId'] !== undefined) {
+      if (typeof targetRecord['memoryId'] !== 'string') return null;
+      const normalizedRef = targetRecord['memoryId'].trim().replace(/^#+/, '').toLowerCase();
+      if (!/^[0-9a-f][0-9a-f-]{3,63}$/.test(normalizedRef)) return null;
+      memoryId = normalizedRef;
+    }
+    let key: string | undefined;
+    if (targetRecord['key'] !== undefined) {
+      if (typeof targetRecord['key'] !== 'string') return null;
+      const trimmedKey = targetRecord['key'].trim().toLowerCase();
+      if (
+        trimmedKey.length < 1 ||
+        trimmedKey.length > 64 ||
+        !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(trimmedKey)
+      ) {
+        return null;
+      }
+      key = trimmedKey;
+    }
+    let contentMatch: string | undefined;
+    if (targetRecord['contentMatch'] !== undefined) {
+      if (typeof targetRecord['contentMatch'] !== 'string') return null;
+      const trimmedMatch = targetRecord['contentMatch'].trim();
+      if (
+        trimmedMatch.length < 1 ||
+        trimmedMatch.length > 200 ||
+        /\p{Surrogate}/u.test(trimmedMatch)
+      ) {
+        return null;
+      }
+      contentMatch = trimmedMatch;
+    }
+    if (memoryId === undefined && key === undefined && contentMatch === undefined) {
+      return null;
+    }
+    targets.push({
+      ...(memoryId === undefined ? {} : { memoryId }),
+      ...(key === undefined ? {} : { key }),
+      ...(contentMatch === undefined ? {} : { contentMatch }),
+    });
+  }
+  return { targets };
 }
 
 const ALLOWED_PROACTIVE_SCHEDULE_PROPS = new Set([
@@ -621,6 +715,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
       let text = fallbackText;
       let delegation: B2TaskDelegationCommand | undefined;
       let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
+      let personalMemoryDelete: PersonalMemoryDeleteTurnCommand | undefined;
       let proactiveScheduleCreate: ProactiveScheduleTurnCommand | undefined;
       if (cmd.outcome.outputJson !== null) {
         try {
@@ -641,6 +736,15 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
               return { ...binding, status: 'failed', failureReason: 'internal_error' };
             }
             personalMemorySave = parsedMem;
+          }
+          if (parsed['personalMemoryDelete'] !== undefined) {
+            const parsedDelete = parsePersonalMemoryDeleteTurnCommand(
+              parsed['personalMemoryDelete'],
+            );
+            if (parsedDelete === null) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
+            }
+            personalMemoryDelete = parsedDelete;
           }
           if (parsed['proactiveScheduleCreate'] !== undefined) {
             const parsedSched = parseProactiveScheduleTurnCommand(
@@ -664,6 +768,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         text,
         ...(delegation !== undefined ? { delegation } : {}),
         ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
+        ...(personalMemoryDelete !== undefined ? { personalMemoryDelete } : {}),
         ...(proactiveScheduleCreate !== undefined ? { proactiveScheduleCreate } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
         ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),

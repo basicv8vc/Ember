@@ -5,11 +5,11 @@ import {
   buildBoundedContext,
   estimateCostMicroUsd,
   FAKE_STREAM_MAX_REPLY_CHARS,
+  fitConversationTurnInputToCap,
   isModelAuthorizationRefused,
   isModelGatewayFailure,
   MODEL_LIMITS,
   ModelGatewayFailure,
-  preflightConversationTurn,
   type ModelRateRow,
 } from '@ember/model-gateway';
 import {
@@ -168,12 +168,21 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     }
     const context = buildBoundedContext(prepared.context);
     const currentTimeIso = new Date().toISOString();
+    const fitted = fitConversationTurnInputToCap({
+      messages: context.messages,
+      ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
+        ? { personalMemories: prepared.personalMemories }
+        : {}),
+      enablePersonalMemorySaveTool: true,
+      enableProactiveScheduleTool: true,
+      maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+    });
     const turnInput = {
       conversationId,
       turnId,
-      context: context.messages,
-      ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
-        ? { personalMemories: prepared.personalMemories }
+      context: fitted.input.messages,
+      ...(fitted.input.personalMemories !== undefined && fitted.input.personalMemories.length > 0
+        ? { personalMemories: fitted.input.personalMemories }
         : {}),
       enablePersonalMemorySaveTool: true,
       enableProactiveScheduleTool: true,
@@ -181,19 +190,10 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
       maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
     };
     if (preflightRate !== null) {
-      const preflight = preflightConversationTurn({
-        messages: context.messages,
-        ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
-          ? { personalMemories: prepared.personalMemories }
-          : {}),
-        enablePersonalMemorySaveTool: true,
-        enableProactiveScheduleTool: true,
-        maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
-      });
       const estimatedMicroUsd = estimateCostMicroUsd(
         preflightRate,
-        preflight.inputTokens,
-        preflight.maxOutputTokens,
+        fitted.preflight.inputTokens,
+        fitted.preflight.maxOutputTokens,
       );
       if (estimatedMicroUsd > prepared.reservedMicroUsd) {
         throw new Error('Model preflight estimate exceeds reservation');
@@ -457,6 +457,9 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             ...(delegation === undefined ? {} : { delegation }),
             ...(reply.output.kind === 'save_memory'
               ? { personalMemorySave: reply.output.memory.arguments }
+              : {}),
+            ...(reply.output.kind === 'delete_memory'
+              ? { personalMemoryDelete: reply.output.memory.arguments }
               : {}),
             ...(reply.output.kind === 'create_schedule'
               ? { proactiveScheduleCreate: reply.output.schedule.arguments }

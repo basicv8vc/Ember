@@ -39,6 +39,7 @@ export interface ModelMessage {
 }
 
 export interface PersonalMemoryContextItem {
+  readonly id?: string;
   readonly kind: 'preference' | 'fact';
   readonly key?: string;
   readonly content: string;
@@ -100,6 +101,20 @@ export interface SavePersonalMemoryCall {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
     readonly key?: string;
+    readonly replaceId?: string;
+  };
+}
+
+export interface DeletePersonalMemoryTarget {
+  readonly memoryId?: string;
+  readonly key?: string;
+  readonly contentMatch?: string;
+}
+
+export interface DeletePersonalMemoryCall {
+  readonly toolName: 'delete_personal_memory';
+  readonly arguments: {
+    readonly targets: readonly DeletePersonalMemoryTarget[];
   };
 }
 
@@ -139,6 +154,13 @@ export type ConversationTurnOutput =
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly memory: SavePersonalMemoryCall;
+    }
+  | {
+      readonly kind: 'delete_memory';
+      readonly toolName: DeletePersonalMemoryCall['toolName'];
+      readonly text: string;
+      readonly finishReason: 'stop' | 'length';
+      readonly memory: DeletePersonalMemoryCall;
     }
   | {
       readonly kind: 'create_schedule';

@@ -1,23 +1,30 @@
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
+  COMMITTED_MEMORY_DELETED_REPLY,
   COMMITTED_MEMORY_SAVED_REPLY,
   COMMITTED_MEMORY_UPDATED_REPLY,
   CONVERSATION_SYSTEM_PROMPT,
   CONVERSATION_TOOLS_WITH_MEMORY,
+  DEFAULT_MEMORY_DELETE_ACK_TEXT,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
   DELEGATION_TOOLS,
+  DELETE_PERSONAL_MEMORY_TOOL_NAME,
   FakeModelGateway,
+  FakeStreamingModelGateway,
   MODEL_LIMITS,
   MODEL_RATE_ROWS,
   ModelGatewayFailure,
+  ModelInputRefused,
   OpenAiModelGateway,
   OpenRouterModelGateway,
   PERSONAL_MEMORY_CONTEXT_HEADER,
   PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
   SAVE_PERSONAL_MEMORY_TOOL_NAME,
   buildBoundedPersonalMemoryContext,
+  fitConversationTurnInputToCap,
   preflightConversationTurn,
+  type FakeConversationJob,
   type FetchLike,
   type ModelRateRow,
   type OpenRouterRoutingPolicy,
@@ -28,12 +35,15 @@ import {
 } from '../../packages/model-gateway/src/providers/shared.js';
 import {
   AgentHeadMemoryService,
+  PERSONAL_MEMORY_DELETED_REPLY,
   PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
   PERSONAL_MEMORY_MAX_ITEMS,
   PERSONAL_MEMORY_SAVED_REPLY,
   PERSONAL_MEMORY_UPDATED_REPLY,
   applyAgentHeadMigrations,
   createDefaultAgentHeadMigrations,
+  deletePersonalMemoriesFromTurnSync,
+  formatTurnMemoryConfirmationReply,
   parseClaimExecutionContext,
   readPersonalMemoriesForTurnSync,
   savePersonalMemoryFromTurnSync,
@@ -428,6 +438,7 @@ describe('Personal Memory — model-gateway bounded context & preflight', () => 
       'delegate_notes_action_items',
       'delegate_python_agent',
       'save_personal_memory',
+      'delete_personal_memory',
     ]);
     expect(capturedRequests[1]?.messages[0]?.content).toContain(
       PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION,
@@ -644,9 +655,14 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       }),
     ).rejects.toMatchObject({ code: 'NOT_FOUND' });
 
-    // Principal A retrieves it for turn context
+    // Principal A retrieves it for turn context (with memory id ref)
     expect(readPersonalMemoriesForTurnSync(storage.sql, tenantId, principalA)).toEqual([
-      { kind: 'preference', key: 'response_style', content: 'Prefer numbered lists' },
+      {
+        id: created.item.memory_id,
+        kind: 'preference',
+        key: 'response_style',
+        content: 'Prefer numbered lists',
+      },
     ]);
 
     // Principal A deletes it
@@ -1057,6 +1073,7 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       outcome: 'saved',
       memoryId: first.outcome === 'saved' ? first.memoryId : '',
       created: false,
+      content: 'Prefers dark roast coffee',
     });
 
     const service = new AgentHeadMemoryService({
@@ -1376,6 +1393,7 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       outcome: 'saved',
       memoryId: originalMemoryId,
       created: false,
+      content: 'Prefer concise bullet points',
     });
 
     // Unknown-ACK retry of original unkeyed POST A must replay idempotently without creating a duplicate or hitting the cap
@@ -1476,6 +1494,7 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       outcome: 'saved',
       memoryId: originalMemoryId,
       created: false,
+      content: 'Prefer concise bullet points',
     });
 
     const listAAfterKeyed = await svc.execute({
@@ -1490,5 +1509,565 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
     expect(listAAfterKeyed.items.find((item) => item.memory_id === originalMemoryId)?.key).toBe(
       'response_style',
     );
+  });
+
+  it('normalizes natural LLM save_personal_memory keys, merges parallel saves, clamps overlong content without splitting surrogates, and suppresses false streaming deltas', async () => {
+    // 1. Key with spaces/slashes/colons normalizes safely; non-ASCII key falls back to unkeyed
+    const spaceKeyParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_norm_1',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: ' Preference ',
+                  key: 'Drink/Order: Style',
+                  content: 'Iced Americano, no sugar',
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(spaceKeyParsed).toMatchObject({
+      kind: 'save_memory',
+      memory: {
+        arguments: {
+          kind: 'preference',
+          key: 'drink_order_style',
+          content: 'Iced Americano, no sugar',
+        },
+      },
+    });
+
+    const nonAsciiKeyParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_norm_2',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'fact',
+                  key: '城市偏好',
+                  content: '住在上海',
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(nonAsciiKeyParsed).toEqual({
+      kind: 'save_memory',
+      toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+      text: DEFAULT_MEMORY_SAVE_ACK_TEXT,
+      finishReason: 'stop',
+      memory: {
+        toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        arguments: {
+          kind: 'fact',
+          content: '住在上海',
+        },
+      },
+    });
+
+    // 2. Overlong content with boundary emoji clamps cleanly without lone surrogates
+    const longWithEmoji = `${'A'.repeat(498)}☕️😀`;
+    const clampedParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_clamp_1',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'preference',
+                  content: longWithEmoji,
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(clampedParsed.kind).toBe('save_memory');
+    if (clampedParsed.kind === 'save_memory') {
+      expect(clampedParsed.memory.arguments.content.length).toBeLessThanOrEqual(500);
+      expect(/\p{Surrogate}/u.test(clampedParsed.memory.arguments.content)).toBe(false);
+    }
+
+    // 3. Parallel save_personal_memory calls merge cleanly instead of throwing model_invalid_output
+    const parallelParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_p1',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'fact',
+                  key: 'city',
+                  content: 'Lives in Kyoto',
+                }),
+              },
+            },
+            {
+              id: 'call_p2',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'preference',
+                  key: 'coffee',
+                  content: 'Prefers black coffee',
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(parallelParsed).toMatchObject({
+      kind: 'save_memory',
+      memory: {
+        arguments: {
+          kind: 'fact',
+          content: 'Lives in Kyoto; Prefers black coffee',
+        },
+      },
+    });
+
+    // Mixed parallel tool calls still fail closed
+    expect(() =>
+      parseConversationTurnChoice(
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_m1',
+                type: 'function',
+                function: {
+                  name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                  arguments: JSON.stringify({ kind: 'fact', content: 'Lives in Kyoto' }),
+                },
+              },
+              {
+                id: 'call_m2',
+                type: 'function',
+                function: {
+                  name: 'delegate_notes_action_items',
+                  arguments: JSON.stringify({ notes: 'Follow up' }),
+                },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+        { allowSavePersonalMemory: true, allowDelegation: true },
+      ),
+    ).toThrow(ModelGatewayFailure);
+
+    // 4. FakeStreamingModelGateway omits provisional delta for save_memory (matches real adapter)
+    const jobs = new Map<string, FakeConversationJob>();
+    const fakeStream = new FakeStreamingModelGateway(
+      {
+        create: (job) => {
+          jobs.set(job.handle, job);
+          return Promise.resolve();
+        },
+        get: (handle) => Promise.resolve(jobs.get(handle) ?? null),
+        findByOperationId: (opId) =>
+          Promise.resolve([...jobs.values()].find((j) => j.operationId === opId) ?? null),
+      },
+      {
+        onConversationTurn: () => ({
+          kind: 'save_memory',
+          toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+          text: DEFAULT_MEMORY_SAVE_ACK_TEXT,
+          finishReason: 'stop',
+          memory: {
+            toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+            arguments: { kind: 'fact', content: 'Lives in Kyoto' },
+          },
+        }),
+      },
+    );
+    const events: string[] = [];
+    for await (const event of fakeStream.streamConversationTurn(
+      {
+        operationId: randomUUID(),
+        deadlineAtMs: Date.now() + 30_000,
+        input: {
+          conversationId: randomUUID(),
+          turnId: randomUUID(),
+          context: [{ role: 'user', text: 'Remember I live in Kyoto' }],
+          enablePersonalMemorySaveTool: true,
+          maxOutputTokens: 512,
+        },
+      },
+      new AbortController().signal,
+    )) {
+      events.push(event.kind);
+    }
+    expect(events).toEqual(['job', 'result']);
+  });
+
+  it('fits CJK conversations with saved personal memories within maxInputTokens without failing preflight', () => {
+    const chineseMemories = Array.from({ length: 10 }, (_, idx) => ({
+      kind: 'fact' as const,
+      key: `note_${idx}`,
+      content: '这'.repeat(160),
+    }));
+    const historyMessages = [
+      { role: 'user' as const, text: '历'.repeat(1_200) },
+      { role: 'assistant' as const, text: '回'.repeat(1_200) },
+      { role: 'user' as const, text: '请用中文回答我现在的偏好。' },
+    ];
+
+    expect(() =>
+      preflightConversationTurn({
+        messages: historyMessages,
+        personalMemories: chineseMemories,
+        enablePersonalMemorySaveTool: true,
+        enableProactiveScheduleTool: true,
+        maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+      }),
+    ).toThrow(ModelInputRefused);
+
+    const fitted = fitConversationTurnInputToCap({
+      messages: historyMessages,
+      personalMemories: chineseMemories,
+      enablePersonalMemorySaveTool: true,
+      enableProactiveScheduleTool: true,
+      maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+    });
+    expect(fitted.preflight.inputTokens).toBeLessThanOrEqual(MODEL_LIMITS.maxInputTokens);
+    expect(fitted.input.messages.at(-1)?.text).toBe('请用中文回答我现在的偏好。');
+    expect(fitted.input.messages.length).toBeLessThan(historyMessages.length);
+  });
+
+  it('supports #id context references, in-place unkeyed replacement, delete_personal_memory parsing/commit, and language-matched replies', async () => {
+    // 1. buildBoundedPersonalMemoryContext formats #id prefixes when id is present
+    const idA = 'a1b2c3d4-1111-4222-8333-444455556666';
+    const idB = 'e5f60718-1111-4222-8333-444455556666';
+    const formatted = buildBoundedPersonalMemoryContext([
+      { id: idA, kind: 'fact', content: '住在上海' },
+      { id: idB, kind: 'preference', key: 'coffee', content: 'Prefers black coffee' },
+    ]);
+    expect(formatted.text).toContain('- [fact | #a1b2c3d4] 住在上海');
+    expect(formatted.text).toContain('- [preference:coffee | #e5f60718] Prefers black coffee');
+
+    // 2. parseConversationTurnChoice parses replace_id (with optional #) and delete_personal_memory (single + parallel)
+    const replaceParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: '好的，已将居住城市更新为北京。',
+          tool_calls: [
+            {
+              id: 'call_replace_1',
+              type: 'function',
+              function: {
+                name: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({
+                  kind: 'fact',
+                  replace_id: '#A1B2C3D4',
+                  content: '现居北京',
+                }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(replaceParsed).toEqual({
+      kind: 'save_memory',
+      toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+      text: '好的，已将居住城市更新为北京。',
+      finishReason: 'stop',
+      memory: {
+        toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        arguments: {
+          kind: 'fact',
+          content: '现居北京',
+          replaceId: 'a1b2c3d4',
+        },
+      },
+    });
+
+    const parallelDeleteParsed = parseConversationTurnChoice(
+      {
+        message: {
+          content: null,
+          tool_calls: [
+            {
+              id: 'call_del_1',
+              type: 'function',
+              function: {
+                name: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({ memory_id: '#a1b2c3d4' }),
+              },
+            },
+            {
+              id: 'call_del_2',
+              type: 'function',
+              function: {
+                name: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+                arguments: JSON.stringify({ key: 'coffee' }),
+              },
+            },
+          ],
+        },
+        finish_reason: 'tool_calls',
+      },
+      { allowSavePersonalMemory: true },
+    );
+    expect(parallelDeleteParsed).toEqual({
+      kind: 'delete_memory',
+      toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+      text: DEFAULT_MEMORY_DELETE_ACK_TEXT,
+      finishReason: 'stop',
+      memory: {
+        toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+        arguments: {
+          targets: [{ memoryId: 'a1b2c3d4' }, { key: 'coffee' }],
+        },
+      },
+    });
+
+    // Reject delete_personal_memory when memory tools are disabled (e.g. V1 / scheduled brief)
+    expect(() =>
+      parseConversationTurnChoice(
+        {
+          message: {
+            content: null,
+            tool_calls: [
+              {
+                id: 'call_del_disabled',
+                type: 'function',
+                function: {
+                  name: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+                  arguments: JSON.stringify({ key: 'coffee' }),
+                },
+              },
+            ],
+          },
+          finish_reason: 'tool_calls',
+        },
+        { allowSavePersonalMemory: false },
+      ),
+    ).toThrow(ModelGatewayFailure);
+
+    // Reject plain-text impersonation of delete acks
+    for (const canned of [DEFAULT_MEMORY_DELETE_ACK_TEXT, COMMITTED_MEMORY_DELETED_REPLY]) {
+      expect(() =>
+        parseConversationTurnChoice(
+          { message: { content: canned }, finish_reason: 'stop' },
+          { allowSavePersonalMemory: true },
+        ),
+      ).toThrow(ModelGatewayFailure);
+    }
+
+    // 3. AgentHeadMemoryService & turn commit: unkeyed save dedup, replaceId in-place update, delete & ambiguous guard
+    const { storage } = createInMemoryDoStorage();
+    const tenantId = randomUUID();
+    const agentId = randomUUID();
+    const principalA = randomUUID();
+    const principalB = randomUUID();
+    const conversationId = randomUUID();
+    const msgId = randomUUID();
+    bootstrapHead(storage, tenantId, agentId);
+    storage.sql.exec(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 1, 0, 1700000000000, 1700000000000)`,
+      conversationId,
+    );
+    storage.sql.exec(
+      `INSERT INTO conversation_messages (id, conversation_id, sequence, kind, text, client_submission_id, created_at_ms)
+       VALUES (?, ?, 1, 'user', '请记住我住在上海', ?, 1700000000000)`,
+      msgId,
+      conversationId,
+      randomUUID(),
+    );
+
+    const svc = new AgentHeadMemoryService({
+      storage,
+      nowMs: () => 1_700_000_005_000,
+      newId: () => idA,
+    });
+    const firstSettings = await svc.execute({
+      kind: 'save',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+      input: {
+        kind: 'fact',
+        content: '住在上海',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    expect(firstSettings).toMatchObject({ created: true, item: { memory_id: idA } });
+
+    // Unkeyed duplicate from iOS settings updates in place rather than duplicating
+    const dupSettings = await svc.execute({
+      kind: 'save',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+      input: {
+        kind: 'fact',
+        content: '住在上海',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    expect(dupSettings).toMatchObject({ created: false, item: { memory_id: idA } });
+
+    // Update unkeyed memory in place via replaceId prefix
+    const replaced = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: { kind: 'fact', content: '现居北京', replaceId: 'a1b2c3d4' },
+      nowMs: 1_700_000_010_000,
+      newId: () => randomUUID(),
+    });
+    expect(replaced).toEqual({
+      outcome: 'saved',
+      memoryId: idA,
+      created: false,
+      content: '现居北京',
+    });
+
+    // Principal B cannot delete Principal A's memory
+    const crossPrincipalDelete = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalB,
+      input: { targets: [{ memoryId: 'a1b2c3d4' }] },
+    });
+    expect(crossPrincipalDelete).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 1,
+      ambiguousCount: 0,
+    });
+
+    // Add two coffee items for Principal A to test ambiguous substring guard
+    savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: { kind: 'preference', content: 'Morning coffee: black Americano' },
+      nowMs: 1_700_000_011_000,
+      newId: () => idB,
+    });
+    savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: { kind: 'preference', content: 'Afternoon coffee: iced latte' },
+      nowMs: 1_700_000_012_000,
+      newId: () => randomUUID(),
+    });
+
+    const ambiguousDelete = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: { targets: [{ contentMatch: 'coffee' }] },
+    });
+    expect(ambiguousDelete).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 0,
+      ambiguousCount: 1,
+    });
+
+    // Specific #id delete removes only the targeted item
+    const exactDelete = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: { targets: [{ memoryId: 'a1b2c3d4' }] },
+    });
+    expect(exactDelete).toEqual({
+      deletedCount: 1,
+      deletedContents: ['现居北京'],
+      notFoundCount: 0,
+      ambiguousCount: 0,
+    });
+
+    // 4. Language-matched memory reply formatting
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: DEFAULT_MEMORY_SAVE_ACK_TEXT,
+        sourceUserText: '请记住我喜欢喝黑咖啡',
+        saveOutcome: { outcome: 'saved', memoryId: idA, created: true, content: '喜欢喝黑咖啡' },
+      }),
+    ).toBe('已记住：喜欢喝黑咖啡');
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: '好的，已经帮您记下现居北京。',
+        sourceUserText: '请记住我住在上海',
+        saveOutcome: { outcome: 'saved', memoryId: idA, created: false, content: '现居北京' },
+      }),
+    ).toBe('好的，已经帮您记下现居北京。');
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: 'I deleted that for you.',
+        sourceUserText: '忘掉那个不存在的偏好',
+        deleteOutcome: {
+          deletedCount: 0,
+          deletedContents: [],
+          notFoundCount: 1,
+          ambiguousCount: 0,
+        },
+      }),
+    ).toContain('未在个人记忆中找到匹配的条目');
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: 'Done, removed all of those.',
+        sourceUserText: 'Forget my coffee preference and unicorn food',
+        deleteOutcome: {
+          deletedCount: 1,
+          deletedContents: ['Morning coffee: black Americano'],
+          notFoundCount: 1,
+          ambiguousCount: 0,
+        },
+      }),
+    ).toBe(
+      'Removed from your personal memory: Morning coffee: black Americano; other requested items were not found in your personal memory.',
+    );
+    expect(PERSONAL_MEMORY_DELETED_REPLY).toBe(COMMITTED_MEMORY_DELETED_REPLY);
   });
 });

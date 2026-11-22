@@ -1074,6 +1074,146 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertNil(model.status)
     }
 
+    func testCapabilityAwareEmptyStateAndHeaderStatusSplit() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let session = StubSession.make()
+        sessions.append(session)
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: FakeEmberSessionAPI(),
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let repo = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth),
+            journal: LiveConversationJournal(directory: directory)
+        )
+        let taskRepo = LiveB1SessionTaskRepository(auth: auth)
+        let memoryRepo = LivePersonalMemoryRepository(auth: auth)
+        let scheduleRepo = LiveProactiveScheduleRepository(auth: auth)
+
+        let memoryStatus = LockedInt(200)
+        let scheduleStatus = LockedInt(200)
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v2/memories" {
+                let code = memoryStatus.value
+                if code == 200 {
+                    return .json(statusCode: 200, body: #"{"items":[],"limits":{"max_items":50,"max_content_chars":500}}"#)
+                }
+                return .json(statusCode: code, body: "{}")
+            }
+            if request.httpMethod == "GET", path == "/v2/schedules" {
+                let code = scheduleStatus.value
+                if code == 200 {
+                    return .json(statusCode: 200, body: #"{"schedules":[]}"#)
+                }
+                return .json(statusCode: code, body: "{}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        // 1. Even with CUSTOM CLOUD badge, confirmed 200 endpoints unlock Memory + Brief + Notes prompts.
+        let fullModel = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            taskRepository: taskRepo,
+            scheduleRepository: scheduleRepo,
+            memoryRepository: memoryRepo,
+            environmentBadge: "CUSTOM CLOUD"
+        )
+        models.append(fullModel)
+        await fullModel.start()
+
+        XCTAssertTrue(fullModel.supportsMemoryCapability)
+        XCTAssertTrue(fullModel.supportsScheduleCapability)
+        XCTAssertEqual(fullModel.screen.environmentPill?.title, "CUSTOM CLOUD")
+        XCTAssertEqual(fullModel.screen.environmentPill?.tone, .custom)
+        XCTAssertEqual(fullModel.screen.environmentPill?.accessibilityIdentifier, "live-cloud-mode")
+        XCTAssertEqual(fullModel.screen.emptyState?.prompts.map(\.id), ["memory", "brief", "notes"])
+        XCTAssertNil(fullModel.screen.emptyState?.capabilityNote)
+
+        // 2. Even with V2 STAGING badge, 404 endpoints fall back truthfully to core/file prompts and surface unavailability.
+        memoryStatus.value = 404
+        scheduleStatus.value = 404
+        let v1FallbackModel = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            taskRepository: taskRepo,
+            scheduleRepository: scheduleRepo,
+            memoryRepository: memoryRepo,
+            environmentBadge: "V2 STAGING"
+        )
+        models.append(v1FallbackModel)
+        await v1FallbackModel.start()
+
+        XCTAssertFalse(v1FallbackModel.supportsMemoryCapability)
+        XCTAssertFalse(v1FallbackModel.supportsScheduleCapability)
+        XCTAssertEqual(v1FallbackModel.screen.emptyState?.prompts.map(\.id), ["notes", "priorities", "analyze_file"])
+        XCTAssertNotNil(v1FallbackModel.screen.emptyState?.capabilityNote)
+
+        // 3. Partial capability (Memory 200, Schedules 404) gates individually.
+        memoryStatus.value = 200
+        scheduleStatus.value = 404
+        let partialModel = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            taskRepository: taskRepo,
+            scheduleRepository: scheduleRepo,
+            memoryRepository: memoryRepo,
+            environmentBadge: "LIVE CLOUD"
+        )
+        models.append(partialModel)
+        await partialModel.start()
+
+        XCTAssertTrue(partialModel.supportsMemoryCapability)
+        XCTAssertFalse(partialModel.supportsScheduleCapability)
+        XCTAssertEqual(partialModel.screen.emptyState?.prompts.map(\.id), ["memory", "notes", "priorities"])
+        XCTAssertEqual(
+            partialModel.screen.emptyState?.capabilityNote,
+            String(localized: "conversation.empty.capability.schedules_unavailable", table: "Conversation")
+        )
+
+        // 4. Transient 500 never assumes V2 Memory/Schedules are available.
+        memoryStatus.value = 500
+        scheduleStatus.value = 500
+        let unknownModel = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            taskRepository: taskRepo,
+            scheduleRepository: scheduleRepo,
+            memoryRepository: memoryRepo,
+            environmentBadge: "V2 STAGING"
+        )
+        models.append(unknownModel)
+        await unknownModel.start()
+
+        XCTAssertFalse(unknownModel.supportsMemoryCapability)
+        XCTAssertFalse(unknownModel.supportsScheduleCapability)
+        XCTAssertEqual(unknownModel.screen.emptyState?.prompts.map(\.id), ["notes", "priorities", "analyze_file"])
+        XCTAssertNil(unknownModel.screen.emptyState?.capabilityNote)
+    }
+
     private func makeHostModel(
         directory: URL,
         taskPollInterval: Duration = .seconds(2)

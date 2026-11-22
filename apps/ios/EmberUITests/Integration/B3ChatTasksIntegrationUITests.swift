@@ -185,6 +185,11 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         launch(app, reset: true)
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        XCTAssertTrue(app.descendants(matching: .any)["mock-only-banner"].waitForExistence(timeout: 5))
+
+        let menuButton = app.buttons["live-conversation-menu"]
+        XCTAssertTrue(menuButton.waitForExistence(timeout: 10))
+        menuButton.tap()
 
         let openMemoryButton = app.buttons["live-conversation-open-memory"]
         XCTAssertTrue(openMemoryButton.waitForExistence(timeout: 10))
@@ -247,6 +252,34 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(closeButton.waitForExistence(timeout: 5))
         closeButton.tap()
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 5))
+    }
+
+    func testUnifiedHeaderMenuOpensSchedulesAndKeepsMockPillVisible() {
+        let app = XCUIApplication()
+        launch(app, reset: true)
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+
+        let mockPill = app.descendants(matching: .any)["mock-only-banner"].firstMatch
+        XCTAssertTrue(mockPill.waitForExistence(timeout: 5))
+        XCTAssertTrue(mockPill.isHittable)
+
+        let menuButton = app.buttons["live-conversation-menu"]
+        XCTAssertTrue(menuButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(menuButton.isHittable)
+        XCTAssertGreaterThanOrEqual(menuButton.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(menuButton.frame.height, 44)
+        menuButton.tap()
+
+        let schedulesButton = app.buttons["live-conversation-open-schedules"]
+        XCTAssertTrue(schedulesButton.waitForExistence(timeout: 5))
+        schedulesButton.tap()
+
+        let closeSchedules = app.buttons["schedules-sheet-close"]
+        XCTAssertTrue(closeSchedules.waitForExistence(timeout: 10))
+        closeSchedules.tap()
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mockPill.isHittable)
     }
 
     private func launch(_ app: XCUIApplication, reset: Bool) {

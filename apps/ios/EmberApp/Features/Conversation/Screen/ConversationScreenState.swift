@@ -22,12 +22,50 @@ struct ComposerAttachment: Identifiable, Equatable {
     }
 }
 
+enum CloudEndpointAvailability: Equatable, Sendable {
+    case unknown
+    case available
+    case unavailable
+}
+
+struct ConversationEnvironmentPill: Equatable, Sendable {
+    enum Tone: Equatable, Sendable {
+        case mock
+        case staging
+        case cloud
+        case custom
+    }
+
+    let title: String
+    let tone: Tone
+    let accessibilityIdentifier: String
+    let accessibilityLabel: String
+}
+
+struct ConversationStarterPrompt: Identifiable, Equatable, Sendable {
+    let id: String
+    let iconName: String
+    let title: String
+    let prompt: String
+}
+
+struct ConversationEmptyStateConfiguration: Equatable, Sendable {
+    let title: String
+    let subtitle: String
+    let capabilityNote: String?
+    let prompts: [ConversationStarterPrompt]
+}
+
 /// Display-only state for the conversation surface. The caller owns message truth and ordering.
 struct ConversationScreenState {
     var partnerName: String = "Ember"
+    var headerSubtitle: String? = nil
+    var headerSubtitleAccessibilityIdentifier: String? = nil
+    var environmentPill: ConversationEnvironmentPill? = nil
     var timeline: [ConversationTimelineEntry] = []
     var replyState: ConversationReplyState = .idle
     var suggestedPrompts: [String] = []
+    var emptyState: ConversationEmptyStateConfiguration? = nil
     var showsEmptyState = true
     var isLoading = false
     var isSubmitting = false

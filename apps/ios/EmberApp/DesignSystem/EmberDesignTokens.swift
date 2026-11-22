@@ -10,6 +10,32 @@ enum EmberDesignTokens {
     static let groupedBackground = Color(uiColor: .systemGroupedBackground)
     static let cardBackground = Color(uiColor: .secondarySystemGroupedBackground)
     static let separator = Color.primary.opacity(0.1)
+
+    static let minTapTarget: CGFloat = 44
+
+    static let emberMarkTint = Color(
+        uiColor: UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark
+                ? UIColor(red: 0.91, green: 0.53, blue: 0.29, alpha: 1.0)
+                : UIColor(red: 0.78, green: 0.39, blue: 0.16, alpha: 1.0)
+        }
+    )
+
+    static let emberSoftSurface = Color(
+        uiColor: UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark
+                ? UIColor(red: 0.91, green: 0.53, blue: 0.29, alpha: 0.16)
+                : UIColor(red: 0.78, green: 0.39, blue: 0.16, alpha: 0.10)
+        }
+    )
+
+    static let mockPillForeground = Color(
+        uiColor: UIColor { traitCollection in
+            traitCollection.userInterfaceStyle == .dark
+                ? UIColor(red: 0.99, green: 0.73, blue: 0.45, alpha: 1.0)
+                : UIColor(red: 0.60, green: 0.24, blue: 0.04, alpha: 1.0)
+        }
+    )
 }
 
 extension TaskStatus {

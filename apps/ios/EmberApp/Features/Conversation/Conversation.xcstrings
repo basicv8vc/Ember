@@ -342,13 +342,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Your personal AI partner"
+            "value": "Personal AI agent"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你的个人 AI 伙伴"
+            "value": "个人 AI 伙伴"
           }
         }
       }
@@ -4525,6 +4525,422 @@
           "stringUnit": {
             "state": "translated",
             "value": "滚动到最新消息并恢复自动跟随。"
+          }
+        }
+      }
+    },
+    "conversation.header.menu.label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "More options"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "更多选项"
+          }
+        }
+      }
+    },
+    "conversation.header.menu.schedule_running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scheduled run in progress"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "定时任务正在执行"
+          }
+        }
+      }
+    },
+    "conversation.header.mock_accessibility": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock only mode — simulated preview data"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅模拟模式 — 当前为本地模拟预览数据"
+          }
+        }
+      }
+    },
+    "conversation.header.env_accessibility_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Environment: %@"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前环境：%@"
+          }
+        }
+      }
+    },
+    "conversation.menu.unavailable_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · 不可用"
+          }
+        }
+      }
+    },
+    "conversation.menu.env.mock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Mock Demo · Local preview"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模拟演示 · 本地预览"
+          }
+        }
+      }
+    },
+    "conversation.menu.env.full_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Memory & Schedules ready"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · 记忆与定时任务可用"
+          }
+        }
+      }
+    },
+    "conversation.menu.env.core_only_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Memory & Schedules unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · 记忆与定时任务不可用"
+          }
+        }
+      }
+    },
+    "conversation.menu.env.memory_unavailable_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Memory unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · 记忆功能不可用"
+          }
+        }
+      }
+    },
+    "conversation.menu.env.schedules_unavailable_format": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · Schedules unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%@ · 定时任务不可用"
+          }
+        }
+      }
+    },
+    "conversation.empty.headline": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "How can I help today?"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "今天想一起推进什么？"
+          }
+        }
+      }
+    },
+    "conversation.empty.subtitle.full": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask a question, hand off a task or file, save a preference, or set a scheduled check-in."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随时提问、交办任务或文件、保存个人偏好，或安排定时提醒与简报。"
+          }
+        }
+      }
+    },
+    "conversation.empty.subtitle.memory_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask a question, organize notes, share a file, or save preferences to remember."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随时提问、整理笔记、发送文件，或保存希望 Ember 记住的偏好。"
+          }
+        }
+      }
+    },
+    "conversation.empty.subtitle.schedules_only": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask a question, organize notes, share a file, or set a scheduled check-in."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随时提问、整理笔记、发送文件，或安排定时提醒与简报。"
+          }
+        }
+      }
+    },
+    "conversation.empty.subtitle.core": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ask a question, organize notes into next steps, or share a file to analyze together."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "随时提问、把笔记整理成下一步行动，或发送文件一起分析。"
+          }
+        }
+      }
+    },
+    "conversation.empty.capability.memory_and_schedules_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal Memory and Proactive Schedules aren’t available on this server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前服务器暂未开放个人记忆与定时任务功能。"
+          }
+        }
+      }
+    },
+    "conversation.empty.capability.memory_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal Memory isn’t available on this server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前服务器暂未开放个人记忆功能。"
+          }
+        }
+      }
+    },
+    "conversation.empty.capability.schedules_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive Schedules aren’t available on this server."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前服务器暂未开放定时任务功能。"
+          }
+        }
+      }
+    },
+    "conversation.prompt.card.memory_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remember a preference"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "记住一个偏好"
+          }
+        }
+      }
+    },
+    "conversation.prompt.card.brief_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Set a morning brief"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设置每日晨报"
+          }
+        }
+      }
+    },
+    "conversation.prompt.card.notes_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Organize notes"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "整理笔记为行动"
+          }
+        }
+      }
+    },
+    "conversation.prompt.card.priorities_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Plan your priorities"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "梳理今日优先事项"
+          }
+        }
+      }
+    },
+    "conversation.prompt.card.file_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Analyze a file or draft"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "分析文件或草稿"
+          }
+        }
+      }
+    },
+    "conversation.empty.prompt.notes_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Turn these notes into clear, prioritized action items."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮我把这段笔记整理成清晰、按优先级排序的行动清单。"
+          }
+        }
+      }
+    },
+    "conversation.empty.prompt.priorities": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Help me break down today’s priorities into three concrete steps."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮我把今天的优先事项拆解成三个具体的下一步。"
+          }
+        }
+      }
+    },
+    "conversation.empty.prompt.analyze_file": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Summarize the attached document and highlight key risks or next steps."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请总结我发送的文件，并标出关键风险和下一步建议。"
           }
         }
       }

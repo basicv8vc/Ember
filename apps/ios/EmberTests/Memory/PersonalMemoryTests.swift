@@ -373,6 +373,37 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertEqual(store.items.count, 1)
     }
 
+    func testVisibleMetadataSummaryHidesRawKeyAndDistinguishesProvenance() {
+        let chatItem = PersonalMemoryItemDTO(
+            memoryID: UUID(),
+            kind: .preference,
+            key: "brief.format.internal",
+            content: "Keep morning briefs concise.",
+            provenance: PersonalMemoryProvenanceDTO(source: .explicitUserRequest),
+            createdAt: "2026-11-20T08:00:00Z",
+            updatedAt: "2026-11-20T08:00:00Z"
+        )
+        let settingsItem = PersonalMemoryItemDTO(
+            memoryID: UUID(),
+            kind: .fact,
+            key: "location.city",
+            content: "Based in Shanghai",
+            provenance: PersonalMemoryProvenanceDTO(source: .userSettings),
+            createdAt: "2026-11-20T09:00:00Z",
+            updatedAt: "2026-11-20T09:00:00Z"
+        )
+
+        let chatSummary = PersonalMemorySheetView.visibleMetadataSummary(for: chatItem)
+        let settingsSummary = PersonalMemorySheetView.visibleMetadataSummary(for: settingsItem)
+
+        XCTAssertEqual(chatSummary, String(localized: "memory.source.chat", table: "Conversation"))
+        XCTAssertEqual(settingsSummary, String(localized: "memory.source.settings", table: "Conversation"))
+        XCTAssertFalse(chatSummary.contains("brief.format.internal"))
+        XCTAssertFalse(settingsSummary.contains("location.city"))
+        XCTAssertEqual(PersonalMemorySheetView.sourceSymbol(for: .explicitUserRequest), "bubble.left")
+        XCTAssertEqual(PersonalMemorySheetView.sourceSymbol(for: .userSettings), "square.and.pencil")
+    }
+
     private func makeLiveRepository() throws -> LivePersonalMemoryRepository {
         let session = StubSession.make()
         sessions.append(session)

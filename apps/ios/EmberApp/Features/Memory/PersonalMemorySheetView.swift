@@ -4,24 +4,32 @@ struct PersonalMemorySheetView: View {
     @Environment(\.dismiss) private var dismiss
     @Bindable var store: PersonalMemoryStore
 
-    @State private var draftContent = ""
-    @State private var selectedKind: PersonalMemoryKind = .preference
+    @State private var isShowingAddSheet = false
+    @State private var addDraftContent = ""
+    @State private var addSelectedKind: PersonalMemoryKind = .preference
     @State private var editingItem: PersonalMemoryItemDTO?
     @State private var editDraftContent = ""
     @State private var editSelectedKind: PersonalMemoryKind = .preference
     @State private var pendingDeleteItem: PersonalMemoryItemDTO?
-    @FocusState private var isComposerFocused: Bool
 
-    private var trimmedDraft: String {
-        draftContent.trimmingCharacters(in: .whitespacesAndNewlines)
+    private var subtitleKey: LocalizedStringKey {
+        if store.isEndpointUnavailable {
+            return LocalizedStringKey(
+                String(localized: "memory.subtitle.unavailable", table: "Conversation")
+            )
+        }
+        if store.isMockOnly {
+            return LocalizedStringKey(
+                String(localized: "memory.subtitle.mock", table: "Conversation")
+            )
+        }
+        return LocalizedStringKey(
+            String(localized: "memory.subtitle", table: "Conversation")
+        )
     }
 
-    private var canSave: Bool {
-        !trimmedDraft.isEmpty
-            && trimmedDraft.count <= store.limits.maxContentChars
-            && !store.isSaving
-            && !store.isAtCapacity
-            && !store.isEndpointUnavailable
+    private var canOpenAddSheet: Bool {
+        !store.isEndpointUnavailable && !store.isAtCapacity
     }
 
     var body: some View {
@@ -32,7 +40,7 @@ struct PersonalMemorySheetView: View {
                         MockOnlyBanner()
                     }
 
-                    Text("memory.subtitle", tableName: "Conversation")
+                    Text(subtitleKey)
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -49,42 +57,21 @@ struct PersonalMemorySheetView: View {
                         )
                         .accessibilityIdentifier("memory-endpoint-unavailable")
                     } else {
-                        composerCard
-                    }
-
-                    if let error = store.errorMessage {
-                        errorNoticeBanner(error, identifier: "memory-error-notice")
-                    }
-
-                    if store.isLoading && store.items.isEmpty {
-                        LoadingPlaceholder(title: "placeholder.loading")
-                            .accessibilityIdentifier("memory-loading")
-                    } else if store.items.isEmpty && !store.isEndpointUnavailable {
-                        EmptyPlaceholder(
-                            title: LocalizedStringKey(
-                                String(localized: "memory.empty.title", table: "Conversation")
-                            ),
-                            message: LocalizedStringKey(
-                                String(localized: "memory.empty.message", table: "Conversation")
-                            ),
-                            systemImage: "brain.head.profile"
-                        )
-                        .accessibilityIdentifier("memory-empty")
-                    } else if !store.items.isEmpty {
-                        VStack(alignment: .leading, spacing: 10) {
-                            HStack {
-                                Text("memory.saved.section_title", tableName: "Conversation")
-                                    .font(.headline)
-                                Spacer()
-                                Text("\(store.items.count) / \(store.limits.maxItems)")
-                                    .font(.caption.monospacedDigit())
-                                    .foregroundStyle(.secondary)
-                            }
-
-                            ForEach(store.items) { item in
-                                memoryRow(item)
-                            }
+                        if let error = store.errorMessage, !store.items.isEmpty {
+                            MemoryErrorBanner(message: error, identifier: "memory-error-notice")
                         }
+
+                        if store.isAtCapacity && store.errorMessage == nil {
+                            InlineNotice(
+                                title: LocalizedStringKey(
+                                    String(localized: "memory.error.limit_reached", table: "Conversation")
+                                ),
+                                tone: .neutral
+                            )
+                            .accessibilityIdentifier("memory-capacity-notice")
+                        }
+
+                        primaryContent
                     }
                 }
                 .padding(EmberDesignTokens.standardSpacing)
@@ -102,6 +89,24 @@ struct PersonalMemorySheetView: View {
                 await store.refresh()
             }
             .toolbar {
+                if !store.isEndpointUnavailable {
+                    ToolbarItem(placement: .topBarLeading) {
+                        Button {
+                            openAddSheet()
+                        } label: {
+                            Label {
+                                Text("memory.add.short", tableName: "Conversation")
+                                    .font(.subheadline.weight(.semibold))
+                            } icon: {
+                                Image(systemName: "plus")
+                            }
+                        }
+                        .disabled(!canOpenAddSheet)
+                        .accessibilityLabel(Text("memory.add.action", tableName: "Conversation"))
+                        .accessibilityIdentifier("memory-add-button")
+                    }
+                }
+
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
                         dismiss()
@@ -134,138 +139,116 @@ struct PersonalMemorySheetView: View {
             } message: {
                 Text("memory.delete.confirm_message", tableName: "Conversation")
             }
+            .sheet(isPresented: $isShowingAddSheet) {
+                addMemorySheet
+            }
             .sheet(item: $editingItem) { item in
                 editMemorySheet(for: item)
             }
         }
     }
 
-    private var composerCard: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Picker(
-                String(localized: "memory.kind.label", table: "Conversation"),
-                selection: $selectedKind
+    @ViewBuilder
+    private var primaryContent: some View {
+        if store.isLoading && store.items.isEmpty {
+            LoadingPlaceholder(title: "placeholder.loading")
+                .accessibilityIdentifier("memory-loading")
+        } else if let error = store.errorMessage, store.items.isEmpty {
+            ErrorPlaceholder(
+                title: LocalizedStringKey(
+                    String(localized: "memory.error.title", table: "Conversation")
+                ),
+                message: LocalizedStringKey(error),
+                retryTitle: LocalizedStringKey("placeholder.retry")
             ) {
-                Text("memory.kind.preference", tableName: "Conversation")
-                    .tag(PersonalMemoryKind.preference)
-                Text("memory.kind.fact", tableName: "Conversation")
-                    .tag(PersonalMemoryKind.fact)
+                Task { await store.refresh() }
             }
-            .pickerStyle(.segmented)
-            .accessibilityIdentifier("memory-kind-picker")
+            .accessibilityIdentifier("memory-error-placeholder")
+        } else if store.items.isEmpty {
+            VStack(spacing: EmberDesignTokens.standardSpacing) {
+                EmptyPlaceholder(
+                    title: LocalizedStringKey(
+                        String(localized: "memory.empty.title", table: "Conversation")
+                    ),
+                    message: LocalizedStringKey(
+                        String(localized: "memory.empty.message", table: "Conversation")
+                    ),
+                    systemImage: "brain.head.profile"
+                )
+                .accessibilityIdentifier("memory-empty")
 
-            TextField(
-                String(localized: "memory.composer.placeholder", table: "Conversation"),
-                text: $draftContent,
-                axis: .vertical
-            )
-            .lineLimit(2...5)
-            .textFieldStyle(.roundedBorder)
-            .focused($isComposerFocused)
-            .accessibilityIdentifier("memory-composer-input")
-
-            HStack {
-                Text("\(trimmedDraft.count) / \(store.limits.maxContentChars)")
-                    .font(.caption.monospacedDigit())
-                    .foregroundStyle(
-                        trimmedDraft.count > store.limits.maxContentChars ? Color.red : Color.secondary
-                    )
-                Spacer()
                 Button {
-                    let contentToSave = trimmedDraft
-                    Task {
-                        if await store.save(kind: selectedKind, content: contentToSave) {
-                            draftContent = ""
-                            isComposerFocused = false
-                        }
-                    }
+                    openAddSheet()
                 } label: {
-                    if store.isSaving {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Text("memory.composer.save", tableName: "Conversation")
+                    Label {
+                        Text("memory.add.action", tableName: "Conversation")
                             .font(.subheadline.weight(.semibold))
+                    } icon: {
+                        Image(systemName: "plus")
                     }
+                    .frame(minHeight: 44)
+                    .padding(.horizontal, 12)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(!canSave)
-                .accessibilityIdentifier("memory-composer-save")
+                .disabled(!canOpenAddSheet)
+                .accessibilityIdentifier("memory-empty-add-button")
             }
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack {
+                    Text("memory.saved.section_title", tableName: "Conversation")
+                        .font(.headline)
+                    Spacer()
+                    Text("\(store.items.count) / \(store.limits.maxItems)")
+                        .font(.caption.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("memory-count-badge")
+                }
 
-            if store.isAtCapacity && store.errorMessage == nil {
-                Text("memory.error.limit_reached", tableName: "Conversation")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("memory-capacity-notice")
+                ForEach(store.items) { item in
+                    memoryRow(item)
+                }
             }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("memory-saved-section")
         }
-        .padding(EmberDesignTokens.standardSpacing)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+    }
+
+    private func openAddSheet() {
+        store.clearError()
+        isShowingAddSheet = true
     }
 
     private func memoryRow(_ item: PersonalMemoryItemDTO) -> some View {
         let isDeleting = store.deletingIDs.contains(item.memoryID)
         let isUpdating = store.updatingIDs.contains(item.memoryID)
-        return VStack(alignment: .leading, spacing: 8) {
-            HStack(alignment: .center, spacing: 8) {
-                Text(
-                    item.kind == .preference
-                        ? "memory.kind.preference"
-                        : "memory.kind.fact",
-                    tableName: "Conversation"
-                )
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 3)
-                .background(Color.accentColor.opacity(0.12), in: Capsule())
+        let idSuffix = item.memoryID.uuidString.lowercased()
 
-                if let key = item.key {
-                    Text(key)
-                        .font(.caption2.monospaced())
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+        return VStack(alignment: .leading, spacing: 10) {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 8) {
+                    kindBadge(for: item.kind)
+                    Spacer(minLength: 8)
+                    rowActionButtons(
+                        for: item,
+                        idSuffix: idSuffix,
+                        isDeleting: isDeleting,
+                        isUpdating: isUpdating
+                    )
                 }
 
-                Spacer(minLength: 8)
-
-                Button {
-                    store.clearError()
-                    editSelectedKind = item.kind
-                    editDraftContent = item.content
-                    editingItem = item
-                } label: {
-                    if isUpdating {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else {
-                        Image(systemName: "pencil")
-                            .font(.caption.weight(.semibold))
+                VStack(alignment: .leading, spacing: 6) {
+                    kindBadge(for: item.kind)
+                    HStack(spacing: 4) {
+                        Spacer(minLength: 0)
+                        rowActionButtons(
+                            for: item,
+                            idSuffix: idSuffix,
+                            isDeleting: isDeleting,
+                            isUpdating: isUpdating
+                        )
                     }
                 }
-                .disabled(isDeleting || isUpdating)
-                .accessibilityLabel(Text("memory.edit.action", tableName: "Conversation"))
-                .accessibilityIdentifier("memory-edit-\(item.memoryID.uuidString.lowercased())")
-
-                Button(role: .destructive) {
-                    pendingDeleteItem = item
-                } label: {
-                    if isDeleting {
-                        ProgressView()
-                            .controlSize(.mini)
-                    } else {
-                        Image(systemName: "trash")
-                            .font(.caption.weight(.semibold))
-                    }
-                }
-                .disabled(isDeleting || isUpdating)
-                .accessibilityLabel(Text("memory.delete.action", tableName: "Conversation"))
-                .accessibilityIdentifier("memory-delete-\(item.memoryID.uuidString.lowercased())")
             }
 
             Text(item.content)
@@ -275,12 +258,9 @@ struct PersonalMemorySheetView: View {
                 .textSelection(.enabled)
 
             HStack(spacing: 6) {
-                Text(
-                    item.provenance.source == .explicitUserRequest
-                        ? "memory.source.chat"
-                        : "memory.source.settings",
-                    tableName: "Conversation"
-                )
+                Image(systemName: Self.sourceSymbol(for: item.provenance.source))
+                    .accessibilityHidden(true)
+                Text(String(localized: Self.sourceLabelKey(for: item.provenance.source), table: "Conversation"))
                 if let date = ConversationCardFormatting.date(from: item.updatedAt) {
                     Text("·")
                     Text(date, format: .dateTime.month(.abbreviated).day().hour().minute())
@@ -300,7 +280,119 @@ struct PersonalMemorySheetView: View {
                 .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
         }
         .accessibilityElement(children: .contain)
-        .accessibilityIdentifier("memory-item-\(item.memoryID.uuidString.lowercased())")
+        .accessibilityIdentifier("memory-item-\(idSuffix)")
+    }
+
+    private func kindBadge(for kind: PersonalMemoryKind) -> some View {
+        Text(
+            kind == .preference
+                ? "memory.kind.preference"
+                : "memory.kind.fact",
+            tableName: "Conversation"
+        )
+        .font(.caption2.weight(.semibold))
+        .foregroundStyle(Color.accentColor)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 4)
+        .background(Color.accentColor.opacity(0.12), in: Capsule())
+    }
+
+    private func rowActionButtons(
+        for item: PersonalMemoryItemDTO,
+        idSuffix: String,
+        isDeleting: Bool,
+        isUpdating: Bool
+    ) -> some View {
+        HStack(spacing: 2) {
+            Button {
+                store.clearError()
+                editSelectedKind = item.kind
+                editDraftContent = item.content
+                editingItem = item
+            } label: {
+                Group {
+                    if isUpdating {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "pencil")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color.accentColor)
+            .disabled(isDeleting || isUpdating)
+            .accessibilityLabel(Text("memory.edit.action", tableName: "Conversation"))
+            .accessibilityIdentifier("memory-edit-\(idSuffix)")
+
+            Button(role: .destructive) {
+                pendingDeleteItem = item
+            } label: {
+                Group {
+                    if isDeleting {
+                        ProgressView()
+                            .controlSize(.mini)
+                    } else {
+                        Image(systemName: "trash")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                }
+                .frame(minWidth: 44, minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(Color(uiColor: .systemRed))
+            .disabled(isDeleting || isUpdating)
+            .accessibilityLabel(Text("memory.delete.action", tableName: "Conversation"))
+            .accessibilityIdentifier("memory-delete-\(idSuffix)")
+        }
+    }
+
+    private var addMemorySheet: some View {
+        let trimmed = addDraftContent.trimmingCharacters(in: .whitespacesAndNewlines)
+        let canCommit = !trimmed.isEmpty
+            && trimmed.count <= store.limits.maxContentChars
+            && !store.isSaving
+            && !store.isAtCapacity
+            && !store.isEndpointUnavailable
+
+        return MemoryEditorSheet(
+            navigationTitleKey: "memory.add.action",
+            selectedKind: $addSelectedKind,
+            draftContent: $addDraftContent,
+            maxContentChars: store.limits.maxContentChars,
+            isCommitting: store.isSaving,
+            canCommit: canCommit,
+            errorMessage: store.errorMessage,
+            errorIdentifier: "memory-add-error-notice",
+            inputIdentifier: "memory-composer-input",
+            saveIdentifier: "memory-composer-save",
+            helperMessage: LocalizedStringKey(
+                String(localized: "memory.add.helper", table: "Conversation")
+            ),
+            onCancel: {
+                store.clearError()
+                isShowingAddSheet = false
+            },
+            onSave: {
+                let kind = addSelectedKind
+                let content = trimmed
+                Task {
+                    if await store.save(kind: kind, content: content) {
+                        addDraftContent = ""
+                        isShowingAddSheet = false
+                    }
+                }
+            }
+        )
+        .onDisappear {
+            if !store.isSaving {
+                store.clearError()
+            }
+        }
     }
 
     private func editMemorySheet(for item: PersonalMemoryItemDTO) -> some View {
@@ -310,73 +402,146 @@ struct PersonalMemorySheetView: View {
             && trimmed.count <= store.limits.maxContentChars
             && !isUpdating
             && (trimmed != item.content || editSelectedKind != item.kind)
+        let sourceText = String(
+            localized: Self.sourceLabelKey(for: item.provenance.source),
+            table: "Conversation"
+        )
 
-        return NavigationStack {
-            VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
-                Picker(
-                    String(localized: "memory.kind.label", table: "Conversation"),
-                    selection: $editSelectedKind
-                ) {
-                    Text("memory.kind.preference", tableName: "Conversation")
-                        .tag(PersonalMemoryKind.preference)
-                    Text("memory.kind.fact", tableName: "Conversation")
-                        .tag(PersonalMemoryKind.fact)
+        return MemoryEditorSheet(
+            navigationTitleKey: "memory.edit.title",
+            selectedKind: $editSelectedKind,
+            draftContent: $editDraftContent,
+            maxContentChars: store.limits.maxContentChars,
+            isCommitting: isUpdating,
+            canCommit: canCommit,
+            errorMessage: store.errorMessage,
+            errorIdentifier: "memory-edit-error-notice",
+            inputIdentifier: "memory-edit-input",
+            saveIdentifier: "memory-edit-save",
+            helperMessage: LocalizedStringKey(
+                String(localized: "memory.edit.source_prefix \(sourceText)", table: "Conversation")
+            ),
+            onCancel: {
+                store.clearError()
+                editingItem = nil
+            },
+            onSave: {
+                let nextKind = editSelectedKind
+                let nextContent = trimmed
+                Task {
+                    let updated = await store.update(
+                        id: item.memoryID,
+                        kind: nextKind,
+                        content: nextContent
+                    )
+                    if updated || !store.items.contains(where: { $0.memoryID == item.memoryID }) {
+                        editingItem = nil
+                    }
                 }
-                .pickerStyle(.segmented)
-
-                TextField(
-                    String(localized: "memory.composer.placeholder", table: "Conversation"),
-                    text: $editDraftContent,
-                    axis: .vertical
-                )
-                .lineLimit(3...6)
-                .textFieldStyle(.roundedBorder)
-                .accessibilityIdentifier("memory-edit-input")
-
-                HStack {
-                    Text("\(trimmed.count) / \(store.limits.maxContentChars)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundStyle(
-                            trimmed.count > store.limits.maxContentChars ? Color.red : Color.secondary
-                        )
-                    Spacer()
-                }
-
-                if let error = store.errorMessage {
-                    errorNoticeBanner(error, identifier: "memory-edit-error-notice")
-                }
-
-                Spacer()
             }
-            .padding(EmberDesignTokens.standardSpacing)
+        )
+        .onDisappear {
+            if store.items.contains(where: { $0.memoryID == item.memoryID }) {
+                store.clearError()
+            }
+        }
+    }
+
+    static func sourceLabelKey(for source: PersonalMemorySource) -> String.LocalizationValue {
+        source == .explicitUserRequest ? "memory.source.chat" : "memory.source.settings"
+    }
+
+    static func sourceSymbol(for source: PersonalMemorySource) -> String {
+        source == .explicitUserRequest ? "bubble.left" : "square.and.pencil"
+    }
+
+    /// Human-readable subtitle lines rendered on a memory row (never includes raw internal `key`).
+    static func visibleMetadataSummary(for item: PersonalMemoryItemDTO) -> String {
+        String(localized: sourceLabelKey(for: item.provenance.source), table: "Conversation")
+    }
+}
+
+private struct MemoryEditorSheet: View {
+    let navigationTitleKey: String.LocalizationValue
+    @Binding var selectedKind: PersonalMemoryKind
+    @Binding var draftContent: String
+    let maxContentChars: Int
+    let isCommitting: Bool
+    let canCommit: Bool
+    let errorMessage: String?
+    let errorIdentifier: String
+    let inputIdentifier: String
+    let saveIdentifier: String
+    let helperMessage: LocalizedStringKey
+    let onCancel: () -> Void
+    let onSave: () -> Void
+
+    @FocusState private var isInputFocused: Bool
+
+    private var trimmedCount: Int {
+        draftContent.trimmingCharacters(in: .whitespacesAndNewlines).count
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
+                    Picker(
+                        String(localized: "memory.kind.label", table: "Conversation"),
+                        selection: $selectedKind
+                    ) {
+                        Text("memory.kind.preference", tableName: "Conversation")
+                            .tag(PersonalMemoryKind.preference)
+                        Text("memory.kind.fact", tableName: "Conversation")
+                            .tag(PersonalMemoryKind.fact)
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("memory-kind-picker")
+
+                    TextField(
+                        String(localized: "memory.composer.placeholder", table: "Conversation"),
+                        text: $draftContent,
+                        axis: .vertical
+                    )
+                    .lineLimit(3...6)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($isInputFocused)
+                    .accessibilityIdentifier(inputIdentifier)
+
+                    HStack {
+                        Text("\(trimmedCount) / \(maxContentChars)")
+                            .font(.caption.monospacedDigit())
+                            .foregroundStyle(
+                                trimmedCount > maxContentChars ? Color.red : Color.secondary
+                            )
+                        Spacer()
+                    }
+
+                    Text(helperMessage)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let errorMessage {
+                        MemoryErrorBanner(message: errorMessage, identifier: errorIdentifier)
+                    }
+                }
+                .padding(EmberDesignTokens.standardSpacing)
+            }
+            .scrollDismissesKeyboard(.interactively)
             .background(EmberDesignTokens.groupedBackground)
-            .navigationTitle(Text("memory.edit.title", tableName: "Conversation"))
+            .navigationTitle(Text(String(localized: navigationTitleKey, table: "Conversation")))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button {
-                        store.clearError()
-                        editingItem = nil
-                    } label: {
+                    Button(action: onCancel) {
                         Text("conversation.live.cancel", tableName: "Conversation")
                     }
+                    .accessibilityIdentifier("memory-editor-cancel")
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button {
-                        let nextKind = editSelectedKind
-                        let nextContent = trimmed
-                        Task {
-                            let updated = await store.update(
-                                id: item.memoryID,
-                                kind: nextKind,
-                                content: nextContent
-                            )
-                            if updated || !store.items.contains(where: { $0.memoryID == item.memoryID }) {
-                                editingItem = nil
-                            }
-                        }
-                    } label: {
-                        if isUpdating {
+                    Button(action: onSave) {
+                        if isCommitting {
                             ProgressView()
                                 .controlSize(.small)
                         } else {
@@ -385,24 +550,27 @@ struct PersonalMemorySheetView: View {
                         }
                     }
                     .disabled(!canCommit)
-                    .accessibilityIdentifier("memory-edit-save")
+                    .accessibilityIdentifier(saveIdentifier)
                 }
             }
-        }
-        .presentationDetents([.medium])
-        .onDisappear {
-            if store.items.contains(where: { $0.memoryID == item.memoryID }) {
-                store.clearError()
+            .onAppear {
+                isInputFocused = true
             }
         }
+        .presentationDetents([.medium, .large])
     }
+}
 
-    private func errorNoticeBanner(_ error: String, identifier: String) -> some View {
+private struct MemoryErrorBanner: View {
+    let message: String
+    let identifier: String
+
+    var body: some View {
         InlineNotice(
             title: LocalizedStringKey(
                 String(localized: "memory.error.title", table: "Conversation")
             ),
-            message: LocalizedStringKey(error),
+            message: LocalizedStringKey(message),
             tone: .warning
         )
         .accessibilityIdentifier(identifier)

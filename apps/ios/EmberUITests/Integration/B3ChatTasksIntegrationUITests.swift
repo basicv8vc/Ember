@@ -195,10 +195,21 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(openMemoryButton.waitForExistence(timeout: 10))
         openMemoryButton.tap()
 
+        // Saved memories are presented first (default sample b901 visible before opening Add sheet).
+        let savedSection = app.otherElements["memory-saved-section"]
+        XCTAssertTrue(savedSection.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.staticTexts["response.style"].exists)
+        attachScreenshot(app: app, name: "ux06-memory-saved-first")
+
+        let addButton = app.buttons["memory-add-button"]
+        XCTAssertTrue(addButton.waitForExistence(timeout: 5))
+        addButton.tap()
+
         let input = app.descendants(matching: .any)["memory-composer-input"]
         XCTAssertTrue(input.waitForExistence(timeout: 10))
         input.tap()
         input.typeText("Keep daily briefs in bullet points")
+        attachScreenshot(app: app, name: "ux06-memory-add-sheet")
 
         let saveButton = app.buttons["memory-composer-save"]
         XCTAssertTrue(saveButton.waitForExistence(timeout: 5))
@@ -233,6 +244,7 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
                 .firstMatch
                 .waitForExistence(timeout: 5)
         )
+        attachScreenshot(app: app, name: "ux06-memory-after-edit")
 
         let deleteButton = app.buttons["memory-delete-\(newUUIDSuffix)"]
         XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))

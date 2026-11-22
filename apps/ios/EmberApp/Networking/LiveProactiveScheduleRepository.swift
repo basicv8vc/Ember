@@ -118,6 +118,8 @@ struct LiveProactiveScheduleRepository: ProactiveScheduleRepositoryProtocol {
             .invalidInput
         case 401:
             .unauthenticated
+        case 403:
+            .policyDenied
         case 404:
             .notFound
         case 405, 501:

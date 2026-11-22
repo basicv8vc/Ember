@@ -252,7 +252,7 @@ final class LiveConversationBoundedPollingTests: XCTestCase {
 
         XCTAssertTrue(model.isPollingPaused)
         XCTAssertEqual(model.reply, .generating, "UI must continue to show waiting (generating), NOT failure")
-        XCTAssertEqual(model.status, "Still waiting for Ember Cloud.")
+        XCTAssertEqual(model.status, String(localized: "conversation.live.waiting_for_cloud", table: "Conversation"))
         XCTAssertEqual(model.screen.replyState, .generating)
 
         let requestsWhenPaused = tracker.total
@@ -310,7 +310,7 @@ final class LiveConversationBoundedPollingTests: XCTestCase {
         }
 
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertEqual(model.status, "Completed by Ember Cloud.")
+        XCTAssertNil(model.status)
         XCTAssertFalse(model.isPollingPaused)
     }
 
@@ -360,7 +360,7 @@ final class LiveConversationBoundedPollingTests: XCTestCase {
         await model.stop()
 
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
+        XCTAssertEqual(model.status, String(localized: "conversation.live.turn_cancelled", table: "Conversation"))
         XCTAssertFalse(model.isPollingPaused)
     }
 
@@ -582,7 +582,7 @@ final class LiveConversationBoundedPollingTests: XCTestCase {
         _ = await cancelTask.value
 
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
+        XCTAssertEqual(model.status, String(localized: "conversation.live.turn_cancelled", table: "Conversation"))
         XCTAssertLessThanOrEqual(tracker.maximumConcurrent, 1, "Concurrency must remain strictly <= 1 even with barrier-held responses")
 
         // Wait to verify late running response did not resurrect generating state

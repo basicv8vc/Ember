@@ -157,11 +157,7 @@ final class LiveConversationHostModel {
                 refreshErrorMessage = nil
                 reply = .idle
                 if let rejected = try await repository.rejectedDraft() {
-                    rejectedDraftText = rejected.text
-                    pendingOutgoingText = nil
-                    command = .rejected
-                    reply = .failed(message: "The previous message was rejected. Review before sending again.", retryable: false)
-                    status = "The rejected message will not be sent automatically."
+                    applyRejectedSubmission(draftText: rejected.text, reason: .previousDraft)
                 }
                 if try await repository.activeTurn() != nil {
                     reply = .generating
@@ -173,32 +169,36 @@ final class LiveConversationHostModel {
                 await syncCloudDeviceExecutorState()
                 await refreshSchedulesAndArmArrival()
             } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
-                clearLiveState()
-                let message = error == .accessDenied
-                    ? String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
-                    : LiveAuthEntryModel.message(for: error)
-                signInErrorMessage = message
-                status = message
+                applyAuthFailure(error)
             } catch {
                 pendingOutgoingText = (try? await repository.pending())?.text
                 command = .unknownAcknowledgement
-                reply = .failed(
-                    message: "Cloud history or send reconciliation unavailable. Retry safely.",
-                    retryable: true)
-                status = "Live Cloud is unavailable; no Mock response will be shown."
+                if pendingOutgoingText != nil {
+                    reply = .failed(
+                        message: LiveConversationCopy.sendUnknownAckMessage,
+                        retryable: true
+                    )
+                    status = LiveConversationCopy.sendUnknownAckStatus
+                } else {
+                    reply = .failed(
+                        message: LiveConversationCopy.loadUnavailableMessage,
+                        retryable: true
+                    )
+                    status = LiveConversationCopy.loadUnavailableStatus
+                }
             }
         } catch let error as AuthError where error == .accessDenied {
             requiresSignIn = true
-            let message = String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
+            let message = LiveConversationCopy.signInNotAllowlisted
             signInErrorMessage = message
             status = message
         } catch let error as AuthError where error.requiresNewSignIn {
             requiresSignIn = true
             signInErrorMessage = nil
-            status = String(localized: "conversation.live.sign_in_prompt", table: "Conversation")
+            status = LiveConversationCopy.signInPrompt
         } catch {
             // A failed bootstrap never causes a switch to the Mock conversation.
-            reply = .failed(message: "Cloud connection unavailable. Retry to connect.", retryable: true)
+            reply = .failed(message: LiveConversationCopy.connectionUnavailable, retryable: true)
             status = nil
         }
     }
@@ -227,9 +227,9 @@ final class LiveConversationHostModel {
             await refreshSchedulesAndArmArrival()
         } catch let error as AuthError where error == .appleCancelled {
             signInErrorMessage = nil
-            status = String(localized: "conversation.live.sign_in_cancelled", table: "Conversation")
+            status = LiveConversationCopy.signInCancelled
         } catch let error as AuthError where error == .accessDenied || error == .unexpectedStatus(403) {
-            let message = String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
+            let message = LiveConversationCopy.signInNotAllowlisted
             signInErrorMessage = message
             status = message
         } catch let error as AuthError {
@@ -237,7 +237,7 @@ final class LiveConversationHostModel {
             signInErrorMessage = message
             status = message
         } catch {
-            let message = "Could not sign in to Live Cloud."
+            let message = LiveConversationCopy.signInFailed
             signInErrorMessage = message
             status = message
         }
@@ -666,6 +666,7 @@ final class LiveConversationHostModel {
         pendingOutgoingText = trimmedOutgoing.isEmpty ? nil : trimmedOutgoing
         streamingReplyText = nil
         attachmentError = nil
+        status = nil
         defer { isSubmitting = false }
         do {
             let sendSession = try await repository.sendStreaming(text: text, attachmentIDs: attachmentIDs)
@@ -679,7 +680,7 @@ final class LiveConversationHostModel {
             refreshErrorMessage = nil
             command = .acknowledged
             reply = .generating
-            status = isMockMode ? nil : "Message saved to Ember Cloud."
+            status = isMockMode ? nil : LiveConversationCopy.messageAccepted
             if let eventStream = sendSession.events {
                 appendAcceptedUserMessageIfNeeded(from: sendSession.receipt)
                 beginStreamingObservation(eventStream, receipt: sendSession.receipt, startedAt: sendStart)
@@ -690,33 +691,18 @@ final class LiveConversationHostModel {
                 await syncTasksFromCloud(snapshot: loaded)
             }
         } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
-            clearLiveState()
-            let message = error == .accessDenied
-                ? String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
-                : LiveAuthEntryModel.message(for: error)
-            signInErrorMessage = message
-            status = message
+            applyAuthFailure(error)
         } catch let error as LiveB1Failure where error == .unknownAcknowledgement {
-            command = .unknownAcknowledgement
-            reply = .failed(message: "Send result is unknown. Check receipt before retrying.", retryable: true)
-            status = "Your original send ID was saved. Recovery will not duplicate the message."
+            applyUnknownAcknowledgement()
         } catch let error as LiveB1Failure where error == .staleEpoch || error == .conflict {
-            rejectedDraftText = text
-            pendingOutgoingText = nil
-            command = .rejected
-            reply = .failed(message: "Conversation changed. Review your draft before sending again.", retryable: false)
-            status = "The server rejected this submission."
+            applyRejectedSubmission(draftText: text, reason: .conflict)
         } catch let error as LiveB1Failure where error == .rejected {
-            pendingOutgoingText = nil
-            command = .rejected
-            reply = .failed(
-                message: String(localized: "conversation.live.send_rejected", table: "Conversation"),
-                retryable: false
+            applyRejectedSubmission(
+                draftText: trimmedOutgoing.isEmpty ? nil : text,
+                reason: .rejected
             )
-            status = nil
         } catch {
-            command = .unknownAcknowledgement
-            reply = .failed(message: "Cloud send was interrupted. Reconcile before resubmitting.", retryable: true)
+            applyUnknownAcknowledgement()
         }
     }
 
@@ -725,8 +711,6 @@ final class LiveConversationHostModel {
             reply = .idle
             if command == .rejected {
                 command = .idle
-            }
-            if status == "The server rejected this submission." || status == "The rejected message will not be sent automatically." {
                 status = nil
             }
         }
@@ -756,10 +740,7 @@ final class LiveConversationHostModel {
                 pendingOutgoingText = nil
                 refreshErrorMessage = nil
                 if let rejected = try await repository.rejectedDraft() {
-                    rejectedDraftText = rejected.text
-                    command = .rejected
-                    reply = .failed(message: "The previous message was rejected. Review before sending again.", retryable: false)
-                    status = "The rejected message will not be sent automatically."
+                    applyRejectedSubmission(draftText: rejected.text, reason: .previousDraft)
                 } else if try await repository.activeTurn() != nil {
                     command = .acknowledged
                     reply = .generating
@@ -775,15 +756,34 @@ final class LiveConversationHostModel {
                 await syncTasksFromCloud(snapshot: loaded)
             }
         } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
-            clearLiveState()
-            let message = error == .accessDenied
-                ? String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
-                : LiveAuthEntryModel.message(for: error)
-            signInErrorMessage = message
-            status = message
+            applyAuthFailure(error)
+        } catch let error as LiveB1Failure where error == .staleEpoch || error == .conflict {
+            let storedDraft = (try? await repository.rejectedDraft())?.text
+            applyRejectedSubmission(draftText: storedDraft ?? pendingOutgoingText, reason: .conflict)
+        } catch let error as LiveB1Failure where error == .rejected {
+            applyRejectedSubmission(draftText: pendingOutgoingText, reason: .rejected)
         } catch {
-            reply = .failed(message: "Could not confirm the previous send. Try again later.", retryable: true)
-            command = .unknownAcknowledgement
+            if pendingOutgoingText != nil {
+                command = .unknownAcknowledgement
+                reply = .failed(
+                    message: LiveConversationCopy.retryUnknownAckMessage,
+                    retryable: true
+                )
+                status = LiveConversationCopy.sendUnknownAckStatus
+            } else if command == .acknowledged {
+                reply = .failed(
+                    message: LiveConversationCopy.replyInterruptedMessage,
+                    retryable: true
+                )
+                status = LiveConversationCopy.replyInterruptedStatus
+            } else {
+                command = .unknownAcknowledgement
+                reply = .failed(
+                    message: LiveConversationCopy.retrySyncUnavailable,
+                    retryable: true
+                )
+                status = nil
+            }
         }
     }
 
@@ -812,21 +812,45 @@ final class LiveConversationHostModel {
             _ = await previousStreamTask.value
         }
 
+        let cancelResult: LiveB1Turn?
         do {
-            let result = try await repository.cancelActiveTurn()
-            if result?.status == .cancelled {
-                reply = .idle
-                status = "Turn cancelled on Ember Cloud."
-            } else {
-                status = "Cancellation requested; checking server state."
-                beginPolling()
-            }
+            cancelResult = try await repository.cancelActiveTurn()
+        } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
+            applyAuthFailure(error)
+            return
+        } catch {
+            status = LiveConversationCopy.cancelStatusUnknown
+            beginPolling()
+            return
+        }
+
+        switch cancelResult?.status {
+        case .cancelled:
+            reply = .idle
+            status = LiveConversationCopy.turnCancelled
+        case .completed:
+            reply = .idle
+            status = nil
+        case .failed:
+            reply = .failed(message: LiveConversationCopy.turnFailed, retryable: false)
+            status = nil
+        case .running:
+            status = LiveConversationCopy.cancelRequested
+            beginPolling()
+        case nil:
+            reply = .idle
+            status = nil
+        }
+
+        do {
             let loaded = try await repository.load()
             snapshot = loaded
+            refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
+        } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
+            applyAuthFailure(error)
         } catch {
-            status = "Cancellation unconfirmed; server state will be checked."
-            beginPolling()
+            refreshErrorMessage = LiveConversationCopy.refreshUnavailable
         }
     }
 
@@ -940,13 +964,12 @@ final class LiveConversationHostModel {
             }
         } catch is CancellationError {
             return
-        } catch let error as AuthError where error.requiresNewSignIn {
+        } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
             guard sessionGeneration == expectedGeneration else { return }
-            clearLiveState()
-            status = LiveAuthEntryModel.message(for: error)
+            applyAuthFailure(error)
         } catch {
             guard sessionGeneration == expectedGeneration else { return }
-            refreshErrorMessage = String(localized: "conversation.live.refresh_unavailable", table: "Conversation")
+            refreshErrorMessage = LiveConversationCopy.refreshUnavailable
             await syncTasksFromCloud(snapshot: snapshot)
         }
     }
@@ -1507,6 +1530,7 @@ final class LiveConversationHostModel {
             var deltaCount = 0
             var committedTurn: LiveB1Turn?
             var handedOff = false
+            var streamInterrupted = false
 
             do {
                 for try await event in stream {
@@ -1537,6 +1561,7 @@ final class LiveConversationHostModel {
                 return
             } catch {
                 // Post-acceptance stream interruption falls back to durable B1 polling/reconciliation.
+                streamInterrupted = true
             }
 
             guard self.sessionGeneration == expectedGeneration,
@@ -1571,30 +1596,22 @@ final class LiveConversationHostModel {
                 } catch is CancellationError {
                     return
                 } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
-                    self.clearLiveState()
-                    let message = error == .accessDenied
-                        ? String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
-                        : LiveAuthEntryModel.message(for: error)
-                    self.signInErrorMessage = message
-                    self.status = message
+                    self.applyAuthFailure(error)
                     return
                 } catch {
-                    self.refreshErrorMessage = String(localized: "conversation.live.refresh_unavailable", table: "Conversation")
+                    self.refreshErrorMessage = LiveConversationCopy.refreshUnavailable
                 }
 
                 switch turn.status {
                 case .completed:
                     self.reply = .idle
-                    self.status = self.isMockMode ? nil : "Completed by Ember Cloud."
+                    self.status = nil
                 case .failed:
-                    self.reply = .failed(
-                        message: String(localized: "conversation.live.turn_failed", table: "Conversation"),
-                        retryable: false
-                    )
+                    self.reply = .failed(message: LiveConversationCopy.turnFailed, retryable: false)
                     self.status = nil
                 case .cancelled:
                     self.reply = .idle
-                    self.status = "Turn cancelled."
+                    self.status = LiveConversationCopy.turnCancelled
                 case .running:
                     self.reply = .generating
                     self.beginPolling(startedAt: startedAt)
@@ -1605,6 +1622,9 @@ final class LiveConversationHostModel {
             }
 
             self.streamingReplyText = nil
+            if streamInterrupted && !self.isMockMode {
+                self.status = LiveConversationCopy.streamInterruptedChecking
+            }
             self.beginPolling(startedAt: startedAt)
         }
     }
@@ -1649,12 +1669,12 @@ final class LiveConversationHostModel {
                     guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                     pollTask = nil
                     isPollingPaused = true
-                    status = String(localized: "conversation.live.waiting_for_cloud", table: "Conversation")
+                    status = LiveConversationCopy.waitingForCloud
                     return
                 }
 
                 do {
-                        guard let turn = try await repository.pollActiveTurn() else {
+                    guard let turn = try await repository.pollActiveTurn() else {
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         reply = .idle
                         pollTask = nil
@@ -1669,7 +1689,7 @@ final class LiveConversationHostModel {
                         if monotonicNow() - startTime >= pollingWindow {
                             pollTask = nil
                             isPollingPaused = true
-                            status = String(localized: "conversation.live.waiting_for_cloud", table: "Conversation")
+                            status = LiveConversationCopy.waitingForCloud
                             return
                         }
                     case .completed:
@@ -1685,7 +1705,7 @@ final class LiveConversationHostModel {
                         Self.latencyLogger.info("turn_completed mode=poll e2e_ms=\(e2eMs, privacy: .public)")
                         snapshot = loaded
                         reply = .idle
-                        status = isMockMode ? nil : "Completed by Ember Cloud."
+                        status = nil
                         pollTask = nil
                         isPollingPaused = false
                         await syncTasksFromCloud(snapshot: loaded)
@@ -1695,10 +1715,7 @@ final class LiveConversationHostModel {
                         let loaded = try await repository.load()
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         snapshot = loaded
-                        reply = .failed(
-                            message: String(localized: "conversation.live.turn_failed", table: "Conversation"),
-                            retryable: false
-                        )
+                        reply = .failed(message: LiveConversationCopy.turnFailed, retryable: false)
                         status = nil
                         pollTask = nil
                         isPollingPaused = false
@@ -1710,7 +1727,7 @@ final class LiveConversationHostModel {
                         guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
                         snapshot = loaded
                         reply = .idle
-                        status = "Turn cancelled."
+                        status = LiveConversationCopy.turnCancelled
                         pollTask = nil
                         isPollingPaused = false
                         await syncTasksFromCloud(snapshot: loaded)
@@ -1719,21 +1736,63 @@ final class LiveConversationHostModel {
                     }
                 } catch is CancellationError {
                     return
-                } catch let error as AuthError where error.requiresNewSignIn {
+                } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
                     guard currentPollSessionID == sessionID, !Task.isCancelled else { return }
-                    clearLiveState()
-                    status = LiveAuthEntryModel.message(for: error)
+                    applyAuthFailure(error)
                     pollTask = nil
                     return
                 } catch {
                     guard currentPollSessionID == sessionID, !Task.isCancelled, !requiresSignIn else { return }
-                    reply = .failed(message: "Cloud connection lost. Resume polling when online.", retryable: true)
+                    reply = .failed(
+                        message: LiveConversationCopy.replyInterruptedMessage,
+                        retryable: true
+                    )
+                    status = LiveConversationCopy.replyInterruptedStatus
                     pollTask = nil
                     isPollingPaused = false
                     return
                 }
             }
         }
+    }
+
+    private enum RejectionReason {
+        case conflict
+        case rejected
+        case previousDraft
+    }
+
+    private func applyAuthFailure(_ error: AuthError) {
+        clearLiveState()
+        let message = error == .accessDenied
+            ? LiveConversationCopy.signInNotAllowlisted
+            : LiveAuthEntryModel.message(for: error)
+        signInErrorMessage = message
+        status = message
+    }
+
+    private func applyUnknownAcknowledgement() {
+        command = .unknownAcknowledgement
+        reply = .failed(
+            message: LiveConversationCopy.sendUnknownAckMessage,
+            retryable: true
+        )
+        status = LiveConversationCopy.sendUnknownAckStatus
+    }
+
+    private func applyRejectedSubmission(draftText: String?, reason: RejectionReason) {
+        if let draftText {
+            rejectedDraftText = draftText
+        }
+        pendingOutgoingText = nil
+        command = .rejected
+        let message: String = switch reason {
+        case .conflict: LiveConversationCopy.sendConflictMessage
+        case .rejected: LiveConversationCopy.sendRejectedMessage
+        case .previousDraft: LiveConversationCopy.previousRejectedMessage
+        }
+        reply = .failed(message: message, retryable: false)
+        status = LiveConversationCopy.sendRejectedStatus
     }
 }
 
@@ -2037,10 +2096,12 @@ struct LiveConversationHost: View {
                     .padding(.top, 6)
                 }
 
-                if let status = model.status, status != "Completed by Ember Cloud." {
+                if let status = model.status {
                     Text(status)
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(.horizontal, 16)
                         .padding(.top, 2)
                         .accessibilityIdentifier("live-conversation-status")

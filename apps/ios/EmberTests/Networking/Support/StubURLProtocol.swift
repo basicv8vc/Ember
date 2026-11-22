@@ -10,6 +10,8 @@ struct URLProtocolStubResponse: @unchecked Sendable {
     var headers: [String: String] = ["Content-Type": "application/json"]
     var body = Data()
     var error: Error?
+    var transportErrorAfterBody: Error?
+    var afterBodyBarrier: (@Sendable () async -> Void)?
     var delayNanoseconds: UInt64 = 0
     var deliveryProbe: URLProtocolDeliveryProbe?
     var onStartLoading: (@Sendable () -> Void)?
@@ -260,6 +262,22 @@ final class StubURLProtocol: URLProtocol {
             if !stub.body.isEmpty {
                 instance.client?.urlProtocol(instance, didLoad: stub.body)
                 guard !instance.isStopped() else { return }
+            }
+
+            if let transportErrorAfterBody = stub.transportErrorAfterBody {
+                if let afterBodyBarrier = stub.afterBodyBarrier {
+                    Task { [reference, transportErrorAfterBody] in
+                        await afterBodyBarrier()
+                        guard let instance = reference.value else { return }
+                        instance.lifecycleQueue.async { [reference, transportErrorAfterBody] in
+                            guard let instance = reference.value, !instance.isStopped() else { return }
+                            instance.client?.urlProtocol(instance, didFailWithError: transportErrorAfterBody)
+                        }
+                    }
+                    return
+                }
+                instance.client?.urlProtocol(instance, didFailWithError: transportErrorAfterBody)
+                return
             }
 
             instance.client?.urlProtocolDidFinishLoading(instance)

@@ -1958,13 +1958,253 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Set up recurring morning briefs or one-time follow-ups. Ember runs them in the cloud even when the app is closed."
+            "value": "Recurring morning briefs and one-time follow-ups run in Ember Cloud even when the app is closed."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "设置每日晨间简报或一次性跟进提醒。即使关闭应用，Ember 也会按时在云端执行并发送结果。"
+            "value": "每日晨间简报与一次性跟进提醒会在云端按时执行，即使关闭应用也能完成。"
+          }
+        }
+      }
+    },
+    "schedules.subtitle.mock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Preview proactive schedules in local demo mode. Nothing here runs in Ember Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在当前本地演示模式预览定时任务，不会在 Ember 云端实际执行。"
+          }
+        }
+      }
+    },
+    "schedules.subtitle.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Proactive schedules require a V2 Ember Cloud environment."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "主动定时任务需要连接到 V2 Ember 云端环境。"
+          }
+        }
+      }
+    },
+    "schedules.add.short": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建"
+          }
+        }
+      }
+    },
+    "schedules.add.action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "New Schedule"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "新建定时任务"
+          }
+        }
+      }
+    },
+    "schedules.section.active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Active"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "进行中"
+          }
+        }
+      }
+    },
+    "schedules.section.paused": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Paused"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已暂停"
+          }
+        }
+      }
+    },
+    "schedules.section.history": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recent History"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "历史记录"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered_queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered · Queued"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发 · 排队中"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered_running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered · In progress"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发 · 执行中"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered_waiting_approval": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered · Needs confirmation"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发 · 等待确认"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered · Run failed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发 · 执行失败"
+          }
+        }
+      }
+    },
+    "schedules.status.triggered_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Triggered · Run cancelled"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已触发 · 已取消"
+          }
+        }
+      }
+    },
+    "schedules.run.waiting_approval": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Waiting for your confirmation"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在等待你的确认"
+          }
+        }
+      }
+    },
+    "schedules.run.cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Run was cancelled"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次执行已取消"
           }
         }
       }
@@ -2342,13 +2582,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Create a daily morning brief or follow-up reminder above."
+            "value": "Create a daily morning brief or one-time follow-up so Ember can act on time."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在上方创建每日晨间简报或跟进提醒。"
+            "value": "创建每日晨间简报或一次性跟进提醒，让 Ember 按时为你推进。"
           }
         }
       }
@@ -2806,13 +3046,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "View in Chat"
+            "value": "Open Chat"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在对话中查看"
+            "value": "打开对话"
           }
         }
       }

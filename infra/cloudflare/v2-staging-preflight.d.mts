@@ -10,7 +10,11 @@ export const G3_MAX_BUDGET_CEILINGS: Readonly<{
 }>;
 export const REQUIRED_REAL_CANARY_SECRETS: readonly string[];
 export const OPTIONAL_REAL_CANARY_SECRETS: readonly string[];
+export const G4_SANDBOX_OWNER: string;
+export const REQUIRED_DAYTONA_CANARY_SECRETS: readonly string[];
+export const OPTIONAL_DAYTONA_CANARY_SECRETS: readonly string[];
 export const G3_REAL_CANARY_VARS: Readonly<Record<string, string>>;
+export const G4_DAYTONA_CANARY_VARS: Readonly<Record<string, string>>;
 
 export interface WranglerV2StagingConfig {
   name?: string;
@@ -50,10 +54,15 @@ export function validateRealCanarySecretNames(
   secretNames: Iterable<string>,
 ): V2StagingValidationResult;
 
+export function validateDaytonaCanarySecretNames(
+  secretNames: Iterable<string>,
+): V2StagingValidationResult;
+
 export function validateV2StagingConfig(input: {
   v2Config: WranglerV2StagingConfig;
   v1Configs: readonly WranglerV2StagingConfig[];
   migrationExists?: boolean;
   requireProvisioned?: boolean;
   allowRealLlmCanary?: boolean;
+  allowDaytonaCanary?: boolean;
 }): V2StagingValidationResult;

@@ -2,7 +2,7 @@
 
 Status: **V2 real Daytona adapter & decoupled configuration implemented and locally verified (zero external spend); awaiting CTO review and separate Founder authorization before any real Daytona provider-canary call.**  
 Owner: Agent F (Tools & Execution)  
-Date: 2026-11-21  
+Date: 2026-11-22  
 Related: [Integrated Acceptance Plan](./PRODUCT-ALPHA-INTEGRATED-ACCEPTANCE-PLAN.md), [Product Alpha Roadmap](./PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [V2 Staging Authorization](../V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [P0-C4 Daytona Security Gap Report](../P0-C4-DAYTONA-SECURITY-GAP-REPORT.md)
 
 ---
@@ -32,7 +32,7 @@ Sandbox provider selection is explicitly decoupled from LLM mode (`EMBER_MODEL_M
 - `EMBER_SANDBOX_MODE="fake"` (default in `wrangler.local-v2.jsonc` and `wrangler.v2-staging.jsonc`): uses the zero-spend local fake executor; enabling real LLM (`EMBER_MODEL_MODE="real"`) cannot implicitly enable paid Daytona or disable the permitted fake sandbox path.
 - `EMBER_SANDBOX_MODE="disabled"` or unset: fails closed (`sandbox_mode_unset` / `sandbox_disabled`) even if `DAYTONA_API_KEY` is bound.
 - `EMBER_SANDBOX_MODE="daytona"`: requires non-empty `DAYTONA_API_KEY` and a non-empty, validated tenant UUID allowlist (`EMBER_DAYTONA_ALLOWED_TENANTS`); fails closed (`daytona_allowlist_missing`, `daytona_allowlist_invalid`, or `sandbox_tenant_not_allowed`) before any model call or sandbox creation.
-- Model execution pairing: uses the approved `V2StreamingModelGateway.stepPythonAgent` with real `ModelRateRow`, `budgetMode: 'real'`, and `simulated: false` (no fallback to `FakeModelGateway`; fails closed with `model_gateway_unavailable` if unavailable).
+- Model execution pairing: uses the approved `V2StreamingModelGateway.stepPythonAgent` with real `ModelRateRow`, `budgetMode: 'real'`, and `simulated: false` (no fallback to `FakeModelGateway`; fails closed with `model_gateway_unavailable` if unavailable), `EMBER_MODEL_ALLOW_RECURRING_BRIEFS="false"`, and `/v2/tasks/python` ingress allowlist (`authorizeModelTurn`) + `EMBER_MODEL_ALPHA_TENANT_IDS` enforcement.
 
 ---
 
@@ -53,18 +53,48 @@ All limits below are enforced in `packages/contracts/src/task-schemas.ts` (`PYTH
 
 ## 4. Canary Execution & Kill-Switch Checklist (Post-Approval Only)
 
-1. **Pre-flight:**
-   - Confirm `EMBER_ENV="v2-staging"`, `EMBER_V2_STAGING_ISOLATED="true"`, `EMBER_SANDBOX_MODE="daytona"`, `EMBER_DAYTONA_ALLOWED_TENANTS="<allowlisted-canary-tenant-uuid>"`, `EMBER_SANDBOX_OWNER="ember-v2-staging:canary"`, and `DAYTONA_API_KEY` bound as a staging secret.
+1. **Pre-flight (non-paid dry run + config validation):**
+   - Run the G4 preflight check from the repo root (validates isolated staging topology, strict G3+G4 budget ceilings, `EMBER_SANDBOX_OWNER="ember-v2-staging:canary"`, and dry-runs `wrangler deploy --dry-run`):
+     ```bash
+     node infra/cloudflare/v2-staging-preflight.mjs \
+       --allow-real-llm-canary \
+       --allow-daytona-canary \
+       --model-mode=real \
+       --sandbox-mode=daytona \
+       --require-provisioned
+     ```
+   - Confirm staging secrets (`wrangler secret list --name ember-v2-staging --config apps/api/wrangler.v2-staging.jsonc`) include `EMBER_MODEL_API_KEY`, `EMBER_MODEL_ALPHA_TENANT_IDS`, `DAYTONA_API_KEY`, and `EMBER_DAYTONA_ALLOWED_TENANTS` (comma-separated canary tenant UUIDs), while plaintext config keeps `EMBER_SANDBOX_MODE="fake"` by default and overrides `daytona` only for the approved canary window.
    - Verify V1 (`ember-api.slowfast.dev`) shares zero Worker, Queue, D1, Hyperdrive, or R2 resources with `ember-v2-staging`.
-2. **Run bounded canary:**
-   - Execute 1 synthetic CSV analysis task (upload -> NL or `/v2/tasks/python` -> Daytona execution -> artifact download + SHA-256 verification) + 1 in-flight cancellation check.
-   - Record deployed SHA/version, task ID, artifact SHA-256, measured latency, and observed cost.
+2. **Run bounded canary (requires explicit Founder authorization):**
+   - The standalone canary runner (`infra/cloudflare/v2-g4-daytona-canary.mjs`) refuses non-loopback targets unless `--confirm-founder-authorization` is explicitly supplied, uses a zero-PII synthetic CSV fixture (`< 1 KiB`), and verifies:
+     - upload -> `/v2/tasks/python` (+ idempotent replay with `simulated: false` and expected `model_label`),
+     - artifact download integrity (`X-Content-Type-Options: nosniff`, `Cache-Control: no-store`, `Content-Length`, SHA-256, safe ASCII filenames, no blocked active web MIME types, zero duplicate filenames),
+     - optional NL chat delegation (`--include-nl-chat`), and
+     - in-flight cancellation (`cancel_requested_at_ms` -> `cancelled` with zero committed output artifacts).
+     ```bash
+     node infra/cloudflare/v2-g4-daytona-canary.mjs \
+       --base-url https://ember-v2-staging.slowfast.dev \
+       --bearer-token "$CANARY_BEARER_TOKEN" \
+       --confirm-founder-authorization \
+       --owner ember-v2-staging:canary \
+       --include-nl-chat \
+       --sweep-orphans
+     ```
+   - Record deployed SHA/version, task IDs, artifact SHA-256, measured latency, and observed cost.
 3. **Verify zero leaked sandboxes & zero duplicate artifacts:**
-   - Confirm `DaytonaSandboxProvider.destroy()` succeeded and `sweepOrphanedSandboxes` for `ember-v2-staging:canary` reports `0` live sandboxes.
+   - Confirm `DaytonaSandboxProvider.destroy()` succeeded and run the Daytona orphan sweep for `ember-v2-staging:canary` (must report `0` live sandboxes):
+     ```bash
+     DAYTONA_API_KEY="$DAYTONA_API_KEY" node infra/cloudflare/v2-g4-daytona-canary.mjs \
+       --sweep-only \
+       --owner ember-v2-staging:canary \
+       --confirm-founder-authorization
+     ```
    - Confirm `GET /v1/me/tasks/:id/artifacts` contains only bound inputs and winning committed outputs (no duplicate/uncommitted artifacts on retry or cancel).
 4. **Immediate kill-switch / rollback:**
-   - Set `EMBER_SANDBOX_MODE="fake"` (or `"disabled"`) in `ember-v2-staging` and/or delete `DAYTONA_API_KEY` secret → `resolveV2SandboxConfig()` immediately stops all Daytona calls without disrupting chat turns, Memory, Schedules, or V1.
+   - Set `EMBER_SANDBOX_MODE="fake"` (or `"disabled"`) in `ember-v2-staging` and/or delete `DAYTONA_API_KEY` secret -> `resolveV2SandboxConfig()` immediately stops all Daytona calls without disrupting chat turns, Memory, Schedules, or V1.
    - Or run `wrangler rollback <previous-version-id> --name ember-v2-staging --config wrangler.v2-staging.jsonc --yes`.
+
+> **Current Status:** Code, preflight checks, synthetic canary runner, unit tests, and local `workerd` loopback integration verification are complete (`$0.00` external spend). **No live OpenRouter or live Daytona calls have been executed**; live G4 canary execution remains blocked pending explicit Founder authorization.
 
 ---
 

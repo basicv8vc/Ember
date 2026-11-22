@@ -44,12 +44,12 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         self.topNotices = topNotices()
     }
 
-    private var isGenerating: Bool {
-        state.replyState == .generating || state.isSubmitting || state.isLoading
+    private var isComposerBusy: Bool {
+        state.replyState == .generating || state.isSubmitting || state.isStopping || state.isLoading
     }
 
     private var canAttachMoreFiles: Bool {
-        !isGenerating
+        !isComposerBusy
             && !state.isUploadingAttachment
             && state.attachments.count < B3AttachmentLimits.maxAttachmentsPerMessage
     }
@@ -89,8 +89,16 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             ConversationComposer(
                 draft: $draft,
                 focused: $composerIsFocused,
-                isGenerating: isGenerating,
+                replyState: state.replyState,
+                isLoading: state.isLoading,
+                isSubmitting: state.isSubmitting,
+                isStopping: state.isStopping,
                 note: composerNote,
+                showsNote: ConversationInteractionRules.shouldShowComposerNote(
+                    timelineIsEmpty: state.timeline.isEmpty,
+                    isLoading: state.isLoading
+                ),
+                stopText: replyStopText,
                 attachments: state.attachments,
                 isUploadingAttachment: state.isUploadingAttachment,
                 attachmentError: state.attachmentError,
@@ -98,6 +106,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                 hidesAttachmentTrigger: isAttachmentMenuOverlayVisible,
                 onPickAttachment: actions.onPickAttachment,
                 onRemoveAttachment: actions.onRemoveAttachment,
+                onStopGenerating: actions.stopGenerating,
                 onSend: actions.send
             )
         }
@@ -124,8 +133,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                 }
             }
         }
-        .onChange(of: isGenerating) { _, generating in
-            if generating && isAttachmentMenuPresented {
+        .onChange(of: isComposerBusy) { _, busy in
+            if busy && isAttachmentMenuPresented {
                 isAttachmentMenuPresented = false
             }
         }
@@ -365,7 +374,12 @@ struct ConversationDemoHost: View {
         self.taskJourneySession = taskJourneySession
         self.onOpenTaskDetail = onOpenTaskDetail
         self.onOpenCommitmentDetail = onOpenCommitmentDetail
-        _model = State(initialValue: ConversationHostModel())
+        let slowReply = ProcessInfo.processInfo.arguments.contains("--ember-mock-slow-reply")
+        _model = State(
+            initialValue: ConversationHostModel(
+                replyDelayNanoseconds: slowReply ? 25_000_000_000 : 900_000_000
+            )
+        )
     }
 
     private var screenState: ConversationScreenState {
@@ -389,6 +403,7 @@ struct ConversationDemoHost: View {
             showsEmptyState: model.showsEmptyState,
             isLoading: model.isLoading,
             isSubmitting: model.isSubmitting || model.isStoppingReply,
+            isStopping: model.isStoppingReply,
             commandStatus: model.commandStatus
         )
     }
@@ -403,7 +418,7 @@ struct ConversationDemoHost: View {
                 },
                 retry: model.retry,
                 stopGenerating: {
-                    Task { await model.stopReply() }
+                    model.triggerStopReply()
                 },
                 selectPrompt: { draft = $0 }
             )

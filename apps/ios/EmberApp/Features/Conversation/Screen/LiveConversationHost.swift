@@ -65,6 +65,7 @@ final class LiveConversationHostModel {
     private(set) var snapshot: ConversationSnapshot?
     private(set) var isLoading = false
     private(set) var isSubmitting = false
+    private(set) var isStopping = false
     private(set) var isSigningIn = false
     private(set) var isSigningOut = false
     private(set) var isPollingPaused = false
@@ -101,6 +102,7 @@ final class LiveConversationHostModel {
         deviceExecutorWorkspace: DeviceSandboxWorkspace? = nil,
         deviceExecutorClock: (any CloudDeviceClock)? = nil,
         isMockMode: Bool = false,
+        initialStagedAttachments: [ComposerAttachment] = [],
         environmentBadge: String = "LIVE CLOUD",
         pollingWindow: Duration = .seconds(60),
         taskPollInterval: Duration = .seconds(2),
@@ -130,6 +132,7 @@ final class LiveConversationHostModel {
         self.deviceExecutorPreferenceKey = nil
         self.isDeviceExecutorEnabled = false
         self.isMockMode = isMockMode
+        self.stagedAttachments = isMockMode ? initialStagedAttachments : []
         self.environmentBadge = environmentBadge
         self.pollingWindow = pollingWindow
         self.taskPollInterval = taskPollInterval
@@ -424,6 +427,7 @@ final class LiveConversationHostModel {
         refreshErrorMessage = nil
         command = .idle
         reply = .idle
+        isStopping = false
         isPollingPaused = false
         selectedTab = .chat
         chatNavigationPath.removeAll()
@@ -787,8 +791,25 @@ final class LiveConversationHostModel {
         }
     }
 
+    func triggerStop() {
+        guard !isSubmitting, !isStopping, reply == .generating else { return }
+        isStopping = true
+        Task { await performStop() }
+    }
+
     func stop() async {
-        guard !isSubmitting else { return }
+        guard !isSubmitting, !isStopping else { return }
+        isStopping = true
+        await performStop()
+    }
+
+    private func performStop() async {
+        let stopGeneration = sessionGeneration
+        defer {
+            if sessionGeneration == stopGeneration {
+                isStopping = false
+            }
+        }
         let previousTask = pollTask
         previousTask?.cancel()
         pollTask = nil
@@ -1256,6 +1277,7 @@ final class LiveConversationHostModel {
             showsEmptyState: timeline.isEmpty && id != nil,
             isLoading: isLoading,
             isSubmitting: isSubmitting,
+            isStopping: isStopping,
             streamingReplyText: streamingReplyText,
             commandStatus: command,
             attachments: stagedAttachments,
@@ -2171,7 +2193,7 @@ struct LiveConversationHost: View {
                             Task { await model.send(text) }
                         },
                         retry: { Task { await model.retry() } },
-                        stopGenerating: { Task { await model.stop() } },
+                        stopGenerating: { model.triggerStop() },
                         selectPrompt: { draft = $0 },
                         onDismissError: { model.dismissReplyError() },
                         onTakePhoto: {

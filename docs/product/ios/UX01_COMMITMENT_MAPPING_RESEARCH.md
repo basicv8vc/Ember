@@ -26,7 +26,7 @@
    When V2's `create_proactive_schedule` tool succeeds during a turn ([`packages/runtime-v2/src/agent-head/turn-commit.ts#L1117-L1158`](../../../packages/runtime-v2/src/agent-head/turn-commit.ts#L1117-L1158)), it commits an `ember` text confirmation message—not a `commitment_reference` row. Furthermore, V2 `ProactiveScheduleDTO` supports `cron_tz` + IANA `timezone` (used by daily briefs/reminders), which `CommitmentCard.Schedule` ([`apps/ios/EmberApp/Features/Conversation/Cards/CommitmentCard.swift#L41-L44`](../../../apps/ios/EmberApp/Features/Conversation/Cards/CommitmentCard.swift#L41-L44)) cannot represent.
 
 **Practical consequence for UX-01:**
-- **Phase 1 (unblocked immediately):** Replace the raw `"Commitment reference"` + UUID row in [`LiveConversationHost.swift#L1157-L1163`](../../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift#L1157-L1163) with a **localized, non-technical neutral fallback** that hides the UUID, avoids fabricating any status/schedule/progress, and offers an action to open `ProactiveSchedulesSheetView` only when V2 Schedules is confirmed available.
+- **Phase 1 (unblocked immediately):** Replace the raw `"Commitment reference"` + UUID row in [`LiveConversationHost.swift#L1157-L1163`](../../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift#L1157-L1163) with a **fully neutral, non-technical fallback** that hides the UUID, avoids asserting `"scheduled"` or fabricating any status/progress, and **omits any reference-specific CTA** until an authoritative entity link exists. (Merely having a reachable `/v2/schedules` endpoint does not prove reference-to-schedule identity.)
 - **Phase 2 (blocked on CTO / Agent E / iOS Lead decision):** Adopt a narrow contract change linking live proactive commitments/schedules to a consumer-session-readable DTO, extend `CommitmentCard.Schedule` for `cron_tz` + timezone-aware formatting, and add a dedicated detail destination.
 
 ---
@@ -164,28 +164,27 @@ Classification rubric:
 
 ## 4. Safe Fallback Proposal (English & Chinese)
 
-Because `LiveConversationHost` currently has **no authoritative DTO** to resolve a `commitmentReference`, any incoming `commitment_reference` message must render a **neutral, non-technical fallback** that obeys all trust rules:
+Because `LiveConversationHost` currently has **no authoritative DTO** to resolve a `commitmentReference`, any incoming `commitment_reference` message must render a **fully neutral, non-technical fallback** that obeys all trust rules:
 1. **No raw UUIDs** shown anywhere in user-facing UI (including subtitle/detail text; `commitmentID` may remain only in internal SwiftUI `.id(...)` or non-user-facing accessibility identifiers if needed, or omitted from visual text entirely).
 2. **No fabricated title, status, schedule, or execution outcome** (do not infer from surrounding `ember` prose).
-3. **No implied progress or completion** (do not say "Active", "Scheduled", "Running", or "Completed").
-4. **Actionable navigation only when a valid destination exists:**
-   - **Variant A (Schedules capability available — e.g. V2 where `scheduleStore.hasRepository && !scheduleStore.isEndpointUnavailable`):** Provide a valid button/disclosure opening `ProactiveSchedulesSheetView` (`isShowingSchedulesSheet = true`) so the user can inspect active/past schedules directly.
-   - **Variant B (Schedules unavailable / V1 / no repository):** Render a non-interactive, honest neutral notice without a chevron or tap action (preventing dead taps or opening an unavailable sheet).
+3. **No implied state, schedule, or completion** (do not assert `"Scheduled"`, `"Active"`, `"Running"`, or `"Completed"` for an unresolved reference).
+4. **No reference-specific CTA until an authoritative link exists:**
+   - Merely having a reachable `/v2/schedules` endpoint does **not** establish reference-to-schedule identity. Do **not** imply that opening `ProactiveSchedulesSheetView` will show this referenced item or its latest status.
+   - **Recommended default:** Render a non-interactive, honest neutral notice with no chevron and no tap action.
+   - **If a generic global shortcut is ever desired:** Keep it strictly outside the reference's own assertion, explicitly labeled as unrelated general navigation (e.g., `"Open Schedules (all)"` / `"打开全部定时任务"`), and never say or imply that the list contains this referenced item.
 
 ### Proposed Localized Copy (`Conversation.xcstrings` / `ConversationCards.xcstrings`)
 
 | Key | English (`en`) | Simplified Chinese (`zh-Hans`) | Usage |
 | --- | --- | --- | --- |
-| `conversation.commitment.fallback_title` | `Scheduled item` | `定时安排` | Neutral card header / title (replaces hardcoded `"Commitment reference"`) |
-| `conversation.commitment.fallback_body_with_schedules` | `Details can’t be shown in this message. Check Schedules for the latest status.` | `此消息暂无法显示详情，请在“定时任务”中查看最新状态。` | Variant A body (when V2 Schedules is available) |
-| `conversation.commitment.fallback_action_open_schedules` | `Open Schedules` | `查看定时任务` | Variant A action button (`minHeight: 44`) |
-| `conversation.commitment.fallback_body_unavailable` | `Details aren’t available in this environment.` | `当前环境暂不支持查看此安排详情。` | Variant B body (when `/v2/schedules` is unavailable, e.g. V1, or `hasRepository == false`) |
-| `conversation.commitment.fallback_a11y_label` | `Scheduled item, details unavailable in chat` | `定时安排，聊天中暂无法显示详情` | Accessibility label |
+| `conversation.commitment.fallback_title` | `Reference details unavailable` | `记录详情暂不可用` | Neutral card header / title (replaces hardcoded `"Commitment reference"`; avoids asserting `"Scheduled"`) |
+| `conversation.commitment.fallback_body` | `Details for this reference aren’t available here.` | `暂无法核实这条记录的详情。` | Neutral fallback body for all environments until an authoritative link exists |
+| `conversation.commitment.fallback_a11y_label` | `Reference details unavailable. Details for this reference aren’t available here.` | `记录详情暂不可用，暂无法核实这条记录的详情。` | Accessibility label |
 
 > **Copy verification against trust rules:**
 > - Contains zero UUIDs, technical terms (`commitmentReference`, `UUID`, `DTO`, `V1/V2`), or `MOCK ONLY` tags.
-> - Does not claim the item was created, active, paused, running, or completed.
-> - Does not attach a tap action when the destination (`/v2/schedules`) is known to be unavailable.
+> - Does not assert `"Scheduled"` or claim the item was created, active, paused, running, or completed.
+> - Does not attach a reference-specific CTA or imply `/v2/schedules` contains the referenced item.
 
 ---
 
@@ -197,17 +196,16 @@ Use the existing [`ConversationCardSurface`](../../../apps/ios/EmberApp/Features
 
 ```text
 +-------------------------------------------------------+
-| [calendar.badge.clock]  Scheduled item                |  <- .body.weight(.semibold), .primary
+| [info.circle]  Reference details unavailable          |  <- .body.weight(.semibold), .primary
 |                                                       |
-| Details can't be shown in this message.               |  <- .footnote, .secondary,
-| Check Schedules for the latest status.                |     fixedSize(horizontal: false, vertical: true)
-|                                                       |
-| [ Open Schedules ]  (bordered button, minHeight: 44)  |  <- Shown ONLY when V2 Schedules is available
+| Details for this reference aren't available here.     |  <- .footnote, .secondary,
+|                                                       |     fixedSize(horizontal: false, vertical: true)
 +-------------------------------------------------------+
 ```
 
-- **When V2 Schedules is unavailable (V1 or no `scheduleStore`):** Omit the `Open Schedules` button and show `conversation.commitment.fallback_body_unavailable`. Do **not** wrap the surface in a `Button` and do **not** show a `chevron.right`.
-- **Timestamp / placement:** Keep in timeline sequence order where `.commitmentReference` appears, without fabricating a status pill.
+- **Non-interactive by default:** Do **not** wrap the surface in a `Button`, do **not** show a `chevron.right`, and do **not** attach a reference-specific CTA (even when `/v2/schedules` is reachable in V2).
+- **If an optional generic shortcut is ever added later:** It must be explicitly approved by UI/UX Lead and labeled as unrelated general Schedules navigation, never implying this reference is in that list.
+- **Timestamp / placement:** Keep in timeline sequence order where `.commitmentReference` appears, without fabricating a status pill or schedule icon (`calendar.badge.clock`).
 - **No `MOCK ONLY` badge** in live mode (`LiveConversationHost` when `!model.isMockMode`).
 
 ### 5.2 Target Structured Card Design (UX-01 Phase 2 — After Option B Contract)
@@ -242,16 +240,16 @@ To connect a live chat reference to a trustworthy `CommitmentCard` without break
 ## 7. Implementation Plan for UX-01
 
 ### Phase 1 — Immediate Safe Fallback (Unblocked Today, Low Risk, iOS-only)
-1. **Add localized strings** in [`Conversation.xcstrings`](../../../apps/ios/EmberApp/Features/Conversation/Conversation.xcstrings) (`en` + `zh-Hans`) for the neutral fallback title, body (with/without schedules), button label, and accessibility label.
+1. **Add localized strings** in [`Conversation.xcstrings`](../../../apps/ios/EmberApp/Features/Conversation/Conversation.xcstrings) (`en` + `zh-Hans`) for the fully neutral fallback title (`conversation.commitment.fallback_title`), body (`conversation.commitment.fallback_body`), and accessibility label (`conversation.commitment.fallback_a11y_label`), without asserting `"Scheduled"` or directing users to check Schedules for the referenced item's status.
 2. **Replace raw UUID rendering in `LiveConversationHost.swift`:**
-   - Update [`LiveConversationHost.swift#L1157-L1163`](../../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift#L1157-L1163) so `.commitmentReference` returns `.inlineCard(...)` using a small view `CommitmentUnavailableFallbackCard` (inside `LiveConversationHost.swift` or `Cards/`).
-   - Determine action availability strictly from `scheduleStore.hasRepository && !scheduleStore.isEndpointUnavailable`; when available, button sets `isShowingSchedulesSheet = true`.
+   - Update [`LiveConversationHost.swift#L1157-L1163`](../../../apps/ios/EmberApp/Features/Conversation/Screen/LiveConversationHost.swift#L1157-L1163) so `.commitmentReference` returns `.inlineCard(...)` using a non-interactive view `CommitmentUnavailableFallbackCard` (inside `LiveConversationHost.swift` or `Cards/`).
+   - Do **not** attach a reference-specific CTA to `ProactiveSchedulesSheetView` (even when `scheduleStore.hasRepository && !scheduleStore.isEndpointUnavailable`), because `/v2/schedules` reachability does not establish reference-to-schedule identity.
 3. **(Optional cleanup check with iOS Lead):** Check `ConversationUnavailableReferenceCard` in [`ConversationHostIntegration.swift#L515-L546`](../../../apps/ios/EmberApp/Features/Conversation/Screen/ConversationHostIntegration.swift#L515-L546) so the Mock Demo path also avoids displaying raw UUIDs for `.commitmentReference` (while preserving `task_reference` tests if any UI tests assert on `SessionTaskPendingReferenceCard`).
 4. **Focused L1/L2 Validation:**
    - Unit tests in `LiveConversationHostTasksTests` verifying:
      - `.commitmentReference` never renders raw `UUID` string in the view/accessibility tree;
-     - `.commitmentReference` does not fabricate `active`/`paused`/`completed`/`cancelled` or `MOCK ONLY` in live mode;
-     - `Open Schedules` action is present when V2 schedules repository is available and omitted when `.endpointNotReady` (V1) or `scheduleRepository == nil`.
+     - `.commitmentReference` does not assert `"Scheduled"`, `active`/`paused`/`completed`/`cancelled`, or `MOCK ONLY` in live mode;
+     - `.commitmentReference` renders the neutral fallback without any reference-specific Schedules CTA regardless of whether `/v2/schedules` is reachable or `.endpointNotReady`.
 
 ### Phase 2 — Live Card Hydration (Blocked on Option B Contract Decision)
 1. Coordinate schema/contract update with Agent E, Agent A, and CTO (see §6).
@@ -264,7 +262,7 @@ To connect a live chat reference to a trustworthy `CommitmentCard` without break
 
 ### Identified Risks & Unknowns
 1. **Dual-ID ambiguity:** `commitment_reference` uses `commitment_id` (UUID), whereas V2 schedules use `schedule_id` (UUID). Overloading `commitment_id` with `schedule_id` without a frozen contract risks colliding with V1 `commitments` semantics or future multi-entity references.
-2. **V1 default environment trap:** Because `AppCompositionRoot` still defaults to V1 `ember-api.slowfast.dev` (where `/v2/schedules` returns 404 -> `.endpointNotReady`), Phase 1 must verify that `scheduleStore.isEndpointUnavailable` suppresses the `Open Schedules` CTA on V1 rather than opening an unavailable sheet.
+2. **V1 default environment trap:** Because `AppCompositionRoot` still defaults to V1 `ember-api.slowfast.dev` (where `/v2/schedules` returns 404 -> `.endpointNotReady`), Phase 1 keeps the `.commitmentReference` fallback completely decoupled from `ProactiveScheduleStore` availability—never assuming V2 schedules exist or link to `commitment_id`.
 3. **Mock Demo vs. Live divergence:** `ConversationHostIntegration.swift` + `ConversationCardRenderer.Commitment` still contain a hardcoded `commitmentFixture`. Future UX-01 PRs must not accidentally wire `LiveConversationHost` to `ConversationCardRenderer.Commitment` (which ignores passed DTOs and renders `"Review the weekly plan"`!).
 4. **`once` schedule status vs. task run status:** In V2, a `once` schedule transitions `v2_schedules.status` to `completed` as soon as it enqueues the task, before the task itself finishes. Any future Phase 2 card must account for `latestRun?.status` so it does not prematurely label an in-flight run as completed.
 5. **`outcome_reference` drops `commitment_id` on decode:** [`LiveB1ConversationClient.swift#L148`](../../../apps/ios/EmberApp/Networking/LiveB1ConversationClient.swift#L148) discards `commitmentID` when building `OutcomeReference.taskResult(taskID:)`. If Phase 2 introduces commitment outcomes in chat, this mapping must be revisited.

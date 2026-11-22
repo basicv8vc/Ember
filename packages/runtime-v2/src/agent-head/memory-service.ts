@@ -129,7 +129,10 @@ function escapeSqlLike(value: string): string {
 }
 
 type MemoryLookupMatch =
-  | { readonly status: 'matched'; readonly row: Pick<PersonalMemoryRow, 'id' | 'memory_key' | 'content'> }
+  | {
+      readonly status: 'matched';
+      readonly row: Pick<PersonalMemoryRow, 'id' | 'memory_key' | 'content'>;
+    }
   | { readonly status: 'not_found' }
   | { readonly status: 'ambiguous' };
 
@@ -182,7 +185,9 @@ export type TurnPersonalMemorySaveOutcome =
       readonly created: boolean;
       readonly content: string;
     }
-  | { readonly outcome: 'budget_exceeded' };
+  | { readonly outcome: 'budget_exceeded' }
+  | { readonly outcome: 'not_found' }
+  | { readonly outcome: 'ambiguous' };
 
 export interface TurnPersonalMemoryDeleteOutcome {
   readonly deletedCount: number;
@@ -241,28 +246,33 @@ export function savePersonalMemoryFromTurnSync(
       params.principalId,
       replaceId,
     );
-    if (targetMatch.status === 'matched') {
-      let nextKey = targetMatch.row.memory_key;
-      if (memoryKey !== null && memoryKey !== targetMatch.row.memory_key) {
-        const collision = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
-          sql,
-          `SELECT id
+    if (targetMatch.status === 'not_found') {
+      return { outcome: 'not_found' };
+    }
+    if (targetMatch.status === 'ambiguous') {
+      return { outcome: 'ambiguous' };
+    }
+    let nextKey = targetMatch.row.memory_key;
+    if (memoryKey !== null && memoryKey !== targetMatch.row.memory_key) {
+      const collision = sqlExecMaybe<Pick<PersonalMemoryRow, 'id'>>(
+        sql,
+        `SELECT id
              FROM personal_memories
             WHERE tenant_id = ?
               AND principal_id = ?
               AND memory_key = ?
               AND id != ?`,
-          params.tenantId,
-          params.principalId,
-          memoryKey,
-          targetMatch.row.id,
-        );
-        if (collision === null) {
-          nextKey = memoryKey;
-        }
+        params.tenantId,
+        params.principalId,
+        memoryKey,
+        targetMatch.row.id,
+      );
+      if (collision === null) {
+        nextKey = memoryKey;
       }
-      sql.exec(
-        `UPDATE personal_memories
+    }
+    sql.exec(
+      `UPDATE personal_memories
             SET kind = ?,
                 memory_key = ?,
                 client_request_id = ?,
@@ -274,24 +284,23 @@ export function savePersonalMemoryFromTurnSync(
           WHERE id = ?
             AND tenant_id = ?
             AND principal_id = ?`,
-        parsed.kind,
-        nextKey,
-        clientRequestId,
-        parsed.content,
-        params.conversationId,
-        params.sourceMessageId,
-        params.nowMs,
-        targetMatch.row.id,
-        params.tenantId,
-        params.principalId,
-      );
-      return {
-        outcome: 'saved',
-        memoryId: targetMatch.row.id,
-        created: false,
-        content: parsed.content,
-      };
-    }
+      parsed.kind,
+      nextKey,
+      clientRequestId,
+      parsed.content,
+      params.conversationId,
+      params.sourceMessageId,
+      params.nowMs,
+      targetMatch.row.id,
+      params.tenantId,
+      params.principalId,
+    );
+    return {
+      outcome: 'saved',
+      memoryId: targetMatch.row.id,
+      created: false,
+      content: parsed.content,
+    };
   }
 
   if (memoryKey !== null) {
@@ -456,6 +465,30 @@ export function savePersonalMemoryFromTurnSync(
   return { outcome: 'saved', memoryId: id, created: true, content: parsed.content };
 }
 
+function findMemoryByKeySync(
+  sql: SqlStorageLike,
+  tenantId: string,
+  principalId: string,
+  memoryKey: string,
+): Pick<PersonalMemoryRow, 'id' | 'memory_key' | 'content'> | null {
+  return sqlExecMaybe<Pick<PersonalMemoryRow, 'id' | 'memory_key' | 'content'>>(
+    sql,
+    `SELECT id, memory_key, content
+       FROM personal_memories
+      WHERE tenant_id = ?
+        AND principal_id = ?
+        AND memory_key = ?`,
+    tenantId,
+    principalId,
+    memoryKey,
+  );
+}
+
+function matchesContentSelector(rowContent: string, contentMatch: string): boolean {
+  const needle = contentMatch.trim().toLowerCase();
+  return needle.length > 0 && rowContent.toLowerCase().includes(needle);
+}
+
 function findMemoryForDeleteTargetSync(
   sql: SqlStorageLike,
   tenantId: string,
@@ -464,26 +497,34 @@ function findMemoryForDeleteTargetSync(
 ): MemoryLookupMatch {
   if (target.memoryId !== undefined) {
     const byId = findUniqueMemoryByRefSync(sql, tenantId, principalId, target.memoryId);
-    if (byId.status !== 'not_found') {
+    if (byId.status !== 'matched') {
       return byId;
     }
+    if (target.key !== undefined && byId.row.memory_key !== target.key) {
+      const otherByKey = findMemoryByKeySync(sql, tenantId, principalId, target.key);
+      return otherByKey !== null ? { status: 'ambiguous' } : { status: 'not_found' };
+    }
+    if (
+      target.contentMatch !== undefined &&
+      !matchesContentSelector(byId.row.content, target.contentMatch)
+    ) {
+      return { status: 'not_found' };
+    }
+    return byId;
   }
 
   if (target.key !== undefined) {
-    const byKey = sqlExecMaybe<Pick<PersonalMemoryRow, 'id' | 'memory_key' | 'content'>>(
-      sql,
-      `SELECT id, memory_key, content
-         FROM personal_memories
-        WHERE tenant_id = ?
-          AND principal_id = ?
-          AND memory_key = ?`,
-      tenantId,
-      principalId,
-      target.key,
-    );
-    if (byKey !== null) {
-      return { status: 'matched', row: byKey };
+    const byKey = findMemoryByKeySync(sql, tenantId, principalId, target.key);
+    if (byKey === null) {
+      return { status: 'not_found' };
     }
+    if (
+      target.contentMatch !== undefined &&
+      !matchesContentSelector(byKey.content, target.contentMatch)
+    ) {
+      return { status: 'not_found' };
+    }
+    return { status: 'matched', row: byKey };
   }
 
   if (target.contentMatch !== undefined) {
@@ -548,12 +589,7 @@ export function deletePersonalMemoriesFromTurnSync(
   let ambiguousCount = 0;
 
   for (const target of parsed.targets) {
-    const match = findMemoryForDeleteTargetSync(
-      sql,
-      params.tenantId,
-      params.principalId,
-      target,
-    );
+    const match = findMemoryForDeleteTargetSync(sql, params.tenantId, params.principalId, target);
     if (match.status === 'ambiguous') {
       ambiguousCount += 1;
       continue;
@@ -614,6 +650,16 @@ export function formatTurnMemoryConfirmationReply(params: {
         ? `无法保存该记忆：已达到 ${PERSONAL_MEMORY_MAX_ITEMS} 条个人记忆上限。请在“记忆”设置中删除旧条目后再试。`
         : PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY;
     }
+    if (saveOutcome.outcome === 'not_found') {
+      return isZh
+        ? '未在个人记忆中找到要更新的条目，没有修改任何内容。请在“记忆”设置中查看后重试。'
+        : "I couldn't find that memory item to update, so nothing was changed. Please check Memory settings and try again.";
+    }
+    if (saveOutcome.outcome === 'ambiguous') {
+      return isZh
+        ? '找到多条相似的个人记忆，无法确定要更新哪一条。请更具体地说明，或在“记忆”设置中手动编辑。'
+        : 'Multiple saved memories matched that reference, so nothing was updated. Please be more specific or edit the item in Memory settings.';
+    }
     if (hasRealModelReply) {
       return trimmedModelText;
     }
@@ -644,8 +690,7 @@ export function formatTurnMemoryConfirmationReply(params: {
         ? '未在个人记忆中找到匹配的条目，没有删除任何内容。你可以在“记忆”设置中查看并删除。'
         : "I couldn't find a matching item in your personal memory, so nothing was deleted. You can inspect and remove items in Memory settings.";
     }
-    const hasPartialFailure =
-      deleteOutcome.ambiguousCount > 0 || deleteOutcome.notFoundCount > 0;
+    const hasPartialFailure = deleteOutcome.ambiguousCount > 0 || deleteOutcome.notFoundCount > 0;
     if (hasPartialFailure) {
       if (isZh) {
         const suffix =

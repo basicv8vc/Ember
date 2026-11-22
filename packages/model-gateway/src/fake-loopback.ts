@@ -440,21 +440,21 @@ function toFakeReply(data: Record<string, unknown>): ModelCallResult<Conversatio
                 },
               }
             : scheduleCreate !== null && text.trim().length > 0
-            ? {
-                kind: 'create_schedule' as const,
-                toolName: 'create_proactive_schedule' as const,
-                finishReason: 'stop' as const,
-                text,
-                schedule: {
+              ? {
+                  kind: 'create_schedule' as const,
                   toolName: 'create_proactive_schedule' as const,
-                  arguments: scheduleCreate,
+                  finishReason: 'stop' as const,
+                  text,
+                  schedule: {
+                    toolName: 'create_proactive_schedule' as const,
+                    arguments: scheduleCreate,
+                  },
+                }
+              : {
+                  kind: 'reply' as const,
+                  finishReason: 'stop' as const,
+                  text,
                 },
-              }
-            : {
-                kind: 'reply' as const,
-                finishReason: 'stop' as const,
-                text,
-              },
     modelLabel: FAKE_MODEL_LABEL,
     simulated: true,
     usage: fake ? parseUsage(data.usage) : null,

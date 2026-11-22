@@ -13,9 +13,7 @@ import type {
 } from '@ember/runtime-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
-import {
-  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
-} from '../../packages/runtime-v2/src/agent-head/memory-service.js';
+import { PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY } from '../../packages/runtime-v2/src/agent-head/memory-service.js';
 import { PERSONAL_MEMORY_MAX_ITEMS } from '../../packages/runtime-v2/src/contracts/personal-memory.js';
 
 const configPath = fileURLToPath(
@@ -991,5 +989,57 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
       200,
     );
     expect(msgsAfterMissing.messages.at(-1)?.text).toContain("couldn't find a matching item");
+
+    // 6. Stale replaceId must NOT fall through to INSERT a duplicate or claim success
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Updated your preference!',
+      savePersonalMemory: {
+        kind: 'preference',
+        key: 'tea_choice',
+        content: 'Oolong tea',
+        replaceId: 'deadbeef',
+      },
+    });
+    const staleReplaceRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Update that old memory to oolong tea.',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(staleReplaceRes.status).toBe(201);
+    await staleReplaceRes.text();
+
+    const afterStaleReplace = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterStaleReplace.items).toEqual([]);
+
+    const msgsAfterStaleReplace = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${user.conversationId}/messages?after=0&limit=30`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${user.token}` },
+        },
+      ),
+      200,
+    );
+    expect(msgsAfterStaleReplace.messages.at(-1)?.text).toContain(
+      "couldn't find that memory item to update",
+    );
   });
 });

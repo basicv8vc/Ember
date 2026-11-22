@@ -1786,7 +1786,8 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       messageId: this.newId(),
       conversationId: conv.id,
       text: messageText,
-      modelLabel: outcome.status === 'completed' ? outcome.modelLabel : PROACTIVE_SCHEDULER_MODEL_LABEL,
+      modelLabel:
+        outcome.status === 'completed' ? outcome.modelLabel : PROACTIVE_SCHEDULER_MODEL_LABEL,
       simulated: outcome.status === 'completed' ? outcome.simulated : false,
       nowMs,
     });
@@ -1819,11 +1820,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       reasonCode,
       nowMs,
     );
-    this.deliverProactiveTerminalOutcomeSync(
-      task,
-      { status: 'failed', reasonCode },
-      nowMs,
-    );
+    this.deliverProactiveTerminalOutcomeSync(task, { status: 'failed', reasonCode }, nowMs);
   }
 
   private resolveTaskPrincipalIdSync(

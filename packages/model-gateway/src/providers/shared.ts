@@ -33,7 +33,8 @@ export const DEFAULT_DELEGATION_ACK_TEXT =
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
 export const DEFAULT_MEMORY_SAVE_ACK_TEXT = "Got it — I'll remember that.";
-export const DEFAULT_MEMORY_DELETE_ACK_TEXT = "Got it — I'll remove that from your personal memory.";
+export const DEFAULT_MEMORY_DELETE_ACK_TEXT =
+  "Got it — I'll remove that from your personal memory.";
 export const COMMITTED_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
 export const COMMITTED_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
 export const COMMITTED_MEMORY_DELETED_REPLY = 'Removed from your personal memory.';
@@ -809,8 +810,7 @@ export function parseConversationTurnChoice(
         throw new ModelGatewayFailure('model_invalid_output');
       }
       const allSaveMemory = toolCalls.every(
-        (call) =>
-          call.type === 'function' && call.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        (call) => call.type === 'function' && call.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME,
       );
       const allDeleteMemory = toolCalls.every(
         (call) =>
@@ -898,7 +898,9 @@ export function parseConversationTurnChoice(
             ? [...distinctKeys][0]
             : undefined;
       const distinctReplaceIds = new Set(
-        parsedMemories.map((item) => item.replace_id).filter((id): id is string => id !== undefined),
+        parsedMemories
+          .map((item) => item.replace_id)
+          .filter((id): id is string => id !== undefined),
       );
       const sharedReplaceId =
         parsedMemories.length === 1
@@ -1058,9 +1060,7 @@ export function parseConversationTurnChoice(
       const ackText =
         rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_MEMORY_DELETE_ACK_TEXT;
       const target = Object.freeze({
-        ...(parsedArgs.data.memory_id === undefined
-          ? {}
-          : { memoryId: parsedArgs.data.memory_id }),
+        ...(parsedArgs.data.memory_id === undefined ? {} : { memoryId: parsedArgs.data.memory_id }),
         ...(parsedArgs.data.key === undefined ? {} : { key: parsedArgs.data.key }),
         ...(parsedArgs.data.content_match === undefined
           ? {}

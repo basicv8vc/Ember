@@ -405,7 +405,9 @@ function parsePersonalMemorySaveTurnCommand(raw: unknown): PersonalMemorySaveTur
   };
 }
 
-function parsePersonalMemoryDeleteTurnCommand(raw: unknown): PersonalMemoryDeleteTurnCommand | null {
+function parsePersonalMemoryDeleteTurnCommand(
+  raw: unknown,
+): PersonalMemoryDeleteTurnCommand | null {
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
     return null;
   }
@@ -415,7 +417,11 @@ function parsePersonalMemoryDeleteTurnCommand(raw: unknown): PersonalMemoryDelet
       return null;
     }
   }
-  if (!Array.isArray(record['targets']) || record['targets'].length < 1 || record['targets'].length > 10) {
+  if (
+    !Array.isArray(record['targets']) ||
+    record['targets'].length < 1 ||
+    record['targets'].length > 10
+  ) {
     return null;
   }
   const targets: PersonalMemoryDeleteTurnCommand['targets'][number][] = [];

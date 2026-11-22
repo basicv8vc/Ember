@@ -2069,5 +2069,164 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       'Removed from your personal memory: Morning coffee: black Americano; other requested items were not found in your personal memory.',
     );
     expect(PERSONAL_MEMORY_DELETED_REPLY).toBe(COMMITTED_MEMORY_DELETED_REPLY);
+
+    // 5. P1/P2 regressions: authoritative replaceId & delete selectors never fall through or create duplicates
+    const staleReplaceRes = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: {
+        kind: 'preference',
+        key: 'new_city_key',
+        content: 'Should not create duplicate',
+        replaceId: 'deadbeef',
+      },
+      nowMs: 1_700_000_013_000,
+      newId: () => randomUUID(),
+    });
+    expect(staleReplaceRes).toEqual({ outcome: 'not_found' });
+
+    const countBeforeAmbiguousReplace = await svc.execute({
+      kind: 'list',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+    });
+    if (!('items' in countBeforeAmbiguousReplace)) throw new Error('expected list result');
+    expect(countBeforeAmbiguousReplace.items).toHaveLength(2);
+
+    // Add a keyed item sharing prefix with idB (`e5f6...`) for ambiguous prefix + conflicting selector checks
+    const sharedPrefixId = 'e5f69999-0000-4000-8000-000000000009';
+    savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: { kind: 'fact', key: 'city_live', content: 'Lives in Tokyo' },
+      nowMs: 1_700_000_014_000,
+      newId: () => sharedPrefixId,
+    });
+
+    const ambiguousReplaceRes = savePersonalMemoryFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      turnId: randomUUID(),
+      conversationId,
+      sourceMessageId: msgId,
+      input: {
+        kind: 'fact',
+        content: 'Should not duplicate on ambiguous replaceId',
+        replaceId: 'e5f6',
+      },
+      nowMs: 1_700_000_015_000,
+      newId: () => randomUUID(),
+    });
+    expect(ambiguousReplaceRes).toEqual({ outcome: 'ambiguous' });
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: '已经帮您更新好了。',
+        sourceUserText: '帮我更新城市记忆',
+        saveOutcome: staleReplaceRes,
+      }),
+    ).toContain('没有修改任何内容');
+    expect(
+      formatTurnMemoryConfirmationReply({
+        modelText: 'Updated your memory.',
+        sourceUserText: 'Update my memory',
+        saveOutcome: ambiguousReplaceRes,
+      }),
+    ).toContain('nothing was updated');
+
+    // Stale memoryId + valid key & contentMatch of city_live must NOT delete city_live
+    const staleIdFallbackAttempt = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: {
+        targets: [{ memoryId: 'deadbeef', key: 'city_live', contentMatch: 'Lives in Tokyo' }],
+      },
+    });
+    expect(staleIdFallbackAttempt).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 1,
+      ambiguousCount: 0,
+    });
+
+    // Conflicting live memoryId (idB = Morning coffee) + valid key of another memory (city_live) must NOT delete either
+    const conflictingIdAndKey = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: {
+        targets: [{ memoryId: idB.slice(0, 8), key: 'city_live' }],
+      },
+    });
+    expect(conflictingIdAndKey).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 0,
+      ambiguousCount: 1,
+    });
+
+    // Conflicting live memoryId (idB) + contentMatch of another memory (Lives in Tokyo) must NOT delete either
+    const conflictingIdAndContent = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: {
+        targets: [{ memoryId: idB.slice(0, 8), contentMatch: 'Lives in Tokyo' }],
+      },
+    });
+    expect(conflictingIdAndContent).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 1,
+      ambiguousCount: 0,
+    });
+
+    // Stale key + valid contentMatch of another memory must NOT fall through and delete by contentMatch
+    const staleKeyAndValidContent = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: {
+        targets: [{ key: 'nonexistent_key', contentMatch: 'Lives in Tokyo' }],
+      },
+    });
+    expect(staleKeyAndValidContent).toEqual({
+      deletedCount: 0,
+      deletedContents: [],
+      notFoundCount: 1,
+      ambiguousCount: 0,
+    });
+
+    // All 3 memories remain untouched
+    const afterRefusedDeletes = await svc.execute({
+      kind: 'list',
+      tenantId,
+      principalId: principalA,
+      agentId,
+      requestId: randomUUID(),
+    });
+    if (!('items' in afterRefusedDeletes)) throw new Error('expected list result');
+    expect(afterRefusedDeletes.items).toHaveLength(3);
+
+    // Agreeing selectors delete only that exact target
+    const agreeingDelete = deletePersonalMemoriesFromTurnSync(storage.sql, {
+      tenantId,
+      principalId: principalA,
+      input: {
+        targets: [
+          { memoryId: sharedPrefixId.slice(0, 8), key: 'city_live', contentMatch: 'Tokyo' },
+        ],
+      },
+    });
+    expect(agreeingDelete).toEqual({
+      deletedCount: 1,
+      deletedContents: ['Lives in Tokyo'],
+      notFoundCount: 0,
+      ambiguousCount: 0,
+    });
   });
 });

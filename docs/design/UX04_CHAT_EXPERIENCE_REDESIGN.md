@@ -83,7 +83,7 @@ Rather than introducing a heavy custom theme or animated mascot, UX-04 refines `
 | --- | --- | --- | --- |
 | `emberMarkTint` | Warm Amber/Terracotta (`#C86428` / `Color.orange` blended with system accent) | Warm Amber (`#E8874A`) | Subtle Ember emblem (`flame.fill` / refined Ember mark) in header & empty state; quiet warmth without loud neon gradients |
 | `emberSoftSurface` | `emberMarkTint.opacity(0.10)` | `emberMarkTint.opacity(0.16)` | Ember identity badge backing & soft empty-state icon halo |
-| `userBubbleFill` | `Color.accentColor` (or deep slate-blue `#1E5EFF` / system tint) | `Color.accentColor` (higher-luminance adaptive blue) | User message bubble only; paired with `Color.white` primary text |
+| `userBubbleFill` | `Color.accentColor.opacity(0.12)` + `.primary` text (soft pill shown in §5.3) or solid `Color.accentColor` + `.white` | `Color.accentColor.opacity(0.24)` + `.primary` text (or solid `Color.accentColor`) | User message bubble only; soft tint keeps transcript quiet while preserving high contrast |
 | `groupedBackground` | `UIColor.systemGroupedBackground` | `UIColor.systemGroupedBackground` | Primary Chat canvas; Ember prose sits directly on this canvas |
 | `cardBackground` | `UIColor.secondarySystemGroupedBackground` | `UIColor.secondarySystemGroupedBackground` | Reserved strictly for structured **Task**, **Result**, **Empty Prompt**, and **Recovery** cards |
 | `outcomeWellBackground` | `Color.primary.opacity(0.035)` | `Color.white.opacity(0.05)` | Subtle content well inside `OutcomeCard` (replaces harsh inner `systemBackground` box) |
@@ -422,6 +422,42 @@ AFTER (375pt / 320pt — Dark Mode + Accessibility Large / AX3)
 └─────────────────────────────────────┘
 ```
 
+### 5.3 Rendered iOS 27.2 Prototype Visual Comparisons (Before vs. After)
+
+> [!NOTE]
+> **Render Provenance:** **Before** panels render the unmodified production SwiftUI views (`LiveConversationHost` header, `ConversationScreen`, `ConversationTimelineView`, `ConversationComposer`, `TaskActivityCard`, `OutcomeCard`) from `main` @ `f37ffc6`. **After** panels render non-committed SwiftUI prototype views on the iOS 27.2 Simulator (`iPhone 18 Pro` runtime, `2x` scale) at exact `320×568pt`, `375×667pt`, and `393×852pt` viewports. Temporary snapshot harness code was removed after capture so this PR remains strictly design-only.
+
+#### Width Comparison: Empty State (`320pt` / `375pt` / `393pt` — V2 Staging)
+
+| Width | Before (`main` @ `f37ffc6`) | After (UX-04 Prototype) |
+| --- | --- | --- |
+| **320pt** (`320×568`) | ![Before 320pt V2 Empty](assets/ux04/before-320-v2-empty.png) | ![After 320pt V2 Empty](assets/ux04/after-320-v2-empty.png) |
+| **375pt** (`375×667`) | ![Before 375pt V2 Empty](assets/ux04/before-375-v2-empty.png) | ![After 375pt V2 Empty](assets/ux04/after-375-v2-empty.png) |
+| **393pt** (`393×852`) | ![Before 393pt V2 Empty](assets/ux04/before-393-v2-empty.png) | ![After 393pt V2 Empty](assets/ux04/after-393-v2-empty.png) |
+
+#### Environment-Honest Empty State (`393pt` — V2 Staging vs. V1 Live Cloud)
+
+| V2 Staging (Memory, Briefs, Schedules Enabled) | V1 Live Cloud (No Memory / Schedule Promises) |
+| --- | --- |
+| ![After 393pt V2 Empty](assets/ux04/after-393-v2-empty.png) | ![After 393pt V1 Empty](assets/ux04/after-393-v1-empty.png) |
+
+#### Width Comparison: Normal Chat + Active Task + Outcome (`320pt` / `375pt` / `393pt`)
+
+| Width | Before (`main` @ `f37ffc6`) | After (UX-04 Prototype) |
+| --- | --- | --- |
+| **320pt** (`320×568`) | ![Before 320pt Chat Task](assets/ux04/before-320-chat-task.png) | ![After 320pt Chat Task](assets/ux04/after-320-chat-task.png) |
+| **375pt** (`375×667`) | ![Before 375pt Chat Task](assets/ux04/before-375-chat-task.png) | ![After 375pt Chat Task](assets/ux04/after-375-chat-task.png) |
+| **393pt** (`393×852`) | ![Before 393pt Chat Task](assets/ux04/before-393-chat-task.png) | ![After 393pt Chat Task](assets/ux04/after-393-chat-task.png) |
+
+#### Key Conversation States (`393pt` — Streaming, Long/Recovery, Dark Mode) & `320pt` Accessibility Large
+
+| Scenario | Before (`main` @ `f37ffc6`) | After (UX-04 Prototype) |
+| --- | --- | --- |
+| **Streaming Response (`393pt`)** | ![Before 393pt Streaming](assets/ux04/before-393-streaming.png) | ![After 393pt Streaming](assets/ux04/after-393-streaming.png) |
+| **Long Chat + Jump-to-Latest + Recovery (`393pt`)** | ![Before 393pt Long Error](assets/ux04/before-393-long-error.png) | ![After 393pt Long Error](assets/ux04/after-393-long-error.png) |
+| **Dark Mode (`393pt`)** | ![Before 393pt Dark](assets/ux04/before-393-dark.png) | ![After 393pt Dark](assets/ux04/after-393-dark.png) |
+| **Accessibility Large Dynamic Type (`320pt`)** | ![Before 320pt A11y Large](assets/ux04/before-320-a11y-large.png) | ![After 320pt A11y Large](assets/ux04/after-320-a11y-large.png) |
+
 ---
 
 ## 6. Interaction, Accessibility, & Localization Notes
@@ -484,3 +520,4 @@ Phase 2 begins **only after UI/UX Lead + CTO approval** of this proposal, split 
 2. **Mock Disclosure Placement in Chat (`MockOnlyBanner` vs Compact Header Pill):** In `--ember-mock-chat-tasks`, replacing the full 90pt `MockOnlyBanner` at the top of Chat with a compact `MOCK ONLY` header pill (`accessibilityIdentifier("mock-only-banner")`) prevents the `375pt` header collapse seen in `before-375-chat-dark-a11y.png` while keeping `MOCK ONLY` permanently visible (and keeping full `MockOnlyBanner` on Onboarding, Task Detail, and Sheets). **Approve compact `MOCK ONLY` pill in Chat header?**
 3. **V1 Empty-State Prompts:** Confirm the 3 V1-only starter prompts (*Organize notes*, *Plan priorities*, *Analyze a file*) and confirm whether V1 should hide Memory/Schedules from the `⋯` menu or keep them visible with an explicit `"V1 unavailable"` state inside the sheet.
 4. **Hiding `composerNote` After First Turn:** Confirm showing `"Sent messages are saved in your Ember Cloud conversation."` only when `timeline.isEmpty` (and hiding it once conversation begins to keep the composer light).
+5. **User Message Bubble Treatment (Soft Tinted Pill vs. Solid Accent Fill):** The §5.3 prototype renders demonstrate a soft-tinted user pill (`Color.accentColor.opacity(0.12)` light / `0.24` dark with `.primary` text) on a `systemBackground` canvas so Ember's editorial prose and structured Result/Task cards remain calm. **Approve the soft-tinted pill + `systemBackground` chat canvas, or prefer keeping solid `Color.accentColor` user bubbles on `systemGroupedBackground`?**

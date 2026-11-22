@@ -679,10 +679,10 @@ private struct TimelineScrollGeometryObserverModifier: ViewModifier {
                 .modifier(ModernScrollPositionModifier(scrollRequest: scrollRequest))
                 .onScrollGeometryChange(for: ConversationTimelineViewportMetrics.self) { geometry in
                     ConversationTimelineViewportMetrics(
-                        contentMinY: -geometry.visibleRect.minY,
+                        contentMinY: -(geometry.contentOffset.y + geometry.contentInsets.top),
                         contentHeight: geometry.contentSize.height,
-                        viewportWidth: geometry.visibleRect.width,
-                        viewportHeight: geometry.visibleRect.height,
+                        viewportWidth: geometry.containerSize.width,
+                        viewportHeight: geometry.containerSize.height,
                         topInset: 0,
                         bottomInset: 0
                     ).quantized()

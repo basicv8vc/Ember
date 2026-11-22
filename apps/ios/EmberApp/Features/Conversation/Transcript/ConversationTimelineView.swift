@@ -12,77 +12,228 @@ struct ConversationTimelineView: View {
     let emberMessageAuthorText: LocalizedStringKey
     var onRefresh: (() async -> Void)? = nil
 
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var scrollState = ConversationTimelineScrollState()
+    @State private var contentBounds: TimelineContentBounds?
+    @State private var viewportBounds: TimelineViewportBounds?
+    @State private var latestMeasuredMetrics: ConversationTimelineViewportMetrics?
+    @State private var scrollRequest: TimelineScrollRequest?
+    @State private var pendingDynamicTypeChange = false
+    @State private var programmaticScrollResetTask: Task<Void, Never>?
+
     private let bottomAnchor = "conversation-timeline-bottom"
+    private let scrollCoordinateSpace = "conversation-timeline-scroll-space"
+
+    private var scrollSnapshot: ConversationTimelineScrollSnapshot {
+        ConversationTimelineScrollSnapshot(state: state)
+    }
+
+    private var hasTimelineContent: Bool {
+        !state.timeline.isEmpty
+    }
+
+    private var showsJumpToLatest: Bool {
+        !state.isLoading && scrollState.showsJumpToLatest(hasContent: hasTimelineContent)
+    }
 
     var body: some View {
         ScrollViewReader { proxy in
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 18) {
-                    if state.isLoading {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 32)
-                    } else if showsSuggestions {
-                        ConversationEmptyStateView(
-                            prompts: state.suggestedPrompts,
-                            onPromptSelected: onPromptSelected
-                        )
-                    }
+            ZStack(alignment: .bottom) {
+                ScrollView {
+                    VStack(spacing: 0) {
+                        LazyVStack(alignment: .leading, spacing: 18) {
+                            if state.isLoading {
+                                ProgressView()
+                                    .frame(maxWidth: .infinity)
+                                    .padding(.vertical, 32)
+                            } else if showsSuggestions {
+                                ConversationEmptyStateView(
+                                    prompts: state.suggestedPrompts,
+                                    onPromptSelected: onPromptSelected
+                                )
+                            }
 
-                    ForEach(state.timeline) { entry in
-                        timelineRow(entry)
-                    }
+                            ForEach(state.timeline) { entry in
+                                timelineRow(entry)
+                            }
 
-                    ConversationReplyStatusView(
-                        state: state.replyState,
-                        isSubmitting: state.isSubmitting,
-                        isStreaming: !(state.streamingReplyText ?? "").isEmpty,
-                        onRetry: onRetry,
-                        onStopGenerating: onStopGenerating,
-                        onDismissError: onDismissError,
-                        preparingText: replyPreparingText,
-                        stopText: replyStopText
+                            ConversationReplyStatusView(
+                                state: state.replyState,
+                                isSubmitting: state.isSubmitting,
+                                isStreaming: !(state.streamingReplyText ?? "").isEmpty,
+                                onRetry: onRetry,
+                                onStopGenerating: onStopGenerating,
+                                onDismissError: onDismissError,
+                                preparingText: replyPreparingText,
+                                stopText: replyStopText
+                            )
+                        }
+                        .frame(maxWidth: 680, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 18)
+                        .padding(.bottom, 20)
+
+                        Color.clear
+                            .frame(height: 1)
+                            .id(bottomAnchor)
+                    }
+                    .modifier(LegacyTimelineContentBoundsModifier(coordinateSpaceName: scrollCoordinateSpace))
+                }
+                .coordinateSpace(name: scrollCoordinateSpace)
+                .modifier(
+                    TimelineScrollGeometryObserverModifier(
+                        coordinateSpaceName: scrollCoordinateSpace,
+                        scrollRequest: scrollRequest,
+                        onMetrics: { metrics in
+                            latestMeasuredMetrics = metrics
+                            applyScrollMetricsIfActive(proxy: proxy)
+                        },
+                        onLegacyContentBounds: { newBounds in
+                            guard newBounds != contentBounds else { return }
+                            contentBounds = newBounds
+                            updateLegacyMetricsIfReady(proxy: proxy)
+                        },
+                        onLegacyViewportBounds: { newBounds in
+                            guard newBounds != viewportBounds else { return }
+                            viewportBounds = newBounds
+                            updateLegacyMetricsIfReady(proxy: proxy)
+                        }
                     )
+                )
+                .scrollDismissesKeyboard(.interactively)
+                .modifier(OptionalRefreshableModifier(onRefresh: onRefresh))
+                .accessibilityElement(children: .contain)
+                .accessibilityIdentifier("conversation-timeline")
 
-                    Color.clear
-                        .frame(height: 1)
-                        .id(bottomAnchor)
+                if showsJumpToLatest {
+                    ConversationJumpToLatestButton {
+                        let directive = scrollState.handleJumpToLatestTap(reduceMotion: reduceMotion)
+                        executeScrollDirective(directive, proxy: proxy)
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 10)
+                    .transition(
+                        reduceMotion
+                            ? .opacity
+                            : .scale(scale: 0.85).combined(with: .opacity)
+                    )
                 }
-                .frame(maxWidth: 680, alignment: .leading)
-                .frame(maxWidth: .infinity, alignment: .center)
-                .padding(.horizontal, 16)
-                .padding(.top, 18)
-                .padding(.bottom, 20)
             }
-            .scrollDismissesKeyboard(.interactively)
-            .modifier(OptionalRefreshableModifier(onRefresh: onRefresh))
+            .animation(
+                reduceMotion ? nil : .easeOut(duration: 0.2),
+                value: showsJumpToLatest
+            )
             .onAppear {
-                DispatchQueue.main.async {
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                let directive = scrollState.handleAppear(hasContent: hasTimelineContent)
+                if directive != .none {
+                    DispatchQueue.main.async {
+                        guard scrollState.isFollowingBottom else { return }
+                        executeScrollDirective(directive, proxy: proxy)
+                    }
                 }
             }
-            .onChange(of: state.timeline.count) { _, _ in
-                withAnimation(.easeOut(duration: 0.18)) {
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+            .onDisappear {
+                programmaticScrollResetTask?.cancel()
+                programmaticScrollResetTask = nil
+                scrollState.finishProgrammaticScroll()
+            }
+            .onChange(of: scrollSnapshot) { oldValue, newValue in
+                let directive = scrollState.handleStateChange(
+                    from: oldValue,
+                    to: newValue,
+                    reduceMotion: reduceMotion
+                )
+                if directive != .none {
+                    DispatchQueue.main.async {
+                        guard scrollState.isFollowingBottom else { return }
+                        executeScrollDirective(directive, proxy: proxy)
+                    }
                 }
             }
-            .onChange(of: state.replyState) { _, _ in
+            .onChange(of: dynamicTypeSize) { _, _ in
+                pendingDynamicTypeChange = true
+            }
+            .onChange(of: scenePhase) { _, newPhase in
+                if newPhase == .active {
+                    applyScrollMetricsIfActive(proxy: proxy)
+                    let directive = scrollState.handleBecameActive(hasContent: hasTimelineContent)
+                    if directive != .none {
+                        DispatchQueue.main.async {
+                            guard scrollState.isFollowingBottom else { return }
+                            executeScrollDirective(directive, proxy: proxy)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func updateLegacyMetricsIfReady(proxy: ScrollViewProxy) {
+        guard let contentBounds, let viewportBounds else { return }
+        latestMeasuredMetrics = ConversationTimelineViewportMetrics(
+            contentMinY: contentBounds.minY,
+            contentHeight: contentBounds.height,
+            viewportWidth: viewportBounds.width,
+            viewportHeight: viewportBounds.height,
+            topInset: viewportBounds.topInset,
+            bottomInset: viewportBounds.bottomInset
+        )
+        applyScrollMetricsIfActive(proxy: proxy)
+    }
+
+    private func applyScrollMetricsIfActive(proxy: ScrollViewProxy) {
+        guard scenePhase == .active,
+              let metrics = latestMeasuredMetrics else {
+            return
+        }
+        let dynamicTypeChanged = pendingDynamicTypeChange
+        pendingDynamicTypeChange = false
+
+        let directive = scrollState.handleMetricsChange(
+            metrics,
+            hasContent: hasTimelineContent,
+            dynamicTypeChanged: dynamicTypeChanged
+        )
+        executeScrollDirective(directive, proxy: proxy)
+    }
+
+    private func executeScrollDirective(
+        _ directive: ConversationTimelineScrollDirective,
+        proxy: ScrollViewProxy
+    ) {
+        guard case .scrollToBottom(let animated) = directive else { return }
+        let shouldAnimate = animated && !reduceMotion
+        programmaticScrollResetTask?.cancel()
+        programmaticScrollResetTask = Task { @MainActor in
+            try? await Task.sleep(for: .milliseconds(shouldAnimate ? 480 : 120))
+            guard !Task.isCancelled else { return }
+            scrollState.finishProgrammaticScroll()
+            if scrollState.isFollowingBottom,
+               (latestMeasuredMetrics?.distanceFromBottom ?? 0) > scrollState.config.settledBottomTolerance {
+                performScrollToBottom(animated: false, proxy: proxy)
+            }
+        }
+
+        performScrollToBottom(animated: shouldAnimate, proxy: proxy)
+    }
+
+    private func performScrollToBottom(animated: Bool, proxy: ScrollViewProxy) {
+        if #available(iOS 18.0, *) {
+            scrollRequest = TimelineScrollRequest(animated: animated)
+        } else if animated {
+            withAnimation(.easeInOut(duration: 0.35)) {
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
             }
-            .onChange(of: state.streamingReplyText) { _, newValue in
-                if newValue != nil {
-                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                }
+        } else {
+            var transaction = Transaction()
+            transaction.disablesAnimations = true
+            withTransaction(transaction) {
+                proxy.scrollTo(bottomAnchor, anchor: .bottom)
             }
-            .onChange(of: state.isSubmitting) { _, submitting in
-                if submitting {
-                    withAnimation(.easeOut(duration: 0.18)) {
-                        proxy.scrollTo(bottomAnchor, anchor: .bottom)
-                    }
-                }
-            }
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("conversation-timeline")
         }
     }
 
@@ -419,5 +570,198 @@ private struct OptionalRefreshableModifier: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+private struct ConversationJumpToLatestButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: "arrow.down")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .modifier(JumpToLatestSurfaceModifier())
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text("conversation.timeline.jump_to_latest", tableName: "Conversation"))
+        .accessibilityHint(Text("conversation.timeline.jump_to_latest_hint", tableName: "Conversation"))
+        .accessibilityIdentifier("conversation-jump-to-latest")
+    }
+}
+
+private struct JumpToLatestSurfaceModifier: ViewModifier {
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(Glass.regular.interactive(), in: Circle())
+                .shadow(color: Color.black.opacity(0.12), radius: 10, x: 0, y: 4)
+        } else {
+            content
+                .background(.ultraThinMaterial, in: Circle())
+                .background(EmberDesignTokens.cardBackground.opacity(0.65), in: Circle())
+                .overlay {
+                    Circle().strokeBorder(EmberDesignTokens.separator, lineWidth: 0.75)
+                }
+                .shadow(color: Color.black.opacity(0.12), radius: 10, x: 0, y: 4)
+        }
+    }
+}
+
+private struct TimelineScrollRequest: Equatable {
+    let id = UUID()
+    let animated: Bool
+}
+
+@available(iOS 18.0, *)
+private struct ModernScrollPositionModifier: ViewModifier {
+    let scrollRequest: TimelineScrollRequest?
+
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+
+    func body(content: Content) -> some View {
+        content
+            .scrollPosition($scrollPosition)
+            .onChange(of: scrollRequest) { _, request in
+                guard let request else { return }
+                if request.animated {
+                    withAnimation(.smooth(duration: 0.42)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                } else {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
+            }
+    }
+}
+
+private struct LegacyTimelineContentBoundsModifier: ViewModifier {
+    let coordinateSpaceName: String
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+        } else {
+            content.background(
+                GeometryReader { contentProxy in
+                    Color.clear.preference(
+                        key: TimelineContentBoundsPreferenceKey.self,
+                        value: TimelineContentBounds(
+                            minY: contentProxy.frame(in: .named(coordinateSpaceName)).minY,
+                            height: contentProxy.size.height
+                        ).quantized()
+                    )
+                }
+            )
+        }
+    }
+}
+
+private struct TimelineScrollGeometryObserverModifier: ViewModifier {
+    let coordinateSpaceName: String
+    let scrollRequest: TimelineScrollRequest?
+    let onMetrics: (ConversationTimelineViewportMetrics) -> Void
+    let onLegacyContentBounds: (TimelineContentBounds) -> Void
+    let onLegacyViewportBounds: (TimelineViewportBounds) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if #available(iOS 18.0, *) {
+            content
+                .modifier(ModernScrollPositionModifier(scrollRequest: scrollRequest))
+                .onScrollGeometryChange(for: ConversationTimelineViewportMetrics.self) { geometry in
+                    ConversationTimelineViewportMetrics(
+                        contentMinY: -(geometry.contentOffset.y + geometry.contentInsets.top),
+                        contentHeight: geometry.contentSize.height,
+                        viewportWidth: geometry.containerSize.width,
+                        viewportHeight: geometry.containerSize.height,
+                        topInset: 0,
+                        bottomInset: 0
+                    ).quantized()
+                } action: { _, newMetrics in
+                    onMetrics(newMetrics)
+                }
+        } else {
+            content
+                .background(
+                    GeometryReader { viewportProxy in
+                        let frame = viewportProxy.frame(in: .named(coordinateSpaceName))
+                        Color.clear.preference(
+                            key: TimelineViewportBoundsPreferenceKey.self,
+                            value: TimelineViewportBounds(
+                                width: viewportProxy.size.width,
+                                height: frame.maxY,
+                                topInset: max(0, frame.minY),
+                                bottomInset: 0
+                            ).quantized()
+                        )
+                    }
+                )
+                .onPreferenceChange(TimelineContentBoundsPreferenceKey.self) { newBounds in
+                    guard let newBounds else { return }
+                    onLegacyContentBounds(newBounds)
+                }
+                .onPreferenceChange(TimelineViewportBoundsPreferenceKey.self) { newBounds in
+                    guard let newBounds else { return }
+                    onLegacyViewportBounds(newBounds)
+                }
+        }
+    }
+}
+
+private struct TimelineContentBounds: Equatable {
+    let minY: CGFloat
+    let height: CGFloat
+
+    func quantized(step: CGFloat = 0.5) -> Self {
+        func quantize(_ value: CGFloat) -> CGFloat {
+            guard value.isFinite, step > 0 else { return 0 }
+            return (value / step).rounded() * step
+        }
+        return Self(minY: quantize(minY), height: quantize(height))
+    }
+}
+
+private struct TimelineViewportBounds: Equatable {
+    let width: CGFloat
+    let height: CGFloat
+    let topInset: CGFloat
+    let bottomInset: CGFloat
+
+    func quantized(step: CGFloat = 0.5) -> Self {
+        func quantize(_ value: CGFloat) -> CGFloat {
+            guard value.isFinite, step > 0 else { return 0 }
+            return (value / step).rounded() * step
+        }
+        return Self(
+            width: quantize(width),
+            height: quantize(height),
+            topInset: quantize(topInset),
+            bottomInset: quantize(bottomInset)
+        )
+    }
+}
+
+private struct TimelineContentBoundsPreferenceKey: PreferenceKey {
+    static let defaultValue: TimelineContentBounds? = nil
+
+    static func reduce(value: inout TimelineContentBounds?, nextValue: () -> TimelineContentBounds?) {
+        value = nextValue() ?? value
+    }
+}
+
+private struct TimelineViewportBoundsPreferenceKey: PreferenceKey {
+    static let defaultValue: TimelineViewportBounds? = nil
+
+    static func reduce(value: inout TimelineViewportBounds?, nextValue: () -> TimelineViewportBounds?) {
+        value = nextValue() ?? value
     }
 }

@@ -2481,6 +2481,22 @@
         }
       }
     },
+    "schedules.error.policy_denied_generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This schedule action is not permitted by your current account policy."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前账号策略暂不允许执行此定时任务操作。"
+          }
+        }
+      }
+    },
     "schedules.frequency.once": {
       "localizations": {
         "en": {

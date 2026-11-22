@@ -93,6 +93,12 @@ final class ProactiveScheduleStore {
             isEndpointUnavailable = true
             errorMessage = nil
             return false
+        } catch ProactiveScheduleRepositoryError.policyDenied {
+            guard generation == startGeneration else { return false }
+            errorMessage = Self.isRecurringModelBrief(request)
+                ? String(localized: "schedules.error.policy_denied", table: "Conversation")
+                : String(localized: "schedules.error.policy_denied_generic", table: "Conversation")
+            return false
         } catch {
             guard generation == startGeneration else { return false }
             errorMessage = Self.localizedMessage(for: error)
@@ -105,7 +111,11 @@ final class ProactiveScheduleStore {
     }
 
     func resume(id: UUID) async {
-        await runMutation(id: id) { try await $0.resumeSchedule(id: id) }
+        let target = schedules.first { $0.scheduleId == id }
+        let isRecurringBrief = target.map { $0.scheduleKind != .once && $0.deliveryMode == .modelBrief } ?? false
+        await runMutation(id: id, isRecurringBriefPolicyTarget: isRecurringBrief) {
+            try await $0.resumeSchedule(id: id)
+        }
     }
 
     func cancel(id: UUID) async {
@@ -124,6 +134,7 @@ final class ProactiveScheduleStore {
 
     private func runMutation(
         id: UUID,
+        isRecurringBriefPolicyTarget: Bool = false,
         operation: (any ProactiveScheduleRepositoryProtocol) async throws -> ProactiveScheduleDTO
     ) async {
         guard let repository, !mutatingIDs.contains(id) else { return }
@@ -142,6 +153,11 @@ final class ProactiveScheduleStore {
             upsertLocal(updated)
         } catch is CancellationError {
             return
+        } catch ProactiveScheduleRepositoryError.policyDenied {
+            guard generation == startGeneration else { return }
+            errorMessage = isRecurringBriefPolicyTarget
+                ? String(localized: "schedules.error.policy_denied", table: "Conversation")
+                : String(localized: "schedules.error.policy_denied_generic", table: "Conversation")
         } catch {
             guard generation == startGeneration else { return }
             errorMessage = Self.localizedMessage(for: error)
@@ -190,10 +206,21 @@ final class ProactiveScheduleStore {
             String(localized: "schedules.error.conflict", table: "Conversation")
         case .unauthenticated:
             String(localized: "schedules.error.unauthenticated", table: "Conversation")
-        case .policyDenied:
+        case .recurringBriefDisabled:
             String(localized: "schedules.error.policy_denied", table: "Conversation")
+        case .policyDenied:
+            String(localized: "schedules.error.policy_denied_generic", table: "Conversation")
         default:
             String(localized: "schedules.error.unavailable", table: "Conversation")
         }
+    }
+
+    private static func isRecurringModelBrief(_ request: CreateProactiveScheduleRequestDTO) -> Bool {
+        let resolvedMode = request.deliveryMode ?? (request.kind == .brief ? .modelBrief : .directReminder)
+        guard resolvedMode == .modelBrief else { return false }
+        if case .once = request.trigger {
+            return false
+        }
+        return true
     }
 }

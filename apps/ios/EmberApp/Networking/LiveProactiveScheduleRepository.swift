@@ -102,41 +102,49 @@ struct LiveProactiveScheduleRepository: ProactiveScheduleRepositoryProtocol {
     private struct APIErrorEnvelope: Decodable {
         struct ErrorDetail: Decodable {
             let code: String?
+            let message: String?
         }
 
         let code: String?
+        let message: String?
         let error: ErrorDetail?
 
         var resolvedCode: String? {
             error?.code ?? code
         }
+
+        var resolvedMessage: String? {
+            error?.message ?? message
+        }
     }
 
     private static func mapStatusError(_ code: Int, data: Data) -> ProactiveScheduleRepositoryError {
+        let envelope = try? JSONDecoder().decode(APIErrorEnvelope.self, from: data)
         switch code {
         case 400, 422:
-            .invalidInput
+            return .invalidInput
         case 401:
-            .unauthenticated
+            return .unauthenticated
         case 403:
-            .policyDenied
-        case 404:
-            .notFound
-        case 405, 501:
-            .endpointNotReady
-        case 409:
-            .conflict
-        case 429:
-            if let envelope = try? JSONDecoder().decode(APIErrorEnvelope.self, from: data),
-               envelope.resolvedCode == "BUDGET_EXCEEDED" {
-                .limitReached
-            } else {
-                .unavailable
+            if envelope?.resolvedMessage?.localizedCaseInsensitiveContains("recurring") == true {
+                return .recurringBriefDisabled
             }
+            return .policyDenied
+        case 404:
+            return .notFound
+        case 405, 501:
+            return .endpointNotReady
+        case 409:
+            return .conflict
+        case 429:
+            if envelope?.resolvedCode == "BUDGET_EXCEEDED" {
+                return .limitReached
+            }
+            return .unavailable
         case 500...599:
-            .unavailable
+            return .unavailable
         default:
-            .invalidResponse
+            return .invalidResponse
         }
     }
 }

@@ -212,6 +212,7 @@ public struct ProactiveScheduleListDTO: Equatable, Codable, Sendable {
 public enum ProactiveScheduleRepositoryError: Error, Equatable, Sendable {
     case unauthenticated
     case policyDenied
+    case recurringBriefDisabled
     case notFound
     case endpointNotReady
     case limitReached

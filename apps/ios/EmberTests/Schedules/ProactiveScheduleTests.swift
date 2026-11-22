@@ -233,6 +233,20 @@ final class ProactiveScheduleTests: XCTestCase {
             String(localized: "schedules.error.policy_denied", table: "Conversation")
         )
 
+        let oneTimeBlocked = await store.create(CreateProactiveScheduleRequestDTO(
+            kind: .reminder,
+            title: "Hydrate",
+            prompt: "Drink water",
+            trigger: .once(fireAt: "2026-11-22T09:00:00Z"),
+            timezone: "Asia/Shanghai",
+            deliveryMode: .directReminder
+        ))
+        XCTAssertFalse(oneTimeBlocked)
+        XCTAssertEqual(
+            store.errorMessage,
+            String(localized: "schedules.error.policy_denied_generic", table: "Conversation")
+        )
+
         let dailySchedule = ProactiveScheduleDTO(
             scheduleId: UUID(),
             kind: .brief,

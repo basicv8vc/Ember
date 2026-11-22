@@ -18,6 +18,12 @@ struct ProactiveSchedulesSheetView: View {
     @State private var dailyTime = Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var oneTimeFireAt = Date().addingTimeInterval(3600)
     @State private var pendingCancelSchedule: ProactiveScheduleDTO?
+    @FocusState private var focusedField: ComposerField?
+
+    private enum ComposerField {
+        case title
+        case prompt
+    }
 
     private var effectiveFrequency: ProactiveScheduleFrequency {
         selectedKind == .followUp ? .once : selectedFrequency
@@ -111,6 +117,7 @@ struct ProactiveSchedulesSheetView: View {
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(EmberDesignTokens.groupedBackground)
             .navigationTitle(Text("schedules.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
@@ -190,6 +197,11 @@ struct ProactiveSchedulesSheetView: View {
                 text: $titleText
             )
             .textFieldStyle(.roundedBorder)
+            .focused($focusedField, equals: .title)
+            .submitLabel(.next)
+            .onSubmit {
+                focusedField = .prompt
+            }
             .accessibilityIdentifier("schedules-title-input")
 
             TextField(
@@ -199,6 +211,7 @@ struct ProactiveSchedulesSheetView: View {
             )
             .lineLimit(2...4)
             .textFieldStyle(.roundedBorder)
+            .focused($focusedField, equals: .prompt)
             .accessibilityIdentifier("schedules-prompt-input")
 
             if selectedKind != .followUp {
@@ -267,6 +280,7 @@ struct ProactiveSchedulesSheetView: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Button {
+                    focusedField = nil
                     let request = buildCreateRequest()
                     Task {
                         if await store.create(request) {

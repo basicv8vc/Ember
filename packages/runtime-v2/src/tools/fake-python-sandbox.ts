@@ -44,6 +44,37 @@ function formatNumber(value: number): string {
   return Number.isInteger(value) ? String(value) : value.toFixed(2);
 }
 
+function parseCsvRow(line: string): string[] {
+  const cells: string[] = [];
+  let current = '';
+  let inQuotes = false;
+
+  for (let i = 0; i < line.length; i += 1) {
+    const ch = line[i]!;
+    if (inQuotes) {
+      if (ch === '"') {
+        if (line[i + 1] === '"') {
+          current += '"';
+          i += 1;
+        } else {
+          inQuotes = false;
+        }
+      } else {
+        current += ch;
+      }
+    } else if (ch === '"') {
+      inQuotes = true;
+    } else if (ch === ',') {
+      cells.push(current.trim());
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  cells.push(current.trim());
+  return cells;
+}
+
 function summarizeCsv(filename: string, text: string) {
   const lines = text
     .replace(/^\uFEFF/, '')
@@ -59,12 +90,12 @@ function summarizeCsv(filename: string, text: string) {
     };
   }
 
-  const headers = lines[0]!.split(',').map((cell) => cell.trim());
+  const headers = parseCsvRow(lines[0]!);
   const dataLines = lines.slice(1, 1 + MAX_PROCESSED_CSV_ROWS);
   const statsByIndex = new Map<number, NumericColumnStats>();
 
   for (const line of dataLines) {
-    const cells = line.split(',').map((cell) => cell.trim());
+    const cells = parseCsvRow(line);
     for (let i = 0; i < headers.length; i += 1) {
       const raw = cells[i];
       if (raw === undefined || raw.length === 0) {

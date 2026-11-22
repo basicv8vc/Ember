@@ -3968,6 +3968,38 @@
           }
         }
       }
+    },
+    "conversation.timeline.jump_to_latest": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Jump to latest"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "跳到最新"
+          }
+        }
+      }
+    },
+    "conversation.timeline.jump_to_latest_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Scrolls to the newest messages and resumes following."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "滚动到最新消息并恢复自动跟随。"
+          }
+        }
+      }
     }
   },
   "version": "1.0"

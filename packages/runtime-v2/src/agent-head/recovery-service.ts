@@ -1991,6 +1991,8 @@ function describeProactiveFailureReason(reasonCode: string): string {
       return 'the daily model budget limit was reached';
     case 'model_unauthorized_tenant':
       return 'model execution is not enabled for this account';
+    case 'recurring_real_model_unauthorized':
+      return 'recurring AI briefs are not enabled for this account';
     case 'model_timeout':
     case 'TIMEOUT':
     case 'lease_expired':

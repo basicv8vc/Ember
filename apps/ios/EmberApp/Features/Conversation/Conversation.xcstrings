@@ -2609,6 +2609,22 @@
         }
       }
     },
+    "schedules.failure.recurring_unauthorized": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recurring AI briefs are not enabled for this account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前账号尚未启用周期性 AI 简报。"
+          }
+        }
+      }
+    },
     "schedules.failure.timeout": {
       "localizations": {
         "en": {

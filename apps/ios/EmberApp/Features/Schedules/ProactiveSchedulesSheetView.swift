@@ -574,6 +574,8 @@ struct ProactiveSchedulesSheetView: View {
             return String(localized: "schedules.failure.budget", table: "Conversation")
         case "model_unauthorized_tenant":
             return String(localized: "schedules.failure.unauthorized", table: "Conversation")
+        case "recurring_real_model_unauthorized":
+            return String(localized: "schedules.failure.recurring_unauthorized", table: "Conversation")
         case "model_timeout", "TIMEOUT", "lease_expired":
             return String(localized: "schedules.failure.timeout", table: "Conversation")
         case "model_unavailable", "PROVIDER_UNAVAILABLE", "model_gateway_unavailable", "JOB_UNAVAILABLE":

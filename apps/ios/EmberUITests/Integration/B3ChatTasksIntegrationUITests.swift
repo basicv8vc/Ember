@@ -185,6 +185,11 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         launch(app, reset: true)
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        XCTAssertTrue(app.descendants(matching: .any)["mock-only-banner"].waitForExistence(timeout: 5))
+
+        let menuButton = app.buttons["live-conversation-menu"]
+        XCTAssertTrue(menuButton.waitForExistence(timeout: 10))
+        menuButton.tap()
 
         let openMemoryButton = app.buttons["live-conversation-open-memory"]
         XCTAssertTrue(openMemoryButton.waitForExistence(timeout: 10))
@@ -272,6 +277,7 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(outcome.waitForExistence(timeout: 10))
         XCTAssertTrue(artifacts.waitForExistence(timeout: 10))
         XCTAssertLessThan(outcome.frame.minY, artifacts.frame.minY)
+        attachScreenshot(app: app, name: "ux05-01-completed-result-first")
 
         // Technical Details collapsed by default: UUID & attempts hidden until expanded
         XCTAssertFalse(app.staticTexts["task-detail-uuid"].exists)
@@ -294,13 +300,15 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
 
         let techDetailsToggle = app.buttons["task-detail-technical-details-toggle"]
         XCTAssertTrue(techDetailsToggle.waitForExistence(timeout: 10))
+        XCTAssertEqual(techDetailsToggle.value as? String, "Collapsed")
         techDetailsToggle.tap()
         if !app.staticTexts["task-detail-uuid"].exists {
             app.swipeUp()
         }
         XCTAssertTrue(app.staticTexts["task-detail-uuid"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["task-detail-attempts"].waitForExistence(timeout: 5))
-        attachScreenshot(app: app, name: "ux05-01-completed-result-first")
+        XCTAssertEqual(techDetailsToggle.value as? String, "Expanded")
+        attachScreenshot(app: app, name: "ux05-01b-completed-technical-details-expanded")
 
         app.navigationBars.buttons.firstMatch.tap()
 
@@ -344,10 +352,39 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         failedRow.tap()
         let failedGuidance = app.descendants(matching: .any)["task-detail-failed-guidance"]
         XCTAssertTrue(failedGuidance.waitForExistence(timeout: 10))
+        XCTAssertTrue(app.staticTexts["Task did not complete"].waitForExistence(timeout: 5))
         if timeline.exists {
             XCTAssertLessThan(failedGuidance.frame.minY, timeline.frame.minY)
         }
         attachScreenshot(app: app, name: "ux05-04-failed-guidance")
+    }
+
+    func testUnifiedHeaderMenuOpensSchedulesAndKeepsMockPillVisible() {
+        let app = XCUIApplication()
+        launch(app, reset: true)
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+
+        let mockPill = app.descendants(matching: .any)["mock-only-banner"].firstMatch
+        XCTAssertTrue(mockPill.waitForExistence(timeout: 5))
+        XCTAssertTrue(mockPill.isHittable)
+
+        let menuButton = app.buttons["live-conversation-menu"]
+        XCTAssertTrue(menuButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(menuButton.isHittable)
+        XCTAssertGreaterThanOrEqual(menuButton.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(menuButton.frame.height, 44)
+        menuButton.tap()
+
+        let schedulesButton = app.buttons["live-conversation-open-schedules"]
+        XCTAssertTrue(schedulesButton.waitForExistence(timeout: 5))
+        schedulesButton.tap()
+
+        let closeSchedules = app.buttons["schedules-sheet-close"]
+        XCTAssertTrue(closeSchedules.waitForExistence(timeout: 10))
+        closeSchedules.tap()
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 5))
+        XCTAssertTrue(mockPill.isHittable)
     }
 
     private func launch(_ app: XCUIApplication, reset: Bool) {

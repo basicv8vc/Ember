@@ -958,6 +958,30 @@
         "en": { "stringUnit": { "state": "translated", "value": "The task is still active. Results appear after the server completes execution." } },
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务仍在执行中，完成后会在此展示服务端返回的结果。" } }
       }
+    },
+    "tasks.detail.failed_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Task did not complete" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务未能完成" } }
+      }
+    },
+    "tasks.detail.failed_next_step": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "No further work will run for this task. Review the activity log below or start a new request from Chat." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "此任务不会再继续执行。你可以查看下方的执行记录，或回到对话发起新的请求。" } }
+      }
+    },
+    "tasks.detail.cancelled_title": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Task cancelled" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "任务已取消" } }
+      }
+    },
+    "tasks.detail.cancelled_next_step": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Execution stopped as requested. No further changes will run; you can start a new task anytime from Chat." } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "已按请求停止执行，不会再有后续改动；你可以随时从对话发起新任务。" } }
+      }
     }
   },
   "version": "1.0"

@@ -1,6 +1,6 @@
 import SwiftUI
 
-struct ConversationScreen: View {
+struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     let state: ConversationScreenState
     @Binding var draft: String
     let actions: ConversationScreenActions
@@ -10,10 +10,39 @@ struct ConversationScreen: View {
     var replyStopText: LocalizedStringKey = "conversation.reply.stop"
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
     var onRefresh: (() async -> Void)? = nil
+    private let headerMenu: HeaderMenu
+    private let topNotices: TopNotices
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @FocusState private var composerIsFocused: Bool
     @State private var isAttachmentMenuPresented = false
     @State private var isAttachmentMenuOverlayVisible = false
+
+    init(
+        state: ConversationScreenState,
+        draft: Binding<String>,
+        actions: ConversationScreenActions,
+        composerNote: LocalizedStringKey = "conversation.composer.local_note",
+        showsSubmissionAcknowledgement: Bool = true,
+        replyPreparingText: LocalizedStringKey = "conversation.reply.preparing",
+        replyStopText: LocalizedStringKey = "conversation.reply.stop",
+        emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock",
+        onRefresh: (() async -> Void)? = nil,
+        @ViewBuilder headerMenu: () -> HeaderMenu,
+        @ViewBuilder topNotices: () -> TopNotices
+    ) {
+        self.state = state
+        _draft = draft
+        self.actions = actions
+        self.composerNote = composerNote
+        self.showsSubmissionAcknowledgement = showsSubmissionAcknowledgement
+        self.replyPreparingText = replyPreparingText
+        self.replyStopText = replyStopText
+        self.emberMessageAuthorText = emberMessageAuthorText
+        self.onRefresh = onRefresh
+        self.headerMenu = headerMenu()
+        self.topNotices = topNotices()
+    }
 
     private var isGenerating: Bool {
         state.replyState == .generating || state.isSubmitting || state.isLoading
@@ -29,19 +58,22 @@ struct ConversationScreen: View {
         VStack(spacing: 0) {
             header
 
+            topNotices
+
             if state.commandStatus == .acknowledged && showsSubmissionAcknowledgement {
                 Text("conversation.submission.acknowledged", tableName: "Conversation")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                     .frame(maxWidth: 680, alignment: .leading)
                     .padding(.horizontal, 16)
+                    .padding(.top, 6)
                     .padding(.bottom, 8)
                     .accessibilityIdentifier("conversation-submission-status")
             }
 
             ConversationTimelineView(
                 state: state,
-                showsSuggestions: state.showsEmptyState && state.timeline.isEmpty && !composerIsFocused,
+                showsSuggestions: state.showsEmptyState && state.timeline.isEmpty,
                 onPromptSelected: selectPrompt,
                 onRetry: actions.retry,
                 onStopGenerating: actions.stopGenerating,
@@ -109,37 +141,209 @@ struct ConversationScreen: View {
 
     private var header: some View {
         VStack(spacing: 0) {
-            HStack(spacing: 12) {
-                Image(systemName: "sparkle")
-                    .font(.title3.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
-                    .frame(width: 42, height: 42)
-                    .background(Color.accentColor.opacity(0.12), in: Circle())
-                    .accessibilityHidden(true)
+            Group {
+                if dynamicTypeSize.isAccessibilitySize {
+                    wrappedHeaderContent
+                } else {
+                    ViewThatFits(in: .horizontal) {
+                        singleRowHeaderContent
+                        wrappedHeaderContent
+                    }
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 8)
+            .padding(.bottom, 8)
+
+            Rectangle()
+                .fill(EmberDesignTokens.separator)
+                .frame(height: 1)
+                .accessibilityHidden(true)
+        }
+        .background(EmberDesignTokens.groupedBackground)
+    }
+
+    private var singleRowHeaderContent: some View {
+        HStack(alignment: .center, spacing: 10) {
+            headerEmblem
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(state.partnerName)
+                    .font(.headline)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+
+                headerSubtitleView
+            }
+
+            Spacer(minLength: 4)
+
+            if let pill = state.environmentPill {
+                environmentPillView(pill)
+            }
+
+            headerMenu
+        }
+    }
+
+    private var wrappedHeaderContent: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .center, spacing: 10) {
+                headerEmblem
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(state.partnerName)
                         .font(.headline)
                         .foregroundStyle(.primary)
-                    Text("conversation.header.subtitle", tableName: "Conversation")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                        .truncationMode(.tail)
+
+                    headerSubtitleView
                 }
 
-                Spacer(minLength: 0)
+                Spacer(minLength: 4)
+
+                headerMenu
             }
 
+            if let pill = state.environmentPill {
+                environmentPillView(pill)
+                    .padding(.leading, 44)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.top, 10)
-        .padding(.bottom, 8)
-        .background(EmberDesignTokens.groupedBackground)
+    }
+
+    private var headerEmblem: some View {
+        Image(systemName: "flame.fill")
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(EmberDesignTokens.emberMarkTint)
+            .frame(width: 34, height: 34)
+            .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+            .accessibilityHidden(true)
+    }
+
+    @ViewBuilder
+    private var headerSubtitleView: some View {
+        if let subtitle = state.headerSubtitle, !subtitle.isEmpty {
+            if let identifier = state.headerSubtitleAccessibilityIdentifier, !identifier.isEmpty {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier(identifier)
+            } else {
+                Text(subtitle)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        } else {
+            Text("conversation.header.subtitle", tableName: "Conversation")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
+    }
+
+    private func environmentPillView(_ pill: ConversationEnvironmentPill) -> some View {
+        HStack(spacing: 4) {
+            if pill.tone == .mock {
+                Image(systemName: "testtube.2")
+                    .font(.caption2.weight(.bold))
+                    .accessibilityHidden(true)
+            }
+            Text(pill.title)
+                .font(.caption2.weight(pill.tone == .mock ? .bold : .semibold))
+                .lineLimit(1)
+        }
+        .foregroundStyle(environmentPillForeground(for: pill.tone))
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(environmentPillBackground(for: pill.tone), in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(environmentPillBorder(for: pill.tone), lineWidth: 1)
+        }
+        .fixedSize(horizontal: true, vertical: false)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Text(verbatim: pill.accessibilityLabel))
+        .accessibilityIdentifier(pill.accessibilityIdentifier)
+    }
+
+    private func environmentPillForeground(for tone: ConversationEnvironmentPill.Tone) -> Color {
+        switch tone {
+        case .mock:
+            EmberDesignTokens.mockPillForeground
+        case .staging:
+            Color(uiColor: .systemTeal)
+        case .custom:
+            Color(uiColor: .systemIndigo)
+        case .cloud:
+            .secondary
+        }
+    }
+
+    private func environmentPillBackground(for tone: ConversationEnvironmentPill.Tone) -> Color {
+        switch tone {
+        case .mock:
+            Color(uiColor: .systemOrange).opacity(0.16)
+        case .staging:
+            Color(uiColor: .systemTeal).opacity(0.12)
+        case .custom:
+            Color(uiColor: .systemIndigo).opacity(0.12)
+        case .cloud:
+            EmberDesignTokens.cardBackground
+        }
+    }
+
+    private func environmentPillBorder(for tone: ConversationEnvironmentPill.Tone) -> Color {
+        switch tone {
+        case .mock:
+            Color(uiColor: .systemOrange).opacity(0.45)
+        case .staging:
+            Color(uiColor: .systemTeal).opacity(0.30)
+        case .custom:
+            Color(uiColor: .systemIndigo).opacity(0.28)
+        case .cloud:
+            EmberDesignTokens.separator
+        }
     }
 
     private func selectPrompt(_ prompt: String) {
         guard case .populateDraft(let draft) = ConversationInteractionRules.promptSelection(prompt) else { return }
         actions.selectPrompt(draft)
         composerIsFocused = true
+    }
+}
+
+extension ConversationScreen where HeaderMenu == EmptyView, TopNotices == EmptyView {
+    init(
+        state: ConversationScreenState,
+        draft: Binding<String>,
+        actions: ConversationScreenActions,
+        composerNote: LocalizedStringKey = "conversation.composer.local_note",
+        showsSubmissionAcknowledgement: Bool = true,
+        replyPreparingText: LocalizedStringKey = "conversation.reply.preparing",
+        replyStopText: LocalizedStringKey = "conversation.reply.stop",
+        emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock",
+        onRefresh: (() async -> Void)? = nil
+    ) {
+        self.init(
+            state: state,
+            draft: draft,
+            actions: actions,
+            composerNote: composerNote,
+            showsSubmissionAcknowledgement: showsSubmissionAcknowledgement,
+            replyPreparingText: replyPreparingText,
+            replyStopText: replyStopText,
+            emberMessageAuthorText: emberMessageAuthorText,
+            onRefresh: onRefresh,
+            headerMenu: { EmptyView() },
+            topNotices: { EmptyView() }
+        )
     }
 }
 

@@ -20,7 +20,7 @@ final class PersonalMemoryStore {
     private(set) var isSaving = false
     private(set) var updatingIDs: Set<UUID> = []
     private(set) var deletingIDs: Set<UUID> = []
-    private(set) var isEndpointUnavailable = false
+    private(set) var endpointAvailability: CloudEndpointAvailability = .unknown
     private(set) var errorMessage: String?
 
     init(repository: (any PersonalMemoryRepositoryProtocol)? = nil) {
@@ -28,6 +28,7 @@ final class PersonalMemoryStore {
     }
 
     var hasRepository: Bool { repository != nil }
+    var isEndpointUnavailable: Bool { endpointAvailability == .unavailable }
     var isMockOnly: Bool { repository?.isMockOnly ?? false }
     var isAtCapacity: Bool { items.count >= limits.maxItems }
 
@@ -36,7 +37,9 @@ final class PersonalMemoryStore {
         let startGeneration = generation
         isLoading = true
         errorMessage = nil
-        isEndpointUnavailable = false
+        if endpointAvailability == .unavailable {
+            endpointAvailability = .unknown
+        }
         defer {
             if generation == startGeneration {
                 isLoading = false
@@ -48,12 +51,13 @@ final class PersonalMemoryStore {
             guard generation == startGeneration else { return }
             items = Self.sortItems(list.items)
             limits = list.limits
+            endpointAvailability = .available
             errorMessage = nil
         } catch is CancellationError {
             return
         } catch PersonalMemoryRepositoryError.endpointNotReady {
             guard generation == startGeneration else { return }
-            isEndpointUnavailable = true
+            endpointAvailability = .unavailable
             errorMessage = nil
         } catch {
             guard generation == startGeneration else { return }
@@ -110,14 +114,14 @@ final class PersonalMemoryStore {
             guard generation == startGeneration else { return false }
             pendingSave = nil
             upsertLocalItem(result.item)
-            isEndpointUnavailable = false
+            endpointAvailability = .available
             errorMessage = nil
             return true
         } catch is CancellationError {
             return false
         } catch PersonalMemoryRepositoryError.endpointNotReady {
             guard generation == startGeneration else { return false }
-            isEndpointUnavailable = true
+            endpointAvailability = .unavailable
             errorMessage = nil
             return false
         } catch {
@@ -207,7 +211,7 @@ final class PersonalMemoryStore {
         isSaving = false
         updatingIDs.removeAll()
         deletingIDs.removeAll()
-        isEndpointUnavailable = false
+        endpointAvailability = .unknown
         errorMessage = nil
     }
 

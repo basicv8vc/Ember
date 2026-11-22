@@ -51,6 +51,7 @@ struct ConversationTimelineView: View {
                                     .padding(.vertical, 32)
                             } else if showsSuggestions {
                                 ConversationEmptyStateView(
+                                    emptyState: state.emptyState,
                                     prompts: state.suggestedPrompts,
                                     onPromptSelected: onPromptSelected
                                 )
@@ -254,23 +255,121 @@ struct ConversationTimelineView: View {
 }
 
 private struct ConversationEmptyStateView: View {
+    let emptyState: ConversationEmptyStateConfiguration?
     let prompts: [String]
     let onPromptSelected: (String) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            VStack(alignment: .leading, spacing: 8) {
-                Text("conversation.empty.title", tableName: "Conversation")
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 10) {
+                Image(systemName: "flame.fill")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                    .frame(width: 48, height: 48)
+                    .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+                    .accessibilityHidden(true)
 
-                Text("conversation.empty.message", tableName: "Conversation")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
+                if let emptyState {
+                    Text(emptyState.title)
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text(emptyState.subtitle)
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if let capabilityNote = emptyState.capabilityNote, !capabilityNote.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "info.circle")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                                .padding(.top, 2)
+                                .accessibilityHidden(true)
+
+                            Text(capabilityNote)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 8)
+                        .background(
+                            EmberDesignTokens.cardBackground,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                        }
+                        .accessibilityElement(children: .combine)
+                        .accessibilityIdentifier("conversation-empty-capability-note")
+                    }
+                } else {
+                    Text("conversation.empty.title", tableName: "Conversation")
+                        .font(.title3.weight(.semibold))
+                        .foregroundStyle(.primary)
+
+                    Text("conversation.empty.message", tableName: "Conversation")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
 
-            if !prompts.isEmpty {
+            if let emptyState, !emptyState.prompts.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("conversation.suggestions.title", tableName: "Conversation")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    ForEach(emptyState.prompts) { item in
+                        Button {
+                            onPromptSelected(item.prompt)
+                        } label: {
+                            HStack(alignment: .top, spacing: 12) {
+                                Image(systemName: item.iconName)
+                                    .font(.callout.weight(.semibold))
+                                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                                    .frame(width: 24, height: 24)
+                                    .padding(.top, 1)
+                                    .accessibilityHidden(true)
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(item.title)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .fixedSize(horizontal: false, vertical: true)
+
+                                    Text(item.prompt)
+                                        .font(.footnote)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                            .frame(minHeight: EmberDesignTokens.minTapTarget)
+                            .background(
+                                EmberDesignTokens.cardBackground,
+                                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(Text(verbatim: "\(item.title). \(item.prompt)"))
+                        .accessibilityHint(Text("conversation.prompt.hint", tableName: "Conversation"))
+                        .accessibilityIdentifier("conversation-suggested-prompt")
+                    }
+                }
+            } else if !prompts.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("conversation.suggestions.title", tableName: "Conversation")
                         .font(.subheadline.weight(.semibold))
@@ -283,7 +382,7 @@ private struct ConversationEmptyStateView: View {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "sparkle")
                                     .font(.callout.weight(.semibold))
-                                    .foregroundStyle(Color.accentColor)
+                                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
                                     .padding(.top, 1)
                                     .accessibilityHidden(true)
 
@@ -296,6 +395,7 @@ private struct ConversationEmptyStateView: View {
                             }
                             .padding(.horizontal, 14)
                             .padding(.vertical, 13)
+                            .frame(minHeight: EmberDesignTokens.minTapTarget)
                             .background(
                                 EmberDesignTokens.cardBackground,
                                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -313,7 +413,7 @@ private struct ConversationEmptyStateView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 12)
+        .padding(.top, 8)
         .padding(.bottom, 8)
     }
 }

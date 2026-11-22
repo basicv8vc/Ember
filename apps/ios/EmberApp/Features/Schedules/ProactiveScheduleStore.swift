@@ -10,7 +10,7 @@ final class ProactiveScheduleStore {
     private(set) var isLoading = false
     private(set) var isCreating = false
     private(set) var mutatingIDs: Set<UUID> = []
-    private(set) var isEndpointUnavailable = false
+    private(set) var endpointAvailability: CloudEndpointAvailability = .unknown
     private(set) var errorMessage: String?
 
     init(repository: (any ProactiveScheduleRepositoryProtocol)? = nil) {
@@ -18,6 +18,7 @@ final class ProactiveScheduleStore {
     }
 
     var hasRepository: Bool { repository != nil }
+    var isEndpointUnavailable: Bool { endpointAvailability == .unavailable }
     var isMockOnly: Bool { repository?.isMockOnly ?? false }
 
     var activeCount: Int {
@@ -43,7 +44,9 @@ final class ProactiveScheduleStore {
         let startGeneration = generation
         isLoading = true
         errorMessage = nil
-        isEndpointUnavailable = false
+        if endpointAvailability == .unavailable {
+            endpointAvailability = .unknown
+        }
         defer {
             if generation == startGeneration {
                 isLoading = false
@@ -54,12 +57,13 @@ final class ProactiveScheduleStore {
             let list = try await repository.listSchedules()
             guard generation == startGeneration else { return }
             schedules = Self.sortSchedules(list.schedules)
+            endpointAvailability = .available
             errorMessage = nil
         } catch is CancellationError {
             return
         } catch ProactiveScheduleRepositoryError.endpointNotReady {
             guard generation == startGeneration else { return }
-            isEndpointUnavailable = true
+            endpointAvailability = .unavailable
             errorMessage = nil
         } catch {
             guard generation == startGeneration else { return }
@@ -83,14 +87,14 @@ final class ProactiveScheduleStore {
             let created = try await repository.createSchedule(request)
             guard generation == startGeneration else { return false }
             upsertLocal(created)
-            isEndpointUnavailable = false
+            endpointAvailability = .available
             errorMessage = nil
             return true
         } catch is CancellationError {
             return false
         } catch ProactiveScheduleRepositoryError.endpointNotReady {
             guard generation == startGeneration else { return false }
-            isEndpointUnavailable = true
+            endpointAvailability = .unavailable
             errorMessage = nil
             return false
         } catch ProactiveScheduleRepositoryError.policyDenied {
@@ -128,7 +132,7 @@ final class ProactiveScheduleStore {
         isLoading = false
         isCreating = false
         mutatingIDs.removeAll()
-        isEndpointUnavailable = false
+        endpointAvailability = .unknown
         errorMessage = nil
     }
 

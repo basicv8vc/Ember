@@ -645,7 +645,11 @@ private struct SessionTaskDetailContent: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityValue(isShowingTechnicalDetails ? Text("Expanded") : Text("Collapsed"))
+            .accessibilityValue(
+                isShowingTechnicalDetails
+                    ? Text("tasks.detail.technical_details_expanded", tableName: "Conversation")
+                    : Text("tasks.detail.technical_details_collapsed", tableName: "Conversation")
+            )
             .accessibilityIdentifier("task-detail-technical-details-toggle")
 
             if isShowingTechnicalDetails {

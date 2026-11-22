@@ -180,6 +180,94 @@ final class ProactiveScheduleTests: XCTestCase {
         XCTAssertEqual(briefReq.kind, .brief)
         XCTAssertEqual(briefReq.deliveryMode, .modelBrief)
         XCTAssertEqual(briefReq.trigger, .cron(cronExpr: "30 8 * * *", timezone: "America/Los_Angeles"))
+
+        let oneTimeBriefReq = ProactiveSchedulesSheetView.makeCreateRequest(
+            kind: .brief,
+            title: "Afternoon Brief",
+            prompt: "Check release blockers",
+            dailyTime: dailyTime,
+            oneTimeFireAt: fireAt,
+            frequency: .once,
+            timeZone: tz,
+            calendar: calendar
+        )
+        XCTAssertEqual(oneTimeBriefReq.kind, .brief)
+        XCTAssertEqual(oneTimeBriefReq.deliveryMode, .modelBrief)
+        XCTAssertEqual(oneTimeBriefReq.trigger, .once(fireAt: fireAt.ISO8601Format()))
+
+        let dailyReminderReq = ProactiveSchedulesSheetView.makeCreateRequest(
+            kind: .reminder,
+            title: "Hydrate",
+            prompt: "Drink water",
+            dailyTime: dailyTime,
+            oneTimeFireAt: fireAt,
+            frequency: .daily,
+            timeZone: tz,
+            calendar: calendar
+        )
+        XCTAssertEqual(dailyReminderReq.kind, .reminder)
+        XCTAssertEqual(dailyReminderReq.deliveryMode, .directReminder)
+        XCTAssertEqual(dailyReminderReq.trigger, .cron(cronExpr: "30 8 * * *", timezone: "America/Los_Angeles"))
+    }
+
+    func testLiveRepository403MapsToPolicyDeniedMessageAndFormattedCadence() async throws {
+        register { request in
+            if request.httpMethod == "POST", request.url?.path == "/v2/schedules" {
+                return .json(statusCode: 403, body: "{\"code\":\"POLICY_DENIED\"}")
+            }
+            return .json(statusCode: 200, body: "{\"schedules\":[]}")
+        }
+
+        let store = ProactiveScheduleStore(repository: try makeLiveRepository())
+        let created = await store.create(CreateProactiveScheduleRequestDTO(
+            kind: .brief,
+            title: "Daily AI Brief",
+            prompt: "Summarize priorities",
+            trigger: .cron(cronExpr: "30 8 * * *", timezone: "Asia/Shanghai"),
+            timezone: "Asia/Shanghai",
+            deliveryMode: .modelBrief
+        ))
+        XCTAssertFalse(created)
+        XCTAssertEqual(
+            store.errorMessage,
+            String(localized: "schedules.error.policy_denied", table: "Conversation")
+        )
+
+        let dailySchedule = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .brief,
+            title: "Daily AI Brief",
+            prompt: "Summarize priorities",
+            deliveryMode: .modelBrief,
+            status: .active,
+            scheduleKind: .cronTZ,
+            cronExpr: "30 8 * * *",
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-22T00:00:00Z",
+            updatedAt: "2026-11-22T00:00:00Z"
+        )
+        XCTAssertEqual(
+            ProactiveSchedulesSheetView.formattedCadence(for: dailySchedule),
+            String(localized: "schedules.cadence.daily \("08:30")", table: "Conversation")
+        )
+
+        let intervalSchedule = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .reminder,
+            title: "Posture Check",
+            prompt: "Stretch",
+            deliveryMode: .directReminder,
+            status: .active,
+            scheduleKind: .interval,
+            intervalSeconds: 3600,
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-22T00:00:00Z",
+            updatedAt: "2026-11-22T00:00:00Z"
+        )
+        XCTAssertEqual(
+            ProactiveSchedulesSheetView.formattedCadence(for: intervalSchedule),
+            String(localized: "schedules.cadence.every_hours \(1)", table: "Conversation")
+        )
     }
 
     func testNextFireAtFormatsInScheduleTimezoneRatherThanDeviceTimezone() throws {

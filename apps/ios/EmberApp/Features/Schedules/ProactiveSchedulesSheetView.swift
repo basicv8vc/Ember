@@ -1,5 +1,10 @@
 import SwiftUI
 
+enum ProactiveScheduleFrequency: String, CaseIterable, Sendable {
+    case once
+    case daily
+}
+
 struct ProactiveSchedulesSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
@@ -7,11 +12,16 @@ struct ProactiveSchedulesSheetView: View {
     var onOpenChat: (() -> Void)? = nil
 
     @State private var selectedKind: ProactiveScheduleKind = .brief
+    @State private var selectedFrequency: ProactiveScheduleFrequency = .once
     @State private var titleText = ""
     @State private var promptText = ""
     @State private var dailyTime = Calendar.current.date(bySettingHour: 8, minute: 0, second: 0, of: Date()) ?? Date()
     @State private var oneTimeFireAt = Date().addingTimeInterval(3600)
     @State private var pendingCancelSchedule: ProactiveScheduleDTO?
+
+    private var effectiveFrequency: ProactiveScheduleFrequency {
+        selectedKind == .followUp ? .once : selectedFrequency
+    }
 
     private var trimmedTitle: String {
         titleText.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -22,7 +32,7 @@ struct ProactiveSchedulesSheetView: View {
     }
 
     private var isOneTimeInPast: Bool {
-        selectedKind != .brief && oneTimeFireAt <= Date()
+        effectiveFrequency == .once && oneTimeFireAt <= Date()
     }
 
     private var canCreate: Bool {
@@ -116,7 +126,10 @@ struct ProactiveSchedulesSheetView: View {
                 }
             }
             .onChange(of: selectedKind) { _, newKind in
-                if newKind != .brief && oneTimeFireAt <= Date().addingTimeInterval(30) {
+                if newKind == .followUp {
+                    selectedFrequency = .once
+                }
+                if effectiveFrequency == .once && oneTimeFireAt <= Date().addingTimeInterval(30) {
                     oneTimeFireAt = Date().addingTimeInterval(3600)
                 }
             }
@@ -188,7 +201,21 @@ struct ProactiveSchedulesSheetView: View {
             .textFieldStyle(.roundedBorder)
             .accessibilityIdentifier("schedules-prompt-input")
 
-            if selectedKind == .brief {
+            if selectedKind != .followUp {
+                Picker(
+                    String(localized: "schedules.frequency.once", table: "Conversation"),
+                    selection: $selectedFrequency
+                ) {
+                    Text("schedules.frequency.once", tableName: "Conversation")
+                        .tag(ProactiveScheduleFrequency.once)
+                    Text("schedules.frequency.daily", tableName: "Conversation")
+                        .tag(ProactiveScheduleFrequency.daily)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityIdentifier("schedules-frequency-picker")
+            }
+
+            if effectiveFrequency == .daily {
                 DatePicker(
                     String(localized: "schedules.composer.daily_time", table: "Conversation"),
                     selection: $dailyTime,
@@ -296,14 +323,16 @@ struct ProactiveSchedulesSheetView: View {
         prompt: String,
         dailyTime: Date,
         oneTimeFireAt: Date,
+        frequency: ProactiveScheduleFrequency? = nil,
         timeZone: TimeZone = .current,
         calendar: Calendar = .current
     ) -> CreateProactiveScheduleRequestDTO {
         let tz = timeZone.identifier
         let trigger: ProactiveScheduleTriggerInput
         let deliveryMode = defaultDeliveryMode(for: kind)
+        let resolvedFrequency = frequency ?? (kind == .brief ? .daily : .once)
 
-        if kind == .brief {
+        if kind != .followUp && resolvedFrequency == .daily {
             let comps = calendar.dateComponents([.hour, .minute], from: dailyTime)
             let minute = comps.minute ?? 0
             let hour = comps.hour ?? 8
@@ -329,7 +358,8 @@ struct ProactiveSchedulesSheetView: View {
             title: trimmedTitle,
             prompt: trimmedPrompt,
             dailyTime: dailyTime,
-            oneTimeFireAt: oneTimeFireAt
+            oneTimeFireAt: oneTimeFireAt,
+            frequency: effectiveFrequency
         )
     }
 
@@ -353,10 +383,11 @@ struct ProactiveSchedulesSheetView: View {
 
                 Spacer(minLength: 8)
 
-                if let cron = schedule.cronExpr {
-                    Text(cron)
-                        .font(.caption2.monospaced())
+                if let cadence = Self.formattedCadence(for: schedule) {
+                    Text(cadence)
+                        .font(.caption2)
                         .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("schedule-cadence-\(schedule.scheduleId.uuidString.lowercased())")
                 }
             }
 
@@ -546,6 +577,33 @@ struct ProactiveSchedulesSheetView: View {
         .buttonStyle(.bordered)
         .controlSize(.small)
         .accessibilityIdentifier(identifier)
+    }
+
+    static func formattedCadence(for schedule: ProactiveScheduleDTO) -> String? {
+        if let cron = schedule.cronExpr?.trimmingCharacters(in: .whitespacesAndNewlines), !cron.isEmpty {
+            let parts = cron.split(whereSeparator: \.isWhitespace)
+            if parts.count == 5,
+               let minute = Int(parts[0]),
+               let hour = Int(parts[1]),
+               (0...59).contains(minute),
+               (0...23).contains(hour),
+               parts[2] == "*",
+               parts[3] == "*",
+               parts[4] == "*" {
+                let hhmm = String(format: "%02d:%02d", hour, minute)
+                return String(localized: "schedules.cadence.daily \(hhmm)", table: "Conversation")
+            }
+            return cron
+        }
+        if let interval = schedule.intervalSeconds, interval > 0 {
+            if interval >= 3600, interval % 3600 == 0 {
+                return String(localized: "schedules.cadence.every_hours \(interval / 3600)", table: "Conversation")
+            }
+            if interval >= 60 {
+                return String(localized: "schedules.cadence.every_minutes \(max(1, interval / 60))", table: "Conversation")
+            }
+        }
+        return nil
     }
 
     static func nextMorningNineAM(from now: Date = Date(), calendar: Calendar = .current) -> Date {

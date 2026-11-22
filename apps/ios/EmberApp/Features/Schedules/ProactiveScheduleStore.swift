@@ -190,6 +190,8 @@ final class ProactiveScheduleStore {
             String(localized: "schedules.error.conflict", table: "Conversation")
         case .unauthenticated:
             String(localized: "schedules.error.unauthenticated", table: "Conversation")
+        case .policyDenied:
+            String(localized: "schedules.error.policy_denied", table: "Conversation")
         default:
             String(localized: "schedules.error.unavailable", table: "Conversation")
         }

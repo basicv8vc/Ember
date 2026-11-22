@@ -203,6 +203,28 @@ describe('V2 Tools & Execution — runV2FakePythonSandbox', () => {
     expect(report).toContain('sales.csv,units,3,30,5,15,10');
   });
 
+  it('parses RFC-4180 quoted CSV cells with embedded commas without shifting columns', () => {
+    const csv = [
+      '"region, area","revenue, USD",units',
+      '"North, ""Tier 1""",120.50,10',
+      '"South, Coastal",79.50,5',
+    ].join('\r\n');
+    const result = runV2FakePythonSandbox({
+      prompt: 'Summarize quoted.csv',
+      inputFiles: [
+        {
+          filename: 'quoted.csv',
+          mediaType: 'text/csv',
+          bytes: new TextEncoder().encode(csv),
+        },
+      ],
+    });
+
+    const report = new TextDecoder().decode(result.outputFiles[0]!.bytes);
+    expect(report).toContain('quoted.csv,"revenue, USD",2,200,79.50,120.50,100');
+    expect(report).toContain('quoted.csv,units,2,15,5,10,7.50');
+  });
+
   it('rejects unsafe input filenames fail-closed', () => {
     expect(() =>
       runV2FakePythonSandbox({

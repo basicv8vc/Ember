@@ -3,7 +3,7 @@
 Status: **V2 real Daytona adapter & decoupled configuration implemented and locally verified (zero external spend); awaiting CTO review and separate Founder authorization before any real Daytona provider-canary call.**  
 Owner: Agent F (Tools & Execution)  
 Date: 2026-11-22  
-Related: [Integrated Acceptance Plan](./PRODUCT-ALPHA-INTEGRATED-ACCEPTANCE-PLAN.md), [Product Alpha Roadmap](./PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [V2 Staging Authorization](../V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [P0-C4 Daytona Security Gap Report](../P0-C4-DAYTONA-SECURITY-GAP-REPORT.md)
+Related: [G4 Approval Packet](./ALPHA-F-DAYTONA-CANARY-APPROVAL.md), [Integrated Acceptance Plan](./PRODUCT-ALPHA-INTEGRATED-ACCEPTANCE-PLAN.md), [Product Alpha Roadmap](./PRODUCT-ALPHA-ROADMAP.md), [ADR-0006](../adr/0006-experience-first-device-powered-runtime-v2.md), [V2 Staging Authorization](../V2-STAGING-DEPLOYMENT-AUTHORIZATION.md), [P0-C4 Daytona Security Gap Report](../P0-C4-DAYTONA-SECURITY-GAP-REPORT.md)
 
 ---
 

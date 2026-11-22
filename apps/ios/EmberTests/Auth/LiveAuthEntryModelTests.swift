@@ -115,4 +115,13 @@ final class LiveAuthEntryModelTests: XCTestCase {
         // A signed-in entry point has no notice to dismiss; the session stays on screen.
         XCTAssertEqual(model.phase, .signedIn(AuthFixture.me()))
     }
+
+    func testAccessDeniedExplainsEnvironmentAuthorization() async {
+        let model = LiveAuthEntryModel { throw AuthError.accessDenied }
+
+        await model.signIn()
+
+        XCTAssertEqual(model.phase, .failed(.accessDenied))
+        XCTAssertTrue(model.statusMessage.contains("not authorized"))
+    }
 }

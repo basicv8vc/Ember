@@ -31,6 +31,7 @@ struct ConversationScreenState {
     var showsEmptyState = true
     var isLoading = false
     var isSubmitting = false
+    var streamingReplyText: String? = nil
     var commandStatus: ConversationCommandStatus = .idle
     var attachments: [ComposerAttachment] = []
     var isUploadingAttachment = false
@@ -53,6 +54,24 @@ struct ConversationMessagePresentation {
     let author: ConversationMessageAuthor
     let text: String
     let timestamp: Date?
+    let deliveryNote: String?
+    let accessibilityIdentifierOverride: String?
+
+    init(
+        id: String,
+        author: ConversationMessageAuthor,
+        text: String,
+        timestamp: Date?,
+        deliveryNote: String? = nil,
+        accessibilityIdentifierOverride: String? = nil
+    ) {
+        self.id = id
+        self.author = author
+        self.text = text
+        self.timestamp = timestamp
+        self.deliveryNote = deliveryNote
+        self.accessibilityIdentifierOverride = accessibilityIdentifierOverride
+    }
 }
 
 struct ConversationActivityPresentation {
@@ -112,6 +131,7 @@ struct ConversationScreenActions {
     var retry: () -> Void
     var stopGenerating: () -> Void
     var selectPrompt: (String) -> Void
+    var onDismissError: (() -> Void)?
     var onTakePhoto: (() -> Void)?
     var onChoosePhoto: (() -> Void)?
     var onPickAttachment: (() -> Void)?
@@ -122,6 +142,7 @@ struct ConversationScreenActions {
         retry: @escaping () -> Void,
         stopGenerating: @escaping () -> Void,
         selectPrompt: @escaping (String) -> Void,
+        onDismissError: (() -> Void)? = nil,
         onTakePhoto: (() -> Void)? = nil,
         onChoosePhoto: (() -> Void)? = nil,
         onPickAttachment: (() -> Void)? = nil,
@@ -131,6 +152,7 @@ struct ConversationScreenActions {
         self.retry = retry
         self.stopGenerating = stopGenerating
         self.selectPrompt = selectPrompt
+        self.onDismissError = onDismissError
         self.onTakePhoto = onTakePhoto
         self.onChoosePhoto = onChoosePhoto
         self.onPickAttachment = onPickAttachment

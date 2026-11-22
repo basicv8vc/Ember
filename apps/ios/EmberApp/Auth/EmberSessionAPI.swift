@@ -172,6 +172,7 @@ public final class LiveEmberSessionAPI: EmberSessionAPI, @unchecked Sendable {
         switch status {
         case 400: .invalidRequest
         case 401: .unauthenticated
+        case 403: .accessDenied
         case 404: .notFound
         case 429: .rateLimited
         case 500...599: .serverUnavailable

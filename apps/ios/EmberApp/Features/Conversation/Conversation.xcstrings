@@ -545,6 +545,22 @@
         }
       }
     },
+    "conversation.reply.streaming": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember is replying…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember 正在回复…"
+          }
+        }
+      }
+    },
     "conversation.reply.retry": {
       "localizations": {
         "en": {
@@ -3693,6 +3709,246 @@
           "stringUnit": {
             "state": "translated",
             "value": "无法为当前会话初始化云端设备执行器。"
+          }
+        }
+      }
+    },
+    "conversation.reply.sending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending message…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在发送消息…"
+          }
+        }
+      }
+    },
+    "conversation.message.sending_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送中…"
+          }
+        }
+      }
+    },
+    "conversation.message.pending_ack_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Awaiting confirmation"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "等待云端确认"
+          }
+        }
+      }
+    },
+    "conversation.live.prompt.memory": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remember that I prefer concise bullet-point summaries with clear next steps."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请记住：我偏好用简洁的要点列表和明确的下一步来回复。"
+          }
+        }
+      }
+    },
+    "conversation.live.prompt.brief": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Prepare a daily morning brief for me at 8:00 AM."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "帮我每天早上 8:00 准备一份晨间简报。"
+          }
+        }
+      }
+    },
+    "conversation.live.prompt.followup": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Remind me in 15 minutes to review my priority tasks."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟后提醒我检查今日优先事项。"
+          }
+        }
+      }
+    },
+    "conversation.live.turn_failed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember couldn't complete this reply. You can send your message again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember 暂时未能完成这次回复，你可以重新发送消息。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_in_prompt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in with Apple to use Live Cloud."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "使用 Apple 登录以连接 Ember 云端。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_in_subtitle": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign in to sync your conversation securely."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "登录以安全同步你的对话、记忆与任务。"
+          }
+        }
+      }
+    },
+    "conversation.live.signing_in": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Signing in…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在登录…"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_in_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in cancelled."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消登录。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_in_not_allowlisted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Apple account is not allowlisted for this staging environment."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 Apple 账号未加入此环境的允许名单。"
+          }
+        }
+      }
+    },
+    "conversation.live.sign_in_error_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in unavailable"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法完成登录"
+          }
+        }
+      }
+    },
+    "conversation.live.send_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This request was rejected by the server policy."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该请求被服务端策略拒绝。"
+          }
+        }
+      }
+    },
+    "tasks.detail.live_updates_active": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking for live progress updates…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在自动同步任务进展…"
           }
         }
       }

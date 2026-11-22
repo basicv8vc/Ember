@@ -24,9 +24,9 @@ enum AppCompositionRoot {
     static let v2StagingCloudBaseURL = "https://ember-v2-staging.slowfast.dev"
     static let v2StagingHost = "ember-v2-staging.slowfast.dev"
     static let defaultHost = "ember-api.slowfast.dev"
-    #if DEBUG
     static let persistedV2StagingDefaultsKey = "ember.debug.useV2Staging"
-    #endif
+    static let infoPlistCloudBaseURLKey = "EmberCloudBaseURL"
+    static let infoPlistAllowEnvironmentSwitchKey = "EmberAllowEnvironmentSwitch"
 
     private static let mockLaunchArguments: Set<String> = [
         "--ember-mock-demo",
@@ -36,7 +36,6 @@ enum AppCompositionRoot {
         "--ember-mock-chat-tasks",
     ]
 
-    #if DEBUG
     static func setPersistedV2Staging(_ enabled: Bool, userDefaults: UserDefaults = .standard) {
         if enabled {
             userDefaults.set(true, forKey: persistedV2StagingDefaultsKey)
@@ -44,26 +43,42 @@ enum AppCompositionRoot {
             userDefaults.removeObject(forKey: persistedV2StagingDefaultsKey)
         }
     }
-    #endif
+
+    static func allowsEnvironmentSwitch(bundleInfo: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
+        #if DEBUG
+        return true
+        #else
+        if let flag = bundleInfo?[infoPlistAllowEnvironmentSwitchKey] as? Bool {
+            return flag
+        }
+        if let raw = bundleInfo?[infoPlistAllowEnvironmentSwitchKey] as? String {
+            return raw == "1" || raw.lowercased() == "true" || raw.lowercased() == "yes"
+        }
+        return false
+        #endif
+    }
 
     /// Resolves the active cloud target and isolated local storage namespace.
     /// - Explicit `EMBER_CLOUD_BASE_URL` takes precedence and fails closed if invalid or non-HTTPS.
     /// - `--ember-live-cloud` explicitly selects V1 (`ember-api.slowfast.dev`).
     /// - `--ember-v2-staging` selects the isolated V2 Staging environment (`ember-v2-staging.slowfast.dev`)
     ///   with a separate Keychain account and conversation journal directory so V1 sessions are never overwritten.
-    /// - In Debug builds only, `--ember-persist-v2-staging` or the internal QA switch persists V2 Staging in
-    ///   `UserDefaults` so relaunching from the Home Screen stays on V2 Staging without altering Release defaults.
+    /// - `--ember-persist-v2-staging` or the internal switch persists V2 Staging in `UserDefaults` when
+    ///   running in Debug or when `EmberAllowEnvironmentSwitch` is enabled in `Info.plist`.
+    /// - `EmberCloudBaseURL` in `Info.plist` configures the build-time target for standalone Release daily-use builds.
     /// - Default remains V1 (`ember-api.slowfast.dev`).
     static func resolveCloudTarget(
         arguments: Set<String>,
         environment: [String: String],
-        userDefaults: UserDefaults = .standard
+        userDefaults: UserDefaults = .standard,
+        bundleInfo: [String: Any]? = Bundle.main.infoDictionary
     ) -> EmberCloudTarget? {
-        #if DEBUG
-        if arguments.contains("--ember-v2-staging") && arguments.contains("--ember-persist-v2-staging") {
+        let canSwitchEnvironment = allowsEnvironmentSwitch(bundleInfo: bundleInfo)
+        if canSwitchEnvironment,
+           arguments.contains("--ember-v2-staging"),
+           arguments.contains("--ember-persist-v2-staging") {
             setPersistedV2Staging(true, userDefaults: userDefaults)
         }
-        #endif
 
         let origin: String
         if let envOrigin = environment["EMBER_CLOUD_BASE_URL"], !envOrigin.isEmpty {
@@ -72,14 +87,14 @@ enum AppCompositionRoot {
             origin = defaultCloudBaseURL
         } else if arguments.contains("--ember-v2-staging") {
             origin = v2StagingCloudBaseURL
+        } else if canSwitchEnvironment, userDefaults.bool(forKey: persistedV2StagingDefaultsKey) {
+            origin = v2StagingCloudBaseURL
+        } else if let infoOrigin = (bundleInfo?[infoPlistCloudBaseURLKey] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !infoOrigin.isEmpty {
+            origin = infoOrigin
         } else {
-            #if DEBUG
-            origin = userDefaults.bool(forKey: persistedV2StagingDefaultsKey)
-                ? v2StagingCloudBaseURL
-                : defaultCloudBaseURL
-            #else
             origin = defaultCloudBaseURL
-            #endif
         }
 
         guard let url = URL(string: origin),
@@ -140,26 +155,10 @@ enum AppCompositionRoot {
         } else if arguments.isDisjoint(with: mockLaunchArguments)
             || arguments.contains("--ember-live-cloud")
             || arguments.contains("--ember-v2-staging") {
-            #if DEBUG
-            DebugLiveCloudRootView(
+            LiveCloudRootView(
                 arguments: arguments,
                 environment: ProcessInfo.processInfo.environment
             )
-            #else
-            if let target = resolveCloudTarget(
-                arguments: arguments,
-                environment: ProcessInfo.processInfo.environment
-            ),
-               let model = try? LiveComposition.make(target: target) {
-                LiveConversationHost(model: model)
-            } else {
-                ContentUnavailableView(
-                    "Live Cloud configuration unavailable",
-                    systemImage: "network.slash",
-                    description: Text("Set a secure EMBER_CLOUD_BASE_URL for the Live Alpha build.")
-                )
-            }
-            #endif
         } else if arguments.contains("--ember-mock-chat-tasks") {
             LiveConversationHost(
                 model: MockB3Composition.make(
@@ -198,8 +197,11 @@ private enum LiveComposition {
             fence: fence,
             signOutCleanupHooks: [{ try? await journal.reset() }]
         ))
+        let supportsStreaming = target.baseURL.host?.lowercased() != AppCompositionRoot.defaultHost
         let repository = LiveConversationRepository(
-            client: LiveB1ConversationClient(auth: auth), journal: journal
+            client: LiveB1ConversationClient(auth: auth),
+            journal: journal,
+            supportsStreaming: supportsStreaming
         )
         let taskRepository = LiveB1SessionTaskRepository(auth: auth)
         let scheduleRepository = LiveProactiveScheduleRepository(auth: auth)
@@ -220,15 +222,16 @@ private enum LiveComposition {
     }
 }
 
-#if DEBUG
 @MainActor
-private struct DebugLiveCloudRootView: View {
+private struct LiveCloudRootView: View {
     @State private var target: EmberCloudTarget?
     @State private var model: LiveConversationHostModel?
     private let environment: [String: String]
+    private let allowsEnvironmentSwitch: Bool
 
     init(arguments: Set<String>, environment: [String: String]) {
         self.environment = environment
+        self.allowsEnvironmentSwitch = AppCompositionRoot.allowsEnvironmentSwitch()
         let resolved = AppCompositionRoot.resolveCloudTarget(
             arguments: arguments,
             environment: environment
@@ -239,9 +242,8 @@ private struct DebugLiveCloudRootView: View {
 
     var body: some View {
         if let target, let model {
-            LiveConversationHost(
-                model: model,
-                debugUseV2Staging: Binding(
+            let toggleBinding: Binding<Bool>? = allowsEnvironmentSwitch
+                ? Binding(
                     get: { target.isV2Staging },
                     set: { enabled in
                         AppCompositionRoot.setPersistedV2Staging(enabled)
@@ -253,6 +255,10 @@ private struct DebugLiveCloudRootView: View {
                         self.model = nextTarget.flatMap { try? LiveComposition.make(target: $0) }
                     }
                 )
+                : nil
+            LiveConversationHost(
+                model: model,
+                debugUseV2Staging: toggleBinding
             )
             .id(target.baseURL.absoluteString)
         } else {
@@ -264,7 +270,6 @@ private struct DebugLiveCloudRootView: View {
         }
     }
 }
-#endif
 
 @MainActor
 private enum MockB3Composition {

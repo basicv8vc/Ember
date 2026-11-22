@@ -188,6 +188,7 @@ struct LiveB1Receipt: Decodable, Sendable {
     let messageID: UUID
     let sequence: Int
     let text: String
+    let createdAt: Date
     let turnID: UUID
     let transcriptEpoch: Int
 
@@ -197,6 +198,7 @@ struct LiveB1Receipt: Decodable, Sendable {
         messageID: UUID,
         sequence: Int,
         text: String,
+        createdAt: Date = Date(),
         turnID: UUID,
         transcriptEpoch: Int
     ) {
@@ -205,6 +207,7 @@ struct LiveB1Receipt: Decodable, Sendable {
         self.messageID = messageID
         self.sequence = sequence
         self.text = text
+        self.createdAt = createdAt
         self.turnID = turnID
         self.transcriptEpoch = transcriptEpoch
     }
@@ -223,7 +226,7 @@ struct LiveB1Receipt: Decodable, Sendable {
         conversationID = try LiveWire.uuid(m, "conversation_id")
         clientSubmissionID = try LiveWire.uuid(m, "client_submission_id")
         sequence = try LiveWire.integer(m, "sequence", min: 1)
-        _ = try LiveWire.date(m, "created_at")
+        createdAt = try LiveWire.date(m, "created_at")
         text = try m.decode(String.self, forKey: LiveWire.key("text"))
         guard !text.isEmpty, text.count <= 4096 else { throw LiveB1Failure.invalidResponse }
         let t = try c.nestedContainer(keyedBy: LiveWireKey.self, forKey: LiveWire.key("turn"))
@@ -234,6 +237,16 @@ struct LiveB1Receipt: Decodable, Sendable {
         turnID = try LiveWire.uuid(t, "turn_id")
         _ = try LiveWire.date(t, "created_at")
     }
+}
+
+enum LiveV2StreamEvent: Sendable {
+    case delta(turnID: UUID, text: String)
+    case committed(turn: LiveB1Turn, responseMessageID: UUID, sequence: Int)
+    case handedOff(turnID: UUID, status: LiveB1Turn.Status)
+}
+
+enum LiveV2StreamFallbackError: Error, Equatable, Sendable {
+    case endpointUnavailable
 }
 
 struct LiveB1Turn: Decodable, Sendable {
@@ -352,20 +365,7 @@ struct LiveB1ConversationClient: Sendable {
     }
 
     func send(_ submission: ConversationSubmission) async throws -> LiveB1Receipt {
-        struct Body: Encodable {
-            let client_submission_id: String
-            let text: String
-            let transcript_epoch: Int64
-            let attachment_ids: [String]?
-        }
-        let attachmentIDs = submission.attachmentIDs.isEmpty
-            ? nil
-            : submission.attachmentIDs.map { $0.uuidString.lowercased() }
-        let body = try JSONEncoder().encode(Body(
-            client_submission_id: submission.clientSubmissionID.uuidString.lowercased(),
-            text: submission.text,
-            transcript_epoch: submission.transcriptEpoch,
-            attachment_ids: attachmentIDs))
+        let body = try encodeSubmissionBody(submission)
         let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
             method: "POST",
             pathComponents: ["v1", "conversations",
@@ -378,6 +378,154 @@ struct LiveB1ConversationClient: Sendable {
         let receipt = try decode(LiveB1Receipt.self, response.data)
         try validate(receipt, for: submission)
         return receipt
+    }
+
+    func streamSend(
+        _ submission: ConversationSubmission
+    ) async throws -> (receipt: LiveB1Receipt, events: AsyncThrowingStream<LiveV2StreamEvent, Error>) {
+        let body = try encodeSubmissionBody(submission)
+        let response = try await auth.authorizedStreamRequest(EmberAuthenticatedRequest(
+            method: "POST",
+            pathComponents: ["v2", "conversations",
+                             submission.conversationID.rawValue.uuidString.lowercased(), "messages", "stream"],
+            body: body,
+            contentType: "application/json",
+            accept: "text/event-stream",
+            idempotency: .nonIdempotent(clientSubmissionID: submission.clientSubmissionID.uuidString)))
+        if response.statusCode == 404 {
+            throw LiveV2StreamFallbackError.endpointUnavailable
+        }
+        guard response.statusCode == 200 || response.statusCode == 201 else {
+            throw Self.failure(response.statusCode)
+        }
+        if let contentType = response.contentType,
+           !contentType.lowercased().contains("text/event-stream") {
+            throw LiveV2StreamFallbackError.endpointUnavailable
+        }
+
+        var capturedContinuation: AsyncThrowingStream<LiveV2StreamEvent, Error>.Continuation?
+        let stream = AsyncThrowingStream<LiveV2StreamEvent, Error> { continuation in
+            capturedContinuation = continuation
+        }
+        guard let eventContinuation = capturedContinuation else {
+            throw LiveB1Failure.invalidResponse
+        }
+
+        let gate = AcceptedStreamGate()
+        let readerTask = Task {
+            var parser = ServerSentEventParser()
+            var acceptedReceipt: LiveB1Receipt?
+
+            do {
+                for try await byte in response.bytes {
+                    try Task.checkCancellation()
+                    let frames = try parser.append(byte)
+                    for frame in frames {
+                        if acceptedReceipt == nil {
+                            guard frame.event == "turn.accepted" else { continue }
+                            let receipt = try decode(LiveB1Receipt.self, Data(frame.data.utf8))
+                            try validate(receipt, for: submission)
+                            acceptedReceipt = receipt
+                            gate.resume(returning: receipt)
+                            continue
+                        }
+                        guard let currentReceipt = acceptedReceipt else { continue }
+                        if let event = try decodeStreamEvent(frame, receipt: currentReceipt) {
+                            eventContinuation.yield(event)
+                        }
+                    }
+                }
+                if acceptedReceipt == nil {
+                    gate.resume(throwing: LiveB1Failure.unknownAcknowledgement)
+                    eventContinuation.finish()
+                } else {
+                    eventContinuation.finish()
+                }
+            } catch {
+                if acceptedReceipt == nil {
+                    gate.resume(throwing: LiveB1Failure.unknownAcknowledgement)
+                    eventContinuation.finish()
+                } else {
+                    eventContinuation.finish(throwing: error)
+                }
+            }
+        }
+
+        eventContinuation.onTermination = { _ in
+            readerTask.cancel()
+        }
+
+        let receipt = try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                gate.install(continuation)
+            }
+        } onCancel: {
+            readerTask.cancel()
+            gate.resume(throwing: CancellationError())
+        }
+
+        return (receipt, stream)
+    }
+
+    private func encodeSubmissionBody(_ submission: ConversationSubmission) throws -> Data {
+        struct Body: Encodable {
+            let client_submission_id: String
+            let text: String
+            let transcript_epoch: Int64
+            let attachment_ids: [String]?
+        }
+        let attachmentIDs = submission.attachmentIDs.isEmpty
+            ? nil
+            : submission.attachmentIDs.map { $0.uuidString.lowercased() }
+        return try JSONEncoder().encode(Body(
+            client_submission_id: submission.clientSubmissionID.uuidString.lowercased(),
+            text: submission.text,
+            transcript_epoch: submission.transcriptEpoch,
+            attachment_ids: attachmentIDs))
+    }
+
+    private func decodeStreamEvent(
+        _ frame: ServerSentEventFrame,
+        receipt: LiveB1Receipt
+    ) throws -> LiveV2StreamEvent? {
+        struct DeltaPayload: Decodable {
+            let turn_id: UUID
+            let text: String
+        }
+        struct CommittedPayload: Decodable {
+            let turn: LiveB1Turn
+            let response_message_id: UUID
+            let sequence: Int
+        }
+        struct HandedOffPayload: Decodable {
+            let turn_id: UUID
+            let status: LiveB1Turn.Status
+        }
+
+        let data = Data(frame.data.utf8)
+        switch frame.event {
+        case "turn.delta":
+            let payload = try decode(DeltaPayload.self, data)
+            guard payload.turn_id == receipt.turnID else { return nil }
+            return .delta(turnID: payload.turn_id, text: payload.text)
+        case "turn.committed":
+            let payload = try decode(CommittedPayload.self, data)
+            guard payload.turn.id == receipt.turnID,
+                  payload.turn.conversationID == receipt.conversationID else {
+                throw LiveB1Failure.invalidResponse
+            }
+            return .committed(
+                turn: payload.turn,
+                responseMessageID: payload.response_message_id,
+                sequence: payload.sequence
+            )
+        case "turn.handed_off":
+            let payload = try decode(HandedOffPayload.self, data)
+            guard payload.turn_id == receipt.turnID else { return nil }
+            return .handedOff(turnID: payload.turn_id, status: payload.status)
+        default:
+            return nil
+        }
     }
 
     func lookup(_ submissionID: UUID) async throws -> LiveB1Receipt? {
@@ -440,7 +588,7 @@ struct LiveB1ConversationClient: Sendable {
 
     private static func failure(_ code: Int) -> LiveB1Failure {
         switch code {
-        case 401: .rejected
+        case 401, 403: .rejected
         case 404: .notFound
         case 409: .conflict
         case 429, 500...599: .unavailable
@@ -450,11 +598,54 @@ struct LiveB1ConversationClient: Sendable {
 
     private static func uploadFailure(_ code: Int) -> LiveB1Failure {
         switch code {
-        case 400, 401: .rejected
+        case 400, 401, 403: .rejected
         case 404: .notFound
         case 409: .conflict
         case 429, 500...599: .unavailable
         default: .invalidResponse
         }
+    }
+}
+
+private final class AcceptedStreamGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var continuation: CheckedContinuation<LiveB1Receipt, Error>?
+    private var pendingResult: Result<LiveB1Receipt, Error>?
+    private var settled = false
+
+    func install(_ continuation: CheckedContinuation<LiveB1Receipt, Error>) {
+        let immediate: Result<LiveB1Receipt, Error>? = lock.withLock {
+            if let pendingResult {
+                self.pendingResult = nil
+                return pendingResult
+            }
+            self.continuation = continuation
+            return nil
+        }
+        if let immediate {
+            continuation.resume(with: immediate)
+        }
+    }
+
+    func resume(returning receipt: LiveB1Receipt) {
+        complete(with: .success(receipt))
+    }
+
+    func resume(throwing error: Error) {
+        complete(with: .failure(error))
+    }
+
+    private func complete(with result: Result<LiveB1Receipt, Error>) {
+        let target: CheckedContinuation<LiveB1Receipt, Error>? = lock.withLock {
+            guard !settled else { return nil }
+            settled = true
+            if let continuation {
+                self.continuation = nil
+                return continuation
+            }
+            self.pendingResult = result
+            return nil
+        }
+        target?.resume(with: result)
     }
 }

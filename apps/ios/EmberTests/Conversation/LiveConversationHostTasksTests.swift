@@ -830,6 +830,244 @@ final class LiveConversationHostTasksTests: XCTestCase {
         return tailRange.lowerBound - markerRange.upperBound
     }
 
+    func testEmptyLiveConversationProvidesStarterPromptsAndPendingSendAppearsImmediatelyUntilCommitted() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let messageText = "Remember my morning brief preference"
+        let sendAttempts = LockedInt(0)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me" {
+                return .json(statusCode: 200, body: AuthFixture.meJSON)
+            }
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                if sendAttempts.value >= 2 {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "messages":[
+                        {"message_id":"55555555-5555-4555-8555-555555555599",
+                         "sequence":1,"created_at":"2026-11-21T10:00:00Z","kind":"user",
+                         "text":"\(messageText)","client_submission_id":"66666666-6666-4666-8666-666666666699"}
+                      ],
+                      "next_after":1,"has_more":false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if request.httpMethod == "POST", path == "/v1/conversations/\(conversationID)/messages" {
+                sendAttempts.increment()
+                if sendAttempts.value == 1 {
+                    return .failure(URLError(.timedOut))
+                }
+                let body = request.httpBody ?? Data()
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let clientID = (obj?["client_submission_id"] as? String) ?? "66666666-6666-4666-8666-666666666699"
+                return .json(statusCode: 201, body: """
+                {
+                  "message":{
+                    "message_id":"55555555-5555-4555-8555-555555555599",
+                    "conversation_id":"\(conversationID)",
+                    "sequence":1,"created_at":"2026-11-21T10:00:00Z","kind":"user",
+                    "text":"\(messageText)","client_submission_id":"\(clientID)"
+                  },
+                  "turn":{"turn_id":"88888888-8888-4888-8888-888888888899","status":"running","created_at":"2026-11-21T10:00:00Z"},
+                  "transcript_epoch":0
+                }
+                """)
+            }
+            if path.contains("/message-submissions/") {
+                return .json(statusCode: 404, body: "{}")
+            }
+            if path.contains("/turns/") {
+                return .json(statusCode: 200, body: """
+                {
+                  "turn_id":"88888888-8888-4888-8888-888888888899",
+                  "conversation_id":"\(conversationID)",
+                  "source_message_id":"55555555-5555-4555-8555-555555555599",
+                  "status":"running",
+                  "created_at":"2026-11-21T10:00:00Z",
+                  "updated_at":"2026-11-21T10:00:01Z"
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory)
+        await model.start()
+
+        // Empty live conversation provides starter prompts
+        XCTAssertEqual(model.screen.suggestedPrompts.count, 3)
+        XCTAssertTrue(model.screen.showsEmptyState)
+
+        // Timed-out send preserves a visible pending bubble until reconciled
+        await model.send(messageText)
+        XCTAssertEqual(model.pendingOutgoingText, messageText)
+        XCTAssertEqual(model.screen.timeline.count, 1)
+        if case .message(let pendingBubble) = model.screen.timeline.first {
+            XCTAssertEqual(pendingBubble.text, messageText)
+            XCTAssertEqual(pendingBubble.accessibilityIdentifierOverride, "conversation-message-user-pending")
+            XCTAssertNotNil(pendingBubble.deliveryNote)
+        } else {
+            XCTFail("Expected pending outgoing bubble in timeline")
+        }
+
+        await model.retry()
+        XCTAssertNil(model.pendingOutgoingText)
+        XCTAssertEqual(model.screen.timeline.count, 1)
+        if case .message(let committedBubble) = model.screen.timeline.first {
+            XCTAssertEqual(committedBubble.text, messageText)
+            XCTAssertNil(committedBubble.accessibilityIdentifierOverride)
+            XCTAssertNil(committedBubble.deliveryNote)
+        } else {
+            XCTFail("Expected committed user bubble in timeline")
+        }
+    }
+
+    func testAllowlist403SignInSurfacesClearAllowlistMessageAndNonRetryableErrorCanBeDismissed() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let session = StubSession.make()
+        sessions.append(session)
+        let api = FakeEmberSessionAPI()
+        api.setCreateSessionResult(.failure(.accessDenied))
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: api,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: nil),
+            appleSignIn: FakeAppleSignInAuthorizer(
+                behavior: .succeed(
+                    AppleSignInCredential(
+                        identityToken: "token",
+                        rawNonce: "nonce",
+                        attemptID: UUID()
+                    )
+                )
+            ),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if request.httpMethod == "POST", path == "/v1/conversations/\(conversationID)/messages" {
+                return .json(statusCode: 409, body: "{}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let repo = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth),
+            journal: LiveConversationJournal(directory: directory)
+        )
+        let model = LiveConversationHostModel(repository: repo, auth: auth)
+        models.append(model)
+
+        await model.start()
+        XCTAssertTrue(model.requiresSignIn)
+
+        await model.signIn()
+        XCTAssertEqual(
+            model.signInErrorMessage,
+            String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
+        )
+        XCTAssertEqual(
+            model.status,
+            String(localized: "conversation.live.sign_in_not_allowlisted", table: "Conversation")
+        )
+        XCTAssertTrue(model.requiresSignIn)
+
+        // Second sign-in succeeds, then a 409 conflict error can be dismissed cleanly
+        api.setCreateSessionResult(.success(AuthFixture.sessionResponse()))
+        await model.signIn()
+        XCTAssertFalse(model.requiresSignIn)
+        XCTAssertNil(model.signInErrorMessage)
+
+        await model.send("conflict test")
+        XCTAssertEqual(model.command, ConversationCommandStatus.rejected)
+        XCTAssertEqual(model.rejectedDraftText, "conflict test")
+        XCTAssertNil(model.pendingOutgoingText)
+
+        model.dismissReplyError()
+        XCTAssertEqual(model.reply, ConversationReplyState.idle)
+        XCTAssertEqual(model.command, ConversationCommandStatus.idle)
+        XCTAssertNil(model.status)
+    }
+
+    func testRetryResetsStuckErrorStateWhenReloadSucceedsWithNoPendingOrActiveTurn() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let messageAttempts = LockedInt(0)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                messageAttempts.increment()
+                if messageAttempts.value <= 2 {
+                    return .failure(URLError(.timedOut))
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory)
+        await model.start()
+        XCTAssertEqual(model.command, .unknownAcknowledgement)
+        if case .failed(_, retryable: true) = model.reply {
+            // Expected initial load failure state
+        } else {
+            return XCTFail("Expected retryable failure after initial load error")
+        }
+
+        await model.retry()
+        XCTAssertEqual(model.command, .idle)
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertNil(model.refreshErrorMessage)
+        XCTAssertNil(model.status)
+    }
+
     private func makeHostModel(
         directory: URL,
         taskPollInterval: Duration = .seconds(2)

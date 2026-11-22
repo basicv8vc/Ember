@@ -81,6 +81,13 @@ final class LiveEmberSessionAPITests: XCTestCase {
         }
     }
 
+    func testCreateSessionMaps403ToAccessDenied() async {
+        register({ _ in .json(statusCode: 403, body: "{\"error_code\":\"POLICY_DENIED\"}") })
+        await assertError(.accessDenied) {
+            _ = try await makeAPI().createSession(identityToken: "jwt", nonce: "nonce")
+        }
+    }
+
     func testCreateSessionMaps404() async {
         register({ _ in .json(statusCode: 404, body: "{}") })
         await assertError(.notFound) {

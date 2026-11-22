@@ -6,6 +6,7 @@ struct ConversationTimelineView: View {
     let onPromptSelected: (String) -> Void
     let onRetry: () -> Void
     let onStopGenerating: () -> Void
+    var onDismissError: (() -> Void)? = nil
     let replyPreparingText: LocalizedStringKey
     let replyStopText: LocalizedStringKey
     let emberMessageAuthorText: LocalizedStringKey
@@ -34,8 +35,11 @@ struct ConversationTimelineView: View {
 
                     ConversationReplyStatusView(
                         state: state.replyState,
+                        isSubmitting: state.isSubmitting,
+                        isStreaming: !(state.streamingReplyText ?? "").isEmpty,
                         onRetry: onRetry,
                         onStopGenerating: onStopGenerating,
+                        onDismissError: onDismissError,
                         preparingText: replyPreparingText,
                         stopText: replyStopText
                     )
@@ -64,6 +68,18 @@ struct ConversationTimelineView: View {
             }
             .onChange(of: state.replyState) { _, _ in
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
+            }
+            .onChange(of: state.streamingReplyText) { _, newValue in
+                if newValue != nil {
+                    proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                }
+            }
+            .onChange(of: state.isSubmitting) { _, submitting in
+                if submitting {
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        proxy.scrollTo(bottomAnchor, anchor: .bottom)
+                    }
+                }
             }
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("conversation-timeline")
@@ -192,7 +208,11 @@ private struct ConversationMessageBubble: View {
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-                if let timestamp = message.timestamp {
+                if let deliveryNote = message.deliveryNote {
+                    Text(deliveryNote)
+                        .font(.caption2)
+                        .foregroundStyle(isUser ? Color.white.opacity(0.85) : Color.secondary)
+                } else if let timestamp = message.timestamp {
                     Text(timestamp.formatted(date: .omitted, time: .shortened))
                         .font(.caption2)
                         .foregroundStyle(isUser ? Color.white.opacity(0.78) : Color.secondary)
@@ -205,6 +225,7 @@ private struct ConversationMessageBubble: View {
                 isUser ? Color.accentColor : EmberDesignTokens.cardBackground,
                 in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
+            .opacity(message.deliveryNote != nil ? 0.85 : 1.0)
             .overlay {
                 if !isUser {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
@@ -222,7 +243,9 @@ private struct ConversationMessageBubble: View {
         // iOS 27, so a label predicate alone matches the same message twice. This stable
         // identifier marks the bubble itself (one element per message), which lets UI tests
         // count messages without relying on label formatting.
-        .accessibilityIdentifier(isUser ? "conversation-message-user" : "conversation-message-ember")
+        .accessibilityIdentifier(
+            message.accessibilityIdentifierOverride ?? (isUser ? "conversation-message-user" : "conversation-message-ember")
+        )
     }
 }
 
@@ -270,8 +293,11 @@ private struct ConversationActivityRow: View {
 
 private struct ConversationReplyStatusView: View {
     let state: ConversationReplyState
+    let isSubmitting: Bool
+    var isStreaming: Bool = false
     let onRetry: () -> Void
     let onStopGenerating: () -> Void
+    let onDismissError: (() -> Void)?
     let preparingText: LocalizedStringKey
     let stopText: LocalizedStringKey
 
@@ -279,17 +305,41 @@ private struct ConversationReplyStatusView: View {
     var body: some View {
         switch state {
         case .idle:
-            EmptyView()
+            if isSubmitting {
+                HStack(alignment: .center, spacing: 10) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("conversation.reply.sending", tableName: "Conversation")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(13)
+                .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("conversation-sending-reply")
+            } else {
+                EmptyView()
+            }
         case .generating:
             HStack(alignment: .center, spacing: 12) {
-                Image(systemName: "sparkle")
-                    .foregroundStyle(Color.accentColor)
-                    .accessibilityHidden(true)
+                ProgressView()
+                    .controlSize(.small)
 
-                Text(preparingText, tableName: "Conversation")
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                Group {
+                    if isStreaming {
+                        Text("conversation.reply.streaming", tableName: "Conversation")
+                    } else {
+                        Text(preparingText, tableName: "Conversation")
+                    }
+                }
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
                 Button(action: onStopGenerating) {
                     Label {
@@ -334,6 +384,15 @@ private struct ConversationReplyStatusView: View {
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .accessibilityIdentifier("conversation-retry")
+                } else if let onDismissError {
+                    Button(action: onDismissError) {
+                        Image(systemName: "xmark")
+                            .font(.caption.weight(.semibold))
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.secondary)
+                    .accessibilityLabel(Text("tasks.detail.close", tableName: "Conversation"))
+                    .accessibilityIdentifier("conversation-dismiss-error")
                 }
             }
             .padding(.horizontal, 13)

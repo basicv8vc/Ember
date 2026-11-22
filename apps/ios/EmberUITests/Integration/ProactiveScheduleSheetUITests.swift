@@ -8,6 +8,10 @@ final class ProactiveScheduleSheetUITests: XCTestCase {
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
 
+        let menuButton = app.buttons["live-conversation-menu"]
+        XCTAssertTrue(menuButton.waitForExistence(timeout: 10))
+        menuButton.tap()
+
         let openSchedulesButton = app.buttons["live-conversation-open-schedules"]
         XCTAssertTrue(openSchedulesButton.waitForExistence(timeout: 10))
         openSchedulesButton.tap()
@@ -53,9 +57,10 @@ final class ProactiveScheduleSheetUITests: XCTestCase {
         promptField.typeText("Summarize afternoon blockers")
 
         let preset15m = app.buttons["schedules-preset-15m"]
-        if preset15m.waitForExistence(timeout: 3) {
-            preset15m.tap()
-        }
+        XCTAssertTrue(preset15m.waitForExistence(timeout: 3))
+        XCTAssertGreaterThanOrEqual(preset15m.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(preset15m.frame.width, 44)
+        preset15m.tap()
         attachScreenshot(app: app, name: "ux06-schedules-create-sheet")
 
         let createButton = app.buttons["schedules-create-button"]

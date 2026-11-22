@@ -1077,10 +1077,10 @@ private struct CreateScheduleSheet: View {
         Button(action: action) {
             Text(String(localized: titleKey, table: "Conversation"))
                 .font(.caption.weight(.medium))
-                .frame(minHeight: 36)
+                .frame(minWidth: 44, minHeight: 44)
+                .padding(.horizontal, 4)
         }
         .buttonStyle(.bordered)
-        .controlSize(.small)
         .accessibilityIdentifier(identifier)
     }
 }

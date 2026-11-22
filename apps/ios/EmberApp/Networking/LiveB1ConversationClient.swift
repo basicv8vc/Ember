@@ -398,9 +398,11 @@ struct LiveB1ConversationClient: Sendable {
         guard response.statusCode == 200 || response.statusCode == 201 else {
             throw Self.failure(response.statusCode)
         }
-        if let contentType = response.contentType,
-           !contentType.lowercased().contains("text/event-stream") {
-            throw LiveV2StreamFallbackError.endpointUnavailable
+        guard let contentType = response.contentType,
+              contentType.lowercased().contains("text/event-stream") else {
+            // Any 2xx proves the POST reached a handler; treat unexpected or missing
+            // non-SSE Content-Type as ambiguous and reconcile before any replay.
+            throw LiveB1Failure.unknownAcknowledgement
         }
 
         var capturedContinuation: AsyncThrowingStream<LiveV2StreamEvent, Error>.Continuation?

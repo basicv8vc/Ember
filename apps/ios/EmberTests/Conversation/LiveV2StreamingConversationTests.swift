@@ -355,6 +355,243 @@ final class LiveV2StreamingConversationTests: XCTestCase {
         XCTAssertEqual(session.receipt.turnID.uuidString.lowercased(), turnID)
     }
 
+    func testSSENonSSE200JSONDoesNotRepostAndReconcilesAcceptedReceiptViaLookup() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let turnID = "88888888-8888-4888-8888-888888888555"
+        let userMessageID = "55555555-5555-4555-8555-555555555555"
+        let taskMessageID = "55555555-5555-4555-8555-555555555556"
+        let assistantMessageID = "77777777-7777-4777-8777-777777777555"
+        let taskID = "00000000-0000-4000-8000-00000000c555"
+
+        let streamPostedIDs = LockedStrings()
+        let b1PostedIDs = LockedStrings()
+        let lookupIDs = LockedStrings()
+        let serverAcceptedID = LockedBox<String?>(nil)
+        let turnCompleted = LockedFlag(false)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "POST", path == "/v2/conversations/\(conversationID)/messages/stream" {
+                let body = request.httpBody ?? Data()
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let clientID = (obj?["client_submission_id"] as? String) ?? ""
+                streamPostedIDs.append(clientID)
+                // Server handler actually accepted the write even though it replied with 200 JSON.
+                serverAcceptedID.set(clientID)
+                return .json(
+                    statusCode: 200,
+                    body: #"{"unexpected":"json_envelope","accepted":true}"#
+                )
+            }
+            if request.httpMethod == "POST", path == "/v1/conversations/\(conversationID)/messages" {
+                let body = request.httpBody ?? Data()
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let clientID = (obj?["client_submission_id"] as? String) ?? ""
+                b1PostedIDs.append(clientID)
+                return .json(statusCode: 500, body: "{}")
+            }
+            if request.httpMethod == "GET", path.hasPrefix("/v1/message-submissions/") {
+                let queriedID = request.url?.lastPathComponent ?? ""
+                lookupIDs.append(queriedID)
+                if let accepted = serverAcceptedID.value, accepted.caseInsensitiveCompare(queriedID) == .orderedSame {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "message":{"message_id":"\(userMessageID)","conversation_id":"\(conversationID)","sequence":1,"created_at":"2026-11-22T01:00:00Z","kind":"user","text":"Ambiguous 200","client_submission_id":"\(accepted)"},
+                      "turn":{"turn_id":"\(turnID)","status":"running","created_at":"2026-11-22T01:00:00Z"},
+                      "transcript_epoch":0
+                    }
+                    """)
+                }
+                return .json(statusCode: 404, body: "{}")
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/turns/\(turnID)" {
+                turnCompleted.value = true
+                return .json(statusCode: 200, body: """
+                {"turn_id":"\(turnID)","conversation_id":"\(conversationID)","source_message_id":"\(userMessageID)","response_message_id":"\(assistantMessageID)","status":"completed","created_at":"2026-11-22T01:00:00Z","updated_at":"2026-11-22T01:00:02Z"}
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                if let accepted = serverAcceptedID.value, turnCompleted.value {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "messages":[
+                        {"message_id":"\(userMessageID)","sequence":1,"created_at":"2026-11-22T01:00:00Z","kind":"user","text":"Ambiguous 200","client_submission_id":"\(accepted)"},
+                        {"message_id":"\(taskMessageID)","sequence":2,"created_at":"2026-11-22T01:00:01Z","kind":"task_reference","task_id":"\(taskID)"},
+                        {"message_id":"\(assistantMessageID)","sequence":3,"created_at":"2026-11-22T01:00:02Z","kind":"ember","text":"Reconciled without duplicate POST","model_label":"deepseek-v4.1-flash","simulated":false}
+                      ],
+                      "next_after":3,"has_more":false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {"conversation_id":"\(conversationID)","transcript_epoch":0,"messages":[],"next_after":0,"has_more":false}
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let setup = try makeRepository(directory: directory, supportsStreaming: true)
+        let model = LiveConversationHostModel(
+            repository: setup.repo,
+            auth: setup.auth,
+            taskRepository: setup.taskRepo
+        )
+        models.append(model)
+        model.handleScenePhase(.active)
+        model.handleViewAppeared()
+        await model.start()
+
+        await model.send("Ambiguous 200")
+
+        // Non-SSE 2xx must stay in unknownAcknowledgement and MUST NOT issue a second POST immediately.
+        XCTAssertEqual(model.command, .unknownAcknowledgement)
+        XCTAssertEqual(streamPostedIDs.values.count, 1)
+        XCTAssertTrue(b1PostedIDs.values.isEmpty)
+        XCTAssertTrue(lookupIDs.values.isEmpty)
+        let savedPending = try await setup.repo.pending()
+        XCTAssertEqual(savedPending?.clientSubmissionID.uuidString.lowercased(), streamPostedIDs.values.first)
+
+        // Reconciliation queries submission lookup and adopts the committed turn without any second POST.
+        await model.retry()
+
+        for _ in 0..<80 {
+            if model.reply == .idle, turnCompleted.value { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertEqual(model.command, .acknowledged)
+        XCTAssertEqual(streamPostedIDs.values.count, 1)
+        XCTAssertTrue(b1PostedIDs.values.isEmpty, "Found receipt must suppress any second POST")
+        XCTAssertEqual(lookupIDs.values, streamPostedIDs.values)
+        let remainingPending = try await setup.repo.pending()
+        XCTAssertNil(remainingPending)
+        let remainingActiveTurn = try await setup.repo.activeTurn()
+        XCTAssertNil(remainingActiveTurn)
+
+        let userTexts = model.screen.timeline.compactMap { entry -> String? in
+            if case .message(let msg) = entry, msg.author == .user { return msg.text }
+            return nil
+        }
+        XCTAssertEqual(userTexts, ["Ambiguous 200"])
+
+        let taskCardEntries = model.screen.timeline.filter { entry in
+            entry.id == "conversation-message-\(taskMessageID)"
+        }
+        XCTAssertEqual(taskCardEntries.count, 1)
+    }
+
+    func testSSENonSSE200JSONThenLookup404SafelyReplaysSameSubmissionID() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let turnID = "88888888-8888-4888-8888-888888888666"
+        let userMessageID = "55555555-5555-4555-8555-555555555666"
+        let assistantMessageID = "77777777-7777-4777-8777-777777777666"
+
+        let streamPostedIDs = LockedStrings()
+        let b1PostedIDs = LockedStrings()
+        let lookupIDs = LockedStrings()
+        let replayedCompleted = LockedFlag(false)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "POST", path == "/v2/conversations/\(conversationID)/messages/stream" {
+                let body = request.httpBody ?? Data()
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let clientID = (obj?["client_submission_id"] as? String) ?? ""
+                streamPostedIDs.append(clientID)
+                return .json(statusCode: 200, body: "{}")
+            }
+            if request.httpMethod == "GET", path.hasPrefix("/v1/message-submissions/") {
+                lookupIDs.append(request.url?.lastPathComponent ?? "")
+                return .json(statusCode: 404, body: "{}")
+            }
+            if request.httpMethod == "POST", path == "/v1/conversations/\(conversationID)/messages" {
+                let body = request.httpBody ?? Data()
+                let obj = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+                let clientID = (obj?["client_submission_id"] as? String) ?? ""
+                b1PostedIDs.append(clientID)
+                return .json(statusCode: 201, body: """
+                {
+                  "message":{"message_id":"\(userMessageID)","conversation_id":"\(conversationID)","sequence":1,"created_at":"2026-11-22T01:00:00Z","kind":"user","text":"Lookup 404 replay","client_submission_id":"\(clientID)"},
+                  "turn":{"turn_id":"\(turnID)","status":"running","created_at":"2026-11-22T01:00:00Z"},
+                  "transcript_epoch":0
+                }
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/turns/\(turnID)" {
+                replayedCompleted.value = true
+                return .json(statusCode: 200, body: """
+                {"turn_id":"\(turnID)","conversation_id":"\(conversationID)","source_message_id":"\(userMessageID)","response_message_id":"\(assistantMessageID)","status":"completed","created_at":"2026-11-22T01:00:00Z","updated_at":"2026-11-22T01:00:02Z"}
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                if let replayedID = b1PostedIDs.values.first, replayedCompleted.value {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "messages":[
+                        {"message_id":"\(userMessageID)","sequence":1,"created_at":"2026-11-22T01:00:00Z","kind":"user","text":"Lookup 404 replay","client_submission_id":"\(replayedID)"},
+                        {"message_id":"\(assistantMessageID)","sequence":2,"created_at":"2026-11-22T01:00:02Z","kind":"ember","text":"Replayed safely after lookup 404","model_label":"deepseek-v4.1-flash","simulated":false}
+                      ],
+                      "next_after":2,"has_more":false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {"conversation_id":"\(conversationID)","transcript_epoch":0,"messages":[],"next_after":0,"has_more":false}
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let setup = try makeRepository(directory: directory, supportsStreaming: true)
+        let model = LiveConversationHostModel(
+            repository: setup.repo,
+            auth: setup.auth,
+            taskRepository: setup.taskRepo
+        )
+        models.append(model)
+        model.handleScenePhase(.active)
+        model.handleViewAppeared()
+        await model.start()
+
+        await model.send("Lookup 404 replay")
+
+        // Ambiguous 200 JSON must not trigger an immediate B1 POST before lookup.
+        XCTAssertEqual(model.command, .unknownAcknowledgement)
+        XCTAssertEqual(streamPostedIDs.values.count, 1)
+        XCTAssertTrue(b1PostedIDs.values.isEmpty)
+
+        // Only after authoritative 404 from submission lookup does replay use the same submission ID.
+        await model.retry()
+
+        for _ in 0..<80 {
+            if model.reply == .idle, replayedCompleted.value { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertEqual(streamPostedIDs.values.count, 1)
+        XCTAssertEqual(lookupIDs.values, streamPostedIDs.values)
+        XCTAssertEqual(b1PostedIDs.values, streamPostedIDs.values)
+        let texts = model.screen.timeline.compactMap { entry -> String? in
+            if case .message(let msg) = entry { return msg.text }
+            return nil
+        }
+        XCTAssertEqual(texts, ["Lookup 404 replay", "Replayed safely after lookup 404"])
+    }
+
     private func makeRepository(
         directory: URL,
         supportsStreaming: Bool,

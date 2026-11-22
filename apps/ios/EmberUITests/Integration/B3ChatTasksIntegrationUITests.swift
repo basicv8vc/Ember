@@ -180,6 +180,75 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(app.buttons["conversation-send"].isEnabled)
     }
 
+    func testMemorySheetSaveEditDeleteInMockConversation() {
+        let app = XCUIApplication()
+        launch(app, reset: true)
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+
+        let openMemoryButton = app.buttons["live-conversation-open-memory"]
+        XCTAssertTrue(openMemoryButton.waitForExistence(timeout: 10))
+        openMemoryButton.tap()
+
+        let input = app.descendants(matching: .any)["memory-composer-input"]
+        XCTAssertTrue(input.waitForExistence(timeout: 10))
+        input.tap()
+        input.typeText("Keep daily briefs in bullet points")
+
+        let saveButton = app.buttons["memory-composer-save"]
+        XCTAssertTrue(saveButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(saveButton.isEnabled)
+        saveButton.tap()
+
+        XCTAssertTrue(
+            app.staticTexts["Keep daily briefs in bullet points"].waitForExistence(timeout: 5)
+        )
+
+        // Verify the newly added item row has a dedicated edit & delete button (beyond default sample b901)
+        let editButtons = app.buttons.matching(
+            NSPredicate(format: "identifier BEGINSWITH 'memory-edit-' AND identifier != 'memory-edit-00000000-0000-4000-8000-00000000b901'")
+        )
+        XCTAssertTrue(editButtons.firstMatch.waitForExistence(timeout: 5))
+        let newEditID = editButtons.firstMatch.identifier
+        let newUUIDSuffix = String(newEditID.dropFirst("memory-edit-".count))
+        editButtons.firstMatch.tap()
+
+        let editInput = app.descendants(matching: .any)["memory-edit-input"]
+        XCTAssertTrue(editInput.waitForExistence(timeout: 5))
+        editInput.tap()
+        editInput.typeText(" with action items")
+
+        let editSave = app.buttons["memory-edit-save"]
+        XCTAssertTrue(editSave.isEnabled)
+        editSave.tap()
+
+        XCTAssertTrue(
+            app.staticTexts
+                .matching(NSPredicate(format: "label CONTAINS 'with action items'"))
+                .firstMatch
+                .waitForExistence(timeout: 5)
+        )
+
+        let deleteButton = app.buttons["memory-delete-\(newUUIDSuffix)"]
+        XCTAssertTrue(deleteButton.waitForExistence(timeout: 5))
+        deleteButton.tap()
+
+        let confirmDelete = app.alerts.buttons["Delete"]
+        XCTAssertTrue(confirmDelete.waitForExistence(timeout: 5))
+        confirmDelete.tap()
+
+        let deletedExpectation = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.buttons["memory-delete-\(newUUIDSuffix)"]
+        )
+        wait(for: [deletedExpectation], timeout: 5)
+
+        let closeButton = app.buttons["memory-sheet-close"]
+        XCTAssertTrue(closeButton.waitForExistence(timeout: 5))
+        closeButton.tap()
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 5))
+    }
+
     private func launch(_ app: XCUIApplication, reset: Bool) {
         var args = ["--ember-mock-chat-tasks"]
         if reset {

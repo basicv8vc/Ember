@@ -3169,6 +3169,22 @@
         }
       }
     },
+    "memory.error.not_found": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "That memory was already deleted."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该记忆已不存在或已被删除。"
+          }
+        }
+      }
+    },
     "memory.error.unauthenticated": {
       "localizations": {
         "en": {

@@ -1041,5 +1041,73 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(msgsAfterStaleReplace.messages.at(-1)?.text).toContain(
       "couldn't find that memory item to update",
     );
+
+    // 7. Chat keyed save followed by Settings unkeyed save with identical (kind, content) deduplicates cleanly
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: '已记住你的饮食偏好。',
+      savePersonalMemory: {
+        kind: 'preference',
+        key: 'diet',
+        content: '不吃香菜',
+      },
+    });
+    const chatKeyedSaveRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: '请记住我不吃香菜',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(chatKeyedSaveRes.status).toBe(201);
+    await chatKeyedSaveRes.text();
+
+    const afterChatKeyed = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterChatKeyed.items).toHaveLength(1);
+    const keyedId = afterChatKeyed.items[0]!.memory_id;
+
+    const settingsDupRes = await harness.fetchOverHttp('/v2/memories', {
+      method: 'POST',
+      headers: {
+        authorization: `Bearer ${user.token}`,
+        'content-type': 'application/json',
+      },
+      body: JSON.stringify({
+        kind: 'preference',
+        content: '不吃香菜',
+        provenance: { source: 'user_settings' },
+      }),
+    });
+    const settingsDupBody = await json<{
+      readonly created: boolean;
+      readonly item: { readonly memory_id: string; readonly key: string | null };
+    }>(settingsDupRes, 200);
+    expect(settingsDupBody).toMatchObject({
+      created: false,
+      item: { memory_id: keyedId, key: 'diet' },
+    });
+
+    const afterSettingsDup = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterSettingsDup.items).toHaveLength(1);
   });
 });

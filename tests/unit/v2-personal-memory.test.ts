@@ -2228,5 +2228,26 @@ describe('Personal Memory — AgentHeadMemoryService & v6 migration', () => {
       notFoundCount: 0,
       ambiguousCount: 0,
     });
+
+    // Unkeyed Settings save matching an existing keyed memory deduplicates without creating a duplicate
+    const dedupKeyedFromSettings = await svc.execute({
+      kind: 'save',
+      tenantId,
+      agentId,
+      principalId: principalA,
+      requestId: randomUUID(),
+      input: {
+        kind: 'preference',
+        content: 'Morning coffee: black Americano',
+        provenance: { source: 'user_settings' },
+      },
+    });
+    expect(dedupKeyedFromSettings).toMatchObject({
+      created: false,
+      item: {
+        memory_id: idB,
+        content: 'Morning coffee: black Americano',
+      },
+    });
   });
 });

@@ -215,6 +215,26 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertTrue(duplicate)
         XCTAssertEqual(store.items.count, 1)
         XCTAssertEqual(store.items[0].memoryID, originalID)
+
+        // Unkeyed UI save matching an existing keyed memory updates in place rather than duplicating.
+        let keyedRepo = InMemoryPersonalMemoryRepository(items: [
+            PersonalMemoryItemDTO(
+                memoryID: originalID,
+                kind: .preference,
+                key: "briefs",
+                content: "Keep briefs concise",
+                provenance: PersonalMemoryProvenanceDTO(source: .explicitUserRequest),
+                createdAt: "2026-11-21T00:00:00Z",
+                updatedAt: "2026-11-21T00:00:00Z"
+            )
+        ])
+        let keyedStore = PersonalMemoryStore(repository: keyedRepo)
+        await keyedStore.refresh()
+        let dedupKeyed = await keyedStore.save(kind: .preference, content: "Keep briefs concise")
+        XCTAssertTrue(dedupKeyed)
+        XCTAssertEqual(keyedStore.items.count, 1)
+        XCTAssertEqual(keyedStore.items[0].memoryID, originalID)
+        XCTAssertEqual(keyedStore.items[0].key, "briefs")
     }
 
     func testStoreSaveReusesClientRequestIDAcrossRetryAfterUnknownOutcomeAndRemovesNotFoundOnUpdate() async throws {
@@ -288,6 +308,10 @@ final class PersonalMemoryTests: XCTestCase {
         )
         XCTAssertFalse(updateMissing)
         XCTAssertFalse(store.items.contains(where: { $0.memoryID == memoryID }))
+        XCTAssertEqual(
+            store.errorMessage,
+            String(localized: "memory.error.not_found", table: "Conversation")
+        )
     }
 
     func testLiveRepositoryWrite401MapsRequestRejectedBeforeExecutionToUnauthenticated() async throws {

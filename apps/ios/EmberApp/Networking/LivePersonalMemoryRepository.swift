@@ -224,7 +224,7 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
 
         if (normalizedKey == nil || normalizedKey?.isEmpty == true),
            let index = items.firstIndex(where: {
-               $0.key == nil && $0.kind == request.kind && $0.content == trimmed
+               $0.kind == request.kind && $0.content == trimmed
            }) {
             let existing = items[index]
             let updated = PersonalMemoryItemDTO(

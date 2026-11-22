@@ -911,13 +911,12 @@ export class AgentHeadMemoryService {
           return { item: toPersonalMemoryDto(updated), created: false };
         }
       } else {
-        const existingUnkeyed = sqlExecMaybe<PersonalMemoryRow>(
+        const existingByContent = sqlExecMaybe<PersonalMemoryRow>(
           this.sql,
           `SELECT *
              FROM personal_memories
             WHERE tenant_id = ?
               AND principal_id = ?
-              AND memory_key IS NULL
               AND kind = ?
               AND content = ?
             ORDER BY updated_at_ms DESC, id ASC
@@ -927,8 +926,8 @@ export class AgentHeadMemoryService {
           input.kind,
           input.content,
         );
-        if (existingUnkeyed !== null) {
-          const nextClientRequestId = existingUnkeyed.client_request_id ?? clientRequestId;
+        if (existingByContent !== null) {
+          const nextClientRequestId = existingByContent.client_request_id ?? clientRequestId;
           this.sql.exec(
             `UPDATE personal_memories
                 SET client_request_id = ?,
@@ -938,12 +937,12 @@ export class AgentHeadMemoryService {
                 AND principal_id = ?`,
             nextClientRequestId,
             nowMs,
-            existingUnkeyed.id,
+            existingByContent.id,
             cmd.tenantId,
             cmd.principalId,
           );
           const updated: PersonalMemoryRow = {
-            ...existingUnkeyed,
+            ...existingByContent,
             client_request_id: nextClientRequestId,
             updated_at_ms: nowMs,
           };

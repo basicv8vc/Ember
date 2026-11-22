@@ -159,7 +159,7 @@ final class PersonalMemoryStore {
         } catch PersonalMemoryRepositoryError.notFound {
             guard generation == startGeneration else { return false }
             items.removeAll { $0.memoryID == id }
-            errorMessage = String(localized: "memory.error.unavailable", table: "Conversation")
+            errorMessage = String(localized: "memory.error.not_found", table: "Conversation")
             return false
         } catch {
             guard generation == startGeneration else { return false }

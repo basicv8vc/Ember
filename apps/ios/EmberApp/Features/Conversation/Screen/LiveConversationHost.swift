@@ -102,6 +102,7 @@ final class LiveConversationHostModel {
         deviceExecutorWorkspace: DeviceSandboxWorkspace? = nil,
         deviceExecutorClock: (any CloudDeviceClock)? = nil,
         isMockMode: Bool = false,
+        initialStagedAttachments: [ComposerAttachment] = [],
         environmentBadge: String = "LIVE CLOUD",
         pollingWindow: Duration = .seconds(60),
         taskPollInterval: Duration = .seconds(2),
@@ -131,6 +132,7 @@ final class LiveConversationHostModel {
         self.deviceExecutorPreferenceKey = nil
         self.isDeviceExecutorEnabled = false
         self.isMockMode = isMockMode
+        self.stagedAttachments = isMockMode ? initialStagedAttachments : []
         self.environmentBadge = environmentBadge
         self.pollingWindow = pollingWindow
         self.taskPollInterval = taskPollInterval

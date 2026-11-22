@@ -289,13 +289,30 @@ private enum MockB3Composition {
         let auth = MockAuthController()
         let scheduleRepository = InMemoryProactiveScheduleRepository()
         let memoryRepository = InMemoryPersonalMemoryRepository()
+        let initialAttachments: [ComposerAttachment] = ProcessInfo.processInfo.arguments.contains("--ember-mock-staged-attachments")
+            ? [
+                ComposerAttachment(
+                    id: UUID(uuidString: "00000000-0000-4000-8000-00000000c101")!,
+                    filename: "q4-launch-summary.csv",
+                    mediaType: "text/csv",
+                    sizeBytes: 24_576
+                ),
+                ComposerAttachment(
+                    id: UUID(uuidString: "00000000-0000-4000-8000-00000000c102")!,
+                    filename: "notes.pdf",
+                    mediaType: "application/pdf",
+                    sizeBytes: 12_288
+                ),
+            ]
+            : []
         return LiveConversationHostModel(
             repository: repository,
             auth: auth,
             taskRepository: taskRepository,
             scheduleRepository: scheduleRepository,
             memoryRepository: memoryRepository,
-            isMockMode: true
+            isMockMode: true,
+            initialStagedAttachments: initialAttachments
         )
     }
 }

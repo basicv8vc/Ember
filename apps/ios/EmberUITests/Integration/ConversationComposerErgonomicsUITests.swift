@@ -171,6 +171,51 @@ final class ConversationComposerErgonomicsUITests: XCTestCase {
         XCTAssertFalse(sendButton.isEnabled)
     }
 
+    func testAttachmentChipRemoveButtonIs44ptRemovesTargetAndPreservesDraft() {
+        let app = XCUIApplication()
+        launch(
+            app,
+            arguments: [
+                "--ember-mock-chat-tasks",
+                "--ember-mock-chat-tasks-reset",
+                "--ember-mock-staged-attachments",
+            ]
+        )
+
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+
+        let composer = app.textFields["conversation-composer-input"]
+        XCTAssertTrue(composer.waitForExistence(timeout: 10))
+        composer.tap()
+        let preservedDraft = "Keep this draft"
+        composer.typeText(preservedDraft)
+
+        let firstChip = app.descendants(matching: .any)["conversation-attachment-chip-q4-launch-summary.csv"]
+        let secondChip = app.descendants(matching: .any)["conversation-attachment-chip-notes.pdf"]
+        XCTAssertTrue(firstChip.waitForExistence(timeout: 5))
+        XCTAssertTrue(secondChip.waitForExistence(timeout: 5))
+
+        let removeFirst = app.buttons["conversation-remove-attachment-00000000-0000-4000-8000-00000000c101"]
+        let removeSecond = app.buttons["conversation-remove-attachment-00000000-0000-4000-8000-00000000c102"]
+        XCTAssertTrue(removeFirst.waitForExistence(timeout: 5))
+        XCTAssertTrue(removeSecond.waitForExistence(timeout: 5))
+        XCTAssertTrue(removeFirst.isHittable)
+        XCTAssertGreaterThanOrEqual(removeFirst.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(removeFirst.frame.height, 44)
+        XCTAssertGreaterThanOrEqual(removeSecond.frame.width, 44)
+        XCTAssertGreaterThanOrEqual(removeSecond.frame.height, 44)
+
+        removeFirst.tap()
+
+        let firstRemoved = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: firstChip
+        )
+        wait(for: [firstRemoved], timeout: 5)
+        XCTAssertTrue(secondChip.exists, "Removing one chip must keep the remaining chip intact.")
+        XCTAssertEqual(composer.value as? String, preservedDraft)
+    }
+
     private func launch(_ app: XCUIApplication, arguments: [String]) {
         app.launchArguments = arguments + [
             "-AppleLanguages", "(en)", "-AppleLocale", "en_US"

@@ -158,21 +158,34 @@ final class ConversationComposerErgonomicsTests: XCTestCase {
         XCTAssertFalse(model.screen.isStopping)
     }
 
-    func testHostedComposerWithAttachmentChipsAndEmptyStateRendersWithin320ptViewport() throws {
-        let attachmentID = UUID(uuidString: "00000000-0000-4000-8000-00000000c101")!
-        let attachment = ComposerAttachment(
-            id: attachmentID,
+    func testHostedAttachmentChipRemoveButtonIs44ptOn320ptRemovesTargetAndPreservesDraft() throws {
+        let firstID = UUID(uuidString: "00000000-0000-4000-8000-00000000c101")!
+        let secondID = UUID(uuidString: "00000000-0000-4000-8000-00000000c102")!
+        let first = ComposerAttachment(
+            id: firstID,
             filename: "q4-launch-risks-and-metrics-summary.csv",
             mediaType: "text/csv",
             sizeBytes: 24_576
         )
-        let emptyState = ConversationScreenState(
+        let second = ComposerAttachment(
+            id: secondID,
+            filename: "notes.pdf",
+            mediaType: "application/pdf",
+            sizeBytes: 12_288
+        )
+        let initialDraft = "Keep this user draft intact"
+        let state = ConversationScreenState(
             timeline: [],
             replyState: .idle,
-            attachments: [attachment]
+            attachments: [first, second]
         )
 
-        let harness = HostedComposerHarnessView(initialState: emptyState, initialDraft: "Draft")
+        var observedRemoveRects: [UUID: CGRect] = [:]
+        let harness = HostedComposerHarnessView(
+            initialState: state,
+            initialDraft: initialDraft,
+            onRemoveRectsMeasured: { observedRemoveRects = $0 }
+        )
         let controller = UIHostingController(rootView: harness)
         let windowScene = UIApplication.shared.connectedScenes.first as? UIWindowScene
         let window = windowScene.map { UIWindow(windowScene: $0) } ?? UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 568))
@@ -185,10 +198,41 @@ final class ConversationComposerErgonomicsTests: XCTestCase {
         let fittedSize = controller.sizeThatFits(in: CGSize(width: 320, height: 568))
         XCTAssertLessThanOrEqual(fittedSize.width, 320)
         XCTAssertGreaterThan(fittedSize.height, 0)
+        for _ in 0..<3 {
+            pumpLayout(controller: controller)
+        }
+        XCTAssertEqual(controller.view.bounds.width, 320)
+
+        let firstRemoveRect = try XCTUnwrap(
+            observedRemoveRects[firstID],
+            "Expected measured remove button bounds for first attachment on 320pt viewport"
+        )
+        let secondRemoveRect = try XCTUnwrap(
+            observedRemoveRects[secondID],
+            "Expected measured remove button bounds for second attachment on 320pt viewport"
+        )
+        XCTAssertGreaterThanOrEqual(firstRemoveRect.width, 44)
+        XCTAssertGreaterThanOrEqual(firstRemoveRect.height, 44)
+        XCTAssertGreaterThanOrEqual(firstRemoveRect.minX, 0)
+        XCTAssertLessThanOrEqual(firstRemoveRect.maxX, 320)
+        XCTAssertGreaterThanOrEqual(secondRemoveRect.width, 44)
+        XCTAssertGreaterThanOrEqual(secondRemoveRect.height, 44)
+
+        let mockModel = LiveConversationHostModel(
+            repository: MockB3ConversationRepository(taskRepository: MockSessionTaskRepository(resetStorage: true)),
+            auth: MockAuthController(),
+            isMockMode: true,
+            initialStagedAttachments: [first, second]
+        )
+        XCTAssertEqual(mockModel.screen.attachments.map(\.id), [firstID, secondID])
+        mockModel.removeAttachment(firstID)
+        XCTAssertEqual(mockModel.screen.attachments.map(\.id), [secondID])
+    }
+
+    private func pumpLayout(controller: UIHostingController<HostedComposerHarnessView>) {
         controller.view.setNeedsLayout()
         controller.view.layoutIfNeeded()
-        RunLoop.main.run(until: Date().addingTimeInterval(0.05))
-        XCTAssertEqual(controller.view.bounds.width, 320)
+        RunLoop.main.run(until: Date().addingTimeInterval(0.08))
     }
 
     private func makeLiveAuth() throws -> (auth: LiveAuthSessionCoordinator, directory: URL) {
@@ -241,10 +285,16 @@ private final class LockedCounter: @unchecked Sendable {
 private struct HostedComposerHarnessView: View {
     @State var state: ConversationScreenState
     @State var draft: String
+    let onRemoveRectsMeasured: ([UUID: CGRect]) -> Void
 
-    init(initialState: ConversationScreenState, initialDraft: String) {
+    init(
+        initialState: ConversationScreenState,
+        initialDraft: String,
+        onRemoveRectsMeasured: @escaping ([UUID: CGRect]) -> Void = { _ in }
+    ) {
         _state = State(initialValue: initialState)
         _draft = State(initialValue: initialDraft)
+        self.onRemoveRectsMeasured = onRemoveRectsMeasured
     }
 
     var body: some View {
@@ -262,5 +312,18 @@ private struct HostedComposerHarnessView: View {
                 }
             )
         )
+        .overlayPreferenceValue(ConversationAttachmentRemoveBoundsKey.self) { anchors in
+            GeometryReader { proxy in
+                let resolved = anchors.mapValues { proxy[$0] }
+                Color.clear
+                    .onAppear {
+                        if !resolved.isEmpty { onRemoveRectsMeasured(resolved) }
+                    }
+                    .onChange(of: resolved) { _, newRects in
+                        onRemoveRectsMeasured(newRects)
+                    }
+            }
+            .allowsHitTesting(false)
+        }
     }
 }

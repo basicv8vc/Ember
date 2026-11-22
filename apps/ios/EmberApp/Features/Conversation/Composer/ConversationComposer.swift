@@ -10,6 +10,15 @@ struct ConversationAttachmentButtonAnchorKey: PreferenceKey {
     }
 }
 
+/// Preference key reporting each attachment chip remove button's interactive bounds.
+struct ConversationAttachmentRemoveBoundsKey: PreferenceKey {
+    static let defaultValue: [UUID: Anchor<CGRect>] = [:]
+
+    static func reduce(value: inout [UUID: Anchor<CGRect>], nextValue: () -> [UUID: Anchor<CGRect>]) {
+        value.merge(nextValue()) { current, _ in current }
+    }
+}
+
 enum ConversationComposerMotion {
     static let morphExpand = Animation.spring(response: 0.36, dampingFraction: 0.84)
     static let morphCollapse = Animation.spring(response: 0.30, dampingFraction: 0.86)
@@ -407,6 +416,9 @@ struct ConversationComposer: View {
                 }
                 .buttonStyle(.plain)
                 .disabled(isComposerBusy || isUploadingAttachment)
+                .anchorPreference(key: ConversationAttachmentRemoveBoundsKey.self, value: .bounds) {
+                    [attachment.id: $0]
+                }
                 .accessibilityLabel(Text("conversation.composer.remove_attachment", tableName: "Conversation"))
                 .accessibilityIdentifier("conversation-remove-attachment-\(attachment.id.uuidString.lowercased())")
             }

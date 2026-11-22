@@ -247,12 +247,12 @@ final class LiveConversationSignOutAndCancellationTests: XCTestCase {
         await model.stop()
 
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
+        XCTAssertEqual(model.status, String(localized: "conversation.live.turn_cancelled", table: "Conversation"))
 
         // Wait to verify late poll response does not overwrite cancelled state
         try await Task.sleep(nanoseconds: 200_000_000)
         XCTAssertEqual(model.reply, .idle)
-        XCTAssertEqual(model.status, "Turn cancelled on Ember Cloud.")
+        XCTAssertEqual(model.status, String(localized: "conversation.live.turn_cancelled", table: "Conversation"))
     }
 
     func testSignOutRacingInFlightPollDoesNotRestorePreviousUserScreen() async throws {

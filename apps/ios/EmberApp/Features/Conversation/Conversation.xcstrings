@@ -534,13 +534,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Waiting for Ember Cloud to process this turn"
+            "value": "Awaiting response…"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "等待 Ember Cloud 处理此轮消息"
+            "value": "正在等待回复…"
           }
         }
       }
@@ -598,13 +598,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Cancel turn"
+            "value": "Cancel reply"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "取消此轮"
+            "value": "取消回复"
           }
         }
       }
@@ -742,13 +742,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Checking Ember Cloud…"
+            "value": "Checking for your reply…"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "正在检查 Ember Cloud…"
+            "value": "正在检查最新回复…"
           }
         }
       }
@@ -758,13 +758,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Still waiting for Ember Cloud."
+            "value": "Message accepted — Ember is still working on your reply."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "仍在等待 Ember Cloud…"
+            "value": "消息已接收，Ember 仍在准备回复。"
           }
         }
       }
@@ -1910,13 +1910,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Unable to reach Ember Cloud. Showing last synced messages."
+            "value": "Temporary connection issue. Showing your last synced messages."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂时无法连接 Ember 云端，正在显示最近同步的消息。"
+            "value": "连接暂时中断，正在显示最近同步的对话。"
           }
         }
       }
@@ -3766,13 +3766,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Awaiting confirmation"
+            "value": "Checking whether sent"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "等待云端确认"
+            "value": "正在确认是否已发送"
           }
         }
       }
@@ -3830,13 +3830,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ember couldn't complete this reply. You can send your message again."
+            "value": "Your message was received, but Ember couldn't finish a reply. You can try sending again."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ember 暂时未能完成这次回复，你可以重新发送消息。"
+            "value": "消息已收到，但 Ember 未能完成这次回复。你可以再试一次。"
           }
         }
       }
@@ -3846,13 +3846,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sign in with Apple to use Live Cloud."
+            "value": "Sign in with Apple to continue."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "使用 Apple 登录以连接 Ember 云端。"
+            "value": "请使用 Apple 登录以继续。"
           }
         }
       }
@@ -3910,13 +3910,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This Apple account is not allowlisted for this staging environment."
+            "value": "This Apple account isn't authorized for this Ember environment."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "当前 Apple 账号未加入此环境的允许名单。"
+            "value": "当前 Apple 账号暂无此 Ember 环境的访问权限。"
           }
         }
       }
@@ -3937,18 +3937,546 @@
         }
       }
     },
-    "conversation.live.send_rejected": {
+    "conversation.live.sign_in_failed": {
       "localizations": {
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "This request was rejected by the server policy."
+            "value": "Could not sign in right now. Please try again."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "该请求被服务端策略拒绝。"
+            "value": "暂时无法登录，请稍后重试。"
+          }
+        }
+      }
+    },
+    "conversation.live.send_rejected": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your message wasn't accepted. Review or edit your draft in the input box before sending again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "这条消息未被接收。请在输入框中检查并修改草稿后再试。"
+          }
+        }
+      }
+    },
+    "conversation.live.message_accepted": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Message accepted"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息已接收"
+          }
+        }
+      }
+    },
+    "conversation.live.send_unknown_ack_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Checking whether your message was sent. It hasn't been marked as failed and won't be sent twice — tap Try again to check status."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在确认消息是否已发送。系统尚未判定失败，也不会重复发送；请点击“重试”核对发送状态。"
+          }
+        }
+      }
+    },
+    "conversation.live.send_unknown_ack_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Delivery is not confirmed yet. Check the message status before trying to send again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "发送结果尚未确认，请先检查消息状态，不要重复发送。"
+          }
+        }
+      }
+    },
+    "conversation.live.retry_unknown_ack_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Still unable to confirm whether your message was sent. Check the message status again shortly before trying to send again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仍无法确认消息是否已发送。请稍后再次检查消息状态，不要重复发送。"
+          }
+        }
+      }
+    },
+    "conversation.live.send_conflict_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your message wasn't accepted because the conversation changed. Your draft is in the input box — review before sending again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话已更新，这条消息未被接收。草稿已为你保留在输入框中，确认后再重新发送。"
+          }
+        }
+      }
+    },
+    "conversation.live.send_rejected_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Not sent — this message will not be sent automatically."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "消息未发出，系统不会自动重发。"
+          }
+        }
+      }
+    },
+    "conversation.live.previous_rejected_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your previous message wasn't accepted. Your draft is ready in the input box to review before sending again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "上一条消息未被接收。草稿已恢复至输入框，请确认后再重新发送。"
+          }
+        }
+      }
+    },
+    "conversation.live.stream_interrupted_checking": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Live updates paused. Your message was saved — checking for Ember's reply."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "实时连接暂时中断，你的消息已保存，正在继续获取回复。"
+          }
+        }
+      }
+    },
+    "conversation.live.reply_interrupted_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your message was saved, but the reply connection was interrupted. Tap Try again when online to check for the reply."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你的消息已保存，但等待回复时连接中断。恢复网络后可点击“重试”获取最新回复。"
+          }
+        }
+      }
+    },
+    "conversation.live.reply_interrupted_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary connection issue — Ember may still be working on your reply."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接暂时中断，Ember 可能仍在继续处理你的回复。"
+          }
+        }
+      }
+    },
+    "conversation.live.load_unavailable_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary connection issue. Couldn't load your conversation — tap Try again to reconnect."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接暂时中断，暂时无法加载对话，请点击“重试”重新连接。"
+          }
+        }
+      }
+    },
+    "conversation.live.load_unavailable_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your saved messages are unaffected."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你已保存的对话不会受影响。"
+          }
+        }
+      }
+    },
+    "conversation.live.connection_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary connection issue. Could not connect to Ember — tap Try again when you're online."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接暂时中断，暂时无法连接到 Ember。请在恢复网络后点击“重试”。"
+          }
+        }
+      }
+    },
+    "conversation.live.retry_sync_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Temporary connection issue. Could not update your conversation — try again shortly."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "连接暂时中断，暂时无法更新对话，请稍后重试。"
+          }
+        }
+      }
+    },
+    "conversation.live.turn_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Reply cancelled."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消本次回复。"
+          }
+        }
+      }
+    },
+    "conversation.live.cancel_requested": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancellation requested — checking whether Ember has stopped."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已请求取消回复，正在确认是否已停止。"
+          }
+        }
+      }
+    },
+    "conversation.live.cancel_status_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Could not confirm whether the reply stopped. Checking status now."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂未确认回复是否已停止，正在检查当前状态。"
+          }
+        }
+      }
+    },
+    "auth.error.apple_cancelled": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sign-in was cancelled. You are not signed in."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已取消登录，当前未登录账号。"
+          }
+        }
+      }
+    },
+    "auth.error.keychain_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your session could not be saved because the device keychain is locked. Unlock the device and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "设备钥匙串当前已锁定，暂时无法保存会话。请解锁设备后重试。"
+          }
+        }
+      }
+    },
+    "auth.error.network_unreachable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember could not reach the server. Your session was kept on this device; try again when you are online."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "暂时无法连接到服务器。你的登录会话仍保留在此设备上，恢复网络后可重试。"
+          }
+        }
+      }
+    },
+    "auth.error.server_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember is temporarily unavailable. Try again shortly."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember 服务暂时不可用，请稍后重试。"
+          }
+        }
+      }
+    },
+    "auth.error.rate_limited": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Too many attempts. Wait a moment and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "操作过于频繁，请稍候再试。"
+          }
+        }
+      }
+    },
+    "auth.error.session_invalid": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your session is no longer valid. Sign in again to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前登录会话已失效，请重新登录以继续。"
+          }
+        }
+      }
+    },
+    "auth.error.access_denied": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This Apple account is not authorized for this Ember environment."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前 Apple 账号暂无此 Ember 环境的访问权限。"
+          }
+        }
+      }
+    },
+    "auth.error.rotation_unknown": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Your session could not be confirmed. Sign in again to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法确认当前会话状态，请重新登录以继续。"
+          }
+        }
+      }
+    },
+    "auth.error.recovery_fence_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember could not prepare a secure session on this device. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法在此设备上准备安全会话，请重试。"
+          }
+        }
+      }
+    },
+    "auth.error.stored_session_corrupt": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The saved session could not be read. Sign in again to continue."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "无法读取已保存的登录会话，请重新登录以继续。"
+          }
+        }
+      }
+    },
+    "auth.error.unexpected_response": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The server returned an unexpected response. Nothing was changed on this device."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务器返回了异常响应，此设备上的内容未作更改。"
+          }
+        }
+      }
+    },
+    "auth.error.invalid_base_url": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This build is not configured for a secure Ember endpoint."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前版本未配置安全的 Ember 服务地址。"
+          }
+        }
+      }
+    },
+    "auth.error.apple_incomplete": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple sign-in did not complete. Try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Apple 登录未完成，请重试。"
+          }
+        }
+      }
+    },
+    "auth.error.superseded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "A newer sign-in replaced this one."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已有更新的登录会话替换了本次操作。"
+          }
+        }
+      }
+    },
+    "auth.error.request_not_completed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The request was not completed. Nothing was saved."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请求未能完成，未保存任何更改。"
           }
         }
       }

@@ -607,7 +607,13 @@ final class LiveConversationHostTasksTests: XCTestCase {
 
         await model.start()
         XCTAssertNil(model.profile)
-        XCTAssertEqual(model.reply, .failed(message: "Cloud connection unavailable. Retry to connect.", retryable: true))
+        XCTAssertEqual(
+            model.reply,
+            .failed(
+                message: String(localized: "conversation.live.connection_unavailable", table: "Conversation"),
+                retryable: true
+            )
+        )
 
         await model.refreshConversationAndTasks()
         XCTAssertNotNil(model.profile)

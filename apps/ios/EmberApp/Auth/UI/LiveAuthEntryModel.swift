@@ -95,36 +95,36 @@ final class LiveAuthEntryModel {
     static func message(for error: AuthError) -> String {
         switch error {
         case .appleCancelled:
-            "Sign-in was cancelled. You are not signed in."
+            String(localized: "auth.error.apple_cancelled", table: "Conversation")
         case .keychainUnavailable:
-            "Your session could not be saved because the device keychain is locked. Unlock the device and try again."
+            String(localized: "auth.error.keychain_unavailable", table: "Conversation")
         case .offline, .timedOut, .transportFailure, .nonHTTPResponse:
-            "Ember could not reach the server. Your session was kept on this device; try again when you are online."
+            String(localized: "auth.error.network_unreachable", table: "Conversation")
         case .serverUnavailable:
-            "Ember is temporarily unavailable. Try again shortly."
+            String(localized: "auth.error.server_unavailable", table: "Conversation")
         case .rateLimited:
-            "Too many attempts. Wait a moment and try again."
+            String(localized: "auth.error.rate_limited", table: "Conversation")
         case .unauthenticated, .sessionMissing, .sessionEnded:
-            "Your session is no longer valid. Sign in again to continue."
+            String(localized: "auth.error.session_invalid", table: "Conversation")
         case .accessDenied:
-            "This Apple account is not authorized for this Ember environment."
+            String(localized: "auth.error.access_denied", table: "Conversation")
         case .rotationOutcomeUnknown:
-            "Your session could not be confirmed. Sign in again to continue."
+            String(localized: "auth.error.rotation_unknown", table: "Conversation")
         case .recoveryFenceUnavailable:
-            "Ember could not prepare a secure session on this device. Try again."
+            String(localized: "auth.error.recovery_fence_unavailable", table: "Conversation")
         case .storedSessionCorrupt:
-            "The saved session could not be read. Sign in again to continue."
+            String(localized: "auth.error.stored_session_corrupt", table: "Conversation")
         case .invalidResponse, .unexpectedStatus, .notFound, .invalidRequest:
-            "The server returned an unexpected response. Nothing was changed on this device."
+            String(localized: "auth.error.unexpected_response", table: "Conversation")
         case .invalidBaseURL:
-            "This build is not configured for a secure Ember endpoint."
+            String(localized: "auth.error.invalid_base_url", table: "Conversation")
         case .appleAuthorizationFailed, .appleCredentialInvalid, .appleAttemptExpired,
             .appleAuthorizationInProgress:
-            "Apple sign-in did not complete. Try again."
+            String(localized: "auth.error.apple_incomplete", table: "Conversation")
         case .superseded:
-            "A newer sign-in replaced this one."
+            String(localized: "auth.error.superseded", table: "Conversation")
         case .requestRejectedBeforeExecution, .unknownWriteOutcome:
-            "The request was not completed. Nothing was saved."
+            String(localized: "auth.error.request_not_completed", table: "Conversation")
         }
     }
 }

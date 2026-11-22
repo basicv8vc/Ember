@@ -69,6 +69,7 @@ struct ConversationScreenState {
     var showsEmptyState = true
     var isLoading = false
     var isSubmitting = false
+    var isStopping = false
     var streamingReplyText: String? = nil
     var commandStatus: ConversationCommandStatus = .idle
     var attachments: [ComposerAttachment] = []

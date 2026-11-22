@@ -160,11 +160,26 @@ final class ConversationHostModel {
         Task { await persistPendingInputAndStartReply(turnID: turnID) }
     }
 
-    func stopReply() async {
+    func triggerStopReply() {
         guard ConversationInteractionRules.stopAction(for: replyState) == .stopMockReply else { return }
         guard !isStoppingReply else { return }
-
         isStoppingReply = true
+        Task { await stopReply(alreadyMarkedStopping: true) }
+    }
+
+    func stopReply() async {
+        await stopReply(alreadyMarkedStopping: false)
+    }
+
+    private func stopReply(alreadyMarkedStopping: Bool) async {
+        guard ConversationInteractionRules.stopAction(for: replyState) == .stopMockReply else {
+            if alreadyMarkedStopping { isStoppingReply = false }
+            return
+        }
+        if !alreadyMarkedStopping {
+            guard !isStoppingReply else { return }
+            isStoppingReply = true
+        }
         let stoppedReply = pendingReply
         replyWork?.cancel()
         replyWork = nil

@@ -97,6 +97,38 @@
         }
       }
     },
+    "conversation.composer.sending": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Sending message"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在发送消息"
+          }
+        }
+      }
+    },
+    "conversation.composer.stop_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Stop generating the current reply without clearing your draft."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "停止生成当前回复，不会清空你的草稿。"
+          }
+        }
+      }
+    },
     "conversation.live.sign_out": {
       "localizations": {
         "en": {

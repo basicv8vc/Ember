@@ -59,8 +59,13 @@ private enum AttachmentPopoverDragBehavior {
 struct ConversationComposer: View {
     @Binding var draft: String
     var focused: FocusState<Bool>.Binding
-    let isGenerating: Bool
+    let replyState: ConversationReplyState
+    var isLoading: Bool = false
+    var isSubmitting: Bool = false
+    var isStopping: Bool = false
     var note: LocalizedStringKey = "conversation.composer.local_note"
+    var showsNote: Bool = true
+    var stopText: LocalizedStringKey = "conversation.reply.stop"
     var attachments: [ComposerAttachment] = []
     var isUploadingAttachment: Bool = false
     var attachmentError: String? = nil
@@ -68,13 +73,21 @@ struct ConversationComposer: View {
     var hidesAttachmentTrigger: Bool = false
     var onPickAttachment: (() -> Void)? = nil
     var onRemoveAttachment: ((UUID) -> Void)? = nil
+    var onStopGenerating: (() -> Void)? = nil
     let onSend: (String) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     init(
         draft: Binding<String>,
         focused: FocusState<Bool>.Binding,
-        isGenerating: Bool,
+        replyState: ConversationReplyState,
+        isLoading: Bool = false,
+        isSubmitting: Bool = false,
+        isStopping: Bool = false,
         note: LocalizedStringKey = "conversation.composer.local_note",
+        showsNote: Bool = true,
+        stopText: LocalizedStringKey = "conversation.reply.stop",
         attachments: [ComposerAttachment] = [],
         isUploadingAttachment: Bool = false,
         attachmentError: String? = nil,
@@ -82,12 +95,18 @@ struct ConversationComposer: View {
         hidesAttachmentTrigger: Bool = false,
         onPickAttachment: (() -> Void)? = nil,
         onRemoveAttachment: ((UUID) -> Void)? = nil,
+        onStopGenerating: (() -> Void)? = nil,
         onSend: @escaping (String) -> Void
     ) {
         _draft = draft
         self.focused = focused
-        self.isGenerating = isGenerating
+        self.replyState = replyState
+        self.isLoading = isLoading
+        self.isSubmitting = isSubmitting
+        self.isStopping = isStopping
         self.note = note
+        self.showsNote = showsNote
+        self.stopText = stopText
         self.attachments = attachments
         self.isUploadingAttachment = isUploadingAttachment
         self.attachmentError = attachmentError
@@ -95,22 +114,34 @@ struct ConversationComposer: View {
         self.hidesAttachmentTrigger = hidesAttachmentTrigger
         self.onPickAttachment = onPickAttachment
         self.onRemoveAttachment = onRemoveAttachment
+        self.onStopGenerating = onStopGenerating
         self.onSend = onSend
+    }
+
+    private var isComposerBusy: Bool {
+        replyState == .generating || isSubmitting || isStopping || isLoading
     }
 
     private var submission: ConversationComposerSubmission? {
         ConversationInteractionRules.submission(
             for: draft,
-            isGenerating: isGenerating || isUploadingAttachment
+            isGenerating: isComposerBusy || isUploadingAttachment
         )
     }
 
-    private var canSend: Bool {
-        submission != nil
+    private var trailingAction: ConversationComposerTrailingAction {
+        ConversationInteractionRules.trailingAction(
+            for: draft,
+            replyState: replyState,
+            isSubmitting: isSubmitting,
+            isStopping: isStopping,
+            isLoading: isLoading,
+            isUploadingAttachment: isUploadingAttachment
+        )
     }
 
     private var canOpenAttachmentMenu: Bool {
-        !isGenerating && !isUploadingAttachment
+        !isComposerBusy && !isUploadingAttachment
     }
 
     private var canAttachMore: Bool {
@@ -121,23 +152,26 @@ struct ConversationComposer: View {
         VStack(spacing: 7) {
             if let attachmentError {
                 attachmentErrorBanner(attachmentError)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
 
             if !attachments.isEmpty || isUploadingAttachment {
                 attachmentChipsRow
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+                    .transition(reduceMotion ? .opacity : .move(edge: .bottom).combined(with: .opacity))
             }
 
             floatingComposerBar
 
-            Text(note, tableName: "Conversation")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: 640)
-                .padding(.horizontal, 8)
+            if showsNote {
+                Text(note, tableName: "Conversation")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: 640)
+                    .padding(.horizontal, 8)
+                    .accessibilityIdentifier("conversation-composer-note")
+            }
         }
         .padding(.horizontal, 14)
         .padding(.top, 8)
@@ -160,15 +194,16 @@ struct ConversationComposer: View {
                     .ignoresSafeArea(edges: .bottom)
             }
         }
-        .animation(ConversationComposerMotion.pillSpring, value: attachments.count)
-        .animation(ConversationComposerMotion.pillSpring, value: isUploadingAttachment)
-        .animation(ConversationComposerMotion.pillSpring, value: attachmentError)
+        .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: attachments.count)
+        .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: isUploadingAttachment)
+        .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: attachmentError)
+        .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: showsNote)
         .sensoryFeedback(.selection, trigger: isAttachmentMenuPresented)
     }
 
     private var floatingComposerBar: some View {
         EmberGlassGroup(spacing: 10) {
-            HStack(alignment: .bottom, spacing: 10) {
+            HStack(alignment: .bottom, spacing: 8) {
                 if onPickAttachment != nil {
                     attachmentTriggerButton
                 }
@@ -187,11 +222,12 @@ struct ConversationComposer: View {
                 .font(.title3.weight(.medium))
                 .foregroundStyle(.primary)
                 .frame(width: 42, height: 42)
-                .contentShape(Circle())
+                .emberGlassCircleSurface(interactive: canOpenAttachmentMenu)
+                .anchorPreference(key: ConversationAttachmentButtonAnchorKey.self, value: .bounds) { $0 }
+                .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .emberGlassCircleSurface(interactive: canOpenAttachmentMenu)
-        .anchorPreference(key: ConversationAttachmentButtonAnchorKey.self, value: .bounds) { $0 }
         // Hide the underlying glass source while the morphed popover owns this spot.
         .opacity(hidesAttachmentTrigger ? 0 : (canOpenAttachmentMenu ? 1 : 0.45))
         .allowsHitTesting(!hidesAttachmentTrigger)
@@ -207,7 +243,7 @@ struct ConversationComposer: View {
     }
 
     private var composerInputPill: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        HStack(alignment: .bottom, spacing: 2) {
             TextField(
                 String(localized: "conversation.composer.placeholder", table: "Conversation"),
                 text: $draft,
@@ -220,33 +256,71 @@ struct ConversationComposer: View {
             .submitLabel(.send)
             .onSubmit(sendIfPossible)
             .padding(.leading, 16)
-            .padding(.vertical, 9)
+            .padding(.vertical, 11)
             .accessibilityLabel(Text("conversation.composer.accessibility", tableName: "Conversation"))
             .accessibilityIdentifier("conversation-composer-input")
 
+            trailingActionButton
+        }
+        .frame(minHeight: EmberDesignTokens.minTapTarget)
+        .emberGlassRoundedSurface(cornerRadius: 22, interactive: false, tintOpacity: 0.52, elevated: false)
+    }
+
+    @ViewBuilder
+    private var trailingActionButton: some View {
+        switch trailingAction {
+        case .send(let isEnabled):
             Button(action: sendIfPossible) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(canSend ? Color.white : Color.secondary)
-                    .frame(width: 32, height: 32)
+                    .foregroundStyle(isEnabled ? Color.white : Color.secondary)
+                    .frame(width: 34, height: 34)
                     .background(
-                        canSend ? Color.accentColor : Color.primary.opacity(0.08),
+                        isEnabled ? Color.accentColor : Color.primary.opacity(0.08),
                         in: Circle()
                     )
-                    .scaleEffect(canSend ? 1.0 : 0.94)
-                    .contentShape(Circle())
+                    .scaleEffect(isEnabled ? 1.0 : 0.94)
+                    .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .disabled(!canSend)
-            .padding(.trailing, 5)
-            .padding(.bottom, 5)
-            .animation(ConversationComposerMotion.pillSpring, value: canSend)
+            .disabled(!isEnabled)
+            .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: trailingAction)
             .accessibilityLabel(Text("conversation.composer.send", tableName: "Conversation"))
             .accessibilityHint(Text("conversation.composer.send_hint", tableName: "Conversation"))
             .accessibilityIdentifier("conversation-send")
+
+        case .submitting:
+            Button {} label: {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(width: 34, height: 34)
+                    .background(Color.primary.opacity(0.08), in: Circle())
+                    .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(true)
+            .accessibilityLabel(Text("conversation.composer.sending", tableName: "Conversation"))
+            .accessibilityIdentifier("conversation-send")
+
+        case .stop(let isEnabled):
+            Button(action: stopGeneratingIfPossible) {
+                Image(systemName: "stop.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundStyle(Color(uiColor: .systemBackground))
+                    .frame(width: 34, height: 34)
+                    .background(Color.primary.opacity(isEnabled ? 1.0 : 0.45), in: Circle())
+                    .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!isEnabled)
+            .animation(reduceMotion ? nil : ConversationComposerMotion.pillSpring, value: trailingAction)
+            .accessibilityLabel(Text(stopText, tableName: "Conversation"))
+            .accessibilityHint(Text("conversation.composer.stop_hint", tableName: "Conversation"))
+            .accessibilityIdentifier("conversation-composer-stop")
         }
-        .frame(minHeight: 42)
-        .emberGlassRoundedSurface(cornerRadius: 21, interactive: false, tintOpacity: 0.52, elevated: false)
     }
 
     private func attachmentErrorBanner(_ message: String) -> some View {
@@ -318,7 +392,7 @@ struct ConversationComposer: View {
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
-            .frame(maxWidth: 160, alignment: .leading)
+            .frame(maxWidth: 148, alignment: .leading)
 
             if let onRemoveAttachment {
                 Button {
@@ -327,18 +401,20 @@ struct ConversationComposer: View {
                     Image(systemName: "xmark.circle.fill")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
-                        .frame(width: 26, height: 26)
-                        .contentShape(Circle())
+                        .frame(width: 24, height: 24)
+                        .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .disabled(isGenerating || isUploadingAttachment)
+                .disabled(isComposerBusy || isUploadingAttachment)
                 .accessibilityLabel(Text("conversation.composer.remove_attachment", tableName: "Conversation"))
                 .accessibilityIdentifier("conversation-remove-attachment-\(attachment.id.uuidString.lowercased())")
             }
         }
-        .padding(.leading, 7)
-        .padding(.trailing, 6)
-        .padding(.vertical, 6)
+        .padding(.leading, 8)
+        .padding(.trailing, onRemoveAttachment == nil ? 10 : 0)
+        .padding(.vertical, onRemoveAttachment == nil ? 6 : 0)
+        .frame(minHeight: EmberDesignTokens.minTapTarget)
         .emberGlassRoundedSurface(cornerRadius: 16, interactive: false, tintOpacity: 0.42, elevated: false)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-attachment-chip-\(attachment.filename)")
@@ -390,6 +466,14 @@ struct ConversationComposer: View {
         focused.wrappedValue = submission.composerShouldFocusAfterSubmission
         onSend(submission.message)
     }
+
+    private func stopGeneratingIfPossible() {
+        guard case .stop(isEnabled: true) = trailingAction else { return }
+        if isAttachmentMenuPresented {
+            isAttachmentMenuPresented = false
+        }
+        onStopGenerating?()
+    }
 }
 
 /// Morphs the `+` Liquid Glass circle directly into a sleek Hielo-style floating menu card
@@ -414,14 +498,15 @@ struct ConversationAttachmentPopoverOverlay: View {
     @State private var isDismissing = false
 
     private var menuWidth: CGFloat {
-        min(316, max(264, containerSize.width - 28))
+        ConversationAttachmentPopoverLayout.menuWidth(for: containerSize.width)
     }
 
     private var destinationRect: CGRect {
-        let size = measuredMenuSize == .zero ? CGSize(width: menuWidth, height: 268) : measuredMenuSize
-        let x = max(12, min(sourceRect.minX, containerSize.width - size.width - 12))
-        let y = max(12, sourceRect.maxY - size.height)
-        return CGRect(origin: CGPoint(x: x, y: y), size: size)
+        ConversationAttachmentPopoverLayout.destinationRect(
+            sourceRect: sourceRect,
+            measuredMenuSize: measuredMenuSize,
+            containerSize: containerSize
+        )
     }
 
     var body: some View {
@@ -443,42 +528,46 @@ struct ConversationAttachmentPopoverOverlay: View {
                     dragOffset: dragOffset,
                     dragScale: AttachmentPopoverDragBehavior.scale(for: dragOffset)
                 ) {
-                    ConversationComposerAttachmentMenu(
-                        canAttachFile: canAttachFile,
-                        attachedCount: attachedCount,
-                        onTakePhoto: onTakePhoto.map { handler in
-                            {
+                    ScrollView(.vertical, showsIndicators: false) {
+                        ConversationComposerAttachmentMenu(
+                            canAttachFile: canAttachFile,
+                            attachedCount: attachedCount,
+                            onTakePhoto: onTakePhoto.map { handler in
+                                {
+                                    dismissPopover()
+                                    handler()
+                                }
+                            },
+                            onChoosePhoto: onChoosePhoto.map { handler in
+                                {
+                                    dismissPopover()
+                                    handler()
+                                }
+                            },
+                            onChooseFile: {
                                 dismissPopover()
-                                handler()
-                            }
-                        },
-                        onChoosePhoto: onChoosePhoto.map { handler in
-                            {
+                                onChooseFile()
+                            },
+                            onSelectStarterPrompt: { starter in
                                 dismissPopover()
-                                handler()
+                                onSelectStarterPrompt(starter)
                             }
-                        },
-                        onChooseFile: {
-                            dismissPopover()
-                            onChooseFile()
-                        },
-                        onSelectStarterPrompt: { starter in
-                            dismissPopover()
-                            onSelectStarterPrompt(starter)
+                        )
+                        .frame(width: menuWidth)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .onGeometryChange(for: CGSize.self) { proxy in
+                            proxy.size
+                        } action: { newSize in
+                            guard !isDismissing,
+                                  newSize.width > 0,
+                                  newSize.height > 0,
+                                  newSize.width.isFinite,
+                                  newSize.height.isFinite,
+                                  newSize != measuredMenuSize else { return }
+                            measuredMenuSize = newSize
                         }
-                    )
-                    .frame(width: menuWidth)
-                    .onGeometryChange(for: CGSize.self) { proxy in
-                        proxy.size
-                    } action: { newSize in
-                        guard !isDismissing,
-                              newSize.width > 0,
-                              newSize.height > 0,
-                              newSize.width.isFinite,
-                              newSize.height.isFinite,
-                              newSize != measuredMenuSize else { return }
-                        measuredMenuSize = newSize
                     }
+                    .scrollBounceBehavior(.basedOnSize)
                 }
                 .opacity(measuredMenuSize == .zero ? 0 : 1)
                 .gesture(
@@ -494,6 +583,8 @@ struct ConversationAttachmentPopoverOverlay: View {
                                 predictedEndTranslation: value.predictedEndTranslation
                             ) {
                                 dismissPopover()
+                            } else if reduceMotion {
+                                dragOffset = .zero
                             } else {
                                 withAnimation(.spring(response: 0.28, dampingFraction: 0.78)) {
                                     dragOffset = .zero
@@ -649,6 +740,8 @@ struct ConversationComposerAttachmentMenu: View {
     let onChooseFile: () -> Void
     let onSelectStarterPrompt: (String) -> Void
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
             if let onTakePhoto {
@@ -741,22 +834,43 @@ struct ConversationComposerAttachmentMenu: View {
                     .background(badgeColor.gradient, in: Circle())
                     .accessibilityHidden(true)
 
-                Text(title, tableName: "Conversation")
-                    .font(.body.weight(.medium))
-                    .foregroundStyle(.primary)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                if dynamicTypeSize.isAccessibilitySize {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(title, tableName: "Conversation")
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(.primary)
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
 
-                if let trailingBadge {
-                    Text(trailingBadge)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                        .fixedSize(horizontal: true, vertical: false)
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(Color.primary.opacity(0.07), in: Capsule())
+                        if let trailingBadge {
+                            Text(trailingBadge)
+                                .font(.caption2.weight(.medium))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(Color.primary.opacity(0.07), in: Capsule())
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                } else {
+                    Text(title, tableName: "Conversation")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+
+                    if let trailingBadge {
+                        Text(trailingBadge)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 3)
+                            .background(Color.primary.opacity(0.07), in: Capsule())
+                    }
                 }
             }
             .padding(.horizontal, 14)
@@ -771,14 +885,16 @@ struct ConversationComposerAttachmentMenu: View {
 }
 
 private struct ComposerMenuRowButtonStyle: ButtonStyle {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .background(
                 configuration.isPressed ? Color.primary.opacity(0.08) : Color.clear,
                 in: RoundedRectangle(cornerRadius: 18, style: .continuous)
             )
-            .scaleEffect(configuration.isPressed ? 0.985 : 1.0)
-            .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
+            .scaleEffect(configuration.isPressed && !reduceMotion ? 0.985 : 1.0)
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: configuration.isPressed)
     }
 }
 

@@ -25,6 +25,7 @@ import type {
 export const DELEGATE_NOTES_TOOL_NAME = 'delegate_notes_action_items' as const;
 export const DELEGATE_PYTHON_TOOL_NAME = 'delegate_python_agent' as const;
 export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
+export const DELETE_PERSONAL_MEMORY_TOOL_NAME = 'delete_personal_memory' as const;
 export const CREATE_PROACTIVE_SCHEDULE_TOOL_NAME = 'create_proactive_schedule' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
@@ -32,24 +33,31 @@ export const DEFAULT_DELEGATION_ACK_TEXT =
 export const DEFAULT_PYTHON_DELEGATION_ACK_TEXT =
   'I have started running your Python task in an isolated sandbox.';
 export const DEFAULT_MEMORY_SAVE_ACK_TEXT = "Got it — I'll remember that.";
+export const DEFAULT_MEMORY_DELETE_ACK_TEXT =
+  "Got it — I'll remove that from your personal memory.";
 export const COMMITTED_MEMORY_SAVED_REPLY = 'Saved to your personal memory.';
 export const COMMITTED_MEMORY_UPDATED_REPLY = 'Updated your personal memory.';
+export const COMMITTED_MEMORY_DELETED_REPLY = 'Removed from your personal memory.';
 export const DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT = 'I have created your proactive schedule.';
 
 const HISTORICAL_NOTES_DELEGATION_MARKER = '[Prior turn called delegate_notes_action_items.]';
 const HISTORICAL_PYTHON_DELEGATION_MARKER = '[Prior turn called delegate_python_agent.]';
 const HISTORICAL_MEMORY_SAVE_MARKER = '[Prior turn called save_personal_memory.]';
+const HISTORICAL_MEMORY_DELETE_MARKER = '[Prior turn called delete_personal_memory.]';
 const HISTORICAL_PROACTIVE_SCHEDULE_MARKER = '[Prior turn called create_proactive_schedule.]';
 const FORBIDDEN_PLAIN_TEXT_DELEGATION_REPLIES = new Set([
   DEFAULT_DELEGATION_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
+  DEFAULT_MEMORY_DELETE_ACK_TEXT,
   COMMITTED_MEMORY_SAVED_REPLY,
   COMMITTED_MEMORY_UPDATED_REPLY,
+  COMMITTED_MEMORY_DELETED_REPLY,
   DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT,
   HISTORICAL_NOTES_DELEGATION_MARKER,
   HISTORICAL_PYTHON_DELEGATION_MARKER,
   HISTORICAL_MEMORY_SAVE_MARKER,
+  HISTORICAL_MEMORY_DELETE_MARKER,
   HISTORICAL_PROACTIVE_SCHEDULE_MARKER,
 ]);
 
@@ -166,6 +174,49 @@ export const SAVE_PERSONAL_MEMORY_TOOL = Object.freeze({
           minLength: 1,
           maxLength: 64,
         }),
+        replace_id: Object.freeze({
+          type: 'string',
+          description:
+            'Optional #id prefix or UUID of an existing saved memory to replace/update in place.',
+          minLength: 4,
+          maxLength: 64,
+        }),
+      }),
+    }),
+  }),
+});
+
+export const DELETE_PERSONAL_MEMORY_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+    description:
+      'Forget/delete a user-requested personal preference or fact from account memory. Call ONLY when the latest actual user message explicitly asks Ember to forget or remove a saved memory.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: [],
+      properties: Object.freeze({
+        memory_id: Object.freeze({
+          type: 'string',
+          description:
+            'Optional #id prefix or UUID of the saved memory to forget (preferred when shown in saved memory context).',
+          minLength: 4,
+          maxLength: 64,
+        }),
+        key: Object.freeze({
+          type: 'string',
+          description: 'Optional existing key of the saved memory to forget.',
+          minLength: 1,
+          maxLength: 64,
+        }),
+        content_match: Object.freeze({
+          type: 'string',
+          description:
+            'Optional concise phrase matching the saved memory content to forget when no id or key is known.',
+          minLength: 1,
+          maxLength: 200,
+        }),
       }),
     }),
   }),
@@ -246,6 +297,7 @@ export const NO_CONVERSATION_TOOLS = Object.freeze([] as const);
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
   ...DELEGATION_TOOLS,
   SAVE_PERSONAL_MEMORY_TOOL,
+  DELETE_PERSONAL_MEMORY_TOOL,
 ]);
 
 export const CONVERSATION_TOOLS_WITH_SCHEDULE = Object.freeze([
@@ -256,6 +308,7 @@ export const CONVERSATION_TOOLS_WITH_SCHEDULE = Object.freeze([
 export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE = Object.freeze([
   ...DELEGATION_TOOLS,
   SAVE_PERSONAL_MEMORY_TOOL,
+  DELETE_PERSONAL_MEMORY_TOOL,
   CREATE_PROACTIVE_SCHEDULE_TOOL,
 ]);
 
@@ -282,7 +335,7 @@ export function getConversationTools(capabilities?: boolean | ConversationToolCa
     return DELEGATION_TOOLS;
   }
   return Object.freeze([
-    ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL] : []),
+    ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL, DELETE_PERSONAL_MEMORY_TOOL] : []),
     ...(allowSchedule ? [CREATE_PROACTIVE_SCHEDULE_TOOL] : []),
   ]);
 }
@@ -366,30 +419,58 @@ const delegatePythonToolArgsSchema = z.strictObject({
 });
 
 const PERSONAL_MEMORY_KEY_REGEX = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const PERSONAL_MEMORY_REF_REGEX = /^[0-9a-f][0-9a-f-]{3,63}$/;
+
+function normalizePersonalMemoryToolKey(value: string | null | undefined): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  const normalized = value
+    .trim()
+    .toLowerCase()
+    .replace(/[\s:/\\]+/g, '_')
+    .replace(/[^a-z0-9._-]+/g, '')
+    .replace(/_+/g, '_')
+    .replace(/^[^a-z0-9]+/, '')
+    .slice(0, 64);
+  return PERSONAL_MEMORY_KEY_REGEX.test(normalized) ? normalized : undefined;
+}
+
+function normalizePersonalMemoryRefId(value: string | null | undefined): string | undefined {
+  if (value === null || value === undefined) {
+    return undefined;
+  }
+  const normalized = value.trim().replace(/^#+/, '').toLowerCase();
+  return PERSONAL_MEMORY_REF_REGEX.test(normalized) ? normalized : undefined;
+}
 
 const savePersonalMemoryToolArgsSchema = z.strictObject({
-  kind: z.enum(['preference', 'fact']),
+  kind: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .pipe(z.enum(['preference', 'fact'])),
   content: z
     .string()
     .trim()
     .min(1)
-    .max(500)
-    .refine((text) => !/\p{Surrogate}/u.test(text), 'content contains invalid surrogate'),
-  key: z
-    .string()
-    .nullable()
-    .optional()
-    .transform((value) => {
-      if (value === null || value === undefined) {
-        return undefined;
-      }
-      const normalized = value.trim().toLowerCase();
-      return normalized.length === 0 ? undefined : normalized;
-    })
-    .refine((value) => value === undefined || PERSONAL_MEMORY_KEY_REGEX.test(value), {
-      message: 'invalid personal memory key',
-    }),
+    .refine((text) => !/\p{Surrogate}/u.test(text), 'content contains invalid surrogate')
+    .transform((text) => clampText(text, 500).text),
+  key: z.string().nullable().optional().transform(normalizePersonalMemoryToolKey),
+  replace_id: z.string().nullable().optional().transform(normalizePersonalMemoryRefId),
 });
+
+const deletePersonalMemoryToolArgsSchema = z
+  .strictObject({
+    memory_id: z.string().nullable().optional().transform(normalizePersonalMemoryRefId),
+    key: z.string().nullable().optional().transform(normalizePersonalMemoryToolKey),
+    content_match: optionalBoundedText(200),
+  })
+  .refine(
+    (value) =>
+      value.memory_id !== undefined || value.key !== undefined || value.content_match !== undefined,
+    'at least one selector (memory_id, key, or content_match) is required',
+  );
 
 const createProactiveScheduleToolArgsSchema = z
   .strictObject({
@@ -551,6 +632,9 @@ function formatContextTurnMessage(
       trimmed === COMMITTED_MEMORY_UPDATED_REPLY
     ) {
       return { role: 'assistant', content: HISTORICAL_MEMORY_SAVE_MARKER };
+    }
+    if (trimmed === DEFAULT_MEMORY_DELETE_ACK_TEXT || trimmed === COMMITTED_MEMORY_DELETED_REPLY) {
+      return { role: 'assistant', content: HISTORICAL_MEMORY_DELETE_MARKER };
     }
     if (trimmed === DEFAULT_PROACTIVE_SCHEDULE_ACK_TEXT) {
       return { role: 'assistant', content: HISTORICAL_PROACTIVE_SCHEDULE_MARKER };
@@ -719,8 +803,134 @@ export function parseConversationTurnChoice(
   const toolCalls = choice.message.tool_calls;
 
   if (toolCalls !== undefined && toolCalls.length > 0) {
-    if (toolCalls.length !== 1) {
-      throw new ModelGatewayFailure('model_invalid_output');
+    const rawText = typeof choice.message.content === 'string' ? choice.message.content.trim() : '';
+
+    if (toolCalls.length > 1) {
+      if (options?.allowSavePersonalMemory !== true) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+      const allSaveMemory = toolCalls.every(
+        (call) => call.type === 'function' && call.function.name === SAVE_PERSONAL_MEMORY_TOOL_NAME,
+      );
+      const allDeleteMemory = toolCalls.every(
+        (call) =>
+          call.type === 'function' && call.function.name === DELETE_PERSONAL_MEMORY_TOOL_NAME,
+      );
+      if (!allSaveMemory && !allDeleteMemory) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+
+      if (allDeleteMemory) {
+        const targets: {
+          readonly memoryId?: string;
+          readonly key?: string;
+          readonly contentMatch?: string;
+        }[] = [];
+        const seen = new Set<string>();
+        for (const call of toolCalls) {
+          let parsedJson: unknown;
+          try {
+            parsedJson = JSON.parse(call.function.arguments);
+          } catch {
+            throw new ModelGatewayFailure('model_invalid_output');
+          }
+          const parsedArgs = deletePersonalMemoryToolArgsSchema.safeParse(parsedJson);
+          if (!parsedArgs.success) {
+            throw new ModelGatewayFailure('model_invalid_output');
+          }
+          const target = {
+            ...(parsedArgs.data.memory_id === undefined
+              ? {}
+              : { memoryId: parsedArgs.data.memory_id }),
+            ...(parsedArgs.data.key === undefined ? {} : { key: parsedArgs.data.key }),
+            ...(parsedArgs.data.content_match === undefined
+              ? {}
+              : { contentMatch: parsedArgs.data.content_match }),
+          };
+          const dedupKey = `${target.memoryId ?? ''}:${target.key ?? ''}:${target.contentMatch ?? ''}`;
+          if (!seen.has(dedupKey) && targets.length < 10) {
+            seen.add(dedupKey);
+            targets.push(Object.freeze(target));
+          }
+        }
+        const ackText =
+          rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_MEMORY_DELETE_ACK_TEXT;
+        return Object.freeze({
+          kind: 'delete_memory' as const,
+          toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+          text: ackText,
+          finishReason,
+          memory: Object.freeze({
+            toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+            arguments: Object.freeze({ targets: Object.freeze(targets) }),
+          }),
+        });
+      }
+
+      const parsedMemories: z.infer<typeof savePersonalMemoryToolArgsSchema>[] = [];
+      const seen = new Set<string>();
+      for (const call of toolCalls) {
+        let parsedJson: unknown;
+        try {
+          parsedJson = JSON.parse(call.function.arguments);
+        } catch {
+          throw new ModelGatewayFailure('model_invalid_output');
+        }
+        const parsedArgs = savePersonalMemoryToolArgsSchema.safeParse(parsedJson);
+        if (!parsedArgs.success) {
+          throw new ModelGatewayFailure('model_invalid_output');
+        }
+        const dedupKey = `${parsedArgs.data.kind}:${parsedArgs.data.key ?? ''}:${parsedArgs.data.replace_id ?? ''}:${parsedArgs.data.content}`;
+        if (!seen.has(dedupKey)) {
+          seen.add(dedupKey);
+          parsedMemories.push(parsedArgs.data);
+        }
+      }
+      const first = parsedMemories[0]!;
+      const allSameKind = parsedMemories.every((item) => item.kind === first.kind);
+      const distinctKeys = new Set(
+        parsedMemories.map((item) => item.key).filter((k): k is string => k !== undefined),
+      );
+      const sharedKey =
+        parsedMemories.length === 1
+          ? first.key
+          : distinctKeys.size === 1 && parsedMemories.every((item) => item.key !== undefined)
+            ? [...distinctKeys][0]
+            : undefined;
+      const distinctReplaceIds = new Set(
+        parsedMemories
+          .map((item) => item.replace_id)
+          .filter((id): id is string => id !== undefined),
+      );
+      const sharedReplaceId =
+        parsedMemories.length === 1
+          ? first.replace_id
+          : distinctReplaceIds.size === 1 &&
+              parsedMemories.every((item) => item.replace_id !== undefined)
+            ? [...distinctReplaceIds][0]
+            : undefined;
+      const mergedContent =
+        parsedMemories.length === 1
+          ? first.content
+          : clampText(parsedMemories.map((item) => item.content).join('; '), 500).text;
+      const ackText =
+        rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_MEMORY_SAVE_ACK_TEXT;
+      const cleanArgs = {
+        kind: allSameKind ? first.kind : ('fact' as const),
+        content: mergedContent,
+        ...(sharedKey === undefined ? {} : { key: sharedKey }),
+        ...(sharedReplaceId === undefined ? {} : { replaceId: sharedReplaceId }),
+      };
+      return Object.freeze({
+        kind: 'save_memory' as const,
+        toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+        text: ackText,
+        finishReason,
+        memory: Object.freeze({
+          toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
+          arguments: Object.freeze(cleanArgs),
+        }),
+      });
     }
 
     const call = toolCalls[0]!;
@@ -734,8 +944,6 @@ export function parseConversationTurnChoice(
     } catch {
       throw new ModelGatewayFailure('model_invalid_output');
     }
-
-    const rawText = typeof choice.message.content === 'string' ? choice.message.content.trim() : '';
 
     if (call.function.name === DELEGATE_NOTES_TOOL_NAME) {
       if (options?.allowDelegation === false) {
@@ -823,6 +1031,9 @@ export function parseConversationTurnChoice(
         kind: parsedArgs.data.kind,
         content: parsedArgs.data.content,
         ...(parsedArgs.data.key === undefined ? {} : { key: parsedArgs.data.key }),
+        ...(parsedArgs.data.replace_id === undefined
+          ? {}
+          : { replaceId: parsedArgs.data.replace_id }),
       };
 
       return Object.freeze({
@@ -833,6 +1044,37 @@ export function parseConversationTurnChoice(
         memory: Object.freeze({
           toolName: SAVE_PERSONAL_MEMORY_TOOL_NAME,
           arguments: Object.freeze(cleanArgs),
+        }),
+      });
+    }
+
+    if (call.function.name === DELETE_PERSONAL_MEMORY_TOOL_NAME) {
+      if (options?.allowSavePersonalMemory !== true) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+      const parsedArgs = deletePersonalMemoryToolArgsSchema.safeParse(rawArgs);
+      if (!parsedArgs.success) {
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+
+      const ackText =
+        rawText.length > 0 ? clampText(rawText, 8_192).text : DEFAULT_MEMORY_DELETE_ACK_TEXT;
+      const target = Object.freeze({
+        ...(parsedArgs.data.memory_id === undefined ? {} : { memoryId: parsedArgs.data.memory_id }),
+        ...(parsedArgs.data.key === undefined ? {} : { key: parsedArgs.data.key }),
+        ...(parsedArgs.data.content_match === undefined
+          ? {}
+          : { contentMatch: parsedArgs.data.content_match }),
+      });
+
+      return Object.freeze({
+        kind: 'delete_memory' as const,
+        toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+        text: ackText,
+        finishReason,
+        memory: Object.freeze({
+          toolName: DELETE_PERSONAL_MEMORY_TOOL_NAME,
+          arguments: Object.freeze({ targets: Object.freeze([target]) }),
         }),
       });
     }
@@ -1052,8 +1294,15 @@ export function clampText(
   }
   const suffix = '…';
   const keep = Math.max(1, maxChars - suffix.length);
+  let head = text.slice(0, keep);
+  if (head.length > 0) {
+    const lastCode = head.charCodeAt(head.length - 1);
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+      head = head.slice(0, -1);
+    }
+  }
   return {
-    text: `${text.slice(0, keep).trimEnd()}${suffix}`,
+    text: `${head.trimEnd()}${suffix}`,
     truncated: true,
   };
 }

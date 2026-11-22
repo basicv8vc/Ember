@@ -47,6 +47,14 @@ export interface FakeGatewayScriptRule {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
     readonly key?: string;
+    readonly replaceId?: string;
+  };
+  readonly deletePersonalMemory?: {
+    readonly targets: readonly {
+      readonly memoryId?: string;
+      readonly key?: string;
+      readonly contentMatch?: string;
+    }[];
   };
   readonly createProactiveSchedule?: {
     readonly kind: 'reminder' | 'brief' | 'follow_up';
@@ -102,6 +110,14 @@ interface PendingJobRecord {
     readonly kind: 'preference' | 'fact';
     readonly content: string;
     readonly key?: string;
+    readonly replaceId?: string;
+  };
+  readonly deletePersonalMemory?: {
+    readonly targets: readonly {
+      readonly memoryId?: string;
+      readonly key?: string;
+      readonly contentMatch?: string;
+    }[];
   };
   readonly createProactiveSchedule?: {
     readonly kind: 'reminder' | 'brief' | 'follow_up';
@@ -296,6 +312,9 @@ export class FakeModelGatewayServer {
           ...(job.savePersonalMemory !== undefined
             ? { personalMemorySave: job.savePersonalMemory }
             : {}),
+          ...(job.deletePersonalMemory !== undefined
+            ? { personalMemoryDelete: job.deletePersonalMemory }
+            : {}),
           ...(job.createProactiveSchedule !== undefined
             ? { proactiveScheduleCreate: job.createProactiveSchedule }
             : {}),
@@ -463,6 +482,9 @@ export class FakeModelGatewayServer {
         ...(rule.savePersonalMemory !== undefined
           ? { savePersonalMemory: rule.savePersonalMemory }
           : {}),
+        ...(rule.deletePersonalMemory !== undefined
+          ? { deletePersonalMemory: rule.deletePersonalMemory }
+          : {}),
         ...(rule.createProactiveSchedule !== undefined
           ? { createProactiveSchedule: rule.createProactiveSchedule }
           : {}),
@@ -587,6 +609,9 @@ export class FakeModelGatewayServer {
               ...(rule.savePersonalMemory !== undefined
                 ? { personalMemorySave: rule.savePersonalMemory }
                 : {}),
+              ...(rule.deletePersonalMemory !== undefined
+                ? { personalMemoryDelete: rule.deletePersonalMemory }
+                : {}),
               ...(rule.createProactiveSchedule !== undefined
                 ? { proactiveScheduleCreate: rule.createProactiveSchedule }
                 : {}),
@@ -608,6 +633,9 @@ export class FakeModelGatewayServer {
         ...(rule.delegation !== undefined ? { delegation: rule.delegation } : {}),
         ...(rule.savePersonalMemory !== undefined
           ? { personalMemorySave: rule.savePersonalMemory }
+          : {}),
+        ...(rule.deletePersonalMemory !== undefined
+          ? { personalMemoryDelete: rule.deletePersonalMemory }
           : {}),
         ...(rule.createProactiveSchedule !== undefined
           ? { proactiveScheduleCreate: rule.createProactiveSchedule }

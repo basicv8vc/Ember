@@ -3,6 +3,7 @@ import {
   estimateCostMicroUsd,
   FAKE_MODEL_LABEL,
   FAKE_V2_RATE_VERSION,
+  fitConversationTurnInputToCap,
   isModelGatewayFailure,
   MODEL_LIMITS,
   preflightConversationTurn,
@@ -385,7 +386,7 @@ export function createDurableExecutor(
           try {
             const input: unknown = JSON.parse(context.inputJson ?? 'null');
             const messages = buildBoundedContext(input as readonly ContextRow[]).messages;
-            const preflight = preflightConversationTurn({
+            const { preflight } = fitConversationTurnInputToCap({
               messages,
               ...(context.personalMemories !== undefined && context.personalMemories.length > 0
                 ? { personalMemories: context.personalMemories }
@@ -477,6 +478,9 @@ export function createDurableExecutor(
             ...(claim.targetKind === 'turn' && output.kind === 'save_memory'
               ? { personalMemorySave: output.memory.arguments }
               : {}),
+            ...(claim.targetKind === 'turn' && output.kind === 'delete_memory'
+              ? { personalMemoryDelete: output.memory.arguments }
+              : {}),
             ...(claim.targetKind === 'turn' && output.kind === 'create_schedule'
               ? { proactiveScheduleCreate: output.schedule.arguments }
               : {}),
@@ -522,9 +526,22 @@ export function createDurableExecutor(
               // Both executors use Agent Head's bounded transcript and the same D gateway job store.
               const input: unknown = JSON.parse(context.inputJson ?? 'null');
               const task = input as { prompt?: string; notes?: string } | null;
-              const messages =
+              const fittedTurn =
                 claim.targetKind === 'turn'
-                  ? buildBoundedContext(input as readonly ContextRow[]).messages
+                  ? fitConversationTurnInputToCap({
+                      messages: buildBoundedContext(input as readonly ContextRow[]).messages,
+                      ...(context.personalMemories !== undefined &&
+                      context.personalMemories.length > 0
+                        ? { personalMemories: context.personalMemories }
+                        : {}),
+                      enablePersonalMemorySaveTool: true,
+                      enableProactiveScheduleTool: true,
+                      maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+                    }).input
+                  : undefined;
+              const messages =
+                fittedTurn !== undefined
+                  ? fittedTurn.messages
                   : [{ role: 'user' as const, text: task?.prompt ?? task?.notes ?? '' }];
               for await (const event of gateway.streamConversationTurn(
                 {
@@ -534,10 +551,9 @@ export function createDurableExecutor(
                     conversationId: context.conversationId ?? claim.targetId,
                     turnId: claim.targetId,
                     context: messages,
-                    ...(claim.targetKind === 'turn' &&
-                    context.personalMemories !== undefined &&
-                    context.personalMemories.length > 0
-                      ? { personalMemories: context.personalMemories }
+                    ...(fittedTurn?.personalMemories !== undefined &&
+                    fittedTurn.personalMemories.length > 0
+                      ? { personalMemories: fittedTurn.personalMemories }
                       : {}),
                     ...(claim.targetKind === 'turn'
                       ? {

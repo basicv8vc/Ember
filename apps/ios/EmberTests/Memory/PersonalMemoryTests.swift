@@ -202,6 +202,21 @@ final class PersonalMemoryTests: XCTestCase {
         XCTAssertFalse(store.isEndpointUnavailable)
     }
 
+    func testInMemoryRepositoryDeduplicatesUnkeyedSaves() async throws {
+        let repo = InMemoryPersonalMemoryRepository(items: [])
+        let store = PersonalMemoryStore(repository: repo)
+
+        let first = await store.save(kind: .preference, content: "Keep briefs concise")
+        XCTAssertTrue(first)
+        XCTAssertEqual(store.items.count, 1)
+        let originalID = store.items[0].memoryID
+
+        let duplicate = await store.save(kind: .preference, content: "  Keep briefs concise  ")
+        XCTAssertTrue(duplicate)
+        XCTAssertEqual(store.items.count, 1)
+        XCTAssertEqual(store.items[0].memoryID, originalID)
+    }
+
     func testStoreSaveReusesClientRequestIDAcrossRetryAfterUnknownOutcomeAndRemovesNotFoundOnUpdate() async throws {
         let attempts = LockedInt(0)
         let capturedClientRequestIDs = LockedStringArray()

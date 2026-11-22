@@ -163,7 +163,8 @@ describe('Product Alpha G2 — Combined 5-Scenario Cross-Feature Verification in
     expect(sseRes.status).toBe(201);
     await sseRes.text();
     const sseCall = harness.fakeGateway.getAuditSnapshot().calls.at(-1);
-    expect(sseCall?.personalMemories).toEqual([
+    expect(sseCall?.personalMemories).toHaveLength(1);
+    expect(sseCall?.personalMemories).toMatchObject([
       {
         kind: 'preference',
         key: 'coffee_city',

@@ -45,13 +45,52 @@ export const savePersonalMemoryRequestSchema = z.strictObject({
 
 export type SavePersonalMemoryRequest = z.infer<typeof savePersonalMemoryRequestSchema>;
 
+export const personalMemoryRefIdSchema = z
+  .string()
+  .trim()
+  .transform((value) => value.replace(/^#+/, '').toLowerCase())
+  .refine(
+    (value) => /^[0-9a-f][0-9a-f-]{3,63}$/.test(value),
+    'invalid personal memory reference id',
+  );
+
 export const personalMemorySaveTurnCommandSchema = z.strictObject({
   kind: personalMemoryKindSchema,
   content: personalMemoryContentSchema,
   key: personalMemoryKeySchema.optional(),
+  replaceId: personalMemoryRefIdSchema.optional(),
 });
 
 export type PersonalMemorySaveTurnCommand = z.infer<typeof personalMemorySaveTurnCommandSchema>;
+
+export const personalMemoryDeleteTargetSchema = z
+  .strictObject({
+    memoryId: personalMemoryRefIdSchema.optional(),
+    key: personalMemoryKeySchema.optional(),
+    contentMatch: z
+      .string()
+      .trim()
+      .min(1)
+      .max(200)
+      .refine((text) => !/\p{Surrogate}/u.test(text), 'content_match contains invalid surrogate')
+      .optional(),
+  })
+  .refine(
+    (value) =>
+      value.memoryId !== undefined || value.key !== undefined || value.contentMatch !== undefined,
+    'at least one selector is required',
+  )
+  .readonly();
+
+export type PersonalMemoryDeleteTarget = z.infer<typeof personalMemoryDeleteTargetSchema>;
+
+export const personalMemoryDeleteTurnCommandSchema = z
+  .strictObject({
+    targets: z.array(personalMemoryDeleteTargetSchema).min(1).max(10).readonly(),
+  })
+  .readonly();
+
+export type PersonalMemoryDeleteTurnCommand = z.infer<typeof personalMemoryDeleteTurnCommandSchema>;
 
 export const updatePersonalMemoryRequestSchema = z
   .strictObject({
@@ -105,6 +144,7 @@ export interface PersonalMemoryDeleteResultDto {
 }
 
 export interface PersonalMemoryContextItem {
+  readonly id?: string;
   readonly kind: PersonalMemoryKind;
   readonly key?: string;
   readonly content: string;

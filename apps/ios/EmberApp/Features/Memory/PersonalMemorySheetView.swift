@@ -10,6 +10,7 @@ struct PersonalMemorySheetView: View {
     @State private var editDraftContent = ""
     @State private var editSelectedKind: PersonalMemoryKind = .preference
     @State private var pendingDeleteItem: PersonalMemoryItemDTO?
+    @FocusState private var isComposerFocused: Bool
 
     private var trimmedDraft: String {
         draftContent.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -90,6 +91,7 @@ struct PersonalMemorySheetView: View {
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
+            .scrollDismissesKeyboard(.interactively)
             .background(EmberDesignTokens.groupedBackground)
             .navigationTitle(Text("memory.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
@@ -159,6 +161,7 @@ struct PersonalMemorySheetView: View {
             )
             .lineLimit(2...5)
             .textFieldStyle(.roundedBorder)
+            .focused($isComposerFocused)
             .accessibilityIdentifier("memory-composer-input")
 
             HStack {
@@ -173,6 +176,7 @@ struct PersonalMemorySheetView: View {
                     Task {
                         if await store.save(kind: selectedKind, content: contentToSave) {
                             draftContent = ""
+                            isComposerFocused = false
                         }
                     }
                 } label: {
@@ -386,6 +390,11 @@ struct PersonalMemorySheetView: View {
             }
         }
         .presentationDetents([.medium])
+        .onDisappear {
+            if store.items.contains(where: { $0.memoryID == item.memoryID }) {
+                store.clearError()
+            }
+        }
     }
 
     private func errorNoticeBanner(_ error: String, identifier: String) -> some View {

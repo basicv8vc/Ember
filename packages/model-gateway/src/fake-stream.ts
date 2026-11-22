@@ -7,12 +7,7 @@ import type {
   ModelUsage,
 } from './types.js';
 
-type FakeReply = ModelCallResult<
-  Extract<
-    ConversationTurnOutput,
-    { kind: 'reply' | 'save_memory' | 'create_schedule' | 'delegate' }
-  >
->;
+type FakeReply = ModelCallResult<ConversationTurnOutput>;
 
 export interface FakeConversationJob {
   readonly handle: string;
@@ -126,10 +121,15 @@ export class FakeStreamingModelGateway extends FakeModelGateway {
       yield { kind: 'progress' };
     }
 
-    const characters = Array.from(output.text);
-    for (let offset = 0; offset < characters.length; offset += CHUNK_CODE_POINTS) {
-      signal.throwIfAborted();
-      yield { kind: 'delta', text: characters.slice(offset, offset + CHUNK_CODE_POINTS).join('') };
+    if (output.kind === 'reply') {
+      const characters = Array.from(output.text);
+      for (let offset = 0; offset < characters.length; offset += CHUNK_CODE_POINTS) {
+        signal.throwIfAborted();
+        yield {
+          kind: 'delta',
+          text: characters.slice(offset, offset + CHUNK_CODE_POINTS).join(''),
+        };
+      }
     }
     yield { kind: 'result', result: job.result };
   }

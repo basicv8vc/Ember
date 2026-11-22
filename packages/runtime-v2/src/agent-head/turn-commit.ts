@@ -25,10 +25,8 @@ import {
   type LocalBudgetCeilings,
 } from './budget.js';
 import {
-  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
-  PERSONAL_MEMORY_SAVED_REPLY,
-  PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY,
-  PERSONAL_MEMORY_UPDATED_REPLY,
+  deletePersonalMemoriesFromTurnSync,
+  formatTurnMemoryConfirmationReply,
   savePersonalMemoryFromTurnSync,
 } from './memory-service.js';
 import {
@@ -1059,26 +1057,60 @@ export async function executeAuthoritativeTurnCommit(
     }
 
     let assistantText = publication.result.text;
-    if (publication.result.personalMemorySave !== undefined) {
-      if (attempt === null) {
-        assistantText = PERSONAL_MEMORY_SAVE_UNAVAILABLE_REPLY;
-      } else {
-        const saved = savePersonalMemoryFromTurnSync(deps.storage.sql, {
-          tenantId: cmd.tenantId,
-          principalId: attempt.principal_id,
-          turnId: turn.id,
-          conversationId: turn.conversation_id,
-          sourceMessageId: turn.source_message_id,
-          input: publication.result.personalMemorySave,
-          nowMs,
-          newId: deps.idFactory,
-        });
-        assistantText =
-          saved.outcome === 'budget_exceeded'
-            ? PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY
-            : saved.created
-              ? PERSONAL_MEMORY_SAVED_REPLY
-              : PERSONAL_MEMORY_UPDATED_REPLY;
+    if (
+      publication.result.personalMemorySave !== undefined ||
+      publication.result.personalMemoryDelete !== undefined
+    ) {
+      const sourceMessage = sqlExecMaybe<{ readonly text: string }>(
+        deps.storage.sql,
+        `SELECT text FROM conversation_messages WHERE id = ?`,
+        turn.source_message_id,
+      );
+      const sourceUserText = sourceMessage?.text ?? '';
+
+      if (publication.result.personalMemorySave !== undefined) {
+        if (attempt === null) {
+          assistantText = formatTurnMemoryConfirmationReply({
+            modelText: assistantText,
+            sourceUserText,
+            saveOutcome: 'unavailable',
+          });
+        } else {
+          const saved = savePersonalMemoryFromTurnSync(deps.storage.sql, {
+            tenantId: cmd.tenantId,
+            principalId: attempt.principal_id,
+            turnId: turn.id,
+            conversationId: turn.conversation_id,
+            sourceMessageId: turn.source_message_id,
+            input: publication.result.personalMemorySave,
+            nowMs,
+            newId: deps.idFactory,
+          });
+          assistantText = formatTurnMemoryConfirmationReply({
+            modelText: assistantText,
+            sourceUserText,
+            saveOutcome: saved,
+          });
+        }
+      } else if (publication.result.personalMemoryDelete !== undefined) {
+        if (attempt === null) {
+          assistantText = formatTurnMemoryConfirmationReply({
+            modelText: assistantText,
+            sourceUserText,
+            deleteOutcome: 'unavailable',
+          });
+        } else {
+          const deleted = deletePersonalMemoriesFromTurnSync(deps.storage.sql, {
+            tenantId: cmd.tenantId,
+            principalId: attempt.principal_id,
+            input: publication.result.personalMemoryDelete,
+          });
+          assistantText = formatTurnMemoryConfirmationReply({
+            modelText: assistantText,
+            sourceUserText,
+            deleteOutcome: deleted,
+          });
+        }
       }
     }
 

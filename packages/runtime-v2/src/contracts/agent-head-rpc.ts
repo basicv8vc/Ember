@@ -13,6 +13,7 @@ import type { BudgetSyncSettlementState } from '../recovery/envelope.js';
 import type { TurnExecutionMode } from '../recovery/ports.js';
 import type {
   PersonalMemoryContextItem,
+  PersonalMemoryDeleteTurnCommand,
   PersonalMemorySaveTurnCommand,
 } from './personal-memory.js';
 import type { ProactiveScheduleTurnCommand } from './proactive-schedules.js';
@@ -233,6 +234,7 @@ export interface CommitTurnRequest {
         readonly simulated: boolean;
         readonly delegation?: B2TaskDelegationCommand;
         readonly personalMemorySave?: PersonalMemorySaveTurnCommand;
+        readonly personalMemoryDelete?: PersonalMemoryDeleteTurnCommand;
         readonly proactiveScheduleCreate?: ProactiveScheduleTurnCommand;
       }
     | {

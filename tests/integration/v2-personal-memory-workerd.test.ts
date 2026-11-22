@@ -13,11 +13,7 @@ import type {
 } from '@ember/runtime-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
-import {
-  PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
-  PERSONAL_MEMORY_SAVED_REPLY,
-  PERSONAL_MEMORY_UPDATED_REPLY,
-} from '../../packages/runtime-v2/src/agent-head/memory-service.js';
+import { PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY } from '../../packages/runtime-v2/src/agent-head/memory-service.js';
 import { PERSONAL_MEMORY_MAX_ITEMS } from '../../packages/runtime-v2/src/contracts/personal-memory.js';
 
 const configPath = fileURLToPath(
@@ -158,6 +154,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(callsAfterFast).toHaveLength(1);
     expect(callsAfterFast[0]?.personalMemories).toEqual([
       {
+        id: saved.item.memory_id,
         kind: 'preference',
         key: 'response_style',
         content: 'Always reply in concise bullet points.',
@@ -203,6 +200,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(callsAfterDurable).toHaveLength(2);
     expect(callsAfterDurable[1]?.personalMemories).toEqual([
       {
+        id: saved.item.memory_id,
         kind: 'preference',
         key: 'response_style',
         content: 'Always reply in concise bullet points.',
@@ -342,6 +340,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     const callsAfterPatch = harness.fakeGateway.getAuditSnapshot().calls;
     expect(callsAfterPatch.at(-1)?.personalMemories).toEqual([
       {
+        id: firstUnkeyed.item.memory_id,
         kind: 'fact',
         key: 'home_city',
         content: 'Based in Kyoto.',
@@ -475,7 +474,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     expect(afterFast.items[0]?.provenance.conversation_id).toBe(userA.conversationId);
     expect(afterFast.items[0]?.provenance.message_id).toBeTruthy();
 
-    // Verify server-owned confirmation text was committed and capability flag was enabled
+    // Verify model's natural confirmation was preserved (not overwritten) and capability flag was enabled
     const messagesAfterFast = await json<{
       readonly messages: readonly { kind: string; text: string | null }[];
     }>(
@@ -490,7 +489,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     );
     expect(messagesAfterFast.messages.at(-1)).toMatchObject({
       kind: 'ember',
-      text: PERSONAL_MEMORY_SAVED_REPLY,
+      text: "Got it — I'll remember that you prefer JPY.",
     });
     expect(harness.fakeGateway.getAuditSnapshot().calls[0]?.enablePersonalMemorySaveTool).toBe(
       true,
@@ -692,7 +691,7 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
     );
     expect(updatedMsgs.messages.at(-1)).toMatchObject({
       kind: 'ember',
-      text: PERSONAL_MEMORY_UPDATED_REPLY,
+      text: 'Updated currency.',
     });
 
     // 6. Chat-saved memories survive a new conversation (clearTranscript) and respect the 50-item cap
@@ -743,7 +742,9 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
       },
     );
     expect(overCapStream.status).toBe(201);
-    await overCapStream.text();
+    const overCapSse = await overCapStream.text();
+    expect(overCapSse).toContain('event: turn.committed');
+    expect(overCapSse).not.toContain('This should be overridden by cap reply.');
 
     const afterCapList = await json<PersonalMemoryListDto>(
       await harness.fetchOverHttp('/v2/memories', {
@@ -771,5 +772,274 @@ describe('Product Alpha Agent B — Personal Memory in local workerd', () => {
       kind: 'ember',
       text: PERSONAL_MEMORY_LIMIT_EXCEEDED_REPLY,
     });
+  });
+
+  it('supports in-place NL replaceId update, NL delete_personal_memory on Fast & Durable paths, and language-matched confirmations', async () => {
+    const user = await signIn();
+
+    // 1. Save an unkeyed Chinese memory via settings (POST /v2/memories)
+    const created = await json<PersonalMemorySaveResultDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          kind: 'fact',
+          content: '住在上海',
+          provenance: { source: 'user_settings' },
+        }),
+      }),
+      201,
+    );
+    const shortRef = created.item.memory_id.slice(0, 8);
+
+    // 2. Replace unkeyed memory in place via Fast Path SSE using replaceId (#prefix) and preserve Chinese reply
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: '好的，已经帮您把居住城市更新为北京。',
+      savePersonalMemory: {
+        kind: 'fact',
+        replaceId: shortRef,
+        content: '现居北京',
+      },
+    });
+    const replaceRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: '我搬到北京了，请更新一下我的城市。',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(replaceRes.status).toBe(201);
+    await replaceRes.text();
+
+    const afterReplace = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterReplace.items).toHaveLength(1);
+    expect(afterReplace.items[0]?.memory_id).toBe(created.item.memory_id);
+    expect(afterReplace.items[0]?.content).toBe('现居北京');
+
+    // 3. Delete in chat via Fast Path SSE with placeholder ack -> generates Chinese confirmation with removed content
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: "Got it — I'll remove that from your personal memory.",
+      deletePersonalMemory: {
+        targets: [{ memoryId: shortRef }],
+      },
+    });
+    const deleteFastRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: '请忘掉我现居北京这件事。',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(deleteFastRes.status).toBe(201);
+    await deleteFastRes.text();
+
+    const afterFastDelete = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterFastDelete.items).toEqual([]);
+
+    const msgsAfterDelete = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${user.conversationId}/messages?after=0&limit=20`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${user.token}` },
+        },
+      ),
+      200,
+    );
+    expect(msgsAfterDelete.messages.at(-1)).toMatchObject({
+      kind: 'ember',
+      text: '已从个人记忆中移除：现居北京',
+    });
+
+    // 4. Durable Queue turn deleting by key removes the item atomically and non-matching delete fails honestly
+    await json<PersonalMemorySaveResultDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          kind: 'preference',
+          key: 'tea',
+          content: 'Prefers green tea',
+          provenance: { source: 'user_settings' },
+        }),
+      }),
+      201,
+    );
+
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Removed your tea preference.',
+      deletePersonalMemory: {
+        targets: [{ key: 'tea' }],
+      },
+    });
+    const durableDeleteRes = await harness.fetchOverHttp(
+      `/v1/conversations/${user.conversationId}/messages`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Forget my tea preference.',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    const durableReceipt = B1SendMessageReceiptSchema.parse(await json(durableDeleteRes, 201));
+
+    await expect
+      .poll(
+        async () => {
+          const turnRes = await harness.fetchOverHttp(
+            `/v1/conversations/${user.conversationId}/turns/${durableReceipt.turn.turn_id}`,
+            {
+              method: 'GET',
+              headers: { authorization: `Bearer ${user.token}` },
+            },
+          );
+          const turn = await json<{ status: string }>(turnRes, 200);
+          return turn.status;
+        },
+        { timeout: 10_000, interval: 100 },
+      )
+      .toBe('completed');
+
+    const afterDurableDelete = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterDurableDelete.items).toEqual([]);
+
+    // 5. Non-matching delete overrides optimistic model text with honest not-found notice
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'I removed that memory.',
+      deletePersonalMemory: {
+        targets: [{ contentMatch: 'nonexistent preference' }],
+      },
+    });
+    const missingDeleteRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Forget my nonexistent preference.',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(missingDeleteRes.status).toBe(201);
+    await missingDeleteRes.text();
+
+    const msgsAfterMissing = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${user.conversationId}/messages?after=0&limit=20`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${user.token}` },
+        },
+      ),
+      200,
+    );
+    expect(msgsAfterMissing.messages.at(-1)?.text).toContain("couldn't find a matching item");
+
+    // 6. Stale replaceId must NOT fall through to INSERT a duplicate or claim success
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'Updated your preference!',
+      savePersonalMemory: {
+        kind: 'preference',
+        key: 'tea_choice',
+        content: 'Oolong tea',
+        replaceId: 'deadbeef',
+      },
+    });
+    const staleReplaceRes = await harness.fetchOverHttp(
+      `/v2/conversations/${user.conversationId}/messages/stream`,
+      {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${user.token}`,
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({
+          client_submission_id: randomUUID(),
+          text: 'Update that old memory to oolong tea.',
+          transcript_epoch: user.transcriptEpoch,
+        }),
+      },
+    );
+    expect(staleReplaceRes.status).toBe(201);
+    await staleReplaceRes.text();
+
+    const afterStaleReplace = await json<PersonalMemoryListDto>(
+      await harness.fetchOverHttp('/v2/memories', {
+        method: 'GET',
+        headers: { authorization: `Bearer ${user.token}` },
+      }),
+      200,
+    );
+    expect(afterStaleReplace.items).toEqual([]);
+
+    const msgsAfterStaleReplace = await json<{ messages: Array<{ kind: string; text?: string }> }>(
+      await harness.fetchOverHttp(
+        `/v1/conversations/${user.conversationId}/messages?after=0&limit=30`,
+        {
+          method: 'GET',
+          headers: { authorization: `Bearer ${user.token}` },
+        },
+      ),
+      200,
+    );
+    expect(msgsAfterStaleReplace.messages.at(-1)?.text).toContain(
+      "couldn't find that memory item to update",
+    );
   });
 });

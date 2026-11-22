@@ -222,6 +222,27 @@ actor InMemoryPersonalMemoryRepository: PersonalMemoryRepositoryProtocol {
             return PersonalMemorySaveResultDTO(item: updated, created: false)
         }
 
+        if (normalizedKey == nil || normalizedKey?.isEmpty == true),
+           let index = items.firstIndex(where: {
+               $0.key == nil && $0.kind == request.kind && $0.content == trimmed
+           }) {
+            let existing = items[index]
+            let updated = PersonalMemoryItemDTO(
+                memoryID: existing.memoryID,
+                kind: existing.kind,
+                key: existing.key,
+                content: existing.content,
+                provenance: existing.provenance,
+                createdAt: existing.createdAt,
+                updatedAt: now
+            )
+            items[index] = updated
+            if let clientRequestID = request.clientRequestID {
+                savedByClientRequestID[clientRequestID] = (request, updated.memoryID)
+            }
+            return PersonalMemorySaveResultDTO(item: updated, created: false)
+        }
+
         guard items.count < limits.maxItems else {
             throw PersonalMemoryRepositoryError.limitReached
         }

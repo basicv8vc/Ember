@@ -33,6 +33,8 @@ export type {
   ConversationTurnOutput,
   CreateProactiveScheduleCall,
   CreateProactiveScheduleToolArguments,
+  DeletePersonalMemoryCall,
+  DeletePersonalMemoryTarget,
   ModelCallResult,
   ModelExecutionMode,
   ModelGateway,
@@ -66,12 +68,15 @@ export {
 } from './context.js';
 export {
   IMAGE_ATTACHMENT_TOKEN_ESTIMATE,
+  fitConversationTurnInputToCap,
   preflightConversationTurn,
   preflightNotesActionItems,
   preflightPythonAgentStep,
+  type ConversationTurnPreflightInput,
   type TokenPreflight,
 } from './preflight.js';
 export {
+  COMMITTED_MEMORY_DELETED_REPLY,
   COMMITTED_MEMORY_SAVED_REPLY,
   COMMITTED_MEMORY_UPDATED_REPLY,
   CONVERSATION_TOOLS_WITH_MEMORY,
@@ -79,8 +84,11 @@ export {
   DELEGATE_PYTHON_TOOL_NAME,
   DELEGATION_TOOLS,
   DEFAULT_DELEGATION_ACK_TEXT,
+  DEFAULT_MEMORY_DELETE_ACK_TEXT,
   DEFAULT_MEMORY_SAVE_ACK_TEXT,
   DEFAULT_PYTHON_DELEGATION_ACK_TEXT,
+  DELETE_PERSONAL_MEMORY_TOOL,
+  DELETE_PERSONAL_MEMORY_TOOL_NAME,
   NO_CONVERSATION_TOOLS,
   PYTHON_AGENT_TOOLS,
   RUN_PYTHON_TOOL_NAME,

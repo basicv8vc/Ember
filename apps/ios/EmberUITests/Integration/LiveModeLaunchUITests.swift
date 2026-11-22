@@ -27,6 +27,10 @@ final class LiveModeLaunchUITests: XCTestCase {
         let signIn = app.descendants(matching: .any)
             .matching(identifier: "live-conversation-sign-in").firstMatch
         if !signIn.waitForExistence(timeout: 3) {
+            let menuButton = app.buttons["live-conversation-menu"]
+            if menuButton.waitForExistence(timeout: 3) && menuButton.isEnabled {
+                menuButton.tap()
+            }
             let signOutButton = app.buttons["live-conversation-sign-out"]
             if signOutButton.waitForExistence(timeout: 3) && signOutButton.isEnabled {
                 signOutButton.tap()

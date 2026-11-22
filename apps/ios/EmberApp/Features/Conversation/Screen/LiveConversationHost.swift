@@ -167,7 +167,7 @@ final class LiveConversationHostModel {
                 }
                 await syncTasksFromCloud(snapshot: recovered)
                 await syncCloudDeviceExecutorState()
-                await refreshSchedulesAndArmArrival()
+                await refreshSchedulesAndMemoryCapabilities()
             } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
                 applyAuthFailure(error)
             } catch {
@@ -224,7 +224,7 @@ final class LiveConversationHostModel {
             refreshErrorMessage = nil
             await syncTasksFromCloud(snapshot: loaded)
             await syncCloudDeviceExecutorState()
-            await refreshSchedulesAndArmArrival()
+            await refreshSchedulesAndMemoryCapabilities()
         } catch let error as AuthError where error == .appleCancelled {
             signInErrorMessage = nil
             status = LiveConversationCopy.signInCancelled
@@ -982,6 +982,18 @@ final class LiveConversationHostModel {
         }
     }
 
+    private func refreshSchedulesAndMemoryCapabilities() async {
+        guard !requiresSignIn, !isMockMode else { return }
+        async let schedulesWork: Void = refreshSchedulesAndArmArrival()
+        async let memoryWork: Void = refreshMemoryAvailabilityIfNeeded()
+        _ = await (schedulesWork, memoryWork)
+    }
+
+    private func refreshMemoryAvailabilityIfNeeded() async {
+        guard !requiresSignIn, !isMockMode, memoryStore.hasRepository else { return }
+        await memoryStore.refresh()
+    }
+
     private func refreshSchedulesAndArmArrival() async {
         guard !requiresSignIn, !isMockMode, scheduleStore.hasRepository else { return }
         await scheduleStore.refresh()
@@ -1217,20 +1229,30 @@ final class LiveConversationHostModel {
                 ))
             )
         }
-        let livePrompts: [String] = if !isMockMode, !isLoading, id != nil, timeline.isEmpty {
-            [
-                String(localized: "conversation.live.prompt.memory", table: "Conversation"),
-                String(localized: "conversation.live.prompt.brief", table: "Conversation"),
-                String(localized: "conversation.live.prompt.followup", table: "Conversation"),
-            ]
+        let emptyPrompts: [ConversationStarterPrompt] = if !isLoading, id != nil, timeline.isEmpty {
+            buildEmptyStatePrompts()
         } else {
             []
         }
+        let emptyState: ConversationEmptyStateConfiguration? = if !isLoading, id != nil, timeline.isEmpty {
+            ConversationEmptyStateConfiguration(
+                title: String(localized: "conversation.empty.headline", table: "Conversation"),
+                subtitle: emptyStateSubtitle(),
+                capabilityNote: emptyStateCapabilityNote(),
+                prompts: emptyPrompts
+            )
+        } else {
+            nil
+        }
         return ConversationScreenState(
             partnerName: profile?.agent.displayName ?? "Ember Cloud",
+            headerSubtitle: headerStatusForSubtitle,
+            headerSubtitleAccessibilityIdentifier: headerStatusForSubtitle != nil ? "live-conversation-status" : nil,
+            environmentPill: environmentPill,
             timeline: timeline,
             replyState: reply,
-            suggestedPrompts: livePrompts,
+            suggestedPrompts: emptyPrompts.map(\.prompt),
+            emptyState: emptyState,
             showsEmptyState: timeline.isEmpty && id != nil,
             isLoading: isLoading,
             isSubmitting: isSubmitting,
@@ -1240,6 +1262,140 @@ final class LiveConversationHostModel {
             isUploadingAttachment: isUploadingAttachment,
             attachmentError: attachmentError
         )
+    }
+
+    var supportsMemoryCapability: Bool {
+        guard memoryStore.hasRepository else { return false }
+        return isMockMode || memoryStore.endpointAvailability == .available
+    }
+
+    var supportsScheduleCapability: Bool {
+        guard scheduleStore.hasRepository else { return false }
+        return isMockMode || scheduleStore.endpointAvailability == .available
+    }
+
+    var headerStatusForSubtitle: String? {
+        guard let status, Self.isShortHeaderStatus(status) else { return nil }
+        return status
+    }
+
+    var bannerStatus: String? {
+        guard let status, !Self.isShortHeaderStatus(status) else { return nil }
+        return status
+    }
+
+    var environmentPill: ConversationEnvironmentPill {
+        if isMockMode {
+            return ConversationEnvironmentPill(
+                title: "MOCK ONLY",
+                tone: .mock,
+                accessibilityIdentifier: "mock-only-banner",
+                accessibilityLabel: String(localized: "conversation.header.mock_accessibility", table: "Conversation")
+            )
+        }
+        let tone: ConversationEnvironmentPill.Tone = switch environmentBadge {
+        case "V2 STAGING":
+            .staging
+        case "CUSTOM CLOUD":
+            .custom
+        default:
+            .cloud
+        }
+        return ConversationEnvironmentPill(
+            title: environmentBadge,
+            tone: tone,
+            accessibilityIdentifier: "live-cloud-mode",
+            accessibilityLabel: String(
+                format: String(localized: "conversation.header.env_accessibility_format", table: "Conversation"),
+                environmentBadge
+            )
+        )
+    }
+
+    private static func isShortHeaderStatus(_ value: String) -> Bool {
+        value == LiveConversationCopy.messageAccepted
+            || value == LiveConversationCopy.checkingStatus
+            || value == LiveConversationCopy.turnCancelled
+    }
+
+    private func buildEmptyStatePrompts() -> [ConversationStarterPrompt] {
+        var prompts: [ConversationStarterPrompt] = []
+        if supportsMemoryCapability {
+            prompts.append(
+                ConversationStarterPrompt(
+                    id: "memory",
+                    iconName: "brain.head.profile",
+                    title: String(localized: "conversation.prompt.card.memory_title", table: "Conversation"),
+                    prompt: String(localized: "conversation.live.prompt.memory", table: "Conversation")
+                )
+            )
+        }
+        if supportsScheduleCapability {
+            prompts.append(
+                ConversationStarterPrompt(
+                    id: "brief",
+                    iconName: "sun.horizon",
+                    title: String(localized: "conversation.prompt.card.brief_title", table: "Conversation"),
+                    prompt: String(localized: "conversation.live.prompt.brief", table: "Conversation")
+                )
+            )
+        }
+        prompts.append(
+            ConversationStarterPrompt(
+                id: "notes",
+                iconName: "checklist",
+                title: String(localized: "conversation.prompt.card.notes_title", table: "Conversation"),
+                prompt: String(localized: "conversation.empty.prompt.notes_action", table: "Conversation")
+            )
+        )
+        if prompts.count < 3 {
+            prompts.append(
+                ConversationStarterPrompt(
+                    id: "priorities",
+                    iconName: "calendar.day.timeline.left",
+                    title: String(localized: "conversation.prompt.card.priorities_title", table: "Conversation"),
+                    prompt: String(localized: "conversation.empty.prompt.priorities", table: "Conversation")
+                )
+            )
+        }
+        if prompts.count < 3 {
+            prompts.append(
+                ConversationStarterPrompt(
+                    id: "analyze_file",
+                    iconName: "doc.text.magnifyingglass",
+                    title: String(localized: "conversation.prompt.card.file_title", table: "Conversation"),
+                    prompt: String(localized: "conversation.empty.prompt.analyze_file", table: "Conversation")
+                )
+            )
+        }
+        return Array(prompts.prefix(3))
+    }
+
+    private func emptyStateSubtitle() -> String {
+        switch (supportsMemoryCapability, supportsScheduleCapability) {
+        case (true, true):
+            String(localized: "conversation.empty.subtitle.full", table: "Conversation")
+        case (true, false):
+            String(localized: "conversation.empty.subtitle.memory_only", table: "Conversation")
+        case (false, true):
+            String(localized: "conversation.empty.subtitle.schedules_only", table: "Conversation")
+        case (false, false):
+            String(localized: "conversation.empty.subtitle.core", table: "Conversation")
+        }
+    }
+
+    private func emptyStateCapabilityNote() -> String? {
+        guard !isMockMode else { return nil }
+        switch (memoryStore.isEndpointUnavailable, scheduleStore.isEndpointUnavailable) {
+        case (true, true):
+            return String(localized: "conversation.empty.capability.memory_and_schedules_unavailable", table: "Conversation")
+        case (true, false):
+            return String(localized: "conversation.empty.capability.memory_unavailable", table: "Conversation")
+        case (false, true):
+            return String(localized: "conversation.empty.capability.schedules_unavailable", table: "Conversation")
+        case (false, false):
+            return nil
+        }
     }
 
     private func makeTaskReferenceEntry(stableID: String, taskID: UUID) -> ConversationTimelineEntry {
@@ -2006,152 +2162,7 @@ struct LiveConversationHost: View {
 
     private var chatTab: some View {
         NavigationStack(path: $model.chatNavigationPath) {
-            VStack(spacing: 0) {
-                if model.isMockMode {
-                    HStack(spacing: 12) {
-                        MockOnlyBanner()
-                        if model.scheduleStore.hasRepository {
-                            Button {
-                                isShowingSchedulesSheet = true
-                            } label: {
-                                Label {
-                                    Text("schedules.nav_title", tableName: "Conversation")
-                                } icon: {
-                                    Image(systemName: "calendar.badge.clock")
-                                }
-                                .font(.caption.weight(.semibold))
-                            }
-                            .accessibilityIdentifier("live-conversation-open-schedules")
-                        }
-                        if model.memoryStore.hasRepository {
-                            Button {
-                                isShowingMemorySheet = true
-                            } label: {
-                                Label {
-                                    Text("memory.nav_title", tableName: "Conversation")
-                                } icon: {
-                                    Image(systemName: "brain.head.profile")
-                                }
-                                .font(.caption.weight(.semibold))
-                            }
-                            .accessibilityIdentifier("live-conversation-open-memory")
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-                    .padding(.bottom, 4)
-                    .background(EmberDesignTokens.groupedBackground)
-                } else {
-                    HStack(spacing: 10) {
-                        Text(model.environmentBadge)
-                            .font(.caption.weight(.semibold))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                            .accessibilityIdentifier("live-cloud-mode")
-                        Spacer(minLength: 4)
-                        if model.scheduleStore.hasRepository {
-                            Button {
-                                isShowingSchedulesSheet = true
-                            } label: {
-                                HStack(spacing: 4) {
-                                    Image(systemName: "calendar.badge.clock")
-                                    Text("schedules.nav_title", tableName: "Conversation")
-                                    if model.scheduleStore.activeCount > 0 {
-                                        Text("(\(model.scheduleStore.activeCount))")
-                                            .monospacedDigit()
-                                    }
-                                }
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                            }
-                            .disabled(model.isSigningOut || model.isLoading)
-                            .accessibilityIdentifier("live-conversation-open-schedules")
-                        }
-                        if model.memoryStore.hasRepository {
-                            Button {
-                                isShowingMemorySheet = true
-                            } label: {
-                                Label {
-                                    Text("memory.nav_title", tableName: "Conversation")
-                                } icon: {
-                                    Image(systemName: "brain.head.profile")
-                                }
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                            }
-                            .disabled(model.isSigningOut || model.isLoading)
-                            .accessibilityIdentifier("live-conversation-open-memory")
-                        }
-                        Button {
-                            isConfirmingSignOut = true
-                        } label: {
-                            Text("conversation.live.sign_out", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                                .lineLimit(1)
-                        }
-                        .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
-                        .accessibilityIdentifier("live-conversation-sign-out")
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 6)
-                }
-
-                if let status = model.status {
-                    Text(status)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .multilineTextAlignment(.center)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 2)
-                        .accessibilityIdentifier("live-conversation-status")
-                }
-
-                if let refreshError = model.refreshErrorMessage {
-                    HStack(alignment: .center, spacing: 10) {
-                        Image(systemName: "wifi.slash")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color(uiColor: .systemOrange))
-                            .accessibilityHidden(true)
-                        Text(refreshError)
-                            .font(.caption)
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Button {
-                            Task { await model.refreshConversationAndTasks() }
-                        } label: {
-                            Text("conversation.live.refresh_retry", tableName: "Conversation")
-                                .font(.caption.weight(.semibold))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .accessibilityIdentifier("live-conversation-refresh-retry")
-                    }
-                    .padding(.horizontal, 12)
-                    .padding(.vertical, 8)
-                    .background(Color(uiColor: .systemOrange).opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-                    .accessibilityElement(children: .contain)
-                    .accessibilityIdentifier("live-conversation-refresh-error")
-                }
-
-                if model.isPollingPaused {
-                    Button {
-                        model.resumePolling()
-                    } label: {
-                        Label(
-                            String(localized: "conversation.live.check_again", table: "Conversation"),
-                            systemImage: "arrow.clockwise"
-                        )
-                        .font(.caption.weight(.semibold))
-                    }
-                    .accessibilityIdentifier("live-conversation-resume-polling")
-                    .padding(.vertical, 4)
-                }
-
-                ConversationScreen(
+            ConversationScreen(
                     state: model.screen,
                     draft: $draft,
                     actions: ConversationScreenActions(
@@ -2189,9 +2200,14 @@ struct LiveConversationHost: View {
                         : "conversation.message.ember_cloud",
                     onRefresh: {
                         await model.refreshConversationAndTasks()
+                    },
+                    headerMenu: {
+                        chatHeaderMenu
+                    },
+                    topNotices: {
+                        chatTopNotices
                     }
                 )
-            }
             .photosPicker(
                 isPresented: $isShowingPhotoPicker,
                 selection: $selectedPhotoItems,
@@ -2262,6 +2278,261 @@ struct LiveConversationHost: View {
                     Task { await model.handleSchedulesSheetDismissed() }
                 }
             }
+        }
+    }
+
+    private var chatHeaderMenu: some View {
+        Menu {
+            if model.scheduleStore.hasRepository {
+                Button {
+                    isShowingSchedulesSheet = true
+                } label: {
+                    Label {
+                        Text(schedulesMenuTitle)
+                    } icon: {
+                        Image(systemName: "calendar.badge.clock")
+                    }
+                }
+                .disabled(model.isSigningOut || model.isLoading)
+                .accessibilityIdentifier("live-conversation-open-schedules")
+            }
+
+            if model.memoryStore.hasRepository {
+                Button {
+                    isShowingMemorySheet = true
+                } label: {
+                    Label {
+                        Text(memoryMenuTitle)
+                    } icon: {
+                        Image(systemName: "brain.head.profile")
+                    }
+                }
+                .disabled(model.isSigningOut || model.isLoading)
+                .accessibilityIdentifier("live-conversation-open-memory")
+            }
+
+            Divider()
+
+            Label {
+                Text(environmentMenuDescription)
+            } icon: {
+                Image(systemName: model.isMockMode ? "testtube.2" : "cloud")
+            }
+
+            if !model.isMockMode {
+                Divider()
+
+                Button(role: .destructive) {
+                    isConfirmingSignOut = true
+                } label: {
+                    Label {
+                        Text("conversation.live.sign_out", tableName: "Conversation")
+                    } icon: {
+                        Image(systemName: "rectangle.portrait.and.arrow.right")
+                    }
+                }
+                .disabled(model.isSigningOut || model.isSubmitting || model.isLoading)
+                .accessibilityIdentifier("live-conversation-sign-out")
+            }
+        } label: {
+            ZStack(alignment: .topTrailing) {
+                Image(systemName: "ellipsis.circle")
+                    .font(.title3)
+                    .foregroundStyle(.secondary)
+
+                if model.scheduleStore.hasInFlightRun {
+                    Circle()
+                        .fill(EmberDesignTokens.emberMarkTint)
+                        .frame(width: 7, height: 7)
+                        .offset(x: 2, y: -1)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
+            .contentShape(Rectangle())
+        }
+        .accessibilityLabel(Text("conversation.header.menu.label", tableName: "Conversation"))
+        .accessibilityValue(
+            model.scheduleStore.hasInFlightRun
+                ? Text("conversation.header.menu.schedule_running", tableName: "Conversation")
+                : Text(verbatim: "")
+        )
+        .accessibilityIdentifier("live-conversation-menu")
+    }
+
+    @ViewBuilder
+    private var chatTopNotices: some View {
+        if model.bannerStatus != nil || model.isPollingPaused {
+            let noticeMessage = model.bannerStatus ?? LiveConversationCopy.waitingForCloud
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    Image(systemName: "info.circle.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(Color(uiColor: .systemOrange))
+                        .accessibilityHidden(true)
+
+                    Text(noticeMessage)
+                        .font(.caption)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .accessibilityIdentifier("live-conversation-status")
+
+                    if model.isPollingPaused {
+                        resumePollingButton
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "info.circle.fill")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color(uiColor: .systemOrange))
+                            .padding(.top, 2)
+                            .accessibilityHidden(true)
+
+                        Text(noticeMessage)
+                            .font(.caption)
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .accessibilityIdentifier("live-conversation-status")
+                    }
+
+                    if model.isPollingPaused {
+                        resumePollingButton
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(uiColor: .systemOrange).opacity(0.09), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+        }
+
+        if let refreshError = model.refreshErrorMessage {
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .center, spacing: 10) {
+                    refreshErrorContent(refreshError)
+                    refreshRetryButton
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    refreshErrorContent(refreshError)
+                    refreshRetryButton
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            .background(Color(uiColor: .systemOrange).opacity(0.1), in: RoundedRectangle(cornerRadius: 12))
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("live-conversation-refresh-error")
+        }
+    }
+
+    private func refreshErrorContent(_ message: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: "wifi.slash")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color(uiColor: .systemOrange))
+                .padding(.top, 2)
+                .accessibilityHidden(true)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.primary)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var refreshRetryButton: some View {
+        Button {
+            Task { await model.refreshConversationAndTasks() }
+        } label: {
+            Text("conversation.live.refresh_retry", tableName: "Conversation")
+                .font(.caption.weight(.semibold))
+                .frame(minHeight: 32)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier("live-conversation-refresh-retry")
+    }
+
+    private var resumePollingButton: some View {
+        Button {
+            model.resumePolling()
+        } label: {
+            Label(
+                String(localized: "conversation.live.check_again", table: "Conversation"),
+                systemImage: "arrow.clockwise"
+            )
+            .font(.caption.weight(.semibold))
+            .frame(minHeight: 32)
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier("live-conversation-resume-polling")
+    }
+
+    private var schedulesMenuTitle: String {
+        let base = String(localized: "schedules.nav_title", table: "Conversation")
+        if model.scheduleStore.isEndpointUnavailable {
+            return String(
+                format: String(localized: "conversation.menu.unavailable_format", table: "Conversation"),
+                base
+            )
+        }
+        if model.scheduleStore.activeCount > 0 {
+            return "\(base) (\(model.scheduleStore.activeCount))"
+        }
+        return base
+    }
+
+    private var memoryMenuTitle: String {
+        let base = String(localized: "memory.nav_title", table: "Conversation")
+        if model.memoryStore.isEndpointUnavailable {
+            return String(
+                format: String(localized: "conversation.menu.unavailable_format", table: "Conversation"),
+                base
+            )
+        }
+        if !model.memoryStore.items.isEmpty {
+            return "\(base) (\(model.memoryStore.items.count))"
+        }
+        return base
+    }
+
+    private var environmentMenuDescription: String {
+        if model.isMockMode {
+            return String(localized: "conversation.menu.env.mock", table: "Conversation")
+        }
+        switch (model.memoryStore.isEndpointUnavailable, model.scheduleStore.isEndpointUnavailable) {
+        case (true, true):
+            return String(
+                format: String(localized: "conversation.menu.env.core_only_format", table: "Conversation"),
+                model.environmentBadge
+            )
+        case (true, false):
+            return String(
+                format: String(localized: "conversation.menu.env.memory_unavailable_format", table: "Conversation"),
+                model.environmentBadge
+            )
+        case (false, true):
+            return String(
+                format: String(localized: "conversation.menu.env.schedules_unavailable_format", table: "Conversation"),
+                model.environmentBadge
+            )
+        case (false, false):
+            if model.supportsMemoryCapability && model.supportsScheduleCapability {
+                return String(
+                    format: String(localized: "conversation.menu.env.full_format", table: "Conversation"),
+                    model.environmentBadge
+                )
+            }
+            return model.environmentBadge
         }
     }
 

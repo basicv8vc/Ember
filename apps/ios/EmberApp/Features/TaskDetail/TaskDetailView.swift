@@ -42,11 +42,13 @@ private struct ArtifactPreviewPayload: Identifiable {
 
 private struct SessionTaskDetailContent: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     let taskID: UUID
     @Bindable var store: SessionTaskStore
 
     @State private var copiedResultAlert = false
     @State private var previewPayload: ArtifactPreviewPayload?
+    @State private var isShowingTechnicalDetails = false
 
     private var task: SessionTaskDTO? {
         store.tasksByID[taskID]
@@ -72,6 +74,16 @@ private struct SessionTaskDetailContent: View {
         store.cancellingTaskIDs.contains(taskID)
     }
 
+    private var orderedArtifacts: [TaskArtifactItemDTO] {
+        TaskDetailPresentation.orderedArtifacts(store.artifactsByTaskID[taskID] ?? [])
+    }
+
+    private var shouldShowArtifactsSection: Bool {
+        !orderedArtifacts.isEmpty
+            || store.loadingArtifactsTaskIDs.contains(taskID)
+            || store.artifactListErrorByTaskID[taskID] != nil
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: EmberDesignTokens.standardSpacing) {
@@ -81,11 +93,10 @@ private struct SessionTaskDetailContent: View {
 
                 if let task {
                     summaryCard(task)
-                    interventionCardIfNeeded(task)
-                    cancelSectionIfNeeded(task)
-                    activitySection
-                    resultSection(for: task)
-                    artifactsSectionIfNeeded
+
+                    ForEach(sectionOrder(for: task), id: \.self) { section in
+                        sectionView(section, for: task)
+                    }
                 } else if isLoading {
                     LoadingPlaceholder(title: "placeholder.loading")
                 } else if store.missingTaskIDs.contains(taskID) {
@@ -222,8 +233,37 @@ private struct SessionTaskDetailContent: View {
         }
     }
 
+    private func sectionOrder(for task: SessionTaskDTO) -> [TaskDetailSection] {
+        TaskDetailPresentation.sectionOrder(
+            for: task.status,
+            hasArtifacts: shouldShowArtifactsSection,
+            hasAvailableResult: result?.resultState == .available && result?.result != nil,
+            hasResultError: store.resultErrorByTaskID[taskID] != nil
+        )
+    }
+
+    @ViewBuilder
+    private func sectionView(_ section: TaskDetailSection, for task: SessionTaskDTO) -> some View {
+        switch section {
+        case .actionRequired:
+            waitingApprovalSection(for: task)
+        case .statusGuidance:
+            statusGuidanceSection(for: task)
+        case .outcome:
+            resultSection(for: task)
+        case .artifacts:
+            artifactsSectionIfNeeded
+        case .progress:
+            activitySection(for: task)
+        case .cancelAction:
+            cancelSectionIfNeeded(task)
+        case .technicalDetails:
+            technicalDetailsSection(for: task)
+        }
+    }
+
     private func summaryCard(_ task: SessionTaskDTO) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 6) {
                     Text(task.kind.localizedDisplayTitle)
@@ -237,15 +277,20 @@ private struct SessionTaskDetailContent: View {
                 TaskStatusBadge(status: task.status)
             }
 
-            Text("tasks.detail.server_truth_note", tableName: "Conversation")
+            if let updatedAt = ConversationCardFormatting.date(from: task.updatedAt) {
+                HStack(spacing: 5) {
+                    Text("tasks.detail.updated_at", tableName: "Conversation")
+                    Text(updatedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
+                }
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            }
 
             if !task.status.isTerminal && task.status != .waitingApproval {
                 HStack(spacing: 6) {
                     ProgressView()
                         .controlSize(.mini)
+                        .accessibilityHidden(true)
                     Text("tasks.detail.live_updates_active", tableName: "Conversation")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -259,42 +304,6 @@ private struct SessionTaskDetailContent: View {
                     tone: .warning
                 )
             }
-
-            Divider()
-
-            VStack(alignment: .leading, spacing: 6) {
-                if let updatedAt = ConversationCardFormatting.date(from: task.updatedAt) {
-                    LabeledContent {
-                        Text(updatedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
-                    } label: {
-                        Text("tasks.detail.updated_at", tableName: "Conversation")
-                    }
-                    .font(.footnote)
-                }
-                if let createdAt = ConversationCardFormatting.date(from: task.createdAt) {
-                    LabeledContent {
-                        Text(createdAt, format: .dateTime.month(.abbreviated).day().hour().minute())
-                    } label: {
-                        Text("tasks.detail.created_at", tableName: "Conversation")
-                    }
-                    .font(.footnote)
-                }
-                LabeledContent {
-                    Text(task.attemptCount, format: .number)
-                } label: {
-                    Text("tasks.detail.attempts", tableName: "Conversation")
-                }
-                .font(.footnote)
-
-                LabeledContent {
-                    Text(task.taskID.uuidString.lowercased())
-                        .font(.caption.monospaced())
-                        .textSelection(.enabled)
-                } label: {
-                    Text("tasks.detail.task_id", tableName: "Conversation")
-                }
-                .font(.footnote)
-            }
         }
         .padding(EmberDesignTokens.standardSpacing)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -306,23 +315,104 @@ private struct SessionTaskDetailContent: View {
         .accessibilityIdentifier("task-detail-summary")
     }
 
-    @ViewBuilder
-    private func interventionCardIfNeeded(_ task: SessionTaskDTO) -> some View {
-        if task.status == .waitingApproval {
-            InlineNotice(
-                title: LocalizedStringKey("tasks.detail.waiting_approval_title"),
-                message: LocalizedStringKey("tasks.detail.waiting_approval_message"),
-                tone: .warning
-            )
-            .accessibilityIdentifier("task-detail-waiting-approval")
-        } else if task.status == .retryableFailed {
-            InlineNotice(
-                title: LocalizedStringKey("tasks.detail.retry_scheduled_title"),
-                message: LocalizedStringKey("tasks.detail.retry_scheduled_message"),
-                tone: .warning
-            )
-            .accessibilityIdentifier("task-detail-retry-scheduled")
+    private func waitingApprovalSection(for task: SessionTaskDTO) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: "hand.raised.fill")
+                    .font(.title3)
+                    .foregroundStyle(Color(uiColor: .systemOrange))
+                    .accessibilityHidden(true)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("tasks.detail.waiting_approval_title")
+                        .font(.headline)
+                        .foregroundStyle(.primary)
+
+                    Text("tasks.detail.waiting_approval_message")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Text("tasks.detail.waiting_approval_honest_note", tableName: "Conversation")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            cancelActionControls(for: task)
         }
+        .padding(EmberDesignTokens.standardSpacing)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            Color(uiColor: .systemOrange).opacity(0.08),
+            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+                .strokeBorder(Color(uiColor: .systemOrange).opacity(0.24), lineWidth: 1)
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-detail-waiting-approval")
+    }
+
+    @ViewBuilder
+    private func statusGuidanceSection(for task: SessionTaskDTO) -> some View {
+        let serverErrorCode = TaskDetailPresentation.latestServerErrorCode(in: events)
+        switch task.status {
+        case .retryableFailed:
+            VStack(alignment: .leading, spacing: 8) {
+                InlineNotice(
+                    title: LocalizedStringKey("tasks.detail.retry_scheduled_title"),
+                    message: LocalizedStringKey("tasks.detail.retry_scheduled_message"),
+                    tone: .warning
+                )
+                if let serverErrorCode {
+                    errorCodeRow(serverErrorCode)
+                }
+                Text("tasks.detail.retry_next_step", tableName: "Conversation")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 4)
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("task-detail-retry-scheduled")
+        case .failed:
+            VStack(alignment: .leading, spacing: 8) {
+                InlineNotice(
+                    title: LocalizedStringKey("tasks.detail.failed_title"),
+                    message: LocalizedStringKey("tasks.detail.failed_next_step"),
+                    tone: .error
+                )
+                if let serverErrorCode {
+                    errorCodeRow(serverErrorCode)
+                }
+            }
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("task-detail-failed-guidance")
+        case .cancelled:
+            InlineNotice(
+                title: LocalizedStringKey("tasks.detail.cancelled_title"),
+                message: LocalizedStringKey("tasks.detail.cancelled_next_step"),
+                tone: .neutral,
+                systemImage: "stop.circle"
+            )
+            .accessibilityIdentifier("task-detail-cancelled-guidance")
+        case .queued, .running, .waitingApproval, .completed:
+            EmptyView()
+        }
+    }
+
+    private func errorCodeRow(_ errorCode: TaskErrorCode) -> some View {
+        HStack(spacing: 6) {
+            Text("tasks.detail.error_code_prefix", tableName: "Conversation")
+            Text(errorCode.rawValue)
+                .fontDesign(.monospaced)
+        }
+        .font(.caption)
+        .foregroundStyle(.secondary)
+        .padding(.horizontal, 4)
     }
 
     @ViewBuilder
@@ -336,44 +426,7 @@ private struct SessionTaskDetailContent: View {
                 }
                 .font(.headline)
 
-                if let cancelError = store.cancelErrorByTaskID[taskID] {
-                    Text(cancelError)
-                        .font(.subheadline)
-                        .foregroundStyle(Color(uiColor: .systemRed))
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("task-cancel-status")
-                } else if (cancelResponse?.cancelRequested == true && cancelResponse?.terminal == false) || task.cancelRequested {
-                    Text("card.cancel_pending", tableName: "ConversationCards")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityIdentifier("task-cancel-status")
-                } else {
-                    Text("tasks.detail.cancel_honest_note", tableName: "Conversation")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-
-                Button(role: .destructive) {
-                    Task { await store.cancelTask(taskID: taskID) }
-                } label: {
-                    if isCancelling {
-                        ProgressView()
-                            .frame(maxWidth: .infinity)
-                    } else {
-                        Label {
-                            Text("tasks.detail.cancel_button", tableName: "Conversation")
-                        } icon: {
-                            Image(systemName: "stop.circle")
-                        }
-                        .frame(maxWidth: .infinity)
-                    }
-                }
-                .buttonStyle(.bordered)
-                .frame(minHeight: 44)
-                .disabled(isCancelling || task.cancelRequested)
-                .accessibilityIdentifier("task-cancel")
+                cancelActionControls(for: task)
             }
             .padding(EmberDesignTokens.standardSpacing)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -384,10 +437,65 @@ private struct SessionTaskDetailContent: View {
         }
     }
 
-    private var activitySection: some View {
+    @ViewBuilder
+    private func cancelActionControls(for task: SessionTaskDTO) -> some View {
+        if let cancelError = store.cancelErrorByTaskID[taskID] {
+            Text(cancelError)
+                .font(.subheadline)
+                .foregroundStyle(Color(uiColor: .systemRed))
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("task-cancel-status")
+        } else if (cancelResponse?.cancelRequested == true && cancelResponse?.terminal == false) || task.cancelRequested {
+            Text("card.cancel_pending", tableName: "ConversationCards")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityIdentifier("task-cancel-status")
+        } else {
+            Text("tasks.detail.cancel_honest_note", tableName: "Conversation")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Button(role: .destructive) {
+            Task { await store.cancelTask(taskID: taskID) }
+        } label: {
+            if isCancelling {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+            } else {
+                Label {
+                    Text("tasks.detail.cancel_button", tableName: "Conversation")
+                } icon: {
+                    Image(systemName: "stop.circle")
+                }
+                .frame(maxWidth: .infinity)
+            }
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .disabled(isCancelling || task.cancelRequested)
+        .accessibilityIdentifier("task-cancel")
+    }
+
+    private func activitySection(for task: SessionTaskDTO) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("tasks.detail.activity_title", tableName: "Conversation")
                 .font(.headline)
+
+            if (task.status == .running || task.status == .queued),
+               let latestTitleKey = TaskDetailPresentation.latestEventTitleKey(in: events) {
+                HStack(spacing: 6) {
+                    Text("tasks.detail.progress_current_step", tableName: "Conversation")
+                        .foregroundStyle(.secondary)
+                    Text(LocalizedStringKey(latestTitleKey), tableName: "ConversationCards")
+                        .fontWeight(.semibold)
+                        .foregroundStyle(.primary)
+                }
+                .font(.subheadline)
+                .fixedSize(horizontal: false, vertical: true)
+            }
 
             if events.isEmpty {
                 Text(
@@ -416,10 +524,10 @@ private struct SessionTaskDetailContent: View {
 
     private func resultSection(for task: SessionTaskDTO) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("tasks.detail.result_section_title", tableName: "Conversation")
-                .font(.headline)
-
             if !task.status.isTerminal {
+                Text("tasks.detail.result_section_title", tableName: "Conversation")
+                    .font(.headline)
+
                 InlineNotice(
                     title: LocalizedStringKey("tasks.detail.result_pending_title"),
                     message: LocalizedStringKey("tasks.detail.result_pending_message"),
@@ -427,6 +535,9 @@ private struct SessionTaskDetailContent: View {
                 )
                 .accessibilityIdentifier("task-outcome-pending")
             } else if let resultError = store.resultErrorByTaskID[taskID], result == nil {
+                Text("tasks.detail.result_section_title", tableName: "Conversation")
+                    .font(.headline)
+
                 ErrorPlaceholder(
                     title: LocalizedStringKey("tasks.error.title"),
                     message: LocalizedStringKey(resultError),
@@ -461,18 +572,6 @@ private struct SessionTaskDetailContent: View {
                         }
                     }
                 )
-
-                if let payload {
-                    HStack(spacing: 12) {
-                        Label(payload.modelLabel, systemImage: "cpu")
-                        if let producedAt = ConversationCardFormatting.date(from: payload.producedAt) {
-                            Text(producedAt, format: .dateTime.month(.abbreviated).day().hour().minute())
-                        }
-                    }
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 4)
-                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -481,7 +580,7 @@ private struct SessionTaskDetailContent: View {
 
     @ViewBuilder
     private var artifactsSectionIfNeeded: some View {
-        let artifacts = store.artifactsByTaskID[taskID] ?? []
+        let artifacts = orderedArtifacts
         let isLoadingArtifacts = store.loadingArtifactsTaskIDs.contains(taskID)
         let listError = store.artifactListErrorByTaskID[taskID]
 
@@ -515,6 +614,136 @@ private struct SessionTaskDetailContent: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("task-detail-artifacts")
         }
+    }
+
+    private func technicalDetailsSection(for task: SessionTaskDTO) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Button {
+                if reduceMotion {
+                    isShowingTechnicalDetails.toggle()
+                } else {
+                    withAnimation(.easeInOut(duration: 0.2)) {
+                        isShowingTechnicalDetails.toggle()
+                    }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "info.circle")
+                        .foregroundStyle(.secondary)
+                        .accessibilityHidden(true)
+                    Text("tasks.detail.technical_details_title", tableName: "Conversation")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Spacer(minLength: 8)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                        .rotationEffect(.degrees(isShowingTechnicalDetails ? 90 : 0))
+                        .accessibilityHidden(true)
+                }
+                .frame(minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(
+                isShowingTechnicalDetails
+                    ? Text("tasks.detail.technical_details_expanded", tableName: "Conversation")
+                    : Text("tasks.detail.technical_details_collapsed", tableName: "Conversation")
+            )
+            .accessibilityIdentifier("task-detail-technical-details-toggle")
+
+            if isShowingTechnicalDetails {
+                VStack(alignment: .leading, spacing: 8) {
+                    Divider()
+
+                    technicalDetailRow(
+                        labelKey: "tasks.detail.task_id",
+                        value: task.taskID.uuidString.lowercased(),
+                        monospaced: true,
+                        selectable: true,
+                        valueIdentifier: "task-detail-uuid"
+                    )
+
+                    technicalDetailRow(
+                        labelKey: "tasks.detail.attempts",
+                        value: task.attemptCount.formatted(.number),
+                        valueIdentifier: "task-detail-attempts"
+                    )
+
+                    if let createdAt = ConversationCardFormatting.date(from: task.createdAt) {
+                        technicalDetailRow(
+                            labelKey: "tasks.detail.created_at",
+                            value: createdAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+                        )
+                    }
+
+                    if let updatedAt = ConversationCardFormatting.date(from: task.updatedAt) {
+                        technicalDetailRow(
+                            labelKey: "tasks.detail.updated_at",
+                            value: updatedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+                        )
+                    }
+
+                    if result?.resultState == .available, let payload = result?.result {
+                        technicalDetailRow(
+                            labelKey: "tasks.detail.model_label",
+                            value: payload.modelLabel,
+                            monospaced: true
+                        )
+
+                        if let producedAt = ConversationCardFormatting.date(from: payload.producedAt) {
+                            technicalDetailRow(
+                                labelKey: "tasks.detail.produced_at",
+                                value: producedAt.formatted(.dateTime.month(.abbreviated).day().hour().minute())
+                            )
+                        }
+                    }
+
+                    Text("tasks.detail.server_truth_note", tableName: "Conversation")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 2)
+                }
+            }
+        }
+        .padding(.horizontal, EmberDesignTokens.standardSpacing)
+        .padding(.vertical, 8)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            EmberDesignTokens.cardBackground,
+            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("task-detail-technical-details")
+    }
+
+    private func technicalDetailRow(
+        labelKey: LocalizedStringKey,
+        value: String,
+        monospaced: Bool = false,
+        selectable: Bool = false,
+        valueIdentifier: String? = nil
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(labelKey, tableName: "Conversation")
+                .foregroundStyle(.secondary)
+            Spacer(minLength: 8)
+            Group {
+                if selectable {
+                    Text(verbatim: value)
+                        .textSelection(.enabled)
+                } else {
+                    Text(verbatim: value)
+                }
+            }
+            .font(monospaced ? .caption.monospaced() : .footnote)
+            .foregroundStyle(.primary)
+            .multilineTextAlignment(.trailing)
+            .accessibilityIdentifier(valueIdentifier ?? "")
+        }
+        .font(.footnote)
+        .accessibilityElement(children: .contain)
     }
 
     private func artifactRow(_ item: TaskArtifactItemDTO) -> some View {
@@ -551,57 +780,31 @@ private struct SessionTaskDetailContent: View {
                 }
 
                 Spacer(minLength: 8)
+
+                if item.createdBy == .run {
+                    Text("tasks.detail.artifacts_output_badge", tableName: "Conversation")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.accentColor)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 3)
+                        .background(Color.accentColor.opacity(0.10), in: Capsule())
+                        .fixedSize(horizontal: true, vertical: false)
+                }
             }
 
             if let downloadedURL,
                B3AttachmentLimits.isSafeMediaType(item.mediaType),
                B3AttachmentLimits.isSafeArtifactFilenameExtension(item.displayFilename),
                B3AttachmentLimits.isSafeArtifactFilenameExtension(downloadedURL.lastPathComponent) {
-                HStack(spacing: 8) {
-                    Button {
-                        if let previewText {
-                            previewPayload = ArtifactPreviewPayload(
-                                id: item.artifactID,
-                                filename: item.displayFilename,
-                                content: .text(previewText)
-                            )
-                        } else if item.mediaType.lowercased().hasPrefix("image/"),
-                                  !B3AttachmentLimits.blockedMediaTypes.contains(B3AttachmentLimits.normalizedMediaType(item.mediaType)),
-                                  let data = try? Data(contentsOf: downloadedURL),
-                                  let uiImage = UIImage(data: data) {
-                            previewPayload = ArtifactPreviewPayload(
-                                id: item.artifactID,
-                                filename: item.displayFilename,
-                                content: .image(uiImage)
-                            )
-                        } else {
-                            previewPayload = ArtifactPreviewPayload(
-                                id: item.artifactID,
-                                filename: item.displayFilename,
-                                content: .quickLook(downloadedURL)
-                            )
-                        }
-                    } label: {
-                        Label {
-                            Text("tasks.artifacts.preview", tableName: "Conversation")
-                        } icon: {
-                            Image(systemName: "eye")
-                        }
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        artifactPreviewButton(item: item, downloadedURL: downloadedURL, previewText: previewText)
+                        artifactExportLink(item: item, downloadedURL: downloadedURL)
                     }
-                    .buttonStyle(.bordered)
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
-
-                    ShareLink(item: downloadedURL) {
-                        Label {
-                            Text("tasks.artifacts.export", tableName: "Conversation")
-                        } icon: {
-                            Image(systemName: "square.and.arrow.up")
-                        }
+                    VStack(alignment: .leading, spacing: 8) {
+                        artifactPreviewButton(item: item, downloadedURL: downloadedURL, previewText: previewText)
+                        artifactExportLink(item: item, downloadedURL: downloadedURL)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .frame(minHeight: 44)
-                    .accessibilityIdentifier("task-artifact-export-\(item.artifactID.uuidString.lowercased())")
                 }
             } else {
                 Button {
@@ -634,6 +837,62 @@ private struct SessionTaskDetailContent: View {
         }
         .padding(12)
         .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func artifactPreviewButton(
+        item: TaskArtifactItemDTO,
+        downloadedURL: URL,
+        previewText: String?
+    ) -> some View {
+        Button {
+            if let previewText {
+                previewPayload = ArtifactPreviewPayload(
+                    id: item.artifactID,
+                    filename: item.displayFilename,
+                    content: .text(previewText)
+                )
+            } else if item.mediaType.lowercased().hasPrefix("image/"),
+                      !B3AttachmentLimits.blockedMediaTypes.contains(B3AttachmentLimits.normalizedMediaType(item.mediaType)),
+                      let data = try? Data(contentsOf: downloadedURL),
+                      let uiImage = UIImage(data: data) {
+                previewPayload = ArtifactPreviewPayload(
+                    id: item.artifactID,
+                    filename: item.displayFilename,
+                    content: .image(uiImage)
+                )
+            } else {
+                previewPayload = ArtifactPreviewPayload(
+                    id: item.artifactID,
+                    filename: item.displayFilename,
+                    content: .quickLook(downloadedURL)
+                )
+            }
+        } label: {
+            Label {
+                Text("tasks.artifacts.preview", tableName: "Conversation")
+            } icon: {
+                Image(systemName: "eye")
+            }
+        }
+        .buttonStyle(.bordered)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
+    }
+
+    private func artifactExportLink(
+        item: TaskArtifactItemDTO,
+        downloadedURL: URL
+    ) -> some View {
+        ShareLink(item: downloadedURL) {
+            Label {
+                Text("tasks.artifacts.export", tableName: "Conversation")
+            } icon: {
+                Image(systemName: "square.and.arrow.up")
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("task-artifact-export-\(item.artifactID.uuidString.lowercased())")
     }
 }
 

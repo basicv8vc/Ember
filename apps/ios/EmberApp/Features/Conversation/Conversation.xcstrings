@@ -4497,6 +4497,166 @@
         }
       }
     },
+    "tasks.detail.technical_details_title": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Technical Details"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "技术详情"
+          }
+        }
+      }
+    },
+    "tasks.detail.technical_details_expanded": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Expanded"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已展开"
+          }
+        }
+      }
+    },
+    "tasks.detail.technical_details_collapsed": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Collapsed"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已收起"
+          }
+        }
+      }
+    },
+    "tasks.detail.model_label": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型"
+          }
+        }
+      }
+    },
+    "tasks.detail.produced_at": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Generated"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "生成于"
+          }
+        }
+      }
+    },
+    "tasks.detail.waiting_approval_honest_note": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In-app confirmation actions are not enabled in this build yet. You can review attached files below or cancel this task if you no longer want it to run."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前版本暂未开放应用内确认操作。你可以先查看下方相关文件，或取消不再需要执行的任务。"
+          }
+        }
+      }
+    },
+    "tasks.detail.retry_next_step": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "You can wait for the server's automatic retry, or cancel the task below if you no longer need it."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "你可以等待服务端自动重试，或如果不再需要该任务，可在下方取消。"
+          }
+        }
+      }
+    },
+    "tasks.detail.error_code_prefix": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Server code:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务端代码："
+          }
+        }
+      }
+    },
+    "tasks.detail.progress_current_step": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Latest update:"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "最新进展："
+          }
+        }
+      }
+    },
+    "tasks.detail.artifacts_output_badge": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Output"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "产出文件"
+          }
+        }
+      }
+    },
     "conversation.timeline.jump_to_latest": {
       "localizations": {
         "en": {

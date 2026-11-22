@@ -28,6 +28,7 @@ import {
   type D1DatabaseLike,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
+  type ProactiveScheduleDetail,
   type ProactiveScheduleSnapshot,
   type QueueLike,
   type RecoveryRegistryPort,
@@ -1762,16 +1763,57 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     });
     expect(providerCalls).toBe(0);
 
-    // 3. Resume of a paused recurring model_brief is denied when allowRecurringModelBriefs=false.
-    const paused = (await legacyHarness.core.proactiveSchedule({
-      kind: 'pause',
+    // 3. Committing recurring_real_model_unauthorized auto-pauses the recurring schedule,
+    //    delivers one honest failure notice, prevents future alarm firings, and denies resume.
+    const commitRes = await legacyHarness.core.commitDurableResult({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      entityType: 'task',
+      entityId: taskEnvelope.entityId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'worker-recurring-guard',
+      outcome,
+    });
+    expect(commitRes.accepted).toBe(true);
+
+    const autoPausedDetail = (await legacyHarness.core.proactiveSchedule({
+      kind: 'get',
       tenantId: TENANT_A,
       principalId: PRINCIPAL_A,
       agentId: AGENT_A,
       requestId: randomUUID(),
       scheduleId: preExisting.scheduleId,
-    })) as ProactiveScheduleSnapshot;
-    expect(paused.status).toBe('paused');
+    })) as ProactiveScheduleDetail;
+    expect(autoPausedDetail.status).toBe('paused');
+
+    const failureMessages = await legacyHarness.core.readMessages({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      conversationId: CONVERSATION_A,
+      after: 0,
+      limit: 10,
+    });
+    const lastFailureMsg = failureMessages.messages.at(-1);
+    expect(lastFailureMsg?.kind).toBe('ember');
+    if (lastFailureMsg?.kind === 'ember') {
+      expect(lastFailureMsg.text).toContain(
+        'recurring AI briefs are not enabled for this account, so this schedule was paused',
+      );
+    }
+
+    const tasksBeforeNextTick = legacyHarness.sentMessages.filter(
+      (msg) => msg.entityKind === 'task',
+    ).length;
+    nowMs += 600_000;
+    await legacyHarness.events.handleAlarm({
+      nowMs,
+      queues: { durable_turn: legacyHarness.queue, agent_task: legacyHarness.queue },
+      globalBudget: legacyHarness.core.createGlobalBudgetSettlePort(),
+      registry: legacyHarness.registry,
+    });
+    expect(legacyHarness.sentMessages.filter((msg) => msg.entityKind === 'task')).toHaveLength(
+      tasksBeforeNextTick,
+    );
 
     const guardedResumeCore = new AgentHeadCore({
       storage: (legacyHarness.core as unknown as { storage: DurableObjectStorageLike }).storage,
@@ -1944,7 +1986,12 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
       agentId: AGENT_A,
       requestId: randomUUID(),
       scheduleId: oneTimeBrief.scheduleId,
-    })) as { readonly latestRun: { readonly status: string; readonly resultMessageId: string | null } | null };
+    })) as {
+      readonly latestRun: {
+        readonly status: string;
+        readonly resultMessageId: string | null;
+      } | null;
+    };
     expect(detail.latestRun?.status).toBe('failed');
     expect(detail.latestRun?.resultMessageId).toBeTruthy();
 

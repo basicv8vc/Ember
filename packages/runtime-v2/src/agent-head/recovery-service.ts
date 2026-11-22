@@ -21,6 +21,7 @@ import type {
 } from '../recovery/ports.js';
 import type {
   OrdinaryOutboxEntityKind,
+  ScheduleKind,
   V2DispatchOutboxRow,
   V2ScheduleRow,
 } from '../recovery/schema.js';
@@ -1717,20 +1718,24 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
   }
 
   private findProactiveRunScheduleSync(taskId: string): {
+    readonly schedule_id: string;
     readonly title: string;
     readonly kind: ProactiveScheduleKind;
     readonly delivery_mode: 'direct_reminder' | 'model_brief';
+    readonly schedule_kind: ScheduleKind;
     readonly schedule_status: V2ScheduleRow['status'];
   } | null {
     if (!this.hasProactiveSchedulesTableSync()) return null;
     return sqlExecMaybe<{
+      readonly schedule_id: string;
       readonly title: string;
       readonly kind: ProactiveScheduleKind;
       readonly delivery_mode: 'direct_reminder' | 'model_brief';
+      readonly schedule_kind: ScheduleKind;
       readonly schedule_status: V2ScheduleRow['status'];
     }>(
       this.deps.storage.sql,
-      `SELECT ps.title, ps.kind, ps.delivery_mode, s.status AS schedule_status
+      `SELECT ps.schedule_id, ps.title, ps.kind, ps.delivery_mode, s.schedule_kind, s.status AS schedule_status
          FROM proactive_schedule_runs r
          JOIN proactive_schedules ps ON ps.schedule_id = r.schedule_id
          JOIN v2_schedules s ON s.schedule_id = ps.schedule_id
@@ -1761,6 +1766,32 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     const proactive = this.findProactiveRunScheduleSync(task.id);
     if (proactive === null || proactive.schedule_status === 'cancelled') {
       return;
+    }
+    if (
+      outcome.status === 'failed' &&
+      outcome.reasonCode === 'recurring_real_model_unauthorized' &&
+      proactive.delivery_mode === 'model_brief' &&
+      proactive.schedule_kind !== 'once' &&
+      proactive.schedule_status === 'active'
+    ) {
+      this.deps.storage.sql.exec(
+        `UPDATE v2_schedules
+            SET status = 'paused',
+                version = version + 1,
+                updated_at_ms = ?
+          WHERE schedule_id = ?
+            AND status = 'active'
+            AND schedule_kind != 'once'`,
+        nowMs,
+        proactive.schedule_id,
+      );
+      this.deps.storage.sql.exec(
+        `UPDATE proactive_schedules
+            SET updated_at_ms = ?
+          WHERE schedule_id = ?`,
+        nowMs,
+        proactive.schedule_id,
+      );
     }
     const conv = getMainConversationSync(this.deps.storage.sql);
     if (conv === null) {
@@ -1992,7 +2023,7 @@ function describeProactiveFailureReason(reasonCode: string): string {
     case 'model_unauthorized_tenant':
       return 'model execution is not enabled for this account';
     case 'recurring_real_model_unauthorized':
-      return 'recurring AI briefs are not enabled for this account';
+      return 'recurring AI briefs are not enabled for this account, so this schedule was paused';
     case 'model_timeout':
     case 'TIMEOUT':
     case 'lease_expired':

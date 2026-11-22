@@ -15,6 +15,10 @@ import {
 } from '@ember/contracts';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { V2LocalRuntimeHarness } from '../../apps/benchmark/src/v2-m1/index.js';
+import {
+  G4_SYNTHETIC_CSV_FIXTURE,
+  runG4DaytonaCanary,
+} from '../../infra/cloudflare/v2-g4-daytona-canary.mjs';
 
 const configPath = fileURLToPath(
   new URL('../../apps/api/wrangler.local-v2.jsonc', import.meta.url),
@@ -325,5 +329,43 @@ describe('V2 Tools & Execution: Python Sandbox & Artifact Delivery in workerd', 
     expect(createHash('sha256').update(Buffer.from(csvBody, 'utf-8')).digest('hex')).toBe(
       outputArtifact!.sha256,
     );
+  });
+
+  it('executes the G4 canary runner synthetic CSV + NL delegation verification against local workerd', async () => {
+    const token = await signIn(harness, `v2-alpha-f-g4-canary-${randomUUID()}`);
+
+    harness.fakeGateway.enqueueRules({
+      mode: 'fast_ok',
+      replyText: 'I have delegated the synthetic CSV analysis to the Python sandbox.',
+      delegation: {
+        toolName: 'delegate_python_agent',
+        arguments: {
+          title: 'G4 NL Synthetic CSV Summary',
+          prompt: `Analyze ${G4_SYNTHETIC_CSV_FIXTURE.filename}\n# output: g4-nl-summary.csv`,
+        },
+      },
+    });
+
+    const report = await runG4DaytonaCanary({
+      baseUrl: 'http://127.0.0.1:8787',
+      bearerToken: token,
+      allowSimulated: true,
+      includeNlChat: true,
+      includeCancellation: false,
+      pollIntervalMs: 50,
+      fetchImpl: (input, init) => {
+        const rawUrl =
+          typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const url = new URL(rawUrl);
+        return harness.fetchOverHttp(`${url.pathname}${url.search}`, init);
+      },
+    });
+
+    expect(report.ok).toBe(true);
+    expect(report.fixtureSha256).toBe(G4_SYNTHETIC_CSV_FIXTURE.sha256);
+    expect(report.directTask.simulated).toBe(true);
+    expect(report.directTask.outputs.length).toBeGreaterThanOrEqual(1);
+    expect(report.nlDelegation?.status).toBe('completed');
+    expect(report.nlDelegation?.outputs.length).toBeGreaterThanOrEqual(1);
   });
 });

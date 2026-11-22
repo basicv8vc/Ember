@@ -76,6 +76,8 @@ export interface DaytonaSdkClientOptions {
   readonly target?: string;
   readonly requestTimeoutMs?: number;
   readonly useDeprecatedPolling?: boolean;
+  /** Optional SDK instance seam for deterministic unit testing. */
+  readonly sdk?: Daytona;
 }
 
 function toState(value: unknown): DaytonaSandboxState {
@@ -123,15 +125,17 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
       throw new Error('daytona api key is empty');
     }
 
-    this.daytona = new Daytona({
-      apiKey: options.apiKey,
-      ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
-      ...(options.target === undefined ? {} : { target: options.target }),
-      ...(options.useDeprecatedPolling === undefined
-        ? {}
-        : { useDeprecatedPolling: options.useDeprecatedPolling }),
-      requestTimeoutMs: options.requestTimeoutMs ?? 120_000,
-    });
+    this.daytona =
+      options.sdk ??
+      new Daytona({
+        apiKey: options.apiKey,
+        ...(options.apiUrl === undefined ? {} : { apiUrl: options.apiUrl }),
+        ...(options.target === undefined ? {} : { target: options.target }),
+        ...(options.useDeprecatedPolling === undefined
+          ? {}
+          : { useDeprecatedPolling: options.useDeprecatedPolling }),
+        requestTimeoutMs: options.requestTimeoutMs ?? 120_000,
+      });
   }
 
   /**
@@ -149,25 +153,42 @@ export class DaytonaSdkSandboxClient implements DaytonaSandboxClient {
   public async create(request: DaytonaCreateRequest): Promise<{ sandboxId: string }> {
     request.signal?.throwIfAborted();
 
-    const sandbox = await this.daytona.create(
-      {
-        snapshot: request.snapshot,
-        labels: { ...request.labels },
-        ttlMinutes: request.ttlMinutes,
-        autoStopInterval: request.autoStopIntervalMinutes,
-        autoDeleteInterval: request.autoDeleteIntervalMinutes,
-        ephemeral: request.ephemeral,
-        networkBlockAll: request.networkBlockAll,
-        public: false,
-        ...(request.networkAllowList === undefined
-          ? {}
-          : { networkAllowList: request.networkAllowList }),
-        ...(request.domainAllowList === undefined
-          ? {}
-          : { domainAllowList: request.domainAllowList }),
-      },
-      { timeout: request.fetchTimeoutSec },
-    );
+    let sandbox: Sandbox;
+    try {
+      sandbox = await this.daytona.create(
+        {
+          snapshot: request.snapshot,
+          labels: { ...request.labels },
+          ttlMinutes: request.ttlMinutes,
+          autoStopInterval: request.autoStopIntervalMinutes,
+          autoDeleteInterval: request.autoDeleteIntervalMinutes,
+          ephemeral: request.ephemeral,
+          networkBlockAll: request.networkBlockAll,
+          public: false,
+          ...(request.networkAllowList === undefined
+            ? {}
+            : { networkAllowList: request.networkAllowList }),
+          ...(request.domainAllowList === undefined
+            ? {}
+            : { domainAllowList: request.domainAllowList }),
+        },
+        { timeout: request.fetchTimeoutSec },
+      );
+    } catch (error) {
+      // Daytona's create() attaches `sandboxId` onto timeout errors when the server created
+      // the sandbox before waitUntilStarted timed out. Best-effort delete so it cannot leak.
+      const leakedSandboxId =
+        error !== null &&
+        typeof error === 'object' &&
+        'sandboxId' in error &&
+        typeof (error as { readonly sandboxId?: unknown }).sandboxId === 'string'
+          ? (error as { readonly sandboxId: string }).sandboxId
+          : '';
+      if (leakedSandboxId.length > 0) {
+        await this.delete(leakedSandboxId, 15_000).catch(() => undefined);
+      }
+      throw error;
+    }
 
     return { sandboxId: sandbox.id };
   }

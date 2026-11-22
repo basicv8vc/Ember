@@ -204,6 +204,8 @@ function createDaytonaSandboxFactory(
       apiKey: config.apiKey,
       ...(config.apiUrl === undefined ? {} : { apiUrl: config.apiUrl }),
       ...(config.target === undefined ? {} : { target: config.target }),
+      // Workers/Queue isolates use explicit HTTP polling instead of opening background socket.io WebSockets.
+      useDeprecatedPolling: true,
     });
     const provider = new DaytonaSandboxProvider({
       tenantId,
@@ -905,7 +907,7 @@ export async function executeV2PythonAgentTask(
             outputs: outputsToPublish,
           })) as V2PublishTaskOutputsResultDto;
           if (!published.accepted) {
-            return { status: 'failed', reasonCode: 'lease_lost' };
+            return { status: 'failed', reasonCode: abortReason ?? 'lease_lost' };
           }
           stagedAnyOutputs = outputsToPublish.length > 0;
         }

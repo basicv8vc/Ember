@@ -20,6 +20,13 @@ export const REQUIRED_REAL_CANARY_SECRETS = Object.freeze([
   'EMBER_MODEL_ALPHA_TENANT_IDS',
 ]);
 export const OPTIONAL_REAL_CANARY_SECRETS = Object.freeze(['EMBER_V2_STAGING_ALLOWED_SUBJECTS']);
+export const G4_SANDBOX_OWNER = 'ember-v2-staging:canary';
+export const REQUIRED_DAYTONA_CANARY_SECRETS = Object.freeze([
+  ...REQUIRED_REAL_CANARY_SECRETS,
+  'DAYTONA_API_KEY',
+  'EMBER_DAYTONA_ALLOWED_TENANTS',
+]);
+export const OPTIONAL_DAYTONA_CANARY_SECRETS = OPTIONAL_REAL_CANARY_SECRETS;
 export const G3_REAL_CANARY_VARS = Object.freeze({
   EMBER_MODEL_MODE: 'real',
   EMBER_MODEL_PROVIDER: G3_APPROVED_PROVIDER,
@@ -37,10 +44,14 @@ export const G3_REAL_CANARY_VARS = Object.freeze({
   GLOBAL_DAILY_CEILING_MICRO_USD: String(G3_MAX_BUDGET_CEILINGS.globalDailyMicroUsd),
   EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: String(G3_MAX_BUDGET_CEILINGS.principalDailyTurns),
 });
+export const G4_DAYTONA_CANARY_VARS = Object.freeze({
+  ...G3_REAL_CANARY_VARS,
+  EMBER_SANDBOX_MODE: 'daytona',
+  EMBER_SANDBOX_OWNER: G4_SANDBOX_OWNER,
+});
 const FORBIDDEN_PLAINTEXT_SECRET_VARS = Object.freeze([
-  ...REQUIRED_REAL_CANARY_SECRETS,
-  ...OPTIONAL_REAL_CANARY_SECRETS,
-  'DAYTONA_API_KEY',
+  ...REQUIRED_DAYTONA_CANARY_SECRETS,
+  ...OPTIONAL_DAYTONA_CANARY_SECRETS,
 ]);
 const SAFE_INT_REGEX = /^\d+$/;
 const REQUIRED_V2_DO_CLASSES = new Map([
@@ -163,6 +174,7 @@ export function validateV2StagingConfig({
   migrationExists = true,
   requireProvisioned = false,
   allowRealLlmCanary = false,
+  allowDaytonaCanary = false,
 }) {
   const errors = [];
   const notices = [];
@@ -185,13 +197,42 @@ export function validateV2StagingConfig({
     }
   }
 
-  if (allowRealLlmCanary) {
+  if (allowRealLlmCanary || allowDaytonaCanary) {
+    if (allowDaytonaCanary && !allowRealLlmCanary) {
+      errors.push(
+        'V2 G4 Daytona canary requires allowRealLlmCanary (pinned model + strict budget caps)',
+      );
+    }
     if (vars.EMBER_MODEL_MODE !== 'fake' && vars.EMBER_MODEL_MODE !== 'real') {
       errors.push(
         `V2 real-LLM canary requires vars.EMBER_MODEL_MODE === "fake" or "real" (got ${JSON.stringify(vars.EMBER_MODEL_MODE)})`,
       );
     }
-    if (vars.EMBER_SANDBOX_MODE !== 'fake' && vars.EMBER_SANDBOX_MODE !== 'disabled') {
+    if (allowDaytonaCanary) {
+      if (
+        vars.EMBER_SANDBOX_MODE !== 'fake' &&
+        vars.EMBER_SANDBOX_MODE !== 'disabled' &&
+        vars.EMBER_SANDBOX_MODE !== 'daytona'
+      ) {
+        errors.push(
+          `V2 G4 Daytona canary requires vars.EMBER_SANDBOX_MODE === "fake", "disabled", or "daytona" (got ${JSON.stringify(vars.EMBER_SANDBOX_MODE)})`,
+        );
+      }
+      if (vars.EMBER_SANDBOX_MODE === 'daytona') {
+        if (vars.EMBER_MODEL_MODE !== 'real') {
+          errors.push(
+            `V2 G4 Daytona canary requires vars.EMBER_MODEL_MODE === "real" when EMBER_SANDBOX_MODE === "daytona" (got ${JSON.stringify(vars.EMBER_MODEL_MODE)})`,
+          );
+        }
+        const owner =
+          typeof vars.EMBER_SANDBOX_OWNER === 'string' ? vars.EMBER_SANDBOX_OWNER.trim() : '';
+        if (!owner.startsWith('ember-v2-staging:') || owner.length <= 'ember-v2-staging:'.length) {
+          errors.push(
+            `V2 G4 Daytona canary requires vars.EMBER_SANDBOX_OWNER starting with "ember-v2-staging:" (got ${JSON.stringify(vars.EMBER_SANDBOX_OWNER)})`,
+          );
+        }
+      }
+    } else if (vars.EMBER_SANDBOX_MODE !== 'fake' && vars.EMBER_SANDBOX_MODE !== 'disabled') {
       errors.push(
         `V2 real-LLM canary requires vars.EMBER_SANDBOX_MODE === "fake" or "disabled" until separate Daytona approval (got ${JSON.stringify(vars.EMBER_SANDBOX_MODE)})`,
       );
@@ -443,7 +484,26 @@ export function validateRealCanarySecretNames(secretNames) {
   return { ok: errors.length === 0, errors, notices };
 }
 
-async function verifyRealCanarySecrets(repoRoot) {
+/**
+ * Validate bound secret names for G4 real-LLM + Daytona canary.
+ */
+export function validateDaytonaCanarySecretNames(secretNames) {
+  const names = new Set(secretNames);
+  const errors = [];
+  const notices = [];
+  const missing = REQUIRED_DAYTONA_CANARY_SECRETS.filter((name) => !names.has(name));
+  if (missing.length > 0) {
+    errors.push(`Missing required G4 Daytona staging secrets: ${missing.join(', ')}`);
+  }
+  if (!names.has('EMBER_V2_STAGING_ALLOWED_SUBJECTS')) {
+    notices.push(
+      'EMBER_V2_STAGING_ALLOWED_SUBJECTS is not bound; G4 real-mode login enforces derived-tenant allowlist via EMBER_MODEL_ALPHA_TENANT_IDS.',
+    );
+  }
+  return { ok: errors.length === 0, errors, notices };
+}
+
+async function verifyCanarySecrets(repoRoot, allowDaytonaCanary) {
   const { stdout } = await runCommand(
     'pnpm',
     [
@@ -466,7 +526,9 @@ async function verifyRealCanarySecrets(repoRoot) {
     throw new Error('Unexpected wrangler secret list output');
   }
   const names = parsed.map((entry) => entry?.name).filter(Boolean);
-  const result = validateRealCanarySecretNames(names);
+  const result = allowDaytonaCanary
+    ? validateDaytonaCanarySecretNames(names)
+    : validateRealCanarySecretNames(names);
   for (const notice of result.notices) {
     process.stdout.write(`[notice] ${notice}\n`);
   }
@@ -480,9 +542,18 @@ async function main() {
   const skipWrangler = args.has('--skip-wrangler');
   const requireProvisioned = args.has('--require-provisioned');
   const allowRealLlmCanary = args.has('--allow-real-llm-canary');
+  const allowDaytonaCanary = args.has('--allow-daytona-canary');
   const modelModeReal = args.has('--model-mode=real');
+  const sandboxModeDaytona = args.has('--sandbox-mode=daytona');
   const verifySecrets = args.has('--verify-secrets');
   const repoRoot = resolve(fileURLToPath(new URL('../..', import.meta.url)));
+
+  if (sandboxModeDaytona && !allowDaytonaCanary) {
+    throw new Error('--sandbox-mode=daytona requires --allow-daytona-canary');
+  }
+  if (sandboxModeDaytona && !modelModeReal) {
+    throw new Error('--sandbox-mode=daytona requires --model-mode=real');
+  }
 
   const v2Path = resolve(repoRoot, 'apps/api/wrangler.v2-staging.jsonc');
   const v1Paths = [
@@ -506,6 +577,14 @@ async function main() {
       ...(allowRealLlmCanary ? G3_REAL_CANARY_VARS : { EMBER_MODEL_MODE: 'real' }),
     };
   }
+  if (sandboxModeDaytona) {
+    v2Config.vars = {
+      ...(v2Config.vars ?? {}),
+      ...(allowDaytonaCanary
+        ? { EMBER_SANDBOX_MODE: 'daytona', EMBER_SANDBOX_OWNER: G4_SANDBOX_OWNER }
+        : { EMBER_SANDBOX_MODE: 'daytona' }),
+    };
+  }
 
   const result = validateV2StagingConfig({
     v2Config,
@@ -513,6 +592,7 @@ async function main() {
     migrationExists: existsSync(migrationPath),
     requireProvisioned,
     allowRealLlmCanary,
+    allowDaytonaCanary,
   });
 
   for (const notice of result.notices) {
@@ -533,18 +613,25 @@ async function main() {
     if (!allowRealLlmCanary) {
       throw new Error('--verify-secrets requires --allow-real-llm-canary');
     }
-    await verifyRealCanarySecrets(repoRoot);
-    process.stdout.write('V2 staging G3 canary secret bindings verified.\n');
+    await verifyCanarySecrets(repoRoot, allowDaytonaCanary);
+    process.stdout.write(
+      `V2 staging ${allowDaytonaCanary ? 'G4 Daytona' : 'G3'} canary secret bindings verified.\n`,
+    );
   }
 
   if (!skipWrangler) {
     process.stdout.write('Running local Wrangler bundle dry-run (no cloud resources touched)...\n');
+    const activeCanaryVars =
+      sandboxModeDaytona && allowDaytonaCanary && modelModeReal && allowRealLlmCanary
+        ? G4_DAYTONA_CANARY_VARS
+        : modelModeReal && allowRealLlmCanary
+          ? G3_REAL_CANARY_VARS
+          : sandboxModeDaytona && allowDaytonaCanary
+            ? { EMBER_SANDBOX_MODE: 'daytona', EMBER_SANDBOX_OWNER: G4_SANDBOX_OWNER }
+            : null;
     const canaryVarFlags =
-      modelModeReal && allowRealLlmCanary
-        ? Object.entries(G3_REAL_CANARY_VARS).flatMap(([key, value]) => [
-            '--var',
-            `${key}:${value}`,
-          ])
+      activeCanaryVars !== null
+        ? Object.entries(activeCanaryVars).flatMap(([key, value]) => ['--var', `${key}:${value}`])
         : [];
     await runCommand(
       'pnpm',

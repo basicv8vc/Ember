@@ -3,8 +3,11 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   G3_REAL_CANARY_VARS,
+  G4_DAYTONA_CANARY_VARS,
+  G4_SANDBOX_OWNER,
   UNPROVISIONED_D1_PLACEHOLDER,
   parseJsonc,
+  validateDaytonaCanarySecretNames,
   validateRealCanarySecretNames,
   validateV2StagingConfig,
 } from '../../infra/cloudflare/v2-staging-preflight.mjs';
@@ -300,5 +303,141 @@ describe('V2 staging preflight validator', () => {
     ]);
     expect(withDaytona.ok).toBe(false);
     expect(withDaytona.errors.some((e) => e.includes('DAYTONA_API_KEY'))).toBe(true);
+  });
+
+  it('requires real LLM canary gates, sandbox owner isolation, and Daytona secrets for G4 canary', () => {
+    const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
+    const g4Config = structuredClone(v2Config);
+    g4Config.vars = {
+      ...g4Config.vars,
+      ...G4_DAYTONA_CANARY_VARS,
+    };
+
+    const g4Pass = validateV2StagingConfig({
+      v2Config: g4Config,
+      v1Configs,
+      migrationExists,
+      requireProvisioned: true,
+      allowRealLlmCanary: true,
+      allowDaytonaCanary: true,
+    });
+    expect(g4Pass.ok).toBe(true);
+    expect(g4Pass.errors).toEqual([]);
+
+    const withoutG3Gate = validateV2StagingConfig({
+      v2Config: g4Config,
+      v1Configs,
+      migrationExists,
+      allowDaytonaCanary: true,
+    });
+    expect(withoutG3Gate.ok).toBe(false);
+    expect(withoutG3Gate.errors.some((e) => e.includes('--allow-real-llm-canary'))).toBe(false);
+    expect(withoutG3Gate.errors.some((e) => e.includes('allowRealLlmCanary'))).toBe(true);
+
+    const daytonaModeWithoutG4Gate = validateV2StagingConfig({
+      v2Config: {
+        ...v2Config,
+        vars: {
+          ...v2Config.vars,
+          ...G3_REAL_CANARY_VARS,
+          EMBER_SANDBOX_MODE: 'daytona',
+        },
+      },
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+    });
+    expect(daytonaModeWithoutG4Gate.ok).toBe(false);
+    expect(
+      daytonaModeWithoutG4Gate.errors.some((e) => e.includes('EMBER_SANDBOX_MODE === "fake"')),
+    ).toBe(true);
+
+    const unsafeOwner = validateV2StagingConfig({
+      v2Config: {
+        ...g4Config,
+        vars: {
+          ...g4Config.vars,
+          EMBER_SANDBOX_OWNER: 'prod-default-owner',
+        },
+      },
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+      allowDaytonaCanary: true,
+    });
+    expect(unsafeOwner.ok).toBe(false);
+    expect(unsafeOwner.errors.some((e) => e.includes('ember-v2-staging:'))).toBe(true);
+    expect(G4_SANDBOX_OWNER).toBe('ember-v2-staging:canary');
+
+    const plaintextAllowlist = validateV2StagingConfig({
+      v2Config: {
+        ...g4Config,
+        vars: {
+          ...g4Config.vars,
+          EMBER_DAYTONA_ALLOWED_TENANTS: '11111111-1111-1111-1111-111111111111',
+        },
+      },
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+      allowDaytonaCanary: true,
+    });
+    expect(plaintextAllowlist.ok).toBe(false);
+    expect(plaintextAllowlist.errors.some((e) => e.includes('EMBER_DAYTONA_ALLOWED_TENANTS'))).toBe(
+      true,
+    );
+
+    const missingSecret = validateDaytonaCanarySecretNames([
+      'EMBER_MODEL_API_KEY',
+      'EMBER_MODEL_ALPHA_TENANT_IDS',
+      'DAYTONA_API_KEY',
+    ]);
+    expect(missingSecret.ok).toBe(false);
+    expect(missingSecret.errors.some((e) => e.includes('EMBER_DAYTONA_ALLOWED_TENANTS'))).toBe(
+      true,
+    );
+
+    const allSecrets = validateDaytonaCanarySecretNames([
+      'EMBER_MODEL_API_KEY',
+      'EMBER_MODEL_ALPHA_TENANT_IDS',
+      'DAYTONA_API_KEY',
+      'EMBER_DAYTONA_ALLOWED_TENANTS',
+    ]);
+    expect(allSecrets.ok).toBe(true);
+    expect(allSecrets.errors).toEqual([]);
+
+    const recurringG4 = validateV2StagingConfig({
+      v2Config: {
+        ...g4Config,
+        vars: {
+          ...g4Config.vars,
+          EMBER_MODEL_ALLOW_RECURRING_BRIEFS: 'true',
+        },
+      },
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+      allowDaytonaCanary: true,
+    });
+    expect(recurringG4.ok).toBe(false);
+    expect(recurringG4.errors.some((e) => e.includes('recurring real-model briefs'))).toBe(true);
+
+    const daytonaWithFakeModel = validateV2StagingConfig({
+      v2Config: {
+        ...g4Config,
+        vars: {
+          ...g4Config.vars,
+          EMBER_MODEL_MODE: 'fake',
+        },
+      },
+      v1Configs,
+      migrationExists,
+      allowRealLlmCanary: true,
+      allowDaytonaCanary: true,
+    });
+    expect(daytonaWithFakeModel.ok).toBe(false);
+    expect(daytonaWithFakeModel.errors.some((e) => e.includes('EMBER_MODEL_MODE === "real"'))).toBe(
+      true,
+    );
   });
 });

@@ -20,6 +20,7 @@ struct ConversationTimelineView: View {
     @State private var contentBounds: TimelineContentBounds?
     @State private var viewportBounds: TimelineViewportBounds?
     @State private var latestMeasuredMetrics: ConversationTimelineViewportMetrics?
+    @State private var scrollRequest: TimelineScrollRequest?
     @State private var pendingDynamicTypeChange = false
     @State private var programmaticScrollResetTask: Task<Void, Never>?
 
@@ -86,6 +87,7 @@ struct ConversationTimelineView: View {
                 .modifier(
                     TimelineScrollGeometryObserverModifier(
                         coordinateSpaceName: scrollCoordinateSpace,
+                        scrollRequest: scrollRequest,
                         onMetrics: { metrics in
                             latestMeasuredMetrics = metrics
                             applyScrollMetricsIfActive(proxy: proxy)
@@ -113,11 +115,11 @@ struct ConversationTimelineView: View {
                         executeScrollDirective(directive, proxy: proxy)
                     }
                     .padding(.horizontal, 16)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 10)
                     .transition(
                         reduceMotion
                             ? .opacity
-                            : .move(edge: .bottom).combined(with: .opacity)
+                            : .scale(scale: 0.85).combined(with: .opacity)
                     )
                 }
             }
@@ -207,13 +209,23 @@ struct ConversationTimelineView: View {
         let shouldAnimate = animated && !reduceMotion
         programmaticScrollResetTask?.cancel()
         programmaticScrollResetTask = Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(shouldAnimate ? 350 : 120))
+            try? await Task.sleep(for: .milliseconds(shouldAnimate ? 480 : 120))
             guard !Task.isCancelled else { return }
             scrollState.finishProgrammaticScroll()
+            if scrollState.isFollowingBottom,
+               (latestMeasuredMetrics?.distanceFromBottom ?? 0) > scrollState.config.settledBottomTolerance {
+                performScrollToBottom(animated: false, proxy: proxy)
+            }
         }
 
-        if shouldAnimate {
-            withAnimation(.easeOut(duration: 0.22)) {
+        performScrollToBottom(animated: shouldAnimate, proxy: proxy)
+    }
+
+    private func performScrollToBottom(animated: Bool, proxy: ScrollViewProxy) {
+        if #available(iOS 18.0, *) {
+            scrollRequest = TimelineScrollRequest(animated: animated)
+        } else if animated {
+            withAnimation(.easeInOut(duration: 0.35)) {
                 proxy.scrollTo(bottomAnchor, anchor: .bottom)
             }
         } else {
@@ -566,23 +578,12 @@ private struct ConversationJumpToLatestButton: View {
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 6) {
-                Image(systemName: "arrow.down")
-                    .font(.footnote.weight(.bold))
-                    .accessibilityHidden(true)
-
-                Text("conversation.timeline.jump_to_latest", tableName: "Conversation")
-                    .font(.footnote.weight(.semibold))
-                    .lineLimit(2)
-                    .minimumScaleFactor(0.85)
-                    .multilineTextAlignment(.center)
-            }
-            .foregroundStyle(.primary)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 9)
-            .modifier(JumpToLatestSurfaceModifier())
-            .frame(minWidth: 44, minHeight: 44)
-            .contentShape(Capsule())
+            Image(systemName: "arrow.down")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(.primary)
+                .frame(width: 44, height: 44)
+                .modifier(JumpToLatestSurfaceModifier())
+                .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel(Text("conversation.timeline.jump_to_latest", tableName: "Conversation"))
@@ -596,17 +597,48 @@ private struct JumpToLatestSurfaceModifier: ViewModifier {
     func body(content: Content) -> some View {
         if #available(iOS 26.0, *) {
             content
-                .glassEffect(Glass.regular.interactive(), in: Capsule())
-                .shadow(color: Color.black.opacity(0.10), radius: 10, x: 0, y: 4)
+                .glassEffect(Glass.regular.interactive(), in: Circle())
+                .shadow(color: Color.black.opacity(0.12), radius: 10, x: 0, y: 4)
         } else {
             content
-                .background(.ultraThinMaterial, in: Capsule())
-                .background(EmberDesignTokens.cardBackground.opacity(0.65), in: Capsule())
+                .background(.ultraThinMaterial, in: Circle())
+                .background(EmberDesignTokens.cardBackground.opacity(0.65), in: Circle())
                 .overlay {
-                    Capsule().strokeBorder(EmberDesignTokens.separator, lineWidth: 0.75)
+                    Circle().strokeBorder(EmberDesignTokens.separator, lineWidth: 0.75)
                 }
-                .shadow(color: Color.black.opacity(0.10), radius: 10, x: 0, y: 4)
+                .shadow(color: Color.black.opacity(0.12), radius: 10, x: 0, y: 4)
         }
+    }
+}
+
+private struct TimelineScrollRequest: Equatable {
+    let id = UUID()
+    let animated: Bool
+}
+
+@available(iOS 18.0, *)
+private struct ModernScrollPositionModifier: ViewModifier {
+    let scrollRequest: TimelineScrollRequest?
+
+    @State private var scrollPosition = ScrollPosition(idType: String.self)
+
+    func body(content: Content) -> some View {
+        content
+            .scrollPosition($scrollPosition)
+            .onChange(of: scrollRequest) { _, request in
+                guard let request else { return }
+                if request.animated {
+                    withAnimation(.smooth(duration: 0.42)) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                } else {
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        scrollPosition.scrollTo(edge: .bottom)
+                    }
+                }
+            }
     }
 }
 
@@ -635,6 +667,7 @@ private struct LegacyTimelineContentBoundsModifier: ViewModifier {
 
 private struct TimelineScrollGeometryObserverModifier: ViewModifier {
     let coordinateSpaceName: String
+    let scrollRequest: TimelineScrollRequest?
     let onMetrics: (ConversationTimelineViewportMetrics) -> Void
     let onLegacyContentBounds: (TimelineContentBounds) -> Void
     let onLegacyViewportBounds: (TimelineViewportBounds) -> Void
@@ -642,18 +675,20 @@ private struct TimelineScrollGeometryObserverModifier: ViewModifier {
     @ViewBuilder
     func body(content: Content) -> some View {
         if #available(iOS 18.0, *) {
-            content.onScrollGeometryChange(for: ConversationTimelineViewportMetrics.self) { geometry in
-                ConversationTimelineViewportMetrics(
-                    contentMinY: -geometry.visibleRect.minY,
-                    contentHeight: geometry.contentSize.height,
-                    viewportWidth: geometry.visibleRect.width,
-                    viewportHeight: geometry.visibleRect.height,
-                    topInset: 0,
-                    bottomInset: 0
-                ).quantized()
-            } action: { _, newMetrics in
-                onMetrics(newMetrics)
-            }
+            content
+                .modifier(ModernScrollPositionModifier(scrollRequest: scrollRequest))
+                .onScrollGeometryChange(for: ConversationTimelineViewportMetrics.self) { geometry in
+                    ConversationTimelineViewportMetrics(
+                        contentMinY: -geometry.visibleRect.minY,
+                        contentHeight: geometry.contentSize.height,
+                        viewportWidth: geometry.visibleRect.width,
+                        viewportHeight: geometry.visibleRect.height,
+                        topInset: 0,
+                        bottomInset: 0
+                    ).quantized()
+                } action: { _, newMetrics in
+                    onMetrics(newMetrics)
+                }
         } else {
             content
                 .background(

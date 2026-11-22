@@ -167,22 +167,26 @@ final class ConversationTimelineScrollStateTests: XCTestCase {
 
         XCTAssertEqual(state.handleJumpToLatestTap(reduceMotion: false), .scrollToBottom(animated: true))
         XCTAssertTrue(state.isFollowingBottom)
+        XCTAssertTrue(state.isAnimatedProgrammaticScroll)
         XCTAssertFalse(state.showsJumpToLatest(hasContent: true))
 
-        // Intermediate animation frames scrolling downward do not cancel following.
+        // Intermediate animation frames scrolling downward and minor layout growth do not cancel
+        // the animated glide by emitting an unanimated jump.
         XCTAssertEqual(
-            state.handleMetricsChange(makeMetrics(contentMinY: -520, contentHeight: 1200), hasContent: true),
+            state.handleMetricsChange(makeMetrics(contentMinY: -520, contentHeight: 1224), hasContent: true),
             .none
         )
         XCTAssertTrue(state.isFollowingBottom)
 
         // Settling at bottom clears programmatic flag.
-        _ = state.handleMetricsChange(makeMetrics(contentMinY: -600, contentHeight: 1200), hasContent: true)
+        _ = state.handleMetricsChange(makeMetrics(contentMinY: -624, contentHeight: 1224), hasContent: true)
         XCTAssertFalse(state.isProgrammaticScrollToBottom)
+        XCTAssertFalse(state.isAnimatedProgrammaticScroll)
 
         // With Reduce Motion enabled, jump is non-animated.
-        _ = state.handleMetricsChange(makeMetrics(contentMinY: -400, contentHeight: 1200), hasContent: true)
+        _ = state.handleMetricsChange(makeMetrics(contentMinY: -400, contentHeight: 1224), hasContent: true)
         XCTAssertEqual(state.handleJumpToLatestTap(reduceMotion: true), .scrollToBottom(animated: false))
+        XCTAssertFalse(state.isAnimatedProgrammaticScroll)
     }
 
     func testSendingNewMessageReenablesFollowingEvenWhenScrolledUp() {

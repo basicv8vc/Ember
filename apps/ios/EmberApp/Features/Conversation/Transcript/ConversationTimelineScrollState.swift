@@ -120,6 +120,7 @@ struct ConversationTimelineScrollState: Equatable, Sendable {
     let config: Configuration
     private(set) var isFollowingBottom: Bool = true
     private(set) var isProgrammaticScrollToBottom: Bool = false
+    private(set) var isAnimatedProgrammaticScroll: Bool = false
     private(set) var hasPerformedInitialPositioning: Bool = false
     private(set) var latestMetrics: ConversationTimelineViewportMetrics?
     private var programmaticScrollBestDistance: CGFloat?
@@ -221,9 +222,10 @@ struct ConversationTimelineScrollState: Equatable, Sendable {
             && old.replyState != .generating && new.replyState != .generating
 
         if newUserMessageAppeared || startedSubmittingNewTurn {
+            let shouldAnimate = !reduceMotion
             isFollowingBottom = true
-            beginProgrammaticScrollToBottom()
-            return .scrollToBottom(animated: !reduceMotion)
+            beginProgrammaticScrollToBottom(animated: shouldAnimate)
+            return .scrollToBottom(animated: shouldAnimate)
         }
 
         guard isFollowingBottom else {
@@ -239,7 +241,7 @@ struct ConversationTimelineScrollState: Equatable, Sendable {
 
         if new.entryIDs.last != old.entryIDs.last || new.entryIDs.count > old.entryIDs.count {
             let animate = !reduceMotion && new.replyState != .generating && old.streamingReplyText == nil
-            beginProgrammaticScrollToBottom()
+            beginProgrammaticScrollToBottom(animated: animate)
             return .scrollToBottom(animated: animate)
         }
 
@@ -323,7 +325,8 @@ struct ConversationTimelineScrollState: Equatable, Sendable {
                 isFollowingBottom = false
                 return .none
             }
-            if isFollowingBottom,
+            if !isAnimatedProgrammaticScroll,
+               isFollowingBottom,
                (contentHeightDelta > 0.5 || visibleBottomDelta < -0.5),
                newDistance > config.settledBottomTolerance {
                 return .scrollToBottom(animated: false)
@@ -359,19 +362,25 @@ struct ConversationTimelineScrollState: Equatable, Sendable {
 
     /// Re-enables bottom following and returns a scroll directive when the user taps "Jump to latest".
     mutating func handleJumpToLatestTap(reduceMotion: Bool) -> ConversationTimelineScrollDirective {
+        let shouldAnimate = !reduceMotion
         isFollowingBottom = true
-        beginProgrammaticScrollToBottom()
-        return .scrollToBottom(animated: !reduceMotion)
+        beginProgrammaticScrollToBottom(animated: shouldAnimate)
+        return .scrollToBottom(animated: shouldAnimate)
     }
 
     /// Clears the in-flight programmatic scroll guard after a scroll completes or times out.
     mutating func finishProgrammaticScroll() {
         isProgrammaticScrollToBottom = false
+        isAnimatedProgrammaticScroll = false
         programmaticScrollBestDistance = nil
     }
 
-    private mutating func beginProgrammaticScrollToBottom(initialDistance: CGFloat? = nil) {
+    private mutating func beginProgrammaticScrollToBottom(
+        animated: Bool = false,
+        initialDistance: CGFloat? = nil
+    ) {
         isProgrammaticScrollToBottom = true
+        isAnimatedProgrammaticScroll = animated
         programmaticScrollBestDistance = initialDistance ?? latestMetrics?.distanceFromBottom
     }
 }

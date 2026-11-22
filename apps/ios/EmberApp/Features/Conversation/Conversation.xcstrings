@@ -2449,6 +2449,246 @@
         }
       }
     },
+    "schedules.error.conflict": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "This schedule changed on the server. Refresh and try again."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "该定时任务状态已更新，请刷新后重试。"
+          }
+        }
+      }
+    },
+    "schedules.composer.past_time_hint": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Choose a future time or tap a quick preset above."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "请选择未来的执行时间或点击上方快捷时间。"
+          }
+        }
+      }
+    },
+    "schedules.preset.1m": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In 1 min"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 分钟后"
+          }
+        }
+      }
+    },
+    "schedules.preset.15m": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In 15 min"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "15 分钟后"
+          }
+        }
+      }
+    },
+    "schedules.preset.1h": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "In 1 hour"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "1 小时后"
+          }
+        }
+      }
+    },
+    "schedules.preset.tomorrow_9am": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tomorrow 9:00"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "明早 9:00"
+          }
+        }
+      }
+    },
+    "schedules.run.queued": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Queued in Ember Cloud…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已在云端排队等待执行…"
+          }
+        }
+      }
+    },
+    "schedules.run.running": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Running in Ember Cloud…"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "正在云端执行…"
+          }
+        }
+      }
+    },
+    "schedules.failure.budget": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Daily model budget limit was reached before this run started."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "已达到每日模型预算上限，本次未能执行。"
+          }
+        }
+      }
+    },
+    "schedules.failure.unauthorized": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Model execution is not enabled for this account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前账号尚未启用模型执行权限。"
+          }
+        }
+      }
+    },
+    "schedules.failure.recurring_unauthorized": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Recurring AI briefs are not enabled for this account."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "当前账号尚未启用周期性 AI 简报。"
+          }
+        }
+      }
+    },
+    "schedules.failure.timeout": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution timed out before completing."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务执行超时，未能完成。"
+          }
+        }
+      }
+    },
+    "schedules.failure.provider_unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "The model provider was temporarily unavailable."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "模型服务暂时不可用，请稍后重试。"
+          }
+        }
+      }
+    },
+    "schedules.failure.generic": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Execution did not complete."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "本次任务未能完成执行。"
+          }
+        }
+      }
+    },
+    "schedules.action.view_in_chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "View in Chat"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "在对话中查看"
+          }
+        }
+      }
+    },
     "memory.nav_title": {
       "localizations": {
         "en": {

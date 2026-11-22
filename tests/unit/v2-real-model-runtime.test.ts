@@ -1809,6 +1809,161 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
     ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
   });
 
+  it('combined negative: recurring real model_brief disabled incurs zero paid egress and existing one-time brief failure delivers one honest Chat notice', async () => {
+    let nowMs = Date.now();
+    const h = createInMemoryHarness({
+      nowMs: () => nowMs,
+      allowRecurringModelBriefs: false,
+    });
+
+    // 1. Recurring model_brief attempt in real mode with recurring disabled -> 0 provider calls
+    let recurringProviderCalls = 0;
+    const disabledRecurringRuntime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: () => {
+        recurringProviderCalls += 1;
+        return Promise.reject(new Error('must not incur paid egress'));
+      },
+    });
+    expect(disabledRecurringRuntime.allowRecurringBriefs).toBe(false);
+
+    await expect(
+      h.core.proactiveSchedule({
+        kind: 'create',
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_A,
+        requestId: randomUUID(),
+        input: {
+          idempotencyKey: 'combined-recurring-disabled',
+          kind: 'brief',
+          title: 'Disabled Recurring Brief',
+          prompt: 'Should never execute.',
+          trigger: { type: 'interval', intervalSeconds: 600 },
+          timezone: 'Asia/Shanghai',
+          deliveryMode: 'model_brief',
+        },
+      }),
+    ).rejects.toMatchObject({ code: 'POLICY_DENIED' });
+    expect(recurringProviderCalls).toBe(0);
+
+    // 2. Existing one-time model_brief fails on OpenRouter 503 -> commits exactly one honest Chat notice
+    const oneTimeBrief = (await h.core.proactiveSchedule({
+      kind: 'create',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      input: {
+        idempotencyKey: 'combined-onetime-brief-failure',
+        kind: 'brief',
+        title: 'One-Time Real Brief',
+        prompt: 'Summarize urgent release notes.',
+        trigger: { type: 'once', fireAt: new Date(nowMs + 1_000).toISOString() },
+        timezone: 'Asia/Shanghai',
+        deliveryMode: 'model_brief',
+      },
+    })) as ProactiveScheduleSnapshot;
+
+    nowMs += 2_000;
+    await h.events.handleAlarm({
+      nowMs,
+      queues: { durable_turn: h.queue, agent_task: h.queue },
+      globalBudget: h.core.createGlobalBudgetSettlePort(),
+      registry: h.registry,
+    });
+    const taskEnvelope = h.sentMessages.find((msg) => msg.entityKind === 'task');
+    expect(taskEnvelope).toBeDefined();
+    if (taskEnvelope === undefined) return;
+
+    const claim = await h.core.claimDurableWork({
+      envelope: taskEnvelope,
+      workerId: 'worker-onetime-fail',
+      leaseMs: 30_000,
+    });
+    expect(claim.kind).toBe('claimed');
+    if (claim.kind !== 'claimed') return;
+
+    let providerCalls = 0;
+    const failingRealRuntime = resolveV2ModelRuntime(baseRealEnv(), {
+      fetchImpl: () => {
+        providerCalls += 1;
+        return Promise.resolve(
+          new Response(JSON.stringify({ error: { message: 'upstream unavailable' } }), {
+            status: 503,
+            headers: { 'content-type': 'application/json' },
+          }),
+        );
+      },
+    });
+    const executorEnv = {
+      ...baseRealEnv(),
+      AGENT_HEAD: {
+        getByName: () => ({
+          markAttemptSent: (req: Parameters<AgentHeadCore['markAttemptSent']>[0]) =>
+            h.core.markAttemptSent(req),
+          reserveTaskModelAttempt: (req: Parameters<AgentHeadCore['reserveTaskModelAttempt']>[0]) =>
+            h.core.reserveTaskModelAttempt(req),
+          taskArtifacts: (req: Parameters<AgentHeadCore['taskArtifacts']>[0]) =>
+            h.core.taskArtifacts(req),
+          edgeRpc: vi.fn(),
+        }),
+      },
+      D1_RECOVERY: {} as D1DatabaseLike,
+      DURABLE_TURN_QUEUE: h.queue,
+      AGENT_TASK_QUEUE: h.queue,
+      GLOBAL_BUDGET: { getByName: () => h.globalBudget },
+    } as unknown as Parameters<typeof createDurableExecutor>[0];
+
+    const executor = createDurableExecutor(executorEnv, failingRealRuntime.gateway, {
+      modelRuntime: failingRealRuntime,
+    });
+    const outcome = await executor.executeDurableWork({
+      ...claim,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      workerId: 'worker-onetime-fail',
+    });
+    expect(outcome).toMatchObject({ status: 'failed' });
+    expect(providerCalls).toBe(1);
+
+    const committed = await h.core.commitDurableResult({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      entityType: 'task',
+      entityId: claim.targetId,
+      leaseEpoch: claim.leaseEpoch,
+      workerId: 'worker-onetime-fail',
+      outcome,
+    });
+    expect(committed.accepted).toBe(true);
+
+    const detail = (await h.core.proactiveSchedule({
+      kind: 'get',
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      requestId: randomUUID(),
+      scheduleId: oneTimeBrief.scheduleId,
+    })) as { readonly latestRun: { readonly status: string; readonly resultMessageId: string | null } | null };
+    expect(detail.latestRun?.status).toBe('failed');
+    expect(detail.latestRun?.resultMessageId).toBeTruthy();
+
+    const page = await h.core.readMessages({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      conversationId: CONVERSATION_A,
+      after: 0,
+      limit: 10,
+    });
+    const notices = page.messages.filter(
+      (msg): msg is Extract<typeof msg, { readonly kind: 'ember' }> =>
+        msg.kind === 'ember' && msg.text.includes('One-Time Real Brief'),
+    );
+    expect(notices).toHaveLength(1);
+    expect(notices[0]?.text).toContain('Could not deliver "**One-Time Real Brief**"');
+    expect(notices[0]?.message_id).toBe(detail.latestRun?.resultMessageId);
+  });
+
   it('blocks un-allowlisted tenants on POST /v2/tasks/python at HTTP ingress', async () => {
     const runtime = resolveV2ModelRuntime(baseRealEnv(), {
       fetchImpl: () => Promise.reject(new Error('must not be called')),

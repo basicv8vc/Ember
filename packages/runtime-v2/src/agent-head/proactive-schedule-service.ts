@@ -279,6 +279,24 @@ export async function computeProactiveScheduleDigest(
   );
 }
 
+function formatNextFireAtInTimezone(isoTimestamp: string, timezone: string): string {
+  const ms = Date.parse(isoTimestamp);
+  if (!Number.isFinite(ms)) return isoTimestamp;
+  try {
+    return new Intl.DateTimeFormat('en-US', {
+      timeZone: timezone,
+      year: 'numeric',
+      month: 'short',
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).format(new Date(ms));
+  } catch {
+    return isoTimestamp;
+  }
+}
+
 export function formatProactiveScheduleConfirmation(snapshot: {
   readonly title: string;
   readonly kind: ProactiveScheduleKind;
@@ -289,7 +307,7 @@ export function formatProactiveScheduleConfirmation(snapshot: {
   const timing =
     snapshot.nextFireAt === null
       ? snapshot.status
-      : `next run at ${snapshot.nextFireAt} (${snapshot.timezone})`;
+      : `next run at ${formatNextFireAtInTimezone(snapshot.nextFireAt, snapshot.timezone)} (${snapshot.timezone})`;
   return `Scheduled "${snapshot.title}" (${snapshot.kind}) — ${timing}. You can pause or cancel it anytime in Schedules.`;
 }
 

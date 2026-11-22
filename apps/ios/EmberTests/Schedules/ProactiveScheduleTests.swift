@@ -339,6 +339,300 @@ final class ProactiveScheduleTests: XCTestCase {
         XCTAssertTrue(resumedTexts.contains(where: { $0.contains("**Morning Brief**") }))
     }
 
+    func testScheduleDisplayResultPrefersDetailTextAndMapsFriendlyFailureReasons() throws {
+        let schedule = ProactiveScheduleDTO(
+            scheduleId: UUID(),
+            kind: .brief,
+            title: "Morning Brief",
+            prompt: "Summarize today's priorities.",
+            deliveryMode: .modelBrief,
+            status: .active,
+            scheduleKind: .cronTZ,
+            cronExpr: "0 8 * * *",
+            timezone: "Asia/Shanghai",
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+
+        let completedRun = ProactiveScheduleRunDTO(
+            occurrenceSeq: 1,
+            taskId: UUID().uuidString.lowercased(),
+            status: "completed",
+            summaryText: "Morning Brief",
+            detailText: "Top priority: finalize Q4 launch checklist.",
+            reasonCode: "ok",
+            resultMessageId: UUID().uuidString.lowercased(),
+            scheduledFor: "2026-11-21T00:00:00Z",
+            completedAt: "2026-11-21T00:00:05Z"
+        )
+        XCTAssertEqual(
+            ProactiveSchedulesSheetView.displayResultText(for: schedule, run: completedRun),
+            "Top priority: finalize Q4 launch checklist."
+        )
+
+        let titleOnlyRun = ProactiveScheduleRunDTO(
+            occurrenceSeq: 1,
+            taskId: UUID().uuidString.lowercased(),
+            status: "completed",
+            summaryText: "Morning Brief",
+            detailText: nil,
+            reasonCode: "ok",
+            scheduledFor: "2026-11-21T00:00:00Z",
+            completedAt: "2026-11-21T00:00:05Z"
+        )
+        XCTAssertNil(
+            ProactiveSchedulesSheetView.displayResultText(for: schedule, run: titleOnlyRun),
+            "Redundant summaryText matching schedule title must not be repeated"
+        )
+
+        let budgetReason = try XCTUnwrap(ProactiveSchedulesSheetView.localizedFailureReason(for: "budget_exceeded"))
+        XCTAssertFalse(budgetReason.contains("budget_exceeded"))
+        let timeoutReason = try XCTUnwrap(ProactiveSchedulesSheetView.localizedFailureReason(for: "model_timeout"))
+        XCTAssertFalse(timeoutReason.contains("model_timeout"))
+        let unknownReason = try XCTUnwrap(ProactiveSchedulesSheetView.localizedFailureReason(for: "custom_code"))
+        XCTAssertTrue(unknownReason.contains("custom_code"))
+    }
+
+    func testScheduleStoreTracksActiveCountInFlightRunsNextFireDateAndConflictError() async throws {
+        let soonFireAt = Date().addingTimeInterval(45).ISO8601Format()
+        let laterFireAt = Date().addingTimeInterval(180).ISO8601Format()
+        let soonID = UUID()
+        let laterID = UUID()
+        let pausedID = UUID()
+
+        let soon = ProactiveScheduleDTO(
+            scheduleId: soonID,
+            kind: .followUp,
+            title: "Soon follow-up",
+            prompt: "Check status",
+            deliveryMode: .modelBrief,
+            status: .active,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            nextFireAt: soonFireAt,
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z",
+            latestRun: ProactiveScheduleRunDTO(
+                occurrenceSeq: 1,
+                taskId: UUID().uuidString.lowercased(),
+                status: "running",
+                scheduledFor: soonFireAt
+            )
+        )
+        let later = ProactiveScheduleDTO(
+            scheduleId: laterID,
+            kind: .reminder,
+            title: "Later reminder",
+            prompt: "Call Alex",
+            deliveryMode: .directReminder,
+            status: .active,
+            scheduleKind: .once,
+            timezone: "Asia/Shanghai",
+            nextFireAt: laterFireAt,
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+        let paused = ProactiveScheduleDTO(
+            scheduleId: pausedID,
+            kind: .brief,
+            title: "Paused brief",
+            prompt: "Brief",
+            deliveryMode: .modelBrief,
+            status: .paused,
+            scheduleKind: .cronTZ,
+            cronExpr: "0 8 * * *",
+            timezone: "Asia/Shanghai",
+            nextFireAt: Date().addingTimeInterval(10).ISO8601Format(),
+            createdAt: "2026-11-21T00:00:00Z",
+            updatedAt: "2026-11-21T00:00:00Z"
+        )
+
+        let store = ProactiveScheduleStore(repository: InMemoryProactiveScheduleRepository(items: [later, paused, soon]))
+        await store.refresh()
+
+        XCTAssertEqual(store.activeCount, 2)
+        XCTAssertTrue(store.hasInFlightRun)
+        XCTAssertEqual(
+            store.nextActiveFireDate?.timeIntervalSince1970 ?? 0,
+            ConversationCardFormatting.date(from: soonFireAt)?.timeIntervalSince1970 ?? -1,
+            accuracy: 1.0
+        )
+
+        register { request in
+            if request.httpMethod == "POST", request.url?.path.hasSuffix("/pause") == true {
+                return .json(statusCode: 409, body: "{\"error\":{\"code\":\"CONFLICT\"}}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+        let liveStore = ProactiveScheduleStore(repository: try makeLiveRepository())
+        await liveStore.pause(id: soonID)
+        XCTAssertNotNil(liveStore.errorMessage)
+        XCTAssertNotEqual(
+            liveStore.errorMessage,
+            String(localized: "schedules.error.unavailable", table: "Conversation")
+        )
+    }
+
+    func testLiveHostArrivingScheduleAutoRefreshesVisibleChat() async throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("ember-proactive-arrival-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let session = StubSession.make()
+        sessions.append(session)
+        let api = FakeEmberSessionAPI()
+        let transport = try EmberAuthenticatedTransport(
+            baseURL: AuthFixture.baseURL,
+            client: EmberAPIClient(session: session)
+        )
+        let auth = LiveAuthSessionCoordinator(dependencies: .init(
+            api: api,
+            transport: transport,
+            store: InMemoryEmberSessionStore(initialRecord: AuthFixture.record()),
+            appleSignIn: FakeAppleSignInAuthorizer(behavior: .fail(.appleCancelled)),
+            fence: InMemorySessionRecoveryFence(),
+            now: { AuthFixture.epoch }
+        ))
+        let journal = LiveConversationJournal(directory: directory)
+        let repo = LiveConversationRepository(
+            client: LiveB1ConversationClient(auth: auth),
+            journal: journal
+        )
+        let scheduleRepo = LiveProactiveScheduleRepository(auth: auth)
+
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let scheduleID = UUID().uuidString.lowercased()
+        let arrivedMsgID = UUID().uuidString.lowercased()
+        let dueISO = Date().addingTimeInterval(0.3).ISO8601Format()
+        let listCalls = LockedCounter()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me" {
+                return .json(statusCode: 200, body: AuthFixture.meJSON)
+            }
+            if request.httpMethod == "GET", path == "/v2/schedules" {
+                let n = listCalls.increment()
+                if n == 1 {
+                    return .json(statusCode: 200, body: """
+                    {
+                      "schedules": [
+                        {
+                          "scheduleId": "\(scheduleID)",
+                          "kind": "reminder",
+                          "title": "Drink water",
+                          "prompt": "Hydrate now",
+                          "deliveryMode": "direct_reminder",
+                          "status": "active",
+                          "scheduleKind": "once",
+                          "intervalSeconds": null,
+                          "cronExpr": null,
+                          "timezone": "Asia/Shanghai",
+                          "misfirePolicy": "coalesce_latest",
+                          "nextFireAt": "\(dueISO)",
+                          "lastFiredAt": null,
+                          "occurrenceCount": 0,
+                          "version": 1,
+                          "createdAt": "2026-11-21T00:00:00Z",
+                          "updatedAt": "2026-11-21T00:00:00Z",
+                          "latestRun": null
+                        }
+                      ]
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "schedules": [
+                    {
+                      "scheduleId": "\(scheduleID)",
+                      "kind": "reminder",
+                      "title": "Drink water",
+                      "prompt": "Hydrate now",
+                      "deliveryMode": "direct_reminder",
+                      "status": "completed",
+                      "scheduleKind": "once",
+                      "intervalSeconds": null,
+                      "cronExpr": null,
+                      "timezone": "Asia/Shanghai",
+                      "misfirePolicy": "coalesce_latest",
+                      "nextFireAt": null,
+                      "lastFiredAt": "\(dueISO)",
+                      "occurrenceCount": 1,
+                      "version": 2,
+                      "createdAt": "2026-11-21T00:00:00Z",
+                      "updatedAt": "\(dueISO)",
+                      "latestRun": {
+                        "occurrenceSeq": 1,
+                        "taskId": "\(UUID().uuidString.lowercased())",
+                        "status": "completed",
+                        "summaryText": "Drink water",
+                        "detailText": "Hydrate now",
+                        "reasonCode": "ok",
+                        "resultMessageId": "\(arrivedMsgID)",
+                        "scheduledFor": "\(dueISO)",
+                        "completedAt": "\(dueISO)"
+                      }
+                    }
+                  ]
+                }
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                let delivered = listCalls.current >= 2
+                let messagesJSON = delivered
+                    ? """
+                    [{
+                      "message_id": "\(arrivedMsgID)",
+                      "sequence": 1,
+                      "created_at": "2026-11-21T08:00:00Z",
+                      "kind": "ember",
+                      "text": "Reminder: Drink water\\n\\nHydrate now",
+                      "model_label": "ember-proactive-scheduler",
+                      "simulated": false
+                    }]
+                    """
+                    : "[]"
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id": "\(conversationID)",
+                  "transcript_epoch": 0,
+                  "messages": \(messagesJSON),
+                  "next_after": \(delivered ? 1 : 0),
+                  "has_more": false
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let host = LiveConversationHostModel(
+            repository: repo,
+            auth: auth,
+            scheduleRepository: scheduleRepo
+        )
+        defer { host.suspendForDisappearance() }
+        host.handleScenePhase(.active)
+        host.handleViewAppeared()
+        await host.start()
+
+        for _ in 0..<120 {
+            let texts = host.screen.timeline.compactMap { entry -> String? in
+                if case .message(let msg) = entry, msg.author == .ember { return msg.text }
+                return nil
+            }
+            if texts.contains(where: { $0.contains("Reminder: Drink water") }) { break }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        let arrivedTexts = host.screen.timeline.compactMap { entry -> String? in
+            if case .message(let msg) = entry, msg.author == .ember { return msg.text }
+            return nil
+        }
+        XCTAssertTrue(arrivedTexts.contains(where: { $0.contains("Reminder: Drink water") }))
+        XCTAssertEqual(host.scheduleStore.schedules.first?.status, .completed)
+    }
+
     private func makeLiveRepository() throws -> LiveProactiveScheduleRepository {
         let session = StubSession.make()
         sessions.append(session)
@@ -365,6 +659,10 @@ final class ProactiveScheduleTests: XCTestCase {
 private final class LockedCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var count = 0
+
+    var current: Int {
+        lock.withLock { count }
+    }
 
     func increment() -> Int {
         lock.withLock {

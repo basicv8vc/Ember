@@ -4,6 +4,7 @@ struct ProactiveSchedulesSheetView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scenePhase
     @Bindable var store: ProactiveScheduleStore
+    var onOpenChat: (() -> Void)? = nil
 
     @State private var selectedKind: ProactiveScheduleKind = .brief
     @State private var titleText = ""
@@ -20,9 +21,14 @@ struct ProactiveSchedulesSheetView: View {
         promptText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    private var isOneTimeInPast: Bool {
+        selectedKind != .brief && oneTimeFireAt <= Date()
+    }
+
     private var canCreate: Bool {
         !trimmedTitle.isEmpty
             && !trimmedPrompt.isEmpty
+            && !isOneTimeInPast
             && !store.isCreating
             && !store.isEndpointUnavailable
     }
@@ -109,6 +115,11 @@ struct ProactiveSchedulesSheetView: View {
                     Task { await store.refresh() }
                 }
             }
+            .onChange(of: selectedKind) { _, newKind in
+                if newKind != .brief && oneTimeFireAt <= Date().addingTimeInterval(30) {
+                    oneTimeFireAt = Date().addingTimeInterval(3600)
+                }
+            }
             .toolbar {
                 ToolbarItem(placement: .topBarTrailing) {
                     Button {
@@ -185,13 +196,42 @@ struct ProactiveSchedulesSheetView: View {
                 )
                 .font(.subheadline)
             } else {
-                DatePicker(
-                    String(localized: "schedules.composer.fire_at", table: "Conversation"),
-                    selection: $oneTimeFireAt,
-                    in: Date()...,
-                    displayedComponents: [.date, .hourAndMinute]
-                )
-                .font(.subheadline)
+                VStack(alignment: .leading, spacing: 8) {
+                    DatePicker(
+                        String(localized: "schedules.composer.fire_at", table: "Conversation"),
+                        selection: $oneTimeFireAt,
+                        in: Date()...,
+                        displayedComponents: [.date, .hourAndMinute]
+                    )
+                    .font(.subheadline)
+
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            presetChip(titleKey: "schedules.preset.1m", identifier: "schedules-preset-1m") {
+                                oneTimeFireAt = Date().addingTimeInterval(65)
+                            }
+                            presetChip(titleKey: "schedules.preset.15m", identifier: "schedules-preset-15m") {
+                                oneTimeFireAt = Date().addingTimeInterval(15 * 60)
+                            }
+                            presetChip(titleKey: "schedules.preset.1h", identifier: "schedules-preset-1h") {
+                                oneTimeFireAt = Date().addingTimeInterval(3600)
+                            }
+                            presetChip(
+                                titleKey: "schedules.preset.tomorrow_9am",
+                                identifier: "schedules-preset-tomorrow-9am"
+                            ) {
+                                oneTimeFireAt = Self.nextMorningNineAM()
+                            }
+                        }
+                    }
+
+                    if isOneTimeInPast {
+                        Text("schedules.composer.past_time_hint", tableName: "Conversation")
+                            .font(.caption)
+                            .foregroundStyle(Color(uiColor: .systemOrange))
+                            .accessibilityIdentifier("schedules-past-time-hint")
+                    }
+                }
             }
 
             HStack {
@@ -205,6 +245,9 @@ struct ProactiveSchedulesSheetView: View {
                         if await store.create(request) {
                             titleText = ""
                             promptText = ""
+                            if oneTimeFireAt <= Date().addingTimeInterval(60) {
+                                oneTimeFireAt = Date().addingTimeInterval(3600)
+                            }
                         }
                     }
                 } label: {
@@ -340,14 +383,35 @@ struct ProactiveSchedulesSheetView: View {
             }
 
             if let latestRun = schedule.latestRun {
-                if latestRun.status == "failed" || latestRun.status == "retryable_failed" {
-                    HStack(spacing: 4) {
-                        Image(systemName: "exclamationmark.triangle")
-                            .font(.caption2)
-                        Text("schedules.last_run_failed", tableName: "Conversation")
-                        if let reason = latestRun.reasonCode, !reason.isEmpty {
-                            Text("(\(reason))")
-                                .font(.caption2.monospaced())
+                if latestRun.status == "queued" || latestRun.status == "running" {
+                    HStack(spacing: 6) {
+                        ProgressView()
+                            .controlSize(.mini)
+                        Text(
+                            latestRun.status == "queued"
+                                ? String(localized: "schedules.run.queued", table: "Conversation")
+                                : String(localized: "schedules.run.running", table: "Conversation")
+                        )
+                    }
+                    .font(.caption)
+                    .foregroundStyle(Color.accentColor)
+                    .accessibilityIdentifier("schedule-run-in-flight-\(schedule.scheduleId.uuidString.lowercased())")
+                } else if latestRun.status == "failed" || latestRun.status == "retryable_failed" {
+                    VStack(alignment: .leading, spacing: 3) {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle")
+                                .font(.caption2)
+                            Text("schedules.last_run_failed", tableName: "Conversation")
+                            if let completedAt = latestRun.completedAt,
+                               let completedDate = ConversationCardFormatting.date(from: completedAt) {
+                                Text("·")
+                                Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
+                            }
+                        }
+                        if let failureDetail = Self.localizedFailureReason(for: latestRun.reasonCode) {
+                            Text(failureDetail)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
                     }
                     .font(.caption)
@@ -358,23 +422,25 @@ struct ProactiveSchedulesSheetView: View {
                         Image(systemName: "checkmark.circle")
                             .font(.caption2)
                         Text("schedules.last_run", tableName: "Conversation")
-                        Text(completedDate, format: .dateTime.month(.abbreviated).day().hour().minute())
+                        Text(Self.formatNextFireAt(completedDate, timezoneID: schedule.timezone))
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 }
 
-                if let latestSummary = latestRun.summaryText, !latestSummary.isEmpty {
-                    Text(latestSummary)
+                if let resultText = Self.displayResultText(for: schedule, run: latestRun) {
+                    Text(resultText)
                         .font(.caption)
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                         .padding(8)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 8))
+                        .accessibilityIdentifier("schedule-result-\(schedule.scheduleId.uuidString.lowercased())")
                 }
             }
 
-            if !schedule.status.isTerminal {
+            if !schedule.status.isTerminal || (schedule.latestRun?.resultMessageId != nil && onOpenChat != nil) {
                 HStack(spacing: 8) {
                     if schedule.status == .active {
                         Button {
@@ -398,15 +464,28 @@ struct ProactiveSchedulesSheetView: View {
                         .accessibilityIdentifier("schedule-resume-\(schedule.scheduleId.uuidString.lowercased())")
                     }
 
-                    Button(role: .destructive) {
-                        pendingCancelSchedule = schedule
-                    } label: {
-                        Text("schedules.action.cancel", tableName: "Conversation")
-                            .font(.caption.weight(.semibold))
+                    if !schedule.status.isTerminal {
+                        Button(role: .destructive) {
+                            pendingCancelSchedule = schedule
+                        } label: {
+                            Text("schedules.action.cancel", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(isMutating)
+                        .accessibilityIdentifier("schedule-cancel-\(schedule.scheduleId.uuidString.lowercased())")
                     }
-                    .buttonStyle(.bordered)
-                    .disabled(isMutating)
-                    .accessibilityIdentifier("schedule-cancel-\(schedule.scheduleId.uuidString.lowercased())")
+
+                    if schedule.latestRun?.resultMessageId != nil, let onOpenChat {
+                        Button {
+                            onOpenChat()
+                        } label: {
+                            Text("schedules.action.view_in_chat", tableName: "Conversation")
+                                .font(.caption.weight(.semibold))
+                        }
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("schedule-open-chat-\(schedule.scheduleId.uuidString.lowercased())")
+                    }
 
                     if isMutating {
                         ProgressView()
@@ -452,6 +531,57 @@ struct ProactiveSchedulesSheetView: View {
         case .paused: Color(uiColor: .systemOrange)
         case .completed: Color.secondary
         case .cancelled: Color(uiColor: .systemRed)
+        }
+    }
+
+    private func presetChip(
+        titleKey: String.LocalizationValue,
+        identifier: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(String(localized: titleKey, table: "Conversation"))
+                .font(.caption.weight(.medium))
+        }
+        .buttonStyle(.bordered)
+        .controlSize(.small)
+        .accessibilityIdentifier(identifier)
+    }
+
+    static func nextMorningNineAM(from now: Date = Date(), calendar: Calendar = .current) -> Date {
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: now) ?? now.addingTimeInterval(86_400)
+        return calendar.date(bySettingHour: 9, minute: 0, second: 0, of: tomorrow) ?? now.addingTimeInterval(86_400)
+    }
+
+    static func displayResultText(for schedule: ProactiveScheduleDTO, run: ProactiveScheduleRunDTO) -> String? {
+        if let detail = run.detailText?.trimmingCharacters(in: .whitespacesAndNewlines), !detail.isEmpty {
+            return detail
+        }
+        if let summary = run.summaryText?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !summary.isEmpty,
+           summary != schedule.title.trimmingCharacters(in: .whitespacesAndNewlines) {
+            return summary
+        }
+        return nil
+    }
+
+    static func localizedFailureReason(for reasonCode: String?) -> String? {
+        guard let raw = reasonCode?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+            return String(localized: "schedules.failure.generic", table: "Conversation")
+        }
+        switch raw {
+        case "budget_exceeded", "budget_halted":
+            return String(localized: "schedules.failure.budget", table: "Conversation")
+        case "model_unauthorized_tenant":
+            return String(localized: "schedules.failure.unauthorized", table: "Conversation")
+        case "recurring_real_model_unauthorized":
+            return String(localized: "schedules.failure.recurring_unauthorized", table: "Conversation")
+        case "model_timeout", "TIMEOUT", "lease_expired":
+            return String(localized: "schedules.failure.timeout", table: "Conversation")
+        case "model_unavailable", "PROVIDER_UNAVAILABLE", "model_gateway_unavailable", "JOB_UNAVAILABLE":
+            return String(localized: "schedules.failure.provider_unavailable", table: "Conversation")
+        default:
+            return "\(String(localized: "schedules.failure.generic", table: "Conversation")) (\(raw))"
         }
     }
 }

@@ -4006,13 +4006,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Delivery isn't confirmed yet. Your message is saved safely."
+            "value": "Delivery is not confirmed yet. Check the message status before trying to send again."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "暂未收到发送确认，你的消息已安全保留。"
+            "value": "发送结果尚未确认，请先检查消息状态，不要重复发送。"
           }
         }
       }
@@ -4022,13 +4022,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Still checking whether your message was sent. Your message is saved and won't be sent twice — try checking again shortly."
+            "value": "Still unable to confirm whether your message was sent. Check the message status again shortly before trying to send again."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "仍未确认消息是否已发送。你的消息已保留且不会重复发送，请稍后重试检查状态。"
+            "value": "仍无法确认消息是否已发送。请稍后再次检查消息状态，不要重复发送。"
           }
         }
       }

@@ -2838,13 +2838,109 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Explicit preferences and facts Ember remembers across new conversations. You can inspect or delete any item at any time."
+            "value": "Explicit preferences and facts Ember uses in future conversations. Past chat history stays unchanged."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "你明确告知 Ember 记住的偏好和事实，会在新对话中继续生效。你可以随时查看或删除。"
+            "value": "你明确保存的偏好和事实会用于后续新对话，不会修改历史聊天记录。"
+          }
+        }
+      }
+    },
+    "memory.subtitle.mock": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Local preview items used only in this simulated session. Past chat history stays unchanged."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "仅在当前本地演示会话中使用的预览记忆，不会修改历史聊天记录。"
+          }
+        }
+      }
+    },
+    "memory.subtitle.unavailable": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Personal memory requires a V2 Ember Cloud environment."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "个人记忆功能需要连接到 V2 Ember 云端环境。"
+          }
+        }
+      }
+    },
+    "memory.add.short": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加"
+          }
+        }
+      }
+    },
+    "memory.add.action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Add Memory"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "添加记忆"
+          }
+        }
+      }
+    },
+    "memory.add.helper": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember will use this in future conversations. You can edit or delete it anytime."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember 会在后续对话中使用这条信息，你可以随时编辑或删除。"
+          }
+        }
+      }
+    },
+    "memory.edit.source_prefix %@": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Source: %@ · Past chat messages stay unchanged."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "来源：%@ · 历史聊天记录保持不变。"
           }
         }
       }
@@ -2966,13 +3062,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Add a preference or fact above so Ember can carry it across future conversations."
+            "value": "Save a preference or fact so Ember can carry it across future conversations."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "在上方添加一条偏好或事实，Ember 会在后续对话中参考它。"
+            "value": "添加一条偏好或事实，Ember 会在后续对话中参考它。"
           }
         }
       }
@@ -3110,13 +3206,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ember will no longer use this item in future conversations."
+            "value": "Ember will no longer use this item in future conversations. Past chat messages stay unchanged."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "删除后，Ember 将不再在后续对话中使用这条内容。"
+            "value": "删除后，Ember 将不再在后续对话中使用这条内容，历史聊天记录保持不变。"
           }
         }
       }

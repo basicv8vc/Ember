@@ -2529,6 +2529,22 @@
         }
       }
     },
+    "schedules.cancel.confirm_action": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Cancel Schedule"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "取消定时任务"
+          }
+        }
+      }
+    },
     "schedules.cancel.confirm_title": {
       "localizations": {
         "en": {
@@ -2541,6 +2557,22 @@
           "stringUnit": {
             "state": "translated",
             "value": "要取消这个定时任务吗？"
+          }
+        }
+      }
+    },
+    "schedules.cancel.keep": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Keep Schedule"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "保留定时任务"
           }
         }
       }

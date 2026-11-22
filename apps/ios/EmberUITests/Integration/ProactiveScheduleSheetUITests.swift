@@ -76,12 +76,11 @@ final class ProactiveScheduleSheetUITests: XCTestCase {
         XCTAssertTrue(cancelButtons.firstMatch.waitForExistence(timeout: 5))
         cancelButtons.firstMatch.tap()
 
-        let confirmCancel = app.alerts.buttons["Cancel"].firstMatch
-        XCTAssertTrue(confirmCancel.waitForExistence(timeout: 5))
-        // Note: alert has two buttons labeled "Cancel" in en (dismiss vs destructive). Tap the destructive second button.
-        let alertButtons = app.alerts.buttons
-        XCTAssertGreaterThanOrEqual(alertButtons.count, 2)
-        alertButtons.element(boundBy: alertButtons.count - 1).tap()
+        let keepButton = app.alerts.buttons["Keep Schedule"]
+        let confirmCancelButton = app.alerts.buttons["Cancel Schedule"]
+        XCTAssertTrue(keepButton.waitForExistence(timeout: 5))
+        XCTAssertTrue(confirmCancelButton.waitForExistence(timeout: 5))
+        confirmCancelButton.tap()
 
         let historySection = app.otherElements["schedules-section-history"]
         XCTAssertTrue(historySection.waitForExistence(timeout: 5))

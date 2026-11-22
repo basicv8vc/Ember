@@ -160,7 +160,7 @@ struct ProactiveSchedulesSheetView: View {
                 Button(role: .cancel) {
                     pendingCancelSchedule = nil
                 } label: {
-                    Text("conversation.live.cancel", tableName: "Conversation")
+                    Text("schedules.cancel.keep", tableName: "Conversation")
                 }
                 Button(role: .destructive) {
                     if let target = pendingCancelSchedule {
@@ -168,7 +168,7 @@ struct ProactiveSchedulesSheetView: View {
                         Task { await store.cancel(id: target.scheduleId) }
                     }
                 } label: {
-                    Text("schedules.action.cancel", tableName: "Conversation")
+                    Text("schedules.cancel.confirm_action", tableName: "Conversation")
                 }
             } message: {
                 Text("schedules.cancel.confirm_message", tableName: "Conversation")

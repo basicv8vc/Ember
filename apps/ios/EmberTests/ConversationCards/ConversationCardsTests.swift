@@ -187,6 +187,33 @@ final class ConversationCardsTests: XCTestCase {
         XCTAssertEqual(String(attributed.characters), raw)
     }
 
+    func testMarkdownBlockParserExtractsHeadingsListsCodeBlocksAndParagraphs() {
+        let markdown = """
+        ## Morning Summary
+
+        Here is your plan:
+        - Check Q4 budget
+        * Reply to Alex
+
+        1. Open report
+        2. Share file
+
+        ```python
+        print("hello")
+        ```
+        """
+        let blocks = ConversationMarkdownBlock.parse(markdown)
+        XCTAssertEqual(blocks, [
+            .heading(level: 2, text: "Morning Summary"),
+            .paragraph(text: "Here is your plan:"),
+            .bulletItem(text: "Check Q4 budget"),
+            .bulletItem(text: "Reply to Alex"),
+            .numberedItem(prefix: "1.", text: "Open report"),
+            .numberedItem(prefix: "2.", text: "Share file"),
+            .codeBlock(language: "python", code: "print(\"hello\")"),
+        ])
+    }
+
     func testTaskActivityFactsExposeActiveProgressSummaryAndArtifactCount() {
         let runningFacts = TaskActivityCard.facts(
             for: makeTask(status: .running),

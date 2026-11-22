@@ -74,9 +74,7 @@ struct PythonTaskComposerSheet: View {
                         .accessibilityIdentifier("python-task-unknown-ack")
                     } else if let errorMessage {
                         InlineNotice(
-                            title: LocalizedStringKey(
-                                String(localized: "tasks.error.title", table: "Conversation")
-                            ),
+                            title: LocalizedStringKey("tasks.error.title"),
                             message: LocalizedStringKey(errorMessage),
                             tone: .warning
                         )

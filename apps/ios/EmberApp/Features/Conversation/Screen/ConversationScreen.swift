@@ -45,6 +45,7 @@ struct ConversationScreen: View {
                 onPromptSelected: selectPrompt,
                 onRetry: actions.retry,
                 onStopGenerating: actions.stopGenerating,
+                onDismissError: actions.onDismissError,
                 replyPreparingText: replyPreparingText,
                 replyStopText: replyStopText,
                 emberMessageAuthorText: emberMessageAuthorText,

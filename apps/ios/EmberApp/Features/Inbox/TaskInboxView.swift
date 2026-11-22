@@ -188,8 +188,12 @@ private struct SessionTaskInboxContent: View {
                                 .padding(.top, 4)
                             } else {
                                 InlineNotice(
-                                    title: LocalizedStringKey("tasks.pagination.partial_title"),
-                                    message: LocalizedStringKey("tasks.pagination.partial_message"),
+                                    title: LocalizedStringKey(
+                                        String(localized: "tasks.pagination.partial_title", table: "Conversation")
+                                    ),
+                                    message: LocalizedStringKey(
+                                        String(localized: "tasks.pagination.partial_message", table: "Conversation")
+                                    ),
                                     tone: .neutral
                                 )
                                 .accessibilityIdentifier("tasks-partial-notice")

@@ -5,6 +5,7 @@ import Foundation
 actor LiveConversationRepository {
     private let client: LiveB1ConversationClient
     private let journal: LiveConversationJournal
+    private let supportsStreaming: Bool
     private let now: @Sendable () -> Date
 
     private var profile: EmberMeDTO?
@@ -12,9 +13,11 @@ actor LiveConversationRepository {
 
     init(client: LiveB1ConversationClient,
          journal: LiveConversationJournal,
+         supportsStreaming: Bool = false,
          now: @escaping @Sendable () -> Date = { Date() }) {
         self.client = client
         self.journal = journal
+        self.supportsStreaming = supportsStreaming
         self.now = now
     }
 
@@ -89,6 +92,28 @@ actor LiveConversationRepository {
 
     /// A fresh UUIDv4 is created once, persisted with its exact body, attachments and epoch, then sent.
     func send(text: String, attachmentIDs: [UUID] = []) async throws -> LiveB1Receipt {
+        let prepared = try await preparePendingSend(text: text, attachmentIDs: attachmentIDs)
+        return try await dispatch(prepared.pending, consumerID: prepared.consumerID)
+    }
+
+    func sendStreaming(text: String, attachmentIDs: [UUID] = []) async throws -> LiveConversationSendSession {
+        let prepared = try await preparePendingSend(text: text, attachmentIDs: attachmentIDs)
+        guard supportsStreaming else {
+            let receipt = try await dispatch(prepared.pending, consumerID: prepared.consumerID)
+            return LiveConversationSendSession(receipt: receipt, events: nil)
+        }
+        return try await dispatchStreaming(prepared.pending, consumerID: prepared.consumerID)
+    }
+
+    func finishTurnFromStream(_ turn: LiveB1Turn) async {
+        guard turn.status != .running, let me = try? await ensureProfile() else { return }
+        try? await journal.clearTurn(consumerID: me.consumerID, turnID: turn.id)
+    }
+
+    private func preparePendingSend(
+        text: String,
+        attachmentIDs: [UUID]
+    ) async throws -> (pending: LiveConversationJournal.Pending, consumerID: UUID) {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty, normalized.count <= 4096 else {
             throw LiveB1Failure.rejected
@@ -108,7 +133,7 @@ actor LiveConversationRepository {
             text: normalized,
             attachmentIDs: attachmentIDs)
         try await journal.prepare(pending, consumerID: me.consumerID)
-        return try await dispatch(pending, consumerID: me.consumerID)
+        return (pending, me.consumerID)
     }
 
     /// N-3: lookup first. An authoritative 404 permits replaying the *same* immutable intent.
@@ -150,9 +175,21 @@ actor LiveConversationRepository {
         }
         let currentTime = now()
         let slot = max(currentTime, nextTurnPoll[active.conversationID] ?? currentTime)
-        nextTurnPoll[active.conversationID] = slot.addingTimeInterval(1)
+        let nextSlot = slot.addingTimeInterval(1)
+        nextTurnPoll[active.conversationID] = nextSlot
         let delay = slot.timeIntervalSince(currentTime)
-        if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+        if delay > 0 {
+            do {
+                try await Task.sleep(for: .seconds(delay))
+            } catch {
+                // Roll back the reserved slot when cancelled before issuing the request
+                // so resuming foreground polling is not pushed out by an unsent poll.
+                if nextTurnPoll[active.conversationID] == nextSlot {
+                    nextTurnPoll[active.conversationID] = slot
+                }
+                throw error
+            }
+        }
 
         let turn = try await client.turn(conversationID: active.conversationID, turnID: active.turnID)
         if turn.status != .running {
@@ -182,17 +219,56 @@ actor LiveConversationRepository {
         return try await bootstrap()
     }
 
-    private func dispatch(_ pending: LiveConversationJournal.Pending, consumerID: UUID) async throws -> LiveB1Receipt {
+    private func dispatchStreaming(
+        _ pending: LiveConversationJournal.Pending,
+        consumerID: UUID,
+        allowPreExecutionRetry: Bool = true
+    ) async throws -> LiveConversationSendSession {
+        do {
+            let (receipt, events) = try await client.streamSend(pending.submission)
+            try validate(receipt, for: pending)
+            try await journal.accepted(receipt, for: pending, consumerID: consumerID)
+            return LiveConversationSendSession(receipt: receipt, events: events)
+        } catch LiveV2StreamFallbackError.endpointUnavailable {
+            let receipt = try await dispatch(pending, consumerID: consumerID)
+            return LiveConversationSendSession(receipt: receipt, events: nil)
+        } catch AuthError.requestRejectedBeforeExecution where allowPreExecutionRetry {
+            return try await dispatchStreaming(pending, consumerID: consumerID, allowPreExecutionRetry: false)
+        } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
+            throw error
+        } catch let error as LiveB1Failure where error == .conflict {
+            try await journal.markConflict(pending, consumerID: consumerID)
+            throw LiveB1Failure.conflict
+        } catch let error as LiveB1Failure where error == .rejected {
+            try? await journal.discardPending(consumerID: consumerID)
+            throw LiveB1Failure.rejected
+        } catch {
+            throw LiveB1Failure.unknownAcknowledgement
+        }
+    }
+
+    private func dispatch(
+        _ pending: LiveConversationJournal.Pending,
+        consumerID: UUID,
+        allowPreExecutionRetry: Bool = true
+    ) async throws -> LiveB1Receipt {
         do {
             let receipt = try await client.send(pending.submission)
             try validate(receipt, for: pending)
             try await journal.accepted(receipt, for: pending, consumerID: consumerID)
             return receipt
+        } catch AuthError.requestRejectedBeforeExecution where allowPreExecutionRetry {
+            return try await dispatch(pending, consumerID: consumerID, allowPreExecutionRetry: false)
+        } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
+            throw error
         } catch let error as LiveB1Failure where error == .conflict {
             // A known 409 is terminal (N-4/TE-3), NOT an unknown ACK: persist it
             // outside pending so relaunch cannot query 404 and resend this intent.
             try await journal.markConflict(pending, consumerID: consumerID)
             throw LiveB1Failure.conflict
+        } catch let error as LiveB1Failure where error == .rejected {
+            try? await journal.discardPending(consumerID: consumerID)
+            throw LiveB1Failure.rejected
         } catch let error as LiveB1Failure where error == .invalidResponse {
             // A malformed 2xx is ambiguous, even if we cannot adopt its body.
             throw LiveB1Failure.unknownAcknowledgement

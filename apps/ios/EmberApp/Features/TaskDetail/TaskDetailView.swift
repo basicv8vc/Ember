@@ -242,6 +242,16 @@ private struct SessionTaskDetailContent: View {
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
+            if !task.status.isTerminal && task.status != .waitingApproval {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("tasks.detail.live_updates_active", tableName: "Conversation")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             if let detailError = store.detailErrorByTaskID[taskID] {
                 InlineNotice(
                     title: LocalizedStringKey("tasks.error.title"),

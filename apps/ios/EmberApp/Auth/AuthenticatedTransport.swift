@@ -24,6 +24,7 @@ public struct EmberAuthenticatedRequest: Equatable, Sendable {
     public let pathComponents: [String]
     public let body: Data?
     public let contentType: String?
+    public let accept: String?
     public let idempotency: EmberRequestIdempotency
     /// Optional bounded query for B1 ascending history pages (after, limit).
     public let queryItems: [URLQueryItem]
@@ -33,6 +34,7 @@ public struct EmberAuthenticatedRequest: Equatable, Sendable {
         pathComponents: [String],
         body: Data? = nil,
         contentType: String? = nil,
+        accept: String? = nil,
         idempotency: EmberRequestIdempotency,
         queryItems: [URLQueryItem] = []
     ) {
@@ -40,6 +42,7 @@ public struct EmberAuthenticatedRequest: Equatable, Sendable {
         self.pathComponents = pathComponents
         self.body = body
         self.contentType = contentType
+        self.accept = accept
         self.idempotency = idempotency
         self.queryItems = queryItems
     }
@@ -100,7 +103,7 @@ public struct EmberAuthenticatedTransport: Sendable {
         // The only place a bearer token enters a URLRequest. It is never placed in a URL, a query
         // item or a log message.
         urlRequest.setValue("Bearer \(accessToken.rawValue)", forHTTPHeaderField: "Authorization")
-        urlRequest.setValue("application/json", forHTTPHeaderField: "Accept")
+        urlRequest.setValue(request.accept ?? "application/json", forHTTPHeaderField: "Accept")
 
         if let contentType = request.contentType {
             urlRequest.setValue(contentType, forHTTPHeaderField: "Content-Type")
@@ -114,6 +117,14 @@ public struct EmberAuthenticatedTransport: Sendable {
     public func send(_ urlRequest: URLRequest) async throws -> EmberAPIResponse {
         do {
             return try await client.send(urlRequest)
+        } catch {
+            throw LiveEmberSessionAPI.error(for: error)
+        }
+    }
+
+    public func stream(_ urlRequest: URLRequest) async throws -> EmberAPIStreamResponse {
+        do {
+            return try await client.stream(urlRequest)
         } catch {
             throw LiveEmberSessionAPI.error(for: error)
         }

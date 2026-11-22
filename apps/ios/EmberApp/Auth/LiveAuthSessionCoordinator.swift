@@ -314,6 +314,29 @@ public actor LiveAuthSessionCoordinator: RefreshingAuthSessionProvider {
     ///   unknown transport outcome as `unknownWriteOutcome`, so the caller keeps its
     ///   `client_submission_id` for the contract-defined reconciliation instead of a blind retry.
     public func authorizedRequest(_ request: EmberAuthenticatedRequest) async throws -> EmberAPIResponse {
+        try await executeAuthorized(
+            request,
+            perform: { try await transport.send($0) },
+            statusCode: \.statusCode
+        )
+    }
+
+    /// Opens one streaming authenticated request through the shared authorization boundary.
+    /// Enforces the exact same single-flight refresh and non-idempotent write safety invariants as
+    /// `authorizedRequest`.
+    public func authorizedStreamRequest(_ request: EmberAuthenticatedRequest) async throws -> EmberAPIStreamResponse {
+        try await executeAuthorized(
+            request,
+            perform: { try await transport.stream($0) },
+            statusCode: \.statusCode
+        )
+    }
+
+    private func executeAuthorized<Response>(
+        _ request: EmberAuthenticatedRequest,
+        perform: (URLRequest) async throws -> Response,
+        statusCode: (Response) -> Int
+    ) async throws -> Response {
         guard !isLoggingOut else { throw AuthError.sessionEnded }
 
         let session = try await validSessionForRequest()
@@ -326,9 +349,9 @@ public actor LiveAuthSessionCoordinator: RefreshingAuthSessionProvider {
 
         let urlRequest = try transport.makeRequest(request, accessToken: session.accessToken)
 
-        let response: EmberAPIResponse
+        let response: Response
         do {
-            response = try await transport.send(urlRequest)
+            response = try await perform(urlRequest)
         } catch {
             let authError = (error as? AuthError) ?? .transportFailure
 
@@ -336,27 +359,29 @@ public actor LiveAuthSessionCoordinator: RefreshingAuthSessionProvider {
             case .idempotentRead:
                 guard authError.isTransient else { throw authError }
                 // Exactly one replay of a read. Never more, and never a replay of a write.
-                return try await transport.send(urlRequest)
+                return try await perform(urlRequest)
             case .nonIdempotent(let submissionID):
                 throw AuthError.unknownWriteOutcome(clientSubmissionID: submissionID)
             }
         }
 
-        guard response.statusCode == 401 else { return response }
-        return try await recoverFromUnauthorized(request: request)
+        guard statusCode(response) == 401 else { return response }
+        return try await recoverFromUnauthorized(request: request, perform: perform, statusCode: statusCode)
     }
 
-    private func recoverFromUnauthorized(
-        request: EmberAuthenticatedRequest
-    ) async throws -> EmberAPIResponse {
+    private func recoverFromUnauthorized<Response>(
+        request: EmberAuthenticatedRequest,
+        perform: (URLRequest) async throws -> Response,
+        statusCode: (Response) -> Int
+    ) async throws -> Response {
         switch request.idempotency {
         case .idempotentRead:
             // One rotation, one replay. A second 401 means the session is gone: revoke and report.
             let refreshed = try await performRefresh(expectedGeneration: generation)
             let retry = try transport.makeRequest(request, accessToken: refreshed.accessToken)
-            let second = try await transport.send(retry)
+            let second = try await perform(retry)
 
-            guard second.statusCode != 401 else {
+            guard statusCode(second) != 401 else {
                 // Keyed to the token that was rejected, so a logout or a newer sign-in that happened
                 // during the replay is not signed out by this older failure.
                 revokeLocally(ifCurrent: refreshed.accessToken)

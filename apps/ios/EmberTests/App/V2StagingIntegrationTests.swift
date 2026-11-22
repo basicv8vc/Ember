@@ -104,6 +104,25 @@ final class V2StagingIntegrationTests: XCTestCase {
             userDefaults: isolatedDefaults
         )
         XCTAssertEqual(resetToV1?.baseURL.absoluteString, AppCompositionRoot.defaultCloudBaseURL)
+
+        // Release/Info.plist EmberCloudBaseURL configures V2 Staging without Debug persistence.
+        let infoPlistV2 = AppCompositionRoot.resolveCloudTarget(
+            arguments: [],
+            environment: [:],
+            userDefaults: isolatedDefaults,
+            bundleInfo: [AppCompositionRoot.infoPlistCloudBaseURLKey: AppCompositionRoot.v2StagingCloudBaseURL]
+        )
+        XCTAssertEqual(infoPlistV2?.baseURL.absoluteString, AppCompositionRoot.v2StagingCloudBaseURL)
+        XCTAssertEqual(infoPlistV2?.isV2Staging, true)
+
+        // Non-HTTPS Info.plist URL must fail closed.
+        let invalidInfoPlist = AppCompositionRoot.resolveCloudTarget(
+            arguments: [],
+            environment: [:],
+            userDefaults: isolatedDefaults,
+            bundleInfo: [AppCompositionRoot.infoPlistCloudBaseURLKey: "http://ember-v2-staging.slowfast.dev"]
+        )
+        XCTAssertNil(invalidInfoPlist)
     }
 
     func testSessionRecoveryFenceIsolationBetweenV1AndV2Staging() throws {

@@ -106,6 +106,8 @@ final class LiveAuthEntryModel {
             "Too many attempts. Wait a moment and try again."
         case .unauthenticated, .sessionMissing, .sessionEnded:
             "Your session is no longer valid. Sign in again to continue."
+        case .accessDenied:
+            "This Apple account is not authorized for this Ember environment."
         case .rotationOutcomeUnknown:
             "Your session could not be confirmed. Sign in again to continue."
         case .recoveryFenceUnavailable:

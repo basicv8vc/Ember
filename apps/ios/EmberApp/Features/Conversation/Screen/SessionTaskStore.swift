@@ -280,7 +280,7 @@ final class SessionTaskStore {
     func observeActiveDetail(
         taskID: UUID,
         pollInterval: Duration = .seconds(2),
-        maxPolls: Int = 30
+        maxPolls: Int = 60
     ) async {
         guard repository != nil else { return }
         let startGeneration = generation

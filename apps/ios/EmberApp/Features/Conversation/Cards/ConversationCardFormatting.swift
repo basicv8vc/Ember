@@ -34,14 +34,203 @@ enum ConversationCardFormatting {
     }
 }
 
+enum ConversationMarkdownBlock: Equatable {
+    case heading(level: Int, text: String)
+    case bulletItem(text: String)
+    case numberedItem(prefix: String, text: String)
+    case codeBlock(language: String?, code: String)
+    case paragraph(text: String)
+
+    static func parse(_ rawText: String) -> [ConversationMarkdownBlock] {
+        let normalized = rawText
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        guard !normalized.isEmpty else { return [] }
+
+        let lines = normalized.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        var blocks: [ConversationMarkdownBlock] = []
+        var paragraphLines: [String] = []
+        var index = 0
+
+        func flushParagraph() {
+            guard !paragraphLines.isEmpty else { return }
+            let joined = paragraphLines.joined(separator: "\n")
+            if !joined.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                blocks.append(.paragraph(text: joined))
+            }
+            paragraphLines.removeAll(keepingCapacity: true)
+        }
+
+        while index < lines.count {
+            let line = lines[index]
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+
+            if trimmed.hasPrefix("```") {
+                flushParagraph()
+                let language = String(trimmed.dropFirst(3)).trimmingCharacters(in: .whitespaces)
+                var codeLines: [String] = []
+                index += 1
+                var closed = false
+                while index < lines.count {
+                    if lines[index].trimmingCharacters(in: .whitespaces).hasPrefix("```") {
+                        closed = true
+                        index += 1
+                        break
+                    }
+                    codeLines.append(lines[index])
+                    index += 1
+                }
+                if closed {
+                    blocks.append(.codeBlock(language: language.isEmpty ? nil : language, code: codeLines.joined(separator: "\n")))
+                } else {
+                    blocks.append(.paragraph(text: ([line] + codeLines).joined(separator: "\n")))
+                }
+                continue
+            }
+
+            if trimmed.isEmpty {
+                flushParagraph()
+                index += 1
+                continue
+            }
+
+            if let heading = parseHeading(trimmed) {
+                flushParagraph()
+                blocks.append(heading)
+                index += 1
+                continue
+            }
+
+            if let bullet = parseBullet(trimmed) {
+                flushParagraph()
+                blocks.append(bullet)
+                index += 1
+                continue
+            }
+
+            if let numbered = parseNumberedItem(trimmed) {
+                flushParagraph()
+                blocks.append(numbered)
+                index += 1
+                continue
+            }
+
+            paragraphLines.append(line)
+            index += 1
+        }
+
+        flushParagraph()
+        return blocks
+    }
+
+    private static func parseHeading(_ line: String) -> ConversationMarkdownBlock? {
+        var level = 0
+        for ch in line where ch == "#" {
+            level += 1
+            if level > 6 { return nil }
+        }
+        guard level > 0, line.count > level else { return nil }
+        let afterHashes = line.index(line.startIndex, offsetBy: level)
+        guard line[afterHashes] == " " else { return nil }
+        let title = String(line[line.index(after: afterHashes)...]).trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return nil }
+        return .heading(level: min(level, 3), text: title)
+    }
+
+    private static func parseBullet(_ line: String) -> ConversationMarkdownBlock? {
+        guard line.hasPrefix("- ") || line.hasPrefix("* ") || line.hasPrefix("• ") else { return nil }
+        let content = String(line.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty else { return nil }
+        return .bulletItem(text: content)
+    }
+
+    private static func parseNumberedItem(_ line: String) -> ConversationMarkdownBlock? {
+        guard let dotIndex = line.firstIndex(of: "."), dotIndex > line.startIndex else { return nil }
+        let digits = line[..<dotIndex]
+        guard digits.count <= 3, digits.allSatisfy(\.isNumber) else { return nil }
+        let afterDot = line.index(after: dotIndex)
+        guard afterDot < line.endIndex, line[afterDot] == " " else { return nil }
+        let content = String(line[line.index(after: afterDot)...]).trimmingCharacters(in: .whitespaces)
+        guard !content.isEmpty else { return nil }
+        return .numberedItem(prefix: "\(digits).", text: content)
+    }
+}
+
 struct ConversationMarkdownText: View {
     let text: String
 
     var body: some View {
-        if let attributed = ConversationCardFormatting.attributedMarkdown(for: text) {
+        let blocks = ConversationMarkdownBlock.parse(text)
+        if blocks.isEmpty {
+            inlineText(text)
+        } else {
+            VStack(alignment: .leading, spacing: 6) {
+                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
+                    blockView(block)
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func blockView(_ block: ConversationMarkdownBlock) -> some View {
+        switch block {
+        case .heading(let level, let title):
+            inlineText(title)
+                .font(headingFont(for: level))
+                .padding(.top, level == 1 ? 4 : 2)
+        case .bulletItem(let itemText):
+            HStack(alignment: .firstTextBaseline, spacing: 7) {
+                Text(verbatim: "•")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                inlineText(itemText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .numberedItem(let prefix, let itemText):
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(verbatim: prefix)
+                    .font(.callout.monospacedDigit().weight(.semibold))
+                    .foregroundStyle(.secondary)
+                inlineText(itemText)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        case .codeBlock(let language, let code):
+            VStack(alignment: .leading, spacing: 4) {
+                if let language {
+                    Text(verbatim: language)
+                        .font(.caption2.monospaced().weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+                ScrollView(.horizontal, showsIndicators: false) {
+                    Text(verbatim: code)
+                        .font(.footnote.monospaced())
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        case .paragraph(let bodyText):
+            inlineText(bodyText)
+        }
+    }
+
+    private func headingFont(for level: Int) -> Font {
+        switch level {
+        case 1: .title3.weight(.bold)
+        case 2: .headline.weight(.semibold)
+        default: .subheadline.weight(.semibold)
+        }
+    }
+
+    @ViewBuilder
+    private func inlineText(_ raw: String) -> some View {
+        if let attributed = ConversationCardFormatting.attributedMarkdown(for: raw) {
             Text(attributed)
         } else {
-            Text(verbatim: text)
+            Text(verbatim: raw)
         }
     }
 }

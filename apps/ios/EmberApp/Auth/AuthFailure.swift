@@ -32,6 +32,9 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
     /// 401. The credential is invalid, expired or revoked. Recovery requires a new sign-in
     /// once the bounded refresh path has been exhausted.
     case unauthenticated
+    /// 403. The server recognized the request or Apple identity, but policy denies access
+    /// (for example, an account not allowlisted for this Staging/Alpha environment).
+    case accessDenied
     /// 404. `GET /v1/me` answers this only when the projection is not visible; it is never a
     /// prompt to create anything locally.
     case notFound
@@ -102,6 +105,7 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
         case .appleAuthorizationInProgress: "appleAuthorizationInProgress"
         case .invalidRequest: "invalidRequest"
         case .unauthenticated: "unauthenticated"
+        case .accessDenied: "accessDenied"
         case .notFound: "notFound"
         case .rateLimited: "rateLimited"
         case .serverUnavailable: "serverUnavailable"
@@ -177,7 +181,7 @@ public enum AuthError: Error, Equatable, Sendable, CustomStringConvertible, Cust
     /// unknown outcome and must be treated as "the token may already be gone".
     public var credentialUnaffectedByRefresh: Bool {
         switch self {
-        case .offline, .invalidBaseURL, .invalidRequest, .unauthenticated, .rateLimited:
+        case .offline, .invalidBaseURL, .invalidRequest, .unauthenticated, .accessDenied, .rateLimited:
             true
         default:
             false

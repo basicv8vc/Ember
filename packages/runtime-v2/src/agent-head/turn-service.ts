@@ -352,6 +352,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           tenantId: req.scope.tenantId,
           principalId: req.scope.principalId,
           utcDay,
+          budgetMode,
           amountMicroUsd: estimatedMicroUsd,
           turnsStartedDelta: 1,
           ...(this.deps.localCeilings !== undefined ? { ceilings: this.deps.localCeilings } : {}),
@@ -516,6 +517,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
               tenantId: req.scope.tenantId,
               principalId: req.scope.principalId,
               utcDay: stage1.utcDay,
+              budgetMode,
               amountMicroUsd: estimatedMicroUsd,
               turnsStartedDelta: 1,
               ...(this.deps.localCeilings !== undefined
@@ -914,6 +916,7 @@ export class AgentHeadTurnService implements AgentHeadRpc {
         this.deps.storage.sql,
         req.scope.tenantId,
         attempt.principal_id,
+        attempt.budget_mode,
       );
       if (halt !== null) {
         return { ok: false, reason: 'budget_halted' };

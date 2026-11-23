@@ -39,24 +39,27 @@ export interface LocalHaltStatus {
 
 /**
  * Checks whether an unresolved local `agent_budget_incidents` row blocks paid execution
- * for the given tenant or principal.
+ * for the given tenant or principal within the requested `budgetMode`.
  */
 export function findLocalUnresolvedIncidentSync(
   sql: SqlStorageLike,
   tenantId: Id,
   principalId: Id,
+  budgetMode: ModelAttemptBudgetMode,
 ): LocalHaltStatus | null {
   const row = sql
     .exec<{ readonly scope_kind: AgentSpendScopeKind; readonly reason: BudgetSyncIncidentReason }>(
       `SELECT scope_kind, reason
          FROM agent_budget_incidents
         WHERE resolved_at_ms IS NULL
+          AND budget_mode = ?
           AND (
             (scope_kind = 'tenant' AND scope_id = ?)
             OR (scope_kind = 'principal' AND scope_id = ?)
           )
         ORDER BY CASE scope_kind WHEN 'tenant' THEN 0 ELSE 1 END, detected_at_ms ASC
         LIMIT 1`,
+      budgetMode,
       tenantId,
       principalId,
     )
@@ -64,13 +67,14 @@ export function findLocalUnresolvedIncidentSync(
   return row === undefined ? null : { scopeKind: row.scope_kind, reason: row.reason };
 }
 
-/** Ensures there are no unresolved local incidents in the tenant scope (used on `markAttemptSent`). */
+/** Ensures there are no unresolved local incidents in the tenant scope for the given `budgetMode`. */
 export function hasAnyUnresolvedLocalIncidentSync(
   sql: SqlStorageLike,
   tenantId: Id,
   principalId: Id,
+  budgetMode: ModelAttemptBudgetMode,
 ): LocalHaltStatus | null {
-  return findLocalUnresolvedIncidentSync(sql, tenantId, principalId);
+  return findLocalUnresolvedIncidentSync(sql, tenantId, principalId, budgetMode);
 }
 
 function getSpendDayRowSync(
@@ -78,6 +82,7 @@ function getSpendDayRowSync(
   scopeKind: AgentSpendScopeKind,
   scopeId: Id,
   utcDay: string,
+  budgetMode: ModelAttemptBudgetMode,
 ): {
   readonly reserved_micro_usd: number;
   readonly consumed_micro_usd: number;
@@ -91,10 +96,11 @@ function getSpendDayRowSync(
     }>(
       `SELECT reserved_micro_usd, consumed_micro_usd, turns_started
          FROM agent_spend_days
-        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ? AND budget_mode = ?`,
       scopeKind,
       scopeId,
       utcDay,
+      budgetMode,
     )
     .toArray()[0];
 
@@ -110,6 +116,7 @@ export function checkLocalBudgetCapacitySync(input: {
   readonly tenantId: Id;
   readonly principalId: Id;
   readonly utcDay: string;
+  readonly budgetMode: ModelAttemptBudgetMode;
   readonly amountMicroUsd: number;
   readonly turnsStartedDelta: number;
   readonly ceilings?: LocalBudgetCeilings;
@@ -118,7 +125,12 @@ export function checkLocalBudgetCapacitySync(input: {
   | { readonly ok: false; readonly reason: 'budget_halted' | 'budget_exceeded' } {
   const ceilings = input.ceilings ?? DEFAULT_LOCAL_BUDGET_CEILINGS;
 
-  const halt = findLocalUnresolvedIncidentSync(input.sql, input.tenantId, input.principalId);
+  const halt = findLocalUnresolvedIncidentSync(
+    input.sql,
+    input.tenantId,
+    input.principalId,
+    input.budgetMode,
+  );
   if (halt !== null) {
     return { ok: false, reason: 'budget_halted' };
   }
@@ -127,7 +139,13 @@ export function checkLocalBudgetCapacitySync(input: {
     return { ok: false, reason: 'budget_exceeded' };
   }
 
-  const tenantBucket = getSpendDayRowSync(input.sql, 'tenant', input.tenantId, input.utcDay);
+  const tenantBucket = getSpendDayRowSync(
+    input.sql,
+    'tenant',
+    input.tenantId,
+    input.utcDay,
+    input.budgetMode,
+  );
   if (
     tenantBucket.reserved_micro_usd + tenantBucket.consumed_micro_usd + input.amountMicroUsd >
     ceilings.tenantDailyMicroUsd
@@ -140,6 +158,7 @@ export function checkLocalBudgetCapacitySync(input: {
     'principal',
     input.principalId,
     input.utcDay,
+    input.budgetMode,
   );
   if (
     principalBucket.reserved_micro_usd + principalBucket.consumed_micro_usd + input.amountMicroUsd >
@@ -161,21 +180,23 @@ function upsertReserveBucketSync(input: {
   readonly scopeKind: AgentSpendScopeKind;
   readonly scopeId: Id;
   readonly utcDay: string;
+  readonly budgetMode: ModelAttemptBudgetMode;
   readonly amountMicroUsd: number;
   readonly turnsStartedDelta: number;
   readonly nowMs: number;
 }): void {
   input.sql.exec(
     `INSERT INTO agent_spend_days
-       (scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
-     VALUES (?, ?, ?, ?, 0, 0, ?, ?)
-     ON CONFLICT (scope_kind, scope_id, utc_day) DO UPDATE
+       (scope_kind, scope_id, utc_day, budget_mode, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
+     VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?)
+     ON CONFLICT (scope_kind, scope_id, utc_day, budget_mode) DO UPDATE
         SET reserved_micro_usd = agent_spend_days.reserved_micro_usd + excluded.reserved_micro_usd,
             turns_started = agent_spend_days.turns_started + excluded.turns_started,
             updated_at_ms = excluded.updated_at_ms`,
     input.scopeKind,
     input.scopeId,
     input.utcDay,
+    input.budgetMode,
     input.amountMicroUsd,
     input.turnsStartedDelta,
     input.nowMs,
@@ -217,6 +238,7 @@ export function reserveLocalAttemptSync(input: {
     tenantId: input.tenantId,
     principalId: input.principalId,
     utcDay: input.utcDay,
+    budgetMode: input.budgetMode,
     amountMicroUsd: input.reservedMicroUsd,
     turnsStartedDelta: turnsDelta,
     ceilings: input.ceilings,
@@ -236,6 +258,7 @@ export function reserveLocalAttemptSync(input: {
       scopeKind: 'tenant',
       scopeId: input.tenantId,
       utcDay: input.utcDay,
+      budgetMode: input.budgetMode,
       amountMicroUsd: input.reservedMicroUsd,
       turnsStartedDelta: 0,
       nowMs: input.nowMs,
@@ -245,6 +268,7 @@ export function reserveLocalAttemptSync(input: {
       scopeKind: 'principal',
       scopeId: input.principalId,
       utcDay: input.utcDay,
+      budgetMode: input.budgetMode,
       amountMicroUsd: input.reservedMicroUsd,
       turnsStartedDelta: turnsDelta,
       nowMs: input.nowMs,
@@ -299,6 +323,7 @@ function applyBucketSettlementDeltaSync(input: {
   readonly scopeKind: AgentSpendScopeKind;
   readonly scopeId: Id;
   readonly utcDay: string;
+  readonly budgetMode: ModelAttemptBudgetMode;
   readonly releaseMicroUsd: number;
   readonly chargeDeltaMicroUsd: number;
   readonly ceiling: number;
@@ -306,12 +331,13 @@ function applyBucketSettlementDeltaSync(input: {
 }): { readonly appliedDelta: number; readonly overageDelta: number } {
   input.sql.exec(
     `INSERT INTO agent_spend_days
-       (scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
-     VALUES (?, ?, ?, 0, 0, 0, 0, ?)
-     ON CONFLICT (scope_kind, scope_id, utc_day) DO NOTHING`,
+       (scope_kind, scope_id, utc_day, budget_mode, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms)
+     VALUES (?, ?, ?, ?, 0, 0, 0, 0, ?)
+     ON CONFLICT (scope_kind, scope_id, utc_day, budget_mode) DO NOTHING`,
     input.scopeKind,
     input.scopeId,
     input.utcDay,
+    input.budgetMode,
     input.nowMs,
   );
 
@@ -319,10 +345,11 @@ function applyBucketSettlementDeltaSync(input: {
     .exec<{ readonly reserved_micro_usd: number; readonly consumed_micro_usd: number }>(
       `SELECT reserved_micro_usd, consumed_micro_usd
          FROM agent_spend_days
-        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+        WHERE scope_kind = ? AND scope_id = ? AND utc_day = ? AND budget_mode = ?`,
       input.scopeKind,
       input.scopeId,
       input.utcDay,
+      input.budgetMode,
     )
     .one();
 
@@ -340,7 +367,7 @@ function applyBucketSettlementDeltaSync(input: {
             consumed_micro_usd = consumed_micro_usd + ?,
             overage_micro_usd = overage_micro_usd + ?,
             updated_at_ms = ?
-      WHERE scope_kind = ? AND scope_id = ? AND utc_day = ?`,
+      WHERE scope_kind = ? AND scope_id = ? AND utc_day = ? AND budget_mode = ?`,
     split.nextReserved,
     split.appliedDelta,
     split.overageDelta,
@@ -348,6 +375,7 @@ function applyBucketSettlementDeltaSync(input: {
     input.scopeKind,
     input.scopeId,
     input.utcDay,
+    input.budgetMode,
   );
 
   return { appliedDelta: split.appliedDelta, overageDelta: split.overageDelta };
@@ -359,6 +387,7 @@ function insertIncidentSync(input: {
   readonly scopeKind: AgentSpendScopeKind;
   readonly scopeId: Id;
   readonly utcDay: string;
+  readonly budgetMode: ModelAttemptBudgetMode;
   readonly reason: BudgetSyncIncidentReason;
   readonly subjectType: ModelAttemptSubjectType;
   readonly subjectId: Id;
@@ -371,13 +400,14 @@ function insertIncidentSync(input: {
 }): void {
   input.sql.exec(
     `INSERT INTO agent_budget_incidents (
-       id, scope_kind, scope_id, utc_day, reason, subject_type, subject_id, attempt_no,
+       id, scope_kind, scope_id, utc_day, budget_mode, reason, subject_type, subject_id, attempt_no,
        observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd, detected_at_ms
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     input.id,
     input.scopeKind,
     input.scopeId,
     input.utcDay,
+    input.budgetMode,
     input.reason,
     input.subjectType,
     input.subjectId,
@@ -676,6 +706,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
         scopeKind: 'tenant',
         scopeId: input.tenantId,
         utcDay: attempt.utc_day,
+        budgetMode: attempt.budget_mode,
         releaseMicroUsd: 0,
         chargeDeltaMicroUsd: chargeDelta,
         ceiling: ceilings.tenantDailyMicroUsd,
@@ -686,6 +717,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
         scopeKind: 'principal',
         scopeId: attempt.principal_id,
         utcDay: attempt.utc_day,
+        budgetMode: attempt.budget_mode,
         releaseMicroUsd: 0,
         chargeDeltaMicroUsd: chargeDelta,
         ceiling: ceilings.principalDailyMicroUsd,
@@ -701,6 +733,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
         scopeKind: 'tenant',
         scopeId: input.tenantId,
         utcDay: attempt.utc_day,
+        budgetMode: attempt.budget_mode,
         reason: incidentReason,
         subjectType: attempt.subject_type,
         subjectId: attempt.subject_id,
@@ -847,6 +880,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
       scopeKind: 'tenant',
       scopeId: input.tenantId,
       utcDay: attempt.utc_day,
+      budgetMode: attempt.budget_mode,
       releaseMicroUsd: releaseFromReserved,
       chargeDeltaMicroUsd: chargeDelta,
       ceiling: ceilings.tenantDailyMicroUsd,
@@ -857,6 +891,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
       scopeKind: 'principal',
       scopeId: attempt.principal_id,
       utcDay: attempt.utc_day,
+      budgetMode: attempt.budget_mode,
       releaseMicroUsd: releaseFromReserved,
       chargeDeltaMicroUsd: chargeDelta,
       ceiling: ceilings.principalDailyMicroUsd,
@@ -871,6 +906,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
         scopeKind: 'tenant',
         scopeId: input.tenantId,
         utcDay: attempt.utc_day,
+        budgetMode: attempt.budget_mode,
         reason: 'day_ceiling_exceeded',
         subjectType: attempt.subject_type,
         subjectId: attempt.subject_id,
@@ -890,6 +926,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
         scopeKind: 'tenant',
         scopeId: input.tenantId,
         utcDay: attempt.utc_day,
+        budgetMode: attempt.budget_mode,
         reason: 'reservation_exceeded',
         subjectType: attempt.subject_type,
         subjectId: attempt.subject_id,
@@ -914,6 +951,7 @@ export function settleLocalAttemptAndEnqueueSync(input: {
       scopeKind: 'tenant',
       scopeId: input.tenantId,
       utcDay: attempt.utc_day,
+      budgetMode: attempt.budget_mode,
       reason: 'usage_missing',
       subjectType: attempt.subject_type,
       subjectId: attempt.subject_id,

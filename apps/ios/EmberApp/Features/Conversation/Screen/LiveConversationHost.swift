@@ -2033,6 +2033,7 @@ struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
+    @State private var isChatComposerFocused = false
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
     @State private var isShowingSchedulesSheet = false
@@ -2050,6 +2051,13 @@ struct LiveConversationHost: View {
     init(model: LiveConversationHostModel, debugUseV2Staging: Binding<Bool>? = nil) {
         _model = State(initialValue: model)
         self.debugUseV2Staging = debugUseV2Staging
+    }
+
+    private var showsFloatingNavigation: Bool {
+        let atRoot = model.selectedTab == .chat
+            ? model.chatNavigationPath.isEmpty
+            : model.tasksNavigationPath.isEmpty
+        return atRoot && (model.selectedTab != .chat || !isChatComposerFocused)
     }
 
     var body: some View {
@@ -2076,6 +2084,19 @@ struct LiveConversationHost: View {
                         }
                         .badge(model.taskStore.needsInterventionCount)
                         .tag(LiveConversationHostModel.RootTab.tasks)
+                }
+                // Keep TabView as the authoritative router so each NavigationStack retains
+                // its path and lifecycle. Only replace the system tab bar's presentation.
+                .toolbar(.hidden, for: .tabBar)
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    if showsFloatingNavigation {
+                        EmberFloatingTabBar(
+                            selection: $model.selectedTab,
+                            needsInterventionCount: model.taskStore.needsInterventionCount
+                        )
+                        .frame(maxWidth: .infinity)
+                        .padding(.bottom, 8)
+                    }
                 }
             }
         }
@@ -2117,6 +2138,7 @@ struct LiveConversationHost: View {
             if let rejected, draft.isEmpty { draft = rejected }
         }
         .onChange(of: model.selectedTab) { _, newTab in
+            if newTab != .chat { isChatComposerFocused = false }
             Task { await model.handleTabSelection(newTab) }
         }
         .onChange(of: scenePhase) { _, newPhase in
@@ -2223,6 +2245,7 @@ struct LiveConversationHost: View {
                     onRefresh: {
                         await model.refreshConversationAndTasks()
                     },
+                    onComposerFocusChanged: { isChatComposerFocused = $0 },
                     headerMenu: {
                         chatHeaderMenu
                     },

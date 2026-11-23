@@ -10,6 +10,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     var replyStopText: LocalizedStringKey = "conversation.reply.stop"
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
     var onRefresh: (() async -> Void)? = nil
+    var onComposerFocusChanged: ((Bool) -> Void)? = nil
     private let headerMenu: HeaderMenu
     private let topNotices: TopNotices
 
@@ -28,6 +29,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         replyStopText: LocalizedStringKey = "conversation.reply.stop",
         emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock",
         onRefresh: (() async -> Void)? = nil,
+        onComposerFocusChanged: ((Bool) -> Void)? = nil,
         @ViewBuilder headerMenu: () -> HeaderMenu,
         @ViewBuilder topNotices: () -> TopNotices
     ) {
@@ -40,6 +42,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         self.replyStopText = replyStopText
         self.emberMessageAuthorText = emberMessageAuthorText
         self.onRefresh = onRefresh
+        self.onComposerFocusChanged = onComposerFocusChanged
         self.headerMenu = headerMenu()
         self.topNotices = topNotices()
     }
@@ -132,6 +135,9 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                     )
                 }
             }
+        }
+        .onChange(of: composerIsFocused) { _, focused in
+            onComposerFocusChanged?(focused)
         }
         .onChange(of: isComposerBusy) { _, busy in
             if busy && isAttachmentMenuPresented {

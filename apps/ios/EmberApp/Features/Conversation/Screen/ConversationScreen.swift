@@ -143,7 +143,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                 isAttachmentMenuPresented = false
             }
         }
-        .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .background(EmberDesignTokens.chatCanvas.ignoresSafeArea())
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-home")
     }
@@ -165,11 +165,11 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             .padding(.bottom, 8)
 
             Rectangle()
-                .fill(EmberDesignTokens.separator)
+                .fill(EmberDesignTokens.chatHairline)
                 .frame(height: 1)
                 .accessibilityHidden(true)
         }
-        .background(EmberDesignTokens.groupedBackground)
+        .background(EmberDesignTokens.chatCanvas)
     }
 
     private var singleRowHeaderContent: some View {
@@ -226,9 +226,9 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     private var headerEmblem: some View {
         Image(systemName: "flame.fill")
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(EmberDesignTokens.emberMarkTint)
+            .foregroundStyle(EmberDesignTokens.chatBrandInk)
             .frame(width: 34, height: 34)
-            .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+            .background(EmberDesignTokens.chatAgentBubble, in: Circle())
             .accessibilityHidden(true)
     }
 

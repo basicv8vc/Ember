@@ -13,6 +13,51 @@ enum EmberDesignTokens {
 
     static let minTapTarget: CGFloat = 44
 
+    // Visual V1: neutral, adaptive Chat-only surfaces. Deliberately scoped so existing
+    // Tasks, Memory and Schedules retain their behavior until their focused visual pass.
+    static let chatCanvas = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.067, green: 0.067, blue: 0.067, alpha: 1)
+            : UIColor(red: 0.980, green: 0.980, blue: 0.980, alpha: 1)
+    })
+
+    static let chatPaper = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.125, green: 0.125, blue: 0.125, alpha: 1)
+            : .white
+    })
+
+    static let chatAgentBubble = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.161, green: 0.161, blue: 0.161, alpha: 1)
+            : UIColor(red: 0.953, green: 0.953, blue: 0.953, alpha: 1)
+    })
+
+    static let chatUserBubble = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.220, green: 0.220, blue: 0.220, alpha: 1)
+            : UIColor(red: 0.914, green: 0.914, blue: 0.914, alpha: 1)
+    })
+
+    static let chatHairline = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.270, green: 0.270, blue: 0.270, alpha: 1)
+            : UIColor(red: 0.885, green: 0.885, blue: 0.885, alpha: 1)
+    })
+
+    static let chatActionFill = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark
+            ? UIColor(red: 0.96, green: 0.96, blue: 0.96, alpha: 1)
+            : UIColor(red: 0.09, green: 0.09, blue: 0.09, alpha: 1)
+    })
+
+    static let chatActionForeground = Color(uiColor: UIColor { traits in
+        traits.userInterfaceStyle == .dark ? .black : .white
+    })
+
+    static let chatBrandInk = Color.primary
+
+
     static let emberMarkTint = Color(
         uiColor: UIColor { traitCollection in
             traitCollection.userInterfaceStyle == .dark

@@ -466,18 +466,15 @@ private struct ConversationMessageBubble: View {
                 .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
-                .frame(maxWidth: .infinity, alignment: .leading)
 
                 if let deliveryNote = message.deliveryNote {
                     Text(deliveryNote)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
                 } else if let timestamp = message.timestamp {
                     Text(timestamp.formatted(date: .omitted, time: .shortened))
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
                 }
             }
             .padding(.horizontal, 14)

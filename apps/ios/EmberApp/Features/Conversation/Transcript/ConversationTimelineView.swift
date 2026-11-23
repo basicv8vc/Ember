@@ -264,14 +264,14 @@ private struct ConversationEmptyStateView: View {
             VStack(alignment: .leading, spacing: 10) {
                 Image(systemName: "flame.fill")
                     .font(.title3.weight(.semibold))
-                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                    .foregroundStyle(EmberDesignTokens.chatBrandInk)
                     .frame(width: 48, height: 48)
-                    .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+                    .background(EmberDesignTokens.chatAgentBubble, in: Circle())
                     .accessibilityHidden(true)
 
                 if let emptyState {
                     Text(emptyState.title)
-                        .font(.title3.weight(.semibold))
+                        .font(.system(.largeTitle, design: .default, weight: .semibold))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
 
@@ -297,19 +297,19 @@ private struct ConversationEmptyStateView: View {
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
                         .background(
-                            EmberDesignTokens.cardBackground,
+                            EmberDesignTokens.chatAgentBubble,
                             in: RoundedRectangle(cornerRadius: 12, style: .continuous)
                         )
                         .overlay {
                             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                                .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
                         }
                         .accessibilityElement(children: .combine)
                         .accessibilityIdentifier("conversation-empty-capability-note")
                     }
                 } else {
                     Text("conversation.empty.title", tableName: "Conversation")
-                        .font(.title3.weight(.semibold))
+                        .font(.system(.largeTitle, design: .default, weight: .semibold))
                         .foregroundStyle(.primary)
 
                     Text("conversation.empty.message", tableName: "Conversation")
@@ -332,7 +332,7 @@ private struct ConversationEmptyStateView: View {
                             HStack(alignment: .top, spacing: 12) {
                                 Image(systemName: item.iconName)
                                     .font(.callout.weight(.semibold))
-                                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                                    .foregroundStyle(EmberDesignTokens.chatBrandInk)
                                     .frame(width: 24, height: 24)
                                     .padding(.top, 1)
                                     .accessibilityHidden(true)
@@ -355,12 +355,12 @@ private struct ConversationEmptyStateView: View {
                             .padding(.vertical, 12)
                             .frame(minHeight: EmberDesignTokens.minTapTarget)
                             .background(
-                                EmberDesignTokens.cardBackground,
+                                EmberDesignTokens.chatPaper,
                                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                             )
                             .overlay {
                                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                                    .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
                             }
                         }
                         .buttonStyle(.plain)
@@ -382,7 +382,7 @@ private struct ConversationEmptyStateView: View {
                             HStack(alignment: .top, spacing: 10) {
                                 Image(systemName: "sparkle")
                                     .font(.callout.weight(.semibold))
-                                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                                    .foregroundStyle(EmberDesignTokens.chatBrandInk)
                                     .padding(.top, 1)
                                     .accessibilityHidden(true)
 
@@ -397,12 +397,12 @@ private struct ConversationEmptyStateView: View {
                             .padding(.vertical, 13)
                             .frame(minHeight: EmberDesignTokens.minTapTarget)
                             .background(
-                                EmberDesignTokens.cardBackground,
+                                EmberDesignTokens.chatPaper,
                                 in: RoundedRectangle(cornerRadius: 16, style: .continuous)
                             )
                             .overlay {
                                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                                    .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
                             }
                         }
                         .buttonStyle(.plain)
@@ -413,7 +413,7 @@ private struct ConversationEmptyStateView: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.top, 8)
+        .padding(.top, 24)
         .padding(.bottom, 8)
     }
 }
@@ -426,25 +426,34 @@ private struct ConversationMessageBubble: View {
         message.author == .user
     }
 
+    // The visible user label is intentionally removed, but VoiceOver still announces
+    // the speaker and preserves the pending/unknown-ACK delivery note.
+    private var accessibilityMessageLabel: Text {
+        let speaker = isUser
+            ? Text("conversation.message.you", tableName: "Conversation")
+            : Text(authorText, tableName: "Conversation")
+        let note = message.deliveryNote.map { Text(verbatim: ". \($0)") } ?? Text("")
+        return speaker + Text(verbatim: ": \(message.text)") + note
+    }
+
     var body: some View {
         HStack(alignment: .bottom, spacing: 8) {
             if isUser {
-                Spacer(minLength: 34)
+                Spacer(minLength: 36)
             }
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-                HStack(spacing: 5) {
-                    if !isUser {
-                        Image(systemName: "sparkle")
-                            .font(.caption2.weight(.semibold))
+            VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
+                if !isUser {
+                    HStack(spacing: 5) {
+                        Image(systemName: "flame.fill")
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(EmberDesignTokens.chatBrandInk)
                             .accessibilityHidden(true)
                         Text(authorText, tableName: "Conversation")
-                    } else {
-                        Text("conversation.message.you", tableName: "Conversation")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
 
                 Group {
                     if isUser {
@@ -454,7 +463,7 @@ private struct ConversationMessageBubble: View {
                     }
                 }
                 .font(.body)
-                .foregroundStyle(isUser ? Color.white : Color.primary)
+                .foregroundStyle(.primary)
                 .fixedSize(horizontal: false, vertical: true)
                 .textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -462,38 +471,32 @@ private struct ConversationMessageBubble: View {
                 if let deliveryNote = message.deliveryNote {
                     Text(deliveryNote)
                         .font(.caption2)
-                        .foregroundStyle(isUser ? Color.white.opacity(0.85) : Color.secondary)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
                 } else if let timestamp = message.timestamp {
                     Text(timestamp.formatted(date: .omitted, time: .shortened))
                         .font(.caption2)
-                        .foregroundStyle(isUser ? Color.white.opacity(0.78) : Color.secondary)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
                 }
             }
             .padding(.horizontal, 14)
-            .padding(.vertical, 11)
+            .padding(.vertical, 12)
             .frame(maxWidth: 620, alignment: isUser ? .trailing : .leading)
             .background(
-                isUser ? Color.accentColor : EmberDesignTokens.cardBackground,
-                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                isUser ? EmberDesignTokens.chatUserBubble : EmberDesignTokens.chatAgentBubble,
+                in: RoundedRectangle(cornerRadius: 19, style: .continuous)
             )
-            .opacity(message.deliveryNote != nil ? 0.85 : 1.0)
-            .overlay {
-                if !isUser {
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-                }
-            }
+            .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
 
             if !isUser {
-                Spacer(minLength: 34)
+                Spacer(minLength: 36)
             }
         }
         .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .accessibilityElement(children: .combine)
-        // The combined bubble and its inner text node are both exposed as StaticText on
-        // iOS 27, so a label predicate alone matches the same message twice. This stable
-        // identifier marks the bubble itself (one element per message), which lets UI tests
-        // count messages without relying on label formatting.
+        .accessibilityLabel(accessibilityMessageLabel)
+        // Keep one stable combined element per message for the existing UX-03/UI tests.
         .accessibilityIdentifier(
             message.accessibilityIdentifierOverride ?? (isUser ? "conversation-message-user" : "conversation-message-ember")
         )
@@ -506,15 +509,15 @@ private struct ConversationActivityRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             Image(systemName: "circle.dotted")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(Color.accentColor)
+                .font(.subheadline.weight(.medium))
+                .foregroundStyle(.secondary)
                 .padding(.top, 2)
                 .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(activity.title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.primary)
+                    .font(.footnote.weight(.semibold))
+                    .foregroundStyle(.secondary)
 
                 if let detail = activity.detail {
                     Text(detail)
@@ -531,12 +534,13 @@ private struct ConversationActivityRow: View {
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 14)
-        .padding(.vertical, 12)
-        .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+        .padding(.leading, 12)
+        .padding(.vertical, 8)
+        .overlay(alignment: .leading) {
+            Rectangle()
+                .fill(EmberDesignTokens.chatHairline)
+                .frame(width: 2)
+                .accessibilityHidden(true)
         }
         .accessibilityElement(children: .combine)
     }

@@ -1204,7 +1204,7 @@ final class LiveConversationHostModel {
             case .activity(let activity):
                 return .activity(ConversationActivityPresentation(
                     id: stableID,
-                    title: "Cloud activity",
+                    title: String(localized: "conversation.activity.cloud", table: "Conversation"),
                     detail: activity.text,
                     timestamp: message.createdAt
                 ))

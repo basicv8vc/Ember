@@ -10,7 +10,6 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     var replyStopText: LocalizedStringKey = "conversation.reply.stop"
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
     var onRefresh: (() async -> Void)? = nil
-    var onOpenSidebar: (() -> Void)? = nil
     private let headerMenu: HeaderMenu
     private let topNotices: TopNotices
 
@@ -29,7 +28,6 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         replyStopText: LocalizedStringKey = "conversation.reply.stop",
         emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock",
         onRefresh: (() async -> Void)? = nil,
-        onOpenSidebar: (() -> Void)? = nil,
         @ViewBuilder headerMenu: () -> HeaderMenu,
         @ViewBuilder topNotices: () -> TopNotices
     ) {
@@ -42,7 +40,6 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         self.replyStopText = replyStopText
         self.emberMessageAuthorText = emberMessageAuthorText
         self.onRefresh = onRefresh
-        self.onOpenSidebar = onOpenSidebar
         self.headerMenu = headerMenu()
         self.topNotices = topNotices()
     }
@@ -177,7 +174,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
 
     private var singleRowHeaderContent: some View {
         HStack(alignment: .center, spacing: 10) {
-            headerLeading
+            headerEmblem
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(state.partnerName)
@@ -202,7 +199,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     private var wrappedHeaderContent: some View {
         VStack(alignment: .leading, spacing: 6) {
             HStack(alignment: .center, spacing: 10) {
-                headerLeading
+                headerEmblem
 
                 VStack(alignment: .leading, spacing: 2) {
                     Text(state.partnerName)
@@ -221,37 +218,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
 
             if let pill = state.environmentPill {
                 environmentPillView(pill)
-                    .padding(.leading, onOpenSidebar != nil ? 54 : 44)
+                    .padding(.leading, 44)
             }
-        }
-    }
-
-    @ViewBuilder
-    private var headerLeading: some View {
-        if let onOpenSidebar {
-            Button {
-                composerIsFocused = false
-                onOpenSidebar()
-            } label: {
-                Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(Color.primary)
-                    .frame(width: EmberDesignTokens.minTapTarget, height: EmberDesignTokens.minTapTarget)
-                    .background(
-                        Color(uiColor: UIColor { traits in
-                            traits.userInterfaceStyle == .dark
-                                ? UIColor(red: 0.161, green: 0.161, blue: 0.161, alpha: 1)
-                                : UIColor(red: 0.953, green: 0.953, blue: 0.953, alpha: 1)
-                        }),
-                        in: Circle()
-                    )
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel(Text(String(localized: "sidebar.open", table: "Conversation")))
-            .accessibilityIdentifier("ember-sidebar-open-chat")
-        } else {
-            headerEmblem
         }
     }
 

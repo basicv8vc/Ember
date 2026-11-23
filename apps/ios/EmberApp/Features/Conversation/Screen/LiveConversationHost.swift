@@ -2031,7 +2031,6 @@ private struct SessionTaskPendingReferenceCard: View {
 /// in a Chat + Tasks dual-tab shell behind Live authentication (and in `--ember-mock-chat-tasks`).
 struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
     @State private var isShowingSidebar = false
@@ -2059,33 +2058,9 @@ struct LiveConversationHost: View {
             if model.requiresSignIn {
                 signInView
             } else {
-                TabView(selection: $model.selectedTab) {
-                    chatTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.chat", table: "Conversation"),
-                                systemImage: "bubble.left.and.bubble.right"
-                            )
-                        }
-                        .tag(LiveConversationHostModel.RootTab.chat)
-
-                    tasksTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.tasks", table: "Conversation"),
-                                systemImage: "checklist"
-                            )
-                        }
-                        .badge(model.taskStore.needsInterventionCount)
-                        .tag(LiveConversationHostModel.RootTab.tasks)
-                }
-                .accessibilityHidden(isShowingSidebar)
-            }
-        }
-        .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
-        .overlay {
-            if isShowingSidebar && !model.requiresSignIn {
-                EmberSidebarOverlay(
+                EmberSidebarContainer(
+                    isShowingSidebar: $isShowingSidebar,
+                    canSwipeOpenFromEdge: canSwipeOpenSidebarFromEdge,
                     selectedTab: model.selectedTab,
                     needsInterventionCount: model.taskStore.needsInterventionCount,
                     hasMemoryRepository: model.memoryStore.hasRepository,
@@ -2095,32 +2070,46 @@ struct LiveConversationHost: View {
                     isMockMode: model.isMockMode,
                     environmentBadge: model.environmentBadge,
                     canSignOut: !model.isSigningOut && !model.isSubmitting && !model.isLoading,
-                    onDismiss: dismissSidebar,
                     onOpenChat: {
-                        dismissSidebar()
                         model.selectedTab = .chat
                     },
                     onOpenTasks: {
-                        dismissSidebar()
                         model.selectedTab = .tasks
                     },
                     onOpenMemory: {
-                        dismissSidebar()
                         isShowingMemorySheet = true
                     },
                     onOpenSchedules: {
-                        dismissSidebar()
                         isShowingSchedulesSheet = true
                     },
                     onSignOut: {
-                        dismissSidebar()
                         isConfirmingSignOut = true
                     }
-                )
-                .zIndex(1)
+                ) {
+                    TabView(selection: $model.selectedTab) {
+                        chatTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.chat", table: "Conversation"),
+                                    systemImage: "bubble.left.and.bubble.right"
+                                )
+                            }
+                            .tag(LiveConversationHostModel.RootTab.chat)
+
+                        tasksTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.tasks", table: "Conversation"),
+                                    systemImage: "checklist"
+                                )
+                            }
+                            .badge(model.taskStore.needsInterventionCount)
+                            .tag(LiveConversationHostModel.RootTab.tasks)
+                    }
+                }
             }
         }
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isShowingSidebar)
+        .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
         .sheet(isPresented: $isShowingMemorySheet) {
             PersonalMemorySheetView(store: model.memoryStore)
         }
@@ -2185,8 +2174,23 @@ struct LiveConversationHost: View {
         }
     }
 
-    private func dismissSidebar() {
-        isShowingSidebar = false
+    private var canSwipeOpenSidebarFromEdge: Bool {
+        guard !model.requiresSignIn,
+              !isShowingMemorySheet,
+              !isShowingSchedulesSheet,
+              !isConfirmingSignOut,
+              !isShowingFileImporter,
+              !isShowingPhotoPicker,
+              !isShowingCamera
+        else {
+            return false
+        }
+        switch model.selectedTab {
+        case .chat:
+            return model.chatNavigationPath.isEmpty
+        case .tasks:
+            return model.tasksNavigationPath.isEmpty
+        }
     }
 
     private var signInView: some View {
@@ -2288,7 +2292,6 @@ struct LiveConversationHost: View {
                     onRefresh: {
                         await model.refreshConversationAndTasks()
                     },
-                    onOpenSidebar: { isShowingSidebar = true },
                     headerMenu: {
                         chatHeaderMenu
                     },
@@ -2623,9 +2626,6 @@ struct LiveConversationHost: View {
                 },
                 onOpenChat: {
                     model.selectedTab = .chat
-                },
-                onOpenSidebar: {
-                    isShowingSidebar = true
                 },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)

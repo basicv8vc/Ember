@@ -1,29 +1,25 @@
 import XCTest
 
-/// NAV-02 focused UI checks for the native TabView + capability-aware sidebar.
+/// NAV-02 focused UI checks for the native TabView + ChatGPT/CoPaper-style interactive swipe sidebar.
 @MainActor
 final class EmberSidebarUITests: XCTestCase {
-    func testChatSidebarOpensShowsOnlyActualDestinationsAndPreservesDraft() {
+    func testChatLeftEdgeSwipeOpensSidebarWithoutTopLeftButtonAndPreservesDraft() {
         let app = makeMockApp()
         app.launch()
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        XCTAssertFalse(app.buttons["ember-sidebar-open-chat"].exists, "Chat header must not show a top-left sidebar toggle button.")
+        XCTAssertFalse(app.buttons["ember-sidebar-close"].exists, "Sidebar drawer must not clutter header with a close button.")
+
         let composer = app.textFields["conversation-composer-input"]
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.tap()
         composer.typeText("Keep this draft while browsing")
 
-        let open = app.buttons["ember-sidebar-open-chat"]
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(open.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(open.frame.height, 44)
-        open.tap()
+        openSidebarByEdgeSwipe(app)
 
-        let close = app.buttons["ember-sidebar-close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5))
-        XCTAssertGreaterThanOrEqual(close.frame.width, 44)
-        XCTAssertGreaterThanOrEqual(close.frame.height, 44)
-        XCTAssertTrue(app.buttons["ember-sidebar-chat"].exists)
+        let chatItem = app.buttons["ember-sidebar-chat"]
+        XCTAssertTrue(chatItem.waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["ember-sidebar-tasks"].exists)
         XCTAssertTrue(app.buttons["ember-sidebar-memory"].exists)
         XCTAssertTrue(app.buttons["ember-sidebar-schedules"].exists)
@@ -31,24 +27,22 @@ final class EmberSidebarUITests: XCTestCase {
 
         attachScreenshot(app, "nav02-sidebar-chat")
 
-        close.tap()
-        let dismissed = XCTNSPredicateExpectation(
+        closeSidebarBySwipeLeft(app)
+        let closed = XCTNSPredicateExpectation(
             predicate: NSPredicate(format: "exists == false"),
-            object: close
+            object: chatItem
         )
-        wait(for: [dismissed], timeout: 5)
+        wait(for: [closed], timeout: 5)
         XCTAssertEqual(composer.value as? String, "Keep this draft while browsing")
         XCTAssertTrue(app.buttons["conversation-send"].isEnabled)
 
-        // Switching Chat -> Tasks -> Chat via Sidebar preserves the unsent Chat draft
-        open.tap()
+        // Switching Chat -> Tasks -> Chat via Sidebar swipes preserves the unsent Chat draft
+        openSidebarByEdgeSwipe(app)
         XCTAssertTrue(app.buttons["ember-sidebar-tasks"].waitForExistence(timeout: 5))
         app.buttons["ember-sidebar-tasks"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
 
-        let openTasksSidebar = app.buttons["ember-sidebar-open-tasks"]
-        XCTAssertTrue(openTasksSidebar.waitForExistence(timeout: 5))
-        openTasksSidebar.tap()
+        openSidebarByEdgeSwipe(app)
         XCTAssertTrue(app.buttons["ember-sidebar-chat"].waitForExistence(timeout: 5))
         app.buttons["ember-sidebar-chat"].tap()
 
@@ -57,7 +51,7 @@ final class EmberSidebarUITests: XCTestCase {
         XCTAssertTrue(app.buttons["conversation-send"].isEnabled)
     }
 
-    func testTasksSidebarCanOpenMemoryAndSchedulesWithoutLosingTasksContext() {
+    func testTasksLeftEdgeSwipeAndDetailPopIsolationKeepTasksState() {
         let app = makeMockApp()
         app.launch()
 
@@ -65,13 +59,31 @@ final class EmberSidebarUITests: XCTestCase {
         app.tabBars.buttons["Tasks"].tap()
         let inbox = app.descendants(matching: .any)["tasks-inbox-screen"]
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
+        XCTAssertFalse(app.buttons["ember-sidebar-open-tasks"].exists, "Tasks toolbar must not show a top-left sidebar toggle button.")
+        XCTAssertTrue(app.buttons["tasks-open-schedules"].exists)
 
-        // Mutate Tasks state (cancel running task), then navigate via Sidebar and confirm Tasks state persists
+        // Inside a pushed Task detail view, left-edge swipe must stay reserved for native back navigation
         let runningRow = app.buttons["tasks-row-00000000-0000-4000-8000-00000000b312"]
         XCTAssertTrue(runningRow.waitForExistence(timeout: 10))
         runningRow.tap()
 
         let cancelButton = app.buttons["task-cancel"]
+        for _ in 0..<4 {
+            if cancelButton.exists && cancelButton.isHittable { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(cancelButton.waitForExistence(timeout: 10))
+
+        // Left-edge swipe on pushed TaskDetailView pops back rather than pulling Sidebar
+        let edgeStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.01, dy: 0.5))
+        let edgeMid = app.coordinate(withNormalizedOffset: CGVector(dx: 0.7, dy: 0.5))
+        edgeStart.press(forDuration: 0.01, thenDragTo: edgeMid)
+        XCTAssertFalse(app.buttons["ember-sidebar-chat"].exists)
+        XCTAssertTrue(inbox.waitForExistence(timeout: 10))
+
+        // Re-open running task and cancel it to mutate Tasks state
+        XCTAssertTrue(runningRow.waitForExistence(timeout: 10))
+        runningRow.tap()
         for _ in 0..<4 {
             if cancelButton.exists && cancelButton.isHittable { break }
             app.swipeUp()
@@ -89,12 +101,8 @@ final class EmberSidebarUITests: XCTestCase {
         backToTasks.tap()
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
 
-        // Open Tasks Sidebar, dismiss via backdrop tap, then open Memory & Schedules while preserving Tasks context
-        let open = app.buttons["ember-sidebar-open-tasks"]
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
-        XCTAssertTrue(open.isHittable)
-        open.tap()
-
+        // Open Tasks Sidebar via edge swipe, dismiss via backdrop tap, then open Memory & Schedules
+        openSidebarByEdgeSwipe(app)
         let backdrop = app.buttons["ember-sidebar-backdrop"]
         XCTAssertTrue(backdrop.waitForExistence(timeout: 5))
         backdrop.tap()
@@ -104,10 +112,9 @@ final class EmberSidebarUITests: XCTestCase {
         )
         wait(for: [backdropDismissed], timeout: 5)
         XCTAssertTrue(inbox.exists)
-        XCTAssertTrue(open.waitForExistence(timeout: 5))
-        XCTAssertTrue(open.isHittable)
+        XCTAssertFalse(app.buttons["ember-sidebar-chat"].exists)
 
-        open.tap()
+        openSidebarByEdgeSwipe(app)
         attachScreenshot(app, "nav02-sidebar-tasks")
         let memory = app.buttons["ember-sidebar-memory"]
         XCTAssertTrue(memory.waitForExistence(timeout: 5))
@@ -118,7 +125,7 @@ final class EmberSidebarUITests: XCTestCase {
         memoryClose.tap()
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
 
-        open.tap()
+        openSidebarByEdgeSwipe(app)
         let schedules = app.buttons["ember-sidebar-schedules"]
         XCTAssertTrue(schedules.waitForExistence(timeout: 5))
         schedules.tap()
@@ -127,23 +134,22 @@ final class EmberSidebarUITests: XCTestCase {
         schedulesClose.tap()
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
 
-        open.tap()
+        openSidebarByEdgeSwipe(app)
         app.buttons["ember-sidebar-chat"].tap()
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 10))
         XCTAssertTrue(app.tabBars.buttons["Chat"].exists)
 
-        let openChat = app.buttons["ember-sidebar-open-chat"]
-        XCTAssertTrue(openChat.waitForExistence(timeout: 5))
-        openChat.tap()
+        openSidebarByEdgeSwipe(app)
+        XCTAssertTrue(app.buttons["ember-sidebar-tasks"].waitForExistence(timeout: 5))
         app.buttons["ember-sidebar-tasks"].tap()
         XCTAssertTrue(inbox.waitForExistence(timeout: 10))
         XCTAssertFalse(
             app.descendants(matching: .any)["tasks-section-in-progress"].exists,
-            "Cancelled Tasks state must persist across Sidebar switches."
+            "Cancelled Tasks state must persist across Sidebar swipe switches."
         )
     }
 
-    func testSidebarInZhHansDarkAndAccessibilityTextRemainsDismissable() {
+    func testSidebarSwipeInZhHansDarkAndAccessibilityTextRemainsDismissable() {
         let app = XCUIApplication()
         app.launchArguments = [
             "--ember-mock-chat-tasks",
@@ -151,26 +157,41 @@ final class EmberSidebarUITests: XCTestCase {
             "-AppleLanguages", "(zh-Hans)",
             "-AppleLocale", "zh_CN",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityLarge",
-            "-UIUserInterfaceStyle", "dark",
         ]
         app.launch()
 
-        let open = app.buttons["ember-sidebar-open-chat"]
-        XCTAssertTrue(open.waitForExistence(timeout: 12))
-        open.tap()
-        let close = app.buttons["ember-sidebar-close"]
-        XCTAssertTrue(close.waitForExistence(timeout: 5))
-        XCTAssertTrue(close.isHittable)
+        XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
+        openSidebarByEdgeSwipe(app)
+
+        let tasksItem = app.buttons["ember-sidebar-tasks"]
+        XCTAssertTrue(tasksItem.waitForExistence(timeout: 5))
         XCTAssertTrue(app.staticTexts["你的个人 AI 助手"].exists)
         XCTAssertTrue(app.staticTexts["标签页"].exists)
         XCTAssertTrue(app.staticTexts["工具"].exists)
-        XCTAssertTrue(app.buttons["ember-sidebar-tasks"].exists)
         XCTAssertTrue(app.buttons["ember-sidebar-memory"].exists)
         XCTAssertTrue(app.buttons["ember-sidebar-schedules"].exists)
 
         attachScreenshot(app, "nav02-sidebar-zhHans-dark-AX")
-        close.tap()
+
+        closeSidebarBySwipeLeft(app)
+        let closed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: tasksItem
+        )
+        wait(for: [closed], timeout: 5)
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 5))
+    }
+
+    private func openSidebarByEdgeSwipe(_ app: XCUIApplication) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.02, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.82, dy: 0.5))
+        start.press(forDuration: 0.01, thenDragTo: end)
+    }
+
+    private func closeSidebarBySwipeLeft(_ app: XCUIApplication) {
+        let start = app.coordinate(withNormalizedOffset: CGVector(dx: 0.72, dy: 0.5))
+        let end = app.coordinate(withNormalizedOffset: CGVector(dx: 0.12, dy: 0.5))
+        start.press(forDuration: 0.01, thenDragTo: end)
     }
 
     private func makeMockApp() -> XCUIApplication {

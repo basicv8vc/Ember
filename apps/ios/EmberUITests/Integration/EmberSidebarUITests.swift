@@ -16,6 +16,7 @@ final class EmberSidebarUITests: XCTestCase {
         XCTAssertTrue(composer.waitForExistence(timeout: 10))
         composer.tap()
         composer.typeText("Keep this draft while browsing")
+        XCTAssertEqual(composer.value(forKey: "hasKeyboardFocus") as? Bool, true)
 
         // P1: Focusable >= 44pt assistive/menu path on Chat opens Sidebar without top-left button
         let chatMenu = app.buttons["live-conversation-menu"]
@@ -23,19 +24,28 @@ final class EmberSidebarUITests: XCTestCase {
         XCTAssertTrue(chatMenu.isHittable)
         XCTAssertGreaterThanOrEqual(chatMenu.frame.width, 44)
         XCTAssertGreaterThanOrEqual(chatMenu.frame.height, 44)
+        XCTAssertFalse(chatMenu.label.isEmpty)
         chatMenu.tap()
 
         let menuOpenSidebar = app.buttons["live-conversation-open-sidebar"]
         XCTAssertTrue(menuOpenSidebar.waitForExistence(timeout: 5))
+        XCTAssertTrue(menuOpenSidebar.isHittable)
         menuOpenSidebar.tap()
 
         let chatItem = app.buttons["ember-sidebar-chat"]
         XCTAssertTrue(chatItem.waitForExistence(timeout: 5))
+        XCTAssertTrue(chatItem.isHittable)
+        XCTAssertGreaterThanOrEqual(chatItem.frame.height, 44)
+        XCTAssertEqual(app.keyboards.count, 0, "Opening Sidebar via menu must dismiss keyboard cleanly.")
+
         let backdrop = app.buttons["ember-sidebar-backdrop"]
         XCTAssertTrue(backdrop.waitForExistence(timeout: 5))
+        XCTAssertTrue(backdrop.isHittable)
         XCTAssertGreaterThanOrEqual(backdrop.frame.width, 44)
+        XCTAssertFalse(backdrop.label.isEmpty)
         backdrop.tap()
         waitUntilMissing(chatItem)
+        XCTAssertEqual(composer.value as? String, "Keep this draft while browsing")
 
         // Left-edge swipe gesture path also opens Sidebar cleanly
         openSidebarByEdgeSwipe(app)
@@ -185,15 +195,18 @@ final class EmberSidebarUITests: XCTestCase {
         waitUntilMissing(chatItem)
 
         // P2: Drag starting in main content (x > 40pt) must NOT open Sidebar
-        let contentStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.5))
-        contentStart.press(forDuration: 0.01, thenDragTo: rightEnd)
+        let contentStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.30, dy: 0.16))
+        let contentEnd = app.coordinate(withNormalizedOffset: CGVector(dx: 0.84, dy: 0.16))
+        contentStart.press(forDuration: 0.01, thenDragTo: contentEnd)
         XCTAssertFalse(chatItem.exists, "Drag starting outside 40pt edge zone must not open Sidebar.")
+        XCTAssertTrue(app.otherElements["conversation-home"].exists)
 
         // P2: Vertical scroll starting near the left edge must NOT open Sidebar
         let verticalStart = app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.72))
         let verticalEnd = app.coordinate(withNormalizedOffset: CGVector(dx: 0.05, dy: 0.28))
         verticalStart.press(forDuration: 0.01, thenDragTo: verticalEnd)
         XCTAssertFalse(chatItem.exists, "Vertical scroll near left edge must not falsely open Sidebar.")
+        XCTAssertTrue(app.otherElements["conversation-home"].exists)
 
         // P2: Smoke check horizontal ScrollView & modal isolation in Schedules sheet
         let menuButton = app.buttons["live-conversation-menu"]

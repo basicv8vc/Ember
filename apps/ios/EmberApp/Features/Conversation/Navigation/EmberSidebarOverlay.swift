@@ -197,6 +197,14 @@ struct EmberSidebarContainer<Content: View>: View {
     }
 
     private func setSidebarPresented(_ present: Bool, drawerWidth: CGFloat, velocityX: CGFloat) {
+        if present {
+            UIApplication.shared.sendAction(
+                #selector(UIResponder.resignFirstResponder),
+                to: nil,
+                from: nil,
+                for: nil
+            )
+        }
         let target = present ? drawerWidth : 0
         let remaining = abs(target - interactiveOffset)
         let normalizedVelocity: CGFloat

@@ -801,6 +801,12 @@
         }
       }
     },
+    "conversation.activity.cloud": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cloud activity" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "云端动态" } }
+      }
+    },
     "tab.chat": {
       "localizations": {
         "en": {

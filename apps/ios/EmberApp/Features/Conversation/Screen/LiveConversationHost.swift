@@ -2031,8 +2031,10 @@ private struct SessionTaskPendingReferenceCard: View {
 /// in a Chat + Tasks dual-tab shell behind Live authentication (and in `--ember-mock-chat-tasks`).
 struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
+    @State private var isShowingSidebar = false
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
     @State private var isShowingSchedulesSheet = false
@@ -2077,9 +2079,64 @@ struct LiveConversationHost: View {
                         .badge(model.taskStore.needsInterventionCount)
                         .tag(LiveConversationHostModel.RootTab.tasks)
                 }
+                .accessibilityHidden(isShowingSidebar)
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .overlay {
+            if isShowingSidebar && !model.requiresSignIn {
+                EmberSidebarOverlay(
+                    selectedTab: model.selectedTab,
+                    needsInterventionCount: model.taskStore.needsInterventionCount,
+                    hasMemoryRepository: model.memoryStore.hasRepository,
+                    memoryUnavailable: model.memoryStore.isEndpointUnavailable,
+                    hasSchedulesRepository: model.scheduleStore.hasRepository,
+                    schedulesUnavailable: model.scheduleStore.isEndpointUnavailable,
+                    isMockMode: model.isMockMode,
+                    environmentBadge: model.environmentBadge,
+                    canSignOut: !model.isSigningOut && !model.isSubmitting && !model.isLoading,
+                    onDismiss: dismissSidebar,
+                    onOpenChat: {
+                        dismissSidebar()
+                        model.selectedTab = .chat
+                    },
+                    onOpenTasks: {
+                        dismissSidebar()
+                        model.selectedTab = .tasks
+                    },
+                    onOpenMemory: {
+                        dismissSidebar()
+                        isShowingMemorySheet = true
+                    },
+                    onOpenSchedules: {
+                        dismissSidebar()
+                        isShowingSchedulesSheet = true
+                    },
+                    onSignOut: {
+                        dismissSidebar()
+                        isConfirmingSignOut = true
+                    }
+                )
+            }
+        }
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isShowingSidebar)
+        .sheet(isPresented: $isShowingMemorySheet) {
+            PersonalMemorySheetView(store: model.memoryStore)
+        }
+        .sheet(isPresented: $isShowingSchedulesSheet) {
+            ProactiveSchedulesSheetView(
+                store: model.scheduleStore,
+                onOpenChat: {
+                    isShowingSchedulesSheet = false
+                    model.selectedTab = .chat
+                }
+            )
+        }
+        .onChange(of: isShowingSchedulesSheet) { _, isShowing in
+            if !isShowing {
+                Task { await model.handleSchedulesSheetDismissed() }
+            }
+        }
         .alert(
             Text("conversation.live.sign_out_confirm_title", tableName: "Conversation"),
             isPresented: $isConfirmingSignOut
@@ -2122,6 +2179,13 @@ struct LiveConversationHost: View {
         .onChange(of: scenePhase) { _, newPhase in
             model.handleScenePhase(newPhase)
         }
+        .onChange(of: model.requiresSignIn) { _, needsSignIn in
+            if needsSignIn { isShowingSidebar = false }
+        }
+    }
+
+    private func dismissSidebar() {
+        isShowingSidebar = false
     }
 
     private var signInView: some View {
@@ -2223,6 +2287,7 @@ struct LiveConversationHost: View {
                     onRefresh: {
                         await model.refreshConversationAndTasks()
                     },
+                    onOpenSidebar: { isShowingSidebar = true },
                     headerMenu: {
                         chatHeaderMenu
                     },
@@ -2285,20 +2350,6 @@ struct LiveConversationHost: View {
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
-            }
-            .sheet(isPresented: $isShowingMemorySheet) {
-                PersonalMemorySheetView(store: model.memoryStore)
-            }
-            .sheet(isPresented: $isShowingSchedulesSheet) {
-                ProactiveSchedulesSheetView(
-                    store: model.scheduleStore,
-                    onOpenChat: { isShowingSchedulesSheet = false }
-                )
-            }
-            .onChange(of: isShowingSchedulesSheet) { _, isShowing in
-                if !isShowing {
-                    Task { await model.handleSchedulesSheetDismissed() }
-                }
             }
         }
     }
@@ -2576,6 +2627,20 @@ struct LiveConversationHost: View {
                     model.openTaskFromInbox(taskID)
                 }
             )
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button {
+                        isShowingSidebar = true
+                    } label: {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.body.weight(.semibold))
+                            .frame(width: EmberDesignTokens.minTapTarget, height: EmberDesignTokens.minTapTarget)
+                            .contentShape(Rectangle())
+                    }
+                    .accessibilityLabel(Text("sidebar.open", tableName: "Conversation"))
+                    .accessibilityIdentifier("ember-sidebar-open-tasks")
+                }
+            }
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)

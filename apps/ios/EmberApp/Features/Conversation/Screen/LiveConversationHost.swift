@@ -2305,6 +2305,7 @@ struct LiveConversationHost: View {
                 }
             }
             .toolbar(.hidden, for: .navigationBar)
+            .toolbar(.hidden, for: .tabBar)
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
@@ -2599,6 +2600,7 @@ struct LiveConversationHost: View {
                     model.openTaskFromInbox(taskID)
                 }
             )
+            .toolbar(.hidden, for: .tabBar)
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)

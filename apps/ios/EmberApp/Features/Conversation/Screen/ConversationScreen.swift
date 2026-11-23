@@ -144,6 +144,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             }
         }
         .background(EmberDesignTokens.chatCanvas.ignoresSafeArea())
+        .tint(EmberDesignTokens.chatBrandInk)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-home")
     }

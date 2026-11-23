@@ -2033,6 +2033,7 @@ struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
     @State private var draft = ""
+    @State private var isShowingSidebar = false
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
     @State private var isShowingSchedulesSheet = false
@@ -2057,29 +2058,75 @@ struct LiveConversationHost: View {
             if model.requiresSignIn {
                 signInView
             } else {
-                TabView(selection: $model.selectedTab) {
-                    chatTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.chat", table: "Conversation"),
-                                systemImage: "bubble.left.and.bubble.right"
-                            )
-                        }
-                        .tag(LiveConversationHostModel.RootTab.chat)
+                EmberSidebarContainer(
+                    isShowingSidebar: $isShowingSidebar,
+                    canSwipeOpenFromEdge: canSwipeOpenSidebarFromEdge,
+                    selectedTab: model.selectedTab,
+                    needsInterventionCount: model.taskStore.needsInterventionCount,
+                    hasMemoryRepository: model.memoryStore.hasRepository,
+                    memoryUnavailable: model.memoryStore.isEndpointUnavailable,
+                    hasSchedulesRepository: model.scheduleStore.hasRepository,
+                    schedulesUnavailable: model.scheduleStore.isEndpointUnavailable,
+                    isMockMode: model.isMockMode,
+                    environmentBadge: model.environmentBadge,
+                    canSignOut: !model.isSigningOut && !model.isSubmitting && !model.isLoading,
+                    onOpenChat: {
+                        model.selectedTab = .chat
+                    },
+                    onOpenTasks: {
+                        model.selectedTab = .tasks
+                    },
+                    onOpenMemory: {
+                        isShowingMemorySheet = true
+                    },
+                    onOpenSchedules: {
+                        isShowingSchedulesSheet = true
+                    },
+                    onSignOut: {
+                        isConfirmingSignOut = true
+                    }
+                ) {
+                    TabView(selection: $model.selectedTab) {
+                        chatTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.chat", table: "Conversation"),
+                                    systemImage: "bubble.left.and.bubble.right"
+                                )
+                            }
+                            .tag(LiveConversationHostModel.RootTab.chat)
 
-                    tasksTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.tasks", table: "Conversation"),
-                                systemImage: "checklist"
-                            )
-                        }
-                        .badge(model.taskStore.needsInterventionCount)
-                        .tag(LiveConversationHostModel.RootTab.tasks)
+                        tasksTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.tasks", table: "Conversation"),
+                                    systemImage: "checklist"
+                                )
+                            }
+                            .badge(model.taskStore.needsInterventionCount)
+                            .tag(LiveConversationHostModel.RootTab.tasks)
+                    }
                 }
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .sheet(isPresented: $isShowingMemorySheet) {
+            PersonalMemorySheetView(store: model.memoryStore)
+        }
+        .sheet(isPresented: $isShowingSchedulesSheet) {
+            ProactiveSchedulesSheetView(
+                store: model.scheduleStore,
+                onOpenChat: {
+                    isShowingSchedulesSheet = false
+                    model.selectedTab = .chat
+                }
+            )
+        }
+        .onChange(of: isShowingSchedulesSheet) { _, isShowing in
+            if !isShowing {
+                Task { await model.handleSchedulesSheetDismissed() }
+            }
+        }
         .alert(
             Text("conversation.live.sign_out_confirm_title", tableName: "Conversation"),
             isPresented: $isConfirmingSignOut
@@ -2121,6 +2168,28 @@ struct LiveConversationHost: View {
         }
         .onChange(of: scenePhase) { _, newPhase in
             model.handleScenePhase(newPhase)
+        }
+        .onChange(of: model.requiresSignIn) { _, needsSignIn in
+            if needsSignIn { isShowingSidebar = false }
+        }
+    }
+
+    private var canSwipeOpenSidebarFromEdge: Bool {
+        guard !model.requiresSignIn,
+              !isShowingMemorySheet,
+              !isShowingSchedulesSheet,
+              !isConfirmingSignOut,
+              !isShowingFileImporter,
+              !isShowingPhotoPicker,
+              !isShowingCamera
+        else {
+            return false
+        }
+        switch model.selectedTab {
+        case .chat:
+            return model.chatNavigationPath.isEmpty
+        case .tasks:
+            return model.tasksNavigationPath.isEmpty
         }
     }
 
@@ -2286,25 +2355,27 @@ struct LiveConversationHost: View {
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
             }
-            .sheet(isPresented: $isShowingMemorySheet) {
-                PersonalMemorySheetView(store: model.memoryStore)
-            }
-            .sheet(isPresented: $isShowingSchedulesSheet) {
-                ProactiveSchedulesSheetView(
-                    store: model.scheduleStore,
-                    onOpenChat: { isShowingSchedulesSheet = false }
-                )
-            }
-            .onChange(of: isShowingSchedulesSheet) { _, isShowing in
-                if !isShowing {
-                    Task { await model.handleSchedulesSheetDismissed() }
-                }
-            }
         }
     }
 
     private var chatHeaderMenu: some View {
         Menu {
+            Button {
+                Task { @MainActor in
+                    await Task.yield()
+                    isShowingSidebar = true
+                }
+            } label: {
+                Label {
+                    Text(String(localized: "sidebar.open", table: "Conversation"))
+                } icon: {
+                    Image(systemName: "sidebar.leading")
+                }
+            }
+            .accessibilityIdentifier("live-conversation-open-sidebar")
+
+            Divider()
+
             if model.scheduleStore.hasRepository {
                 Button {
                     isShowingSchedulesSheet = true
@@ -2571,6 +2642,12 @@ struct LiveConversationHost: View {
                 },
                 onOpenChat: {
                     model.selectedTab = .chat
+                },
+                onOpenNavigationDirectory: {
+                    Task { @MainActor in
+                        await Task.yield()
+                        isShowingSidebar = true
+                    }
                 },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)

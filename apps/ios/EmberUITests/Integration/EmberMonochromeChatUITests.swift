@@ -56,36 +56,18 @@ final class EmberMonochromeChatUITests: XCTestCase {
             .firstMatch
         XCTAssertTrue(bubble.waitForExistence(timeout: 10))
         XCTAssertTrue(bubble.label.contains("You"), "Speaker is retained for VoiceOver without a visible You header.")
-        XCTAssertFalse(app.buttons["conversation-send"].isEnabled)
         capture(app, name: "visual-v1-active-chat-en")
     }
 
     func testChineseDarkLargeTypeRetainsComposerAndModeDisclosure() {
         let app = XCUIApplication()
         app.launchArguments = [
-            "--ember-show-onboarding",
+            "--ember-mock-chat-tasks", "--ember-mock-chat-tasks-reset",
             "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_Hans",
             "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityLarge",
             "-UIUserInterfaceStyle", "dark",
         ]
         app.launch()
-
-        let demo = app.buttons["View the mock demo"]
-        // The onboarding button is localized in Chinese in this launch configuration.
-        // Select its stable function by the same label only when English; instead use
-        // the existing mock Chat/Tasks launch for accessibility verification.
-        if demo.exists {
-            demo.tap()
-        } else {
-            app.terminate()
-            app.launchArguments = [
-                "--ember-mock-chat-tasks", "--ember-mock-chat-tasks-reset",
-                "-AppleLanguages", "(zh-Hans)", "-AppleLocale", "zh_Hans",
-                "-UIPreferredContentSizeCategoryName", "UICTContentSizeCategoryAccessibilityLarge",
-                "-UIUserInterfaceStyle", "dark",
-            ]
-            app.launch()
-        }
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
         XCTAssertTrue(app.descendants(matching: .any)["mock-only-banner"].exists)

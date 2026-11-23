@@ -1,11 +1,11 @@
 # Ember Visual V1 — Founder Review Spec
 
-**Status:** Visual concept for review, **not** a production or Simulator acceptance report.
+**Status:** **Founder-approved monochrome direction (2026-11-23)**; implementation specification, **not** a production or Simulator acceptance report.
 **Date:** 2026-11-23
 **Code baseline:** `main` @ `c347dc9f4133cb3ed51a18f05a003010e6f0baae`.
 **Companion reference:** Three-screen HTML concept + Chromium-rendered board delivered with the Founder conversation on 2026-11-23. The screenshots are **not** Xcode/iOS Simulator captures and are **not** committed to this repo.
 
-This proposal refines [Ember UX Foundation V1](EMBER_MUSE_UX_FOUNDATION_V1.md). It keeps its principles **Warm · Quiet · Competent**, **Less Chatbot. More Personal Agent**, two real primary destinations, and reversible future customization.
+This proposal refines [Ember UX Foundation V1](EMBER_MUSE_UX_FOUNDATION_V1.md). It keeps its principles **Quiet · Focused · Reliable**, **Less Chatbot. More Personal Agent**, two real primary destinations, and reversible future customization. The Founder explicitly selected **A: black, white, and grayscale minimalism** over the earlier cream/terracotta exploration.
 
 ## 1. Visual thesis
 
@@ -28,28 +28,32 @@ Treat the submitted Muse walkthrough stills as reference for understated bubbles
 
 **Data integrity:** The reference examples show illustrative task names and counts. In production use the authoritative SessionTaskStore / Task & Run DTOs; hide unknown counts; preserve pending/unknown-ACK and mock badges. On default V1 API, unavailable V2 capabilities must be disclosed, not shown as completed.
 
-## 3. Color and materials (concept-only reference values)
+## 3. Color and materials — **APPROVED monochrome**
 
-| Role | Light reference | Usage |
-| --- | --- | --- |
-| Warm canvas | `#FAF7F4` | Default page plane; calm and slightly warm |
-| Primary paper | `#FEFCFA` | Editable Composer and meaningful task cards |
-| Secondary surface | `#F1EBE7` | Soft neutral conversation surfaces |
-| Hairline | `#E9E0DA` | Separation only where needed |
-| Primary ink | `#322B28` | Core text hierarchy |
-| Secondary ink | `#7B726E` | Supplementary metadata (verify 4.5:1 for readable text) |
-| Ember terracotta | `#C86A43` | Brand, selection, purposeful accents |
-| Pale Ember | `#F7EAE3` | Brand backing and restrained emphasis |
-| Success | `#568369` | Only authoritative completed/success state |
+The Founder chose **A: black, white and gray minimalism**. Previous cream, blush and terracotta palettes are rejected. Reference values are targets, not a license to bypass native contrast or accessibility:
 
-**Important:** Reference RGB values are **not** a request to hardcode a light theme. Implement semantic colors in `EmberDesignTokens.swift`, define a deliberate dark palette, and verify Increase Contrast and text contrast before landing. Existing `emberMarkTint`, `emberSoftSurface`, `cardBackground` remain the compatibility starting point.
+| Role | Light reference | Dark reference | Usage |
+| --- | --- | --- | --- |
+| Canvas | `#FAFAFA` | `#111111` | Neutral Chat background |
+| Paper | `#FFFFFF` | `#202020` | Composer / result surfaces |
+| Assistant bubble | `#F3F3F3` | `#292929` | Quiet message grouping |
+| User bubble | `#E9E9E9` | `#383838` | Distinct, soft, highly readable |
+| Hairline | `#E3E3E3` | `#414141` | Only where needed |
+| Primary ink | `#171717` | `#F5F5F5` | Body text, icon identity |
+| Secondary ink | adaptive semantic secondary | adaptive semantic secondary | Supporting metadata |
+| Primary action | `#171717` | `#F5F5F5` | Send / selected CTA; foreground inverses |
+| Status | native semantic warning/success/error | native semantic warning/success/error | **Do not** make failure/warnings gray-only |
+
+Ember's flame is **monochrome black/white**, not orange. Brand recognition comes from silhouette, typography, rhythm, and behavior—not an accent color.
+
+**Implementation constraints:** Introduce small adaptive semantic tokens in `EmberDesignTokens.swift`; avoid a global unreviewed restyle. Keep status meaning, contrast, UI test identifiers and environment/MOCK distinctions. Test Dark Mode + Increase Contrast. Other tabs can adopt the tokens in follow-up focused PRs.
 
 ## 4. Type, spacing, shapes
 
-- Use native San Francisco/dynamic type, no bundled custom font. Display 32–36pt concept; screen titles ~28pt; body 15–17pt; captions 11–13pt, with Dynamic Type rather than fixed font sizes in implementation.
+- Use native San Francisco/dynamic type, no bundled custom font. Display 30–36pt concept; screen titles ~28pt; body 15–17pt; captions 11–13pt, with Dynamic Type rather than fixed font sizes in implementation.
 - 8pt spacing rhythm; horizontal page inset ~16–20pt; 44×44pt minimum actual touch targets; max readable message content ~680pt.
 - Soft 16–20pt corners for conversation and Task/Result; Composer pill 26–28pt; subtle shadows *only* if they convey depth, not as decoration.
-- Prefer content structure, breathing room and text quality over animated mascots, large gradients or bright UI accents.
+- Prefer content structure, breathing room and text quality over animated mascots, gradients or bright UI accents. No orange brand surfaces; semantic warnings may retain orange where needed.
 - iOS deployment target is **17.0**. Keep the native `TabView` for Chat / Tasks as the V1 baseline. Newer iOS system affordances are progressive enhancements; don't require Liquid Glass or a custom Floating Tab Bar.
 
 ## 5. Chat first-run — concrete requirements
@@ -76,7 +80,7 @@ Treat the submitted Muse walkthrough stills as reference for understated bubbles
 
 ## 8. Merge / implementation order
 
-1. **Review these visuals** before modifying shared production components. This document is design-only.
+1. **Monochrome direction accepted by Founder**; maintain this contract while implementing shared components.
 2. **UX-04 PR 3**: Chat bubbles / hierarchy and empty first-run treatment; small, reversible UI changes with 320/375/393pt evidence.
 3. **Unify Tasks and Result card materials** through shared adaptive tokens, avoiding a separate extensive redesign.
 4. **Reconcile drafts #284 (Sidebar), #285 (Work Status)** against the chosen visual language before merging. Resolve shared-file conflicts rather than stacking them blindly.
@@ -87,11 +91,11 @@ Treat the submitted Muse walkthrough stills as reference for understated bubbles
 
 Local `xcodebuild` on the current Ember scheme. Capture **real Simulator** states at 320/375/393pt widths, Light/Dark, English/zh-Hans and large Dynamic Type; compare to the concept board. Check sign-in / V1 unavailable / V2 real / MOCK, keyboard + attachment menu, streaming + Stop, recovery + Unknown ACK, Task detail, and real result / file UI. Preserve VoiceOver / Reduce Motion. Never present the Chromium mockups as native screenshots.
 
-## 9. Decisions awaiting visual approval
+## 9. Founder decisions — accepted 2026-11-23
 
-- V1 direction: warm porcelain + terracotta vs previous more-neutral system grouping.
+- **Approved:** black/white/grayscale; no cream/terracotta as dominant brand colors.
 - Use low-contrast soft two-sided conversation bubbles (but meaningful interactive cards remain distinct).
 - Keep two **native** bottom tabs for now; separate the Sidebar as an optional directory.
 - Place the Work Status strip only when real, actionable, known data justifies its vertical cost.
 
-Once these are accepted, update the existing UX-04 proposal's superseded presentation description and give the iOS Lead one coordinated implementation milestone rather than additional unreviewed one-off visual PRs.
+Implement UX-04 PR 3 using these approved color decisions. Independently verify all native behaviors before merging UI code; no requirement to repeat visual palette selection.

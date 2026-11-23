@@ -10,7 +10,7 @@ struct TaskInboxView: View {
 
     private enum Mode {
         case legacyDemo(TaskJourneySession, () -> Void)
-        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (() -> Void)?, (UUID) -> Void)
+        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (() -> Void)?, (() -> Void)?, (UUID) -> Void)
     }
 
     private let mode: Mode
@@ -27,6 +27,7 @@ struct TaskInboxView: View {
         deviceExecutorError: String? = nil,
         onSetDeviceExecutorEnabled: @escaping (Bool) -> Void = { _ in },
         onOpenChat: (() -> Void)? = nil,
+        onOpenSidebar: (() -> Void)? = nil,
         onOpenTask: @escaping (UUID) -> Void
     ) {
         self.mode = .sessionTasks(
@@ -39,6 +40,7 @@ struct TaskInboxView: View {
                 onSetEnabled: onSetDeviceExecutorEnabled
             ),
             onOpenChat,
+            onOpenSidebar,
             onOpenTask
         )
     }
@@ -47,7 +49,7 @@ struct TaskInboxView: View {
         switch mode {
         case .legacyDemo(let session, let onSelectTask):
             LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
-        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenChat, let onOpenTask):
+        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenChat, let onOpenSidebar, let onOpenTask):
             SessionTaskInboxContent(
                 store: store,
                 scheduleStore: scheduleStore,
@@ -56,6 +58,7 @@ struct TaskInboxView: View {
                 deviceExecutorError: deviceWiring.errorMessage,
                 onSetDeviceExecutorEnabled: deviceWiring.onSetEnabled,
                 onOpenChat: onOpenChat,
+                onOpenSidebar: onOpenSidebar,
                 onOpenTask: onOpenTask
             )
         }
@@ -70,6 +73,7 @@ private struct SessionTaskInboxContent: View {
     let deviceExecutorError: String?
     let onSetDeviceExecutorEnabled: (Bool) -> Void
     let onOpenChat: (() -> Void)?
+    let onOpenSidebar: (() -> Void)?
     let onOpenTask: (UUID) -> Void
     @State private var isShowingSchedulesSheet = false
     @State private var isShowingPythonComposer = false
@@ -214,21 +218,25 @@ private struct SessionTaskInboxContent: View {
             await store.refreshAll()
         }
         .toolbar {
-            if let scheduleStore, scheduleStore.hasRepository {
+            if let onOpenSidebar {
                 ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        isShowingSchedulesSheet = true
-                    } label: {
-                        Label {
-                            Text("schedules.nav_title", tableName: "Conversation")
-                        } icon: {
-                            Image(systemName: "calendar.badge.clock")
-                        }
+                    Button(action: onOpenSidebar) {
+                        Image(systemName: "line.3.horizontal")
+                            .font(.body.weight(.semibold))
+                            .foregroundStyle(Color.primary)
+                            .accessibilityLabel(Text(String(localized: "sidebar.open", table: "Conversation")))
                     }
-                    .accessibilityIdentifier("tasks-open-schedules")
+                    .accessibilityIdentifier("ember-sidebar-open-tasks")
+                }
+            } else if let scheduleStore, scheduleStore.hasRepository {
+                ToolbarItem(placement: .topBarLeading) {
+                    schedulesToolbarButton
                 }
             }
             ToolbarItemGroup(placement: .topBarTrailing) {
+                if onOpenSidebar != nil, let scheduleStore, scheduleStore.hasRepository {
+                    schedulesToolbarButton
+                }
                 if let deviceMonitor {
                     Button {
                         isShowingDeviceExecutorSheet = true
@@ -292,6 +300,19 @@ private struct SessionTaskInboxContent: View {
                 )
             }
         }
+    }
+
+    private var schedulesToolbarButton: some View {
+        Button {
+            isShowingSchedulesSheet = true
+        } label: {
+            Label {
+                Text("schedules.nav_title", tableName: "Conversation")
+            } icon: {
+                Image(systemName: "calendar.badge.clock")
+            }
+        }
+        .accessibilityIdentifier("tasks-open-schedules")
     }
 
     private func taskSection(

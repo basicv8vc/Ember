@@ -221,7 +221,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
 
             if let pill = state.environmentPill {
                 environmentPillView(pill)
-                    .padding(.leading, 44)
+                    .padding(.leading, onOpenSidebar != nil ? 54 : 44)
             }
         }
     }
@@ -235,13 +235,20 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             } label: {
                 Image(systemName: "line.3.horizontal")
                     .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(EmberDesignTokens.emberMarkTint)
+                    .foregroundStyle(Color.primary)
                     .frame(width: EmberDesignTokens.minTapTarget, height: EmberDesignTokens.minTapTarget)
-                    .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+                    .background(
+                        Color(uiColor: UIColor { traits in
+                            traits.userInterfaceStyle == .dark
+                                ? UIColor(red: 0.161, green: 0.161, blue: 0.161, alpha: 1)
+                                : UIColor(red: 0.953, green: 0.953, blue: 0.953, alpha: 1)
+                        }),
+                        in: Circle()
+                    )
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel(Text("sidebar.open", tableName: "Conversation"))
+            .accessibilityLabel(Text(String(localized: "sidebar.open", table: "Conversation")))
             .accessibilityIdentifier("ember-sidebar-open-chat")
         } else {
             headerEmblem

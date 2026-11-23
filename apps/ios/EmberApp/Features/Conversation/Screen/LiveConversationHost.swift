@@ -2117,6 +2117,7 @@ struct LiveConversationHost: View {
                         isConfirmingSignOut = true
                     }
                 )
+                .zIndex(1)
             }
         }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isShowingSidebar)
@@ -2623,24 +2624,13 @@ struct LiveConversationHost: View {
                 onOpenChat: {
                     model.selectedTab = .chat
                 },
+                onOpenSidebar: {
+                    isShowingSidebar = true
+                },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)
                 }
             )
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button {
-                        isShowingSidebar = true
-                    } label: {
-                        Image(systemName: "line.3.horizontal")
-                            .font(.body.weight(.semibold))
-                            .frame(width: EmberDesignTokens.minTapTarget, height: EmberDesignTokens.minTapTarget)
-                            .contentShape(Rectangle())
-                    }
-                    .accessibilityLabel(Text("sidebar.open", tableName: "Conversation"))
-                    .accessibilityIdentifier("ember-sidebar-open-tasks")
-                }
-            }
             .navigationDestination(for: UUID.self) { taskID in
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)

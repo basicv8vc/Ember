@@ -801,6 +801,38 @@
         }
       }
     },
+    "tab.chat": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Chat"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "对话"
+          }
+        }
+      }
+    },
+    "tab.tasks": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Tasks"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "任务"
+          }
+        }
+      }
+    },
     "sidebar.account": {
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "ACCOUNT" } },
@@ -847,38 +879,6 @@
       "localizations": {
         "en": { "stringUnit": { "state": "translated", "value": "Unavailable in this environment" } },
         "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前环境不可用" } }
-      }
-    },
-    "tab.chat": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Chat"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "对话"
-          }
-        }
-      }
-    },
-    "tab.tasks": {
-      "localizations": {
-        "en": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "Tasks"
-          }
-        },
-        "zh-Hans": {
-          "stringUnit": {
-            "state": "translated",
-            "value": "任务"
-          }
-        }
       }
     },
     "tasks.kind.notes_action_items": {

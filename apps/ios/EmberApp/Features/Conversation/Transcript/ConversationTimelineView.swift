@@ -570,11 +570,7 @@ private struct ConversationReplyStatusView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(13)
-                .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay {
-                    RoundedRectangle(cornerRadius: 16, style: .continuous)
-                        .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-                }
+                .background(EmberDesignTokens.chatAgentBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("conversation-sending-reply")
             } else {
@@ -609,11 +605,7 @@ private struct ConversationReplyStatusView: View {
                 .accessibilityIdentifier("conversation-stop-reply")
             }
             .padding(13)
-            .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-            }
+            .background(EmberDesignTokens.chatAgentBubble, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             .accessibilityElement(children: .contain)
         case .failed(let message, _):
             HStack(alignment: .top, spacing: 10) {

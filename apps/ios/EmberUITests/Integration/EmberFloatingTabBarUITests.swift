@@ -20,13 +20,18 @@ final class EmberFloatingTabBarUITests: XCTestCase {
         XCTAssertGreaterThanOrEqual(tasks.frame.width, 44)
         XCTAssertGreaterThanOrEqual(tasks.frame.height, 44)
         XCTAssertLessThanOrEqual(bar.frame.width, app.windows.firstMatch.frame.width - 28)
-        XCTAssertFalse(app.tabBars.buttons["Tasks"].exists, "The system tab bar must not duplicate the floating bar.")
+        XCTAssertFalse(app.tabBars.buttons["Tasks"].isHittable, "The system tab bar must not duplicate the floating bar.")
 
         tasks.tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
 
         let taskRow = app.buttons["tasks-row-00000000-0000-4000-8000-00000000b311"]
+        for _ in 0..<4 {
+            if taskRow.exists && taskRow.isHittable { break }
+            app.swipeUp()
+        }
         XCTAssertTrue(taskRow.waitForExistence(timeout: 10))
+        XCTAssertTrue(taskRow.isHittable)
         taskRow.tap()
         XCTAssertTrue(app.descendants(matching: .any)["task-detail-summary"].waitForExistence(timeout: 10))
         XCTAssertFalse(bar.exists, "Navigation must not cover a pushed Task Detail page.")

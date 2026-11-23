@@ -801,6 +801,22 @@
         }
       }
     },
+    "navigation.tasks.attention_count": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "%lld tasks need attention"
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "有 %lld 项任务需要处理"
+          }
+        }
+      }
+    },
     "tab.chat": {
       "localizations": {
         "en": {

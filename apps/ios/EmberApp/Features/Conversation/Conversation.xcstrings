@@ -801,6 +801,54 @@
         }
       }
     },
+    "sidebar.account": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "ACCOUNT" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "账户" } }
+      }
+    },
+    "sidebar.close": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Close navigation" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "关闭导航" } }
+      }
+    },
+    "sidebar.dismiss": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Dismiss navigation" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "关闭导航" } }
+      }
+    },
+    "sidebar.open": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Open navigation" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "打开导航" } }
+      }
+    },
+    "sidebar.subtitle": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Your personal agent" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "你的个人 AI 助手" } }
+      }
+    },
+    "sidebar.tabs": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "TABS" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "标签页" } }
+      }
+    },
+    "sidebar.tools": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "TOOLS" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "工具" } }
+      }
+    },
+    "sidebar.unavailable": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Unavailable in this environment" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "当前环境不可用" } }
+      }
+    },
     "tab.chat": {
       "localizations": {
         "en": {

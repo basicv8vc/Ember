@@ -1,5 +1,8 @@
 # UX-04: Conversation-First Experience Redesign — Phase 1 Design Proposal
 
+> **2026-11-23 design amendment (Visual V1):** The Founder selected **black/white/grayscale minimalism**. For UX-04 PR 3, follow [Ember Visual V1](EMBER_VISUAL_V1_FOUNDER_REVIEW.md) and [UX Foundation V1](EMBER_MUSE_UX_FOUNDATION_V1.md): use **two quiet neutral chat bubbles** (not the earlier \"Assistant no bubble\" proposal), a monochrome brand mark, and lightweight **real** activity. Preserve all server-authoritative Task/Result cards, MOCK/cloud disclosures, UX-02 scrolling and UX-03 delivery/recovery semantics. Historical alternatives below remain for context and are **superseded** where they conflict.
+
+
 - **Ticket / Workstream:** UX-04 — Conversation-First Experience Redesign (Phase 1: Design Proposal)
 - **Author:** Agent A (Senior iOS Product Designer & SwiftUI Engineer)
 - **Reviewers:** UI/UX Lead, iOS Lead, CTO

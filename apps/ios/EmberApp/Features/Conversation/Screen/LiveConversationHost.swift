@@ -2052,6 +2052,19 @@ struct LiveConversationHost: View {
         self.debugUseV2Staging = debugUseV2Staging
     }
 
+    // Only surface task counts actually known from the existing repository.
+    // Never imply that a failed/unavailable task list is live.
+    private var workSummary: ConversationWorkSummary? {
+        let store = model.taskStore
+        guard store.hasRepository,
+              !store.listEndpointUnavailable,
+              store.listErrorMessage == nil else { return nil }
+        return ConversationWorkSummary(
+            needsAttentionCount: store.needsInterventionCount,
+            activeCount: store.inProgressCount
+        )
+    }
+
     var body: some View {
         Group {
             if model.requiresSignIn {
@@ -2223,6 +2236,8 @@ struct LiveConversationHost: View {
                     onRefresh: {
                         await model.refreshConversationAndTasks()
                     },
+                    workSummary: workSummary,
+                    onOpenTasks: { model.selectedTab = .tasks },
                     headerMenu: {
                         chatHeaderMenu
                     },

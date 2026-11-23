@@ -327,9 +327,12 @@ struct ConversationComposer: View {
             Button(action: stopGeneratingIfPossible) {
                 Image(systemName: "stop.fill")
                     .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(Color(uiColor: .systemBackground))
+                    .foregroundStyle(EmberDesignTokens.chatActionForeground)
                     .frame(width: 34, height: 34)
-                    .background(Color.primary.opacity(isEnabled ? 1.0 : 0.45), in: Circle())
+                    .background(
+                        EmberDesignTokens.chatActionFill.opacity(isEnabled ? 1.0 : 0.45),
+                        in: Circle()
+                    )
                     .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
                     .contentShape(Rectangle())
             }
@@ -394,9 +397,9 @@ struct ConversationComposer: View {
             } else {
                 Image(systemName: symbolName(for: attachment))
                     .font(.caption.weight(.semibold))
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(EmberDesignTokens.chatBrandInk)
                     .frame(width: 24, height: 24)
-                    .background(Color.accentColor.opacity(0.12), in: Circle())
+                    .background(EmberDesignTokens.chatAgentBubble, in: Circle())
                     .accessibilityHidden(true)
             }
 

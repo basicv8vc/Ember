@@ -41,12 +41,21 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
     )
 
     private let taskRepository: MockSessionTaskRepository
+    private let seedFixtures: Bool
     private var messages: [ConversationMessage]
     private var pendingTurnID: UUID?
 
-    init(taskRepository: MockSessionTaskRepository, initialUserMessages: [String] = []) {
+    init(
+        taskRepository: MockSessionTaskRepository,
+        initialUserMessages: [String] = [],
+        seedFixtures: Bool = true
+    ) {
         self.taskRepository = taskRepository
-        self.messages = Self.buildMessages(extraUserTexts: initialUserMessages)
+        self.seedFixtures = seedFixtures
+        self.messages = Self.buildMessages(
+            extraUserTexts: initialUserMessages,
+            seedFixtures: seedFixtures
+        )
     }
 
     func bootstrap() async throws -> EmberMeDTO {
@@ -68,7 +77,10 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
 
     func load() async throws -> ConversationSnapshot {
         let persistedMessages = await taskRepository.appendedUserMessages()
-        messages = Self.buildMessages(extraUserTexts: persistedMessages)
+        messages = Self.buildMessages(
+            extraUserTexts: persistedMessages,
+            seedFixtures: seedFixtures
+        )
         return ConversationSnapshot(
             conversation: Conversation(
                 id: Self.conversationID,
@@ -117,7 +129,10 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
         }
         await taskRepository.recordUserMessage(trimmed)
         let persisted = await taskRepository.appendedUserMessages()
-        messages = Self.buildMessages(extraUserTexts: persisted)
+        messages = Self.buildMessages(
+            extraUserTexts: persisted,
+            seedFixtures: seedFixtures
+        )
 
         let turnID = UUID()
         pendingTurnID = turnID
@@ -159,54 +174,56 @@ actor MockB3ConversationRepository: LiveConversationServiceProtocol {
         pendingTurnID = nil
     }
 
-    private static func buildMessages(extraUserTexts: [String]) -> [ConversationMessage] {
+    private static func buildMessages(extraUserTexts: [String], seedFixtures: Bool) -> [ConversationMessage] {
         let t0 = Date(timeIntervalSince1970: 1_763_196_800)
-        var list: [ConversationMessage] = [
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b321")!),
-                conversationID: conversationID,
-                sequence: 1,
-                createdAt: t0,
-                kind: .user(text: "Please pull out Q4 launch action items from my meeting notes.")
-            ),
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b322")!),
-                conversationID: conversationID,
-                sequence: 2,
-                createdAt: t0.addingTimeInterval(15),
-                kind: .ember(text: "[SIMULATED] I started a Notes action-items task. Track persisted status in the card below:")
-            ),
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b323")!),
-                conversationID: conversationID,
-                sequence: 3,
-                createdAt: t0.addingTimeInterval(20),
-                kind: .taskReference(TaskReference(taskID: MockSessionTaskRepository.notesTaskID))
-            ),
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b324")!),
-                conversationID: conversationID,
-                sequence: 4,
-                createdAt: t0.addingTimeInterval(120),
-                kind: .outcomeReference(.taskResult(taskID: MockSessionTaskRepository.notesTaskID))
-            ),
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b325")!),
-                conversationID: conversationID,
-                sequence: 5,
-                createdAt: t0.addingTimeInterval(240),
-                kind: .user(text: "Also summarize the customer interview transcript when ready.")
-            ),
-            ConversationMessage(
-                id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b326")!),
-                conversationID: conversationID,
-                sequence: 6,
-                createdAt: t0.addingTimeInterval(250),
-                kind: .taskReference(TaskReference(taskID: MockSessionTaskRepository.runningTaskID))
-            ),
-        ]
+        var list: [ConversationMessage] = seedFixtures
+            ? [
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b321")!),
+                    conversationID: conversationID,
+                    sequence: 1,
+                    createdAt: t0,
+                    kind: .user(text: "Please pull out Q4 launch action items from my meeting notes.")
+                ),
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b322")!),
+                    conversationID: conversationID,
+                    sequence: 2,
+                    createdAt: t0.addingTimeInterval(15),
+                    kind: .ember(text: "[SIMULATED] I started a Notes action-items task. Track persisted status in the card below:")
+                ),
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b323")!),
+                    conversationID: conversationID,
+                    sequence: 3,
+                    createdAt: t0.addingTimeInterval(20),
+                    kind: .taskReference(TaskReference(taskID: MockSessionTaskRepository.notesTaskID))
+                ),
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b324")!),
+                    conversationID: conversationID,
+                    sequence: 4,
+                    createdAt: t0.addingTimeInterval(120),
+                    kind: .outcomeReference(.taskResult(taskID: MockSessionTaskRepository.notesTaskID))
+                ),
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b325")!),
+                    conversationID: conversationID,
+                    sequence: 5,
+                    createdAt: t0.addingTimeInterval(240),
+                    kind: .user(text: "Also summarize the customer interview transcript when ready.")
+                ),
+                ConversationMessage(
+                    id: MessageID(rawValue: UUID(uuidString: "00000000-0000-4000-8000-00000000b326")!),
+                    conversationID: conversationID,
+                    sequence: 6,
+                    createdAt: t0.addingTimeInterval(250),
+                    kind: .taskReference(TaskReference(taskID: MockSessionTaskRepository.runningTaskID))
+                ),
+            ]
+            : []
 
-        var nextSeq = 7
+        var nextSeq = (list.map(\.sequence).max() ?? 0) + 1
         for (offset, text) in extraUserTexts.enumerated() {
             let suffix = String(format: "%04x", 0xB400 + offset * 2)
             let replySuffix = String(format: "%04x", 0xB401 + offset * 2)

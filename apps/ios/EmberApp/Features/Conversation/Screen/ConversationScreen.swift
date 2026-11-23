@@ -251,7 +251,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else {
-            Text("conversation.header.subtitle", tableName: "Conversation")
+            Text(String(localized: "conversation.header.subtitle", table: "Conversation"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -305,7 +305,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         case .custom:
             Color(uiColor: .systemIndigo).opacity(0.12)
         case .cloud:
-            EmberDesignTokens.cardBackground
+            EmberDesignTokens.chatPaper
         }
     }
 
@@ -318,7 +318,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         case .custom:
             Color(uiColor: .systemIndigo).opacity(0.28)
         case .cloud:
-            EmberDesignTokens.separator
+            EmberDesignTokens.chatHairline
         }
     }
 
@@ -375,9 +375,14 @@ struct ConversationDemoHost: View {
         self.taskJourneySession = taskJourneySession
         self.onOpenTaskDetail = onOpenTaskDetail
         self.onOpenCommitmentDetail = onOpenCommitmentDetail
-        let slowReply = ProcessInfo.processInfo.arguments.contains("--ember-mock-slow-reply")
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        let slowReply = arguments.contains("--ember-mock-slow-reply")
+        let emptyChat = arguments.contains("--ember-mock-empty-chat")
         _model = State(
             initialValue: ConversationHostModel(
+                conversationID: emptyChat
+                    ? ConversationFixtures.emptyConversation.conversation.id
+                    : ConversationFixtures.mainConversationID,
                 replyDelayNanoseconds: slowReply ? 25_000_000_000 : 900_000_000
             )
         )

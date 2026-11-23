@@ -308,11 +308,12 @@ private struct ConversationEmptyStateView: View {
                         .accessibilityIdentifier("conversation-empty-capability-note")
                     }
                 } else {
-                    Text("conversation.empty.title", tableName: "Conversation")
+                    Text(String(localized: "conversation.empty.title", table: "Conversation"))
                         .font(.system(.largeTitle, design: .default, weight: .semibold))
                         .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
 
-                    Text("conversation.empty.message", tableName: "Conversation")
+                    Text(String(localized: "conversation.empty.message", table: "Conversation"))
                         .font(.body)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -321,7 +322,7 @@ private struct ConversationEmptyStateView: View {
 
             if let emptyState, !emptyState.prompts.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("conversation.suggestions.title", tableName: "Conversation")
+                    Text(String(localized: "conversation.suggestions.title", table: "Conversation"))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
 
@@ -371,7 +372,7 @@ private struct ConversationEmptyStateView: View {
                 }
             } else if !prompts.isEmpty {
                 VStack(alignment: .leading, spacing: 10) {
-                    Text("conversation.suggestions.title", tableName: "Conversation")
+                    Text(String(localized: "conversation.suggestions.title", table: "Conversation"))
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.secondary)
 
@@ -458,6 +459,7 @@ private struct ConversationMessageBubble: View {
                 Group {
                     if isUser {
                         Text(verbatim: message.text)
+                            .multilineTextAlignment(.leading)
                     } else {
                         ConversationMarkdownText(text: message.text)
                     }
@@ -596,6 +598,7 @@ private struct ConversationReplyStatusView: View {
                         Image(systemName: "stop.fill")
                     }
                     .font(.subheadline.weight(.semibold))
+                    .frame(minHeight: EmberDesignTokens.minTapTarget)
                 }
                 .buttonStyle(.bordered)
                 .tint(.secondary)
@@ -624,6 +627,7 @@ private struct ConversationReplyStatusView: View {
                             Image(systemName: "arrow.clockwise")
                         }
                         .font(.footnote.weight(.semibold))
+                        .frame(minHeight: EmberDesignTokens.minTapTarget)
                     }
                     .buttonStyle(.bordered)
                     .tint(.red)
@@ -632,6 +636,7 @@ private struct ConversationReplyStatusView: View {
                     Button(action: onDismissError) {
                         Image(systemName: "xmark")
                             .font(.caption.weight(.semibold))
+                            .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
                     }
                     .buttonStyle(.bordered)
                     .tint(.secondary)
@@ -695,9 +700,9 @@ private struct JumpToLatestSurfaceModifier: ViewModifier {
         } else {
             content
                 .background(.ultraThinMaterial, in: Circle())
-                .background(EmberDesignTokens.cardBackground.opacity(0.65), in: Circle())
+                .background(EmberDesignTokens.chatPaper.opacity(0.82), in: Circle())
                 .overlay {
-                    Circle().strokeBorder(EmberDesignTokens.separator, lineWidth: 0.75)
+                    Circle().strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 0.75)
                 }
                 .shadow(color: Color.black.opacity(0.12), radius: 10, x: 0, y: 4)
         }

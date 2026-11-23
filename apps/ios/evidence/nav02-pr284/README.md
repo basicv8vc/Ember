@@ -1,50 +1,46 @@
 # NAV-02 PR #284 Simulator Verification Evidence
 
-Verified on commit `7402e2945c76385e80f182586962fc0f74965804` (`feat/ios-nav02-sidebar-directory`), and additionally verified in a clean temporary local merge (`PR #287 @ 9b407260eddc30ff717373a3d083a23a8d4dc46e` + `PR #284 @ 7402e2945c76385e80f182586962fc0f74965804`).
+Verified on commit `f2296549f9cf40c890b39a3ab2cf2e6caf2acd57` (`feat/ios-nav02-sidebar-directory`), and additionally verified in a clean temporary local merge (`PR #287 @ 9b407260eddc30ff717373a3d083a23a8d4dc46e` + `PR #284 @ f2296549f9cf40c890b39a3ab2cf2e6caf2acd57`).
 
-## Highlights Fixed & Verified
-- **Visual V1 Monochrome Unification**: Aligned `EmberSidebarOverlay`, `ConversationScreen` Chat sidebar trigger, and `TaskInboxView` Tasks sidebar trigger with the Founder-selected Black / White / Grayscale palette while keeping amber `MOCK ONLY` disclosure and red destructive Sign Out action outside mock mode.
-- **Backdrop Hit-Testing & Dismissal**: Constrained `ember-sidebar-backdrop` interactive hit/accessibility frame to the exposed trailing scrim strip (`x >= drawerWidth`) so tapping the dimmed backdrop never overlaps the Sidebar drawer rows while the full-screen dim scrim continues to absorb taps cleanly, alongside close button (`>= 44pt`), left-drag gesture, and `.accessibilityAction(.escape)`.
-- **Navigation, Localization & Tasks Toolbar Separation**: Moved `ember-sidebar-open-tasks` cleanly into `.topBarLeading` and `tasks-open-schedules` into `.topBarTrailing` when Sidebar wiring is active; fixed `zh-Hans` localization (`"你的个人 AI 助手"`, `"标签页"`, `"工具"`); and verified unsent Chat draft + mutated Tasks state persist across Sidebar switches (`Chat <-> Tasks <-> Memory <-> Schedules`).
+## Interaction & Visual Design Highlights
+- **Interactive Edge-Swipe Drawer (ChatGPT / Shua CoPaper style):**
+  - Removed the top-left hamburger toggle button from Chat and Tasks headers and removed the drawer header close (`X`) button — Chat retains its clean monochrome emblem, and Tasks keeps `tasks-open-schedules` cleanly in `.topBarLeading`.
+  - **Left-edge swipe to open (`x <= 40pt`, left-to-right):** UIKit `UIPanGestureRecognizer` bridge (`SidebarSwipeBridge`) attached seamlessly on `UIWindow` tracks the finger 1:1 with `Transaction(disablesAnimations: true)` and settles cleanly with `.interpolatingSpring(stiffness: 320, damping: 34, initialVelocity: ...)` while shifting the main `TabView` horizontally in sync and dimming the exposed peek.
+  - **Right-to-left swipe to close (anywhere) + scrim tap:** Tracks 1:1 from open back to closed; preserves vertical scrolling inside `ScrollView` (via `shouldBeRequiredToFailBy` / velocity direction lock) and keeps pushed child detail views (`TaskDetailView`) free for native iOS interactive swipe-back (`canSwipeOpenFromEdge` checks empty navigation paths and no presented modal).
+- **Visual V1 Monochrome & Localization:**
+  - `EmberSidebarOverlay` matches the Black / White / Grayscale palette (`#FFFFFF`/`#202020`, `#F3F3F3`/`#292929`, `#E9E9E9`/`#383838`, `#E3E3E3`/`#454545`), preserving amber `MOCK ONLY` disclosure and red Sign Out outside Mock mode.
+  - All Sidebar labels (`"你的个人 AI 助手"`, `"标签页"`, `"工具"`) resolve natively in `zh-Hans` and adapt under `AXLarge` and Dark Mode.
 
 ## Test Commands & Observed Results (iOS 27.2 Simulator)
 
-1. **PR #284 (`7402e2945c76385e80f182586962fc0f74965804`) — `iPhone 18 Pro` (`402pt`, Light, EN + `zh-Hans` AXLarge):**
-   ```bash
-   xcodebuild test -project apps/ios/Ember.xcodeproj -scheme Ember \
-     -destination "platform=iOS Simulator,id=8A4CCF42-FD5C-4CCE-B6B8-05E967E552EF" \
-     -derivedDataPath /tmp/ember-pr284-deriveddata \
-     -only-testing:EmberUITests/EmberSidebarUITests \
-     -only-testing:EmberUITests/B3ChatTasksIntegrationUITests \
-     -only-testing:EmberUITests/ConversationRootLaunchUITests
-   ```
+1. **PR #284 (`f2296549f9cf40c890b39a3ab2cf2e6caf2acd57`) — `iPhone 18 Pro` (`402pt`, Light, EN + `zh-Hans` `AXLarge`):**
    - `EmberSidebarUITests`: **3/3 passed** (0 failures)
    - `B3ChatTasksIntegrationUITests`: **5/5 passed** (0 failures)
    - `ConversationRootLaunchUITests`: **4/4 passed** (0 failures)
    - Total: **12/12 passed** (`** TEST SUCCEEDED **`)
 
-2. **PR #284 — Genuine Dark Mode (`xcrun simctl ui ... appearance dark`, `zh-Hans`, `UICTContentSizeCategoryAccessibilityLarge`, `402pt`):**
-   - `EmberSidebarUITests/testSidebarInZhHansDarkAndAccessibilityTextRemainsDismissable`: **1/1 passed** (`** TEST EXECUTE SUCCEEDED **`)
+2. **PR #284 — Genuine System Dark Mode (`xcrun simctl ui ... appearance dark`, `zh-Hans`, `AXLarge`, `402pt`):**
+   - `EmberSidebarUITests/testSidebarSwipeInZhHansDarkAndAccessibilityTextRemainsDismissable`: **1/1 passed** (`** TEST EXECUTE SUCCEEDED **`)
 
-3. **PR #284 — Small Screens (`375pt` `iPhone SE (3rd generation)` & `393pt` `iPhone 16`):**
+3. **PR #284 — Small Screens:**
    - `iPhone SE (3rd generation)` (`375pt`): `EmberSidebarUITests` **3/3 passed** (`** TEST EXECUTE SUCCEEDED **`)
-   - `iPhone 16` (`393pt`): `EmberSidebarUITests/testChatSidebarOpensShowsOnlyActualDestinationsAndPreservesDraft` **1/1 passed** (`** TEST EXECUTE SUCCEEDED **`)
+   - `iPhone 16` (`393pt`): `EmberSidebarUITests/testChatLeftEdgeSwipeOpensSidebarWithoutTopLeftButtonAndPreservesDraft` **1/1 passed** (`** TEST EXECUTE SUCCEEDED **`)
 
-4. **Combined Integration (`PR #287 @ 9b407260eddc30ff717373a3d083a23a8d4dc46e` + `PR #284 @ 7402e2945c76385e80f182586962fc0f74965804`):**
-   - `git merge-tree --write-tree origin/feat/ios-ux04-chat-monochrome-v1 7402e2945c76385e80f182586962fc0f74965804` exited `0` (tree `a3ddafe779e91c8257de7fd0fcba6be511551a1e`) with **0 textual merge conflicts** across all 3 shared files (`Conversation.xcstrings`, `ConversationScreen.swift`, `LiveConversationHost.swift`).
-   - Combined `test-without-building` on `iPhone 18 Pro` (`402pt`):
+4. **Combined Integration (`PR #287 @ 9b407260eddc30ff717373a3d083a23a8d4dc46e` + `PR #284 @ f2296549f9cf40c890b39a3ab2cf2e6caf2acd57`):**
+   - Shared files reduced to **2** (`Conversation.xcstrings` and `LiveConversationHost.swift`), with **0 textual merge conflicts** (`git merge-tree --write-tree` tree `7bbeeaaa216ab7206c13e76fd2d71bf9f9a9e878`).
+   - Combined `test` on `iPhone 18 Pro` (`402pt`):
      - `EmberChatMonochromeTokensTests`: **2/2 passed**
      - `EmberMonochromeChatUITests`: **4/4 passed**
      - `B3ChatTasksIntegrationUITests`: **5/5 passed**
      - `EmberSidebarUITests`: **3/3 passed**
-     - Total: **14/14 passed** (`** TEST EXECUTE SUCCEEDED **`)
+     - Total: **14/14 passed** (`** TEST SUCCEEDED **`)
 
 ## Screenshots
-- `01-sidebar-chat-light-402pt.png` — Light Mode, EN, `iPhone 18 Pro` (`1206x2622`), Sidebar open over Chat tab
-- `02-sidebar-tasks-light-402pt.png` — Light Mode, EN, `iPhone 18 Pro` (`1206x2622`), Sidebar open over Tasks tab (`tasks-open-schedules` moved to trailing, Sidebar selected on Tasks)
+- `01-sidebar-chat-light-402pt.png` — Light Mode, EN, `iPhone 18 Pro` (`1206x2622`), edge-swipe Sidebar open alongside shifted Chat
+- `02-sidebar-tasks-light-402pt.png` — Light Mode, EN, `iPhone 18 Pro` (`1206x2622`), edge-swipe Sidebar open alongside shifted Tasks
 - `03-sidebar-chat-dark-zhhans-axlarge-402pt.png` — System Dark Mode, `zh-Hans`, `AXLarge`, `iPhone 18 Pro` (`1206x2622`)
 - `04-sidebar-chat-light-393pt-iphone16.png` — Light Mode, EN, `iPhone 16` (`393pt`)
-- `05-sidebar-chat-light-375pt-iphonese3.png` — Light Mode, EN, `iPhone SE (3rd generation)` (`375pt`, Sidebar open over Chat)
-- `06-sidebar-tasks-light-375pt-iphonese3.png` — Light Mode, EN, `iPhone SE (3rd generation)` (`375pt`, Sidebar open over Tasks)
-- `07-combined-pr287-pr284-chat-sidebar-light-402pt.png` — Combined `#287 + #284` build, Light Mode, EN, `iPhone 18 Pro`, expanded monochrome Sidebar over Visual V1 monochrome Chat
-- `08-combined-pr287-pr284-chat-monochrome-header-402pt.png` — Combined `#287 + #284` build, Light Mode, EN, `iPhone 18 Pro`, active Chat showing monochrome `ember-sidebar-open-chat` header button and timeline cards
+- `05-sidebar-chat-light-375pt-iphonese3.png` — Light Mode, EN, `iPhone SE (3rd generation)` (`375pt`)
+- `06-sidebar-tasks-light-375pt-iphonese3.png` — Light Mode, EN, `iPhone SE (3rd generation)` (`375pt`)
+- `07-combined-pr287-pr284-chat-sidebar-light-402pt.png` — Combined `#287 + #284`, Light Mode, EN, `iPhone 18 Pro`, monochrome Chat shifted cleanly beside edge-swipe Sidebar
+- `08-combined-pr287-pr284-chat-monochrome-header-402pt.png` — Combined `#287 + #284`, Light Mode, EN, `iPhone 18 Pro`, active Chat header cleanly restored without top-left toggle button

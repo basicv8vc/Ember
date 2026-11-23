@@ -190,16 +190,16 @@ struct ConversationComposer: View {
             VStack(spacing: 0) {
                 LinearGradient(
                     stops: [
-                        .init(color: EmberDesignTokens.groupedBackground.opacity(0), location: 0),
-                        .init(color: EmberDesignTokens.groupedBackground.opacity(0.75), location: 0.6),
-                        .init(color: EmberDesignTokens.groupedBackground, location: 1.0),
+                        .init(color: EmberDesignTokens.chatCanvas.opacity(0), location: 0),
+                        .init(color: EmberDesignTokens.chatCanvas.opacity(0.75), location: 0.6),
+                        .init(color: EmberDesignTokens.chatCanvas, location: 1.0),
                     ],
                     startPoint: .top,
                     endPoint: .bottom
                 )
                 .frame(height: 52)
 
-                EmberDesignTokens.groupedBackground
+                EmberDesignTokens.chatCanvas
                     .ignoresSafeArea(edges: .bottom)
             }
         }
@@ -231,7 +231,10 @@ struct ConversationComposer: View {
                 .font(.title3.weight(.medium))
                 .foregroundStyle(.primary)
                 .frame(width: 42, height: 42)
-                .emberGlassCircleSurface(interactive: canOpenAttachmentMenu)
+                .background(EmberDesignTokens.chatPaper, in: Circle())
+                .overlay {
+                    Circle().strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
+                }
                 .anchorPreference(key: ConversationAttachmentButtonAnchorKey.self, value: .bounds) { $0 }
                 .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
                 .contentShape(Rectangle())
@@ -272,7 +275,14 @@ struct ConversationComposer: View {
             trailingActionButton
         }
         .frame(minHeight: EmberDesignTokens.minTapTarget)
-        .emberGlassRoundedSurface(cornerRadius: 22, interactive: false, tintOpacity: 0.52, elevated: false)
+        .background(
+            EmberDesignTokens.chatPaper,
+            in: RoundedRectangle(cornerRadius: 22, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
+        }
     }
 
     @ViewBuilder
@@ -282,10 +292,10 @@ struct ConversationComposer: View {
             Button(action: sendIfPossible) {
                 Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .bold))
-                    .foregroundStyle(isEnabled ? Color.white : Color.secondary)
+                    .foregroundStyle(isEnabled ? EmberDesignTokens.chatActionForeground : Color.secondary)
                     .frame(width: 34, height: 34)
                     .background(
-                        isEnabled ? Color.accentColor : Color.primary.opacity(0.08),
+                        isEnabled ? EmberDesignTokens.chatActionFill : Color.primary.opacity(0.08),
                         in: Circle()
                     )
                     .scaleEffect(isEnabled ? 1.0 : 0.94)

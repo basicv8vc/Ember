@@ -64,7 +64,7 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(sentBubble.waitForExistence(timeout: 10))
 
         // 5. Switch to Tasks tab and verify status groups
-        let tasksTabButton = app.tabBars.buttons["Tasks"]
+        let tasksTabButton = app.buttons["ember-nav-tasks"]
         XCTAssertTrue(tasksTabButton.waitForExistence(timeout: 10))
         tasksTabButton.tap()
 
@@ -117,7 +117,7 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         XCTAssertTrue(persistedBubble.waitForExistence(timeout: 10))
 
         // Running task should remain cancelled after relaunch (not in In Progress)
-        app.tabBars.buttons["Tasks"].tap()
+        app.buttons["ember-nav-tasks"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
         XCTAssertFalse(app.descendants(matching: .any)["tasks-section-in-progress"].exists)
         let cancelledRow = app.buttons["tasks-row-00000000-0000-4000-8000-00000000b312"]
@@ -271,7 +271,7 @@ final class B3ChatTasksIntegrationUITests: XCTestCase {
         launch(app, reset: true)
 
         XCTAssertTrue(app.otherElements["conversation-home"].waitForExistence(timeout: 12))
-        app.tabBars.buttons["Tasks"].tap()
+        app.buttons["ember-nav-tasks"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["tasks-inbox-screen"].waitForExistence(timeout: 10))
 
         // 1. Completed task: Result & Files appear BEFORE Execution Activity; Technical Details collapsed by default

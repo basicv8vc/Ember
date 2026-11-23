@@ -1204,7 +1204,7 @@ final class LiveConversationHostModel {
             case .activity(let activity):
                 return .activity(ConversationActivityPresentation(
                     id: stableID,
-                    title: "Cloud activity",
+                    title: String(localized: "conversation.activity.cloud", table: "Conversation"),
                     detail: activity.text,
                     timestamp: message.createdAt
                 ))
@@ -2435,7 +2435,7 @@ struct LiveConversationHost: View {
 
                 if model.scheduleStore.hasInFlightRun {
                     Circle()
-                        .fill(EmberDesignTokens.emberMarkTint)
+                        .fill(EmberDesignTokens.chatBrandInk)
                         .frame(width: 7, height: 7)
                         .offset(x: 2, y: -1)
                         .accessibilityHidden(true)
@@ -2545,9 +2545,9 @@ struct LiveConversationHost: View {
         Button {
             Task { await model.refreshConversationAndTasks() }
         } label: {
-            Text("conversation.live.refresh_retry", tableName: "Conversation")
+            Text(String(localized: "conversation.live.refresh_retry", table: "Conversation"))
                 .font(.caption.weight(.semibold))
-                .frame(minHeight: 32)
+                .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -2563,7 +2563,7 @@ struct LiveConversationHost: View {
                 systemImage: "arrow.clockwise"
             )
             .font(.caption.weight(.semibold))
-            .frame(minHeight: 32)
+            .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)

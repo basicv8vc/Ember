@@ -162,7 +162,8 @@ enum AppCompositionRoot {
         } else if arguments.contains("--ember-mock-chat-tasks") {
             LiveConversationHost(
                 model: MockB3Composition.make(
-                    resetStorage: arguments.contains("--ember-mock-chat-tasks-reset")
+                    resetStorage: arguments.contains("--ember-mock-chat-tasks-reset"),
+                    emptyChat: arguments.contains("--ember-mock-empty-chat")
                 )
             )
         } else {
@@ -273,7 +274,7 @@ private struct LiveCloudRootView: View {
 
 @MainActor
 private enum MockB3Composition {
-    static func make(resetStorage: Bool) -> LiveConversationHostModel {
+    static func make(resetStorage: Bool, emptyChat: Bool = false) -> LiveConversationHostModel {
         let storageURL = MockSessionTaskRepository.defaultStorageURL()
         let taskRepository = MockSessionTaskRepository(
             storageURL: storageURL,
@@ -284,7 +285,8 @@ private enum MockB3Composition {
             : MockSessionTaskRepository.loadPersistedUserMessages(from: storageURL)
         let repository = MockB3ConversationRepository(
             taskRepository: taskRepository,
-            initialUserMessages: initialMessages
+            initialUserMessages: initialMessages,
+            seedFixtures: !emptyChat
         )
         let auth = MockAuthController()
         let scheduleRepository = InMemoryProactiveScheduleRepository()

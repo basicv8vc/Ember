@@ -326,13 +326,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "I’m here with you."
+            "value": "More life. Less busywork."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "我在这里陪你聊。"
+            "value": "多点生活，少点琐事。"
           }
         }
       }
@@ -799,6 +799,12 @@
             "value": "消息已接收，Ember 仍在准备回复。"
           }
         }
+      }
+    },
+    "conversation.activity.cloud": {
+      "localizations": {
+        "en": { "stringUnit": { "state": "translated", "value": "Cloud activity" } },
+        "zh-Hans": { "stringUnit": { "state": "translated", "value": "云端动态" } }
       }
     },
     "tab.chat": {
@@ -5302,13 +5308,13 @@
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "How can I help today?"
+            "value": "More life. Less busywork."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "今天想一起推进什么？"
+            "value": "多点生活，少点琐事。"
           }
         }
       }

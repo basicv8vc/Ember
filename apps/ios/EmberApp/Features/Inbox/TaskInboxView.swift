@@ -10,7 +10,7 @@ struct TaskInboxView: View {
 
     private enum Mode {
         case legacyDemo(TaskJourneySession, () -> Void)
-        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (() -> Void)?, (UUID) -> Void)
+        case sessionTasks(SessionTaskStore, ProactiveScheduleStore?, DeviceExecutorWiring, (() -> Void)?, (() -> Void)?, (UUID) -> Void)
     }
 
     private let mode: Mode
@@ -27,6 +27,7 @@ struct TaskInboxView: View {
         deviceExecutorError: String? = nil,
         onSetDeviceExecutorEnabled: @escaping (Bool) -> Void = { _ in },
         onOpenChat: (() -> Void)? = nil,
+        onOpenNavigationDirectory: (() -> Void)? = nil,
         onOpenTask: @escaping (UUID) -> Void
     ) {
         self.mode = .sessionTasks(
@@ -39,6 +40,7 @@ struct TaskInboxView: View {
                 onSetEnabled: onSetDeviceExecutorEnabled
             ),
             onOpenChat,
+            onOpenNavigationDirectory,
             onOpenTask
         )
     }
@@ -47,7 +49,7 @@ struct TaskInboxView: View {
         switch mode {
         case .legacyDemo(let session, let onSelectTask):
             LegacyDemoTaskInboxView(session: session, onSelectTask: onSelectTask)
-        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenChat, let onOpenTask):
+        case .sessionTasks(let store, let scheduleStore, let deviceWiring, let onOpenChat, let onOpenNavigationDirectory, let onOpenTask):
             SessionTaskInboxContent(
                 store: store,
                 scheduleStore: scheduleStore,
@@ -56,6 +58,7 @@ struct TaskInboxView: View {
                 deviceExecutorError: deviceWiring.errorMessage,
                 onSetDeviceExecutorEnabled: deviceWiring.onSetEnabled,
                 onOpenChat: onOpenChat,
+                onOpenNavigationDirectory: onOpenNavigationDirectory,
                 onOpenTask: onOpenTask
             )
         }
@@ -70,6 +73,7 @@ private struct SessionTaskInboxContent: View {
     let deviceExecutorError: String?
     let onSetDeviceExecutorEnabled: (Bool) -> Void
     let onOpenChat: (() -> Void)?
+    let onOpenNavigationDirectory: (() -> Void)?
     let onOpenTask: (UUID) -> Void
     @State private var isShowingSchedulesSheet = false
     @State private var isShowingPythonComposer = false
@@ -262,6 +266,24 @@ private struct SessionTaskInboxContent: View {
                 }
                 .disabled(store.isLoadingList)
                 .accessibilityIdentifier("tasks-refresh-button")
+
+                if let onOpenNavigationDirectory {
+                    Menu {
+                        Button(action: onOpenNavigationDirectory) {
+                            Label {
+                                Text(String(localized: "sidebar.open", table: "Conversation"))
+                            } icon: {
+                                Image(systemName: "sidebar.leading")
+                            }
+                        }
+                        .accessibilityIdentifier("tasks-open-sidebar")
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                            .foregroundStyle(.secondary)
+                            .accessibilityLabel(Text("conversation.header.menu.label", tableName: "Conversation"))
+                    }
+                    .accessibilityIdentifier("tasks-navigation-menu")
+                }
             }
         }
         .sheet(isPresented: $isShowingSchedulesSheet) {

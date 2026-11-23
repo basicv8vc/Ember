@@ -82,6 +82,17 @@ struct EmberSidebarContainer<Content: View>: View {
                         setSidebarPresented(true, drawerWidth: drawerWidth, velocityX: 0)
                     }
 
+                if canSwipeOpenFromEdge {
+                    Capsule(style: .continuous)
+                        .fill(Color.primary.opacity((colorScheme == .dark ? 0.24 : 0.16) * (1 - progress)))
+                        .frame(width: 3, height: 36)
+                        .padding(.leading, 3)
+                        .offset(x: interactiveOffset)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
+                        .accessibilityIdentifier("ember-sidebar-edge-hint")
+                }
+
                 if interactiveOffset > 0.5 || isShowingSidebar {
                     Button {
                         setSidebarPresented(false, drawerWidth: drawerWidth, velocityX: 0)
@@ -252,10 +263,27 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
     }
 
     @MainActor
+    private final class EdgeStartPanGestureRecognizer: UIPanGestureRecognizer {
+        private(set) var initialTouchX: CGFloat?
+
+        override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
+            if initialTouchX == nil {
+                initialTouchX = touches.first?.location(in: view).x
+            }
+            super.touchesBegan(touches, with: event)
+        }
+
+        override func reset() {
+            initialTouchX = nil
+            super.reset()
+        }
+    }
+
+    @MainActor
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
         var parent: SidebarSwipeBridge
         private weak var attachedWindow: UIWindow?
-        private var openPan: UIPanGestureRecognizer?
+        private var openPan: EdgeStartPanGestureRecognizer?
         private var closePan: UIPanGestureRecognizer?
         private var startOffset: CGFloat = 0
 
@@ -268,7 +296,7 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
             detach()
             guard let window else { return }
 
-            let open = UIPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
+            let open = EdgeStartPanGestureRecognizer(target: self, action: #selector(handlePan(_:)))
             open.maximumNumberOfTouches = 1
             open.cancelsTouchesInView = true
             open.delegate = self
@@ -322,13 +350,13 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
                 return false
             }
 
-            let location = pan.location(in: window)
             let velocity = pan.velocity(in: window)
             let translation = pan.translation(in: window)
 
-            if pan === openPan {
+            if let edgePan = openPan, pan === edgePan {
                 guard !parent.isShowingSidebar, parent.canSwipeOpenFromEdge else { return false }
-                guard location.x <= 40 else { return false }
+                let startX = edgePan.initialTouchX ?? (pan.location(in: window).x - translation.x)
+                guard startX <= 40 else { return false }
                 let movingRight = (velocity.x > 0 && velocity.x > abs(velocity.y) * 1.1)
                     || (translation.x > 0 && translation.x > abs(translation.y) * 1.1)
                 return movingRight
@@ -364,10 +392,11 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
                 return false
             }
 
-            if gestureRecognizer === openPan {
+            if let edgePan = openPan, gestureRecognizer === edgePan {
+                let startX = edgePan.initialTouchX ?? otherGestureRecognizer.location(in: window).x
                 return !parent.isShowingSidebar
                     && parent.canSwipeOpenFromEdge
-                    && otherGestureRecognizer.location(in: window).x <= 40
+                    && startX <= 40
             }
 
             if gestureRecognizer === closePan {

@@ -2360,6 +2360,22 @@ struct LiveConversationHost: View {
 
     private var chatHeaderMenu: some View {
         Menu {
+            Button {
+                Task { @MainActor in
+                    await Task.yield()
+                    isShowingSidebar = true
+                }
+            } label: {
+                Label {
+                    Text(String(localized: "sidebar.open", table: "Conversation"))
+                } icon: {
+                    Image(systemName: "sidebar.leading")
+                }
+            }
+            .accessibilityIdentifier("live-conversation-open-sidebar")
+
+            Divider()
+
             if model.scheduleStore.hasRepository {
                 Button {
                     isShowingSchedulesSheet = true
@@ -2626,6 +2642,12 @@ struct LiveConversationHost: View {
                 },
                 onOpenChat: {
                     model.selectedTab = .chat
+                },
+                onOpenNavigationDirectory: {
+                    Task { @MainActor in
+                        await Task.yield()
+                        isShowingSidebar = true
+                    }
                 },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)

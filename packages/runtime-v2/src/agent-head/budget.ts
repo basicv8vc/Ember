@@ -52,7 +52,7 @@ export function findLocalUnresolvedIncidentSync(
       `SELECT scope_kind, reason
          FROM agent_budget_incidents
         WHERE resolved_at_ms IS NULL
-          AND budget_mode = ?
+          AND (budget_mode = ? OR budget_mode IS NULL)
           AND (
             (scope_kind = 'tenant' AND scope_id = ?)
             OR (scope_kind = 'principal' AND scope_id = ?)

@@ -60,56 +60,97 @@ struct EmberSidebarContainer<Content: View>: View {
     let onOpenMemory: () -> Void
     let onOpenSchedules: () -> Void
     let onSignOut: () -> Void
-    @ViewBuilder let content: () -> Content
+    let content: Content
 
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.colorScheme) private var colorScheme
+    @State private var containerWidth: CGFloat = 390
     @State private var interactiveOffset: CGFloat = 0
     @State private var isDragging = false
+    @State private var isDrawerMounted = false
+
+    init(
+        isShowingSidebar: Binding<Bool>,
+        canSwipeOpenFromEdge: Bool,
+        selectedTab: LiveConversationHostModel.RootTab,
+        needsInterventionCount: Int,
+        hasMemoryRepository: Bool,
+        memoryUnavailable: Bool,
+        hasSchedulesRepository: Bool,
+        schedulesUnavailable: Bool,
+        isMockMode: Bool,
+        environmentBadge: String,
+        canSignOut: Bool,
+        onOpenChat: @escaping () -> Void,
+        onOpenTasks: @escaping () -> Void,
+        onOpenMemory: @escaping () -> Void,
+        onOpenSchedules: @escaping () -> Void,
+        onSignOut: @escaping () -> Void,
+        @ViewBuilder content: () -> Content
+    ) {
+        _isShowingSidebar = isShowingSidebar
+        self.canSwipeOpenFromEdge = canSwipeOpenFromEdge
+        self.selectedTab = selectedTab
+        self.needsInterventionCount = needsInterventionCount
+        self.hasMemoryRepository = hasMemoryRepository
+        self.memoryUnavailable = memoryUnavailable
+        self.hasSchedulesRepository = hasSchedulesRepository
+        self.schedulesUnavailable = schedulesUnavailable
+        self.isMockMode = isMockMode
+        self.environmentBadge = environmentBadge
+        self.canSignOut = canSignOut
+        self.onOpenChat = onOpenChat
+        self.onOpenTasks = onOpenTasks
+        self.onOpenMemory = onOpenMemory
+        self.onOpenSchedules = onOpenSchedules
+        self.onSignOut = onSignOut
+        self.content = content()
+    }
 
     var body: some View {
-        GeometryReader { geometry in
-            let drawerWidth = max(240, min(320, geometry.size.width - 52))
-            let progress = drawerWidth > 0 ? min(1, max(0, interactiveOffset / drawerWidth)) : 0
-            let exposedWidth = max(0, geometry.size.width - interactiveOffset)
+        let drawerWidth = max(240, min(320, containerWidth - 52))
+        let progress = drawerWidth > 0 ? min(1, max(0, interactiveOffset / drawerWidth)) : 0
+        let exposedWidth = max(0, containerWidth - interactiveOffset)
+        let shouldShowDrawer = isDrawerMounted || isShowingSidebar || interactiveOffset > 0.5
 
-            ZStack(alignment: .leading) {
-                content()
+        ZStack(alignment: .leading) {
+            content
+                .offset(x: interactiveOffset)
+                .allowsHitTesting(!isShowingSidebar && !isDragging)
+                .accessibilityHidden(isShowingSidebar)
+                .accessibilityAction(named: Text(String(localized: "sidebar.open", table: "Conversation"))) {
+                    setSidebarPresented(true, drawerWidth: drawerWidth, velocityX: 0)
+                }
+
+            if canSwipeOpenFromEdge {
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity((colorScheme == .dark ? 0.24 : 0.16) * (1 - progress)))
+                    .frame(width: 3, height: 36)
+                    .padding(.leading, 3)
                     .offset(x: interactiveOffset)
-                    .allowsHitTesting(!isShowingSidebar && !isDragging)
-                    .accessibilityHidden(isShowingSidebar)
-                    .accessibilityAction(named: Text(String(localized: "sidebar.open", table: "Conversation"))) {
-                        setSidebarPresented(true, drawerWidth: drawerWidth, velocityX: 0)
-                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .accessibilityIdentifier("ember-sidebar-edge-hint")
+            }
 
-                if canSwipeOpenFromEdge {
-                    Capsule(style: .continuous)
-                        .fill(Color.primary.opacity((colorScheme == .dark ? 0.24 : 0.16) * (1 - progress)))
-                        .frame(width: 3, height: 36)
-                        .padding(.leading, 3)
-                        .offset(x: interactiveOffset)
-                        .allowsHitTesting(false)
-                        .accessibilityHidden(true)
-                        .accessibilityIdentifier("ember-sidebar-edge-hint")
+            if interactiveOffset > 0.5 || isShowingSidebar {
+                Button {
+                    setSidebarPresented(false, drawerWidth: drawerWidth, velocityX: 0)
+                } label: {
+                    Color.black.opacity((colorScheme == .dark ? 0.52 : 0.28) * progress)
+                        .ignoresSafeArea()
+                        .contentShape(Rectangle())
                 }
+                .buttonStyle(.plain)
+                .frame(width: exposedWidth)
+                .frame(maxHeight: .infinity)
+                .padding(.leading, max(0, interactiveOffset))
+                .allowsHitTesting(isShowingSidebar && !isDragging)
+                .accessibilityLabel(Text(String(localized: "sidebar.dismiss", table: "Conversation")))
+                .accessibilityIdentifier("ember-sidebar-backdrop")
+            }
 
-                if interactiveOffset > 0.5 || isShowingSidebar {
-                    Button {
-                        setSidebarPresented(false, drawerWidth: drawerWidth, velocityX: 0)
-                    } label: {
-                        Color.black.opacity((colorScheme == .dark ? 0.52 : 0.28) * progress)
-                            .ignoresSafeArea()
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .frame(width: exposedWidth)
-                    .frame(maxHeight: .infinity)
-                    .padding(.leading, max(0, interactiveOffset))
-                    .allowsHitTesting(isShowingSidebar && !isDragging)
-                    .accessibilityLabel(Text(String(localized: "sidebar.dismiss", table: "Conversation")))
-                    .accessibilityIdentifier("ember-sidebar-backdrop")
-                }
-
+            if shouldShowDrawer {
                 EmberSidebarOverlay(
                     selectedTab: selectedTab,
                     needsInterventionCount: needsInterventionCount,
@@ -149,45 +190,53 @@ struct EmberSidebarContainer<Content: View>: View {
                 }
                 .accessibilityIdentifier("ember-sidebar")
             }
-            .background(
-                SidebarSwipeBridge(
-                    isShowingSidebar: isShowingSidebar,
-                    canSwipeOpenFromEdge: canSwipeOpenFromEdge,
-                    currentOffset: { interactiveOffset },
-                    onDragBegan: {
-                        isDragging = true
-                        UIApplication.shared.sendAction(
-                            #selector(UIResponder.resignFirstResponder),
-                            to: nil,
-                            from: nil,
-                            for: nil
-                        )
-                    },
-                    onDragChanged: { translationX, startOffset in
-                        let clamped = min(drawerWidth, max(0, startOffset + translationX))
-                        var transaction = Transaction()
-                        transaction.disablesAnimations = true
-                        withTransaction(transaction) {
-                            interactiveOffset = clamped
-                        }
-                    },
-                    onDragEnded: { translationX, velocityX, startOffset in
-                        let current = min(drawerWidth, max(0, startOffset + translationX))
-                        let progressAtLift = drawerWidth > 0 ? current / drawerWidth : 0
-                        let projected = progressAtLift + (velocityX * 0.16) / max(1, drawerWidth)
-                        let shouldOpen: Bool = isShowingSidebar
-                            ? !(progressAtLift < 0.65 || projected < 0.55 || velocityX < -320)
-                            : (progressAtLift > 0.35 || projected > 0.45 || velocityX > 320)
-                        isDragging = false
-                        setSidebarPresented(shouldOpen, drawerWidth: drawerWidth, velocityX: velocityX)
-                    }
-                )
-            )
-            .onChange(of: isShowingSidebar) { _, newValue in
-                let target = newValue ? drawerWidth : 0
-                guard !isDragging, abs(interactiveOffset - target) > 0.5 else { return }
-                setSidebarPresented(newValue, drawerWidth: drawerWidth, velocityX: 0)
+        }
+        .onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.size.width
+        } action: { newWidth in
+            if newWidth > 0, abs(containerWidth - newWidth) > 0.5 {
+                containerWidth = newWidth
             }
+        }
+        .background(
+            SidebarSwipeBridge(
+                isShowingSidebar: isShowingSidebar,
+                canSwipeOpenFromEdge: canSwipeOpenFromEdge,
+                currentOffset: { interactiveOffset },
+                onDragBegan: {
+                    isDrawerMounted = true
+                    isDragging = true
+                    UIApplication.shared.sendAction(
+                        #selector(UIResponder.resignFirstResponder),
+                        to: nil,
+                        from: nil,
+                        for: nil
+                    )
+                },
+                onDragChanged: { translationX, startOffset in
+                    let clamped = min(drawerWidth, max(0, startOffset + translationX))
+                    var transaction = Transaction()
+                    transaction.disablesAnimations = true
+                    withTransaction(transaction) {
+                        interactiveOffset = clamped
+                    }
+                },
+                onDragEnded: { translationX, velocityX, startOffset in
+                    let current = min(drawerWidth, max(0, startOffset + translationX))
+                    let progressAtLift = drawerWidth > 0 ? current / drawerWidth : 0
+                    let projected = progressAtLift + (velocityX * 0.16) / max(1, drawerWidth)
+                    let shouldOpen: Bool = isShowingSidebar
+                        ? !(progressAtLift < 0.65 || projected < 0.55 || velocityX < -320)
+                        : (progressAtLift > 0.35 || projected > 0.45 || velocityX > 320)
+                    isDragging = false
+                    setSidebarPresented(shouldOpen, drawerWidth: drawerWidth, velocityX: velocityX)
+                }
+            )
+        )
+        .onChange(of: isShowingSidebar) { _, newValue in
+            let target = newValue ? drawerWidth : 0
+            guard !isDragging, abs(interactiveOffset - target) > 0.5 else { return }
+            setSidebarPresented(newValue, drawerWidth: drawerWidth, velocityX: 0)
         }
     }
 
@@ -198,6 +247,7 @@ struct EmberSidebarContainer<Content: View>: View {
 
     private func setSidebarPresented(_ present: Bool, drawerWidth: CGFloat, velocityX: CGFloat) {
         if present {
+            isDrawerMounted = true
             UIApplication.shared.sendAction(
                 #selector(UIResponder.resignFirstResponder),
                 to: nil,
@@ -219,8 +269,19 @@ struct EmberSidebarContainer<Content: View>: View {
             ? nil
             : .interpolatingSpring(stiffness: 320, damping: 34, initialVelocity: normalizedVelocity)
 
-        withAnimation(animation) {
+        if let animation {
+            withAnimation(animation) {
+                interactiveOffset = target
+            } completion: {
+                if !isShowingSidebar && !isDragging && interactiveOffset <= 0.5 {
+                    isDrawerMounted = false
+                }
+            }
+        } else {
             interactiveOffset = target
+            if !present {
+                isDrawerMounted = false
+            }
         }
         if isShowingSidebar != present {
             isShowingSidebar = present
@@ -255,6 +316,7 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
         if let window = uiView.window {
             context.coordinator.attachIfNeeded(to: window)
         }
+        context.coordinator.updateGestureEnablement()
     }
 
     static func dismantleUIView(_ uiView: BridgeView, coordinator: Coordinator) {
@@ -276,7 +338,12 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
 
         override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent) {
             if initialTouchX == nil {
-                initialTouchX = touches.first?.location(in: view).x
+                let x = touches.first?.location(in: view).x
+                initialTouchX = x
+                if let x, x > 40 {
+                    state = .failed
+                    return
+                }
             }
             super.touchesBegan(touches, with: event)
         }
@@ -319,6 +386,18 @@ private struct SidebarSwipeBridge: UIViewRepresentable {
             attachedWindow = window
             openPan = open
             closePan = close
+            updateGestureEnablement()
+        }
+
+        func updateGestureEnablement() {
+            let shouldEnableOpen = !parent.isShowingSidebar && parent.canSwipeOpenFromEdge
+            if openPan?.isEnabled != shouldEnableOpen {
+                openPan?.isEnabled = shouldEnableOpen
+            }
+            let shouldEnableClose = parent.isShowingSidebar
+            if closePan?.isEnabled != shouldEnableClose {
+                closePan?.isEnabled = shouldEnableClose
+            }
         }
 
         func detach() {

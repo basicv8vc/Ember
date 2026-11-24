@@ -2,35 +2,100 @@ import Foundation
 import SwiftUI
 
 enum ConversationCardFormatting {
-    static func date(from value: String) -> Date? {
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractionalFormatter.date(from: value) {
-            return date
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
+    private final class MarkdownBlocksBox: NSObject {
+        let blocks: [ConversationMarkdownBlock]
+        init(_ blocks: [ConversationMarkdownBlock]) { self.blocks = blocks }
     }
 
-    static func duration(seconds: Int) -> String? {
-        guard seconds > 0 else { return nil }
+    private final class AttributedStringBox: NSObject {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let formatterLock = NSLock()
+    private static let fractionalISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let plainISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    private static let durationFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.day, .hour, .minute, .second]
         formatter.unitsStyle = .short
         formatter.maximumUnitCount = 2
         formatter.zeroFormattingBehavior = .dropAll
-        return formatter.string(from: TimeInterval(seconds))
+        return formatter
+    }()
+    private static let dateCache: NSCache<NSString, NSDate> = {
+        let cache = NSCache<NSString, NSDate>()
+        cache.countLimit = 512
+        return cache
+    }()
+    private static let markdownBlocksCache: NSCache<NSString, MarkdownBlocksBox> = {
+        let cache = NSCache<NSString, MarkdownBlocksBox>()
+        cache.countLimit = 256
+        return cache
+    }()
+    private static let attributedMarkdownCache: NSCache<NSString, AttributedStringBox> = {
+        let cache = NSCache<NSString, AttributedStringBox>()
+        cache.countLimit = 256
+        return cache
+    }()
+
+    static func date(from value: String) -> Date? {
+        guard !value.isEmpty else { return nil }
+        let key = value as NSString
+        if let cached = dateCache.object(forKey: key) {
+            return cached as Date
+        }
+        formatterLock.lock()
+        let parsed = fractionalISOFormatter.date(from: value) ?? plainISOFormatter.date(from: value)
+        formatterLock.unlock()
+        if let parsed {
+            dateCache.setObject(parsed as NSDate, forKey: key)
+        }
+        return parsed
+    }
+
+    static func duration(seconds: Int) -> String? {
+        guard seconds > 0 else { return nil }
+        formatterLock.lock()
+        let formatted = durationFormatter.string(from: TimeInterval(seconds))
+        formatterLock.unlock()
+        return formatted
     }
 
     static func attributedMarkdown(for rawText: String) -> AttributedString? {
         guard !rawText.isEmpty else { return nil }
+        let key = rawText as NSString
+        if let cached = attributedMarkdownCache.object(forKey: key) {
+            return cached.value
+        }
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
-        return try? AttributedString(markdown: rawText, options: options)
+        guard let parsed = try? AttributedString(markdown: rawText, options: options) else {
+            return nil
+        }
+        attributedMarkdownCache.setObject(AttributedStringBox(parsed), forKey: key)
+        return parsed
+    }
+
+    static func cachedMarkdownBlocks(for rawText: String) -> [ConversationMarkdownBlock] {
+        guard !rawText.isEmpty else { return [] }
+        let key = rawText as NSString
+        if let cached = markdownBlocksCache.object(forKey: key) {
+            return cached.blocks
+        }
+        let parsed = ConversationMarkdownBlock.parse(rawText)
+        markdownBlocksCache.setObject(MarkdownBlocksBox(parsed), forKey: key)
+        return parsed
     }
 }
 
@@ -160,7 +225,7 @@ struct ConversationMarkdownText: View {
     let text: String
 
     var body: some View {
-        let blocks = ConversationMarkdownBlock.parse(text)
+        let blocks = ConversationCardFormatting.cachedMarkdownBlocks(for: text)
         if blocks.isEmpty {
             inlineText(text)
         } else {

@@ -42,13 +42,7 @@ public struct ActivityRow: View {
     }
 
     private static func date(from value: String) -> Date? {
-        if let date = ISO8601DateFormatter().date(from: value) {
-            return date
-        }
-
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return fractionalFormatter.date(from: value)
+        ConversationCardFormatting.date(from: value)
     }
 }
 

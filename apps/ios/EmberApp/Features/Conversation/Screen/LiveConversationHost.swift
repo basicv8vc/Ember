@@ -2032,7 +2032,6 @@ private struct SessionTaskPendingReferenceCard: View {
 struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
-    @State private var draft = ""
     @State private var isShowingSidebar = false
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
@@ -2137,7 +2136,6 @@ struct LiveConversationHost: View {
             Button(role: .destructive) {
                 Task {
                     await model.signOut()
-                    if model.requiresSignIn { draft = "" }
                 }
             } label: {
                 Text("conversation.live.sign_out", tableName: "Conversation")
@@ -2159,10 +2157,6 @@ struct LiveConversationHost: View {
             model.handleViewAppeared()
         }
         .onDisappear { model.handleViewDisappeared() }
-        .onChange(of: model.rejectedDraftText) { _, rejected in
-            // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
-            if let rejected, draft.isEmpty { draft = rejected }
-        }
         .onChange(of: model.selectedTab) { _, newTab in
             Task { await model.handleTabSelection(newTab) }
         }
@@ -2253,52 +2247,35 @@ struct LiveConversationHost: View {
 
     private var chatTab: some View {
         NavigationStack(path: $model.chatNavigationPath) {
-            ConversationScreen(
-                    state: model.screen,
-                    draft: $draft,
-                    actions: ConversationScreenActions(
-                        send: { text in
-                            draft = ""
-                            Task { await model.send(text) }
-                        },
-                        retry: { Task { await model.retry() } },
-                        stopGenerating: { model.triggerStop() },
-                        selectPrompt: { draft = $0 },
-                        onDismissError: { model.dismissReplyError() },
-                        onTakePhoto: {
-                            if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                                isShowingCamera = true
-                            } else {
-                                model.reportCameraUnavailable()
-                            }
-                        },
-                        onChoosePhoto: { isShowingPhotoPicker = true },
-                        onPickAttachment: { isShowingFileImporter = true },
-                        onRemoveAttachment: { model.removeAttachment($0) }
-                    ),
-                    composerNote: model.isMockMode
-                        ? "conversation.composer.local_note"
-                        : "conversation.composer.cloud_note",
-                    showsSubmissionAcknowledgement: model.isMockMode,
-                    replyPreparingText: model.isMockMode
-                        ? "conversation.reply.preparing"
-                        : "conversation.reply.waiting_for_cloud",
-                    replyStopText: model.isMockMode
-                        ? "conversation.reply.stop"
-                        : "conversation.reply.cancel_cloud_turn",
-                    emberMessageAuthorText: model.isMockMode
-                        ? "conversation.message.ember_mock"
-                        : "conversation.message.ember_cloud",
-                    onRefresh: {
-                        await model.refreshConversationAndTasks()
-                    },
-                    headerMenu: {
-                        chatHeaderMenu
-                    },
-                    topNotices: {
-                        chatTopNotices
+            LiveChatDraftHost(
+                state: model.screen,
+                rejectedDraftText: model.rejectedDraftText,
+                requiresSignIn: model.requiresSignIn,
+                isMockMode: model.isMockMode,
+                onSend: { text in Task { await model.send(text) } },
+                onRetry: { Task { await model.retry() } },
+                onStopGenerating: { model.triggerStop() },
+                onDismissError: { model.dismissReplyError() },
+                onTakePhoto: {
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                        isShowingCamera = true
+                    } else {
+                        model.reportCameraUnavailable()
                     }
-                )
+                },
+                onChoosePhoto: { isShowingPhotoPicker = true },
+                onPickAttachment: { isShowingFileImporter = true },
+                onRemoveAttachment: { model.removeAttachment($0) },
+                onRefresh: {
+                    await model.refreshConversationAndTasks()
+                },
+                headerMenu: {
+                    chatHeaderMenu
+                },
+                topNotices: {
+                    chatTopNotices
+                }
+            )
             .photosPicker(
                 isPresented: $isShowingPhotoPicker,
                 selection: $selectedPhotoItems,
@@ -2657,6 +2634,104 @@ struct LiveConversationHost: View {
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
             }
+        }
+    }
+}
+
+private struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
+    let state: ConversationScreenState
+    let rejectedDraftText: String?
+    let requiresSignIn: Bool
+    let isMockMode: Bool
+    let onSend: (String) -> Void
+    let onRetry: () -> Void
+    let onStopGenerating: () -> Void
+    let onDismissError: () -> Void
+    let onTakePhoto: () -> Void
+    let onChoosePhoto: () -> Void
+    let onPickAttachment: () -> Void
+    let onRemoveAttachment: (UUID) -> Void
+    let onRefresh: () async -> Void
+    let headerMenu: HeaderMenu
+    let topNotices: TopNotices
+
+    @State private var draft = ""
+
+    init(
+        state: ConversationScreenState,
+        rejectedDraftText: String?,
+        requiresSignIn: Bool,
+        isMockMode: Bool,
+        onSend: @escaping (String) -> Void,
+        onRetry: @escaping () -> Void,
+        onStopGenerating: @escaping () -> Void,
+        onDismissError: @escaping () -> Void,
+        onTakePhoto: @escaping () -> Void,
+        onChoosePhoto: @escaping () -> Void,
+        onPickAttachment: @escaping () -> Void,
+        onRemoveAttachment: @escaping (UUID) -> Void,
+        onRefresh: @escaping () async -> Void,
+        @ViewBuilder headerMenu: () -> HeaderMenu,
+        @ViewBuilder topNotices: () -> TopNotices
+    ) {
+        self.state = state
+        self.rejectedDraftText = rejectedDraftText
+        self.requiresSignIn = requiresSignIn
+        self.isMockMode = isMockMode
+        self.onSend = onSend
+        self.onRetry = onRetry
+        self.onStopGenerating = onStopGenerating
+        self.onDismissError = onDismissError
+        self.onTakePhoto = onTakePhoto
+        self.onChoosePhoto = onChoosePhoto
+        self.onPickAttachment = onPickAttachment
+        self.onRemoveAttachment = onRemoveAttachment
+        self.onRefresh = onRefresh
+        self.headerMenu = headerMenu()
+        self.topNotices = topNotices()
+    }
+
+    var body: some View {
+        ConversationScreen(
+            state: state,
+            draft: $draft,
+            actions: ConversationScreenActions(
+                send: { text in
+                    draft = ""
+                    onSend(text)
+                },
+                retry: onRetry,
+                stopGenerating: onStopGenerating,
+                selectPrompt: { draft = $0 },
+                onDismissError: onDismissError,
+                onTakePhoto: onTakePhoto,
+                onChoosePhoto: onChoosePhoto,
+                onPickAttachment: onPickAttachment,
+                onRemoveAttachment: onRemoveAttachment
+            ),
+            composerNote: isMockMode
+                ? "conversation.composer.local_note"
+                : "conversation.composer.cloud_note",
+            showsSubmissionAcknowledgement: isMockMode,
+            replyPreparingText: isMockMode
+                ? "conversation.reply.preparing"
+                : "conversation.reply.waiting_for_cloud",
+            replyStopText: isMockMode
+                ? "conversation.reply.stop"
+                : "conversation.reply.cancel_cloud_turn",
+            emberMessageAuthorText: isMockMode
+                ? "conversation.message.ember_mock"
+                : "conversation.message.ember_cloud",
+            onRefresh: onRefresh,
+            headerMenu: { headerMenu },
+            topNotices: { topNotices }
+        )
+        .onChange(of: rejectedDraftText) { _, rejected in
+            // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
+            if let rejected, draft.isEmpty { draft = rejected }
+        }
+        .onChange(of: requiresSignIn) { _, needsSignIn in
+            if needsSignIn { draft = "" }
         }
     }
 }

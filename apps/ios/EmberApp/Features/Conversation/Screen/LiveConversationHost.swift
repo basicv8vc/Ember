@@ -13,6 +13,11 @@ struct TurnLatencyMetrics: Equatable, Sendable {
     let deltaCount: Int
 }
 
+struct PendingRejectedDraft: Equatable, Sendable {
+    let id: UUID
+    let text: String
+}
+
 /// The Live host observes real Cloud state; it never runs the local Mock reply generator unless explicitly configured for B3 Mock UI tests.
 @MainActor @Observable
 final class LiveConversationHostModel {
@@ -80,6 +85,7 @@ final class LiveConversationHostModel {
     private(set) var refreshErrorMessage: String?
     private(set) var requiresSignIn = false
     private(set) var rejectedDraftText: String?
+    private(set) var pendingRejectedDraftRestoration: PendingRejectedDraft?
     private(set) var pendingOutgoingText: String?
     private(set) var streamingReplyText: String?
     private(set) var lastTurnMetrics: TurnLatencyMetrics?
@@ -418,6 +424,7 @@ final class LiveConversationHostModel {
         requiresSignIn = true
         signInErrorMessage = nil
         rejectedDraftText = nil
+        pendingRejectedDraftRestoration = nil
         pendingOutgoingText = nil
         streamingReplyText = nil
         lastTurnMetrics = nil
@@ -435,6 +442,7 @@ final class LiveConversationHostModel {
         taskStore.clear()
         scheduleStore.clear()
         memoryStore.clear()
+        ConversationCardFormatting.clearCaches()
     }
 
     func removeAttachment(_ attachmentID: UUID) {
@@ -667,6 +675,7 @@ final class LiveConversationHostModel {
         isSubmitting = true
         command = .submitting
         rejectedDraftText = nil
+        pendingRejectedDraftRestoration = nil
         pendingOutgoingText = trimmedOutgoing.isEmpty ? nil : trimmedOutgoing
         streamingReplyText = nil
         attachmentError = nil
@@ -1246,7 +1255,8 @@ final class LiveConversationHostModel {
                     author: .ember,
                     text: streamingReplyText,
                     timestamp: nil,
-                    accessibilityIdentifierOverride: "conversation-streaming-reply"
+                    accessibilityIdentifierOverride: "conversation-streaming-reply",
+                    isStreaming: true
                 ))
             )
         }
@@ -1958,9 +1968,16 @@ final class LiveConversationHostModel {
         status = LiveConversationCopy.sendUnknownAckStatus
     }
 
+    func consumePendingRejectedDraftRestoration(id: UUID) {
+        if pendingRejectedDraftRestoration?.id == id {
+            pendingRejectedDraftRestoration = nil
+        }
+    }
+
     private func applyRejectedSubmission(draftText: String?, reason: RejectionReason) {
         if let draftText {
             rejectedDraftText = draftText
+            pendingRejectedDraftRestoration = PendingRejectedDraft(id: UUID(), text: draftText)
         }
         pendingOutgoingText = nil
         command = .rejected
@@ -2249,9 +2266,10 @@ struct LiveConversationHost: View {
         NavigationStack(path: $model.chatNavigationPath) {
             LiveChatDraftHost(
                 state: model.screen,
-                rejectedDraftText: model.rejectedDraftText,
+                pendingRejectedDraft: model.pendingRejectedDraftRestoration,
                 requiresSignIn: model.requiresSignIn,
                 isMockMode: model.isMockMode,
+                onConsumeRejectedDraft: { model.consumePendingRejectedDraftRestoration(id: $0) },
                 onSend: { text in Task { await model.send(text) } },
                 onRetry: { Task { await model.retry() } },
                 onStopGenerating: { model.triggerStop() },
@@ -2638,11 +2656,12 @@ struct LiveConversationHost: View {
     }
 }
 
-private struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
+struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
     let state: ConversationScreenState
-    let rejectedDraftText: String?
+    let pendingRejectedDraft: PendingRejectedDraft?
     let requiresSignIn: Bool
     let isMockMode: Bool
+    let onConsumeRejectedDraft: (UUID) -> Void
     let onSend: (String) -> Void
     let onRetry: () -> Void
     let onStopGenerating: () -> Void
@@ -2659,9 +2678,10 @@ private struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
 
     init(
         state: ConversationScreenState,
-        rejectedDraftText: String?,
+        pendingRejectedDraft: PendingRejectedDraft?,
         requiresSignIn: Bool,
         isMockMode: Bool,
+        onConsumeRejectedDraft: @escaping (UUID) -> Void,
         onSend: @escaping (String) -> Void,
         onRetry: @escaping () -> Void,
         onStopGenerating: @escaping () -> Void,
@@ -2675,9 +2695,10 @@ private struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
         @ViewBuilder topNotices: () -> TopNotices
     ) {
         self.state = state
-        self.rejectedDraftText = rejectedDraftText
+        self.pendingRejectedDraft = pendingRejectedDraft
         self.requiresSignIn = requiresSignIn
         self.isMockMode = isMockMode
+        self.onConsumeRejectedDraft = onConsumeRejectedDraft
         self.onSend = onSend
         self.onRetry = onRetry
         self.onStopGenerating = onStopGenerating
@@ -2726,13 +2747,22 @@ private struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
             headerMenu: { headerMenu },
             topNotices: { topNotices }
         )
-        .onChange(of: rejectedDraftText) { _, rejected in
+        .onChange(of: pendingRejectedDraft, initial: true) { _, pending in
+            guard let pending else { return }
             // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
-            if let rejected, draft.isEmpty { draft = rejected }
+            draft = Self.applyPendingRejectedDraft(currentDraft: draft, pending: pending)
+            onConsumeRejectedDraft(pending.id)
         }
-        .onChange(of: requiresSignIn) { _, needsSignIn in
+        .onChange(of: requiresSignIn, initial: true) { _, needsSignIn in
             if needsSignIn { draft = "" }
         }
+    }
+
+    static func applyPendingRejectedDraft(
+        currentDraft: String,
+        pending: PendingRejectedDraft
+    ) -> String {
+        currentDraft.isEmpty ? pending.text : currentDraft
     }
 }
 

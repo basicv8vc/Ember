@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import Ember
 
@@ -145,6 +146,135 @@ final class ConversationCardRendererTests: XCTestCase {
         XCTAssertEqual(presentation.title, "固定演示结果")
         XCTAssertNil(presentation.readableContent)
         XCTAssertTrue(presentation.isMockOnly)
+    }
+
+    func testStreamingMarkdownBypassesGlobalCachesWhileFinalizedMessagesCacheAndClear() {
+        ConversationCardFormatting.clearCaches()
+        defer { ConversationCardFormatting.clearCaches() }
+
+        let streamingPrefix = "## Summary\n- **Item 1** with `inline_code`"
+        let streamingBlocks = ConversationCardFormatting.cachedMarkdownBlocks(for: streamingPrefix, useCache: false)
+        let streamingInline = ConversationCardFormatting.attributedMarkdown(for: "**Item 1** with `inline_code`", useCache: false)
+
+        XCTAssertEqual(streamingBlocks.count, 2)
+        XCTAssertNotNil(streamingInline)
+        XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: streamingPrefix))
+        XCTAssertFalse(ConversationCardFormatting.hasCachedAttributedMarkdown(for: "**Item 1** with `inline_code`"))
+
+        let finalizedText = "## Finalized\n- **Done** with `code`"
+        let finalizedBlocks = ConversationCardFormatting.cachedMarkdownBlocks(for: finalizedText, useCache: true)
+        let finalizedInline = ConversationCardFormatting.attributedMarkdown(for: "**Done** with `code`", useCache: true)
+
+        XCTAssertEqual(finalizedBlocks.count, 2)
+        XCTAssertNotNil(finalizedInline)
+        XCTAssertTrue(ConversationCardFormatting.hasCachedMarkdownBlocks(for: finalizedText))
+        XCTAssertTrue(ConversationCardFormatting.hasCachedAttributedMarkdown(for: "**Done** with `code`"))
+
+        // Oversized entries (> maxCacheableEntryBytes) must still parse cleanly without entering the cache.
+        let oversized = String(repeating: "a", count: ConversationCardFormatting.maxCacheableEntryBytes + 64)
+        XCTAssertEqual(ConversationCardFormatting.cachedMarkdownBlocks(for: oversized, useCache: true).count, 1)
+        XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: oversized))
+
+        ConversationCardFormatting.clearCaches()
+        XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: finalizedText))
+        XCTAssertFalse(ConversationCardFormatting.hasCachedAttributedMarkdown(for: "**Done** with `code`"))
+    }
+
+    func testLongStreamingReplySkipsPrefixCachingAndBoundsMemory() {
+        ConversationCardFormatting.clearCaches()
+        defer { ConversationCardFormatting.clearCaches() }
+
+        let deltaCount = 300
+        let chunkTemplate = "Paragraph **segment** with `code_token` and details for streaming verification. "
+        var accumulated = "# Long Streaming Reply\n\n"
+        var prefixes: [String] = []
+        prefixes.reserveCapacity(deltaCount)
+
+        for index in 1...deltaCount {
+            if index % 25 == 0 {
+                accumulated += "\n\n## Section \(index / 25)\n- Bullet **\(index)**: \(chunkTemplate)"
+            } else {
+                accumulated += chunkTemplate
+            }
+            prefixes.append(accumulated)
+        }
+        XCTAssertGreaterThanOrEqual(accumulated.count, 10_000)
+
+        let cachedBaselineFootprint = Self.currentResidentFootprintBytes()
+        let cachedStart = ContinuousClock.now
+        for prefix in prefixes {
+            let blocks = ConversationCardFormatting.cachedMarkdownBlocks(for: prefix, useCache: true)
+            for block in blocks {
+                switch block {
+                case .heading(_, let text), .bulletItem(let text), .numberedItem(_, let text), .paragraph(let text):
+                    _ = ConversationCardFormatting.attributedMarkdown(for: text, useCache: true)
+                case .codeBlock:
+                    break
+                }
+            }
+        }
+        let cachedElapsed = cachedStart.duration(to: .now).components
+        let cachedDurationMs = Double(cachedElapsed.seconds) * 1000.0 + Double(cachedElapsed.attoseconds) / 1e15
+        let cachedAfterFootprint = Self.currentResidentFootprintBytes()
+        let cachedDeltaMB = Double(Int64(cachedAfterFootprint) - Int64(cachedBaselineFootprint)) / (1024.0 * 1024.0)
+        let retainedPrefixCountWithCache = prefixes.filter {
+            ConversationCardFormatting.hasCachedMarkdownBlocks(for: $0)
+        }.count
+
+        ConversationCardFormatting.clearCaches()
+
+        let baselineFootprint = Self.currentResidentFootprintBytes()
+        let start = ContinuousClock.now
+        for prefix in prefixes {
+            let blocks = ConversationCardFormatting.cachedMarkdownBlocks(for: prefix, useCache: false)
+            let lastIndex = blocks.count - 1
+            for (offset, block) in blocks.enumerated() {
+                let useInlineCache = offset < lastIndex
+                switch block {
+                case .heading(_, let text), .bulletItem(let text), .numberedItem(_, let text), .paragraph(let text):
+                    _ = ConversationCardFormatting.attributedMarkdown(for: text, useCache: useInlineCache)
+                case .codeBlock:
+                    break
+                }
+            }
+        }
+        let elapsedMs = start.duration(to: .now).components
+        let durationMs = Double(elapsedMs.seconds) * 1000.0 + Double(elapsedMs.attoseconds) / 1e15
+        let afterStreamingFootprint = Self.currentResidentFootprintBytes()
+        let deltaMB = Double(Int64(afterStreamingFootprint) - Int64(baselineFootprint)) / (1024.0 * 1024.0)
+
+        print(
+            String(
+                format: "P1_LONG_STREAM_AB deltas=%d final_chars=%d cached_ms=%.2f cached_delta_mb=%.2f cached_retained=%d streaming_ms=%.2f streaming_delta_mb=%.2f streaming_retained=0",
+                deltaCount,
+                accumulated.count,
+                cachedDurationMs,
+                cachedDeltaMB,
+                retainedPrefixCountWithCache,
+                durationMs,
+                deltaMB
+            )
+        )
+
+        // None of the 300 accumulating prefixes should be retained in the whole-message blocks cache,
+        // and the actively mutating final block must not be retained in the inline cache.
+        for prefix in prefixes {
+            XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: prefix))
+        }
+        if case .bulletItem(let tailText) = ConversationMarkdownBlock.parse(accumulated).last {
+            XCTAssertFalse(ConversationCardFormatting.hasCachedAttributedMarkdown(for: tailText))
+        }
+    }
+
+    private static func currentResidentFootprintBytes() -> UInt64 {
+        var info = task_vm_info_data_t()
+        var count = mach_msg_type_number_t(MemoryLayout<task_vm_info_data_t>.size) / 4
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: integer_t.self, capacity: Int(count)) { rebound in
+                task_info(mach_task_self_, task_flavor_t(TASK_VM_INFO), rebound, &count)
+            }
+        }
+        return result == KERN_SUCCESS ? info.phys_footprint : 0
     }
 
     private func makeRecord(

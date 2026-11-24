@@ -461,7 +461,10 @@ private struct ConversationMessageBubble: View {
                         Text(verbatim: message.text)
                             .multilineTextAlignment(.leading)
                     } else {
-                        ConversationMarkdownText(text: message.text)
+                        ConversationMarkdownText(
+                            text: message.text,
+                            cachesParsedMarkdown: !message.isStreaming
+                        )
                     }
                 }
                 .font(.body)

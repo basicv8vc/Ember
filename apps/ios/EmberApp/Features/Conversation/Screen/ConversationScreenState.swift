@@ -95,6 +95,7 @@ struct ConversationMessagePresentation {
     let timestamp: Date?
     let deliveryNote: String?
     let accessibilityIdentifierOverride: String?
+    let isStreaming: Bool
 
     init(
         id: String,
@@ -102,7 +103,8 @@ struct ConversationMessagePresentation {
         text: String,
         timestamp: Date?,
         deliveryNote: String? = nil,
-        accessibilityIdentifierOverride: String? = nil
+        accessibilityIdentifierOverride: String? = nil,
+        isStreaming: Bool = false
     ) {
         self.id = id
         self.author = author
@@ -110,6 +112,7 @@ struct ConversationMessagePresentation {
         self.timestamp = timestamp
         self.deliveryNote = deliveryNote
         self.accessibilityIdentifierOverride = accessibilityIdentifierOverride
+        self.isStreaming = isStreaming
     }
 }
 

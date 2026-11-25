@@ -6,6 +6,7 @@ import {
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  WEB_SEARCH_SYSTEM_INSTRUCTION,
   buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
 } from '../context.js';
@@ -27,6 +28,7 @@ export const DELEGATE_PYTHON_TOOL_NAME = 'delegate_python_agent' as const;
 export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
 export const DELETE_PERSONAL_MEMORY_TOOL_NAME = 'delete_personal_memory' as const;
 export const CREATE_PROACTIVE_SCHEDULE_TOOL_NAME = 'create_proactive_schedule' as const;
+export const WEB_SEARCH_TOOL_NAME = 'web_search' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
   'I have started organizing these notes into action items.';
@@ -292,6 +294,34 @@ export const CREATE_PROACTIVE_SCHEDULE_TOOL = Object.freeze({
   }),
 });
 
+export const WEB_SEARCH_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: WEB_SEARCH_TOOL_NAME,
+    description:
+      'Search the live web for current events, recent news, prices, weather, or up-to-date information.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: Object.freeze({
+        query: Object.freeze({
+          type: 'string',
+          description: 'Concise search query (1-256 characters).',
+          minLength: 1,
+          maxLength: 256,
+        }),
+        num_results: Object.freeze({
+          type: 'integer',
+          description: 'Number of web results to return (1-5, default 5).',
+          minimum: 1,
+          maximum: 5,
+        }),
+      }),
+    }),
+  }),
+});
+
 export const NO_CONVERSATION_TOOLS = Object.freeze([] as const);
 
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
@@ -316,6 +346,7 @@ export interface ConversationToolCapabilities {
   readonly allowDelegation?: boolean;
   readonly allowSavePersonalMemory?: boolean;
   readonly allowCreateProactiveSchedule?: boolean;
+  readonly allowWebSearch?: boolean;
 }
 
 export function getConversationTools(capabilities?: boolean | ConversationToolCapabilities) {
@@ -327,16 +358,22 @@ export function getConversationTools(capabilities?: boolean | ConversationToolCa
       : capabilities?.allowSavePersonalMemory === true;
   const allowSchedule =
     typeof capabilities === 'boolean' ? false : capabilities?.allowCreateProactiveSchedule === true;
-  if (!allowDelegation && !allowMemory && !allowSchedule) return NO_CONVERSATION_TOOLS;
-  if (allowDelegation) {
+  const allowWebSearch =
+    typeof capabilities === 'boolean' ? false : capabilities?.allowWebSearch === true;
+  if (!allowDelegation && !allowMemory && !allowSchedule && !allowWebSearch) {
+    return NO_CONVERSATION_TOOLS;
+  }
+  if (!allowWebSearch && allowDelegation) {
     if (allowMemory && allowSchedule) return CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE;
     if (allowMemory) return CONVERSATION_TOOLS_WITH_MEMORY;
     if (allowSchedule) return CONVERSATION_TOOLS_WITH_SCHEDULE;
     return DELEGATION_TOOLS;
   }
   return Object.freeze([
+    ...(allowDelegation ? DELEGATION_TOOLS : []),
     ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL, DELETE_PERSONAL_MEMORY_TOOL] : []),
     ...(allowSchedule ? [CREATE_PROACTIVE_SCHEDULE_TOOL] : []),
+    ...(allowWebSearch ? [WEB_SEARCH_TOOL] : []),
   ]);
 }
 
@@ -388,6 +425,42 @@ export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE =
 export const PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
   JSON.stringify(PYTHON_AGENT_TOOLS),
 );
+
+export const WEB_SEARCH_TOOL_TOKEN_ESTIMATE = estimateTokensConservative(
+  JSON.stringify(WEB_SEARCH_TOOL),
+);
+
+const webSearchToolArgsSchema = z.object({
+  query: z.string().trim().min(1).max(256),
+  num_results: z
+    .number()
+    .nullable()
+    .optional()
+    .transform((value) => {
+      if (value === null || value === undefined || !Number.isFinite(value)) return undefined;
+      return Math.max(1, Math.min(5, Math.trunc(value)));
+    }),
+});
+
+export function parseWebSearchToolArguments(rawJson: string): {
+  readonly query: string;
+  readonly numResults?: number;
+} {
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(rawJson);
+  } catch {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  const parsed = webSearchToolArgsSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  return {
+    query: parsed.data.query,
+    ...(parsed.data.num_results === undefined ? {} : { numResults: parsed.data.num_results }),
+  };
+}
 
 const optionalBoundedText = (maxChars: number) =>
   z
@@ -683,6 +756,9 @@ export function buildConversationTurnMessages(input: ConversationTurnInput): Pro
     ) {
       systemParts.push(`Authoritative current UTC time: ${input.currentTimeIso}.`);
     }
+  }
+  if (input.enableWebSearchTool === true) {
+    systemParts.push(WEB_SEARCH_SYSTEM_INSTRUCTION);
   }
   const systemPrompt = systemParts.join(' ');
   const memoryBlock =

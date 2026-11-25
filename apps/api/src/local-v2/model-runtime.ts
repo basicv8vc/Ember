@@ -1,5 +1,6 @@
 import { DomainError } from '@ember/domain';
 import {
+  ExaWebSearchClient,
   FAKE_MODEL_LABEL,
   FAKE_REPLY_PREFIX,
   FAKE_V2_RATE_VERSION,
@@ -23,6 +24,7 @@ import {
   type ModelRateRow,
   type PythonAgentStepInput,
   type PythonAgentStepOutput,
+  type WebSearchPort,
 } from '@ember/model-gateway';
 import {
   V2_BUDGET_LIMITS,
@@ -75,6 +77,10 @@ export interface V2ModelRuntimeEnv extends V2SandboxEnv {
   readonly EMBER_MODEL_PROVIDER?: string;
   readonly EMBER_MODEL_ID?: string;
   readonly EMBER_MODEL_API_KEY?: string;
+  readonly EXA_API_KEY?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_ACCOUNT_ID?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_ID?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_TOKEN?: string;
   readonly EMBER_MODEL_ALPHA_SCOPE?: string;
   readonly EMBER_MODEL_ALPHA_TENANT_IDS?: string;
   readonly EMBER_MODEL_ALLOW_RECURRING_BRIEFS?: string;
@@ -309,14 +315,16 @@ export function resolveV2GlobalCeilingOverride(
 export function adaptModelGatewayForV2(
   gateway: ModelGateway,
   attemptTimeoutMs: number,
+  options: { readonly webSearchEnabled?: boolean } = {},
 ): V2StreamingModelGateway {
   if (gateway.providerId === 'fake' || gateway.simulated) {
     throw new Error(
       'adaptModelGatewayForV2 is strictly for real non-simulated ModelGateway instances',
     );
   }
+  const webSearchEnabled = options.webSearchEnabled === true;
   return {
-    providerId: gateway.providerId,
+    providerId: gateway.providerId === 'openrouter' ? 'openrouter' : 'openai',
     modelLabel: gateway.modelLabel,
     simulated: false,
     async *streamConversationTurn(request, signal) {
@@ -329,7 +337,11 @@ export function adaptModelGatewayForV2(
       const timeoutMs = Math.max(1, Math.min(attemptTimeoutMs, remainingMs));
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
-      const result = await gateway.generateConversationTurn(request.input, combinedSignal);
+      const turnInput: ConversationTurnInput =
+        webSearchEnabled && request.input.allowDelegationTools !== false
+          ? { ...request.input, enableWebSearchTool: true }
+          : request.input;
+      const result = await gateway.generateConversationTurn(turnInput, combinedSignal);
       signal.throwIfAborted();
       if (result.output.kind === 'reply' && result.output.text.length > 0) {
         yield { kind: 'delta', text: result.output.text };
@@ -475,14 +487,44 @@ export function resolveV2ModelRuntime(
   }
 
   const modelId = resolution.settings.modelId;
-  const providerId = resolution.settings.providerId;
+  // AgentHeadDO SQLite enforces CHECK (provider_id IN ('fake', 'openai', 'openrouter'));
+  // direct OpenAI-compatible providers like 'deepseek' persist under the 'openai' slot while
+  // preserving exact modelLabel ('deepseek-chat') and rateVersion ('deepseek-chat-official-...').
+  const providerId: 'fake' | 'openai' | 'openrouter' =
+    resolution.settings.providerId === 'openrouter'
+      ? 'openrouter'
+      : resolution.settings.providerId === 'fake'
+        ? 'fake'
+        : 'openai';
   const rate = resolution.rate;
   const perAttemptCeiling = resolution.settings.ceilings.perAttemptMicroUsd;
-  const rawGateway = createModelGateway(
-    resolution,
-    options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl },
-  );
-  const gateway = adaptModelGatewayForV2(rawGateway, resolution.settings.attemptTimeoutMs);
+  const exaApiKey = env.EXA_API_KEY?.trim() ?? '';
+  const webSearch: WebSearchPort | undefined =
+    exaApiKey.length > 0
+      ? new ExaWebSearchClient({
+          apiKey: exaApiKey,
+          ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+        })
+      : undefined;
+  const cfAiGatewayAccountId = env.EMBER_OPENROUTER_CF_AI_GATEWAY_ACCOUNT_ID?.trim() ?? '';
+  const cfAiGatewayId = env.EMBER_OPENROUTER_CF_AI_GATEWAY_ID?.trim() ?? '';
+  const cfAiGatewayToken = env.EMBER_OPENROUTER_CF_AI_GATEWAY_TOKEN?.trim() ?? '';
+  const openRouterCloudflareAiGateway =
+    cfAiGatewayAccountId.length > 0 && cfAiGatewayId.length > 0
+      ? {
+          accountId: cfAiGatewayAccountId,
+          gatewayId: cfAiGatewayId,
+          ...(cfAiGatewayToken.length > 0 ? { token: cfAiGatewayToken } : {}),
+        }
+      : undefined;
+  const rawGateway = createModelGateway(resolution, {
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    ...(webSearch === undefined ? {} : { webSearch }),
+    ...(openRouterCloudflareAiGateway === undefined ? {} : { openRouterCloudflareAiGateway }),
+  });
+  const gateway = adaptModelGatewayForV2(rawGateway, resolution.settings.attemptTimeoutMs, {
+    webSearchEnabled: webSearch !== undefined,
+  });
 
   return {
     mode: 'real',

@@ -1,13 +1,22 @@
 import { isModelExecutionAuthorized, type ModelExecutionResolution } from './config.js';
 import { FakeModelGateway, type FakeModelGatewayOptions } from './fake.js';
+import { DeepSeekModelGateway } from './providers/deepseek.js';
 import { OpenAiModelGateway, type FetchLike } from './providers/openai.js';
-import { OpenRouterModelGateway } from './providers/openrouter.js';
+import {
+  OpenRouterModelGateway,
+  type OpenRouterCloudflareAiGateway,
+} from './providers/openrouter.js';
 import type { ModelGateway } from './types.js';
+import type { WebSearchPort } from './web-search.js';
 
 export interface CreateModelGatewayOptions {
   /** Test-only transport substitution. The URL is still the pinned constant. */
   readonly fetchImpl?: FetchLike;
   readonly fake?: FakeModelGatewayOptions;
+  /** Optional bounded web search adapter (e.g. ExaWebSearchClient) for V2 conversation turns. */
+  readonly webSearch?: WebSearchPort;
+  /** Optional Cloudflare AI Gateway target for OpenRouter calls from Cloudflare Workers. */
+  readonly openRouterCloudflareAiGateway?: OpenRouterCloudflareAiGateway;
 }
 
 /**
@@ -51,6 +60,17 @@ export function createModelGateway(
       });
     }
 
+    if (resolution.settings.providerId === 'deepseek') {
+      return new DeepSeekModelGateway({
+        apiKey,
+        modelId,
+        rate: resolution.rate,
+        isAuthorized,
+        ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+        ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+      });
+    }
+
     if (resolution.openRouterRouting === null) {
       throw new Error('OpenRouter requires a reviewed provider routing policy');
     }
@@ -62,6 +82,10 @@ export function createModelGateway(
       routing: resolution.openRouterRouting,
       isAuthorized,
       ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+      ...(options.webSearch === undefined ? {} : { webSearch: options.webSearch }),
+      ...(options.openRouterCloudflareAiGateway === undefined
+        ? {}
+        : { cloudflareAiGateway: options.openRouterCloudflareAiGateway }),
     });
   });
 }

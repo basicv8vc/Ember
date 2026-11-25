@@ -251,7 +251,12 @@ export function resolveModelExecution(
       ? modelApproval.budgetCeilings
       : DEFAULT_MODEL_CEILINGS);
   const ceilings = resolveCeilings(input.ceilings, budgetDefaults);
-  const providerId: ModelProviderId = configuredProvider === 'openrouter' ? 'openrouter' : 'openai';
+  const providerId: ModelProviderId =
+    configuredProvider === 'openrouter'
+      ? 'openrouter'
+      : configuredProvider === 'deepseek'
+        ? 'deepseek'
+        : 'openai';
 
   const settings: ModelExecutionSettings = Object.freeze({
     mode: mode ?? 'disabled',

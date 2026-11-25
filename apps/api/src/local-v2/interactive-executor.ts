@@ -360,6 +360,20 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
             ? error.code
             : 'model_unavailable';
 
+    console.log(
+      JSON.stringify({
+        event: 'v2.model_attempt_failed',
+        path: 'interactive',
+        operationId,
+        outcomeCode,
+        sendState,
+        stopReason: typeof reason === 'string' ? reason : null,
+        errorName: error instanceof Error ? error.name : null,
+        errorCode: isModelGatewayFailure(error) ? error.code : null,
+        diagnostic: isModelGatewayFailure(error) ? error.diagnostic : null,
+      }),
+    );
+
     await publish(
       {
         ...attempt,

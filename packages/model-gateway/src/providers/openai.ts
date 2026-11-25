@@ -42,6 +42,7 @@ export const OPENAI_CHAT_COMPLETIONS_URL = `${OPENAI_ORIGIN}${OPENAI_CHAT_COMPLE
 export interface FetchResponseLike {
   readonly status: number;
   readonly ok: boolean;
+  readonly headers?: { get(name: string): string | null };
   json(): Promise<unknown>;
 }
 

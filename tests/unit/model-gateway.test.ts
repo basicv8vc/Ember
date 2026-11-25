@@ -174,7 +174,7 @@ describe('model gateway limits and pricing', () => {
     expect(worstCasePerAttempt).toBeLessThanOrEqual(MODEL_LIMITS.maxReservedMicroUsdPerAttempt);
   });
 
-  it('ships only the CTO-approved OpenRouter routes', () => {
+  it('ships only the approved real model routes', () => {
     expect(APPROVED_REAL_MODELS).toMatchObject([
       {
         providerId: 'openrouter',
@@ -214,8 +214,26 @@ describe('model gateway limits and pricing', () => {
         maxPaidSmokeTurns: 1,
         openRouterRouting: OPENROUTER_ROUTING,
       },
+      {
+        providerId: 'deepseek',
+        modelId: 'deepseek-chat',
+        approval: {
+          approvalId: 'EMBER-V2-STAGING-DEEPSEEK-DIRECT-2026-11-25',
+          approvedAt: '2026-11-25',
+          expiresAt: '2026-12-31',
+        },
+        executionScope: 'smoke_only',
+        budgetCeilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 250_000,
+          tenantDailyMicroUsd: 1_000_000,
+          globalDailyMicroUsd: 1_000_000,
+          principalDailyTurns: 60,
+        },
+        maxPaidSmokeTurns: 1,
+      },
     ]);
-    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(2);
+    expect(DEFAULT_MODEL_APPROVAL_REGISTRY.models).toHaveLength(3);
     expect(OPENROUTER_RATE.provenance).toBe('official_price_verified');
   });
 });

@@ -12,21 +12,13 @@ struct EmberCloudTarget: Equatable, Sendable {
     let journalSubdirectory: String
     let authFenceSubdirectory: String
     let environmentBadge: String
-
-    var isV2Staging: Bool {
-        baseURL.host?.lowercased() == AppCompositionRoot.v2StagingHost
-    }
 }
 
 @MainActor
 enum AppCompositionRoot {
-    static let defaultCloudBaseURL = "https://ember-api.slowfast.dev"
-    static let v2StagingCloudBaseURL = "https://ember-v2-staging.slowfast.dev"
-    static let v2StagingHost = "ember-v2-staging.slowfast.dev"
-    static let defaultHost = "ember-api.slowfast.dev"
-    static let persistedV2StagingDefaultsKey = "ember.debug.useV2Staging"
+    static let defaultCloudBaseURL = "https://ember-v2-staging.slowfast.dev"
+    static let defaultHost = "ember-v2-staging.slowfast.dev"
     static let infoPlistCloudBaseURLKey = "EmberCloudBaseURL"
-    static let infoPlistAllowEnvironmentSwitchKey = "EmberAllowEnvironmentSwitch"
 
     private static let mockLaunchArguments: Set<String> = [
         "--ember-mock-demo",
@@ -36,59 +28,18 @@ enum AppCompositionRoot {
         "--ember-mock-chat-tasks",
     ]
 
-    static func setPersistedV2Staging(_ enabled: Bool, userDefaults: UserDefaults = .standard) {
-        if enabled {
-            userDefaults.set(true, forKey: persistedV2StagingDefaultsKey)
-        } else {
-            userDefaults.removeObject(forKey: persistedV2StagingDefaultsKey)
-        }
-    }
-
-    static func allowsEnvironmentSwitch(bundleInfo: [String: Any]? = Bundle.main.infoDictionary) -> Bool {
-        #if DEBUG
-        return true
-        #else
-        if let flag = bundleInfo?[infoPlistAllowEnvironmentSwitchKey] as? Bool {
-            return flag
-        }
-        if let raw = bundleInfo?[infoPlistAllowEnvironmentSwitchKey] as? String {
-            return raw == "1" || raw.lowercased() == "true" || raw.lowercased() == "yes"
-        }
-        return false
-        #endif
-    }
-
     /// Resolves the active cloud target and isolated local storage namespace.
     /// - Explicit `EMBER_CLOUD_BASE_URL` takes precedence and fails closed if invalid or non-HTTPS.
-    /// - `--ember-live-cloud` explicitly selects V1 (`ember-api.slowfast.dev`).
-    /// - `--ember-v2-staging` selects the isolated V2 Staging environment (`ember-v2-staging.slowfast.dev`)
-    ///   with a separate Keychain account and conversation journal directory so V1 sessions are never overwritten.
-    /// - `--ember-persist-v2-staging` or the internal switch persists V2 Staging in `UserDefaults` when
-    ///   running in Debug or when `EmberAllowEnvironmentSwitch` is enabled in `Info.plist`.
-    /// - `EmberCloudBaseURL` in `Info.plist` configures the build-time target for standalone Release daily-use builds.
-    /// - Default remains V1 (`ember-api.slowfast.dev`).
+    /// - `EmberCloudBaseURL` in `Info.plist` configures a custom build-time target and fails closed if invalid or non-HTTPS.
+    /// - Default targets Ember V2 Cloud (`ember-v2-staging.slowfast.dev`).
     static func resolveCloudTarget(
         arguments: Set<String>,
         environment: [String: String],
-        userDefaults: UserDefaults = .standard,
         bundleInfo: [String: Any]? = Bundle.main.infoDictionary
     ) -> EmberCloudTarget? {
-        let canSwitchEnvironment = allowsEnvironmentSwitch(bundleInfo: bundleInfo)
-        if canSwitchEnvironment,
-           arguments.contains("--ember-v2-staging"),
-           arguments.contains("--ember-persist-v2-staging") {
-            setPersistedV2Staging(true, userDefaults: userDefaults)
-        }
-
         let origin: String
         if let envOrigin = environment["EMBER_CLOUD_BASE_URL"], !envOrigin.isEmpty {
             origin = envOrigin
-        } else if arguments.contains("--ember-live-cloud") {
-            origin = defaultCloudBaseURL
-        } else if arguments.contains("--ember-v2-staging") {
-            origin = v2StagingCloudBaseURL
-        } else if canSwitchEnvironment, userDefaults.bool(forKey: persistedV2StagingDefaultsKey) {
-            origin = v2StagingCloudBaseURL
         } else if let infoOrigin = (bundleInfo?[infoPlistCloudBaseURLKey] as? String)?
             .trimmingCharacters(in: .whitespacesAndNewlines),
                   !infoOrigin.isEmpty {
@@ -105,16 +56,7 @@ enum AppCompositionRoot {
         }
 
         if host == defaultHost {
-            return EmberCloudTarget(
-                baseURL: url,
-                keychainConfiguration: .live,
-                journalSubdirectory: "EmberConversation",
-                authFenceSubdirectory: FileSessionRecoveryFence.directoryName,
-                environmentBadge: "LIVE CLOUD"
-            )
-        }
-
-        if host == v2StagingHost {
+            // Preserve the existing V2 storage namespace so signed-in devices keep their session and journal.
             return EmberCloudTarget(
                 baseURL: url,
                 keychainConfiguration: KeychainSessionStore.Configuration(
@@ -123,7 +65,7 @@ enum AppCompositionRoot {
                 ),
                 journalSubdirectory: "EmberConversation-v2-staging",
                 authFenceSubdirectory: "\(FileSessionRecoveryFence.directoryName)-v2-staging",
-                environmentBadge: "V2 STAGING"
+                environmentBadge: "LIVE CLOUD"
             )
         }
 
@@ -153,8 +95,7 @@ enum AppCompositionRoot {
         if arguments.contains("--ember-device-executor") {
             DeviceExecutorWorkbenchView(model: DeviceExecutorWorkbenchModel())
         } else if arguments.isDisjoint(with: mockLaunchArguments)
-            || arguments.contains("--ember-live-cloud")
-            || arguments.contains("--ember-v2-staging") {
+            || arguments.contains("--ember-live-cloud") {
             LiveCloudRootView(
                 arguments: arguments,
                 environment: ProcessInfo.processInfo.environment
@@ -198,11 +139,10 @@ private enum LiveComposition {
             fence: fence,
             signOutCleanupHooks: [{ try? await journal.reset() }]
         ))
-        let supportsStreaming = target.baseURL.host?.lowercased() != AppCompositionRoot.defaultHost
         let repository = LiveConversationRepository(
             client: LiveB1ConversationClient(auth: auth),
             journal: journal,
-            supportsStreaming: supportsStreaming
+            supportsStreaming: true
         )
         let taskRepository = LiveB1SessionTaskRepository(auth: auth)
         let scheduleRepository = LiveProactiveScheduleRepository(auth: auth)
@@ -216,8 +156,8 @@ private enum LiveComposition {
             taskRepository: taskRepository,
             scheduleRepository: scheduleRepository,
             memoryRepository: memoryRepository,
-            cloudBaseURL: target.baseURL.host?.lowercased() == AppCompositionRoot.defaultHost ? nil : target.baseURL,
-            deviceAuthProvider: target.baseURL.host?.lowercased() == AppCompositionRoot.defaultHost ? nil : auth,
+            cloudBaseURL: target.baseURL,
+            deviceAuthProvider: auth,
             environmentBadge: target.environmentBadge
         )
     }
@@ -227,12 +167,8 @@ private enum LiveComposition {
 private struct LiveCloudRootView: View {
     @State private var target: EmberCloudTarget?
     @State private var model: LiveConversationHostModel?
-    private let environment: [String: String]
-    private let allowsEnvironmentSwitch: Bool
 
     init(arguments: Set<String>, environment: [String: String]) {
-        self.environment = environment
-        self.allowsEnvironmentSwitch = AppCompositionRoot.allowsEnvironmentSwitch()
         let resolved = AppCompositionRoot.resolveCloudTarget(
             arguments: arguments,
             environment: environment
@@ -243,25 +179,8 @@ private struct LiveCloudRootView: View {
 
     var body: some View {
         if let target, let model {
-            let toggleBinding: Binding<Bool>? = allowsEnvironmentSwitch
-                ? Binding(
-                    get: { target.isV2Staging },
-                    set: { enabled in
-                        AppCompositionRoot.setPersistedV2Staging(enabled)
-                        let nextTarget = AppCompositionRoot.resolveCloudTarget(
-                            arguments: [],
-                            environment: environment
-                        )
-                        self.target = nextTarget
-                        self.model = nextTarget.flatMap { try? LiveComposition.make(target: $0) }
-                    }
-                )
-                : nil
-            LiveConversationHost(
-                model: model,
-                debugUseV2Staging: toggleBinding
-            )
-            .id(target.baseURL.absoluteString)
+            LiveConversationHost(model: model)
+                .id(target.baseURL.absoluteString)
         } else {
             ContentUnavailableView(
                 "Live Cloud configuration unavailable",

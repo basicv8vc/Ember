@@ -457,19 +457,26 @@ private struct ConversationMessageBubble: View {
                 Spacer(minLength: 56)
 
                 VStack(alignment: .trailing, spacing: 4) {
-                    Text(verbatim: message.text)
-                        .font(.body)
-                        .foregroundStyle(.primary)
-                        .multilineTextAlignment(.leading)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .textSelection(.enabled)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 10)
-                        .background(
-                            EmberDesignTokens.chatUserBubble,
-                            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        )
-                        .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
+                    Group {
+                        if let linkedText = ConversationCardFormatting.linkifiedPlainText(for: message.text) {
+                            Text(linkedText)
+                                .tint(.primary)
+                        } else {
+                            Text(verbatim: message.text)
+                        }
+                    }
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(
+                        EmberDesignTokens.chatUserBubble,
+                        in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    )
+                    .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
 
                     if let deliveryNote = message.deliveryNote {
                         Text(deliveryNote)
@@ -496,6 +503,7 @@ private struct ConversationMessageBubble: View {
                     )
                     .font(.body)
                     .foregroundStyle(.primary)
+                    .tint(.primary)
                     .fixedSize(horizontal: false, vertical: true)
                     .textSelection(.enabled)
 

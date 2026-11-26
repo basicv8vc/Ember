@@ -146,6 +146,7 @@ struct PersonalMemorySheetView: View {
                 editMemorySheet(for: item)
             }
         }
+        .emberInAppBrowser()
     }
 
     @ViewBuilder

@@ -108,14 +108,33 @@ enum ConversationCardFormatting {
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
-        guard let parsed = try? AttributedString(markdown: rawText, options: options) else {
+        guard var parsed = try? AttributedString(markdown: rawText, options: options) else {
             return nil
         }
+        EmberLinkDetector.enhanceLinks(in: &parsed)
         if shouldCache {
             let cost = max(1, utf8ByteCount * 4)
             attributedMarkdownCache.setObject(AttributedStringBox(parsed), forKey: rawText as NSString, cost: cost)
         }
         return parsed
+    }
+
+    static func linkifiedPlainText(for rawText: String, useCache: Bool = true) -> AttributedString? {
+        guard !rawText.isEmpty else { return nil }
+        let utf8ByteCount = rawText.utf8.count
+        let shouldCache = useCache && utf8ByteCount <= maxCacheableEntryBytes
+        let cacheKey = ("plain:\(rawText)") as NSString
+        if shouldCache, let cached = attributedMarkdownCache.object(forKey: cacheKey) {
+            return cached.value
+        }
+        guard let linked = EmberLinkDetector.linkifiedPlainText(for: rawText) else {
+            return nil
+        }
+        if shouldCache {
+            let cost = max(1, utf8ByteCount * 4)
+            attributedMarkdownCache.setObject(AttributedStringBox(linked), forKey: cacheKey, cost: cost)
+        }
+        return linked
     }
 
     static func cachedMarkdownBlocks(for rawText: String, useCache: Bool = true) -> [ConversationMarkdownBlock] {

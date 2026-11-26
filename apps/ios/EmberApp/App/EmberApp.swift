@@ -5,6 +5,7 @@ struct EmberApp: App {
     var body: some Scene {
         WindowGroup {
             AppCompositionRoot.makeRootView()
+                .emberInAppBrowser()
         }
     }
 }

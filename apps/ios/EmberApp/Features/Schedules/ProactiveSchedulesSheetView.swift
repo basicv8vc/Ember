@@ -197,6 +197,7 @@ struct ProactiveSchedulesSheetView: View {
                 )
             }
         }
+        .emberInAppBrowser()
     }
 
     @ViewBuilder

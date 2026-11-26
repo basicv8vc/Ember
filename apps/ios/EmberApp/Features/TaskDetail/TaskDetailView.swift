@@ -123,7 +123,7 @@ private struct SessionTaskDetailContent: View {
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
-        .background(EmberDesignTokens.groupedBackground)
+        .background(EmberDesignTokens.surfaceCanvas)
         .navigationTitle(Text("tasks.detail.nav_title", tableName: "Conversation"))
         .navigationBarTitleDisplayMode(.inline)
         .refreshable {
@@ -171,7 +171,7 @@ private struct SessionTaskDetailContent: View {
                             .padding(EmberDesignTokens.standardSpacing)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
-                    .background(EmberDesignTokens.groupedBackground)
+                    .background(EmberDesignTokens.surfaceCanvas)
                     .navigationTitle(payload.filename)
                     .navigationBarTitleDisplayMode(.inline)
                     .toolbar {
@@ -307,10 +307,7 @@ private struct SessionTaskDetailContent: View {
         }
         .padding(EmberDesignTokens.standardSpacing)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-detail-summary")
     }
@@ -430,10 +427,7 @@ private struct SessionTaskDetailContent: View {
             }
             .padding(EmberDesignTokens.standardSpacing)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                EmberDesignTokens.cardBackground,
-                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-            )
+            .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         }
     }
 
@@ -514,10 +508,7 @@ private struct SessionTaskDetailContent: View {
         }
         .padding(EmberDesignTokens.standardSpacing)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-detail-timeline")
     }
@@ -607,10 +598,7 @@ private struct SessionTaskDetailContent: View {
             }
             .padding(EmberDesignTokens.standardSpacing)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                EmberDesignTokens.cardBackground,
-                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-            )
+            .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("task-detail-artifacts")
         }
@@ -710,10 +698,7 @@ private struct SessionTaskDetailContent: View {
         .padding(.horizontal, EmberDesignTokens.standardSpacing)
         .padding(.vertical, 8)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("task-detail-technical-details")
     }
@@ -756,7 +741,7 @@ private struct SessionTaskDetailContent: View {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: item.createdBy == .user ? "doc.text" : "doc.badge.gearshape")
                     .font(.body)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(.primary)
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 3) {
@@ -823,6 +808,7 @@ private struct SessionTaskDetailContent: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                .tint(.primary)
                 .frame(minHeight: 44)
                 .disabled(isDownloading)
                 .accessibilityIdentifier("task-artifact-download-\(item.artifactID.uuidString.lowercased())")
@@ -836,7 +822,14 @@ private struct SessionTaskDetailContent: View {
             }
         }
         .padding(12)
-        .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 12))
+        .background(
+            EmberDesignTokens.surfaceSubtle,
+            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .strokeBorder(EmberDesignTokens.surfaceHairline, lineWidth: 1)
+        }
     }
 
     private func artifactPreviewButton(
@@ -875,6 +868,7 @@ private struct SessionTaskDetailContent: View {
             }
         }
         .buttonStyle(.bordered)
+        .tint(.primary)
         .frame(minHeight: 44)
         .accessibilityIdentifier("task-artifact-preview-\(item.artifactID.uuidString.lowercased())")
     }
@@ -889,8 +883,10 @@ private struct SessionTaskDetailContent: View {
             } icon: {
                 Image(systemName: "square.and.arrow.up")
             }
+            .foregroundStyle(EmberDesignTokens.primaryActionForeground)
         }
         .buttonStyle(.borderedProminent)
+        .tint(EmberDesignTokens.primaryActionFill)
         .frame(minHeight: 44)
         .accessibilityIdentifier("task-artifact-export-\(item.artifactID.uuidString.lowercased())")
     }

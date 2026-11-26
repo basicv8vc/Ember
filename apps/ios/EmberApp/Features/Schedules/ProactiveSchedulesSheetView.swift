@@ -109,7 +109,7 @@ struct ProactiveSchedulesSheetView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text("schedules.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
@@ -237,10 +237,12 @@ struct ProactiveSchedulesSheetView: View {
                     } icon: {
                         Image(systemName: "plus")
                     }
+                    .foregroundStyle(EmberDesignTokens.primaryActionForeground)
                     .frame(minHeight: 44)
                     .padding(.horizontal, 12)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(EmberDesignTokens.primaryActionFill)
                 .accessibilityIdentifier("schedules-empty-add-button")
             }
         } else {
@@ -375,14 +377,7 @@ struct ProactiveSchedulesSheetView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-        }
+        .emberCardSurface(cornerRadius: 16)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("schedule-item-\(idSuffix)")
     }
@@ -435,7 +430,7 @@ struct ProactiveSchedulesSheetView: View {
                     .fixedSize(horizontal: false, vertical: true)
                 }
                 .font(.caption)
-                .foregroundStyle(Color.accentColor)
+                .foregroundStyle(Color(uiColor: .systemIndigo))
                 .accessibilityIdentifier("schedule-run-in-flight-\(idSuffix)")
 
             case "waiting_approval":
@@ -508,9 +503,13 @@ struct ProactiveSchedulesSheetView: View {
                     .padding(10)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(
-                        EmberDesignTokens.groupedBackground,
+                        EmberDesignTokens.surfaceSubtle,
                         in: RoundedRectangle(cornerRadius: 10, style: .continuous)
                     )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .strokeBorder(EmberDesignTokens.surfaceHairline, lineWidth: 1)
+                    }
                     .accessibilityIdentifier("schedule-result-\(idSuffix)")
             }
         }
@@ -576,6 +575,7 @@ struct ProactiveSchedulesSheetView: View {
                     .padding(.horizontal, 4)
             }
             .buttonStyle(.bordered)
+            .tint(.primary)
             .disabled(isMutating)
             .accessibilityIdentifier("schedule-pause-\(idSuffix)")
         } else if schedule.status == .paused {
@@ -588,6 +588,7 @@ struct ProactiveSchedulesSheetView: View {
                     .padding(.horizontal, 4)
             }
             .buttonStyle(.bordered)
+            .tint(.primary)
             .disabled(isMutating)
             .accessibilityIdentifier("schedule-resume-\(idSuffix)")
         }
@@ -627,6 +628,7 @@ struct ProactiveSchedulesSheetView: View {
                     .padding(.horizontal, 4)
             }
             .buttonStyle(.bordered)
+            .tint(.primary)
             .accessibilityIdentifier("schedule-open-chat-\(idSuffix)")
         }
     }
@@ -1013,7 +1015,7 @@ private struct CreateScheduleSheet: View {
                 .padding(EmberDesignTokens.standardSpacing)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text("schedules.add.action", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
             .onChange(of: selectedKind) { _, newKind in

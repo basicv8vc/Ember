@@ -60,7 +60,14 @@ public struct OutcomeCard: View {
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(11)
-                        .background(Color(uiColor: .systemBackground), in: RoundedRectangle(cornerRadius: 12))
+                        .background(
+                            EmberDesignTokens.surfaceSubtle,
+                            in: RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .strokeBorder(EmberDesignTokens.surfaceHairline, lineWidth: 1)
+                        }
 
                     HStack(spacing: 8) {
                         if let onCopy {
@@ -72,6 +79,7 @@ public struct OutcomeCard: View {
                                 }
                             }
                             .buttonStyle(.bordered)
+                            .tint(.primary)
                             .frame(minHeight: 44)
                             .accessibilityIdentifier("outcome-copy")
                         }
@@ -84,6 +92,7 @@ public struct OutcomeCard: View {
                             }
                         }
                         .buttonStyle(.bordered)
+                        .tint(.primary)
                         .frame(minHeight: 44)
                         .accessibilityIdentifier("outcome-share")
                     }

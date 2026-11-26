@@ -52,10 +52,7 @@ struct DeviceExecutorStatusSheet: View {
                         .accessibilityIdentifier("device-executor-toggle")
                     }
                     .padding(EmberDesignTokens.standardSpacing)
-                    .background(
-                        EmberDesignTokens.cardBackground,
-                        in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-                    )
+                    .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
 
                     VStack(alignment: .leading, spacing: 10) {
                         LabeledContent {
@@ -113,10 +110,7 @@ struct DeviceExecutorStatusSheet: View {
                         }
                     }
                     .padding(EmberDesignTokens.standardSpacing)
-                    .background(
-                        EmberDesignTokens.cardBackground,
-                        in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-                    )
+                    .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
 
                     #if DEBUG
                     if monitor.deviceID != nil {
@@ -193,7 +187,7 @@ struct DeviceExecutorStatusSheet: View {
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text("device.executor.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

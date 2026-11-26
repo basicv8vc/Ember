@@ -46,6 +46,39 @@ final class EmberChatMonochromeTokensTests: XCTestCase {
         XCTAssertLessThan(relativeLuminance(dark), 0.02)
     }
 
+    func testSharedVisualV1SurfaceHierarchyAndContrast() {
+        for style in [UIUserInterfaceStyle.light, .dark] {
+            let traits = UITraitCollection(userInterfaceStyle: style)
+            let foreground = UIColor.label.resolvedColor(with: traits)
+            let paper = resolved(EmberDesignTokens.surfacePaper, traits: traits)
+            let subtle = resolved(EmberDesignTokens.surfaceSubtle, traits: traits)
+            let hairline = resolved(EmberDesignTokens.surfaceHairline, traits: traits)
+            let actionFill = resolved(EmberDesignTokens.primaryActionFill, traits: traits)
+            let actionForeground = resolved(EmberDesignTokens.primaryActionForeground, traits: traits)
+
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(foreground, paper), 4.5,
+                "Card body text contrast must remain readable on surfacePaper in \(style)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(foreground, subtle), 4.5,
+                "Nested well text contrast must remain readable on surfaceSubtle in \(style)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(actionForeground, actionFill), 4.5,
+                "Primary monochrome CTA contrast must remain readable in \(style)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(paper, subtle), 1.1,
+                "Nested wells must remain visually distinct from paper cards in \(style)"
+            )
+            XCTAssertGreaterThanOrEqual(
+                contrastRatio(paper, hairline), 1.25,
+                "Card hairlines must remain visible against paper cards in \(style)"
+            )
+        }
+    }
+
     private func resolved(_ color: Color, traits: UITraitCollection) -> UIColor {
         UIColor(color).resolvedColor(with: traits)
     }

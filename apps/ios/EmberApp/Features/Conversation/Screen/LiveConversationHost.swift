@@ -13,6 +13,11 @@ struct TurnLatencyMetrics: Equatable, Sendable {
     let deltaCount: Int
 }
 
+struct PendingRejectedDraft: Equatable, Sendable {
+    let id: UUID
+    let text: String
+}
+
 /// The Live host observes real Cloud state; it never runs the local Mock reply generator unless explicitly configured for B3 Mock UI tests.
 @MainActor @Observable
 final class LiveConversationHostModel {
@@ -80,6 +85,7 @@ final class LiveConversationHostModel {
     private(set) var refreshErrorMessage: String?
     private(set) var requiresSignIn = false
     private(set) var rejectedDraftText: String?
+    private(set) var pendingRejectedDraftRestoration: PendingRejectedDraft?
     private(set) var pendingOutgoingText: String?
     private(set) var streamingReplyText: String?
     private(set) var lastTurnMetrics: TurnLatencyMetrics?
@@ -418,6 +424,7 @@ final class LiveConversationHostModel {
         requiresSignIn = true
         signInErrorMessage = nil
         rejectedDraftText = nil
+        pendingRejectedDraftRestoration = nil
         pendingOutgoingText = nil
         streamingReplyText = nil
         lastTurnMetrics = nil
@@ -435,6 +442,7 @@ final class LiveConversationHostModel {
         taskStore.clear()
         scheduleStore.clear()
         memoryStore.clear()
+        ConversationCardFormatting.clearCaches()
     }
 
     func removeAttachment(_ attachmentID: UUID) {
@@ -667,6 +675,7 @@ final class LiveConversationHostModel {
         isSubmitting = true
         command = .submitting
         rejectedDraftText = nil
+        pendingRejectedDraftRestoration = nil
         pendingOutgoingText = trimmedOutgoing.isEmpty ? nil : trimmedOutgoing
         streamingReplyText = nil
         attachmentError = nil
@@ -1204,7 +1213,7 @@ final class LiveConversationHostModel {
             case .activity(let activity):
                 return .activity(ConversationActivityPresentation(
                     id: stableID,
-                    title: "Cloud activity",
+                    title: String(localized: "conversation.activity.cloud", table: "Conversation"),
                     detail: activity.text,
                     timestamp: message.createdAt
                 ))
@@ -1246,7 +1255,8 @@ final class LiveConversationHostModel {
                     author: .ember,
                     text: streamingReplyText,
                     timestamp: nil,
-                    accessibilityIdentifierOverride: "conversation-streaming-reply"
+                    accessibilityIdentifierOverride: "conversation-streaming-reply",
+                    isStreaming: true
                 ))
             )
         }
@@ -1958,9 +1968,16 @@ final class LiveConversationHostModel {
         status = LiveConversationCopy.sendUnknownAckStatus
     }
 
+    func consumePendingRejectedDraftRestoration(id: UUID) {
+        if pendingRejectedDraftRestoration?.id == id {
+            pendingRejectedDraftRestoration = nil
+        }
+    }
+
     private func applyRejectedSubmission(draftText: String?, reason: RejectionReason) {
         if let draftText {
             rejectedDraftText = draftText
+            pendingRejectedDraftRestoration = PendingRejectedDraft(id: UUID(), text: draftText)
         }
         pendingOutgoingText = nil
         command = .rejected
@@ -2032,7 +2049,7 @@ private struct SessionTaskPendingReferenceCard: View {
 struct LiveConversationHost: View {
     @Environment(\.scenePhase) private var scenePhase
     @State private var model: LiveConversationHostModel
-    @State private var draft = ""
+    @State private var isShowingSidebar = false
     @State private var isConfirmingSignOut = false
     @State private var isShowingMemorySheet = false
     @State private var isShowingSchedulesSheet = false
@@ -2041,15 +2058,12 @@ struct LiveConversationHost: View {
     @State private var isShowingCamera = false
     @State private var selectedPhotoItems: [PhotosPickerItem] = []
 
-    private let debugUseV2Staging: Binding<Bool>?
-
     private static var allowedAttachmentTypes: [UTType] {
         [.item]
     }
 
-    init(model: LiveConversationHostModel, debugUseV2Staging: Binding<Bool>? = nil) {
+    init(model: LiveConversationHostModel) {
         _model = State(initialValue: model)
-        self.debugUseV2Staging = debugUseV2Staging
     }
 
     var body: some View {
@@ -2057,29 +2071,75 @@ struct LiveConversationHost: View {
             if model.requiresSignIn {
                 signInView
             } else {
-                TabView(selection: $model.selectedTab) {
-                    chatTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.chat", table: "Conversation"),
-                                systemImage: "bubble.left.and.bubble.right"
-                            )
-                        }
-                        .tag(LiveConversationHostModel.RootTab.chat)
+                EmberSidebarContainer(
+                    isShowingSidebar: $isShowingSidebar,
+                    canSwipeOpenFromEdge: canSwipeOpenSidebarFromEdge,
+                    selectedTab: model.selectedTab,
+                    needsInterventionCount: model.taskStore.needsInterventionCount,
+                    hasMemoryRepository: model.memoryStore.hasRepository,
+                    memoryUnavailable: model.memoryStore.isEndpointUnavailable,
+                    hasSchedulesRepository: model.scheduleStore.hasRepository,
+                    schedulesUnavailable: model.scheduleStore.isEndpointUnavailable,
+                    isMockMode: model.isMockMode,
+                    environmentBadge: model.environmentBadge,
+                    canSignOut: !model.isSigningOut && !model.isSubmitting && !model.isLoading,
+                    onOpenChat: {
+                        model.selectedTab = .chat
+                    },
+                    onOpenTasks: {
+                        model.selectedTab = .tasks
+                    },
+                    onOpenMemory: {
+                        isShowingMemorySheet = true
+                    },
+                    onOpenSchedules: {
+                        isShowingSchedulesSheet = true
+                    },
+                    onSignOut: {
+                        isConfirmingSignOut = true
+                    }
+                ) {
+                    TabView(selection: $model.selectedTab) {
+                        chatTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.chat", table: "Conversation"),
+                                    systemImage: "bubble.left.and.bubble.right"
+                                )
+                            }
+                            .tag(LiveConversationHostModel.RootTab.chat)
 
-                    tasksTab
-                        .tabItem {
-                            Label(
-                                String(localized: "tab.tasks", table: "Conversation"),
-                                systemImage: "checklist"
-                            )
-                        }
-                        .badge(model.taskStore.needsInterventionCount)
-                        .tag(LiveConversationHostModel.RootTab.tasks)
+                        tasksTab
+                            .tabItem {
+                                Label(
+                                    String(localized: "tab.tasks", table: "Conversation"),
+                                    systemImage: "checklist"
+                                )
+                            }
+                            .badge(model.taskStore.needsInterventionCount)
+                            .tag(LiveConversationHostModel.RootTab.tasks)
+                    }
                 }
             }
         }
         .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .sheet(isPresented: $isShowingMemorySheet) {
+            PersonalMemorySheetView(store: model.memoryStore)
+        }
+        .sheet(isPresented: $isShowingSchedulesSheet) {
+            ProactiveSchedulesSheetView(
+                store: model.scheduleStore,
+                onOpenChat: {
+                    isShowingSchedulesSheet = false
+                    model.selectedTab = .chat
+                }
+            )
+        }
+        .onChange(of: isShowingSchedulesSheet) { _, isShowing in
+            if !isShowing {
+                Task { await model.handleSchedulesSheetDismissed() }
+            }
+        }
         .alert(
             Text("conversation.live.sign_out_confirm_title", tableName: "Conversation"),
             isPresented: $isConfirmingSignOut
@@ -2090,7 +2150,6 @@ struct LiveConversationHost: View {
             Button(role: .destructive) {
                 Task {
                     await model.signOut()
-                    if model.requiresSignIn { draft = "" }
                 }
             } label: {
                 Text("conversation.live.sign_out", tableName: "Conversation")
@@ -2112,15 +2171,33 @@ struct LiveConversationHost: View {
             model.handleViewAppeared()
         }
         .onDisappear { model.handleViewDisappeared() }
-        .onChange(of: model.rejectedDraftText) { _, rejected in
-            // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
-            if let rejected, draft.isEmpty { draft = rejected }
-        }
         .onChange(of: model.selectedTab) { _, newTab in
             Task { await model.handleTabSelection(newTab) }
         }
         .onChange(of: scenePhase) { _, newPhase in
             model.handleScenePhase(newPhase)
+        }
+        .onChange(of: model.requiresSignIn) { _, needsSignIn in
+            if needsSignIn { isShowingSidebar = false }
+        }
+    }
+
+    private var canSwipeOpenSidebarFromEdge: Bool {
+        guard !model.requiresSignIn,
+              !isShowingMemorySheet,
+              !isShowingSchedulesSheet,
+              !isConfirmingSignOut,
+              !isShowingFileImporter,
+              !isShowingPhotoPicker,
+              !isShowingCamera
+        else {
+            return false
+        }
+        switch model.selectedTab {
+        case .chat:
+            return model.chatNavigationPath.isEmpty
+        case .tasks:
+            return model.tasksNavigationPath.isEmpty
         }
     }
 
@@ -2169,67 +2246,42 @@ struct LiveConversationHost: View {
                     .multilineTextAlignment(.center)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let debugUseV2Staging,
-               (ProcessInfo.processInfo.environment["EMBER_CLOUD_BASE_URL"] ?? "").isEmpty {
-                Toggle("V2 Staging (Internal QA)", isOn: debugUseV2Staging)
-                    .toggleStyle(.switch)
-                    .font(.caption)
-                    .frame(maxWidth: 260)
-                    .padding(.top, 8)
-                    .accessibilityIdentifier("debug-v2-staging-toggle")
-            }
         }
         .padding()
     }
 
     private var chatTab: some View {
         NavigationStack(path: $model.chatNavigationPath) {
-            ConversationScreen(
-                    state: model.screen,
-                    draft: $draft,
-                    actions: ConversationScreenActions(
-                        send: { text in
-                            draft = ""
-                            Task { await model.send(text) }
-                        },
-                        retry: { Task { await model.retry() } },
-                        stopGenerating: { model.triggerStop() },
-                        selectPrompt: { draft = $0 },
-                        onDismissError: { model.dismissReplyError() },
-                        onTakePhoto: {
-                            if UIImagePickerController.isSourceTypeAvailable(.camera) {
-                                isShowingCamera = true
-                            } else {
-                                model.reportCameraUnavailable()
-                            }
-                        },
-                        onChoosePhoto: { isShowingPhotoPicker = true },
-                        onPickAttachment: { isShowingFileImporter = true },
-                        onRemoveAttachment: { model.removeAttachment($0) }
-                    ),
-                    composerNote: model.isMockMode
-                        ? "conversation.composer.local_note"
-                        : "conversation.composer.cloud_note",
-                    showsSubmissionAcknowledgement: model.isMockMode,
-                    replyPreparingText: model.isMockMode
-                        ? "conversation.reply.preparing"
-                        : "conversation.reply.waiting_for_cloud",
-                    replyStopText: model.isMockMode
-                        ? "conversation.reply.stop"
-                        : "conversation.reply.cancel_cloud_turn",
-                    emberMessageAuthorText: model.isMockMode
-                        ? "conversation.message.ember_mock"
-                        : "conversation.message.ember_cloud",
-                    onRefresh: {
-                        await model.refreshConversationAndTasks()
-                    },
-                    headerMenu: {
-                        chatHeaderMenu
-                    },
-                    topNotices: {
-                        chatTopNotices
+            LiveChatDraftHost(
+                state: model.screen,
+                pendingRejectedDraft: model.pendingRejectedDraftRestoration,
+                requiresSignIn: model.requiresSignIn,
+                isMockMode: model.isMockMode,
+                onConsumeRejectedDraft: { model.consumePendingRejectedDraftRestoration(id: $0) },
+                onSend: { text in Task { await model.send(text) } },
+                onRetry: { Task { await model.retry() } },
+                onStopGenerating: { model.triggerStop() },
+                onDismissError: { model.dismissReplyError() },
+                onTakePhoto: {
+                    if UIImagePickerController.isSourceTypeAvailable(.camera) {
+                        isShowingCamera = true
+                    } else {
+                        model.reportCameraUnavailable()
                     }
-                )
+                },
+                onChoosePhoto: { isShowingPhotoPicker = true },
+                onPickAttachment: { isShowingFileImporter = true },
+                onRemoveAttachment: { model.removeAttachment($0) },
+                onRefresh: {
+                    await model.refreshConversationAndTasks()
+                },
+                headerMenu: {
+                    chatHeaderMenu
+                },
+                topNotices: {
+                    chatTopNotices
+                }
+            )
             .photosPicker(
                 isPresented: $isShowingPhotoPicker,
                 selection: $selectedPhotoItems,
@@ -2286,25 +2338,27 @@ struct LiveConversationHost: View {
                 TaskDetailView(taskID: taskID, store: model.taskStore)
                     .toolbar(.hidden, for: .tabBar)
             }
-            .sheet(isPresented: $isShowingMemorySheet) {
-                PersonalMemorySheetView(store: model.memoryStore)
-            }
-            .sheet(isPresented: $isShowingSchedulesSheet) {
-                ProactiveSchedulesSheetView(
-                    store: model.scheduleStore,
-                    onOpenChat: { isShowingSchedulesSheet = false }
-                )
-            }
-            .onChange(of: isShowingSchedulesSheet) { _, isShowing in
-                if !isShowing {
-                    Task { await model.handleSchedulesSheetDismissed() }
-                }
-            }
         }
     }
 
     private var chatHeaderMenu: some View {
         Menu {
+            Button {
+                Task { @MainActor in
+                    await Task.yield()
+                    isShowingSidebar = true
+                }
+            } label: {
+                Label {
+                    Text(String(localized: "sidebar.open", table: "Conversation"))
+                } icon: {
+                    Image(systemName: "sidebar.leading")
+                }
+            }
+            .accessibilityIdentifier("live-conversation-open-sidebar")
+
+            Divider()
+
             if model.scheduleStore.hasRepository {
                 Button {
                     isShowingSchedulesSheet = true
@@ -2364,7 +2418,7 @@ struct LiveConversationHost: View {
 
                 if model.scheduleStore.hasInFlightRun {
                     Circle()
-                        .fill(EmberDesignTokens.emberMarkTint)
+                        .fill(EmberDesignTokens.chatBrandInk)
                         .frame(width: 7, height: 7)
                         .offset(x: 2, y: -1)
                         .accessibilityHidden(true)
@@ -2474,9 +2528,9 @@ struct LiveConversationHost: View {
         Button {
             Task { await model.refreshConversationAndTasks() }
         } label: {
-            Text("conversation.live.refresh_retry", tableName: "Conversation")
+            Text(String(localized: "conversation.live.refresh_retry", table: "Conversation"))
                 .font(.caption.weight(.semibold))
-                .frame(minHeight: 32)
+                .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -2492,7 +2546,7 @@ struct LiveConversationHost: View {
                 systemImage: "arrow.clockwise"
             )
             .font(.caption.weight(.semibold))
-            .frame(minHeight: 32)
+            .frame(minWidth: EmberDesignTokens.minTapTarget, minHeight: EmberDesignTokens.minTapTarget)
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
@@ -2572,6 +2626,12 @@ struct LiveConversationHost: View {
                 onOpenChat: {
                     model.selectedTab = .chat
                 },
+                onOpenNavigationDirectory: {
+                    Task { @MainActor in
+                        await Task.yield()
+                        isShowingSidebar = true
+                    }
+                },
                 onOpenTask: { taskID in
                     model.openTaskFromInbox(taskID)
                 }
@@ -2581,6 +2641,116 @@ struct LiveConversationHost: View {
                     .toolbar(.hidden, for: .tabBar)
             }
         }
+    }
+}
+
+struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
+    let state: ConversationScreenState
+    let pendingRejectedDraft: PendingRejectedDraft?
+    let requiresSignIn: Bool
+    let isMockMode: Bool
+    let onConsumeRejectedDraft: (UUID) -> Void
+    let onSend: (String) -> Void
+    let onRetry: () -> Void
+    let onStopGenerating: () -> Void
+    let onDismissError: () -> Void
+    let onTakePhoto: () -> Void
+    let onChoosePhoto: () -> Void
+    let onPickAttachment: () -> Void
+    let onRemoveAttachment: (UUID) -> Void
+    let onRefresh: () async -> Void
+    let headerMenu: HeaderMenu
+    let topNotices: TopNotices
+
+    @State private var draft = ""
+
+    init(
+        state: ConversationScreenState,
+        pendingRejectedDraft: PendingRejectedDraft?,
+        requiresSignIn: Bool,
+        isMockMode: Bool,
+        onConsumeRejectedDraft: @escaping (UUID) -> Void,
+        onSend: @escaping (String) -> Void,
+        onRetry: @escaping () -> Void,
+        onStopGenerating: @escaping () -> Void,
+        onDismissError: @escaping () -> Void,
+        onTakePhoto: @escaping () -> Void,
+        onChoosePhoto: @escaping () -> Void,
+        onPickAttachment: @escaping () -> Void,
+        onRemoveAttachment: @escaping (UUID) -> Void,
+        onRefresh: @escaping () async -> Void,
+        @ViewBuilder headerMenu: () -> HeaderMenu,
+        @ViewBuilder topNotices: () -> TopNotices
+    ) {
+        self.state = state
+        self.pendingRejectedDraft = pendingRejectedDraft
+        self.requiresSignIn = requiresSignIn
+        self.isMockMode = isMockMode
+        self.onConsumeRejectedDraft = onConsumeRejectedDraft
+        self.onSend = onSend
+        self.onRetry = onRetry
+        self.onStopGenerating = onStopGenerating
+        self.onDismissError = onDismissError
+        self.onTakePhoto = onTakePhoto
+        self.onChoosePhoto = onChoosePhoto
+        self.onPickAttachment = onPickAttachment
+        self.onRemoveAttachment = onRemoveAttachment
+        self.onRefresh = onRefresh
+        self.headerMenu = headerMenu()
+        self.topNotices = topNotices()
+    }
+
+    var body: some View {
+        ConversationScreen(
+            state: state,
+            draft: $draft,
+            actions: ConversationScreenActions(
+                send: { text in
+                    draft = ""
+                    onSend(text)
+                },
+                retry: onRetry,
+                stopGenerating: onStopGenerating,
+                selectPrompt: { draft = $0 },
+                onDismissError: onDismissError,
+                onTakePhoto: onTakePhoto,
+                onChoosePhoto: onChoosePhoto,
+                onPickAttachment: onPickAttachment,
+                onRemoveAttachment: onRemoveAttachment
+            ),
+            composerNote: isMockMode
+                ? "conversation.composer.local_note"
+                : "conversation.composer.cloud_note",
+            showsSubmissionAcknowledgement: isMockMode,
+            replyPreparingText: isMockMode
+                ? "conversation.reply.preparing"
+                : "conversation.reply.waiting_for_cloud",
+            replyStopText: isMockMode
+                ? "conversation.reply.stop"
+                : "conversation.reply.cancel_cloud_turn",
+            emberMessageAuthorText: isMockMode
+                ? "conversation.message.ember_mock"
+                : "conversation.message.ember_cloud",
+            onRefresh: onRefresh,
+            headerMenu: { headerMenu },
+            topNotices: { topNotices }
+        )
+        .onChange(of: pendingRejectedDraft, initial: true) { _, pending in
+            guard let pending else { return }
+            // Do not overwrite user edits. Only an explicit Send may create a fresh ID.
+            draft = Self.applyPendingRejectedDraft(currentDraft: draft, pending: pending)
+            onConsumeRejectedDraft(pending.id)
+        }
+        .onChange(of: requiresSignIn, initial: true) { _, needsSignIn in
+            if needsSignIn { draft = "" }
+        }
+    }
+
+    static func applyPendingRejectedDraft(
+        currentDraft: String,
+        pending: PendingRejectedDraft
+    ) -> String {
+        currentDraft.isEmpty ? pending.text : currentDraft
     }
 }
 

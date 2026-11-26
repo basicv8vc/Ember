@@ -21,13 +21,18 @@ import {
   GLOBAL_BUDGET_REAL_OBJECT_NAME,
   PROACTIVE_SCHEDULE_RECURRING_REAL_MODEL_DENIED_REPLY,
   applyAgentHeadMigrations,
+  checkLocalBudgetCapacitySync,
   createAgentHeadGlobalBudgetOptions,
   createDefaultAgentHeadMigrations,
+  findLocalUnresolvedIncidentSync,
   resolveGlobalBudgetObjectName,
   runV2FakePythonSandbox,
+  type AgentBudgetIncidentRow,
+  type AgentSpendDayRow,
   type D1DatabaseLike,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
+  type LocalBudgetCeilings,
   type ProactiveScheduleDetail,
   type ProactiveScheduleSnapshot,
   type QueueLike,
@@ -123,6 +128,8 @@ function createInMemoryHarness(
     globalCeilingMicroUsd?: number;
     nowMs?: () => number;
     allowRecurringModelBriefs?: boolean;
+    localCeilings?: LocalBudgetCeilings;
+    realGlobalBudget?: GlobalBudgetAuthority;
   } = {},
 ) {
   const headDb = new DatabaseSync(':memory:');
@@ -132,6 +139,7 @@ function createInMemoryHarness(
   const globalBudget = new GlobalBudgetAuthorityCore(
     gbStorage,
     options.globalCeilingMicroUsd ?? 100_000,
+    options.nowMs,
   );
   const registry: RecoveryRegistryPort = {
     upsertCoverage: vi.fn((cmd: Parameters<RecoveryRegistryPort['upsertCoverage']>[0]) =>
@@ -175,7 +183,11 @@ function createInMemoryHarness(
     agentId: AGENT_A,
     recoveryRegistry: registry,
     globalBudget,
+    ...(options.realGlobalBudget === undefined
+      ? {}
+      : { realGlobalBudget: options.realGlobalBudget }),
     globalDailyCeilingMicroUsd: options.globalCeilingMicroUsd ?? 100_000,
+    ...(options.localCeilings === undefined ? {} : { localCeilings: options.localCeilings }),
     ...(options.allowRecurringModelBriefs === undefined
       ? {}
       : { allowRecurringModelBriefs: options.allowRecurringModelBriefs }),
@@ -1017,7 +1029,8 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
        VALUES (?, ?, ?, 'preference', 'tone', NULL, 'Concise answers', 'user_settings', 1000, 1000)`,
     ).run(randomUUID(), TENANT_A, PRINCIPAL_A);
 
-    const upgraded = applyAgentHeadMigrations(storage, allMigrations, 2_000);
+    const v1To8 = allMigrations.filter((m) => m.version <= 8);
+    const upgraded = applyAgentHeadMigrations(storage, v1To8, 2_000);
     expect(upgraded.appliedVersions).toEqual([7, 8]);
     expect(upgraded.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6]);
     expect(db.prepare('SELECT content FROM personal_memories').all()).toEqual([
@@ -2079,5 +2092,688 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
 
     expect(res.status).toBe(403);
     expect(taskArtifacts).not.toHaveBeenCalled();
+  });
+
+  it('upgrades v8 AgentHeadDO spend/incident tables cleanly to v9, preserves mixed-mode spend/reservations, and fails closed on unprovable rows', async () => {
+    const db = new DatabaseSync(':memory:');
+    const storage = createSqliteStorage(db);
+    const allMigrations = createDefaultAgentHeadMigrations();
+    const v1To8 = allMigrations.filter((m) => m.version <= 8);
+
+    const first = applyAgentHeadMigrations(storage, v1To8, 1_000);
+    expect(first.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    db.prepare(
+      `INSERT INTO agent_head_meta (id, tenant_id, agent_id, policy_version, home_region, created_at_ms, updated_at_ms)
+       VALUES (1, ?, ?, 1, NULL, 1000, 1000)`,
+    ).run(TENANT_A, AGENT_A);
+    db.prepare(
+      `INSERT INTO conversations (id, kind, last_sequence, transcript_epoch, created_at_ms, updated_at_ms)
+       VALUES (?, 'main', 2, 0, 1000, 1000)`,
+    ).run(CONVERSATION_A);
+    const activeTurnId = randomUUID();
+    const activeMsgId = randomUUID();
+    db.prepare(
+      `INSERT INTO conversation_messages (id, conversation_id, sequence, kind, text, client_submission_id, created_at_ms)
+       VALUES (?, ?, 1, 'user', 'in-flight real turn', ?, 3000)`,
+    ).run(activeMsgId, CONVERSATION_A, randomUUID());
+    db.prepare(
+      `INSERT INTO assistant_turns (
+         id, conversation_id, source_message_id, response_message_id, status,
+         execution_mode, deadline_at_ms, lease_epoch, lease_owner, lease_expires_at_ms, claim_count, created_at_ms, updated_at_ms
+       ) VALUES (?, ?, ?, NULL, 'running', 'fast_interactive', 600000, 1, 'edge-1', 60000, 1, 3000, 3000)`,
+    ).run(activeTurnId, CONVERSATION_A, activeMsgId);
+
+    const activeRealOpId = randomUUID();
+    db.prepare(
+      `INSERT INTO model_attempts (
+         subject_type, subject_id, attempt_no, operation_id, principal_id, utc_day,
+         lease_epoch, provider_id, model_label, rate_version, budget_mode, state,
+         reserved_micro_usd, applied_cost_micro_usd, observed_cost_micro_usd, started_at_ms, settled_at_ms
+       ) VALUES
+         ('turn', 'turn-real-only', 1, 'op-real-only', ?, '2026-11-21', 1, 'openrouter', ?, 'r1', 'real', 'settled', 935, 220, 220, 1000, 1100),
+         ('turn', 'turn-fake-only', 1, 'op-fake-only', ?, '2026-11-22', 1, 'fake', 'ember-fake-llm-1', 'v1', 'simulated_full_protocol', 'conservative_billed', 250, 250, NULL, 2000, 2100),
+         ('turn', 'turn-real-mix', 1, 'op-real-mix', ?, '2026-11-23', 1, 'openrouter', ?, 'r1', 'real', 'settled', 935, 900, 900, 3000, 3100),
+         ('turn', 'turn-fake-mix', 1, 'op-fake-mix', ?, '2026-11-23', 1, 'fake', 'ember-fake-llm-1', 'v1', 'simulated_full_protocol', 'settled', 250, 200, 200, 3200, 3300),
+         ('turn', ?, 1, ?, ?, '2026-11-24', 1, 'openrouter', ?, 'r1', 'real', 'reserved', 935, 0, NULL, 3400, NULL),
+         ('turn', 'turn-fake-day24', 1, 'op-fake-day24', ?, '2026-11-24', 1, 'fake', 'ember-fake-llm-1', 'v1', 'simulated_full_protocol', 'settled', 250, 200, 200, 3500, 3600)`,
+    ).run(
+      PRINCIPAL_A,
+      APPROVED_OPENROUTER_MODEL,
+      PRINCIPAL_A,
+      PRINCIPAL_A,
+      APPROVED_OPENROUTER_MODEL,
+      PRINCIPAL_A,
+      activeTurnId,
+      activeRealOpId,
+      PRINCIPAL_A,
+      APPROVED_OPENROUTER_MODEL,
+      PRINCIPAL_A,
+    );
+
+    db.prepare(
+      `INSERT INTO agent_spend_days (
+         scope_kind, scope_id, utc_day, reserved_micro_usd, consumed_micro_usd,
+         overage_micro_usd, turns_started, updated_at_ms
+       ) VALUES
+         ('tenant', ?, '2026-11-20', 0, 400, 0, 0, 900),
+         ('tenant', ?, '2026-11-21', 0, 220, 0, 0, 1100),
+         ('principal', ?, '2026-11-21', 0, 220, 0, 1, 1100),
+         ('tenant', ?, '2026-11-22', 0, 250, 0, 0, 2100),
+         ('tenant', ?, '2026-11-23', 0, 1100, 0, 0, 3300),
+         ('principal', ?, '2026-11-23', 0, 1100, 0, 2, 3300),
+         ('tenant', ?, '2026-11-24', 935, 200, 0, 0, 3600),
+         ('principal', ?, '2026-11-24', 935, 200, 0, 2, 3600)`,
+    ).run(TENANT_A, TENANT_A, PRINCIPAL_A, TENANT_A, TENANT_A, PRINCIPAL_A, TENANT_A, PRINCIPAL_A);
+
+    db.prepare(
+      `INSERT INTO agent_budget_incidents (
+         id, scope_kind, scope_id, utc_day, reason, subject_type, subject_id, attempt_no,
+         observed_micro_usd, applied_micro_usd, overage_micro_usd, reservation_micro_usd, detected_at_ms
+       ) VALUES
+         ('inc-fake', 'tenant', ?, '2026-11-22', 'usage_missing', 'turn', 'turn-fake-only', 1, 250, 250, 0, 250, 2100),
+         ('inc-orphaned', 'tenant', ?, '2026-11-20', 'reservation_exceeded', 'turn', 'missing-turn', 1, 500, 500, 100, 400, 950),
+         ('inc-real', 'tenant', ?, '2026-11-23', 'reservation_exceeded', 'turn', 'turn-real-mix', 1, 1200, 1200, 265, 935, 3100),
+         ('inc-unlinked', 'tenant', ?, '2026-11-20', 'day_ceiling_exceeded', NULL, NULL, NULL, 500, 500, 100, 400, 900)`,
+    ).run(TENANT_A, TENANT_A, TENANT_A, TENANT_A);
+
+    const upgraded = applyAgentHeadMigrations(storage, allMigrations, 4_000);
+    expect(upgraded.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(upgraded.appliedVersions).toEqual([9]);
+
+    const rerun = applyAgentHeadMigrations(storage, allMigrations, 5_000);
+    expect(rerun.appliedVersions).toEqual([]);
+    expect(rerun.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+
+    const spendDdl = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_spend_days'")
+      .get() as { sql: string };
+    expect(spendDdl.sql).toMatch(/\bWITHOUT\s+ROWID\b/i);
+    expect(spendDdl.sql).toMatch(/PRIMARY KEY \(scope_kind, scope_id, utc_day, budget_mode\)/i);
+
+    const spendRows = db
+      .prepare(
+        `SELECT scope_kind, utc_day, budget_mode, reserved_micro_usd, consumed_micro_usd, overage_micro_usd, turns_started
+           FROM agent_spend_days
+          ORDER BY utc_day ASC, scope_kind ASC, budget_mode ASC`,
+      )
+      .all() as Array<
+      Pick<
+        AgentSpendDayRow,
+        | 'scope_kind'
+        | 'utc_day'
+        | 'budget_mode'
+        | 'reserved_micro_usd'
+        | 'consumed_micro_usd'
+        | 'overage_micro_usd'
+        | 'turns_started'
+      >
+    >;
+    expect(spendRows).toEqual([
+      // 2026-11-20: unprovable row (no model_attempts) is conservatively preserved in BOTH modes
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-20',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 400,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-20',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 400,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      // 2026-11-21: real-only day
+      {
+        scope_kind: 'principal',
+        utc_day: '2026-11-21',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 220,
+        overage_micro_usd: 0,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-21',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 220,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      // 2026-11-22: simulated-only day
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-22',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 250,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      // 2026-11-23: mixed day faithfully splits 900 real + 200 simulated (conserving 1100 total & 2 turns)
+      {
+        scope_kind: 'principal',
+        utc_day: '2026-11-23',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 900,
+        overage_micro_usd: 0,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'principal',
+        utc_day: '2026-11-23',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        overage_micro_usd: 0,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-23',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 900,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-23',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      // 2026-11-24: mixed day keeps active real reservation (935) in real and settled fake (200) in simulated
+      {
+        scope_kind: 'principal',
+        utc_day: '2026-11-24',
+        budget_mode: 'real',
+        reserved_micro_usd: 935,
+        consumed_micro_usd: 0,
+        overage_micro_usd: 0,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'principal',
+        utc_day: '2026-11-24',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        overage_micro_usd: 0,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-24',
+        budget_mode: 'real',
+        reserved_micro_usd: 935,
+        consumed_micro_usd: 0,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+      {
+        scope_kind: 'tenant',
+        utc_day: '2026-11-24',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        overage_micro_usd: 0,
+        turns_started: 0,
+      },
+    ]);
+
+    const incidentRows = db
+      .prepare('SELECT id, budget_mode, reason FROM agent_budget_incidents ORDER BY id ASC')
+      .all() as Array<Pick<AgentBudgetIncidentRow, 'id' | 'budget_mode' | 'reason'>>;
+    expect(incidentRows).toEqual([
+      { id: 'inc-fake', budget_mode: 'simulated_full_protocol', reason: 'usage_missing' },
+      { id: 'inc-orphaned', budget_mode: null, reason: 'reservation_exceeded' },
+      { id: 'inc-real', budget_mode: 'real', reason: 'reservation_exceeded' },
+      { id: 'inc-unlinked', budget_mode: null, reason: 'day_ceiling_exceeded' },
+    ]);
+
+    // Unlinked/orphaned unresolved incidents fail closed for BOTH real and simulated modes!
+    expect(
+      findLocalUnresolvedIncidentSync(storage.sql, TENANT_A, PRINCIPAL_A, 'real'),
+    ).not.toBeNull();
+    expect(
+      findLocalUnresolvedIncidentSync(
+        storage.sql,
+        TENANT_A,
+        PRINCIPAL_A,
+        'simulated_full_protocol',
+      ),
+    ).not.toBeNull();
+
+    // Resolving unlinked/orphaned + real incidents clears real while inc-fake still halts simulated only.
+    db.prepare(
+      `UPDATE agent_budget_incidents
+          SET resolved_at_ms = 4500
+        WHERE id IN ('inc-unlinked', 'inc-orphaned', 'inc-real')`,
+    ).run();
+    expect(findLocalUnresolvedIncidentSync(storage.sql, TENANT_A, PRINCIPAL_A, 'real')).toBeNull();
+    expect(
+      findLocalUnresolvedIncidentSync(
+        storage.sql,
+        TENANT_A,
+        PRINCIPAL_A,
+        'simulated_full_protocol',
+      ),
+    ).toEqual({ scopeKind: 'tenant', reason: 'usage_missing' });
+
+    // Post-upgrade real capacity reflects the migrated 900 real spend on 2026-11-23 (ceiling 1000: 100 passes, 101 fails).
+    expect(
+      checkLocalBudgetCapacitySync({
+        sql: storage.sql,
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        utcDay: '2026-11-23',
+        budgetMode: 'real',
+        amountMicroUsd: 100,
+        turnsStartedDelta: 1,
+        ceilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 1_000,
+          tenantDailyMicroUsd: 1_000,
+          principalDailyTurns: 20,
+        },
+      }),
+    ).toEqual({ ok: true });
+    expect(
+      checkLocalBudgetCapacitySync({
+        sql: storage.sql,
+        tenantId: TENANT_A,
+        principalId: PRINCIPAL_A,
+        utcDay: '2026-11-23',
+        budgetMode: 'real',
+        amountMicroUsd: 101,
+        turnsStartedDelta: 1,
+        ceilings: {
+          perAttemptMicroUsd: 5_000,
+          principalDailyMicroUsd: 1_000,
+          tenantDailyMicroUsd: 1_000,
+          principalDailyTurns: 20,
+        },
+      }),
+    ).toEqual({ ok: false, reason: 'budget_exceeded' });
+
+    // Settling the pre-upgrade in-progress real reserved attempt after upgrade releases 935 from 'real' and books 220 without stranding or distorting 'simulated_full_protocol'.
+    const fakeGbStorage = createSqliteStorage(new DatabaseSync(':memory:'));
+    const fakeGb = new GlobalBudgetAuthorityCore(fakeGbStorage, 100_000);
+    const postUpgradeCore = new AgentHeadCore({
+      storage,
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      recoveryRegistry: {
+        upsertCoverage: () =>
+          Promise.resolve({ accepted: true, currentGeneration: 1, actualRecoveryAtMs: 5_000 }),
+        postponeCoverage: () =>
+          Promise.resolve({ updated: true, currentGeneration: 1, actualRecoveryAtMs: 5_000 }),
+        retireCoverage: () => Promise.resolve({ retired: true }),
+        getCoverage: () =>
+          Promise.resolve({
+            exists: false,
+            currentGeneration: null,
+            actualRecoveryAtMs: null,
+            status: null,
+            retryNotBeforeMs: null,
+          }),
+      },
+      globalBudget: fakeGb,
+      globalDailyCeilingMicroUsd: 100_000,
+      nowMs: () => 4_600,
+      eventRuntimeFactory(business) {
+        const events = new AgentEventRuntimeFacade({
+          storage,
+          tenantId: TENANT_A,
+          agentId: AGENT_A,
+          business,
+        });
+        return {
+          recoveryAdmission: events.coverage,
+          eventCoordinator: events.outbox,
+          recoveryHooks: events.asTurnRecoveryHooks({
+            globalBudget: { settleGlobal: () => Promise.resolve({ accepted: true }) },
+          }),
+        };
+      },
+    });
+
+    const settledPostUpgrade = await postUpgradeCore.commitTurn({
+      scope: { tenantId: TENANT_A, agentId: AGENT_A },
+      conversationId: CONVERSATION_A,
+      turnId: activeTurnId,
+      leaseEpoch: 1,
+      leaseOwner: 'edge-1',
+      attemptNo: 1,
+      operationId: activeRealOpId,
+      settlement: {
+        state: 'settled',
+        outcomeCode: 'ok',
+        observedCostMicroUsd: 220,
+        inputTokens: 100,
+        outputTokens: 20,
+      },
+      result: {
+        status: 'completed',
+        text: 'settled after v9 upgrade',
+        modelLabel: APPROVED_OPENROUTER_MODEL,
+        simulated: false,
+      },
+    });
+    expect(settledPostUpgrade.outcome).toBe('published');
+
+    const day24Rows = db
+      .prepare(
+        `SELECT scope_kind, budget_mode, reserved_micro_usd, consumed_micro_usd, turns_started
+           FROM agent_spend_days
+          WHERE utc_day = '2026-11-24'
+          ORDER BY scope_kind ASC, budget_mode ASC`,
+      )
+      .all() as Array<
+      Pick<
+        AgentSpendDayRow,
+        'scope_kind' | 'budget_mode' | 'reserved_micro_usd' | 'consumed_micro_usd' | 'turns_started'
+      >
+    >;
+    expect(day24Rows).toEqual([
+      {
+        scope_kind: 'principal',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 220,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'principal',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        turns_started: 1,
+      },
+      {
+        scope_kind: 'tenant',
+        budget_mode: 'real',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 220,
+        turns_started: 0,
+      },
+      {
+        scope_kind: 'tenant',
+        budget_mode: 'simulated_full_protocol',
+        reserved_micro_usd: 0,
+        consumed_micro_usd: 200,
+        turns_started: 0,
+      },
+    ]);
+    expect(db.prepare('PRAGMA foreign_key_check').all()).toEqual([]);
+  });
+
+  it('isolates AgentHeadDO turns, spend buckets, and unresolved incidents between simulated_full_protocol and real modes on the same UTC day (P0-2)', async () => {
+    const nowMs = Date.parse('2026-11-23T00:00:00.000Z');
+    const realGbStorage = createSqliteStorage(new DatabaseSync(':memory:'));
+    const realGlobalBudget = new GlobalBudgetAuthorityCore(
+      realGbStorage,
+      100_000,
+      () => nowMs,
+      () => `real:${randomUUID()}`,
+    );
+    const h = createInMemoryHarness({
+      nowMs: () => nowMs,
+      realGlobalBudget,
+      localCeilings: {
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 5_000,
+        tenantDailyMicroUsd: 5_000,
+        principalDailyTurns: 2,
+      },
+    });
+
+    const fakeReservation = {
+      budgetMode: 'simulated_full_protocol' as const,
+      providerId: 'fake' as const,
+      modelLabel: 'ember-fake-llm-1',
+      rateVersion: 'v1',
+      maxAttempts: 1,
+      estimatedMicroUsd: 2_500,
+    };
+    const realReservation = {
+      budgetMode: 'real' as const,
+      providerId: 'openrouter' as const,
+      modelLabel: APPROVED_OPENROUTER_MODEL,
+      rateVersion: 'openrouter-deepseek-v4.1-flash-1017-deepinfra-fp8-2026-11-17',
+      maxAttempts: 1,
+      estimatedMicroUsd: 935,
+    };
+
+    const runTurn = async (
+      reservation: typeof fakeReservation | typeof realReservation,
+      text: string,
+      settlement:
+        | { state: 'settled'; outcomeCode: 'ok'; observedCostMicroUsd: number }
+        | { state: 'conservative_billed'; outcomeCode: 'usage_missing' },
+    ) => {
+      const prep = await h.core.prepareTurn({
+        scope: {
+          tenantId: TENANT_A,
+          principalId: PRINCIPAL_A,
+          agentId: AGENT_A,
+          policyVersion: 1,
+          requestId: randomUUID(),
+        },
+        conversationId: CONVERSATION_A,
+        request: {
+          client_submission_id: randomUUID(),
+          text,
+          transcript_epoch: 0,
+        },
+        workerId: 'edge-1',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: reservation,
+      });
+      if (prep.kind !== 'prepared') throw new Error('expected prepared');
+      const sent = await h.core.markAttemptSent({
+        scope: { tenantId: TENANT_A, agentId: AGENT_A },
+        subjectType: 'turn',
+        subjectId: prep.turnId,
+        attemptNo: prep.attemptNo,
+        operationId: prep.operationId,
+        leaseEpoch: prep.leaseEpoch,
+        leaseOwner: 'edge-1',
+      });
+      expect(sent.authorized).toBe(true);
+      await h.core.commitTurn({
+        scope: { tenantId: TENANT_A, agentId: AGENT_A },
+        conversationId: CONVERSATION_A,
+        turnId: prep.turnId,
+        leaseEpoch: prep.leaseEpoch,
+        leaseOwner: 'edge-1',
+        attemptNo: prep.attemptNo,
+        operationId: prep.operationId,
+        settlement,
+        result: {
+          status: 'completed',
+          text: `reply:${text}`,
+          modelLabel: reservation.modelLabel,
+          simulated: reservation.budgetMode !== 'real',
+        },
+      });
+    };
+
+    // Exhaust BOTH principalDailyTurns (2) and daily micro-USD (5_000) in fake mode,
+    // plus open an unresolved fake `usage_missing` incident.
+    await runTurn(fakeReservation, 'fake-1', {
+      state: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: 2_500,
+    });
+    await runTurn(fakeReservation, 'fake-2', {
+      state: 'conservative_billed',
+      outcomeCode: 'usage_missing',
+    });
+
+    await expect(
+      h.core.prepareTurn({
+        scope: {
+          tenantId: TENANT_A,
+          principalId: PRINCIPAL_A,
+          agentId: AGENT_A,
+          policyVersion: 1,
+          requestId: randomUUID(),
+        },
+        conversationId: CONVERSATION_A,
+        request: {
+          client_submission_id: randomUUID(),
+          text: 'fake-3-blocked',
+          transcript_epoch: 0,
+        },
+        workerId: 'edge-1',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: fakeReservation,
+      }),
+    ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+
+    // Real turns AND real task model attempts must remain completely unaffected on the same UTC day!
+    await runTurn(realReservation, 'real-1', {
+      state: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: 220,
+    });
+
+    const taskId = randomUUID();
+    const runId = randomUUID();
+    h.headDb
+      .prepare(
+        `INSERT INTO tasks (id, kind, input_json, digest, idempotency_key, status, execution_path, execution_target, attempt_count, max_attempts, current_run_id, lease_epoch, lease_expires_at_ms, next_run_at_ms, created_at_ms, updated_at_ms)
+         VALUES (?, 'python.agent', '{"prompt":"p"}', 'd', ?, 'running', 'heavy', 'cloud', 1, 3, ?, 1, ?, ?, ?, ?)`,
+      )
+      .run(taskId, randomUUID(), runId, nowMs + 30_000, nowMs, nowMs, nowMs);
+    h.headDb
+      .prepare(
+        `INSERT INTO runs (id, task_id, attempt, lease_epoch, status, worker_id, executor_kind, leased_until_ms, started_at_ms, updated_at_ms)
+         VALUES (?, ?, 1, 1, 'running', 'py-worker', 'queue_worker', ?, ?, ?)`,
+      )
+      .run(runId, taskId, nowMs + 30_000, nowMs, nowMs);
+
+    const realTaskRes = await h.core.reserveTaskModelAttempt({
+      tenantId: TENANT_A,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_A,
+      taskId,
+      runId,
+      leaseEpoch: 1,
+      providerId: 'openrouter',
+      modelLabel: APPROVED_OPENROUTER_MODEL,
+      rateVersion: realReservation.rateVersion,
+      budgetMode: 'real',
+      estimatedMicroUsd: 500,
+    });
+    expect(realTaskRes.kind).toBe('reserved');
+    if (realTaskRes.kind !== 'reserved') throw new Error('expected reserved');
+    const taskSent = await h.core.markAttemptSent({
+      scope: { tenantId: TENANT_A, agentId: AGENT_A },
+      subjectType: 'task',
+      subjectId: taskId,
+      attemptNo: realTaskRes.attemptNo,
+      operationId: realTaskRes.operationId,
+      leaseEpoch: 1,
+      leaseOwner: 'py-worker',
+    });
+    expect(taskSent.authorized).toBe(true);
+    await h.core.settleTaskModelAttempt({
+      tenantId: TENANT_A,
+      agentId: AGENT_A,
+      taskId,
+      attemptNo: realTaskRes.attemptNo,
+      operationId: realTaskRes.operationId,
+      requestedState: 'settled',
+      outcomeCode: 'ok',
+      observedCostMicroUsd: 180,
+    });
+
+    // Reverse isolation: an unresolved real incident halts real turns without halting fake turns
+    // (after resolving the fake incident while keeping fake turns under a fresh principal).
+    await runTurn(realReservation, 'real-2-incident', {
+      state: 'conservative_billed',
+      outcomeCode: 'usage_missing',
+    });
+    await expect(
+      h.core.prepareTurn({
+        scope: {
+          tenantId: TENANT_A,
+          principalId: PRINCIPAL_A,
+          agentId: AGENT_A,
+          policyVersion: 1,
+          requestId: randomUUID(),
+        },
+        conversationId: CONVERSATION_A,
+        request: {
+          client_submission_id: randomUUID(),
+          text: 'real-3-blocked',
+          transcript_epoch: 0,
+        },
+        workerId: 'edge-1',
+        leaseMs: 45_000,
+        interactiveDeadlineMs: 120_000,
+        turnDeadlineMs: 600_000,
+        executionMode: 'fast_interactive',
+        modelReservation: realReservation,
+      }),
+    ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+
+    const spendRows = h.headDb
+      .prepare(
+        `SELECT scope_kind, budget_mode, consumed_micro_usd, turns_started
+           FROM agent_spend_days
+          WHERE utc_day = '2026-11-23'
+          ORDER BY budget_mode ASC, scope_kind ASC`,
+      )
+      .all() as Array<
+      Pick<AgentSpendDayRow, 'scope_kind' | 'budget_mode' | 'consumed_micro_usd' | 'turns_started'>
+    >;
+    expect(spendRows).toEqual([
+      {
+        scope_kind: 'principal',
+        budget_mode: 'real',
+        consumed_micro_usd: 220 + 180 + 935,
+        turns_started: 2,
+      },
+      {
+        scope_kind: 'tenant',
+        budget_mode: 'real',
+        consumed_micro_usd: 220 + 180 + 935,
+        turns_started: 0,
+      },
+      {
+        scope_kind: 'principal',
+        budget_mode: 'simulated_full_protocol',
+        consumed_micro_usd: 2_500 + 2_500,
+        turns_started: 2,
+      },
+      {
+        scope_kind: 'tenant',
+        budget_mode: 'simulated_full_protocol',
+        consumed_micro_usd: 2_500 + 2_500,
+        turns_started: 0,
+      },
+    ]);
   });
 });

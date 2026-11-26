@@ -98,7 +98,7 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
   it('upgrades existing Agent Head storage for device execution and detects checksum drift', () => {
     const { storage, db } = createInMemoryDoStorage();
     const steps = createDefaultAgentHeadMigrations();
-    expect(steps.map((s) => s.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(steps.map((s) => s.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
     const first = applyAgentHeadMigrations(storage, steps.slice(0, 2), 1_700_000_000_000);
     expect(first.appliedVersions).toEqual([1, 2]);
@@ -123,7 +123,7 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
       VALUES ('existing-device-task', 'owner', 'device')`);
 
     const nativeUpgrade = applyAgentHeadMigrations(storage, steps, 1_700_000_006_000);
-    expect(nativeUpgrade.appliedVersions).toEqual([4, 5, 6, 7, 8]);
+    expect(nativeUpgrade.appliedVersions).toEqual([4, 5, 6, 7, 8, 9]);
     expect(
       db
         .prepare(
@@ -134,7 +134,7 @@ describe('V2-M1-A1 shared runtime contracts, validators & unified migrations', (
 
     const replay = applyAgentHeadMigrations(storage, steps, 1_700_000_005_000);
     expect(replay.appliedVersions).toEqual([]);
-    expect(replay.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(replay.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
 
     const tables = db
       .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name ASC")

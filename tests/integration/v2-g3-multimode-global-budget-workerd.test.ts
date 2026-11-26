@@ -8,6 +8,7 @@ import {
   GLOBAL_BUDGET_REAL_OBJECT_NAME,
   isRealGlobalGrantId,
 } from '../../packages/runtime-v2/src/global-budget/platform.js';
+import { formatRecoveryAgentKey } from '../../packages/runtime-v2/src/recovery/registry.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const apiRequire = createRequire(new URL('../../apps/api/package.json', import.meta.url));
@@ -644,6 +645,208 @@ describe('V2 G3 multi-mode GlobalBudgetDO transitions in workerd', () => {
           ceiling_micro_usd: 100_000,
           reserved_micro_usd: 0,
           consumed_micro_usd: 350 + 935 + 500,
+        },
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
+  it('isolates local AgentHeadDO principalDailyTurns between Fake and Real modes on the same UTC day in workerd (P0-2)', async () => {
+    const wrangler = (await import(apiRequire.resolve('wrangler'))) as {
+      createTestHarness(options: unknown): WorkerdHarness;
+    };
+
+    const harness = wrangler.createTestHarness({
+      root: REPO_ROOT,
+      workers: [{ config: buildWorkerConfig(FAKE_VARS) }],
+    });
+    await harness.listen();
+
+    try {
+      const tenantId = randomUUID();
+      const principalId = randomUUID();
+      const agentId = randomUUID();
+      const conversationId = randomUUID();
+      const todayUtc = new Date().toISOString().slice(0, 10);
+
+      await postJson(harness, '/d1/migrate', { sql: MIGRATION_SQL });
+      await postJson(harness, '/head/bootstrap', { tenantId, agentId, conversationId });
+
+      // Run 3 Fake turns (> Real's principalDailyTurns=2 cap) on the same UTC day.
+      for (let i = 1; i <= 3; i += 1) {
+        const fakeTurn = await headRpc<{
+          kind: string;
+          turnId: string;
+          attemptNo: number;
+          operationId: string;
+          leaseEpoch: number;
+        }>(harness, {
+          tenantId,
+          agentId,
+          method: 'prepareTurn',
+          request: makePrepareTurnRequest({
+            tenantId,
+            principalId,
+            agentId,
+            conversationId,
+            mode: 'fake',
+            text: `fake turn ${i}`,
+            transcriptEpoch: 0,
+            workerId: `worker-fake-${i}`,
+          }),
+        });
+        expect(fakeTurn.kind).toBe('prepared');
+        await headRpc(harness, {
+          tenantId,
+          agentId,
+          method: 'markAttemptSent',
+          request: {
+            scope: { tenantId, agentId },
+            subjectType: 'turn',
+            subjectId: fakeTurn.turnId,
+            attemptNo: fakeTurn.attemptNo,
+            operationId: fakeTurn.operationId,
+            leaseEpoch: fakeTurn.leaseEpoch,
+            leaseOwner: `worker-fake-${i}`,
+          },
+        });
+        await headRpc(harness, {
+          tenantId,
+          agentId,
+          method: 'commitTurn',
+          request: {
+            scope: { tenantId, agentId },
+            conversationId,
+            turnId: fakeTurn.turnId,
+            leaseEpoch: fakeTurn.leaseEpoch,
+            leaseOwner: `worker-fake-${i}`,
+            attemptNo: fakeTurn.attemptNo,
+            operationId: fakeTurn.operationId,
+            settlement: {
+              state: 'settled',
+              outcomeCode: 'ok',
+              observedCostMicroUsd: 100,
+              inputTokens: 10,
+              outputTokens: 5,
+            },
+            result: {
+              status: 'completed',
+              text: `fake reply ${i}`,
+              modelLabel: 'ember-fake-llm-1',
+              simulated: true,
+            },
+          },
+        });
+      }
+
+      // Switch the worker to Real mode with a strict principalDailyTurns=2 limit.
+      await harness.update({
+        root: REPO_ROOT,
+        workers: [
+          {
+            config: buildWorkerConfig({
+              ...REAL_VARS,
+              EMBER_MODEL_BUDGET_PRINCIPAL_DAILY_TURNS: '2',
+            }),
+          },
+        ],
+      });
+
+      // Both Real turns succeed despite 3 Fake turns on the same UTC day; the 3rd Real turn hits BUDGET_EXCEEDED.
+      for (let i = 1; i <= 2; i += 1) {
+        const realTurn = await headRpc<{
+          kind: string;
+          turnId: string;
+          attemptNo: number;
+          operationId: string;
+          leaseEpoch: number;
+        }>(harness, {
+          tenantId,
+          agentId,
+          method: 'prepareTurn',
+          request: makePrepareTurnRequest({
+            tenantId,
+            principalId,
+            agentId,
+            conversationId,
+            mode: 'real',
+            text: `real turn ${i}`,
+            transcriptEpoch: 0,
+            workerId: `worker-real-${i}`,
+          }),
+        });
+        expect(realTurn.kind).toBe('prepared');
+      }
+
+      await expect(
+        headRpc(harness, {
+          tenantId,
+          agentId,
+          method: 'prepareTurn',
+          request: makePrepareTurnRequest({
+            tenantId,
+            principalId,
+            agentId,
+            conversationId,
+            mode: 'real',
+            text: 'real turn 3 blocked',
+            transcriptEpoch: 0,
+            workerId: 'worker-real-3',
+          }),
+        }),
+      ).rejects.toThrow(/BUDGET_EXCEEDED/);
+
+      // Switch back to Fake mode: Fake turns still succeed independently!
+      await harness.update({
+        root: REPO_ROOT,
+        workers: [{ config: buildWorkerConfig(FAKE_VARS) }],
+      });
+      const fake4 = await headRpc<{ kind: string }>(harness, {
+        tenantId,
+        agentId,
+        method: 'prepareTurn',
+        request: makePrepareTurnRequest({
+          tenantId,
+          principalId,
+          agentId,
+          conversationId,
+          mode: 'fake',
+          text: 'fake turn 4',
+          transcriptEpoch: 0,
+          workerId: 'worker-fake-4',
+        }),
+      });
+      expect(fake4.kind).toBe('prepared');
+
+      const headStorage = await harness
+        .getWorker()
+        .getDurableObjectStorage('AGENT_HEAD', { name: formatRecoveryAgentKey(tenantId, agentId) });
+      const principalBuckets = await headStorage.exec<{
+        budget_mode: string;
+        turns_started: number;
+        consumed_micro_usd: number;
+        reserved_micro_usd: number;
+      }>(
+        `SELECT budget_mode, turns_started, consumed_micro_usd, reserved_micro_usd
+           FROM agent_spend_days
+          WHERE scope_kind = 'principal' AND scope_id = ? AND utc_day = ?
+          ORDER BY budget_mode ASC`,
+        principalId,
+        todayUtc,
+      );
+      expect(principalBuckets).toEqual([
+        {
+          budget_mode: 'real',
+          turns_started: 2,
+          consumed_micro_usd: 0,
+          reserved_micro_usd: 935 * 2,
+        },
+        {
+          budget_mode: 'simulated_full_protocol',
+          turns_started: 4,
+          consumed_micro_usd: 300,
+          reserved_micro_usd: 250,
         },
       ]);
     } finally {

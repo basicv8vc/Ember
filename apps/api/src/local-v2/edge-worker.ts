@@ -637,6 +637,14 @@ async function callRuntime<T>(call: () => Promise<T>): Promise<T> {
     return await call();
   } catch (error) {
     if (isDomainError(error)) throw error;
+    console.error(
+      JSON.stringify({
+        event: 'v2.edge_worker.runtime_call_error',
+        errorName: error instanceof Error ? error.name : typeof error,
+        errorMessage:
+          error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+      }),
+    );
     throw new DomainError('DB_UNAVAILABLE', 'local runtime response unavailable');
   }
 }

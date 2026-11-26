@@ -158,6 +158,10 @@ export class AgentHeadDO
       },
     });
     const budget = core.createGlobalBudgetSettlePort();
+    if (meta !== null) {
+      // Apply pending DO SQLite migrations when an existing head wakes up on a newer deploy.
+      core.ensureMigrations();
+    }
     this.#runtime = { core, events };
     return this.#runtime;
   }
@@ -189,6 +193,16 @@ export class AgentHeadDO
       return { value: await invoke.call(core, req) };
     } catch (error) {
       if (!isDomainError(error)) throw error;
+      if (error.code === 'DB_UNAVAILABLE') {
+        console.error(
+          JSON.stringify({
+            event: 'v2.agent_head.edge_rpc_unavailable',
+            method,
+            code: error.code,
+            diagnostic: error.diagnostic.slice(0, 240),
+          }),
+        );
+      }
       return { code: error.code };
     }
   }

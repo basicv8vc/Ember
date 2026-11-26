@@ -79,7 +79,7 @@ struct PersonalMemorySheetView: View {
                 .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text("memory.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
             .refreshable {
@@ -186,10 +186,12 @@ struct PersonalMemorySheetView: View {
                     } icon: {
                         Image(systemName: "plus")
                     }
+                    .foregroundStyle(EmberDesignTokens.primaryActionForeground)
                     .frame(minHeight: 44)
                     .padding(.horizontal, 12)
                 }
                 .buttonStyle(.borderedProminent)
+                .tint(EmberDesignTokens.primaryActionFill)
                 .disabled(!canOpenAddSheet)
                 .accessibilityIdentifier("memory-empty-add-button")
             }
@@ -271,14 +273,7 @@ struct PersonalMemorySheetView: View {
         }
         .padding(14)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-        )
-        .overlay {
-            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-        }
+        .emberCardSurface(cornerRadius: 16)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("memory-item-\(idSuffix)")
     }
@@ -291,10 +286,14 @@ struct PersonalMemorySheetView: View {
             tableName: "Conversation"
         )
         .font(.caption2.weight(.semibold))
-        .foregroundStyle(Color.accentColor)
+        .foregroundStyle(.primary)
         .padding(.horizontal, 9)
         .padding(.vertical, 4)
-        .background(Color.accentColor.opacity(0.12), in: Capsule())
+        .background(EmberDesignTokens.surfaceSubtle, in: Capsule())
+        .overlay {
+            Capsule()
+                .strokeBorder(EmberDesignTokens.surfaceHairline, lineWidth: 1)
+        }
     }
 
     private func rowActionButtons(
@@ -323,7 +322,7 @@ struct PersonalMemorySheetView: View {
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .foregroundStyle(Color.accentColor)
+            .foregroundStyle(.primary)
             .disabled(isDeleting || isUpdating)
             .accessibilityLabel(Text("memory.edit.action", tableName: "Conversation"))
             .accessibilityIdentifier("memory-edit-\(idSuffix)")
@@ -529,7 +528,7 @@ private struct MemoryEditorSheet: View {
                 .padding(EmberDesignTokens.standardSpacing)
             }
             .scrollDismissesKeyboard(.interactively)
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text(String(localized: navigationTitleKey, table: "Conversation")))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {

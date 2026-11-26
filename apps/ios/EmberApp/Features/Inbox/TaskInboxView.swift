@@ -181,6 +181,7 @@ private struct SessionTaskInboxContent: View {
                                         .padding(.vertical, 10)
                                     }
                                     .buttonStyle(.bordered)
+                                    .tint(.primary)
                                     .disabled(store.isLoadingMoreTasks || store.isLoadingList)
                                     .accessibilityIdentifier("tasks-load-more-button")
 
@@ -210,7 +211,7 @@ private struct SessionTaskInboxContent: View {
             .frame(maxWidth: 760)
             .frame(maxWidth: .infinity)
         }
-        .background(EmberDesignTokens.groupedBackground)
+        .background(EmberDesignTokens.surfaceCanvas)
         .navigationTitle(Text("tab.tasks", tableName: "Conversation"))
         .navigationBarTitleDisplayMode(.large)
         .accessibilityIdentifier("tasks-inbox-screen")
@@ -238,7 +239,7 @@ private struct SessionTaskInboxContent: View {
                         isShowingDeviceExecutorSheet = true
                     } label: {
                         Image(systemName: deviceMonitor.isRunning ? "iphone.radiowaves.left.and.right" : "iphone")
-                            .foregroundStyle(deviceMonitor.isRunning ? Color(uiColor: .systemGreen) : Color.accentColor)
+                            .foregroundStyle(deviceMonitor.isRunning ? Color(uiColor: .systemGreen) : .primary)
                             .accessibilityLabel(Text("device.executor.nav_title", tableName: "Conversation"))
                     }
                     .accessibilityIdentifier("tasks-open-device-executor")
@@ -407,11 +408,8 @@ private struct SessionTaskInboxRow: View {
             }
             .padding(EmberDesignTokens.standardSpacing)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                EmberDesignTokens.cardBackground,
-                in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-            )
-            .contentShape(RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius))
+            .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
+            .contentShape(RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)

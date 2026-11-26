@@ -61,7 +61,7 @@ public struct EmptyPlaceholder: View {
         }
         .padding(24)
         .frame(maxWidth: .infinity, minHeight: 144)
-        .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius))
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         .accessibilityElement(children: .combine)
     }
 }
@@ -110,11 +110,12 @@ public struct ErrorPlaceholder: View {
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.bordered)
+                .tint(.primary)
             }
         }
         .padding(24)
         .frame(maxWidth: .infinity, minHeight: 176)
-        .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius))
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
         .accessibilityElement(children: .contain)
     }
 }

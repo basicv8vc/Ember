@@ -88,7 +88,7 @@ struct PythonTaskComposerSheet: View {
                 .frame(maxWidth: 720)
                 .frame(maxWidth: .infinity)
             }
-            .background(EmberDesignTokens.groupedBackground)
+            .background(EmberDesignTokens.surfaceCanvas)
             .navigationTitle(Text("tasks.python.nav_title", tableName: "Conversation"))
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -184,10 +184,7 @@ struct PythonTaskComposerSheet: View {
             }
         }
         .padding(EmberDesignTokens.standardSpacing)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
     }
 
     private var attachmentsSection: some View {
@@ -224,7 +221,7 @@ struct PythonTaskComposerSheet: View {
                 ForEach(attachedFiles) { attachment in
                     HStack(spacing: 10) {
                         Image(systemName: "doc.text")
-                            .foregroundStyle(Color.accentColor)
+                            .foregroundStyle(.primary)
                             .accessibilityHidden(true)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(attachment.filename)
@@ -245,15 +242,12 @@ struct PythonTaskComposerSheet: View {
                         .accessibilityLabel(Text("tasks.python.attachments.remove", tableName: "Conversation"))
                     }
                     .padding(10)
-                    .background(EmberDesignTokens.groupedBackground, in: RoundedRectangle(cornerRadius: 10))
+                    .background(EmberDesignTokens.surfaceSubtle, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                 }
             }
         }
         .padding(EmberDesignTokens.standardSpacing)
-        .background(
-            EmberDesignTokens.cardBackground,
-            in: RoundedRectangle(cornerRadius: EmberDesignTokens.cardCornerRadius)
-        )
+        .emberCardSurface(cornerRadius: EmberDesignTokens.cardCornerRadius)
     }
 
     private func attachFile(from url: URL) async {

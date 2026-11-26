@@ -76,7 +76,7 @@ public struct TaskActivityCard: View {
                     HStack(alignment: .top, spacing: 10) {
                         Image(systemName: "bolt.horizontal.circle.fill")
                             .font(.title3)
-                            .foregroundStyle(Color(uiColor: .systemTeal))
+                            .foregroundStyle(.primary)
                             .accessibilityHidden(true)
 
                         VStack(alignment: .leading, spacing: 5) {
@@ -127,7 +127,7 @@ public struct TaskActivityCard: View {
                             .foregroundStyle(.secondary)
                             .padding(.horizontal, 7)
                             .padding(.vertical, 3)
-                            .background(EmberDesignTokens.groupedBackground, in: Capsule())
+                            .background(EmberDesignTokens.surfaceSubtle, in: Capsule())
                         }
                         if let updatedAt = facts.updatedAt {
                             HStack(spacing: 4) {

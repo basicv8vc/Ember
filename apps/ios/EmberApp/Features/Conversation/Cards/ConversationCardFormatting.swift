@@ -356,11 +356,7 @@ struct ConversationCardSurface<Content: View>: View {
         content
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 16))
-            .overlay {
-                RoundedRectangle(cornerRadius: 16)
-                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
-            }
+            .emberCardSurface(cornerRadius: 16)
     }
 }
 

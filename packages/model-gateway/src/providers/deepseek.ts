@@ -16,6 +16,7 @@ import type {
 import { statusToFailureCode, type FetchLike, type FetchResponseLike } from './openai.js';
 import {
   PYTHON_AGENT_TOOLS,
+  WEB_FETCH_TOOL_NAME,
   WEB_SEARCH_TOOL_NAME,
   assertAuthorizedBeforeFetch,
   buildConversationTurnMessages,
@@ -24,19 +25,23 @@ import {
   completionMessageSchema,
   estimateProviderMessagesInputTokens,
   extractLatestUserMessageText,
+  formatWebFetchPolicyRefusal,
   formatWebSearchPrivacyRefusal,
   getConversationTools,
   maxInputTokensForRemainingCost,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
   parsePythonAgentStepChoice,
+  parseWebFetchToolArguments,
   parseWebSearchToolArguments,
   truncateToolOutputToTokenBudget,
   type ProviderChatMessage,
 } from './shared.js';
 import {
   WEB_SEARCH_LIMITS,
+  formatWebFetchToolOutput,
   formatWebSearchToolOutput,
+  validateWebFetchUrl,
   validateWebSearchQueryPrivacy,
   type WebSearchPort,
 } from '../web-search.js';
@@ -282,7 +287,10 @@ export class DeepSeekModelGateway implements ModelGateway {
         toolCalls !== undefined &&
         toolCalls.length > 0 &&
         toolCalls.every(
-          (call) => call.type === 'function' && call.function.name === WEB_SEARCH_TOOL_NAME,
+          (call) =>
+            call.type === 'function' &&
+            (call.function.name === WEB_SEARCH_TOOL_NAME ||
+              call.function.name === WEB_FETCH_TOOL_NAME),
         );
 
       if (isWebSearchBatch && toolCalls !== undefined) {
@@ -345,6 +353,60 @@ export class DeepSeekModelGateway implements ModelGateway {
 
         const toolResults = await Promise.all(
           cappedCalls.map(async (call) => {
+            if (call.name === WEB_FETCH_TOOL_NAME) {
+              const args = parseWebFetchToolArguments(call.arguments);
+              const validation = validateWebFetchUrl(args.url);
+              if (!validation.ok) {
+                console.log(
+                  JSON.stringify({
+                    event: 'v2.web_fetch.policy_refused',
+                    round,
+                    reason: validation.reason,
+                  }),
+                );
+                return {
+                  id: call.id,
+                  content: truncateToolOutputToTokenBudget(
+                    formatWebFetchPolicyRefusal(validation.reason),
+                    perCallTokenBudget,
+                  ),
+                };
+              }
+              if (this.#webSearch?.fetchPage === undefined) {
+                return {
+                  id: call.id,
+                  content: truncateToolOutputToTokenBudget(
+                    'Web fetch unavailable: page fetching is not enabled in this runtime.',
+                    perCallTokenBudget,
+                  ),
+                };
+              }
+              totalSearchCalls += 1;
+              try {
+                const page = await this.#webSearch.fetchPage({ url: validation.url }, signal);
+                return {
+                  id: call.id,
+                  content: truncateToolOutputToTokenBudget(
+                    formatWebFetchToolOutput(page),
+                    perCallTokenBudget,
+                  ),
+                };
+              } catch (error) {
+                if (signal.aborted) {
+                  throw new ModelGatewayFailure('model_timeout');
+                }
+                const reason =
+                  error instanceof Error ? error.message.slice(0, 120) : 'fetch_failed';
+                return {
+                  id: call.id,
+                  content: truncateToolOutputToTokenBudget(
+                    `Web fetch unavailable (${reason}). Continue without fetching this page and be honest about what could not be read.`,
+                    perCallTokenBudget,
+                  ),
+                };
+              }
+            }
+
             const args = parseWebSearchToolArguments(call.arguments);
             const privacy = validateWebSearchQueryPrivacy(args.query, privacyContext);
             if (!privacy.ok) {

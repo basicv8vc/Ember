@@ -17,7 +17,10 @@ import {
   serializationOverheadTokens,
 } from '../limits.js';
 import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
-import type { WebSearchPrivacyViolationReason } from '../web-search.js';
+import type {
+  WebFetchValidationReason,
+  WebSearchPrivacyViolationReason,
+} from '../web-search.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
@@ -34,6 +37,7 @@ export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
 export const DELETE_PERSONAL_MEMORY_TOOL_NAME = 'delete_personal_memory' as const;
 export const CREATE_PROACTIVE_SCHEDULE_TOOL_NAME = 'create_proactive_schedule' as const;
 export const WEB_SEARCH_TOOL_NAME = 'web_search' as const;
+export const WEB_FETCH_TOOL_NAME = 'web_fetch' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
   'I have started organizing these notes into action items.';
@@ -327,6 +331,28 @@ export const WEB_SEARCH_TOOL = Object.freeze({
   }),
 });
 
+export const WEB_FETCH_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: WEB_FETCH_TOOL_NAME,
+    description:
+      'Fetch and read the public text content of a specific HTTP(S) web page URL shared by the user or returned by web_search.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: ['url'],
+      properties: Object.freeze({
+        url: Object.freeze({
+          type: 'string',
+          description: 'Public HTTP(S) URL to read (1-2048 characters).',
+          minLength: 1,
+          maxLength: 2048,
+        }),
+      }),
+    }),
+  }),
+});
+
 export const NO_CONVERSATION_TOOLS = Object.freeze([] as const);
 
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
@@ -378,7 +404,7 @@ export function getConversationTools(capabilities?: boolean | ConversationToolCa
     ...(allowDelegation ? DELEGATION_TOOLS : []),
     ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL, DELETE_PERSONAL_MEMORY_TOOL] : []),
     ...(allowSchedule ? [CREATE_PROACTIVE_SCHEDULE_TOOL] : []),
-    ...(allowWebSearch ? [WEB_SEARCH_TOOL] : []),
+    ...(allowWebSearch ? [WEB_SEARCH_TOOL, WEB_FETCH_TOOL] : []),
   ]);
 }
 
@@ -464,6 +490,28 @@ export function parseWebSearchToolArguments(rawJson: string): {
   return {
     query: parsed.data.query,
     ...(parsed.data.num_results === undefined ? {} : { numResults: parsed.data.num_results }),
+  };
+}
+
+const webFetchToolArgsSchema = z.strictObject({
+  url: z.string().trim().min(1).max(2_048),
+});
+
+export function parseWebFetchToolArguments(rawJson: string): {
+  readonly url: string;
+} {
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(rawJson);
+  } catch {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  const parsed = webFetchToolArgsSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  return {
+    url: parsed.data.url,
   };
 }
 
@@ -1510,4 +1558,8 @@ export function extractLatestUserMessageText(
 
 export function formatWebSearchPrivacyRefusal(reason: WebSearchPrivacyViolationReason): string {
   return `Web search refused by privacy policy (${reason}): do not include personal memories, private user details, or sensitive identifiers in external search queries. Rephrase with minimal public search terms only, or answer without web search.`;
+}
+
+export function formatWebFetchPolicyRefusal(reason: WebFetchValidationReason): string {
+  return `Web fetch refused by safety policy (${reason}): only public HTTP(S) URLs without embedded credentials, private/internal network addresses, or secrets may be fetched.`;
 }

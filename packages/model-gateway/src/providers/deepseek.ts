@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { ModelGatewayFailure } from '../errors.js';
+import { ModelGatewayFailure, ModelInputRefused } from '../errors.js';
 import { MODEL_LIMITS } from '../limits.js';
 import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
 import type {
@@ -22,14 +22,24 @@ import {
   buildNotesExtractionMessages,
   buildPythonAgentMessages,
   completionMessageSchema,
+  estimateProviderMessagesInputTokens,
+  extractLatestUserMessageText,
+  formatWebSearchPrivacyRefusal,
   getConversationTools,
+  maxInputTokensForRemainingCost,
   parseConversationTurnChoice,
   parseNotesActionItemsChoice,
   parsePythonAgentStepChoice,
   parseWebSearchToolArguments,
+  truncateToolOutputToTokenBudget,
   type ProviderChatMessage,
 } from './shared.js';
-import { WEB_SEARCH_LIMITS, formatWebSearchToolOutput, type WebSearchPort } from '../web-search.js';
+import {
+  WEB_SEARCH_LIMITS,
+  formatWebSearchToolOutput,
+  validateWebSearchQueryPrivacy,
+  type WebSearchPort,
+} from '../web-search.js';
 
 export const DEEPSEEK_ORIGIN = 'https://api.deepseek.com';
 export const DEEPSEEK_CHAT_COMPLETIONS_PATH = '/chat/completions';
@@ -164,17 +174,83 @@ export class DeepSeekModelGateway implements ModelGateway {
       );
     }
 
+    const budgetCapMicroUsd = Math.min(
+      input.maxCostMicroUsd ?? MODEL_LIMITS.maxReservedMicroUsdPerAttempt,
+      MODEL_LIMITS.maxReservedMicroUsdPerAttempt,
+    );
+    const latestUserMessageText = extractLatestUserMessageText(input.context);
+    const privacyContext = {
+      ...(input.personalMemories !== undefined ? { personalMemories: input.personalMemories } : {}),
+      latestUserMessageText,
+    };
+
     let accumulatedUsage: ModelUsage | null = null;
     let sawMissingUsage = false;
+    let spentMicroUsd = 0;
+    let totalSearchCalls = 0;
 
     for (let round = 0; round <= WEB_SEARCH_LIMITS.maxRoundsPerTurn; round += 1) {
-      const canSearchThisRound = round < WEB_SEARCH_LIMITS.maxRoundsPerTurn;
-      const tools = getConversationTools({
+      const searchTools = getConversationTools({
         allowDelegation,
         allowSavePersonalMemory,
         allowCreateProactiveSchedule,
-        allowWebSearch: canSearchThisRound,
+        allowWebSearch: true,
       });
+      const finalTools = getConversationTools({
+        allowDelegation,
+        allowSavePersonalMemory,
+        allowCreateProactiveSchedule,
+        allowWebSearch: false,
+      });
+
+      const remainingSearchCalls = WEB_SEARCH_LIMITS.maxCallsPerTurn - totalSearchCalls;
+      let canSearchThisRound =
+        round < WEB_SEARCH_LIMITS.maxRoundsPerTurn && remainingSearchCalls > 0;
+      if (canSearchThisRound) {
+        const searchRoundInputTokens = estimateProviderMessagesInputTokens(messages, searchTools);
+        const searchRoundWorstCaseCost = estimateCostMicroUsd(
+          this.#rate,
+          searchRoundInputTokens,
+          maxTokens,
+        );
+        const minFollowUpInputTokens =
+          estimateProviderMessagesInputTokens(messages, finalTools) + 64;
+        const minFollowUpCost = estimateCostMicroUsd(this.#rate, minFollowUpInputTokens, maxTokens);
+        if (
+          searchRoundInputTokens > MODEL_LIMITS.maxInputTokens ||
+          minFollowUpInputTokens > MODEL_LIMITS.maxInputTokens ||
+          spentMicroUsd + searchRoundWorstCaseCost + minFollowUpCost > budgetCapMicroUsd
+        ) {
+          canSearchThisRound = false;
+        }
+      }
+
+      const tools = canSearchThisRound ? searchTools : finalTools;
+      const roundInputTokens = estimateProviderMessagesInputTokens(messages, tools);
+      const roundWorstCaseCost = estimateCostMicroUsd(this.#rate, roundInputTokens, maxTokens);
+
+      if (roundInputTokens > MODEL_LIMITS.maxInputTokens) {
+        if (round === 0) {
+          throw new ModelInputRefused('input_tokens_over_cap');
+        }
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+      if (spentMicroUsd + roundWorstCaseCost > budgetCapMicroUsd) {
+        if (round === 0) {
+          throw new ModelInputRefused('reservation_cap_exceeded');
+        }
+        console.log(
+          JSON.stringify({
+            event: 'v2.web_search.budget_exhausted',
+            round,
+            spentMicroUsd,
+            roundWorstCaseCost,
+            budgetCapMicroUsd,
+          }),
+        );
+        throw new ModelGatewayFailure('model_invalid_output');
+      }
+
       const body = this.#serializePayload({
         messages,
         maxTokens,
@@ -184,16 +260,20 @@ export class DeepSeekModelGateway implements ModelGateway {
       const step = await this.#requestRawCompletion(body, signal);
       if (step.usage === null) {
         sawMissingUsage = true;
-      } else if (!sawMissingUsage) {
-        accumulatedUsage =
-          accumulatedUsage === null
-            ? step.usage
-            : Object.freeze({
-                inputTokens: accumulatedUsage.inputTokens + step.usage.inputTokens,
-                outputTokens: accumulatedUsage.outputTokens + step.usage.outputTokens,
-                costMicroUsd: accumulatedUsage.costMicroUsd + step.usage.costMicroUsd,
-                rateVersion: step.usage.rateVersion,
-              });
+        spentMicroUsd += roundWorstCaseCost;
+      } else {
+        spentMicroUsd += step.usage.costMicroUsd;
+        if (!sawMissingUsage) {
+          accumulatedUsage =
+            accumulatedUsage === null
+              ? step.usage
+              : Object.freeze({
+                  inputTokens: accumulatedUsage.inputTokens + step.usage.inputTokens,
+                  outputTokens: accumulatedUsage.outputTokens + step.usage.outputTokens,
+                  costMicroUsd: accumulatedUsage.costMicroUsd + step.usage.costMicroUsd,
+                  rateVersion: step.usage.rateVersion,
+                });
+        }
       }
 
       const toolCalls = step.choice.message.tool_calls;
@@ -206,20 +286,15 @@ export class DeepSeekModelGateway implements ModelGateway {
         );
 
       if (isWebSearchBatch && toolCalls !== undefined) {
-        const cappedCalls = toolCalls
-          .slice(0, WEB_SEARCH_LIMITS.maxCallsPerRound)
-          .map((call, idx) => ({
-            id: call.id ?? `web_search_${round}_${idx}`,
-            name: call.function.name,
-            arguments: call.function.arguments,
-          }));
-        console.log(
-          JSON.stringify({
-            event: 'v2.web_search.round',
-            round,
-            callCount: cappedCalls.length,
-          }),
+        const allowedCallsThisRound = Math.min(
+          WEB_SEARCH_LIMITS.maxCallsPerRound,
+          WEB_SEARCH_LIMITS.maxCallsPerTurn - totalSearchCalls,
         );
+        const cappedCalls = toolCalls.slice(0, allowedCallsThisRound).map((call, idx) => ({
+          id: call.id ?? `web_search_${round}_${idx}`,
+          name: call.function.name,
+          arguments: call.function.arguments,
+        }));
 
         messages.push({
           role: 'assistant',
@@ -235,14 +310,68 @@ export class DeepSeekModelGateway implements ModelGateway {
           })),
         });
 
+        const nextRoundBaseTokens = estimateProviderMessagesInputTokens(messages, finalTools);
+        const maxAllowedNextInputTokens = maxInputTokensForRemainingCost(
+          this.#rate,
+          budgetCapMicroUsd - spentMicroUsd,
+          maxTokens,
+        );
+        const availableToolTokens = maxAllowedNextInputTokens - nextRoundBaseTokens;
+        if (availableToolTokens < 32) {
+          console.log(
+            JSON.stringify({
+              event: 'v2.web_search.budget_exhausted',
+              stage: 'pre_exa',
+              round,
+              spentMicroUsd,
+              budgetCapMicroUsd,
+            }),
+          );
+          throw new ModelGatewayFailure('model_invalid_output');
+        }
+
+        console.log(
+          JSON.stringify({
+            event: 'v2.web_search.round',
+            round,
+            callCount: cappedCalls.length,
+          }),
+        );
+
+        const perCallTokenBudget = Math.max(
+          32,
+          Math.floor((availableToolTokens - 16) / cappedCalls.length),
+        );
+
         const toolResults = await Promise.all(
           cappedCalls.map(async (call) => {
             const args = parseWebSearchToolArguments(call.arguments);
+            const privacy = validateWebSearchQueryPrivacy(args.query, privacyContext);
+            if (!privacy.ok) {
+              console.log(
+                JSON.stringify({
+                  event: 'v2.web_search.privacy_refused',
+                  round,
+                  reason: privacy.reason,
+                }),
+              );
+              return {
+                id: call.id,
+                content: truncateToolOutputToTokenBudget(
+                  formatWebSearchPrivacyRefusal(privacy.reason),
+                  perCallTokenBudget,
+                ),
+              };
+            }
+            totalSearchCalls += 1;
             try {
               const searchResponse = await this.#webSearch!.search(args, signal);
               return {
                 id: call.id,
-                content: formatWebSearchToolOutput(searchResponse),
+                content: truncateToolOutputToTokenBudget(
+                  formatWebSearchToolOutput(searchResponse),
+                  perCallTokenBudget,
+                ),
               };
             } catch (error) {
               if (signal.aborted) {
@@ -251,7 +380,10 @@ export class DeepSeekModelGateway implements ModelGateway {
               const reason = error instanceof Error ? error.message.slice(0, 120) : 'search_failed';
               return {
                 id: call.id,
-                content: `Web search unavailable: ${reason}`,
+                content: truncateToolOutputToTokenBudget(
+                  `Web search unavailable: ${reason}`,
+                  perCallTokenBudget,
+                ),
               };
             }
           }),

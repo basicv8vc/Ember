@@ -8,6 +8,7 @@ import {
   LoopbackFakeModelGateway,
   MODEL_LIMITS,
   ModelGatewayFailure,
+  WEB_SEARCH_LIMITS,
   createModelGateway,
   estimateCostMicroUsd,
   preflightConversationTurn,
@@ -52,6 +53,7 @@ export interface V2StreamingModelGateway {
   readonly providerId?: 'fake' | 'openai' | 'openrouter';
   readonly modelLabel?: string;
   readonly simulated?: boolean;
+  readonly webSearchEnabled?: boolean;
   streamConversationTurn(
     request: FakeConversationStreamRequest,
     signal: AbortSignal,
@@ -315,7 +317,7 @@ export function resolveV2GlobalCeilingOverride(
 export function adaptModelGatewayForV2(
   gateway: ModelGateway,
   attemptTimeoutMs: number,
-  options: { readonly webSearchEnabled?: boolean } = {},
+  options: { readonly webSearchEnabled?: boolean; readonly maxCostMicroUsd?: number } = {},
 ): V2StreamingModelGateway {
   if (gateway.providerId === 'fake' || gateway.simulated) {
     throw new Error(
@@ -323,10 +325,12 @@ export function adaptModelGatewayForV2(
     );
   }
   const webSearchEnabled = options.webSearchEnabled === true;
+  const maxCostMicroUsd = options.maxCostMicroUsd;
   return {
     providerId: gateway.providerId === 'openrouter' ? 'openrouter' : 'openai',
     modelLabel: gateway.modelLabel,
     simulated: false,
+    webSearchEnabled,
     async *streamConversationTurn(request, signal) {
       signal.throwIfAborted();
       const remainingMs = request.deadlineAtMs - Date.now();
@@ -337,10 +341,17 @@ export function adaptModelGatewayForV2(
       const timeoutMs = Math.max(1, Math.min(attemptTimeoutMs, remainingMs));
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
-      const turnInput: ConversationTurnInput =
-        webSearchEnabled && request.input.allowDelegationTools !== false
-          ? { ...request.input, enableWebSearchTool: true }
-          : request.input;
+      const effectiveMaxCost =
+        request.input.maxCostMicroUsd !== undefined && maxCostMicroUsd !== undefined
+          ? Math.min(request.input.maxCostMicroUsd, maxCostMicroUsd)
+          : (request.input.maxCostMicroUsd ?? maxCostMicroUsd);
+      const turnInput: ConversationTurnInput = {
+        ...request.input,
+        ...(webSearchEnabled && request.input.allowDelegationTools !== false
+          ? { enableWebSearchTool: true }
+          : {}),
+        ...(effectiveMaxCost !== undefined ? { maxCostMicroUsd: effectiveMaxCost } : {}),
+      };
       const result = await gateway.generateConversationTurn(turnInput, combinedSignal);
       signal.throwIfAborted();
       if (result.output.kind === 'reply' && result.output.text.length > 0) {
@@ -524,6 +535,7 @@ export function resolveV2ModelRuntime(
   });
   const gateway = adaptModelGatewayForV2(rawGateway, resolution.settings.attemptTimeoutMs, {
     webSearchEnabled: webSearch !== undefined,
+    maxCostMicroUsd: perAttemptCeiling,
   });
 
   return {
@@ -543,17 +555,29 @@ export function resolveV2ModelRuntime(
       return tenantAllowlist.tenantIds.has(tenantId.trim().toLowerCase());
     },
     getTurnReservation() {
-      const estimatedMicroUsd = estimateCostMicroUsd(
+      const singleRoundWorstCase = estimateCostMicroUsd(
         rate,
         MODEL_LIMITS.maxInputTokens,
         MODEL_LIMITS.maxOutputTokens,
       );
-      if (estimatedMicroUsd > perAttemptCeiling) {
+      if (singleRoundWorstCase > perAttemptCeiling) {
         throw new DomainError(
           'BUDGET_EXCEEDED',
           'worst-case turn reservation exceeds per-attempt budget ceiling',
         );
       }
+      // Under `maxProviderAttemptsPerTurn = 1`, one authorized turn attempt encompasses the
+      // bounded multi-round `web_search` loop (at most `maxRoundsPerTurn + 1` model POSTs), all
+      // strictly capped at `estimatedMicroUsd <= perAttemptCeiling` before each round's egress.
+      // Exa external search fees are bounded separately via `WEB_SEARCH_LIMITS.maxCallsPerTurn`
+      // and the operator's Exa API key spend cap.
+      const estimatedMicroUsd =
+        webSearch !== undefined
+          ? Math.min(
+              perAttemptCeiling,
+              singleRoundWorstCase * (WEB_SEARCH_LIMITS.maxRoundsPerTurn + 1),
+            )
+          : singleRoundWorstCase;
       return {
         budgetMode: 'real',
         providerId,

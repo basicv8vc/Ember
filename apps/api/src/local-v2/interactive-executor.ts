@@ -50,7 +50,7 @@ export type ReportObservedTurnUsage = (receipt: ObservedTurnUsage) => Promise<vo
 
 export interface InteractiveExecution {
   readonly rpc: ExecutorRpc;
-  readonly gateway: Pick<V2StreamingModelGateway, 'streamConversationTurn'>;
+  readonly gateway: Pick<V2StreamingModelGateway, 'streamConversationTurn' | 'webSearchEnabled'>;
   readonly reportObservedUsage: ReportObservedTurnUsage;
   readonly prepared: PreparedTurn;
   readonly scope: HeadScope;
@@ -168,6 +168,7 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
     }
     const context = buildBoundedContext(prepared.context);
     const currentTimeIso = new Date().toISOString();
+    const webSearchEnabled = gateway.webSearchEnabled === true;
     const fitted = fitConversationTurnInputToCap({
       messages: context.messages,
       ...(prepared.personalMemories !== undefined && prepared.personalMemories.length > 0
@@ -175,6 +176,7 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
         : {}),
       enablePersonalMemorySaveTool: true,
       enableProactiveScheduleTool: true,
+      enableWebSearchTool: webSearchEnabled,
       maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
     });
     const turnInput = {
@@ -186,8 +188,10 @@ export async function executeInteractive(execution: InteractiveExecution): Promi
         : {}),
       enablePersonalMemorySaveTool: true,
       enableProactiveScheduleTool: true,
+      ...(webSearchEnabled ? { enableWebSearchTool: true } : {}),
       currentTimeIso,
       maxOutputTokens: MODEL_LIMITS.maxOutputTokens,
+      maxCostMicroUsd: prepared.reservedMicroUsd,
     };
     if (preflightRate !== null) {
       const estimatedMicroUsd = estimateCostMicroUsd(

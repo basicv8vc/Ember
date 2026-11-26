@@ -11,8 +11,13 @@ import {
   formatConversationMessageText,
 } from '../context.js';
 import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
-import { MODEL_LIMITS, estimateTokensConservative } from '../limits.js';
-import type { ModelRateRow } from '../rates.js';
+import {
+  MODEL_LIMITS,
+  estimateTokensConservative,
+  serializationOverheadTokens,
+} from '../limits.js';
+import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
+import type { WebSearchPrivacyViolationReason } from '../web-search.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
@@ -1387,4 +1392,122 @@ export function assertAuthorizedBeforeFetch(isAuthorized: () => boolean): void {
   if (!isAuthorized()) {
     throw new ModelAuthorizationRefused();
   }
+}
+
+const IMAGE_PART_TOKEN_ESTIMATE = 1_024;
+const TOOL_OUTPUT_TRUNCATION_SUFFIX = '\n[truncated to fit context budget]';
+
+/**
+ * Conservative per-round input token estimate for a full provider `messages` + `tools` payload.
+ * Used before every provider POST in multi-round tool loops so growing tool outputs can never
+ * bypass `MODEL_LIMITS.maxInputTokens` or the attempt's pre-egress budget hold.
+ */
+export function estimateProviderMessagesInputTokens(
+  messages: readonly ProviderChatMessage[],
+  tools: readonly unknown[] = [],
+): number {
+  let tokens = serializationOverheadTokens();
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      tokens += estimateTokensConservative(message.content);
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === 'text') {
+          tokens += estimateTokensConservative(part.text);
+        } else if (part.type === 'image_url') {
+          tokens += IMAGE_PART_TOKEN_ESTIMATE;
+        }
+      }
+    }
+    if (message.role === 'assistant' && message.tool_calls !== undefined) {
+      for (const call of message.tool_calls) {
+        tokens += estimateTokensConservative(`${call.function.name}:${call.function.arguments}`);
+      }
+    }
+  }
+  if (tools.length > 0) {
+    tokens += estimateTokensConservative(JSON.stringify(tools));
+  }
+  return tokens;
+}
+
+/**
+ * Largest integer input token count in `[0, MODEL_LIMITS.maxInputTokens]` whose worst-case cost
+ * with `maxOutputTokens` fits within `remainingCostMicroUsd`, or `-1` if even 0 input tokens
+ * would exceed the remaining budget.
+ */
+export function maxInputTokensForRemainingCost(
+  rate: ModelRateRow,
+  remainingCostMicroUsd: number,
+  maxOutputTokens: number,
+): number {
+  if (remainingCostMicroUsd <= 0) {
+    return -1;
+  }
+  const outputNumerator = maxOutputTokens * rate.outputMicroUsdPerMillion;
+  const maxTotalNumerator = remainingCostMicroUsd * 1_000_000;
+  if (outputNumerator > maxTotalNumerator) {
+    return -1;
+  }
+  if (rate.inputMicroUsdPerMillion <= 0) {
+    return MODEL_LIMITS.maxInputTokens;
+  }
+  const maxByCost = Math.floor((maxTotalNumerator - outputNumerator) / rate.inputMicroUsdPerMillion);
+  const clamped = Math.min(MODEL_LIMITS.maxInputTokens, maxByCost);
+  // Sanity-check against estimateCostMicroUsd in case of floating-point edge rounding.
+  if (clamped >= 0 && estimateCostMicroUsd(rate, clamped, maxOutputTokens) <= remainingCostMicroUsd) {
+    return clamped;
+  }
+  return clamped - 1;
+}
+
+/**
+ * Truncate a tool output string so its conservative token estimate never exceeds `maxTokens`.
+ */
+export function truncateToolOutputToTokenBudget(content: string, maxTokens: number): string {
+  if (maxTokens <= 0) {
+    return '';
+  }
+  if (estimateTokensConservative(content) <= maxTokens) {
+    return content;
+  }
+  const suffixTokens = estimateTokensConservative(TOOL_OUTPUT_TRUNCATION_SUFFIX);
+  if (maxTokens <= suffixTokens) {
+    return TOOL_OUTPUT_TRUNCATION_SUFFIX.trim().slice(0, Math.max(1, maxTokens * 2));
+  }
+  let low = 0;
+  let high = content.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = `${content.slice(0, mid)}${TOOL_OUTPUT_TRUNCATION_SUFFIX}`;
+    if (estimateTokensConservative(candidate) <= maxTokens) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  let head = content.slice(0, low);
+  if (head.length > 0) {
+    const lastCode = head.charCodeAt(head.length - 1);
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+      head = head.slice(0, -1);
+    }
+  }
+  return `${head.trimEnd()}${TOOL_OUTPUT_TRUNCATION_SUFFIX}`;
+}
+
+export function extractLatestUserMessageText(
+  context: ConversationTurnInput['context'],
+): string {
+  for (let i = context.length - 1; i >= 0; i -= 1) {
+    const message = context[i]!;
+    if (message.role === 'user') {
+      return message.text;
+    }
+  }
+  return '';
+}
+
+export function formatWebSearchPrivacyRefusal(reason: WebSearchPrivacyViolationReason): string {
+  return `Web search refused by privacy policy (${reason}): do not include personal memories, private user details, or sensitive identifiers in external search queries. Rephrase with minimal public search terms only, or answer without web search.`;
 }

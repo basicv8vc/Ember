@@ -79,6 +79,13 @@ export interface ConversationTurnInput {
    */
   readonly currentTimeIso?: string;
   readonly maxOutputTokens: number;
+  /**
+   * Optional hard cumulative cost cap (micro-USD) across all provider POSTs in this turn attempt
+   * (e.g. multi-round `web_search` loops). Defaults to `MODEL_LIMITS.maxReservedMicroUsdPerAttempt`
+   * when multi-round tool loops are active so a single authorized attempt can never exceed its
+   * pre-egress budget hold.
+   */
+  readonly maxCostMicroUsd?: number;
 }
 
 export type ConversationDelegationCall =

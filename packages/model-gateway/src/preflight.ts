@@ -5,6 +5,7 @@ import {
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  WEB_SEARCH_SYSTEM_INSTRUCTION,
   buildBoundedPersonalMemoryContext,
 } from './context.js';
 import { ModelInputRefused } from './errors.js';
@@ -15,6 +16,7 @@ import {
   CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE,
   DELEGATION_TOOLS_TOKEN_ESTIMATE,
   PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE,
+  WEB_SEARCH_TOOL_TOKEN_ESTIMATE,
   buildPythonAgentInitialUserText,
   formatConversationMessageText,
 } from './providers/shared.js';
@@ -49,6 +51,7 @@ const MEMORY_SAVE_INSTRUCTION_TOKENS = estimateTokensConservative(
 const PROACTIVE_SCHEDULE_INSTRUCTION_TOKENS = estimateTokensConservative(
   `${PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION} Authoritative current UTC time: 2026-11-20T00:00:00.000Z.`,
 );
+const WEB_SEARCH_INSTRUCTION_TOKENS = estimateTokensConservative(WEB_SEARCH_SYSTEM_INSTRUCTION);
 const NOTES_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(NOTES_ACTION_ITEMS_SYSTEM_PROMPT);
 const PYTHON_SYSTEM_PROMPT_TOKENS = estimateTokensConservative(PYTHON_AGENT_SYSTEM_PROMPT);
 const OVERHEAD_TOKENS = serializationOverheadTokens();
@@ -80,6 +83,7 @@ export function preflightConversationTurn(input: {
   readonly allowDelegationTools?: boolean;
   readonly enablePersonalMemorySaveTool?: boolean;
   readonly enableProactiveScheduleTool?: boolean;
+  readonly enableWebSearchTool?: boolean;
   readonly maxOutputTokens: number;
 }): TokenPreflight {
   if (
@@ -141,7 +145,8 @@ export function preflightConversationTurn(input: {
   const allowDelegation = input.allowDelegationTools !== false;
   const memorySaveEnabled = input.enablePersonalMemorySaveTool === true;
   const scheduleCreateEnabled = input.enableProactiveScheduleTool === true;
-  const toolTokens =
+  const webSearchEnabled = input.enableWebSearchTool === true;
+  const baseToolTokens =
     !allowDelegation && !memorySaveEnabled && !scheduleCreateEnabled
       ? 0
       : memorySaveEnabled && scheduleCreateEnabled
@@ -151,11 +156,13 @@ export function preflightConversationTurn(input: {
           : scheduleCreateEnabled
             ? CONVERSATION_TOOLS_WITH_SCHEDULE_TOKEN_ESTIMATE
             : DELEGATION_TOOLS_TOKEN_ESTIMATE;
+  const toolTokens = baseToolTokens + (webSearchEnabled ? WEB_SEARCH_TOOL_TOKEN_ESTIMATE : 0);
   const inputChars =
     messageChars +
     memoryChars +
     (memorySaveEnabled ? PERSONAL_MEMORY_SAVE_SYSTEM_INSTRUCTION.length + 1 : 0) +
     (scheduleCreateEnabled ? PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION.length + 64 : 0) +
+    (webSearchEnabled ? WEB_SEARCH_SYSTEM_INSTRUCTION.length + 1 : 0) +
     MODEL_LIMITS.systemPromptChars +
     MODEL_LIMITS.serializationOverheadChars;
   const inputTokens =
@@ -164,6 +171,7 @@ export function preflightConversationTurn(input: {
     (allowDelegation ? SYSTEM_PROMPT_TOKENS : SCHEDULED_BRIEF_SYSTEM_PROMPT_TOKENS) +
     (memorySaveEnabled ? MEMORY_SAVE_INSTRUCTION_TOKENS : 0) +
     (scheduleCreateEnabled ? PROACTIVE_SCHEDULE_INSTRUCTION_TOKENS : 0) +
+    (webSearchEnabled ? WEB_SEARCH_INSTRUCTION_TOKENS : 0) +
     toolTokens +
     OVERHEAD_TOKENS;
 

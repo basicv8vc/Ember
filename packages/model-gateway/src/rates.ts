@@ -156,6 +156,41 @@ export const APPROVED_REAL_MODELS: readonly ApprovedModel[] = Object.freeze([
       requireParameters: true,
     }),
   }),
+  Object.freeze({
+    providerId: 'deepseek' as const,
+    modelId: 'deepseek-chat',
+    approval: Object.freeze({
+      approvalId: 'EMBER-V2-STAGING-DEEPSEEK-DIRECT-2026-11-25',
+      approvedBy: 'Founder',
+      approvedAt: '2026-11-25',
+      expiresAt: '2026-12-31',
+    }),
+    executionScope: 'smoke_only' as const,
+    budgetCeilings: Object.freeze({
+      perAttemptMicroUsd: 5_000,
+      principalDailyMicroUsd: 250_000,
+      tenantDailyMicroUsd: 1_000_000,
+      globalDailyMicroUsd: 1_000_000,
+      principalDailyTurns: 60,
+    }),
+    maxPaidSmokeTurns: 1,
+    stagingAlpha: Object.freeze({
+      approval: Object.freeze({
+        approvalId: 'EMBER-V2-STAGING-DEEPSEEK-DIRECT-2026-11-25',
+        approvedBy: 'Founder',
+        approvedAt: '2026-11-25',
+      }),
+      budgetCeilings: Object.freeze({
+        perAttemptMicroUsd: 5_000,
+        principalDailyMicroUsd: 250_000,
+        tenantDailyMicroUsd: 1_000_000,
+        globalDailyMicroUsd: 1_000_000,
+        principalDailyTurns: 60,
+      }),
+      externalApiKeySpendLimitUsd: 1 as const,
+      maxProviderAttemptsPerTurn: 1 as const,
+    }),
+  }),
 ]);
 
 /**
@@ -189,7 +224,11 @@ export const PENDING_MODEL_CANDIDATES: readonly ModelCandidate[] = Object.freeze
  * Kept separate from the model allowlist so an unapproved model reports `model_not_approved`
  * rather than masking the real reason as a provider problem.
  */
-export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze(['openai', 'openrouter']);
+export const APPROVED_MODEL_PROVIDERS: readonly string[] = Object.freeze([
+  'openai',
+  'openrouter',
+  'deepseek',
+]);
 
 /** Documented placeholder: boot refuses any model id containing it. */
 export const MODEL_ID_PLACEHOLDER = 'REPLACE-WITH-CTO-APPROVED-MODEL-ID';
@@ -301,6 +340,17 @@ export const MODEL_RATE_ROWS: readonly ModelRateRow[] = Object.freeze([
     source: OPENROUTER_DEEPSEEK_V41_FLASH_DEEPINFRA_SOURCE,
     shutdownDate: null,
     reasoningEffort: 'none' as const,
+  }),
+  Object.freeze({
+    providerId: 'deepseek' as const,
+    modelId: 'deepseek-chat',
+    inputMicroUsdPerMillion: 270_000,
+    outputMicroUsdPerMillion: 1_100_000,
+    rateVersion: 'deepseek-chat-official-2026-11-25',
+    provenance: 'official_price_verified' as const,
+    source:
+      'https://api-docs.deepseek.com/quick_start/pricing — $0.27/M input (cache miss) and $1.10/M output',
+    shutdownDate: null,
   }),
   Object.freeze({
     providerId: 'openai' as const,

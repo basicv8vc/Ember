@@ -4,7 +4,7 @@
  * prompt, a caller-defined tool list, a stop sequence or a provider, so a later feature cannot
  * smuggle capability in through a parameter.
  */
-export type ModelProviderId = 'fake' | 'openai' | 'openrouter';
+export type ModelProviderId = 'fake' | 'openai' | 'openrouter' | 'deepseek';
 export type RealModelProviderId = Exclude<ModelProviderId, 'fake'>;
 
 export type ModelOperation = 'conversation.turn' | 'task.notes_action_items' | 'task.python_agent';
@@ -69,11 +69,23 @@ export interface ConversationTurnInput {
    */
   readonly enableProactiveScheduleTool?: boolean;
   /**
+   * Explicit runtime capability gate for the closed `web_search` tool (Exa-backed in V2).
+   * Defaults to `false` so V1, fake mode, and unconfigured runtimes never advertise or invoke it.
+   */
+  readonly enableWebSearchTool?: boolean;
+  /**
    * Authoritative UTC ISO-8601 current timestamp supplied by the runtime when
    * `enableProactiveScheduleTool` is enabled so relative scheduling requests resolve accurately.
    */
   readonly currentTimeIso?: string;
   readonly maxOutputTokens: number;
+  /**
+   * Optional hard cumulative cost cap (micro-USD) across all provider POSTs in this turn attempt
+   * (e.g. multi-round `web_search` loops). Defaults to `MODEL_LIMITS.maxReservedMicroUsdPerAttempt`
+   * when multi-round tool loops are active so a single authorized attempt can never exceed its
+   * pre-egress budget hold.
+   */
+  readonly maxCostMicroUsd?: number;
 }
 
 export type ConversationDelegationCall =

@@ -6,12 +6,18 @@ import {
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  WEB_SEARCH_SYSTEM_INSTRUCTION,
   buildBoundedPersonalMemoryContext,
   formatConversationMessageText,
 } from '../context.js';
 import { ModelAuthorizationRefused, ModelGatewayFailure } from '../errors.js';
-import { MODEL_LIMITS, estimateTokensConservative } from '../limits.js';
-import type { ModelRateRow } from '../rates.js';
+import {
+  MODEL_LIMITS,
+  estimateTokensConservative,
+  serializationOverheadTokens,
+} from '../limits.js';
+import { estimateCostMicroUsd, type ModelRateRow } from '../rates.js';
+import type { WebSearchPrivacyViolationReason } from '../web-search.js';
 import type {
   ConversationTurnInput,
   ConversationTurnOutput,
@@ -27,6 +33,7 @@ export const DELEGATE_PYTHON_TOOL_NAME = 'delegate_python_agent' as const;
 export const SAVE_PERSONAL_MEMORY_TOOL_NAME = 'save_personal_memory' as const;
 export const DELETE_PERSONAL_MEMORY_TOOL_NAME = 'delete_personal_memory' as const;
 export const CREATE_PROACTIVE_SCHEDULE_TOOL_NAME = 'create_proactive_schedule' as const;
+export const WEB_SEARCH_TOOL_NAME = 'web_search' as const;
 export const RUN_PYTHON_TOOL_NAME = 'run_python_script' as const;
 export const DEFAULT_DELEGATION_ACK_TEXT =
   'I have started organizing these notes into action items.';
@@ -292,6 +299,34 @@ export const CREATE_PROACTIVE_SCHEDULE_TOOL = Object.freeze({
   }),
 });
 
+export const WEB_SEARCH_TOOL = Object.freeze({
+  type: 'function' as const,
+  function: Object.freeze({
+    name: WEB_SEARCH_TOOL_NAME,
+    description:
+      'Search the live web for current events, recent news, prices, weather, or up-to-date information.',
+    parameters: Object.freeze({
+      type: 'object',
+      additionalProperties: false,
+      required: ['query'],
+      properties: Object.freeze({
+        query: Object.freeze({
+          type: 'string',
+          description: 'Concise search query (1-256 characters).',
+          minLength: 1,
+          maxLength: 256,
+        }),
+        num_results: Object.freeze({
+          type: 'integer',
+          description: 'Number of web results to return (1-5, default 5).',
+          minimum: 1,
+          maximum: 5,
+        }),
+      }),
+    }),
+  }),
+});
+
 export const NO_CONVERSATION_TOOLS = Object.freeze([] as const);
 
 export const CONVERSATION_TOOLS_WITH_MEMORY = Object.freeze([
@@ -316,6 +351,7 @@ export interface ConversationToolCapabilities {
   readonly allowDelegation?: boolean;
   readonly allowSavePersonalMemory?: boolean;
   readonly allowCreateProactiveSchedule?: boolean;
+  readonly allowWebSearch?: boolean;
 }
 
 export function getConversationTools(capabilities?: boolean | ConversationToolCapabilities) {
@@ -327,16 +363,22 @@ export function getConversationTools(capabilities?: boolean | ConversationToolCa
       : capabilities?.allowSavePersonalMemory === true;
   const allowSchedule =
     typeof capabilities === 'boolean' ? false : capabilities?.allowCreateProactiveSchedule === true;
-  if (!allowDelegation && !allowMemory && !allowSchedule) return NO_CONVERSATION_TOOLS;
-  if (allowDelegation) {
+  const allowWebSearch =
+    typeof capabilities === 'boolean' ? false : capabilities?.allowWebSearch === true;
+  if (!allowDelegation && !allowMemory && !allowSchedule && !allowWebSearch) {
+    return NO_CONVERSATION_TOOLS;
+  }
+  if (!allowWebSearch && allowDelegation) {
     if (allowMemory && allowSchedule) return CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE;
     if (allowMemory) return CONVERSATION_TOOLS_WITH_MEMORY;
     if (allowSchedule) return CONVERSATION_TOOLS_WITH_SCHEDULE;
     return DELEGATION_TOOLS;
   }
   return Object.freeze([
+    ...(allowDelegation ? DELEGATION_TOOLS : []),
     ...(allowMemory ? [SAVE_PERSONAL_MEMORY_TOOL, DELETE_PERSONAL_MEMORY_TOOL] : []),
     ...(allowSchedule ? [CREATE_PROACTIVE_SCHEDULE_TOOL] : []),
+    ...(allowWebSearch ? [WEB_SEARCH_TOOL] : []),
   ]);
 }
 
@@ -388,6 +430,42 @@ export const CONVERSATION_TOOLS_WITH_MEMORY_AND_SCHEDULE_TOKEN_ESTIMATE =
 export const PYTHON_AGENT_TOOLS_TOKEN_ESTIMATE = estimateTokensConservative(
   JSON.stringify(PYTHON_AGENT_TOOLS),
 );
+
+export const WEB_SEARCH_TOOL_TOKEN_ESTIMATE = estimateTokensConservative(
+  JSON.stringify(WEB_SEARCH_TOOL),
+);
+
+const webSearchToolArgsSchema = z.object({
+  query: z.string().trim().min(1).max(256),
+  num_results: z
+    .number()
+    .nullable()
+    .optional()
+    .transform((value) => {
+      if (value === null || value === undefined || !Number.isFinite(value)) return undefined;
+      return Math.max(1, Math.min(5, Math.trunc(value)));
+    }),
+});
+
+export function parseWebSearchToolArguments(rawJson: string): {
+  readonly query: string;
+  readonly numResults?: number;
+} {
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(rawJson);
+  } catch {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  const parsed = webSearchToolArgsSchema.safeParse(parsedJson);
+  if (!parsed.success) {
+    throw new ModelGatewayFailure('model_invalid_output');
+  }
+  return {
+    query: parsed.data.query,
+    ...(parsed.data.num_results === undefined ? {} : { numResults: parsed.data.num_results }),
+  };
+}
 
 const optionalBoundedText = (maxChars: number) =>
   z
@@ -683,6 +761,9 @@ export function buildConversationTurnMessages(input: ConversationTurnInput): Pro
     ) {
       systemParts.push(`Authoritative current UTC time: ${input.currentTimeIso}.`);
     }
+  }
+  if (input.enableWebSearchTool === true) {
+    systemParts.push(WEB_SEARCH_SYSTEM_INSTRUCTION);
   }
   const systemPrompt = systemParts.join(' ');
   const memoryBlock =
@@ -1311,4 +1392,122 @@ export function assertAuthorizedBeforeFetch(isAuthorized: () => boolean): void {
   if (!isAuthorized()) {
     throw new ModelAuthorizationRefused();
   }
+}
+
+const IMAGE_PART_TOKEN_ESTIMATE = 1_024;
+const TOOL_OUTPUT_TRUNCATION_SUFFIX = '\n[truncated to fit context budget]';
+
+/**
+ * Conservative per-round input token estimate for a full provider `messages` + `tools` payload.
+ * Used before every provider POST in multi-round tool loops so growing tool outputs can never
+ * bypass `MODEL_LIMITS.maxInputTokens` or the attempt's pre-egress budget hold.
+ */
+export function estimateProviderMessagesInputTokens(
+  messages: readonly ProviderChatMessage[],
+  tools: readonly unknown[] = [],
+): number {
+  let tokens = serializationOverheadTokens();
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      tokens += estimateTokensConservative(message.content);
+    } else if (Array.isArray(message.content)) {
+      for (const part of message.content) {
+        if (part.type === 'text') {
+          tokens += estimateTokensConservative(part.text);
+        } else if (part.type === 'image_url') {
+          tokens += IMAGE_PART_TOKEN_ESTIMATE;
+        }
+      }
+    }
+    if (message.role === 'assistant' && message.tool_calls !== undefined) {
+      for (const call of message.tool_calls) {
+        tokens += estimateTokensConservative(`${call.function.name}:${call.function.arguments}`);
+      }
+    }
+  }
+  if (tools.length > 0) {
+    tokens += estimateTokensConservative(JSON.stringify(tools));
+  }
+  return tokens;
+}
+
+/**
+ * Largest integer input token count in `[0, MODEL_LIMITS.maxInputTokens]` whose worst-case cost
+ * with `maxOutputTokens` fits within `remainingCostMicroUsd`, or `-1` if even 0 input tokens
+ * would exceed the remaining budget.
+ */
+export function maxInputTokensForRemainingCost(
+  rate: ModelRateRow,
+  remainingCostMicroUsd: number,
+  maxOutputTokens: number,
+): number {
+  if (remainingCostMicroUsd <= 0) {
+    return -1;
+  }
+  const outputNumerator = maxOutputTokens * rate.outputMicroUsdPerMillion;
+  const maxTotalNumerator = remainingCostMicroUsd * 1_000_000;
+  if (outputNumerator > maxTotalNumerator) {
+    return -1;
+  }
+  if (rate.inputMicroUsdPerMillion <= 0) {
+    return MODEL_LIMITS.maxInputTokens;
+  }
+  const maxByCost = Math.floor((maxTotalNumerator - outputNumerator) / rate.inputMicroUsdPerMillion);
+  const clamped = Math.min(MODEL_LIMITS.maxInputTokens, maxByCost);
+  // Sanity-check against estimateCostMicroUsd in case of floating-point edge rounding.
+  if (clamped >= 0 && estimateCostMicroUsd(rate, clamped, maxOutputTokens) <= remainingCostMicroUsd) {
+    return clamped;
+  }
+  return clamped - 1;
+}
+
+/**
+ * Truncate a tool output string so its conservative token estimate never exceeds `maxTokens`.
+ */
+export function truncateToolOutputToTokenBudget(content: string, maxTokens: number): string {
+  if (maxTokens <= 0) {
+    return '';
+  }
+  if (estimateTokensConservative(content) <= maxTokens) {
+    return content;
+  }
+  const suffixTokens = estimateTokensConservative(TOOL_OUTPUT_TRUNCATION_SUFFIX);
+  if (maxTokens <= suffixTokens) {
+    return TOOL_OUTPUT_TRUNCATION_SUFFIX.trim().slice(0, Math.max(1, maxTokens * 2));
+  }
+  let low = 0;
+  let high = content.length;
+  while (low < high) {
+    const mid = Math.ceil((low + high) / 2);
+    const candidate = `${content.slice(0, mid)}${TOOL_OUTPUT_TRUNCATION_SUFFIX}`;
+    if (estimateTokensConservative(candidate) <= maxTokens) {
+      low = mid;
+    } else {
+      high = mid - 1;
+    }
+  }
+  let head = content.slice(0, low);
+  if (head.length > 0) {
+    const lastCode = head.charCodeAt(head.length - 1);
+    if (lastCode >= 0xd800 && lastCode <= 0xdbff) {
+      head = head.slice(0, -1);
+    }
+  }
+  return `${head.trimEnd()}${TOOL_OUTPUT_TRUNCATION_SUFFIX}`;
+}
+
+export function extractLatestUserMessageText(
+  context: ConversationTurnInput['context'],
+): string {
+  for (let i = context.length - 1; i >= 0; i -= 1) {
+    const message = context[i]!;
+    if (message.role === 'user') {
+      return message.text;
+    }
+  }
+  return '';
+}
+
+export function formatWebSearchPrivacyRefusal(reason: WebSearchPrivacyViolationReason): string {
+  return `Web search refused by privacy policy (${reason}): do not include personal memories, private user details, or sensitive identifiers in external search queries. Rephrase with minimal public search terms only, or answer without web search.`;
 }

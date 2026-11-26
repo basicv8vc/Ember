@@ -1,5 +1,6 @@
 import { DomainError } from '@ember/domain';
 import {
+  ExaWebSearchClient,
   FAKE_MODEL_LABEL,
   FAKE_REPLY_PREFIX,
   FAKE_V2_RATE_VERSION,
@@ -7,6 +8,7 @@ import {
   LoopbackFakeModelGateway,
   MODEL_LIMITS,
   ModelGatewayFailure,
+  WEB_SEARCH_LIMITS,
   createModelGateway,
   estimateCostMicroUsd,
   preflightConversationTurn,
@@ -23,6 +25,7 @@ import {
   type ModelRateRow,
   type PythonAgentStepInput,
   type PythonAgentStepOutput,
+  type WebSearchPort,
 } from '@ember/model-gateway';
 import {
   V2_BUDGET_LIMITS,
@@ -50,6 +53,7 @@ export interface V2StreamingModelGateway {
   readonly providerId?: 'fake' | 'openai' | 'openrouter';
   readonly modelLabel?: string;
   readonly simulated?: boolean;
+  readonly webSearchEnabled?: boolean;
   streamConversationTurn(
     request: FakeConversationStreamRequest,
     signal: AbortSignal,
@@ -75,6 +79,10 @@ export interface V2ModelRuntimeEnv extends V2SandboxEnv {
   readonly EMBER_MODEL_PROVIDER?: string;
   readonly EMBER_MODEL_ID?: string;
   readonly EMBER_MODEL_API_KEY?: string;
+  readonly EXA_API_KEY?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_ACCOUNT_ID?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_ID?: string;
+  readonly EMBER_OPENROUTER_CF_AI_GATEWAY_TOKEN?: string;
   readonly EMBER_MODEL_ALPHA_SCOPE?: string;
   readonly EMBER_MODEL_ALPHA_TENANT_IDS?: string;
   readonly EMBER_MODEL_ALLOW_RECURRING_BRIEFS?: string;
@@ -309,16 +317,20 @@ export function resolveV2GlobalCeilingOverride(
 export function adaptModelGatewayForV2(
   gateway: ModelGateway,
   attemptTimeoutMs: number,
+  options: { readonly webSearchEnabled?: boolean; readonly maxCostMicroUsd?: number } = {},
 ): V2StreamingModelGateway {
   if (gateway.providerId === 'fake' || gateway.simulated) {
     throw new Error(
       'adaptModelGatewayForV2 is strictly for real non-simulated ModelGateway instances',
     );
   }
+  const webSearchEnabled = options.webSearchEnabled === true;
+  const maxCostMicroUsd = options.maxCostMicroUsd;
   return {
-    providerId: gateway.providerId,
+    providerId: gateway.providerId === 'openrouter' ? 'openrouter' : 'openai',
     modelLabel: gateway.modelLabel,
     simulated: false,
+    webSearchEnabled,
     async *streamConversationTurn(request, signal) {
       signal.throwIfAborted();
       const remainingMs = request.deadlineAtMs - Date.now();
@@ -329,7 +341,18 @@ export function adaptModelGatewayForV2(
       const timeoutMs = Math.max(1, Math.min(attemptTimeoutMs, remainingMs));
       const timeoutSignal = AbortSignal.timeout(timeoutMs);
       const combinedSignal = AbortSignal.any([signal, timeoutSignal]);
-      const result = await gateway.generateConversationTurn(request.input, combinedSignal);
+      const effectiveMaxCost =
+        request.input.maxCostMicroUsd !== undefined && maxCostMicroUsd !== undefined
+          ? Math.min(request.input.maxCostMicroUsd, maxCostMicroUsd)
+          : (request.input.maxCostMicroUsd ?? maxCostMicroUsd);
+      const turnInput: ConversationTurnInput = {
+        ...request.input,
+        ...(webSearchEnabled && request.input.allowDelegationTools !== false
+          ? { enableWebSearchTool: true }
+          : {}),
+        ...(effectiveMaxCost !== undefined ? { maxCostMicroUsd: effectiveMaxCost } : {}),
+      };
+      const result = await gateway.generateConversationTurn(turnInput, combinedSignal);
       signal.throwIfAborted();
       if (result.output.kind === 'reply' && result.output.text.length > 0) {
         yield { kind: 'delta', text: result.output.text };
@@ -475,14 +498,45 @@ export function resolveV2ModelRuntime(
   }
 
   const modelId = resolution.settings.modelId;
-  const providerId = resolution.settings.providerId;
+  // AgentHeadDO SQLite enforces CHECK (provider_id IN ('fake', 'openai', 'openrouter'));
+  // direct OpenAI-compatible providers like 'deepseek' persist under the 'openai' slot while
+  // preserving exact modelLabel ('deepseek-chat') and rateVersion ('deepseek-chat-official-...').
+  const providerId: 'fake' | 'openai' | 'openrouter' =
+    resolution.settings.providerId === 'openrouter'
+      ? 'openrouter'
+      : resolution.settings.providerId === 'fake'
+        ? 'fake'
+        : 'openai';
   const rate = resolution.rate;
   const perAttemptCeiling = resolution.settings.ceilings.perAttemptMicroUsd;
-  const rawGateway = createModelGateway(
-    resolution,
-    options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl },
-  );
-  const gateway = adaptModelGatewayForV2(rawGateway, resolution.settings.attemptTimeoutMs);
+  const exaApiKey = env.EXA_API_KEY?.trim() ?? '';
+  const webSearch: WebSearchPort | undefined =
+    exaApiKey.length > 0
+      ? new ExaWebSearchClient({
+          apiKey: exaApiKey,
+          ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+        })
+      : undefined;
+  const cfAiGatewayAccountId = env.EMBER_OPENROUTER_CF_AI_GATEWAY_ACCOUNT_ID?.trim() ?? '';
+  const cfAiGatewayId = env.EMBER_OPENROUTER_CF_AI_GATEWAY_ID?.trim() ?? '';
+  const cfAiGatewayToken = env.EMBER_OPENROUTER_CF_AI_GATEWAY_TOKEN?.trim() ?? '';
+  const openRouterCloudflareAiGateway =
+    cfAiGatewayAccountId.length > 0 && cfAiGatewayId.length > 0
+      ? {
+          accountId: cfAiGatewayAccountId,
+          gatewayId: cfAiGatewayId,
+          ...(cfAiGatewayToken.length > 0 ? { token: cfAiGatewayToken } : {}),
+        }
+      : undefined;
+  const rawGateway = createModelGateway(resolution, {
+    ...(options.fetchImpl === undefined ? {} : { fetchImpl: options.fetchImpl }),
+    ...(webSearch === undefined ? {} : { webSearch }),
+    ...(openRouterCloudflareAiGateway === undefined ? {} : { openRouterCloudflareAiGateway }),
+  });
+  const gateway = adaptModelGatewayForV2(rawGateway, resolution.settings.attemptTimeoutMs, {
+    webSearchEnabled: webSearch !== undefined,
+    maxCostMicroUsd: perAttemptCeiling,
+  });
 
   return {
     mode: 'real',
@@ -501,17 +555,29 @@ export function resolveV2ModelRuntime(
       return tenantAllowlist.tenantIds.has(tenantId.trim().toLowerCase());
     },
     getTurnReservation() {
-      const estimatedMicroUsd = estimateCostMicroUsd(
+      const singleRoundWorstCase = estimateCostMicroUsd(
         rate,
         MODEL_LIMITS.maxInputTokens,
         MODEL_LIMITS.maxOutputTokens,
       );
-      if (estimatedMicroUsd > perAttemptCeiling) {
+      if (singleRoundWorstCase > perAttemptCeiling) {
         throw new DomainError(
           'BUDGET_EXCEEDED',
           'worst-case turn reservation exceeds per-attempt budget ceiling',
         );
       }
+      // Under `maxProviderAttemptsPerTurn = 1`, one authorized turn attempt encompasses the
+      // bounded multi-round `web_search` loop (at most `maxRoundsPerTurn + 1` model POSTs), all
+      // strictly capped at `estimatedMicroUsd <= perAttemptCeiling` before each round's egress.
+      // Exa external search fees are bounded separately via `WEB_SEARCH_LIMITS.maxCallsPerTurn`
+      // and the operator's Exa API key spend cap.
+      const estimatedMicroUsd =
+        webSearch !== undefined
+          ? Math.min(
+              perAttemptCeiling,
+              singleRoundWorstCase * (WEB_SEARCH_LIMITS.maxRoundsPerTurn + 1),
+            )
+          : singleRoundWorstCase;
       return {
         budgetMode: 'real',
         providerId,

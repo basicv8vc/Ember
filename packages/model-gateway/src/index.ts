@@ -60,6 +60,7 @@ export {
   PROACTIVE_SCHEDULE_CREATE_SYSTEM_INSTRUCTION,
   PYTHON_AGENT_SYSTEM_PROMPT,
   SCHEDULED_BRIEF_SYSTEM_PROMPT,
+  WEB_SEARCH_SYSTEM_INSTRUCTION,
   buildBoundedContext,
   buildBoundedPersonalMemoryContext,
   type BoundedContext,
@@ -94,6 +95,8 @@ export {
   RUN_PYTHON_TOOL_NAME,
   SAVE_PERSONAL_MEMORY_TOOL,
   SAVE_PERSONAL_MEMORY_TOOL_NAME,
+  WEB_SEARCH_TOOL,
+  WEB_SEARCH_TOOL_NAME,
   formatConversationMessageText,
   getConversationTools,
 } from './providers/shared.js';
@@ -155,6 +158,13 @@ export {
   type OpenAiGatewayOptions,
 } from './providers/openai.js';
 export {
+  DEEPSEEK_CHAT_COMPLETIONS_PATH,
+  DEEPSEEK_CHAT_COMPLETIONS_URL,
+  DEEPSEEK_ORIGIN,
+  DeepSeekModelGateway,
+  type DeepSeekModelGatewayOptions,
+} from './providers/deepseek.js';
+export {
   OPENROUTER_CHAT_COMPLETIONS_PATH,
   OPENROUTER_CHAT_COMPLETIONS_URL,
   OPENROUTER_ORIGIN,
@@ -162,6 +172,23 @@ export {
   type OpenRouterModelGatewayOptions,
 } from './providers/openrouter.js';
 export { createModelGateway, type CreateModelGatewayOptions } from './gateway.js';
+export {
+  EXA_SEARCH_ORIGIN,
+  EXA_SEARCH_PATH,
+  EXA_SEARCH_URL,
+  ExaWebSearchClient,
+  WEB_SEARCH_LIMITS,
+  formatWebSearchToolOutput,
+  validateWebSearchQueryPrivacy,
+  type ExaWebSearchClientOptions,
+  type WebSearchPort,
+  type WebSearchPrivacyViolationReason,
+  type WebSearchQueryPrivacyContext,
+  type WebSearchQueryPrivacyResult,
+  type WebSearchRequest,
+  type WebSearchResponse,
+  type WebSearchResultItem,
+} from './web-search.js';
 export {
   FakeStreamingModelGateway,
   FAKE_STREAM_MAX_REPLY_CHARS,

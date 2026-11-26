@@ -1214,6 +1214,158 @@ final class LiveConversationHostTasksTests: XCTestCase {
         XCTAssertNil(unknownModel.screen.emptyState?.capabilityNote)
     }
 
+    func testStartUnlocksComposerBeforeSecondaryTaskSyncCompletes() async throws {
+        let taskID = "00000000-0000-4000-8000-00000000b399"
+        let agentID = "00000000-0000-4000-8000-00000000b301"
+        let tasksStarted = DispatchSemaphore(value: 0)
+        let allowTasksToFinish = DispatchSemaphore(value: 0)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                tasksStarted.signal()
+                _ = allowTasksToFinish.wait(timeout: .now() + .seconds(5))
+                return .json(statusCode: 200, body: """
+                {
+                  "tasks":[
+                    {"task_id":"\(taskID)","agent_id":"\(agentID)","kind":"notes.action_items",
+                     "title":"Slow startup task","status":"running",
+                     "attempt_count":1,"result_state":"pending",
+                     "created_at":"2026-11-15T10:00:05Z","updated_at":"2026-11-15T10:01:00Z","deadline_at":null}
+                  ]
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: makeTempDirectory())
+        let startTask = Task { await model.start() }
+
+        let enteredTasks = await Task.detached {
+            tasksStarted.wait(timeout: .now() + .seconds(5)) == .success
+        }.value
+        XCTAssertTrue(enteredTasks, "expected startup to reach secondary task sync")
+
+        // Secondary task sync is still blocked, but the composer must already be unlocked for sending.
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(
+            ConversationInteractionRules.trailingAction(
+                for: "Hello Ember",
+                replyState: model.reply,
+                isSubmitting: model.isSubmitting,
+                isStopping: model.isStopping,
+                isLoading: model.isLoading
+            ),
+            .send(isEnabled: true)
+        )
+
+        allowTasksToFinish.signal()
+        await startTask.value
+
+        XCTAssertFalse(model.isLoading)
+        XCTAssertEqual(model.taskStore.tasksByID.count, 1)
+    }
+
+    func testSendDuringStartupShowsOptimisticMessageImmediatelyAndDispatchesAfterRecovery() async throws {
+        let messagesStarted = DispatchSemaphore(value: 0)
+        let allowMessagesToFinish = DispatchSemaphore(value: 0)
+        let didBlockInitialLoad = LockedBool(false)
+        let postCount = LockedInt(0)
+        let sentTextBox = LockedBool(false)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if path == "/v1/conversations/\(AuthFixture.conversationID.uuidString.lowercased())/messages" {
+                if request.httpMethod == "POST" {
+                    postCount.increment()
+                    let body = request.httpBody.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    let submissionID = body?["client_submission_id"] as? String ?? UUID().uuidString.lowercased()
+                    let text = body?["text"] as? String ?? ""
+                    if text == "Hello right away" {
+                        sentTextBox.value = true
+                    }
+                    return .json(statusCode: 200, body: """
+                    {
+                      "message":{
+                        "message_id":"55555555-5555-4555-8555-555555555599",
+                        "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                        "sequence":1,
+                        "created_at":"2026-11-15T10:05:00Z",
+                        "kind":"user",
+                        "text":"\(text)",
+                        "client_submission_id":"\(submissionID)"
+                      },
+                      "turn":{
+                        "turn_id":"88888888-8888-4888-8888-888888888899",
+                        "status":"running",
+                        "created_at":"2026-11-15T10:05:01Z"
+                      },
+                      "transcript_epoch":0
+                    }
+                    """)
+                }
+                if !didBlockInitialLoad.value {
+                    didBlockInitialLoad.value = true
+                    messagesStarted.signal()
+                    _ = allowMessagesToFinish.wait(timeout: .now() + .seconds(5))
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(AuthFixture.conversationID.uuidString.lowercased())",
+                  "transcript_epoch":0,
+                  "messages":[],
+                  "next_after":0,"has_more":false
+                }
+                """)
+            }
+            if path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: "{\"tasks\":[]}")
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: makeTempDirectory())
+        let startTask = Task { await model.start() }
+
+        let enteredMessages = await Task.detached {
+            messagesStarted.wait(timeout: .now() + .seconds(5)) == .success
+        }.value
+        XCTAssertTrue(enteredMessages, "expected startup to be in-flight loading messages")
+        XCTAssertTrue(model.isLoading)
+
+        // User types and taps Send while startup recovery is still in flight.
+        let sendTask = Task { await model.send("Hello right away") }
+        await Task.yield()
+
+        // Immediately visible in UI as submitting with optimistic pending message,
+        // while no POST has been dispatched yet.
+        XCTAssertTrue(model.isSubmitting)
+        XCTAssertEqual(model.pendingOutgoingText, "Hello right away")
+        XCTAssertEqual(postCount.value, 0)
+
+        // Unblock startup recovery: queued send should dispatch automatically.
+        allowMessagesToFinish.signal()
+        await sendTask.value
+        await startTask.value
+
+        XCTAssertEqual(postCount.value, 1)
+        XCTAssertTrue(sentTextBox.value)
+        XCTAssertEqual(model.command, .acknowledged)
+        XCTAssertEqual(model.reply, .generating)
+        XCTAssertNil(model.pendingOutgoingText)
+    }
+
     private func makeHostModel(
         directory: URL,
         taskPollInterval: Duration = .seconds(2)

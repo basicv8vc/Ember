@@ -73,14 +73,18 @@ enum ConversationInteractionRules {
         isLoading: Bool = false,
         isUploadingAttachment: Bool = false
     ) -> ConversationComposerTrailingAction {
-        if isLoading {
-            return .send(isEnabled: false)
-        }
         if isStopping {
             return .stop(isEnabled: false)
         }
         if isSubmitting {
             return .submitting
+        }
+        if isLoading {
+            if replyState == .generating {
+                return .send(isEnabled: false)
+            }
+            let canSend = submission(for: draft, isGenerating: isUploadingAttachment) != nil
+            return .send(isEnabled: canSend)
         }
         if replyState == .generating {
             return .stop(isEnabled: true)

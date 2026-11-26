@@ -59,7 +59,7 @@ actor LiveConversationRepository {
 
     /// On every launch, reconcile an unresolved durable intent before enabling a new send.
     func recoverAfterRelaunch() async throws -> ConversationSnapshot {
-        _ = try await bootstrap()
+        _ = try await ensureProfile()
         if try await pending() != nil {
             _ = try await reconcilePending()
         }

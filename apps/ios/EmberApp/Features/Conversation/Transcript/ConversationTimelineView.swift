@@ -57,8 +57,22 @@ struct ConversationTimelineView: View {
                                 )
                             }
 
+                            let timestampDividerIDs = ConversationTimelineTimestampGrouping.dividerEntryIDs(
+                                for: state.timeline
+                            )
                             ForEach(state.timeline) { entry in
-                                timelineRow(entry)
+                                VStack(alignment: .leading, spacing: 8) {
+                                    if timestampDividerIDs.contains(entry.id),
+                                       let timestamp = entry.timelineTimestamp {
+                                        Text(ConversationTimelineTimestampGrouping.formattedDivider(for: timestamp))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .frame(maxWidth: .infinity, alignment: .center)
+                                            .padding(.top, 4)
+                                            .accessibilityIdentifier("conversation-timestamp-divider")
+                                    }
+                                    timelineRow(entry)
+                                }
                             }
 
                             ConversationReplyStatusView(
@@ -438,13 +452,34 @@ private struct ConversationMessageBubble: View {
     }
 
     var body: some View {
-        HStack(alignment: .bottom, spacing: 8) {
+        HStack(alignment: .bottom, spacing: 0) {
             if isUser {
-                Spacer(minLength: 36)
-            }
+                Spacer(minLength: 56)
 
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 8) {
-                if !isUser {
+                VStack(alignment: .trailing, spacing: 4) {
+                    Text(verbatim: message.text)
+                        .font(.body)
+                        .foregroundStyle(.primary)
+                        .multilineTextAlignment(.leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                        .background(
+                            EmberDesignTokens.chatUserBubble,
+                            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        )
+                        .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
+
+                    if let deliveryNote = message.deliveryNote {
+                        Text(deliveryNote)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .padding(.trailing, 4)
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
                         Image(systemName: "flame.fill")
                             .font(.caption2.weight(.medium))
@@ -454,44 +489,30 @@ private struct ConversationMessageBubble: View {
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
-                }
 
-                Group {
-                    if isUser {
-                        Text(verbatim: message.text)
-                            .multilineTextAlignment(.leading)
-                    } else {
-                        ConversationMarkdownText(
-                            text: message.text,
-                            cachesParsedMarkdown: !message.isStreaming
-                        )
+                    ConversationMarkdownText(
+                        text: message.text,
+                        cachesParsedMarkdown: !message.isStreaming
+                    )
+                    .font(.body)
+                    .foregroundStyle(.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+
+                    if let deliveryNote = message.deliveryNote {
+                        Text(deliveryNote)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
                     }
                 }
-                .font(.body)
-                .foregroundStyle(.primary)
-                .fixedSize(horizontal: false, vertical: true)
-                .textSelection(.enabled)
+                .padding(.horizontal, 14)
+                .padding(.vertical, 12)
+                .background(
+                    EmberDesignTokens.chatAgentBubble,
+                    in: RoundedRectangle(cornerRadius: 19, style: .continuous)
+                )
+                .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
 
-                if let deliveryNote = message.deliveryNote {
-                    Text(deliveryNote)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                } else if let timestamp = message.timestamp {
-                    Text(timestamp.formatted(date: .omitted, time: .shortened))
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .frame(maxWidth: 620, alignment: isUser ? .trailing : .leading)
-            .background(
-                isUser ? EmberDesignTokens.chatUserBubble : EmberDesignTokens.chatAgentBubble,
-                in: RoundedRectangle(cornerRadius: 19, style: .continuous)
-            )
-            .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
-
-            if !isUser {
                 Spacer(minLength: 36)
             }
         }
@@ -502,6 +523,59 @@ private struct ConversationMessageBubble: View {
         .accessibilityIdentifier(
             message.accessibilityIdentifierOverride ?? (isUser ? "conversation-message-user" : "conversation-message-ember")
         )
+    }
+}
+
+enum ConversationTimelineTimestampGrouping {
+    static let minimumGapSeconds: TimeInterval = 15 * 60
+
+    static func dividerEntryIDs(
+        for entries: [ConversationTimelineEntry],
+        calendar: Calendar = .current
+    ) -> Set<String> {
+        var result: Set<String> = []
+        var lastShownTimestamp: Date?
+
+        for entry in entries {
+            guard let timestamp = entry.timelineTimestamp else { continue }
+            if let previous = lastShownTimestamp {
+                let crossedDay = !calendar.isDate(timestamp, inSameDayAs: previous)
+                let exceededGap = timestamp.timeIntervalSince(previous) >= minimumGapSeconds
+                if crossedDay || exceededGap {
+                    result.insert(entry.id)
+                    lastShownTimestamp = timestamp
+                }
+            } else {
+                result.insert(entry.id)
+                lastShownTimestamp = timestamp
+            }
+        }
+
+        return result
+    }
+
+    static func formattedDivider(
+        for date: Date,
+        relativeTo now: Date = Date(),
+        calendar: Calendar = .current
+    ) -> String {
+        if calendar.isDate(date, inSameDayAs: now) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+}
+
+private extension ConversationTimelineEntry {
+    var timelineTimestamp: Date? {
+        switch self {
+        case .message(let message):
+            return message.timestamp
+        case .activity(let activity):
+            return activity.timestamp
+        case .inlineContent:
+            return nil
+        }
     }
 }
 

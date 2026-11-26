@@ -369,4 +369,21 @@ final class ConversationTimelineScrollStateTests: XCTestCase {
         XCTAssertEqual(state.handleStateChange(from: pendingSend, to: acked, reduceMotion: false), .none)
         XCTAssertFalse(state.isFollowingBottom)
     }
+
+    func testTimestampGroupingShowsDividersOnlyForFirstMessageGapOrDayChange() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+
+        let day1Base = calendar.date(from: DateComponents(year: 2026, month: 11, day: 26, hour: 10, minute: 0))!
+        let entries: [ConversationTimelineEntry] = [
+            .message(ConversationMessagePresentation(id: "m1", author: .user, text: "hi", timestamp: day1Base)),
+            .message(ConversationMessagePresentation(id: "m2", author: .ember, text: "hello", timestamp: day1Base.addingTimeInterval(30))),
+            .message(ConversationMessagePresentation(id: "m3", author: .user, text: "quick follow-up", timestamp: day1Base.addingTimeInterval(10 * 60))),
+            .message(ConversationMessagePresentation(id: "m4", author: .user, text: "later", timestamp: day1Base.addingTimeInterval(20 * 60))),
+            .message(ConversationMessagePresentation(id: "m5", author: .ember, text: "next day", timestamp: day1Base.addingTimeInterval(24 * 60 * 60))),
+        ]
+
+        let dividerIDs = ConversationTimelineTimestampGrouping.dividerEntryIDs(for: entries, calendar: calendar)
+        XCTAssertEqual(dividerIDs, Set(["m1", "m4", "m5"]))
+    }
 }

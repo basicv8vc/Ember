@@ -2,35 +2,138 @@ import Foundation
 import SwiftUI
 
 enum ConversationCardFormatting {
-    static func date(from value: String) -> Date? {
-        let fractionalFormatter = ISO8601DateFormatter()
-        fractionalFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = fractionalFormatter.date(from: value) {
-            return date
-        }
-
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: value)
+    private final class MarkdownBlocksBox: NSObject {
+        let blocks: [ConversationMarkdownBlock]
+        init(_ blocks: [ConversationMarkdownBlock]) { self.blocks = blocks }
     }
 
-    static func duration(seconds: Int) -> String? {
-        guard seconds > 0 else { return nil }
+    private final class AttributedStringBox: NSObject {
+        let value: AttributedString
+        init(_ value: AttributedString) { self.value = value }
+    }
+
+    private static let formatterLock = NSLock()
+    private static let fractionalISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+    private static let plainISOFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        return formatter
+    }()
+    private static let durationFormatter: DateComponentsFormatter = {
         let formatter = DateComponentsFormatter()
         formatter.allowedUnits = [.day, .hour, .minute, .second]
         formatter.unitsStyle = .short
         formatter.maximumUnitCount = 2
         formatter.zeroFormattingBehavior = .dropAll
-        return formatter.string(from: TimeInterval(seconds))
+        return formatter
+    }()
+    /// Cap both cache entry size and total byte cost so long messages or repeated turns
+    /// cannot cause unbounded memory growth. In-progress streaming text bypasses both caches.
+    static let maxCacheableEntryBytes = 64 * 1024
+    static let markdownBlocksCacheTotalCostLimit = 2 * 1024 * 1024
+    static let attributedMarkdownCacheTotalCostLimit = 2 * 1024 * 1024
+
+    private static let dateCache: NSCache<NSString, NSDate> = {
+        let cache = NSCache<NSString, NSDate>()
+        cache.countLimit = 512
+        return cache
+    }()
+    private static let markdownBlocksCache: NSCache<NSString, MarkdownBlocksBox> = {
+        let cache = NSCache<NSString, MarkdownBlocksBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = markdownBlocksCacheTotalCostLimit
+        return cache
+    }()
+    private static let attributedMarkdownCache: NSCache<NSString, AttributedStringBox> = {
+        let cache = NSCache<NSString, AttributedStringBox>()
+        cache.countLimit = 256
+        cache.totalCostLimit = attributedMarkdownCacheTotalCostLimit
+        return cache
+    }()
+
+    static func clearCaches() {
+        dateCache.removeAllObjects()
+        markdownBlocksCache.removeAllObjects()
+        attributedMarkdownCache.removeAllObjects()
     }
 
-    static func attributedMarkdown(for rawText: String) -> AttributedString? {
+    static func hasCachedMarkdownBlocks(for rawText: String) -> Bool {
+        guard !rawText.isEmpty else { return false }
+        return markdownBlocksCache.object(forKey: rawText as NSString) != nil
+    }
+
+    static func hasCachedAttributedMarkdown(for rawText: String) -> Bool {
+        guard !rawText.isEmpty else { return false }
+        return attributedMarkdownCache.object(forKey: rawText as NSString) != nil
+    }
+
+    static func date(from value: String) -> Date? {
+        guard !value.isEmpty else { return nil }
+        let key = value as NSString
+        if let cached = dateCache.object(forKey: key) {
+            return cached as Date
+        }
+        formatterLock.lock()
+        let parsed = fractionalISOFormatter.date(from: value) ?? plainISOFormatter.date(from: value)
+        formatterLock.unlock()
+        if let parsed {
+            dateCache.setObject(parsed as NSDate, forKey: key)
+        }
+        return parsed
+    }
+
+    static func duration(seconds: Int) -> String? {
+        guard seconds > 0 else { return nil }
+        formatterLock.lock()
+        let formatted = durationFormatter.string(from: TimeInterval(seconds))
+        formatterLock.unlock()
+        return formatted
+    }
+
+    static func attributedMarkdown(for rawText: String, useCache: Bool = true) -> AttributedString? {
         guard !rawText.isEmpty else { return nil }
+        let utf8ByteCount = rawText.utf8.count
+        let shouldCache = useCache && utf8ByteCount <= maxCacheableEntryBytes
+        if shouldCache {
+            let key = rawText as NSString
+            if let cached = attributedMarkdownCache.object(forKey: key) {
+                return cached.value
+            }
+        }
         let options = AttributedString.MarkdownParsingOptions(
             interpretedSyntax: .inlineOnlyPreservingWhitespace,
             failurePolicy: .returnPartiallyParsedIfPossible
         )
-        return try? AttributedString(markdown: rawText, options: options)
+        guard let parsed = try? AttributedString(markdown: rawText, options: options) else {
+            return nil
+        }
+        if shouldCache {
+            let cost = max(1, utf8ByteCount * 4)
+            attributedMarkdownCache.setObject(AttributedStringBox(parsed), forKey: rawText as NSString, cost: cost)
+        }
+        return parsed
+    }
+
+    static func cachedMarkdownBlocks(for rawText: String, useCache: Bool = true) -> [ConversationMarkdownBlock] {
+        guard !rawText.isEmpty else { return [] }
+        let utf8ByteCount = rawText.utf8.count
+        let shouldCache = useCache && utf8ByteCount <= maxCacheableEntryBytes
+        if shouldCache {
+            let key = rawText as NSString
+            if let cached = markdownBlocksCache.object(forKey: key) {
+                return cached.blocks
+            }
+        }
+        let parsed = ConversationMarkdownBlock.parse(rawText)
+        if shouldCache {
+            let cost = max(1, utf8ByteCount * 2)
+            markdownBlocksCache.setObject(MarkdownBlocksBox(parsed), forKey: rawText as NSString, cost: cost)
+        }
+        return parsed
     }
 }
 
@@ -158,25 +261,33 @@ enum ConversationMarkdownBlock: Equatable {
 
 struct ConversationMarkdownText: View {
     let text: String
+    var cachesParsedMarkdown: Bool = true
 
     var body: some View {
-        let blocks = ConversationMarkdownBlock.parse(text)
+        let blocks = ConversationCardFormatting.cachedMarkdownBlocks(
+            for: text,
+            useCache: cachesParsedMarkdown
+        )
         if blocks.isEmpty {
-            inlineText(text)
+            inlineText(text, useCache: cachesParsedMarkdown)
         } else {
+            let lastBlockIndex = blocks.count - 1
             VStack(alignment: .leading, spacing: 6) {
-                ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
-                    blockView(block)
+                ForEach(Array(blocks.enumerated()), id: \.offset) { offset, block in
+                    // During streaming, skip caching the whole growing text and the actively
+                    // mutating final block, while allowing completed earlier blocks to reuse
+                    // the cost-bounded inline Markdown cache to avoid O(N^2) reparsing hitches.
+                    blockView(block, useInlineCache: cachesParsedMarkdown || offset < lastBlockIndex)
                 }
             }
         }
     }
 
     @ViewBuilder
-    private func blockView(_ block: ConversationMarkdownBlock) -> some View {
+    private func blockView(_ block: ConversationMarkdownBlock, useInlineCache: Bool) -> some View {
         switch block {
         case .heading(let level, let title):
-            inlineText(title)
+            inlineText(title, useCache: useInlineCache)
                 .font(headingFont(for: level))
                 .padding(.top, level == 1 ? 4 : 2)
         case .bulletItem(let itemText):
@@ -184,7 +295,7 @@ struct ConversationMarkdownText: View {
                 Text(verbatim: "•")
                     .font(.body.weight(.semibold))
                     .foregroundStyle(.secondary)
-                inlineText(itemText)
+                inlineText(itemText, useCache: useInlineCache)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .numberedItem(let prefix, let itemText):
@@ -192,7 +303,7 @@ struct ConversationMarkdownText: View {
                 Text(verbatim: prefix)
                     .font(.callout.monospacedDigit().weight(.semibold))
                     .foregroundStyle(.secondary)
-                inlineText(itemText)
+                inlineText(itemText, useCache: useInlineCache)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
         case .codeBlock(let language, let code):
@@ -213,7 +324,7 @@ struct ConversationMarkdownText: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.primary.opacity(0.05), in: RoundedRectangle(cornerRadius: 10, style: .continuous))
         case .paragraph(let bodyText):
-            inlineText(bodyText)
+            inlineText(bodyText, useCache: useInlineCache)
         }
     }
 
@@ -226,8 +337,11 @@ struct ConversationMarkdownText: View {
     }
 
     @ViewBuilder
-    private func inlineText(_ raw: String) -> some View {
-        if let attributed = ConversationCardFormatting.attributedMarkdown(for: raw) {
+    private func inlineText(_ raw: String, useCache: Bool) -> some View {
+        if let attributed = ConversationCardFormatting.attributedMarkdown(
+            for: raw,
+            useCache: useCache
+        ) {
             Text(attributed)
         } else {
             Text(verbatim: raw)

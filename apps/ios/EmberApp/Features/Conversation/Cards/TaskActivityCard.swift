@@ -69,6 +69,7 @@ public struct TaskActivityCard: View {
     }
 
     public var body: some View {
+        let facts = self.facts
         Button(action: onOpenDetail) {
             ConversationCardSurface {
                 VStack(alignment: .leading, spacing: 10) {

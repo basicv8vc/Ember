@@ -187,7 +187,7 @@ describe('M1-A6 real workerd persistent pre-v4 -> v4 & GlobalBudgetDO upgrade, r
       };
       expect(agentUp).toMatchObject({
         ok: true,
-        appliedVersions: [5, 6, 7, 8],
+        appliedVersions: [5, 6, 7, 8, 9],
         alreadyAppliedVersions: [1, 2, 3, 4],
         replayAppliedVersions: [],
         hasDupMsgIndex: false,

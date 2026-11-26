@@ -971,8 +971,9 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     const storage = createInMemoryDoStorage();
     const allMigrations = createDefaultAgentHeadMigrations();
     const v1ToV7 = allMigrations.filter((m) => m.version <= 7);
+    const upToV8 = allMigrations.filter((m) => m.version <= 8);
     expect(v1ToV7.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
-    expect(allMigrations.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(upToV8.map((m) => m.version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
 
     const first = applyAgentHeadMigrations(storage, v1ToV7, 1_760_000_000_000);
     expect(first.appliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
@@ -1003,7 +1004,7 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     );
 
     // Upgrade to v8: v1–v7 must be alreadyApplied with matching checksums; only v8 applies.
-    const upgraded = applyAgentHeadMigrations(storage, allMigrations, 1_760_000_010_000);
+    const upgraded = applyAgentHeadMigrations(storage, upToV8, 1_760_000_010_000);
     expect(upgraded.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7]);
     expect(upgraded.appliedVersions).toEqual([8]);
 

@@ -1,4 +1,5 @@
 import Foundation
+import SwiftUI
 import XCTest
 @testable import Ember
 
@@ -592,6 +593,150 @@ final class LiveV2StreamingConversationTests: XCTestCase {
         XCTAssertEqual(texts, ["Lookup 404 replay", "Replayed safely after lookup 404"])
     }
 
+    func testLongSSEStreamMarksMessageAsStreamingAndStopClearsInProgressReply() async throws {
+        ConversationCardFormatting.clearCaches()
+        defer { ConversationCardFormatting.clearCaches() }
+
+        let directory = makeTempDirectory()
+        let setup = try makeRepository(directory: directory, supportsStreaming: true)
+        let turnID = UUID(uuidString: "88888888-8888-4888-8888-888888888777")!
+        let userMessageID = UUID(uuidString: "55555555-5555-4555-8555-555555555777")!
+        var streamContinuation: AsyncThrowingStream<LiveV2StreamEvent, Error>.Continuation?
+        let stream = AsyncThrowingStream<LiveV2StreamEvent, Error> { continuation in
+            streamContinuation = continuation
+        }
+        let service = ControlledLongStreamConversationService(
+            turnID: turnID,
+            userMessageID: userMessageID,
+            stream: stream
+        )
+        let model = LiveConversationHostModel(
+            repository: service,
+            auth: setup.auth,
+            taskRepository: setup.taskRepo
+        )
+        models.append(model)
+        model.handleScenePhase(.active)
+        model.handleViewAppeared()
+        await model.start()
+
+        await model.send("Write a long reply")
+
+        let deltaCount = 240
+        let chunkText = "Streaming **markdown** delta with `token` content. "
+        for i in 1...deltaCount {
+            streamContinuation?.yield(.delta(turnID: turnID, text: "\(i). \(chunkText)"))
+        }
+
+        for _ in 0..<80 {
+            if (model.streamingReplyText?.count ?? 0) >= 10_000 { break }
+            try await Task.sleep(nanoseconds: 25_000_000)
+        }
+
+        let streamingText = try XCTUnwrap(model.streamingReplyText)
+        XCTAssertGreaterThanOrEqual(streamingText.count, 10_000)
+
+        let streamingPresentation = model.screen.timeline.compactMap { entry -> ConversationMessagePresentation? in
+            if case .message(let msg) = entry, msg.id == "conversation-streaming-reply" {
+                return msg
+            }
+            return nil
+        }.first
+        XCTAssertEqual(streamingPresentation?.isStreaming, true)
+        // Simulate rendering the streaming message through ConversationMarkdownText's path.
+        _ = ConversationCardFormatting.cachedMarkdownBlocks(
+            for: streamingText,
+            useCache: !(streamingPresentation?.isStreaming ?? false)
+        )
+        XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: streamingText))
+
+        // Stopping an active long stream must cancel cleanly and clear the streaming reply.
+        await model.stop()
+        streamContinuation?.finish()
+        let cancelCalled = await service.cancelCalled
+        XCTAssertTrue(cancelCalled)
+        XCTAssertNil(model.streamingReplyText)
+        XCTAssertEqual(model.reply, .idle)
+    }
+
+    func testRejectedSendWhileOnTasksTabRestoresDraftOnceAndClearsOnSignOut() async throws {
+        ConversationCardFormatting.clearCaches()
+        defer { ConversationCardFormatting.clearCaches() }
+
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let rejectionStatus = LockedBox<Int>(409)
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                return .json(statusCode: 200, body: """
+                {"conversation_id":"\(conversationID)","transcript_epoch":0,"messages":[],"next_after":0,"has_more":false}
+                """)
+            }
+            if request.httpMethod == "POST", path == "/v2/conversations/\(conversationID)/messages/stream" {
+                return .json(statusCode: rejectionStatus.value, body: #"{"error":"conflict_or_rejected"}"#)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let setup = try makeRepository(directory: directory, supportsStreaming: true)
+        let model = LiveConversationHostModel(
+            repository: setup.repo,
+            auth: setup.auth,
+            taskRepository: setup.taskRepo
+        )
+        models.append(model)
+        model.handleScenePhase(.active)
+        model.handleViewAppeared()
+        await model.start()
+
+        // Populate a finalized cache entry so we can verify sign-out wipes it too.
+        let cachedSample = "Cached **finalized** message before sign-out"
+        _ = ConversationCardFormatting.cachedMarkdownBlocks(for: cachedSample, useCache: true)
+        XCTAssertTrue(ConversationCardFormatting.hasCachedMarkdownBlocks(for: cachedSample))
+
+        // Simulate user switching to Tasks tab while a send fails with 409 conflict.
+        model.selectedTab = .tasks
+        await model.send("Unsent draft while on Tasks")
+
+        XCTAssertEqual(model.command, .rejected)
+        XCTAssertEqual(model.rejectedDraftText, "Unsent draft while on Tasks")
+        let pending409 = try XCTUnwrap(model.pendingRejectedDraftRestoration)
+        XCTAssertEqual(pending409.text, "Unsent draft while on Tasks")
+
+        // When Chat view mounts late, initial restoration populates empty draft and consumes the token once.
+        let restored = LiveChatDraftHost<EmptyView, EmptyView>.applyPendingRejectedDraft(
+            currentDraft: "",
+            pending: pending409
+        )
+        XCTAssertEqual(restored, "Unsent draft while on Tasks")
+        model.consumePendingRejectedDraftRestoration(id: pending409.id)
+        XCTAssertNil(model.pendingRejectedDraftRestoration)
+        // Model keeps rejectedDraftText for refresh guards until the next send or sign-out.
+        XCTAssertEqual(model.rejectedDraftText, "Unsent draft while on Tasks")
+
+        // Newer user edits must never be clobbered if another rejection (403/rejected) arrives.
+        rejectionStatus.set(403)
+        await model.send("Second rejected draft")
+        let pendingRejected = try XCTUnwrap(model.pendingRejectedDraftRestoration)
+        let preservedUserEdit = LiveChatDraftHost<EmptyView, EmptyView>.applyPendingRejectedDraft(
+            currentDraft: "User typed something newer",
+            pending: pendingRejected
+        )
+        XCTAssertEqual(preservedUserEdit, "User typed something newer")
+
+        // Sign-out must isolate rejected draft state and wipe static Markdown caches.
+        await model.signOut()
+        XCTAssertTrue(model.requiresSignIn)
+        XCTAssertNil(model.rejectedDraftText)
+        XCTAssertNil(model.pendingRejectedDraftRestoration)
+        XCTAssertFalse(ConversationCardFormatting.hasCachedMarkdownBlocks(for: cachedSample))
+    }
+
     private func makeRepository(
         directory: URL,
         supportsStreaming: Bool,
@@ -658,4 +803,90 @@ private final class LockedBox<T>: @unchecked Sendable {
     init(_ initial: T) { storage = initial }
     var value: T { lock.withLock { storage } }
     func set(_ newValue: T) { lock.withLock { storage = newValue } }
+}
+
+private actor ControlledLongStreamConversationService: LiveConversationServiceProtocol {
+    let turnID: UUID
+    let userMessageID: UUID
+    let stream: AsyncThrowingStream<LiveV2StreamEvent, Error>
+    private(set) var cancelCalled = false
+
+    init(
+        turnID: UUID,
+        userMessageID: UUID,
+        stream: AsyncThrowingStream<LiveV2StreamEvent, Error>
+    ) {
+        self.turnID = turnID
+        self.userMessageID = userMessageID
+        self.stream = stream
+    }
+
+    func bootstrap() async throws -> EmberMeDTO {
+        EmberMeDTO(
+            consumerID: AuthFixture.consumerID,
+            agent: .init(agentID: AuthFixture.agentID, displayName: "Ember"),
+            conversation: .init(
+                conversationID: AuthFixture.conversationID,
+                transcriptEpoch: 0,
+                createdAt: AuthFixture.epoch,
+                updatedAt: AuthFixture.epoch
+            )
+        )
+    }
+
+    func load() async throws -> ConversationSnapshot {
+        ConversationSnapshot(
+            conversation: Conversation(
+                id: ConversationID(rawValue: AuthFixture.conversationID),
+                createdAt: AuthFixture.epoch,
+                updatedAt: AuthFixture.epoch
+            ),
+            messages: [],
+            assistantTurns: []
+        )
+    }
+
+    func recoverAfterRelaunch() async throws -> ConversationSnapshot {
+        try await load()
+    }
+
+    func pending() async throws -> LiveConversationJournal.Pending? { nil }
+    func activeTurn() async throws -> LiveConversationJournal.Turn? { nil }
+    func rejectedDraft() async throws -> LiveConversationJournal.Pending? { nil }
+
+    func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO {
+        throw LiveB1Failure.rejected
+    }
+
+    func send(text: String, attachmentIDs: [UUID]) async throws -> LiveB1Receipt {
+        LiveB1Receipt(
+            clientSubmissionID: UUID(),
+            conversationID: AuthFixture.conversationID,
+            messageID: userMessageID,
+            sequence: 1,
+            text: text,
+            createdAt: AuthFixture.epoch,
+            turnID: turnID,
+            transcriptEpoch: 0
+        )
+    }
+
+    func sendStreaming(text: String, attachmentIDs: [UUID]) async throws -> LiveConversationSendSession {
+        let receipt = try await send(text: text, attachmentIDs: attachmentIDs)
+        return LiveConversationSendSession(receipt: receipt, events: stream)
+    }
+
+    func reconcilePending() async throws -> LiveB1Receipt? { nil }
+    func pollActiveTurn() async throws -> LiveB1Turn? { nil }
+
+    func cancelActiveTurn() async throws -> LiveB1Turn? {
+        cancelCalled = true
+        return LiveB1Turn(
+            id: turnID,
+            conversationID: AuthFixture.conversationID,
+            status: .cancelled
+        )
+    }
+
+    func clearOnLogout() async {}
 }

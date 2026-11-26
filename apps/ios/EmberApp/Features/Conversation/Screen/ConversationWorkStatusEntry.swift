@@ -28,7 +28,7 @@ struct ConversationWorkStatusEntry: View {
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(summary.needsAttentionCount > 0
                         ? Color(uiColor: .systemOrange)
-                        : EmberDesignTokens.emberMarkTint)
+                        : EmberDesignTokens.chatBrandInk)
                     .frame(width: 20)
                     .accessibilityHidden(true)
 
@@ -50,10 +50,10 @@ struct ConversationWorkStatusEntry: View {
             .padding(.horizontal, 14)
             .padding(.vertical, dynamicTypeSize.isAccessibilitySize ? 12 : 9)
             .frame(minHeight: EmberDesignTokens.minTapTarget)
-            .background(EmberDesignTokens.cardBackground, in: RoundedRectangle(cornerRadius: 14))
+            .background(EmberDesignTokens.chatPaper, in: RoundedRectangle(cornerRadius: 14))
             .overlay {
                 RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(EmberDesignTokens.separator, lineWidth: 1)
+                    .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
             }
             .contentShape(Rectangle())
         }

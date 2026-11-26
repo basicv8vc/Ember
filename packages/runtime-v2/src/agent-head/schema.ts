@@ -206,6 +206,7 @@ export interface AgentSpendDayRow {
   readonly scope_kind: AgentSpendScopeKind;
   readonly scope_id: string;
   readonly utc_day: string;
+  readonly budget_mode: ModelAttemptBudgetMode;
   readonly reserved_micro_usd: number;
   readonly consumed_micro_usd: number;
   readonly overage_micro_usd: number;
@@ -218,6 +219,7 @@ export interface AgentBudgetIncidentRow {
   readonly scope_kind: AgentSpendScopeKind;
   readonly scope_id: string;
   readonly utc_day: string;
+  readonly budget_mode: ModelAttemptBudgetMode | null;
   readonly reason: BudgetSyncIncidentReason;
   readonly subject_type: string | null;
   readonly subject_id: string | null;
@@ -846,6 +848,199 @@ export function createV2TaskArtifactsMigration(
   };
 }
 
+export const DEFAULT_AGENT_HEAD_BUDGET_MODE_PARTITION_MIGRATION_VERSION = 9;
+
+/**
+ * P0-2 migration (v9): partitions local `agent_spend_days` and `agent_budget_incidents`
+ * by `budget_mode` so simulated/fake turns and incidents never exhaust or halt real-LLM budgets.
+ */
+export const V2_BUDGET_MODE_PARTITION_STATEMENTS = [
+  `CREATE TABLE agent_spend_days_v9 (
+  scope_kind         TEXT    NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
+  scope_id           TEXT    NOT NULL,
+  utc_day            TEXT    NOT NULL,
+  budget_mode        TEXT    NOT NULL CHECK (budget_mode IN ('disabled_echo_only', 'simulated_full_protocol', 'real')),
+  reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (reserved_micro_usd >= 0),
+  consumed_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (consumed_micro_usd >= 0),
+  overage_micro_usd  INTEGER NOT NULL DEFAULT 0 CHECK (overage_micro_usd >= 0),
+  turns_started      INTEGER NOT NULL DEFAULT 0 CHECK (turns_started >= 0),
+  updated_at_ms      INTEGER NOT NULL,
+  PRIMARY KEY (scope_kind, scope_id, utc_day, budget_mode)
+) WITHOUT ROWID;`,
+  `INSERT INTO agent_spend_days_v9 (
+  scope_kind, scope_id, utc_day, budget_mode, reserved_micro_usd,
+  consumed_micro_usd, overage_micro_usd, turns_started, updated_at_ms
+)
+WITH legacy_agg AS (
+  SELECT
+    d.scope_kind,
+    d.scope_id,
+    d.utc_day,
+    d.reserved_micro_usd,
+    d.consumed_micro_usd,
+    d.overage_micro_usd,
+    d.turns_started,
+    d.updated_at_ms,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'real' THEN 1 ELSE 0 END), 0) AS real_cnt,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'simulated_full_protocol' THEN 1 ELSE 0 END), 0) AS sim_cnt,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'real' AND m.state = 'reserved' THEN m.reserved_micro_usd ELSE 0 END), 0) AS real_reserved,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'real' AND m.state IN ('settled', 'unknown_billed', 'conservative_billed') THEN COALESCE(m.applied_cost_micro_usd, m.reserved_micro_usd) ELSE 0 END), 0) AS real_applied,
+    CASE
+      WHEN d.scope_kind = 'principal' THEN COALESCE(SUM(CASE WHEN m.budget_mode = 'real' AND m.subject_type = 'turn' AND m.attempt_no = 1 THEN 1 ELSE 0 END), 0)
+      ELSE 0
+    END AS real_turns,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'simulated_full_protocol' AND m.state = 'reserved' THEN m.reserved_micro_usd ELSE 0 END), 0) AS sim_reserved,
+    COALESCE(SUM(CASE WHEN m.budget_mode = 'simulated_full_protocol' AND m.state IN ('settled', 'unknown_billed', 'conservative_billed') THEN COALESCE(m.applied_cost_micro_usd, m.reserved_micro_usd) ELSE 0 END), 0) AS sim_applied,
+    CASE
+      WHEN d.scope_kind = 'principal' THEN COALESCE(SUM(CASE WHEN m.budget_mode = 'simulated_full_protocol' AND m.subject_type = 'turn' AND m.attempt_no = 1 THEN 1 ELSE 0 END), 0)
+      ELSE 0
+    END AS sim_turns
+  FROM agent_spend_days d
+  LEFT JOIN model_attempts m
+    ON m.utc_day = d.utc_day
+   AND m.budget_mode != 'disabled_echo_only'
+   AND (d.scope_kind = 'tenant' OR m.principal_id = d.scope_id)
+  GROUP BY
+    d.scope_kind,
+    d.scope_id,
+    d.utc_day,
+    d.reserved_micro_usd,
+    d.consumed_micro_usd,
+    d.overage_micro_usd,
+    d.turns_started,
+    d.updated_at_ms
+)
+SELECT
+  scope_kind,
+  scope_id,
+  utc_day,
+  'real' AS budget_mode,
+  CASE
+    WHEN real_cnt > 0 AND sim_cnt = 0 THEN reserved_micro_usd
+    WHEN real_cnt > 0 AND sim_cnt > 0 THEN real_reserved + MAX(0, reserved_micro_usd - real_reserved - sim_reserved)
+    ELSE reserved_micro_usd
+  END AS reserved_micro_usd,
+  CASE
+    WHEN real_cnt > 0 AND sim_cnt = 0 THEN consumed_micro_usd
+    WHEN real_cnt > 0 AND sim_cnt > 0 THEN
+      CASE
+        WHEN real_applied <= consumed_micro_usd + overage_micro_usd
+        THEN MIN(
+          real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied),
+          consumed_micro_usd
+        )
+        ELSE real_applied
+      END
+    ELSE consumed_micro_usd
+  END AS consumed_micro_usd,
+  CASE
+    WHEN real_cnt > 0 AND sim_cnt = 0 THEN overage_micro_usd
+    WHEN real_cnt > 0 AND sim_cnt > 0 THEN
+      CASE
+        WHEN real_applied <= consumed_micro_usd + overage_micro_usd
+        THEN MAX(
+          0,
+          (real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied)) -
+          MIN(
+            real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied),
+            consumed_micro_usd
+          )
+        )
+        ELSE 0
+      END
+    ELSE overage_micro_usd
+  END AS overage_micro_usd,
+  CASE
+    WHEN real_cnt > 0 AND sim_cnt = 0 THEN turns_started
+    WHEN real_cnt > 0 AND sim_cnt > 0 THEN real_turns + MAX(0, turns_started - real_turns - sim_turns)
+    ELSE turns_started
+  END AS turns_started,
+  updated_at_ms
+FROM legacy_agg
+WHERE real_cnt > 0
+   OR (real_cnt = 0 AND sim_cnt = 0)
+UNION ALL
+SELECT
+  scope_kind,
+  scope_id,
+  utc_day,
+  'simulated_full_protocol' AS budget_mode,
+  CASE
+    WHEN sim_cnt > 0 AND real_cnt = 0 THEN reserved_micro_usd
+    WHEN sim_cnt > 0 AND real_cnt > 0 THEN MAX(0, reserved_micro_usd - (real_reserved + MAX(0, reserved_micro_usd - real_reserved - sim_reserved)))
+    ELSE reserved_micro_usd
+  END AS reserved_micro_usd,
+  CASE
+    WHEN sim_cnt > 0 AND real_cnt = 0 THEN consumed_micro_usd
+    WHEN sim_cnt > 0 AND real_cnt > 0 THEN
+      CASE
+        WHEN real_applied <= consumed_micro_usd + overage_micro_usd
+        THEN consumed_micro_usd - MIN(
+          real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied),
+          consumed_micro_usd
+        )
+        ELSE 0
+      END
+    ELSE consumed_micro_usd
+  END AS consumed_micro_usd,
+  CASE
+    WHEN sim_cnt > 0 AND real_cnt = 0 THEN overage_micro_usd
+    WHEN sim_cnt > 0 AND real_cnt > 0 THEN
+      CASE
+        WHEN real_applied <= consumed_micro_usd + overage_micro_usd
+        THEN overage_micro_usd - MAX(
+          0,
+          (real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied)) -
+          MIN(
+            real_applied + MAX(0, consumed_micro_usd + overage_micro_usd - real_applied - sim_applied),
+            consumed_micro_usd
+          )
+        )
+        ELSE 0
+      END
+    ELSE overage_micro_usd
+  END AS overage_micro_usd,
+  CASE
+    WHEN sim_cnt > 0 AND real_cnt = 0 THEN turns_started
+    WHEN sim_cnt > 0 AND real_cnt > 0 THEN MAX(0, turns_started - (real_turns + MAX(0, turns_started - real_turns - sim_turns)))
+    ELSE turns_started
+  END AS turns_started,
+  updated_at_ms
+FROM legacy_agg
+WHERE sim_cnt > 0
+   OR (real_cnt = 0 AND sim_cnt = 0);`,
+  `DROP TABLE agent_spend_days;`,
+  `ALTER TABLE agent_spend_days_v9 RENAME TO agent_spend_days;`,
+  `ALTER TABLE agent_budget_incidents
+  ADD COLUMN budget_mode TEXT
+    CHECK (budget_mode IS NULL OR budget_mode IN ('disabled_echo_only', 'simulated_full_protocol', 'real'));`,
+  `UPDATE agent_budget_incidents
+   SET budget_mode = (
+     SELECT m.budget_mode
+       FROM model_attempts m
+      WHERE m.subject_type = agent_budget_incidents.subject_type
+        AND m.subject_id = agent_budget_incidents.subject_id
+        AND m.attempt_no = agent_budget_incidents.attempt_no
+   )
+ WHERE subject_type IS NOT NULL
+   AND subject_id IS NOT NULL
+   AND attempt_no IS NOT NULL;`,
+  `CREATE INDEX IF NOT EXISTS idx_agent_budget_incidents_unresolved
+  ON agent_budget_incidents (scope_kind, scope_id, budget_mode, detected_at_ms)
+  WHERE resolved_at_ms IS NULL;`,
+] as const;
+
+export function createBudgetModePartitionDoMigration(
+  version = DEFAULT_AGENT_HEAD_BUDGET_MODE_PARTITION_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_budget_mode_partition',
+    statements: V2_BUDGET_MODE_PARTITION_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_BUDGET_MODE_PARTITION_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -867,5 +1062,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     createPersonalMemoryDoMigration(),
     createProactiveSchedulesMigration(),
     createV2TaskArtifactsMigration(),
+    createBudgetModePartitionDoMigration(),
   ];
 }

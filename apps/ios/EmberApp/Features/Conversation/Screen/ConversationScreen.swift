@@ -156,7 +156,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                 isAttachmentMenuPresented = false
             }
         }
-        .background(EmberDesignTokens.groupedBackground.ignoresSafeArea())
+        .background(EmberDesignTokens.chatCanvas.ignoresSafeArea())
+        .tint(EmberDesignTokens.chatBrandInk)
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-home")
     }
@@ -178,11 +179,11 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             .padding(.bottom, 8)
 
             Rectangle()
-                .fill(EmberDesignTokens.separator)
+                .fill(EmberDesignTokens.chatHairline)
                 .frame(height: 1)
                 .accessibilityHidden(true)
         }
-        .background(EmberDesignTokens.groupedBackground)
+        .background(EmberDesignTokens.chatCanvas)
     }
 
     private var singleRowHeaderContent: some View {
@@ -239,9 +240,9 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     private var headerEmblem: some View {
         Image(systemName: "flame.fill")
             .font(.subheadline.weight(.semibold))
-            .foregroundStyle(EmberDesignTokens.emberMarkTint)
+            .foregroundStyle(EmberDesignTokens.chatBrandInk)
             .frame(width: 34, height: 34)
-            .background(EmberDesignTokens.emberSoftSurface, in: Circle())
+            .background(EmberDesignTokens.chatAgentBubble, in: Circle())
             .accessibilityHidden(true)
     }
 
@@ -263,7 +264,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         } else {
-            Text("conversation.header.subtitle", tableName: "Conversation")
+            Text(String(localized: "conversation.header.subtitle", table: "Conversation"))
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
@@ -317,7 +318,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         case .custom:
             Color(uiColor: .systemIndigo).opacity(0.12)
         case .cloud:
-            EmberDesignTokens.cardBackground
+            EmberDesignTokens.chatPaper
         }
     }
 
@@ -330,7 +331,7 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         case .custom:
             Color(uiColor: .systemIndigo).opacity(0.28)
         case .cloud:
-            EmberDesignTokens.separator
+            EmberDesignTokens.chatHairline
         }
     }
 
@@ -387,9 +388,14 @@ struct ConversationDemoHost: View {
         self.taskJourneySession = taskJourneySession
         self.onOpenTaskDetail = onOpenTaskDetail
         self.onOpenCommitmentDetail = onOpenCommitmentDetail
-        let slowReply = ProcessInfo.processInfo.arguments.contains("--ember-mock-slow-reply")
+        let arguments = Set(ProcessInfo.processInfo.arguments)
+        let slowReply = arguments.contains("--ember-mock-slow-reply")
+        let emptyChat = arguments.contains("--ember-mock-empty-chat")
         _model = State(
             initialValue: ConversationHostModel(
+                conversationID: emptyChat
+                    ? ConversationFixtures.emptyConversation.conversation.id
+                    : ConversationFixtures.mainConversationID,
                 replyDelayNanoseconds: slowReply ? 25_000_000_000 : 900_000_000
             )
         )

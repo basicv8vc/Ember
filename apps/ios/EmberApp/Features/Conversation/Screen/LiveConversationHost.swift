@@ -43,6 +43,7 @@ final class LiveConversationHostModel {
     private var sessionGeneration: UInt64 = 0
     private var isStarting = false
     private var startupReadinessTask: Task<Void, Never>?
+    private var pendingDiscardTask: Task<Void, Never>?
 
     let taskStore: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore
@@ -196,6 +197,20 @@ final class LiveConversationHostModel {
                 } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
                     guard self.sessionGeneration == expectedGeneration else { return }
                     self.applyAuthFailure(error)
+                } catch let error as LiveB1Failure where error == .unavailable {
+                    guard self.sessionGeneration == expectedGeneration else { return }
+                    let persistedPending = (try? await self.repository.pending())?.text
+                    self.pendingOutgoingText = persistedPending
+                    if persistedPending != nil {
+                        self.applyServiceUnavailable()
+                    } else {
+                        self.command = .unknownAcknowledgement
+                        self.reply = .failed(
+                            message: LiveConversationCopy.loadUnavailableMessage,
+                            retryable: true
+                        )
+                        self.status = LiveConversationCopy.loadUnavailableStatus
+                    }
                 } catch {
                     guard self.sessionGeneration == expectedGeneration else { return }
                     let persistedPending = (try? await self.repository.pending())?.text
@@ -438,6 +453,8 @@ final class LiveConversationHostModel {
         sessionGeneration &+= 1
         startupReadinessTask?.cancel()
         startupReadinessTask = nil
+        pendingDiscardTask?.cancel()
+        pendingDiscardTask = nil
         currentPollSessionID = UUID()
         currentStreamSessionID = UUID()
         pollTask?.cancel()
@@ -724,6 +741,11 @@ final class LiveConversationHostModel {
         status = nil
         defer { isSubmitting = false }
 
+        if let pendingDiscardTask {
+            await pendingDiscardTask.value
+            guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
+        }
+
         if let startupReadinessTask {
             await startupReadinessTask.value
             guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
@@ -777,6 +799,8 @@ final class LiveConversationHostModel {
             }
         } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
             applyAuthFailure(error)
+        } catch let error as LiveB1Failure where error == .unavailable {
+            applyServiceUnavailable()
         } catch let error as LiveB1Failure where error == .unknownAcknowledgement {
             applyUnknownAcknowledgement()
         } catch let error as LiveB1Failure where error == .staleEpoch || error == .conflict {
@@ -792,12 +816,35 @@ final class LiveConversationHostModel {
     }
 
     func dismissReplyError() {
-        if case .failed(_, retryable: false) = reply {
+        switch reply {
+        case .failed(_, retryable: false):
             reply = .idle
             if command == .rejected {
                 command = .idle
                 status = nil
             }
+        case .failed(_, retryable: true):
+            let draftToRestore = pendingOutgoingText
+            if let draftToRestore, !draftToRestore.isEmpty {
+                rejectedDraftText = draftToRestore
+                pendingRejectedDraftRestoration = PendingRejectedDraft(id: UUID(), text: draftToRestore)
+            }
+            pendingOutgoingText = nil
+            reply = .idle
+            if command == .unknownAcknowledgement {
+                command = .idle
+            }
+            status = nil
+            if draftToRestore != nil {
+                pendingDiscardTask?.cancel()
+                let expectedGeneration = sessionGeneration
+                pendingDiscardTask = Task { [weak self] in
+                    guard let self, self.sessionGeneration == expectedGeneration else { return }
+                    try? await self.repository.discardPending()
+                }
+            }
+        default:
+            break
         }
     }
 
@@ -847,6 +894,23 @@ final class LiveConversationHostModel {
             applyRejectedSubmission(draftText: storedDraft ?? pendingOutgoingText, reason: .conflict)
         } catch let error as LiveB1Failure where error == .rejected {
             applyRejectedSubmission(draftText: pendingOutgoingText, reason: .rejected)
+        } catch let error as LiveB1Failure where error == .unavailable {
+            if pendingOutgoingText != nil {
+                applyServiceUnavailable()
+            } else if command == .acknowledged {
+                reply = .failed(
+                    message: LiveConversationCopy.replyInterruptedMessage,
+                    retryable: true
+                )
+                status = LiveConversationCopy.replyInterruptedStatus
+            } else {
+                command = .unknownAcknowledgement
+                reply = .failed(
+                    message: LiveConversationCopy.retrySyncUnavailable,
+                    retryable: true
+                )
+                status = nil
+            }
         } catch {
             if pendingOutgoingText != nil {
                 command = .unknownAcknowledgement
@@ -2038,6 +2102,15 @@ final class LiveConversationHostModel {
             retryable: true
         )
         status = LiveConversationCopy.sendUnknownAckStatus
+    }
+
+    private func applyServiceUnavailable() {
+        command = .unknownAcknowledgement
+        reply = .failed(
+            message: LiveConversationCopy.sendServiceUnavailableMessage,
+            retryable: true
+        )
+        status = LiveConversationCopy.sendServiceUnavailableStatus
     }
 
     func consumePendingRejectedDraftRestoration(id: UUID) {

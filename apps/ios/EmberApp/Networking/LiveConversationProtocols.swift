@@ -12,6 +12,7 @@ protocol LiveConversationServiceProtocol: Sendable {
     func load() async throws -> ConversationSnapshot
     func recoverAfterRelaunch() async throws -> ConversationSnapshot
     func pending() async throws -> LiveConversationJournal.Pending?
+    func discardPending() async throws
     func activeTurn() async throws -> LiveConversationJournal.Turn?
     func rejectedDraft() async throws -> LiveConversationJournal.Pending?
     func uploadAttachment(filename: String, mediaType: String, data: Data) async throws -> StagedUploadReceiptDTO
@@ -35,6 +36,8 @@ extension LiveConversationServiceProtocol {
     }
 
     func finishTurnFromStream(_ turn: LiveB1Turn) async {}
+
+    func discardPending() async throws {}
 }
 
 protocol LiveAuthControlling: Sendable {

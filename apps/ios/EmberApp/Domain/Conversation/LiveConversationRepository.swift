@@ -74,6 +74,13 @@ actor LiveConversationRepository {
         return try await journal.pending(for: me.consumerID)
     }
 
+    /// Explicitly discards a stuck unconfirmed send when the user chooses to cancel recovery
+    /// and restore their message as a draft.
+    func discardPending() async throws {
+        let me = try await ensureProfile()
+        try await journal.discardPending(consumerID: me.consumerID)
+    }
+
     func activeTurn() async throws -> LiveConversationJournal.Turn? {
         let me = try await ensureProfile()
         return try await journal.turn(for: me.consumerID)
@@ -242,6 +249,10 @@ actor LiveConversationRepository {
         } catch let error as LiveB1Failure where error == .rejected {
             try? await journal.discardPending(consumerID: consumerID)
             throw LiveB1Failure.rejected
+        } catch let error as LiveB1Failure where error == .unavailable {
+            // Keep pending intent so Retry reconciles via lookup before replaying the same id,
+            // while surfacing the explicit 429/5xx service-unavailable signal to the UI.
+            throw LiveB1Failure.unavailable
         } catch {
             throw LiveB1Failure.unknownAcknowledgement
         }
@@ -269,11 +280,15 @@ actor LiveConversationRepository {
         } catch let error as LiveB1Failure where error == .rejected {
             try? await journal.discardPending(consumerID: consumerID)
             throw LiveB1Failure.rejected
+        } catch let error as LiveB1Failure where error == .unavailable {
+            // Preserve durable intent for idempotent reconciliation while telling the user
+            // the service returned 429/5xx instead of disguising it as unknown delivery.
+            throw LiveB1Failure.unavailable
         } catch let error as LiveB1Failure where error == .invalidResponse {
             // A malformed 2xx is ambiguous, even if we cannot adopt its body.
             throw LiveB1Failure.unknownAcknowledgement
         } catch {
-            // Includes L1 unknownWriteOutcome, timeout, offline, 5xx and revoked credentials.
+            // Includes L1 unknownWriteOutcome, timeout, offline and revoked credentials.
             // Do not lose the durable intent and do not resend blindly.
             throw LiveB1Failure.unknownAcknowledgement
         }

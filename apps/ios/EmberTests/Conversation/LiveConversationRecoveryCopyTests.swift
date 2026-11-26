@@ -568,6 +568,93 @@ final class LiveConversationRecoveryCopyTests: XCTestCase {
         XCTAssertEqual(model.status, LiveAuthEntryModel.message(for: .unauthenticated))
     }
 
+    // MARK: - Service Unavailable (503) & Dismiss Stuck Pending Send
+
+    func testServiceUnavailableSurfacesClearCopyAndDismissRestoresDraftAndUnblocksSend() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let turnID = UUID().uuidString.lowercased()
+        let messageID = UUID().uuidString.lowercased()
+        let postStatus = LockedInt(503)
+        let postedIDs = LockedStrings()
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path.contains("/message-submissions/") {
+                return .json(statusCode: 404, body: "{}")
+            }
+            if request.httpMethod == "POST", path == "/v1/conversations/\(conversationID)/messages" {
+                let obj = (try? JSONSerialization.jsonObject(with: request.httpBody ?? Data())) as? [String: Any]
+                let id = (obj?["client_submission_id"] as? String) ?? UUID().uuidString.lowercased()
+                postedIDs.append(id)
+                let code = postStatus.value
+                if code == 503 {
+                    return .json(statusCode: 503, body: #"{"error":{"code":"DB_UNAVAILABLE","message":"service unavailable"}}"#)
+                }
+                return .json(statusCode: 201, body: """
+                {
+                  "message":{"message_id":"\(messageID)","conversation_id":"\(conversationID)","sequence":1,"created_at":"2026-11-26T22:00:00Z","kind":"user","text":"Fresh message","client_submission_id":"\(id)"},
+                  "turn":{"turn_id":"\(turnID)","status":"running","created_at":"2026-11-26T22:00:00Z"},
+                  "transcript_epoch":0
+                }
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/turns/\(turnID)" {
+                return .json(statusCode: 200, body: """
+                {"turn_id":"\(turnID)","conversation_id":"\(conversationID)","source_message_id":"\(messageID)","response_message_id":"\(UUID().uuidString.lowercased())","status":"completed","created_at":"2026-11-26T22:00:00Z","updated_at":"2026-11-26T22:00:01Z"}
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                return .json(statusCode: 200, body: """
+                {"conversation_id":"\(conversationID)","transcript_epoch":0,"messages":[],"next_after":0,"has_more":false}
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory)
+        model.handleScenePhase(.active)
+        model.handleViewAppeared()
+        await model.start()
+
+        // 1. Initial 503 surfaces service-unavailable copy instead of unknown-ack copy.
+        await model.send("Stuck message")
+        XCTAssertEqual(model.command, .unknownAcknowledgement)
+        XCTAssertEqual(model.pendingOutgoingText, "Stuck message")
+        XCTAssertEqual(
+            model.reply,
+            .failed(message: LiveConversationCopy.sendServiceUnavailableMessage, retryable: true)
+        )
+        XCTAssertEqual(model.status, LiveConversationCopy.sendServiceUnavailableStatus)
+
+        // 2. Retry while backend still returns 503 keeps service-unavailable copy.
+        await model.retry()
+        XCTAssertEqual(
+            model.reply,
+            .failed(message: LiveConversationCopy.sendServiceUnavailableMessage, retryable: true)
+        )
+        XCTAssertEqual(model.status, LiveConversationCopy.sendServiceUnavailableStatus)
+
+        // 3. Dismissing the error restores the draft, clears stuck state, and unblocks a new send.
+        model.dismissReplyError()
+        XCTAssertEqual(model.reply, .idle)
+        XCTAssertEqual(model.command, .idle)
+        XCTAssertNil(model.status)
+        XCTAssertNil(model.pendingOutgoingText)
+        XCTAssertEqual(model.rejectedDraftText, "Stuck message")
+        XCTAssertEqual(model.pendingRejectedDraftRestoration?.text, "Stuck message")
+
+        postStatus.set(201)
+        await model.send("Fresh message")
+        XCTAssertEqual(model.command, .acknowledged)
+        XCTAssertNil(model.pendingOutgoingText)
+        XCTAssertEqual(postedIDs.values.count, 3)
+        XCTAssertNotEqual(postedIDs.values[0], postedIDs.values[2])
+    }
+
     // MARK: - Localization Completeness (en & zh-Hans)
 
     func testAllRecoveryAndAuthKeysResolveInEnglishAndSimplifiedChinese() throws {
@@ -588,6 +675,8 @@ final class LiveConversationRecoveryCopyTests: XCTestCase {
             "conversation.live.send_unknown_ack_message",
             "conversation.live.send_unknown_ack_status",
             "conversation.live.retry_unknown_ack_message",
+            "conversation.live.send_service_unavailable_message",
+            "conversation.live.send_service_unavailable_status",
             "conversation.live.send_conflict_message",
             "conversation.live.send_rejected",
             "conversation.live.send_rejected_status",

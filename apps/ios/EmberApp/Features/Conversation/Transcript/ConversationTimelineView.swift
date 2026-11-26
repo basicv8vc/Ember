@@ -45,11 +45,11 @@ struct ConversationTimelineView: View {
                 ScrollView {
                     VStack(spacing: 0) {
                         LazyVStack(alignment: .leading, spacing: 18) {
-                            if state.isLoading {
+                            if state.isLoading && state.timeline.isEmpty {
                                 ProgressView()
                                     .frame(maxWidth: .infinity)
                                     .padding(.vertical, 32)
-                            } else if showsSuggestions {
+                            } else if !state.isLoading && showsSuggestions {
                                 ConversationEmptyStateView(
                                     emptyState: state.emptyState,
                                     prompts: state.suggestedPrompts,

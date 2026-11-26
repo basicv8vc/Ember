@@ -181,6 +181,27 @@ final class ConversationInteractionRulesTests: XCTestCase {
             ),
             .send(isEnabled: false)
         )
+
+        // Optimistic send while startup is still loading: non-empty draft is sendable immediately,
+        // and tapping Send transitions immediately into the submitting indicator.
+        XCTAssertEqual(
+            ConversationInteractionRules.trailingAction(
+                for: "Hello",
+                replyState: .idle,
+                isSubmitting: false,
+                isLoading: true
+            ),
+            .send(isEnabled: true)
+        )
+        XCTAssertEqual(
+            ConversationInteractionRules.trailingAction(
+                for: "",
+                replyState: .idle,
+                isSubmitting: true,
+                isLoading: true
+            ),
+            .submitting
+        )
     }
 
     func testComposerNoteShownOnlyForNonLoadingEmptyTimeline() {

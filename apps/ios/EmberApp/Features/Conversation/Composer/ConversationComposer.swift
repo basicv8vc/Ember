@@ -127,6 +127,10 @@ struct ConversationComposer: View {
         self.onSend = onSend
     }
 
+    private var isSendBlocked: Bool {
+        replyState == .generating || isSubmitting || isStopping || isUploadingAttachment
+    }
+
     private var isComposerBusy: Bool {
         replyState == .generating || isSubmitting || isStopping || isLoading
     }
@@ -134,7 +138,7 @@ struct ConversationComposer: View {
     private var submission: ConversationComposerSubmission? {
         ConversationInteractionRules.submission(
             for: draft,
-            isGenerating: isComposerBusy || isUploadingAttachment
+            isGenerating: isSendBlocked
         )
     }
 

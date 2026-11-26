@@ -42,6 +42,7 @@ final class LiveConversationHostModel {
     private var currentStreamSessionID = UUID()
     private var sessionGeneration: UInt64 = 0
     private var isStarting = false
+    private var startupReadinessTask: Task<Void, Never>?
 
     let taskStore: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore
@@ -150,75 +151,103 @@ final class LiveConversationHostModel {
         guard !isStarting else { return }
         isStarting = true
         isLoading = true
+        let expectedGeneration = sessionGeneration
         defer {
             isLoading = false
             isStarting = false
         }
-        do {
-            // Bootstrap identity first: an unresolved outbox lookup may fail offline, but the
-            // signed-in user must still see the Live UI and a recovery action, not an empty Mock.
-            let bootstrapProfile = try await repository.bootstrap()
-            profile = bootstrapProfile
-            requiresSignIn = false
-            signInErrorMessage = nil
-            applyStoredDeviceExecutorPreference(for: bootstrapProfile)
+
+        var recoveredSnapshot: ConversationSnapshot?
+        let readinessTask = Task { @MainActor [weak self] in
+            guard let self else { return }
             do {
-                let recovered = try await repository.recoverAfterRelaunch()
-                snapshot = recovered
-                pendingOutgoingText = (try? await repository.pending())?.text
-                streamingReplyText = nil
-                status = nil
-                refreshErrorMessage = nil
-                reply = .idle
-                if let rejected = try await repository.rejectedDraft() {
-                    applyRejectedSubmission(draftText: rejected.text, reason: .previousDraft)
-                }
-                if try await repository.activeTurn() != nil {
-                    reply = .generating
-                    if isViewVisible && isSceneActive {
-                        beginPolling()
+                // Bootstrap identity first: an unresolved outbox lookup may fail offline, but the
+                // signed-in user must still see the Live UI and a recovery action, not an empty Mock.
+                let bootstrapProfile = try await self.repository.bootstrap()
+                guard self.sessionGeneration == expectedGeneration, !Task.isCancelled else { return }
+                self.profile = bootstrapProfile
+                self.requiresSignIn = false
+                self.signInErrorMessage = nil
+                self.applyStoredDeviceExecutorPreference(for: bootstrapProfile)
+                do {
+                    let recovered = try await self.repository.recoverAfterRelaunch()
+                    guard self.sessionGeneration == expectedGeneration, !Task.isCancelled else { return }
+                    recoveredSnapshot = recovered
+                    self.snapshot = recovered
+                    let persistedPending = (try? await self.repository.pending())?.text
+                    if !self.isSubmitting || persistedPending != nil {
+                        self.pendingOutgoingText = persistedPending
+                    }
+                    if !self.isSubmitting {
+                        self.streamingReplyText = nil
+                        self.status = nil
+                        self.refreshErrorMessage = nil
+                        self.reply = .idle
+                        if let rejected = try await self.repository.rejectedDraft() {
+                            self.applyRejectedSubmission(draftText: rejected.text, reason: .previousDraft)
+                        }
+                    }
+                    if try await self.repository.activeTurn() != nil {
+                        self.reply = .generating
+                        if self.isViewVisible && self.isSceneActive {
+                            self.beginPolling()
+                        }
+                    }
+                } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
+                    guard self.sessionGeneration == expectedGeneration else { return }
+                    self.applyAuthFailure(error)
+                } catch {
+                    guard self.sessionGeneration == expectedGeneration else { return }
+                    let persistedPending = (try? await self.repository.pending())?.text
+                    self.pendingOutgoingText = persistedPending
+                    self.command = .unknownAcknowledgement
+                    if persistedPending != nil {
+                        self.reply = .failed(
+                            message: LiveConversationCopy.sendUnknownAckMessage,
+                            retryable: true
+                        )
+                        self.status = LiveConversationCopy.sendUnknownAckStatus
+                    } else {
+                        self.reply = .failed(
+                            message: LiveConversationCopy.loadUnavailableMessage,
+                            retryable: true
+                        )
+                        self.status = LiveConversationCopy.loadUnavailableStatus
                     }
                 }
-                // Unlock the composer as soon as conversation recovery finishes so secondary
-                // startup syncs (tasks, device executor, schedules/memory) never block sending.
-                isLoading = false
-                async let tasksWork: Void = syncTasksFromCloud(snapshot: recovered)
-                async let deviceWork: Void = syncCloudDeviceExecutorState()
-                async let capabilitiesWork: Void = refreshSchedulesAndMemoryCapabilities()
-                _ = await (tasksWork, deviceWork, capabilitiesWork)
-            } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
-                applyAuthFailure(error)
+            } catch let error as AuthError where error == .accessDenied {
+                guard self.sessionGeneration == expectedGeneration else { return }
+                self.requiresSignIn = true
+                let message = LiveConversationCopy.signInNotAllowlisted
+                self.signInErrorMessage = message
+                self.status = message
+            } catch let error as AuthError where error.requiresNewSignIn {
+                guard self.sessionGeneration == expectedGeneration else { return }
+                self.requiresSignIn = true
+                self.signInErrorMessage = nil
+                self.status = LiveConversationCopy.signInPrompt
             } catch {
-                pendingOutgoingText = (try? await repository.pending())?.text
-                command = .unknownAcknowledgement
-                if pendingOutgoingText != nil {
-                    reply = .failed(
-                        message: LiveConversationCopy.sendUnknownAckMessage,
-                        retryable: true
-                    )
-                    status = LiveConversationCopy.sendUnknownAckStatus
-                } else {
-                    reply = .failed(
-                        message: LiveConversationCopy.loadUnavailableMessage,
-                        retryable: true
-                    )
-                    status = LiveConversationCopy.loadUnavailableStatus
-                }
+                guard self.sessionGeneration == expectedGeneration else { return }
+                // A failed bootstrap never causes a switch to the Mock conversation.
+                self.reply = .failed(message: LiveConversationCopy.connectionUnavailable, retryable: true)
+                self.status = nil
             }
-        } catch let error as AuthError where error == .accessDenied {
-            requiresSignIn = true
-            let message = LiveConversationCopy.signInNotAllowlisted
-            signInErrorMessage = message
-            status = message
-        } catch let error as AuthError where error.requiresNewSignIn {
-            requiresSignIn = true
-            signInErrorMessage = nil
-            status = LiveConversationCopy.signInPrompt
-        } catch {
-            // A failed bootstrap never causes a switch to the Mock conversation.
-            reply = .failed(message: LiveConversationCopy.connectionUnavailable, retryable: true)
-            status = nil
         }
+        startupReadinessTask = readinessTask
+        await readinessTask.value
+        if sessionGeneration == expectedGeneration {
+            startupReadinessTask = nil
+        }
+        isLoading = false
+
+        guard sessionGeneration == expectedGeneration,
+              !Task.isCancelled,
+              let recovered = recoveredSnapshot else { return }
+
+        async let tasksWork: Void = syncTasksFromCloud(snapshot: recovered)
+        async let deviceWork: Void = syncCloudDeviceExecutorState()
+        async let capabilitiesWork: Void = refreshSchedulesAndMemoryCapabilities()
+        _ = await (tasksWork, deviceWork, capabilitiesWork)
     }
 
     func signIn() async {
@@ -407,6 +436,8 @@ final class LiveConversationHostModel {
 
     private func clearLiveState() {
         sessionGeneration &+= 1
+        startupReadinessTask?.cancel()
+        startupReadinessTask = nil
         currentPollSessionID = UUID()
         currentStreamSessionID = UUID()
         pollTask?.cancel()
@@ -682,6 +713,7 @@ final class LiveConversationHostModel {
         let attachmentIDs = stagedAttachments.map(\.id)
         let trimmedOutgoing = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let sendStart = monotonicNow()
+        let startGeneration = sessionGeneration
         isSubmitting = true
         command = .submitting
         rejectedDraftText = nil
@@ -691,6 +723,36 @@ final class LiveConversationHostModel {
         attachmentError = nil
         status = nil
         defer { isSubmitting = false }
+
+        if let startupReadinessTask {
+            await startupReadinessTask.value
+            guard sessionGeneration == startGeneration, !Task.isCancelled else { return }
+            if requiresSignIn {
+                pendingOutgoingText = nil
+                command = .idle
+                return
+            }
+            if command == .unknownAcknowledgement || reply == .generating {
+                // Startup recovered an unresolved prior send or an active turn; restore the
+                // newly composed text so the user never loses it.
+                if !trimmedOutgoing.isEmpty {
+                    rejectedDraftText = text
+                    pendingRejectedDraftRestoration = PendingRejectedDraft(id: UUID(), text: text)
+                }
+                pendingOutgoingText = (try? await repository.pending())?.text
+                return
+            }
+            if profile == nil {
+                if !trimmedOutgoing.isEmpty {
+                    rejectedDraftText = text
+                    pendingRejectedDraftRestoration = PendingRejectedDraft(id: UUID(), text: text)
+                }
+                pendingOutgoingText = nil
+                command = .idle
+                return
+            }
+        }
+
         do {
             let sendSession = try await repository.sendStreaming(text: text, attachmentIDs: attachmentIDs)
             if profile == nil, let hydrated = try? await repository.bootstrap() {

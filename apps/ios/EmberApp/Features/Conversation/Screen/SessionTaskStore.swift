@@ -128,20 +128,21 @@ final class SessionTaskStore {
             tasksByID = preservedReferenced.merging(fetchedTasksByID) { _, latest in latest }
         }
 
-        let remainingIDs = referencedTaskIDs.subtracting(fetchedIDs)
-        for taskID in remainingIDs {
-            guard generation == startGeneration, !Task.isCancelled else { return }
-            await refreshSingleTask(taskID, using: repository, generation: startGeneration)
+        let remainingIDs = Array(referencedTaskIDs.subtracting(fetchedIDs))
+        await runBoundedConcurrency(for: remainingIDs, generation: startGeneration) { [weak self] taskID in
+            guard let self else { return }
+            await self.refreshSingleTask(taskID, using: repository, generation: startGeneration)
         }
+        guard generation == startGeneration, !Task.isCancelled else { return }
 
         let candidateResultIDs = referencedResultTaskIDs.union(
             tasksByID.values.filter { $0.status.isTerminal }.map(\.taskID)
-        )
-        for taskID in candidateResultIDs {
-            guard generation == startGeneration, !Task.isCancelled else { return }
-            guard shouldFetchResult(for: taskID) else { continue }
-            await refreshResult(taskID, using: repository, generation: startGeneration)
+        ).filter { shouldFetchResult(for: $0) }
+        await runBoundedConcurrency(for: Array(candidateResultIDs), generation: startGeneration) { [weak self] taskID in
+            guard let self else { return }
+            await self.refreshResult(taskID, using: repository, generation: startGeneration)
         }
+        guard generation == startGeneration, !Task.isCancelled else { return }
 
         let terminalPythonIDs = tasksByID.values.filter { task in
             task.status.isTerminal &&
@@ -149,9 +150,39 @@ final class SessionTaskStore {
             artifactsByTaskID[task.taskID] == nil &&
             !artifactsUnavailableTaskIDs.contains(task.taskID)
         }.map(\.taskID)
-        for taskID in terminalPythonIDs {
-            guard generation == startGeneration, !Task.isCancelled else { return }
-            await refreshArtifacts(taskID, using: repository, generation: startGeneration)
+        await runBoundedConcurrency(for: terminalPythonIDs, generation: startGeneration) { [weak self] taskID in
+            guard let self else { return }
+            await self.refreshArtifacts(taskID, using: repository, generation: startGeneration)
+        }
+    }
+
+    private func runBoundedConcurrency(
+        for taskIDs: [UUID],
+        maxConcurrent: Int = 6,
+        generation startGeneration: UInt64,
+        operation: @escaping @MainActor (UUID) async -> Void
+    ) async {
+        guard !taskIDs.isEmpty else { return }
+        let limit = max(1, min(maxConcurrent, taskIDs.count))
+        await withTaskGroup(of: Void.self) { group in
+            var iterator = taskIDs.makeIterator()
+            for _ in 0..<limit {
+                guard let nextID = iterator.next() else { break }
+                group.addTask {
+                    await operation(nextID)
+                }
+            }
+            while await group.next() != nil {
+                guard generation == startGeneration, !Task.isCancelled else {
+                    group.cancelAll()
+                    return
+                }
+                if let nextID = iterator.next() {
+                    group.addTask {
+                        await operation(nextID)
+                    }
+                }
+            }
         }
     }
 

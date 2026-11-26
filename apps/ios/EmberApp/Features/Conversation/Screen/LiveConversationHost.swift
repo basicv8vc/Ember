@@ -41,6 +41,7 @@ final class LiveConversationHostModel {
     private var currentPollSessionID = UUID()
     private var currentStreamSessionID = UUID()
     private var sessionGeneration: UInt64 = 0
+    private var isStarting = false
 
     let taskStore: SessionTaskStore
     let scheduleStore: ProactiveScheduleStore
@@ -146,9 +147,13 @@ final class LiveConversationHostModel {
     }
 
     func start() async {
-        guard !isLoading else { return }
+        guard !isStarting else { return }
+        isStarting = true
         isLoading = true
-        defer { isLoading = false }
+        defer {
+            isLoading = false
+            isStarting = false
+        }
         do {
             // Bootstrap identity first: an unresolved outbox lookup may fail offline, but the
             // signed-in user must still see the Live UI and a recovery action, not an empty Mock.
@@ -174,9 +179,13 @@ final class LiveConversationHostModel {
                         beginPolling()
                     }
                 }
-                await syncTasksFromCloud(snapshot: recovered)
-                await syncCloudDeviceExecutorState()
-                await refreshSchedulesAndMemoryCapabilities()
+                // Unlock the composer as soon as conversation recovery finishes so secondary
+                // startup syncs (tasks, device executor, schedules/memory) never block sending.
+                isLoading = false
+                async let tasksWork: Void = syncTasksFromCloud(snapshot: recovered)
+                async let deviceWork: Void = syncCloudDeviceExecutorState()
+                async let capabilitiesWork: Void = refreshSchedulesAndMemoryCapabilities()
+                _ = await (tasksWork, deviceWork, capabilitiesWork)
             } catch let error as AuthError where error.requiresNewSignIn || error == .accessDenied {
                 applyAuthFailure(error)
             } catch {
@@ -231,9 +240,10 @@ final class LiveConversationHostModel {
             applyStoredDeviceExecutorPreference(for: bootstrapProfile)
             status = nil
             refreshErrorMessage = nil
-            await syncTasksFromCloud(snapshot: loaded)
-            await syncCloudDeviceExecutorState()
-            await refreshSchedulesAndMemoryCapabilities()
+            async let tasksWork: Void = syncTasksFromCloud(snapshot: loaded)
+            async let deviceWork: Void = syncCloudDeviceExecutorState()
+            async let capabilitiesWork: Void = refreshSchedulesAndMemoryCapabilities()
+            _ = await (tasksWork, deviceWork, capabilitiesWork)
         } catch let error as AuthError where error == .appleCancelled {
             signInErrorMessage = nil
             status = LiveConversationCopy.signInCancelled

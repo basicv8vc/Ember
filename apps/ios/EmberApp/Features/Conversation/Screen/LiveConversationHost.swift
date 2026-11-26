@@ -2066,6 +2066,19 @@ struct LiveConversationHost: View {
         _model = State(initialValue: model)
     }
 
+    // Only surface task counts actually known from the existing repository.
+    // Never imply that a failed/unavailable task list is live.
+    private var workSummary: ConversationWorkSummary? {
+        let store = model.taskStore
+        guard store.hasRepository,
+              !store.listEndpointUnavailable,
+              store.listErrorMessage == nil else { return nil }
+        return ConversationWorkSummary(
+            needsAttentionCount: store.needsInterventionCount,
+            activeCount: store.inProgressCount
+        )
+    }
+
     var body: some View {
         Group {
             if model.requiresSignIn {
@@ -2257,6 +2270,8 @@ struct LiveConversationHost: View {
                 pendingRejectedDraft: model.pendingRejectedDraftRestoration,
                 requiresSignIn: model.requiresSignIn,
                 isMockMode: model.isMockMode,
+                workSummary: workSummary,
+                onOpenTasks: { model.selectedTab = .tasks },
                 onConsumeRejectedDraft: { model.consumePendingRejectedDraftRestoration(id: $0) },
                 onSend: { text in Task { await model.send(text) } },
                 onRetry: { Task { await model.retry() } },
@@ -2649,6 +2664,8 @@ struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
     let pendingRejectedDraft: PendingRejectedDraft?
     let requiresSignIn: Bool
     let isMockMode: Bool
+    let workSummary: ConversationWorkSummary?
+    let onOpenTasks: (() -> Void)?
     let onConsumeRejectedDraft: (UUID) -> Void
     let onSend: (String) -> Void
     let onRetry: () -> Void
@@ -2669,6 +2686,8 @@ struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
         pendingRejectedDraft: PendingRejectedDraft?,
         requiresSignIn: Bool,
         isMockMode: Bool,
+        workSummary: ConversationWorkSummary? = nil,
+        onOpenTasks: (() -> Void)? = nil,
         onConsumeRejectedDraft: @escaping (UUID) -> Void,
         onSend: @escaping (String) -> Void,
         onRetry: @escaping () -> Void,
@@ -2686,6 +2705,8 @@ struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
         self.pendingRejectedDraft = pendingRejectedDraft
         self.requiresSignIn = requiresSignIn
         self.isMockMode = isMockMode
+        self.workSummary = workSummary
+        self.onOpenTasks = onOpenTasks
         self.onConsumeRejectedDraft = onConsumeRejectedDraft
         self.onSend = onSend
         self.onRetry = onRetry
@@ -2732,6 +2753,8 @@ struct LiveChatDraftHost<HeaderMenu: View, TopNotices: View>: View {
                 ? "conversation.message.ember_mock"
                 : "conversation.message.ember_cloud",
             onRefresh: onRefresh,
+            workSummary: workSummary,
+            onOpenTasks: onOpenTasks,
             headerMenu: { headerMenu },
             topNotices: { topNotices }
         )

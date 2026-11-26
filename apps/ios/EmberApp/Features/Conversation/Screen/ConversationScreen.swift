@@ -10,6 +10,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
     var replyStopText: LocalizedStringKey = "conversation.reply.stop"
     var emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock"
     var onRefresh: (() async -> Void)? = nil
+    var workSummary: ConversationWorkSummary? = nil
+    var onOpenTasks: (() -> Void)? = nil
     private let headerMenu: HeaderMenu
     private let topNotices: TopNotices
 
@@ -28,6 +30,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         replyStopText: LocalizedStringKey = "conversation.reply.stop",
         emberMessageAuthorText: LocalizedStringKey = "conversation.message.ember_mock",
         onRefresh: (() async -> Void)? = nil,
+        workSummary: ConversationWorkSummary? = nil,
+        onOpenTasks: (() -> Void)? = nil,
         @ViewBuilder headerMenu: () -> HeaderMenu,
         @ViewBuilder topNotices: () -> TopNotices
     ) {
@@ -40,6 +44,8 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         self.replyStopText = replyStopText
         self.emberMessageAuthorText = emberMessageAuthorText
         self.onRefresh = onRefresh
+        self.workSummary = workSummary
+        self.onOpenTasks = onOpenTasks
         self.headerMenu = headerMenu()
         self.topNotices = topNotices()
     }
@@ -59,6 +65,13 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
             header
 
             topNotices
+
+            if let workSummary, let onOpenTasks, !state.isLoading {
+                ConversationWorkStatusEntry(summary: workSummary, onOpenTasks: onOpenTasks)
+                    .frame(maxWidth: 680)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
 
             if state.commandStatus == .acknowledged && showsSubmissionAcknowledgement {
                 Text("conversation.submission.acknowledged", tableName: "Conversation")

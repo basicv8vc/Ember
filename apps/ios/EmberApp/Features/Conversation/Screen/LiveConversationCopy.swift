@@ -20,6 +20,14 @@ enum LiveConversationCopy {
         String(localized: "conversation.live.retry_unknown_ack_message", table: "Conversation")
     }
 
+    static var sendServiceUnavailableMessage: String {
+        String(localized: "conversation.live.send_service_unavailable_message", table: "Conversation")
+    }
+
+    static var sendServiceUnavailableStatus: String {
+        String(localized: "conversation.live.send_service_unavailable_status", table: "Conversation")
+    }
+
     static var sendConflictMessage: String {
         String(localized: "conversation.live.send_conflict_message", table: "Conversation")
     }

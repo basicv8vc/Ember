@@ -4505,6 +4505,38 @@
         }
       }
     },
+    "conversation.live.send_service_unavailable_message": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember Cloud is temporarily unavailable. Tap Try again to resend, or close to restore your message as a draft."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Ember 服务暂时不可用。点击“重试”可重新发送，或关闭将消息恢复为草稿。"
+          }
+        }
+      }
+    },
+    "conversation.live.send_service_unavailable_status": {
+      "localizations": {
+        "en": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "Service temporarily unavailable."
+          }
+        },
+        "zh-Hans": {
+          "stringUnit": {
+            "state": "translated",
+            "value": "服务暂时不可用。"
+          }
+        }
+      }
+    },
     "conversation.live.send_conflict_message": {
       "localizations": {
         "en": {

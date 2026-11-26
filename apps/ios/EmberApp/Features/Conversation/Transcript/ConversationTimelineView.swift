@@ -635,7 +635,9 @@ private struct ConversationReplyStatusView: View {
                     .buttonStyle(.bordered)
                     .tint(.red)
                     .accessibilityIdentifier("conversation-retry")
-                } else if let onDismissError {
+                }
+
+                if let onDismissError {
                     Button(action: onDismissError) {
                         Image(systemName: "xmark")
                             .font(.caption.weight(.semibold))

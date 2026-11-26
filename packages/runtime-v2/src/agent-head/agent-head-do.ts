@@ -352,6 +352,14 @@ export class AgentHeadCore
   }
 
   /**
+   * Idempotently applies any pending AgentHeadDO SQLite migrations for an already-anchored head
+   * waking up after a code upgrade (for example v8 -> v9 `v2_budget_mode_partition`).
+   */
+  ensureMigrations(): void {
+    applyAgentHeadMigrations(this.storage, this.migrations, this.nowMsFn());
+  }
+
+  /**
    * Executes the single unified DO SQLite migration entrypoint (`applyAgentHeadMigrations`)
    * and anchors `agent_head_meta` + the tenant's `main` conversation.
    */

@@ -853,4 +853,90 @@ describe('V2 G3 multi-mode GlobalBudgetDO transitions in workerd', () => {
       await harness.close();
     }
   });
+
+  it('auto-applies pending v9 budget_mode migration when an existing v8 AgentHeadDO wakes without bootstrap', async () => {
+    const wrangler = (await import(apiRequire.resolve('wrangler'))) as {
+      createTestHarness(options: unknown): WorkerdHarness;
+    };
+    const harness = wrangler.createTestHarness({
+      root: REPO_ROOT,
+      workers: [{ config: buildWorkerConfig(REAL_VARS) }],
+    });
+    await harness.listen();
+
+    try {
+      await postJson(harness, '/d1/migrate', { sql: MIGRATION_SQL });
+
+      const tenantId = randomUUID();
+      const principalId = randomUUID();
+      const agentId = randomUUID();
+      const conversationId = randomUUID();
+      const headName = formatRecoveryAgentKey(tenantId, agentId);
+
+      await postJson(harness, '/head/bootstrap', { tenantId, agentId, conversationId });
+
+      // Simulate an already-bootstrapped v8 AgentHeadDO (pre-P0-2) persisted on disk.
+      const headStorage = await harness
+        .getWorker()
+        .getDurableObjectStorage('AGENT_HEAD', { name: headName });
+      await headStorage.exec('DROP INDEX IF EXISTS idx_agent_budget_incidents_unresolved');
+      await headStorage.exec('DROP TABLE agent_budget_incidents');
+      await headStorage.exec(`CREATE TABLE agent_budget_incidents (
+        id TEXT PRIMARY KEY,
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
+        scope_id TEXT NOT NULL,
+        utc_day TEXT NOT NULL,
+        reason TEXT NOT NULL,
+        subject_type TEXT,
+        subject_id TEXT,
+        attempt_no INTEGER,
+        observed_micro_usd INTEGER NOT NULL DEFAULT 0,
+        applied_micro_usd INTEGER NOT NULL DEFAULT 0,
+        overage_micro_usd INTEGER NOT NULL DEFAULT 0,
+        reservation_micro_usd INTEGER NOT NULL DEFAULT 0,
+        detected_at_ms INTEGER NOT NULL,
+        resolved_at_ms INTEGER
+      )`);
+      await headStorage.exec('DROP TABLE agent_spend_days');
+      await headStorage.exec(`CREATE TABLE agent_spend_days (
+        scope_kind TEXT NOT NULL CHECK (scope_kind IN ('tenant', 'principal')),
+        scope_id TEXT NOT NULL,
+        utc_day TEXT NOT NULL,
+        reserved_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (reserved_micro_usd >= 0),
+        consumed_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (consumed_micro_usd >= 0),
+        overage_micro_usd INTEGER NOT NULL DEFAULT 0 CHECK (overage_micro_usd >= 0),
+        turns_started INTEGER NOT NULL DEFAULT 0 CHECK (turns_started >= 0),
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (scope_kind, scope_id, utc_day)
+      ) WITHOUT ROWID`);
+      await headStorage.exec('DELETE FROM schema_migrations WHERE version = 9');
+
+      // Evict DO so the next RPC wakes a cold instance without calling bootstrap().
+      await harness.getWorker().evictDurableObject('AGENT_HEAD', { name: headName });
+
+      const prepared = await headRpc<{ kind: string }>(harness, {
+        tenantId,
+        agentId,
+        method: 'prepareTurn',
+        request: makePrepareTurnRequest({
+          tenantId,
+          principalId,
+          agentId,
+          conversationId,
+          mode: 'real',
+          text: 'wake after v9 deploy',
+          transcriptEpoch: 0,
+          workerId: 'worker-v8-wake',
+        }),
+      });
+      expect(prepared.kind).toBe('prepared');
+
+      const migrations = await headStorage.exec<{ version: number }>(
+        'SELECT version FROM schema_migrations WHERE version = 9',
+      );
+      expect(migrations).toEqual([{ version: 9 }]);
+    } finally {
+      await harness.close();
+    }
+  });
 });

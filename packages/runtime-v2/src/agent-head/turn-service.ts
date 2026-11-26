@@ -438,7 +438,17 @@ export class AgentHeadTurnService implements AgentHeadRpc {
           ceilingMicroUsd: this.globalDailyCeilingMicroUsd,
           expiresAtMs: globalGrantExpiresMs,
         });
-      } catch {
+      } catch (err) {
+        console.error(
+          JSON.stringify({
+            event: 'v2.turn.reserve_global_error',
+            budgetMode,
+            estimatedMicroUsd,
+            ceilingMicroUsd: this.globalDailyCeilingMicroUsd,
+            errorName: err instanceof Error ? err.name : typeof err,
+            errorMessage: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+        );
         throw new DomainError('DB_UNAVAILABLE', 'global budget authority unavailable');
       }
 

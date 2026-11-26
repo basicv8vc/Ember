@@ -212,7 +212,17 @@ export async function ensureRecoveryCoverageAsync(
         recoveryAtMs: activeTarget,
         nowMs: deps.nowMs(),
       });
-    } catch {
+    } catch (upsertErr) {
+      console.error(
+        JSON.stringify({
+          event: 'v2.recovery_coverage.upsert_error',
+          attempt,
+          activeGen,
+          errorName: upsertErr instanceof Error ? upsertErr.name : typeof upsertErr,
+          errorMessage:
+            upsertErr instanceof Error ? upsertErr.message.slice(0, 240) : String(upsertErr).slice(0, 240),
+        }),
+      );
       try {
         const readBack = await deps.recoveryRegistry.getCoverage({
           tenantId: input.tenantId,
@@ -243,6 +253,14 @@ export async function ensureRecoveryCoverageAsync(
         if (err instanceof DomainError) {
           throw err;
         }
+        console.error(
+          JSON.stringify({
+            event: 'v2.recovery_coverage.readback_error',
+            attempt,
+            errorName: err instanceof Error ? err.name : typeof err,
+            errorMessage: err instanceof Error ? err.message.slice(0, 240) : String(err).slice(0, 240),
+          }),
+        );
         throw new DomainError('DB_UNAVAILABLE', 'recovery registry unavailable');
       }
     }

@@ -2,6 +2,13 @@ import Foundation
 import SafariServices
 import SwiftUI
 
+struct EmberWebSourceLink: Identifiable, Equatable {
+    let url: URL
+    let displayHost: String
+
+    var id: String { url.absoluteString }
+}
+
 enum EmberInAppBrowserPolicy {
     /// Only HTTP(S) URLs with a non-empty host are safe to open in `SFSafariViewController`.
     static func webURL(from url: URL) -> URL? {
@@ -13,6 +20,17 @@ enum EmberInAppBrowserPolicy {
             return nil
         }
         return url
+    }
+
+    static func displayHost(for url: URL) -> String {
+        guard let host = url.host, !host.isEmpty else {
+            return url.absoluteString
+        }
+        let lowercased = host.lowercased()
+        if lowercased.hasPrefix("www."), lowercased.count > 4 {
+            return String(lowercased.dropFirst(4))
+        }
+        return lowercased
     }
 }
 
@@ -91,6 +109,30 @@ enum EmberLinkDetector {
                 attributed[attrRange].underlineStyle = .single
             }
         }
+    }
+
+    /// Extracts unique HTTP(S) source links from Markdown or plain text for display as source pills.
+    static func extractWebLinks(from rawText: String, limit: Int = 6) -> [EmberWebSourceLink] {
+        guard limit > 0, mayContainWebURL(rawText) else { return [] }
+
+        var seen: Set<String> = []
+        var results: [EmberWebSourceLink] = []
+
+        let detected = matches(in: rawText)
+        for (_, url) in detected {
+            let key = url.absoluteString
+            guard seen.insert(key).inserted else { continue }
+            results.append(
+                EmberWebSourceLink(
+                    url: url,
+                    displayHost: EmberInAppBrowserPolicy.displayHost(for: url)
+                )
+            )
+            if results.count >= limit {
+                break
+            }
+        }
+        return results
     }
 }
 

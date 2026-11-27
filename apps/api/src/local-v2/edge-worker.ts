@@ -19,13 +19,13 @@ import {
   type ModelRateRow,
 } from '@ember/model-gateway';
 import {
-  v2UploadR2Key,
   type DeviceExecutionRpc,
   type PersonalMemoryRpc,
   type ProactiveScheduleRpc,
   type TaskArtifactCommand,
   type TaskArtifactResponse,
   type TaskArtifactRpc,
+  type V2CheckArtifactsCommittedDto,
   type V2PythonTaskSubmitResultDto,
   type V2TaskArtifactDownloadDto,
 } from '@ember/runtime-v2';
@@ -67,11 +67,9 @@ import {
 } from './interactive-executor.js';
 import type { V2StreamingModelGateway } from './model-runtime.js';
 import {
-  deleteV2R2KeysBestEffort,
   encodeBytesBase64,
-  putV2R2Bytes,
   resolveV2StoredFileBytes,
-  sha256HexBytes,
+  stageV2UploadWithR2,
 } from './r2-artifacts.js';
 import type { EdgeAgentHeadRpc, PrepareTurnRequest, ResolvedMessageAttachment } from './rpc.js';
 
@@ -478,28 +476,23 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
           uploads: {
             async stageUpload(auth, input) {
               if (deps.r2Bucket !== undefined) {
-                const uploadId = crypto.randomUUID();
-                const sha256 = await sha256HexBytes(input.bytes);
-                const r2Key = v2UploadR2Key(auth.tenantId, uploadId);
-                await putV2R2Bytes(deps.r2Bucket, r2Key, input.bytes, input.mediaType, {
+                return stageV2UploadWithR2({
+                  bucket: deps.r2Bucket,
                   tenantId: auth.tenantId,
-                  uploadId,
-                  sha256,
+                  filename: input.filename,
+                  mediaType: input.mediaType,
+                  bytes: input.bytes,
+                  registerInDo: async (cmd) =>
+                    (await runTaskArtifacts({
+                      kind: 'stage_upload',
+                      ...cmd,
+                    })) as B3StagedUploadReceiptDto,
+                  checkCommitted: async (artifactIds) =>
+                    (await runTaskArtifacts({
+                      kind: 'check_artifacts_committed',
+                      artifactIds,
+                    })) as V2CheckArtifactsCommittedDto,
                 });
-                try {
-                  return (await runTaskArtifacts({
-                    kind: 'stage_upload',
-                    uploadId,
-                    filename: input.filename,
-                    mediaType: input.mediaType,
-                    sizeBytes: input.bytes.byteLength,
-                    sha256,
-                    r2Key,
-                  })) as B3StagedUploadReceiptDto;
-                } catch (error) {
-                  await deleteV2R2KeysBestEffort(deps.r2Bucket, [r2Key]);
-                  throw error;
-                }
               }
               return (await runTaskArtifacts({
                 kind: 'stage_upload',

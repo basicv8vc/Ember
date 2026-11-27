@@ -27,6 +27,7 @@ import {
   formatRecoveryAgentKey,
   runV2FakePythonSandbox,
   type DurableExecutorPort,
+  type V2CheckArtifactsCommittedDto,
   type V2PublishTaskOutputsResultDto,
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
@@ -35,11 +36,7 @@ import {
   DaytonaSandboxProvider,
   DaytonaSdkSandboxClient,
 } from '@ember/sandbox-daytona';
-import {
-  deleteV2R2KeysBestEffort,
-  resolveV2StoredFileBytes,
-  stageV2OutputFilesForPublish,
-} from './r2-artifacts.js';
+import { publishV2OutputsWithR2Reconciliation, resolveV2StoredFileBytes } from './r2-artifacts.js';
 import { resolveV2SandboxConfig, type V2SandboxConfig } from './runtime-config.js';
 import type { AgentHeadDO, LocalRuntimeEnv } from './runtime-head.js';
 
@@ -357,34 +354,37 @@ async function runFakeFastPath(
   });
 
   if (sandboxResult.outputFiles.length > 0) {
-    const staged = await stageV2OutputFilesForPublish({
+    const published = await publishV2OutputsWithR2Reconciliation({
       bucket: r2Bucket,
       tenantId: claim.tenantId,
       taskId: claim.targetId,
       runId,
       files: sandboxResult.outputFiles,
+      publishInDo: async (outputs) =>
+        (await head.taskArtifacts({
+          kind: 'publish_task_outputs',
+          tenantId: claim.tenantId,
+          principalId,
+          agentId: claim.agentId,
+          requestId: crypto.randomUUID(),
+          taskId: claim.targetId,
+          runId,
+          leaseEpoch: claim.leaseEpoch,
+          workerId: claim.workerId,
+          simulated: true,
+          outputs,
+        })) as V2PublishTaskOutputsResultDto,
+      checkCommitted: async (artifactIds) =>
+        (await head.taskArtifacts({
+          kind: 'check_artifacts_committed',
+          tenantId: claim.tenantId,
+          principalId,
+          agentId: claim.agentId,
+          requestId: crypto.randomUUID(),
+          artifactIds,
+        })) as V2CheckArtifactsCommittedDto,
     });
-    let published: V2PublishTaskOutputsResultDto;
-    try {
-      published = (await head.taskArtifacts({
-        kind: 'publish_task_outputs',
-        tenantId: claim.tenantId,
-        principalId,
-        agentId: claim.agentId,
-        requestId: crypto.randomUUID(),
-        taskId: claim.targetId,
-        runId,
-        leaseEpoch: claim.leaseEpoch,
-        workerId: claim.workerId,
-        simulated: true,
-        outputs: staged.outputs,
-      })) as V2PublishTaskOutputsResultDto;
-    } catch (error) {
-      await deleteV2R2KeysBestEffort(r2Bucket, staged.stagedR2Keys);
-      throw error;
-    }
     if (!published.accepted) {
-      await deleteV2R2KeysBestEffort(r2Bucket, staged.stagedR2Keys);
       return { status: 'failed', reasonCode: 'lease_lost' };
     }
   }
@@ -897,34 +897,37 @@ export async function executeV2PythonAgentTask(
         }
 
         if (rawOutputs.length > 0 || stagedAnyOutputs) {
-          const staged = await stageV2OutputFilesForPublish({
+          const published = await publishV2OutputsWithR2Reconciliation({
             bucket: env.EMBER_BLOBS,
             tenantId: claim.tenantId,
             taskId: claim.targetId,
             runId,
             files: rawOutputs,
+            publishInDo: async (outputs) =>
+              (await head.taskArtifacts({
+                kind: 'publish_task_outputs',
+                tenantId: claim.tenantId,
+                principalId,
+                agentId: claim.agentId,
+                requestId: crypto.randomUUID(),
+                taskId: claim.targetId,
+                runId,
+                leaseEpoch: claim.leaseEpoch,
+                workerId: claim.workerId,
+                simulated: isSimulatedRun,
+                outputs,
+              })) as V2PublishTaskOutputsResultDto,
+            checkCommitted: async (artifactIds) =>
+              (await head.taskArtifacts({
+                kind: 'check_artifacts_committed',
+                tenantId: claim.tenantId,
+                principalId,
+                agentId: claim.agentId,
+                requestId: crypto.randomUUID(),
+                artifactIds,
+              })) as V2CheckArtifactsCommittedDto,
           });
-          let published: V2PublishTaskOutputsResultDto;
-          try {
-            published = (await head.taskArtifacts({
-              kind: 'publish_task_outputs',
-              tenantId: claim.tenantId,
-              principalId,
-              agentId: claim.agentId,
-              requestId: crypto.randomUUID(),
-              taskId: claim.targetId,
-              runId,
-              leaseEpoch: claim.leaseEpoch,
-              workerId: claim.workerId,
-              simulated: isSimulatedRun,
-              outputs: staged.outputs,
-            })) as V2PublishTaskOutputsResultDto;
-          } catch (error) {
-            await deleteV2R2KeysBestEffort(env.EMBER_BLOBS, staged.stagedR2Keys);
-            throw error;
-          }
           if (!published.accepted) {
-            await deleteV2R2KeysBestEffort(env.EMBER_BLOBS, staged.stagedR2Keys);
             return { status: 'failed', reasonCode: abortReason ?? 'lease_lost' };
           }
           stagedAnyOutputs = rawOutputs.length > 0;

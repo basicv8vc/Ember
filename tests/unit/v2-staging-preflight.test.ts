@@ -70,12 +70,13 @@ describe('V2 staging preflight validator', () => {
     expect(strictResult.errors.some((e) => e.includes('placeholder database_id'))).toBe(true);
   });
 
-  it('rejects any V1 resource collision (worker name, queue, route, or Hyperdrive)', () => {
+  it('rejects any V1 resource collision (worker name, queue, route, R2 bucket, or Hyperdrive)', () => {
     const { v2Config, v1Configs, migrationExists } = loadRealConfigs();
     const mutated = structuredClone(v2Config);
     const firstProducer = mutated.queues?.producers?.[0];
     if (firstProducer) firstProducer.queue = 'ember-staging-assistant-turns';
     mutated.routes = [{ pattern: 'ember-api.slowfast.dev', custom_domain: true }];
+    mutated.r2_buckets = [{ binding: 'EMBER_BLOBS', bucket_name: 'ember-blobs-staging' }];
     mutated.hyperdrive = [{ binding: 'HYPERDRIVE', id: 'f7da9cff26b843fda8187764f9b81b25' }];
 
     const result = validateV2StagingConfig({
@@ -87,6 +88,10 @@ describe('V2 staging preflight validator', () => {
     expect(result.ok).toBe(false);
     expect(result.errors.some((e) => e.includes('queue collides with V1'))).toBe(true);
     expect(result.errors.some((e) => e.includes('route collides with V1'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('R2 bucket collides with V1'))).toBe(true);
+    expect(result.errors.some((e) => e.includes('V2 staging R2 bucket must use isolated'))).toBe(
+      true,
+    );
     expect(result.errors.some((e) => e.includes('Hyperdrive ID collides with V1'))).toBe(true);
   });
 

@@ -1045,6 +1045,10 @@ export const DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION = 10;
 
 export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
   `ALTER TABLE v2_task_artifacts ADD COLUMN r2_key TEXT;`,
+  `CREATE TABLE IF NOT EXISTS v2_r2_pending_deletes (
+  r2_key        TEXT    PRIMARY KEY,
+  created_at_ms INTEGER NOT NULL
+) WITHOUT ROWID;`,
 ] as const;
 
 export function createV2TaskArtifactsR2Migration(

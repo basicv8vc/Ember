@@ -532,17 +532,19 @@ export class AgentHeadCore
 
   // ---- AgentHeadRecoveryPort delegation ----
 
-  flushDeletedR2Keys(): Promise<void> {
+  flushDeletedR2Keys(): Promise<number> {
     return this.recoveryService.flushDeletedR2Keys();
   }
 
-  reconcileFromRegistry(cmd: {
+  async reconcileFromRegistry(cmd: {
     readonly tenantId: string;
     readonly agentId: string;
     readonly expectedGen: number;
     readonly nowMs: number;
   }) {
-    return this.recoveryService.reconcileFromRegistry(cmd).finally(() => this.flushDeletedR2Keys());
+    const result = await this.recoveryService.reconcileFromRegistry(cmd);
+    await this.flushDeletedR2Keys();
+    return result;
   }
 
   confirmRegistryPlan(cmd: {

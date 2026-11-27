@@ -163,6 +163,10 @@ export type TaskArtifactCommand = Omit<AgentHeadCallerScope, 'policyVersion'> &
     | { readonly kind: 'list_task_artifacts'; readonly taskId: string }
     | { readonly kind: 'download_artifact'; readonly artifactId: string }
     | {
+        readonly kind: 'check_artifacts_committed';
+        readonly artifactIds: readonly string[];
+      }
+    | {
         readonly kind: 'load_task_inputs';
         readonly taskId: string;
         readonly runId: string;
@@ -185,6 +189,10 @@ export interface V2PublishTaskOutputsResultDto {
   readonly artifactIds: readonly string[];
 }
 
+export interface V2CheckArtifactsCommittedDto {
+  readonly existingIds: readonly string[];
+}
+
 export type TaskArtifactResponse =
   | readonly ResolvedMessageAttachment[]
   | B3StagedUploadReceiptDto
@@ -196,6 +204,7 @@ export type TaskArtifactResponse =
   | B1TaskCancelDto
   | B3TaskArtifactsListDto
   | V2TaskArtifactDownloadDto
+  | V2CheckArtifactsCommittedDto
   | readonly V2TaskInputFileDto[]
   | V2PublishTaskOutputsResultDto
   | null;

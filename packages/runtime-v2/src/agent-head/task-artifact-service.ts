@@ -22,11 +22,13 @@ import {
   v2UploadR2Key,
   type TaskArtifactCommand,
   type TaskArtifactResponse,
+  type V2CheckArtifactsCommittedDto,
   type V2PublishTaskOutputsResultDto,
   type V2PythonTaskSubmitResultDto,
   type V2TaskArtifactDownloadDto,
   type V2TaskInputFileDto,
 } from '../contracts/task-artifacts.js';
+import { enqueuePendingR2DeletesSync, flushPendingR2Deletes } from './r2-delete-outbox.js';
 import type { ResolvedMessageAttachment } from '../contracts/agent-head-rpc.js';
 import type { V2DispatchEnvelope } from '../recovery/envelope.js';
 import type { EventRuntimeCoordinatorPort } from '../recovery/ports.js';
@@ -201,6 +203,8 @@ export class AgentHeadTaskArtifactService {
         return this.listTaskArtifactsSync(cmd.tenantId, cmd.principalId, cmd.taskId);
       case 'download_artifact':
         return this.downloadArtifact(cmd.tenantId, cmd.principalId, cmd.artifactId);
+      case 'check_artifacts_committed':
+        return this.checkArtifactsCommittedSync(cmd.tenantId, cmd.artifactIds);
       case 'load_task_inputs':
         return this.loadTaskInputs(cmd);
       case 'publish_task_outputs':
@@ -385,6 +389,11 @@ export class AgentHeadTaskArtifactService {
         cmd.principalId,
         expiryCutoffMs,
       );
+      enqueuePendingR2DeletesSync(
+        this.sql,
+        expiredRows.map((row) => row.r2_key),
+        now,
+      );
       this.sql.exec(
         `DELETE FROM v2_task_artifacts
           WHERE tenant_id = ? AND principal_id = ? AND task_id IS NULL AND created_at_ms <= ?`,
@@ -432,12 +441,15 @@ export class AgentHeadTaskArtifactService {
           expires_at: toIsoTimestamp(now + PYTHON_AGENT_LIMITS.maxUploadTtlMs),
           created_at: toIsoTimestamp(now),
         },
-        expiredR2Keys: expiredRows.map((row) => row.r2_key),
+        hasPendingDeletes: expiredRows.length > 0,
       };
     });
 
-    if (tx.expiredR2Keys.length > 0) {
-      await this.deps.deleteR2Keys?.(tx.expiredR2Keys).catch(() => undefined);
+    if (tx.hasPendingDeletes) {
+      await flushPendingR2Deletes({
+        storage: this.deps.storage,
+        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
+      });
     }
 
     return tx.receipt;
@@ -836,6 +848,11 @@ export class AgentHeadTaskArtifactService {
           WHERE task_id = ? AND created_by = 'run' AND committed = 0 AND r2_key IS NOT NULL`,
         task.id,
       );
+      enqueuePendingR2DeletesSync(
+        this.sql,
+        purgedR2Rows.map((row) => row.r2_key),
+        now,
+      );
       if (task.status === 'queued' || task.status === 'retryable_failed') {
         this.sql.exec(
           `UPDATE tasks
@@ -892,15 +909,18 @@ export class AgentHeadTaskArtifactService {
         },
         now,
         alarmAtMs,
-        deletedR2Keys: purgedR2Rows.map((row) => row.r2_key),
+        hasPendingDeletes: purgedR2Rows.length > 0,
       };
     });
 
     if (tx.alarmAtMs !== null) {
       await this.deps.recoveryHooks.syncPlatformAlarm?.(tx.alarmAtMs, tx.now);
     }
-    if (tx.deletedR2Keys !== undefined && tx.deletedR2Keys.length > 0) {
-      await this.deps.deleteR2Keys?.(tx.deletedR2Keys).catch(() => undefined);
+    if (tx.hasPendingDeletes) {
+      await flushPendingR2Deletes({
+        storage: this.deps.storage,
+        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
+      });
     }
     return tx.result;
   }
@@ -994,6 +1014,27 @@ export class AgentHeadTaskArtifactService {
       size: row.size_bytes,
       contentBase64: row.content_b64,
     };
+  }
+
+  private checkArtifactsCommittedSync(
+    tenantId: string,
+    artifactIds: readonly string[],
+  ): V2CheckArtifactsCommittedDto {
+    const existingIds: string[] = [];
+    for (const rawId of artifactIds) {
+      const parsedId = v2TaskIdSchema.safeParse(rawId);
+      if (!parsedId.success) continue;
+      const row = sqlExecMaybe<{ readonly id: string }>(
+        this.sql,
+        `SELECT id FROM v2_task_artifacts WHERE id = ? AND tenant_id = ? LIMIT 1`,
+        parsedId.data,
+        tenantId,
+      );
+      if (row !== null) {
+        existingIds.push(row.id);
+      }
+    }
+    return { existingIds };
   }
 
   private async loadTaskInputs(
@@ -1196,6 +1237,11 @@ export class AgentHeadTaskArtifactService {
         task.id,
         run.id,
       );
+      enqueuePendingR2DeletesSync(
+        this.sql,
+        replacedR2Rows.map((row) => row.r2_key),
+        now,
+      );
       this.sql.exec(
         `DELETE FROM v2_task_artifacts
           WHERE tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
@@ -1244,12 +1290,15 @@ export class AgentHeadTaskArtifactService {
       return {
         accepted: true,
         artifactIds,
-        replacedR2Keys: replacedR2Rows.map((row) => row.r2_key),
+        hasPendingDeletes: replacedR2Rows.length > 0,
       };
     });
 
-    if (tx.replacedR2Keys.length > 0) {
-      await this.deps.deleteR2Keys?.(tx.replacedR2Keys).catch(() => undefined);
+    if (tx.hasPendingDeletes) {
+      await flushPendingR2Deletes({
+        storage: this.deps.storage,
+        ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
+      });
     }
 
     return { accepted: tx.accepted, artifactIds: tx.artifactIds };

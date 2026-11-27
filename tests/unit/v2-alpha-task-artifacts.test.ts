@@ -6,7 +6,9 @@ import {
   type B1TaskListDto,
   type B3StagedUploadReceiptDto,
   type B3TaskArtifactsListDto,
+  type R2BucketPort,
 } from '@ember/contracts';
+import { DomainError } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
@@ -19,12 +21,17 @@ import {
   type RecoveryRegistryPort,
   type SqlStorageCursorLike,
   type SqlStorageRow,
+  type V2CheckArtifactsCommittedDto,
   type V2DispatchEnvelope,
   type V2PublishTaskOutputsResultDto,
   type V2PythonTaskSubmitResultDto,
   type V2TaskArtifactDownloadDto,
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
+import {
+  publishV2OutputsWithR2Reconciliation,
+  stageV2UploadWithR2,
+} from '../../apps/api/src/local-v2/r2-artifacts.js';
 
 const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d840101';
 const AGENT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d840102';
@@ -1209,5 +1216,298 @@ describe('V2 AgentHeadTaskArtifactService', () => {
       size: bigSize,
       r2Key: outKey,
     });
+  });
+
+  it('fault injection: retains R2 objects on ambiguous DO RPC failures after commit and deletes only on proven non-commit', async () => {
+    const store = new Map<string, Uint8Array>();
+    const deletedLog: string[][] = [];
+    const bucket: R2BucketPort = {
+      put(key, value) {
+        const bytes =
+          value instanceof Uint8Array
+            ? new Uint8Array(value)
+            : typeof value === 'string'
+              ? new TextEncoder().encode(value)
+              : new Uint8Array(value as ArrayBuffer);
+        store.set(key, bytes);
+        return Promise.resolve();
+      },
+      get(key) {
+        const data = store.get(key);
+        if (data === undefined) return Promise.resolve(null);
+        const copy = new Uint8Array(data.byteLength);
+        copy.set(data);
+        return Promise.resolve({
+          size: copy.byteLength,
+          arrayBuffer: () => Promise.resolve(copy.buffer),
+        });
+      },
+      delete(keys) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        deletedLog.push(list);
+        for (const k of list) store.delete(k);
+        return Promise.resolve();
+      },
+    };
+
+    const clock = { now: 1_760_000_000_000 };
+    const { core } = createTestCore(clock);
+
+    // 1) Upload path: DO commits stage_upload, then RPC response is lost (DB_UNAVAILABLE).
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'ambiguous.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('a,b\n1,2\n'),
+        registerInDo: async (cmd) => {
+          await core.taskArtifacts({
+            kind: 'stage_upload',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842001',
+            ...cmd,
+          });
+          throw new DomainError('DB_UNAVAILABLE', 'simulated lost RPC ACK after commit');
+        },
+        checkCommitted: async (artifactIds) =>
+          (await core.taskArtifacts({
+            kind: 'check_artifacts_committed',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842002',
+            artifactIds,
+          })) as V2CheckArtifactsCommittedDto,
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+    // Committed R2 object MUST survive the lost RPC ACK!
+    expect(store.size).toBe(1);
+    expect(deletedLog).toEqual([]);
+
+    // 2) Upload path: when reconciliation itself fails, retain R2 object safely.
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'uncertain-check.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('x,y\n3,4\n'),
+        registerInDo: () => Promise.reject(new Error('network drop')),
+        checkCommitted: () => Promise.reject(new Error('DO still unreachable')),
+      }),
+    ).rejects.toThrow('network drop');
+    expect(store.size).toBe(2);
+
+    // 3) Upload path: definite pre-commit rejection (BUDGET_EXCEEDED) deletes R2 object immediately.
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'rejected.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('p,q\n5,6\n'),
+        registerInDo: () => Promise.reject(new DomainError('BUDGET_EXCEEDED', 'quota full')),
+        checkCommitted: () => Promise.reject(new Error('should not reconcile definite rejection')),
+      }),
+    ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+    expect(store.size).toBe(2);
+
+    // 4) Output publish path: DO commits outputs then drops RPC ACK -> R2 output MUST survive.
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842003',
+      input: { prompt: 'Run fault injection output test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-fi',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    await expect(
+      publishV2OutputsWithR2Reconciliation({
+        bucket,
+        tenantId: TENANT_ID,
+        taskId,
+        runId,
+        files: [
+          {
+            filename: 'fi-report.csv',
+            mediaType: 'text/csv',
+            bytes: new TextEncoder().encode('col\n42\n'),
+          },
+        ],
+        publishInDo: async (outputs) => {
+          await core.taskArtifacts({
+            kind: 'publish_task_outputs',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842004',
+            taskId,
+            runId,
+            leaseEpoch: claimed.leaseEpoch,
+            workerId: 'worker-fi',
+            outputs,
+          });
+          throw new Error('simulated RPC transport drop after publish_task_outputs commit');
+        },
+        checkCommitted: async (artifactIds) =>
+          (await core.taskArtifacts({
+            kind: 'check_artifacts_committed',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842005',
+            artifactIds,
+          })) as V2CheckArtifactsCommittedDto,
+      }),
+    ).rejects.toThrow('simulated RPC transport drop');
+
+    // Output R2 object remains intact alongside the 2 retained upload objects.
+    expect(store.size).toBe(3);
+
+    // 5) Output publish path: authoritative accepted:false deletes staged R2 output immediately.
+    const rejected = await publishV2OutputsWithR2Reconciliation({
+      bucket,
+      tenantId: TENANT_ID,
+      taskId,
+      runId,
+      files: [
+        {
+          filename: 'stale-report.csv',
+          mediaType: 'text/csv',
+          bytes: new TextEncoder().encode('col\n99\n'),
+        },
+      ],
+      publishInDo: () => Promise.resolve({ accepted: false, artifactIds: [] }),
+      checkCommitted: () => Promise.reject(new Error('not needed')),
+    });
+    expect(rejected.accepted).toBe(false);
+    expect(store.size).toBe(3);
+  });
+
+  it('fault injection: does not delete R2 objects when SQLite transaction rolls back after purge, and durably retries failed R2 deletes', async () => {
+    const deletedKeys: string[][] = [];
+    let failDeletes = false;
+    const clock = { now: 1_760_000_000_000 };
+    const { core, storage } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        if (failDeletes) {
+          return Promise.reject(new Error('transient R2 delete outage'));
+        }
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
+    });
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843001',
+      input: { prompt: 'Rollback & retry test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-rb',
+      leaseMs: 10_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d843002';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843003',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-rb',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'rb-report.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 64,
+          sha256: 'c'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Advance past lease expiry, then simulate an exception AFTER purgeUncommittedTaskOutputsSync
+    // inside transactionSync so SQLite rolls back.
+    clock.now += 15_000;
+    expect(() =>
+      storage.transactionSync(() => {
+        core.recoveryService.convergeDueBusinessItemSync('task', taskId, clock.now);
+        throw new Error('injected post-purge SQLite transaction failure');
+      }),
+    ).toThrow('injected post-purge SQLite transaction failure');
+
+    // SQLite row survived rollback AND v2_r2_pending_deletes must be empty; flush must delete nothing.
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_task_artifacts WHERE id = ?',
+          outId,
+        )
+        .one().cnt,
+    ).toBe(1);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    await core.flushDeletedR2Keys();
+    expect(deletedKeys).toEqual([]);
+
+    // Now commit the convergence with transient R2 delete failure -> key stays queued and retries!
+    failDeletes = true;
+    storage.transactionSync(() => {
+      core.recoveryService.convergeDueBusinessItemSync('task', taskId, clock.now);
+    });
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(1);
+
+    await core.flushDeletedR2Keys();
+    expect(deletedKeys).toEqual([]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(1);
+
+    // R2 recovers -> subsequent flush deletes the key and clears v2_r2_pending_deletes.
+    failDeletes = false;
+    await core.flushDeletedR2Keys();
+    expect(deletedKeys).toEqual([[outKey]]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
   });
 });

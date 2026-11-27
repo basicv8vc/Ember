@@ -1,34 +1,18 @@
 import { randomUUID } from 'node:crypto';
-import { AuthContextSchema, IdSchema, toInvalidArgumentError } from '@ember/contracts';
+import {
+  AuthContextSchema,
+  IdSchema,
+  toInvalidArgumentError,
+  type AgentRepository,
+  type AgentView,
+  type CreateAgentCommand,
+} from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import { z } from 'zod';
 import type pg from 'pg';
 import { asDomainError, toIsoTimestamp, withTransaction } from './support.js';
 
-export interface CreateAgentCommand {
-  readonly name: string;
-  /** Defaults to the verified AuthContext policy version. */
-  readonly policyVersion?: number;
-}
-
-export interface AgentView {
-  readonly agentId: Id;
-  readonly name: string;
-  readonly policyVersion: number;
-  readonly workspaceId: Id;
-  /** New workspaces start at version 0. */
-  readonly workspaceVersion: number;
-  readonly createdAt: string;
-  readonly updatedAt: string;
-}
-
-/** Minimal tenant-scoped agent persistence boundary for P0B-03. */
-export interface AgentRepository {
-  /** Atomically create an agent and its single initial workspace in the caller's tenant. */
-  create(ctx: AuthContext, command: CreateAgentCommand): Promise<AgentView>;
-  /** Return `null` for a missing agent and for an agent owned by another tenant. */
-  get(ctx: AuthContext, agentId: Id): Promise<AgentView | null>;
-}
+export type { AgentRepository, AgentView, CreateAgentCommand };
 
 const createAgentCommandSchema = z.strictObject({
   name: z

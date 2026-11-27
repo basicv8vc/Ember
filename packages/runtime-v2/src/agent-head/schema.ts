@@ -1041,6 +1041,23 @@ export function createBudgetModePartitionDoMigration(
   };
 }
 
+export const DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION = 10;
+
+export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
+  `ALTER TABLE v2_task_artifacts ADD COLUMN r2_key TEXT;`,
+] as const;
+
+export function createV2TaskArtifactsR2Migration(
+  version = DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_task_artifacts_r2',
+    statements: V2_TASK_ARTIFACTS_R2_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_TASK_ARTIFACTS_R2_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -1063,5 +1080,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     createProactiveSchedulesMigration(),
     createV2TaskArtifactsMigration(),
     createBudgetModePartitionDoMigration(),
+    createV2TaskArtifactsR2Migration(),
   ];
 }

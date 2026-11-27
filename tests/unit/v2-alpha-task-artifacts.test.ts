@@ -129,7 +129,10 @@ function createMockGlobalBudget(): GlobalBudgetAuthority {
   };
 }
 
-function createTestCore(clockRef: { now: number }) {
+function createTestCore(
+  clockRef: { now: number },
+  options?: { readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void> },
+) {
   const storage = createInMemoryDoStorage();
   const registry = createMockRegistry();
   let facade!: AgentEventRuntimeFacade;
@@ -140,6 +143,7 @@ function createTestCore(clockRef: { now: number }) {
     recoveryRegistry: registry,
     globalBudget: createMockGlobalBudget(),
     nowMs: () => clockRef.now,
+    ...(options?.deleteR2Keys === undefined ? {} : { deleteR2Keys: options.deleteR2Keys }),
     eventRuntimeFactory: (business) => {
       facade = new AgentEventRuntimeFacade({
         tenantId: TENANT_ID,
@@ -1024,5 +1028,186 @@ describe('V2 AgentHeadTaskArtifactService', () => {
         .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_task_artifacts')
         .one().cnt,
     ).toBe(0);
+  });
+
+  it('supports >1 MiB R2-backed uploads, inputs, outputs, downloads, and post-commit R2 key cleanup', async () => {
+    const deletedKeys: string[][] = [];
+    const clock = { now: 1_760_000_000_000 };
+    const { core } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
+    });
+
+    const bigSize = V2_MAX_INLINE_ARTIFACT_BYTES + 262_144;
+    const uploadId = '018f5f2e-0e91-7a30-ae62-bcb97d841001';
+    const r2Key = `v2/uploads/${TENANT_ID}/${uploadId}`;
+    const sha256 = 'a'.repeat(64);
+
+    // Reject forged/cross-tenant R2 keys.
+    await expect(
+      core.taskArtifacts({
+        kind: 'stage_upload',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841002',
+        uploadId,
+        filename: 'big.csv',
+        mediaType: 'text/csv',
+        sizeBytes: bigSize,
+        sha256,
+        r2Key: `v2/uploads/018f5f2e-0e91-7a30-ae62-bcb97d849999/${uploadId}`,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // Stage an R2 upload that expires later and verify lazy cleanup notifies deleteR2Keys.
+    const expiredId = '018f5f2e-0e91-7a30-ae62-bcb97d841003';
+    const expiredKey = `v2/uploads/${TENANT_ID}/${expiredId}`;
+    await core.taskArtifacts({
+      kind: 'stage_upload',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841004',
+      uploadId: expiredId,
+      filename: 'stale.csv',
+      mediaType: 'text/csv',
+      sizeBytes: 128,
+      sha256,
+      r2Key: expiredKey,
+    });
+
+    clock.now += PYTHON_AGENT_LIMITS.maxUploadTtlMs + 1;
+    const receipt = (await core.taskArtifacts({
+      kind: 'stage_upload',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841005',
+      uploadId,
+      filename: 'big.csv',
+      mediaType: 'text/csv',
+      sizeBytes: bigSize,
+      sha256,
+      r2Key,
+    })) as B3StagedUploadReceiptDto;
+    expect(receipt.size).toBe(bigSize);
+    expect(deletedKeys).toEqual([[expiredKey]]);
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841006',
+      input: {
+        prompt: 'Analyze big.csv',
+        attachment_ids: [uploadId],
+      },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+
+    const claimed = await core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `task:${taskId}:epoch:0`,
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        entityKind: 'task',
+        entityId: taskId,
+        queueName: 'agent_task',
+        fenceEpoch: 0,
+      },
+      workerId: 'worker-r2',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const inputs = (await core.taskArtifacts({
+      kind: 'load_task_inputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841007',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+    })) as readonly V2TaskInputFileDto[];
+    expect(inputs).toEqual([
+      {
+        artifactId: uploadId,
+        filename: 'big.csv',
+        mediaType: 'text/csv',
+        size: bigSize,
+        sha256,
+        r2Key,
+      },
+    ]);
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d841008';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    const outSha = 'b'.repeat(64);
+    const published = (await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841009',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'big-report.csv',
+          mediaType: 'text/csv',
+          sizeBytes: bigSize,
+          sha256: outSha,
+          r2Key: outKey,
+        },
+      ],
+    })) as V2PublishTaskOutputsResultDto;
+    expect(published.accepted).toBe(true);
+
+    await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+      outcome: {
+        status: 'completed',
+        summaryText: 'Done',
+        detailText: 'Report generated',
+        modelLabel: 'fake',
+        simulated: true,
+        truncated: false,
+        reasonCode: 'ok',
+      },
+    });
+
+    const download = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841010',
+      artifactId: outId,
+    })) as V2TaskArtifactDownloadDto | null;
+    expect(download).toEqual({
+      artifactId: outId,
+      filename: 'big-report.csv',
+      mediaType: 'text/csv',
+      sha256: outSha,
+      size: bigSize,
+      r2Key: outKey,
+    });
   });
 });

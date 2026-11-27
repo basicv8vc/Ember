@@ -1,5 +1,5 @@
+import type { B1SessionRecord } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
-import type { B1SessionRecord } from '@ember/postgres';
 import { deterministicEdgeUuid } from '@ember/runtime-v2';
 import { createRemoteJWKSet, type JWTVerifyGetKey } from 'jose';
 import {

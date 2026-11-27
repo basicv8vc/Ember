@@ -1,6 +1,10 @@
-import { IdSchema, IsoDateTimeSchema } from '@ember/contracts';
+import {
+  IdSchema,
+  IsoDateTimeSchema,
+  type AgentView,
+  type CreateAgentCommand,
+} from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
-import type { AgentView, CreateAgentCommand } from '@ember/postgres';
 import { z } from 'zod';
 import { AGENT_NAME_MAX_CHARS, AGENT_NAME_MIN_CHARS } from './constants.js';
 

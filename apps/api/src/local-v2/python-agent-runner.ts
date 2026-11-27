@@ -4,6 +4,7 @@ import {
   isSafeArtifactFilename,
   type SandboxExecResult,
   type SandboxSpec,
+  type R2BucketPort,
 } from '@ember/contracts';
 import { isDomainError, type Id } from '@ember/domain';
 import {
@@ -34,6 +35,11 @@ import {
   DaytonaSandboxProvider,
   DaytonaSdkSandboxClient,
 } from '@ember/sandbox-daytona';
+import {
+  deleteV2R2KeysBestEffort,
+  resolveV2StoredFileBytes,
+  stageV2OutputFilesForPublish,
+} from './r2-artifacts.js';
 import { resolveV2SandboxConfig, type V2SandboxConfig } from './runtime-config.js';
 import type { AgentHeadDO, LocalRuntimeEnv } from './runtime-head.js';
 
@@ -143,23 +149,6 @@ export type V2PythonExecutionOutcome =
       readonly status: 'failed';
       readonly reasonCode: string;
     };
-
-function decodeBase64ToBytes(encoded: string): Uint8Array {
-  const binary = globalThis.atob(encoded);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return bytes;
-}
-
-function encodeBytesToBase64(bytes: Uint8Array): string {
-  let binary = '';
-  for (let i = 0; i < bytes.byteLength; i += 1) {
-    binary += String.fromCharCode(bytes[i]!);
-  }
-  return globalThis.btoa(binary);
-}
 
 function clampText(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -339,6 +328,7 @@ async function runFakeFastPath(
   runId: string,
   principalId: string,
   taskInput: { readonly prompt?: string; readonly instructions?: string },
+  r2Bucket: R2BucketPort | undefined,
 ): Promise<V2PythonExecutionOutcome> {
   const loadedInputs = (await head.taskArtifacts({
     kind: 'load_task_inputs',
@@ -352,35 +342,49 @@ async function runFakeFastPath(
     workerId: claim.workerId,
   })) as readonly V2TaskInputFileDto[];
 
+  const inputFiles = await Promise.all(
+    loadedInputs.map(async (file) => ({
+      filename: file.filename,
+      mediaType: file.mediaType,
+      bytes: await resolveV2StoredFileBytes(file, r2Bucket),
+    })),
+  );
+
   const sandboxResult = runV2FakePythonSandbox({
     prompt: taskInput.prompt ?? '',
     ...(taskInput.instructions === undefined ? {} : { instructions: taskInput.instructions }),
-    inputFiles: loadedInputs.map((file) => ({
-      filename: file.filename,
-      mediaType: file.mediaType,
-      bytes: decodeBase64ToBytes(file.contentBase64),
-    })),
+    inputFiles,
   });
 
   if (sandboxResult.outputFiles.length > 0) {
-    const published = (await head.taskArtifacts({
-      kind: 'publish_task_outputs',
+    const staged = await stageV2OutputFilesForPublish({
+      bucket: r2Bucket,
       tenantId: claim.tenantId,
-      principalId,
-      agentId: claim.agentId,
-      requestId: crypto.randomUUID(),
       taskId: claim.targetId,
       runId,
-      leaseEpoch: claim.leaseEpoch,
-      workerId: claim.workerId,
-      simulated: true,
-      outputs: sandboxResult.outputFiles.map((file) => ({
-        filename: file.filename,
-        mediaType: file.mediaType,
-        contentBase64: encodeBytesToBase64(file.bytes),
-      })),
-    })) as V2PublishTaskOutputsResultDto;
+      files: sandboxResult.outputFiles,
+    });
+    let published: V2PublishTaskOutputsResultDto;
+    try {
+      published = (await head.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: claim.tenantId,
+        principalId,
+        agentId: claim.agentId,
+        requestId: crypto.randomUUID(),
+        taskId: claim.targetId,
+        runId,
+        leaseEpoch: claim.leaseEpoch,
+        workerId: claim.workerId,
+        simulated: true,
+        outputs: staged.outputs,
+      })) as V2PublishTaskOutputsResultDto;
+    } catch (error) {
+      await deleteV2R2KeysBestEffort(r2Bucket, staged.stagedR2Keys);
+      throw error;
+    }
     if (!published.accepted) {
+      await deleteV2R2KeysBestEffort(r2Bucket, staged.stagedR2Keys);
       return { status: 'failed', reasonCode: 'lease_lost' };
     }
   }
@@ -443,7 +447,7 @@ export async function executeV2PythonAgentTask(
     gateway.simulated === true &&
     input.sandboxFactory === undefined
   ) {
-    return runFakeFastPath(head, claim, runId, principalId, taskInput);
+    return runFakeFastPath(head, claim, runId, principalId, taskInput, env.EMBER_BLOBS);
   }
 
   if (
@@ -547,10 +551,12 @@ export async function executeV2PythonAgentTask(
       workerId: claim.workerId,
     })) as readonly V2TaskInputFileDto[];
 
-    const decodedInputs = loadedInputs.map((file) => {
-      const bytes = decodeBase64ToBytes(file.contentBase64);
-      return { ...file, bytes };
-    });
+    const decodedInputs = await Promise.all(
+      loadedInputs.map(async (file) => ({
+        ...file,
+        bytes: await resolveV2StoredFileBytes(file, env.EMBER_BLOBS),
+      })),
+    );
     const inputTotalBytes = decodedInputs.reduce((sum, f) => sum + f.size, 0);
     const inputFiles: PythonAgentInputFile[] = decodedInputs.map((file) => {
       const previewText = buildTextPreview(file.filename, file.mediaType, file.bytes);
@@ -835,6 +841,10 @@ export async function executeV2PythonAgentTask(
           return { status: 'failed', reasonCode: 'too_many_output_artifacts' };
         }
 
+        const maxOutputFileBytes =
+          env.EMBER_BLOBS !== undefined
+            ? PYTHON_AGENT_LIMITS.maxFileBytes
+            : Math.min(PYTHON_AGENT_LIMITS.maxFileBytes, V2_MAX_INLINE_ARTIFACT_BYTES);
         let plannedOutputBytes = 0;
         for (const entry of entries) {
           if (entry.isSymlink) return { status: 'failed', reasonCode: 'symlink_output_forbidden' };
@@ -842,10 +852,7 @@ export async function executeV2PythonAgentTask(
           if (!isSafeArtifactFilename(entry.name)) {
             return { status: 'failed', reasonCode: 'invalid_output_filename' };
           }
-          if (
-            entry.sizeBytes > PYTHON_AGENT_LIMITS.maxFileBytes ||
-            entry.sizeBytes > V2_MAX_INLINE_ARTIFACT_BYTES
-          ) {
+          if (entry.sizeBytes > maxOutputFileBytes) {
             return { status: 'failed', reasonCode: 'output_artifact_too_large' };
           }
           plannedOutputBytes += entry.sizeBytes;
@@ -854,10 +861,10 @@ export async function executeV2PythonAgentTask(
           return { status: 'failed', reasonCode: 'task_file_budget_exceeded' };
         }
 
-        const outputsToPublish: Array<{
+        const rawOutputs: Array<{
           readonly filename: string;
           readonly mediaType: string;
-          readonly contentBase64: string;
+          readonly bytes: Uint8Array;
         }> = [];
         let actualOutputBytes = 0;
 
@@ -866,10 +873,7 @@ export async function executeV2PythonAgentTask(
             sandboxReady.id,
             `outputs/${entry.name}`,
           );
-          if (
-            rawBytes.byteLength > PYTHON_AGENT_LIMITS.maxFileBytes ||
-            rawBytes.byteLength > V2_MAX_INLINE_ARTIFACT_BYTES
-          ) {
+          if (rawBytes.byteLength > maxOutputFileBytes) {
             return { status: 'failed', reasonCode: 'output_artifact_too_large' };
           }
           actualOutputBytes += rawBytes.byteLength;
@@ -880,10 +884,10 @@ export async function executeV2PythonAgentTask(
           if (!B3StagedUploadMediaTypeSchema.safeParse(mediaType).success) {
             return { status: 'failed', reasonCode: 'blocked_output_media_type' };
           }
-          outputsToPublish.push({
+          rawOutputs.push({
             filename: entry.name,
             mediaType,
-            contentBase64: encodeBytesToBase64(rawBytes),
+            bytes: rawBytes,
           });
           publishedMeta.push({
             filename: entry.name,
@@ -892,24 +896,38 @@ export async function executeV2PythonAgentTask(
           });
         }
 
-        if (outputsToPublish.length > 0 || stagedAnyOutputs) {
-          const published = (await head.taskArtifacts({
-            kind: 'publish_task_outputs',
+        if (rawOutputs.length > 0 || stagedAnyOutputs) {
+          const staged = await stageV2OutputFilesForPublish({
+            bucket: env.EMBER_BLOBS,
             tenantId: claim.tenantId,
-            principalId,
-            agentId: claim.agentId,
-            requestId: crypto.randomUUID(),
             taskId: claim.targetId,
             runId,
-            leaseEpoch: claim.leaseEpoch,
-            workerId: claim.workerId,
-            simulated: isSimulatedRun,
-            outputs: outputsToPublish,
-          })) as V2PublishTaskOutputsResultDto;
+            files: rawOutputs,
+          });
+          let published: V2PublishTaskOutputsResultDto;
+          try {
+            published = (await head.taskArtifacts({
+              kind: 'publish_task_outputs',
+              tenantId: claim.tenantId,
+              principalId,
+              agentId: claim.agentId,
+              requestId: crypto.randomUUID(),
+              taskId: claim.targetId,
+              runId,
+              leaseEpoch: claim.leaseEpoch,
+              workerId: claim.workerId,
+              simulated: isSimulatedRun,
+              outputs: staged.outputs,
+            })) as V2PublishTaskOutputsResultDto;
+          } catch (error) {
+            await deleteV2R2KeysBestEffort(env.EMBER_BLOBS, staged.stagedR2Keys);
+            throw error;
+          }
           if (!published.accepted) {
+            await deleteV2R2KeysBestEffort(env.EMBER_BLOBS, staged.stagedR2Keys);
             return { status: 'failed', reasonCode: abortReason ?? 'lease_lost' };
           }
-          stagedAnyOutputs = outputsToPublish.length > 0;
+          stagedAnyOutputs = rawOutputs.length > 0;
         }
       }
 

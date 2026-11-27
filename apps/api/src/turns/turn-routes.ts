@@ -1,6 +1,9 @@
-import { B1AssistantTurnDtoSchema, IdSchema } from '@ember/contracts';
+import {
+  B1AssistantTurnDtoSchema,
+  IdSchema,
+  type B1AssistantTurnRepository,
+} from '@ember/contracts';
 import { Hono } from 'hono';
-import type { B1AssistantTurnRepository } from '@ember/postgres';
 import type { AppBindings, AppContext } from '../http/app-context.js';
 import { respondInvalidArgument, respondNotFound } from '../http/error-mapping.js';
 import type { Logger } from '../logger.js';

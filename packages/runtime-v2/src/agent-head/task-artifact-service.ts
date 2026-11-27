@@ -15,8 +15,11 @@ import { V2_TIMING_LIMITS } from '../contracts/constants.js';
 import {
   V2_MAX_INLINE_ARTIFACT_BYTES,
   submitPythonTaskRequestSchema,
+  v2ArtifactR2Key,
   v2StageUploadInputSchema,
+  v2StageUploadR2InputSchema,
   v2TaskIdSchema,
+  v2UploadR2Key,
   type TaskArtifactCommand,
   type TaskArtifactResponse,
   type V2PublishTaskOutputsResultDto,
@@ -63,6 +66,7 @@ export interface V2TaskArtifactRow {
   readonly size_bytes: number;
   readonly sha256: string;
   readonly content_b64: string;
+  readonly r2_key: string | null;
   readonly created_at_ms: number;
 }
 
@@ -159,6 +163,7 @@ export type AgentHeadTaskArtifactServiceDeps = CoverageHelperDeps & {
   readonly eventCoordinator: EventRuntimeCoordinatorPort;
   readonly nowMs: () => number;
   readonly newId: () => string;
+  readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void>;
 };
 
 /**
@@ -247,11 +252,18 @@ export class AgentHeadTaskArtifactService {
       const row = sqlExecMaybe<
         Pick<
           V2TaskArtifactRow,
-          'id' | 'task_id' | 'filename' | 'media_type' | 'size_bytes' | 'sha256' | 'created_at_ms'
+          | 'id'
+          | 'task_id'
+          | 'filename'
+          | 'media_type'
+          | 'size_bytes'
+          | 'sha256'
+          | 'r2_key'
+          | 'created_at_ms'
         >
       >(
         this.sql,
-        `SELECT id, task_id, filename, media_type, size_bytes, sha256, created_at_ms
+        `SELECT id, task_id, filename, media_type, size_bytes, sha256, r2_key, created_at_ms
            FROM v2_task_artifacts
           WHERE id = ? AND tenant_id = ? AND principal_id = ? AND created_by = 'user' AND committed = 1`,
         uploadId,
@@ -291,7 +303,7 @@ export class AgentHeadTaskArtifactService {
         filename: row.filename,
         mediaType: row.media_type,
         sizeBytes: row.size_bytes,
-        r2Key: `v2-inline:${row.id}`,
+        r2Key: row.r2_key ?? `v2-inline:${row.id}`,
         sha256: row.sha256,
       });
     }
@@ -302,31 +314,77 @@ export class AgentHeadTaskArtifactService {
   private async stageUpload(
     cmd: Extract<TaskArtifactCommand, { kind: 'stage_upload' }>,
   ): Promise<B3StagedUploadReceiptDto> {
-    const parsed = v2StageUploadInputSchema.safeParse({
-      filename: cmd.filename,
-      mediaType: cmd.mediaType,
-      contentBase64: cmd.contentBase64,
-    });
-    if (!parsed.success) {
-      throw new DomainError('INVALID_ARGUMENT', 'invalid staged upload payload');
+    let uploadId: string;
+    let filename: string;
+    let mediaType: string;
+    let sizeBytes: number;
+    let sha256: string;
+    let normalizedB64 = '';
+    let r2Key: string | null = null;
+
+    if ('r2Key' in cmd) {
+      const parsed = v2StageUploadR2InputSchema.safeParse({
+        id: cmd.uploadId,
+        filename: cmd.filename,
+        mediaType: cmd.mediaType,
+        sizeBytes: cmd.sizeBytes,
+        sha256: cmd.sha256,
+        r2Key: cmd.r2Key,
+      });
+      if (!parsed.success) {
+        throw new DomainError('INVALID_ARGUMENT', 'invalid staged r2 upload payload');
+      }
+      const expectedKey = v2UploadR2Key(cmd.tenantId, parsed.data.id);
+      if (parsed.data.r2Key !== expectedKey) {
+        throw new DomainError('INVALID_ARGUMENT', 'invalid staged upload object key');
+      }
+      uploadId = parsed.data.id;
+      filename = parsed.data.filename;
+      mediaType = parsed.data.mediaType;
+      sizeBytes = parsed.data.sizeBytes;
+      sha256 = parsed.data.sha256;
+      r2Key = parsed.data.r2Key;
+    } else {
+      const parsed = v2StageUploadInputSchema.safeParse({
+        filename: cmd.filename,
+        mediaType: cmd.mediaType,
+        contentBase64: cmd.contentBase64,
+      });
+      if (!parsed.success) {
+        throw new DomainError('INVALID_ARGUMENT', 'invalid staged upload payload');
+      }
+
+      const bytes = decodeBase64Strict(parsed.data.contentBase64);
+      if (bytes.byteLength > V2_MAX_INLINE_ARTIFACT_BYTES) {
+        throw new DomainError(
+          'INVALID_ARGUMENT',
+          `uploaded file exceeds ${V2_MAX_INLINE_ARTIFACT_BYTES} byte V2 inline limit`,
+        );
+      }
+
+      uploadId = this.deps.newId();
+      filename = parsed.data.filename;
+      mediaType = parsed.data.mediaType;
+      sizeBytes = bytes.byteLength;
+      sha256 = await sha256BytesHex(bytes);
+      normalizedB64 = parsed.data.contentBase64.replace(/\s+/g, '');
     }
 
-    const bytes = decodeBase64Strict(parsed.data.contentBase64);
-    if (bytes.byteLength > V2_MAX_INLINE_ARTIFACT_BYTES) {
-      throw new DomainError(
-        'INVALID_ARGUMENT',
-        `uploaded file exceeds ${V2_MAX_INLINE_ARTIFACT_BYTES} byte V2 inline limit`,
-      );
-    }
-
-    const sha256 = await sha256BytesHex(bytes);
     const now = this.deps.nowMs();
-    const uploadId = this.deps.newId();
-    const normalizedB64 = parsed.data.contentBase64.replace(/\s+/g, '');
     const expiryCutoffMs = now - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
 
-    return this.deps.storage.transactionSync(() => {
+    const tx = this.deps.storage.transactionSync(() => {
       // Lazily prune expired unbound uploads before enforcing quota; never touch bound inputs.
+      const expiredRows = sqlExecAll<{ readonly r2_key: string }>(
+        this.sql,
+        `SELECT r2_key
+           FROM v2_task_artifacts
+          WHERE tenant_id = ? AND principal_id = ? AND task_id IS NULL AND created_at_ms <= ?
+            AND r2_key IS NOT NULL`,
+        cmd.tenantId,
+        cmd.principalId,
+        expiryCutoffMs,
+      );
       this.sql.exec(
         `DELETE FROM v2_task_artifacts
           WHERE tenant_id = ? AND principal_id = ? AND task_id IS NULL AND created_at_ms <= ?`,
@@ -350,29 +408,39 @@ export class AgentHeadTaskArtifactService {
       this.sql.exec(
         `INSERT INTO v2_task_artifacts (
           id, tenant_id, principal_id, task_id, run_id, committed, created_by,
-          filename, media_type, size_bytes, sha256, content_b64, created_at_ms
-        ) VALUES (?, ?, ?, NULL, NULL, 1, 'user', ?, ?, ?, ?, ?, ?)`,
+          filename, media_type, size_bytes, sha256, content_b64, r2_key, created_at_ms
+        ) VALUES (?, ?, ?, NULL, NULL, 1, 'user', ?, ?, ?, ?, ?, ?, ?)`,
         uploadId,
         cmd.tenantId,
         cmd.principalId,
-        parsed.data.filename,
-        parsed.data.mediaType,
-        bytes.byteLength,
+        filename,
+        mediaType,
+        sizeBytes,
         sha256,
         normalizedB64,
+        r2Key,
         now,
       );
 
       return {
-        upload_id: uploadId,
-        filename: parsed.data.filename,
-        media_type: parsed.data.mediaType,
-        size: bytes.byteLength,
-        sha256,
-        expires_at: toIsoTimestamp(now + PYTHON_AGENT_LIMITS.maxUploadTtlMs),
-        created_at: toIsoTimestamp(now),
+        receipt: {
+          upload_id: uploadId,
+          filename,
+          media_type: mediaType,
+          size: sizeBytes,
+          sha256,
+          expires_at: toIsoTimestamp(now + PYTHON_AGENT_LIMITS.maxUploadTtlMs),
+          created_at: toIsoTimestamp(now),
+        },
+        expiredR2Keys: expiredRows.map((row) => row.r2_key),
       };
     });
+
+    if (tx.expiredR2Keys.length > 0) {
+      await this.deps.deleteR2Keys?.(tx.expiredR2Keys).catch(() => undefined);
+    }
+
+    return tx.receipt;
   }
 
   private async submitPythonTask(
@@ -761,6 +829,13 @@ export class AgentHeadTaskArtifactService {
       }
 
       const cancelAt = task.cancel_requested_at_ms ?? now;
+      const purgedR2Rows = sqlExecAll<{ readonly r2_key: string }>(
+        this.sql,
+        `SELECT r2_key
+           FROM v2_task_artifacts
+          WHERE task_id = ? AND created_by = 'run' AND committed = 0 AND r2_key IS NOT NULL`,
+        task.id,
+      );
       if (task.status === 'queued' || task.status === 'retryable_failed') {
         this.sql.exec(
           `UPDATE tasks
@@ -817,11 +892,15 @@ export class AgentHeadTaskArtifactService {
         },
         now,
         alarmAtMs,
+        deletedR2Keys: purgedR2Rows.map((row) => row.r2_key),
       };
     });
 
     if (tx.alarmAtMs !== null) {
       await this.deps.recoveryHooks.syncPlatformAlarm?.(tx.alarmAtMs, tx.now);
+    }
+    if (tx.deletedR2Keys !== undefined && tx.deletedR2Keys.length > 0) {
+      await this.deps.deleteR2Keys?.(tx.deletedR2Keys).catch(() => undefined);
     }
     return tx.result;
   }
@@ -890,6 +969,17 @@ export class AgentHeadTaskArtifactService {
     );
     if (row === null) return null;
 
+    if (row.r2_key !== null) {
+      return {
+        artifactId: row.id,
+        filename: row.filename,
+        mediaType: row.media_type,
+        sha256: row.sha256,
+        size: row.size_bytes,
+        r2Key: row.r2_key,
+      };
+    }
+
     const bytes = decodeBase64Strict(row.content_b64);
     const verifiedSha = await sha256BytesHex(bytes);
     if (verifiedSha !== row.sha256 || bytes.byteLength !== row.size_bytes) {
@@ -937,6 +1027,18 @@ export class AgentHeadTaskArtifactService {
 
     const verified: V2TaskInputFileDto[] = [];
     for (const row of rows) {
+      if (row.r2_key !== null) {
+        verified.push({
+          artifactId: row.id,
+          filename: row.filename,
+          mediaType: row.media_type,
+          size: row.size_bytes,
+          sha256: row.sha256,
+          r2Key: row.r2_key,
+        });
+        continue;
+      }
+
       const bytes = decodeBase64Strict(row.content_b64);
       const actualSha = await sha256BytesHex(bytes);
       if (bytes.byteLength !== row.size_bytes || actualSha !== row.sha256) {
@@ -963,11 +1065,13 @@ export class AgentHeadTaskArtifactService {
     }
 
     const prepared: Array<{
+      readonly artifactId: string;
       readonly filename: string;
       readonly mediaType: string;
       readonly size: number;
       readonly sha256: string;
       readonly contentBase64: string;
+      readonly r2Key: string | null;
     }> = [];
     let totalOutputBytes = 0;
 
@@ -975,26 +1079,56 @@ export class AgentHeadTaskArtifactService {
       if (!isSafeArtifactFilename(output.filename)) {
         throw new DomainError('POLICY_DENIED', 'invalid output artifact filename');
       }
-      const parsed = v2StageUploadInputSchema.safeParse(output);
-      if (!parsed.success) {
-        throw new DomainError('POLICY_DENIED', 'invalid output artifact metadata');
+      if ('r2Key' in output) {
+        const parsed = v2StageUploadR2InputSchema.safeParse({
+          id: output.artifactId,
+          filename: output.filename,
+          mediaType: output.mediaType,
+          sizeBytes: output.sizeBytes,
+          sha256: output.sha256,
+          r2Key: output.r2Key,
+        });
+        if (!parsed.success) {
+          throw new DomainError('POLICY_DENIED', 'invalid output artifact metadata');
+        }
+        const expectedKey = v2ArtifactR2Key(cmd.tenantId, cmd.taskId, cmd.runId, parsed.data.id);
+        if (parsed.data.r2Key !== expectedKey) {
+          throw new DomainError('POLICY_DENIED', 'invalid output artifact object key');
+        }
+        totalOutputBytes += parsed.data.sizeBytes;
+        prepared.push({
+          artifactId: parsed.data.id,
+          filename: parsed.data.filename,
+          mediaType: parsed.data.mediaType,
+          size: parsed.data.sizeBytes,
+          sha256: parsed.data.sha256,
+          contentBase64: '',
+          r2Key: parsed.data.r2Key,
+        });
+      } else {
+        const parsed = v2StageUploadInputSchema.safeParse(output);
+        if (!parsed.success) {
+          throw new DomainError('POLICY_DENIED', 'invalid output artifact metadata');
+        }
+        const bytes = decodeBase64Strict(parsed.data.contentBase64);
+        if (bytes.byteLength > V2_MAX_INLINE_ARTIFACT_BYTES) {
+          throw new DomainError('POLICY_DENIED', 'output artifact exceeds V2 inline limit');
+        }
+        totalOutputBytes += bytes.byteLength;
+        const sha256 = await sha256BytesHex(bytes);
+        prepared.push({
+          artifactId: this.deps.newId(),
+          filename: parsed.data.filename,
+          mediaType: parsed.data.mediaType,
+          size: bytes.byteLength,
+          sha256,
+          contentBase64: parsed.data.contentBase64.replace(/\s+/g, ''),
+          r2Key: null,
+        });
       }
-      const bytes = decodeBase64Strict(parsed.data.contentBase64);
-      if (bytes.byteLength > V2_MAX_INLINE_ARTIFACT_BYTES) {
-        throw new DomainError('POLICY_DENIED', 'output artifact exceeds V2 inline limit');
-      }
-      totalOutputBytes += bytes.byteLength;
-      const sha256 = await sha256BytesHex(bytes);
-      prepared.push({
-        filename: parsed.data.filename,
-        mediaType: parsed.data.mediaType,
-        size: bytes.byteLength,
-        sha256,
-        contentBase64: parsed.data.contentBase64.replace(/\s+/g, ''),
-      });
     }
 
-    return this.deps.storage.transactionSync(() => {
+    const tx = this.deps.storage.transactionSync(() => {
       const now = this.deps.nowMs();
       const task = sqlExecMaybe<TaskRow>(this.sql, 'SELECT * FROM tasks WHERE id = ?', cmd.taskId);
       const run = task === null ? null : getLatestRunForTaskSync(this.sql, task.id);
@@ -1008,7 +1142,7 @@ export class AgentHeadTaskArtifactService {
           executorKind: 'queue_worker',
         })
       ) {
-        return { accepted: false, artifactIds: [] };
+        return { accepted: false, artifactIds: [], replacedR2Keys: [] as string[] };
       }
 
       // Enforce aggregate per-task file budget (bound inputs + staged outputs for this run).
@@ -1052,6 +1186,16 @@ export class AgentHeadTaskArtifactService {
 
       // Replace any prior uncommitted staging rows for this specific run (idempotent re-stage).
       // Rows stay `committed = 0` until `commitDurableResult` atomically commits this winning run.
+      const replacedR2Rows = sqlExecAll<{ readonly r2_key: string }>(
+        this.sql,
+        `SELECT r2_key
+           FROM v2_task_artifacts
+          WHERE tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0
+            AND r2_key IS NOT NULL`,
+        cmd.tenantId,
+        task.id,
+        run.id,
+      );
       this.sql.exec(
         `DELETE FROM v2_task_artifacts
           WHERE tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
@@ -1062,13 +1206,12 @@ export class AgentHeadTaskArtifactService {
 
       const artifactIds: string[] = [];
       for (const item of prepared) {
-        const artifactId = this.deps.newId();
         this.sql.exec(
           `INSERT INTO v2_task_artifacts (
             id, tenant_id, principal_id, task_id, run_id, committed, created_by,
-            filename, media_type, size_bytes, sha256, content_b64, created_at_ms
-          ) VALUES (?, ?, ?, ?, ?, 0, 'run', ?, ?, ?, ?, ?, ?)`,
-          artifactId,
+            filename, media_type, size_bytes, sha256, content_b64, r2_key, created_at_ms
+          ) VALUES (?, ?, ?, ?, ?, 0, 'run', ?, ?, ?, ?, ?, ?, ?)`,
+          item.artifactId,
           cmd.tenantId,
           ownerPrincipalId,
           task.id,
@@ -1078,9 +1221,10 @@ export class AgentHeadTaskArtifactService {
           item.size,
           item.sha256,
           item.contentBase64,
+          item.r2Key,
           now,
         );
-        artifactIds.push(artifactId);
+        artifactIds.push(item.artifactId);
         appendTaskEventSync(this.sql, {
           id: this.deps.newId(),
           taskId: task.id,
@@ -1091,13 +1235,23 @@ export class AgentHeadTaskArtifactService {
             taskKind: task.kind,
             runId: run.id,
             attempt: run.attempt,
-            artifactId,
+            artifactId: item.artifactId,
             simulated: cmd.simulated ?? true,
           },
         });
       }
 
-      return { accepted: true, artifactIds };
+      return {
+        accepted: true,
+        artifactIds,
+        replacedR2Keys: replacedR2Rows.map((row) => row.r2_key),
+      };
     });
+
+    if (tx.replacedR2Keys.length > 0) {
+      await this.deps.deleteR2Keys?.(tx.replacedR2Keys).catch(() => undefined);
+    }
+
+    return { accepted: tx.accepted, artifactIds: tx.artifactIds };
   }
 }

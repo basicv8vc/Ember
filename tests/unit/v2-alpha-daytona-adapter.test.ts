@@ -836,7 +836,8 @@ describe('V2 Sandbox Configuration & Daytona Adapter Safety (Agent F)', () => {
       artifactId: outputMeta!.artifact_id,
     })) as V2TaskArtifactDownloadDto | null;
     expect(downloaded).not.toBeNull();
-    const decoded = Buffer.from(downloaded!.contentBase64, 'base64');
+    expect(downloaded!.contentBase64).toBeDefined();
+    const decoded = Buffer.from(downloaded!.contentBase64!, 'base64');
     expect(decoded.toString('utf-8')).toBe('summary\nregion,revenue\nnorth,120\n');
     expect(sha256Hex(decoded)).toBe(downloaded!.sha256);
   });

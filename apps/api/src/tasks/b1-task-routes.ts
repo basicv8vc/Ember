@@ -6,13 +6,11 @@ import {
   B1TaskResultDtoSchema,
   IdSchema,
   TaskStatusSchema,
+  type B1TaskListQuery,
+  type B1TaskReadRepository,
+  type B1TaskResultRepository,
 } from '@ember/contracts';
 import { isDomainError, type Id, type TaskStatus } from '@ember/domain';
-import type {
-  B1TaskListQuery,
-  B1TaskReadRepository,
-  B1TaskResultRepository,
-} from '@ember/postgres';
 import { Hono } from 'hono';
 import { requireSessionAuth } from '../auth/session-authenticator.js';
 import type { SessionService } from '../auth/session-service.js';

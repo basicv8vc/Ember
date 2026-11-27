@@ -1,32 +1,10 @@
+import type { R2BucketPort, R2ObjectBodyPort, R2PutOptionsPort } from '@ember/contracts';
 import { DomainError, type Id } from '@ember/domain';
 import { UUID_PATTERN, parseTenantId } from './validation.js';
 
 export const UPLOAD_KEY_PATTERN = /^uploads\/[0-9a-f-]{36}\/[0-9a-f-]{36}$/;
 
-/** Structural R2 object body returned by `R2Bucket.get()`. */
-export interface R2ObjectBodyPort {
-  readonly size?: number;
-  arrayBuffer(): Promise<ArrayBuffer>;
-}
-
-/** Structural R2 put options subset used by Ember storage adapters. */
-export interface R2PutOptionsPort {
-  readonly httpMetadata?: { readonly contentType?: string };
-  readonly customMetadata?: Readonly<Record<string, string>>;
-}
-
-/**
- * Structural Cloudflare R2 bucket contract (edge-safe, zero `@cloudflare/workers-types` or `node:*` deps).
- */
-export interface R2BucketPort {
-  put(
-    key: string,
-    value: ArrayBuffer | ArrayBufferView | ReadableStream<Uint8Array> | string | Blob,
-    options?: R2PutOptionsPort,
-  ): Promise<unknown>;
-  get(key: string): Promise<R2ObjectBodyPort | null>;
-  delete(keys: string | string[]): Promise<void>;
-}
+export type { R2BucketPort, R2ObjectBodyPort, R2PutOptionsPort };
 
 /** Build the deterministic tenant-scoped R2 object key for a staged upload. */
 export function uploadKeyFor(tenantId: Id, uploadId: Id): string {

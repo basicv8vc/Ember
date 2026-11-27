@@ -1,14 +1,12 @@
 import {
   B1SessionResponseSchema,
+  type B1ConsumerProvisioningRepository,
+  type B1ConsumerSessionRepository,
   type B1MeResponse,
+  type B1SessionRecord,
   type B1SessionResponse,
 } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
-import type {
-  B1ConsumerProvisioningRepository,
-  B1ConsumerSessionRepository,
-  B1SessionRecord,
-} from '@ember/postgres';
 import type { VerifiedIdentity } from './identity-verifier.js';
 import {
   digestSessionToken,

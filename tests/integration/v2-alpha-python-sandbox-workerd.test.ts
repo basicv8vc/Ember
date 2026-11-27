@@ -368,4 +368,83 @@ describe('V2 Tools & Execution: Python Sandbox & Artifact Delivery in workerd', 
     expect(report.nlDelegation?.status).toBe('completed');
     expect(report.nlDelegation?.outputs.length).toBeGreaterThanOrEqual(1);
   });
+
+  it('uploads and processes a >1 MiB CSV via Cloudflare R2 in local workerd without hitting DO SQLite inline limits', async () => {
+    const token = await signIn(harness, `v2-alpha-f-r2-large-${randomUUID()}`);
+
+    // Build a ~1.27 MiB CSV exceeding V2_MAX_INLINE_ARTIFACT_BYTES (1 MiB).
+    const rows = ['region,revenue,units'];
+    const targetRowCount = 75_000;
+    for (let i = 0; i < targetRowCount; i += 1) {
+      rows.push(`region-${i % 10},10.00,1`);
+    }
+    const largeCsv = rows.join('\n');
+    expect(Buffer.byteLength(largeCsv, 'utf-8')).toBeGreaterThan(1_048_576);
+
+    const uploadRes = await harness.fetchOverHttp('/v1/me/uploads', {
+      method: 'POST',
+      headers: { ...authHeaders(token), 'content-type': 'application/json' },
+      body: JSON.stringify({
+        filename: 'large-sales.csv',
+        media_type: 'text/csv',
+        content: largeCsv,
+      }),
+    });
+    expect(uploadRes.status).toBe(201);
+    const upload = B3StagedUploadReceiptDtoSchema.parse(await uploadRes.json());
+    expect(upload.size).toBe(Buffer.byteLength(largeCsv, 'utf-8'));
+
+    const submitRes = await harness.fetchOverHttp('/v2/tasks/python', {
+      method: 'POST',
+      headers: {
+        ...authHeaders(token),
+        'content-type': 'application/json',
+        'idempotency-key': randomUUID(),
+      },
+      body: JSON.stringify({
+        title: 'Analyze large-sales.csv via R2',
+        prompt: 'Summarize large-sales.csv numeric columns\n# output: large-summary.csv',
+        attachment_ids: [upload.upload_id],
+      }),
+    });
+    expect(submitRes.status).toBe(201);
+    const submitted = (await submitRes.json()) as {
+      readonly task: ReturnType<typeof B1TaskDetailDtoSchema.parse>;
+    };
+    const taskId = B1TaskDetailDtoSchema.parse(submitted.task).task_id;
+
+    let finalDetail: ReturnType<typeof B1TaskDetailDtoSchema.parse> | undefined;
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      const detailRes = await harness.fetchOverHttp(`/v1/me/tasks/${taskId}`, {
+        headers: authHeaders(token),
+      });
+      expect(detailRes.status).toBe(200);
+      finalDetail = B1TaskDetailDtoSchema.parse(await detailRes.json());
+      if (finalDetail.status === 'completed') break;
+      await setTimeout(100);
+    }
+    expect(finalDetail?.status).toBe('completed');
+
+    const artifactsRes = await harness.fetchOverHttp(`/v1/me/tasks/${taskId}/artifacts`, {
+      headers: authHeaders(token),
+    });
+    expect(artifactsRes.status).toBe(200);
+    const artifacts = B3TaskArtifactsListDtoSchema.parse(await artifactsRes.json()).artifacts;
+    const outputArtifact = artifacts.find(
+      (a) => a.created_by === 'run' && a.filename === 'large-summary.csv',
+    );
+    expect(outputArtifact).toBeDefined();
+
+    const downloadRes = await harness.fetchOverHttp(
+      `/v1/me/artifacts/${outputArtifact!.artifact_id}`,
+      { headers: authHeaders(token) },
+    );
+    expect(downloadRes.status).toBe(200);
+    const downloadedCsv = await downloadRes.text();
+    expect(downloadedCsv).toContain('large-sales.csv,revenue,10000,100000,10,10,10');
+    expect(createHash('sha256').update(Buffer.from(downloadedCsv, 'utf-8')).digest('hex')).toBe(
+      outputArtifact!.sha256,
+    );
+  });
 });

@@ -1,11 +1,11 @@
-import { isDomainError } from '@ember/domain';
 import type {
   B1AssistantTurnRepository,
   B1ConversationRepository,
   B1TaskReadRepository,
   B1TaskResultRepository,
   B3StagedUploadRepository,
-} from '@ember/postgres';
+} from '@ember/contracts';
+import { isDomainError } from '@ember/domain';
 import { Hono, type MiddlewareHandler } from 'hono';
 import { unconfiguredAgentStore, type AgentStore } from './agents/agent-store.js';
 import { AGENTS_PATH } from './agents/constants.js';

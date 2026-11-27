@@ -99,6 +99,7 @@ export type AgentHeadCoreOptions = {
   readonly globalDailyCeilingMicroUsd?: number;
   readonly allowRecurringModelBriefs?: boolean;
   readonly migrations?: readonly AgentHeadMigrationStep[];
+  readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void>;
 } & (
   | AgentHeadEventRuntimeBindings
   | {
@@ -242,6 +243,7 @@ export class AgentHeadCore
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
+      ...(options.deleteR2Keys !== undefined ? { deleteR2Keys: options.deleteR2Keys } : {}),
     });
 
     if ('eventRuntimeFactory' in options) {
@@ -292,6 +294,7 @@ export class AgentHeadCore
       eventCoordinator: bindings.eventCoordinator,
       nowMs: this.nowMsFn,
       newId: this.newId,
+      ...(options.deleteR2Keys !== undefined ? { deleteR2Keys: options.deleteR2Keys } : {}),
     });
 
     this.turnService = new AgentHeadTurnService({
@@ -529,13 +532,17 @@ export class AgentHeadCore
 
   // ---- AgentHeadRecoveryPort delegation ----
 
+  flushDeletedR2Keys(): Promise<void> {
+    return this.recoveryService.flushDeletedR2Keys();
+  }
+
   reconcileFromRegistry(cmd: {
     readonly tenantId: string;
     readonly agentId: string;
     readonly expectedGen: number;
     readonly nowMs: number;
   }) {
-    return this.recoveryService.reconcileFromRegistry(cmd);
+    return this.recoveryService.reconcileFromRegistry(cmd).finally(() => this.flushDeletedR2Keys());
   }
 
   confirmRegistryPlan(cmd: {

@@ -9,6 +9,7 @@ import {
   type B1TaskResultDto,
   type B3StagedUploadReceiptDto,
   type B3TaskArtifactsListDto,
+  type R2BucketPort,
 } from '@ember/contracts';
 import { DomainError, isDomainError, type AuthContext } from '@ember/domain';
 import {
@@ -17,15 +18,16 @@ import {
   MODEL_LIMITS,
   type ModelRateRow,
 } from '@ember/model-gateway';
-import type {
-  DeviceExecutionRpc,
-  PersonalMemoryRpc,
-  ProactiveScheduleRpc,
-  TaskArtifactCommand,
-  TaskArtifactResponse,
-  TaskArtifactRpc,
-  V2PythonTaskSubmitResultDto,
-  V2TaskArtifactDownloadDto,
+import {
+  v2UploadR2Key,
+  type DeviceExecutionRpc,
+  type PersonalMemoryRpc,
+  type ProactiveScheduleRpc,
+  type TaskArtifactCommand,
+  type TaskArtifactResponse,
+  type TaskArtifactRpc,
+  type V2PythonTaskSubmitResultDto,
+  type V2TaskArtifactDownloadDto,
 } from '@ember/runtime-v2';
 import { Hono, type MiddlewareHandler } from 'hono';
 import type { B1SessionRuntime } from '../auth/b1-auth-runtime.js';
@@ -64,6 +66,13 @@ import {
   type ReportObservedTurnUsage,
 } from './interactive-executor.js';
 import type { V2StreamingModelGateway } from './model-runtime.js';
+import {
+  deleteV2R2KeysBestEffort,
+  encodeBytesBase64,
+  putV2R2Bytes,
+  resolveV2StoredFileBytes,
+  sha256HexBytes,
+} from './r2-artifacts.js';
 import type { EdgeAgentHeadRpc, PrepareTurnRequest, ResolvedMessageAttachment } from './rpc.js';
 
 const LOCAL_STREAM_PATH = '/v2/conversations/:conversationId/messages/stream';
@@ -102,6 +111,8 @@ export interface LocalV2EdgeDependencies {
   readonly now?: () => Date;
   /** Allowed Hostnames for incoming requests. Defaults to loopback only. */
   readonly allowedHosts?: readonly string[];
+  /** Optional Cloudflare R2 bucket for >1 MiB V2 uploads and task artifacts. */
+  readonly r2Bucket?: R2BucketPort;
   /** Resolve the canonical head from verified identity; request path IDs never select a head. */
   resolveAgentHead(auth: AuthContext): Promise<ResolvedAgentHead | null>;
   /** Read already-authorized local staged metadata, including attachments on accepted replays. */
@@ -416,23 +427,6 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         );
       };
 
-      const encodeBytesBase64 = (bytes: Uint8Array): string => {
-        let binary = '';
-        for (let i = 0; i < bytes.byteLength; i += 1) {
-          binary += String.fromCharCode(bytes[i]!);
-        }
-        return globalThis.btoa(binary);
-      };
-
-      const decodeBytesBase64 = (encoded: string): Uint8Array => {
-        const binary = globalThis.atob(encoded);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i += 1) {
-          bytes[i] = binary.charCodeAt(i);
-        }
-        return bytes;
-      };
-
       app.route(
         '/v1',
         createB1TaskRoutes({
@@ -482,7 +476,31 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
         createB3UploadArtifactRoutes({
           session: sessions,
           uploads: {
-            async stageUpload(_auth, input) {
+            async stageUpload(auth, input) {
+              if (deps.r2Bucket !== undefined) {
+                const uploadId = crypto.randomUUID();
+                const sha256 = await sha256HexBytes(input.bytes);
+                const r2Key = v2UploadR2Key(auth.tenantId, uploadId);
+                await putV2R2Bytes(deps.r2Bucket, r2Key, input.bytes, input.mediaType, {
+                  tenantId: auth.tenantId,
+                  uploadId,
+                  sha256,
+                });
+                try {
+                  return (await runTaskArtifacts({
+                    kind: 'stage_upload',
+                    uploadId,
+                    filename: input.filename,
+                    mediaType: input.mediaType,
+                    sizeBytes: input.bytes.byteLength,
+                    sha256,
+                    r2Key,
+                  })) as B3StagedUploadReceiptDto;
+                } catch (error) {
+                  await deleteV2R2KeysBestEffort(deps.r2Bucket, [r2Key]);
+                  throw error;
+                }
+              }
               return (await runTaskArtifacts({
                 kind: 'stage_upload',
                 filename: input.filename,
@@ -502,13 +520,14 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
                 artifactId,
               })) as V2TaskArtifactDownloadDto | null;
               if (downloaded === null) return null;
+              const bytes = await resolveV2StoredFileBytes(downloaded, deps.r2Bucket);
               return {
                 artifactId: downloaded.artifactId,
                 filename: downloaded.filename,
                 mediaType: downloaded.mediaType,
                 sha256: downloaded.sha256,
                 size: downloaded.size,
-                bytes: decodeBytesBase64(downloaded.contentBase64),
+                bytes,
               };
             },
             sweepExpiredUnboundUploads() {

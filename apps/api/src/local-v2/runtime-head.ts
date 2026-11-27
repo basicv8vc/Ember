@@ -2,6 +2,7 @@
 /// <reference path="../../../../packages/runtime-v2/src/global-budget/cloudflare-workers.d.ts" />
 
 import type { DurableObjectState } from '@cloudflare/workers-types/index.js';
+import type { R2BucketPort } from '@ember/contracts';
 import { DomainError, isDomainError, type DomainErrorCode } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
@@ -40,6 +41,7 @@ export interface LocalRuntimeEnv extends GlobalBudgetBindings, V2ModelRuntimeEnv
   readonly D1_RECOVERY: D1DatabaseLike;
   readonly DURABLE_TURN_QUEUE: QueueLike<V2DispatchEnvelope>;
   readonly AGENT_TASK_QUEUE: QueueLike<V2DispatchEnvelope>;
+  readonly EMBER_BLOBS?: R2BucketPort;
   readonly EMBER_V2_ALLOWED_HOST?: string;
   readonly EMBER_V2_STAGING_ALLOWED_SUBJECTS?: string;
   readonly EMBER_APPLE_BUNDLE_ID?: string;
@@ -146,6 +148,10 @@ export class AgentHeadDO
       ...defaultGlobalBudgetOpts,
       ...(localCeilings === undefined ? {} : { localCeilings }),
       allowRecurringModelBriefs,
+      deleteR2Keys: async (keys) => {
+        if (keys.length === 0 || this.bindings.EMBER_BLOBS === undefined) return;
+        await this.bindings.EMBER_BLOBS.delete([...keys]);
+      },
       eventRuntimeFactory(business) {
         events = new AgentEventRuntimeFacade({ ...scope, storage, business });
         return {
@@ -306,6 +312,7 @@ export class AgentHeadDO
       globalBudget: core.createGlobalBudgetSettlePort(),
       registry: new D1RecoveryRegistry(this.bindings.D1_RECOVERY),
     });
+    await core.flushDeletedR2Keys();
   }
 
   override alarm() {

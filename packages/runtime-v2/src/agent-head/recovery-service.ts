@@ -115,6 +115,7 @@ export interface RecoveryServiceDeps {
   readonly nowMs: () => number;
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
+  readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void>;
 }
 
 /**
@@ -124,9 +125,16 @@ export interface RecoveryServiceDeps {
  */
 export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, AgentHeadRecoveryPort {
   private readonly newId: () => Id;
+  private readonly pendingDeletedR2Keys: string[] = [];
 
   constructor(private readonly deps: RecoveryServiceDeps) {
     this.newId = deps.idFactory ?? (() => globalThis.crypto.randomUUID());
+  }
+
+  async flushDeletedR2Keys(): Promise<void> {
+    if (this.pendingDeletedR2Keys.length === 0) return;
+    const keys = this.pendingDeletedR2Keys.splice(0);
+    await this.deps.deleteR2Keys?.(keys).catch(() => undefined);
   }
 
   earliestRequiredDiscoveryAtMsSync(_nowMs: number): number | null {
@@ -952,6 +960,16 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
 
   private purgeUncommittedTaskOutputsSync(taskId: string): void {
     if (!this.hasTaskArtifactsTableSync()) return;
+    const rows = sqlExecAll<{ readonly r2_key: string }>(
+      this.deps.storage.sql,
+      `SELECT r2_key
+         FROM v2_task_artifacts
+        WHERE task_id = ? AND created_by = 'run' AND committed = 0 AND r2_key IS NOT NULL`,
+      taskId,
+    );
+    for (const row of rows) {
+      this.pendingDeletedR2Keys.push(row.r2_key);
+    }
     this.deps.storage.sql.exec(
       `DELETE FROM v2_task_artifacts
         WHERE task_id = ? AND created_by = 'run' AND committed = 0`,
@@ -1714,6 +1732,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       recomputeAlarmSync: (ts) =>
         this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
+    await this.flushDeletedR2Keys();
     return { accepted: committed.accepted };
   }
 

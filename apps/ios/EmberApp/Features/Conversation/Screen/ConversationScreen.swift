@@ -158,6 +158,11 @@ struct ConversationScreen<HeaderMenu: View, TopNotices: View>: View {
         }
         .background(EmberDesignTokens.chatCanvas.ignoresSafeArea())
         .tint(EmberDesignTokens.chatBrandInk)
+        .emberInAppBrowser { pageURL in
+            let prompt = "帮我看看这个页面：\(pageURL.absoluteString)"
+            draft = ConversationInteractionRules.insertingStarterPrompt(prompt, into: draft)
+            composerIsFocused = true
+        }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("conversation-home")
     }

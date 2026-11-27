@@ -451,9 +451,11 @@ private struct ConversationMessageBubble: View {
         return speaker + Text(verbatim: ": \(message.text)") + note
     }
 
+    @Environment(\.openURL) private var openURL
+
     var body: some View {
-        HStack(alignment: .bottom, spacing: 0) {
-            if isUser {
+        if isUser {
+            HStack(alignment: .bottom, spacing: 0) {
                 Spacer(minLength: 56)
 
                 VStack(alignment: .trailing, spacing: 4) {
@@ -485,7 +487,18 @@ private struct ConversationMessageBubble: View {
                             .padding(.trailing, 4)
                     }
                 }
-            } else {
+            }
+            .frame(maxWidth: .infinity, alignment: .trailing)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(accessibilityMessageLabel)
+            // Keep one stable combined element per message for the existing UX-03/UI tests.
+            .accessibilityIdentifier(
+                message.accessibilityIdentifierOverride ?? "conversation-message-user"
+            )
+        } else {
+            let sourceLinks = message.isStreaming ? [] : EmberLinkDetector.extractWebLinks(from: message.text)
+
+            VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
                         Image(systemName: "flame.fill")
@@ -513,24 +526,53 @@ private struct ConversationMessageBubble: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .padding(.horizontal, 14)
-                .padding(.vertical, 12)
-                .background(
-                    EmberDesignTokens.chatAgentBubble,
-                    in: RoundedRectangle(cornerRadius: 19, style: .continuous)
-                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.vertical, 2)
                 .opacity(message.deliveryNote != nil ? 0.92 : 1.0)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel(accessibilityMessageLabel)
+                // Keep one stable combined element per message for the existing UX-03/UI tests.
+                .accessibilityIdentifier(
+                    message.accessibilityIdentifierOverride ?? "conversation-message-ember"
+                )
 
-                Spacer(minLength: 36)
+                if !sourceLinks.isEmpty {
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 8) {
+                            ForEach(sourceLinks) { source in
+                                Button {
+                                    openURL(source.url)
+                                } label: {
+                                    HStack(spacing: 5) {
+                                        Image(systemName: "globe")
+                                            .font(.caption2.weight(.medium))
+                                            .foregroundStyle(.secondary)
+                                        Text(source.displayHost)
+                                            .font(.caption.weight(.medium))
+                                            .foregroundStyle(.primary)
+                                            .lineLimit(1)
+                                        Image(systemName: "arrow.up.right")
+                                            .font(.caption2.weight(.semibold))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(.horizontal, 11)
+                                    .padding(.vertical, 6)
+                                    .background(EmberDesignTokens.chatPaper, in: Capsule())
+                                    .overlay {
+                                        Capsule()
+                                            .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
+                                    }
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityLabel(Text(verbatim: source.displayHost))
+                                .accessibilityIdentifier("conversation-source-pill")
+                            }
+                        }
+                    }
+                }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityMessageLabel)
-        // Keep one stable combined element per message for the existing UX-03/UI tests.
-        .accessibilityIdentifier(
-            message.accessibilityIdentifierOverride ?? (isUser ? "conversation-message-user" : "conversation-message-ember")
-        )
     }
 }
 

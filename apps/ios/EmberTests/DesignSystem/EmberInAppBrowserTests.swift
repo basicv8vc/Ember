@@ -54,4 +54,31 @@ final class EmberInAppBrowserTests: XCTestCase {
         ])
         XCTAssertTrue(linkedRuns.allSatisfy { $0.underlineStyle == .single })
     }
+
+    func testExtractWebLinksDeduplicatesAndStripsWWWHostPrefix() {
+        let markdown = """
+        Summary based on [Superlinear Returns](https://paulgraham.com/superlinear.html),
+        https://paulgraham.com/superlinear.html, and www.apple.com/iphone.
+        """
+        let links = EmberLinkDetector.extractWebLinks(from: markdown)
+
+        XCTAssertEqual(links.map(\.url), [
+            URL(string: "https://paulgraham.com/superlinear.html")!,
+            URL(string: "https://www.apple.com/iphone")!,
+        ])
+        XCTAssertEqual(links.map(\.displayHost), [
+            "paulgraham.com",
+            "apple.com",
+        ])
+    }
+
+    func testExtractWebLinksHonorsLimitAndReturnsEmptyForPlainText() {
+        XCTAssertTrue(EmberLinkDetector.extractWebLinks(from: "没有链接的普通回复").isEmpty)
+
+        let many = (1...8).map { "https://site\($0).example.com" }.joined(separator: " ")
+        let limited = EmberLinkDetector.extractWebLinks(from: many, limit: 4)
+        XCTAssertEqual(limited.count, 4)
+        XCTAssertEqual(limited.first?.displayHost, "site1.example.com")
+        XCTAssertEqual(limited.last?.displayHost, "site4.example.com")
+    }
 }

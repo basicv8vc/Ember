@@ -1,4 +1,5 @@
 import Foundation
+import OSLog
 import SwiftUI
 import UIKit
 import WebKit
@@ -291,7 +292,29 @@ private final class EmberEmbeddedBrowserModel: NSObject, ObservableObject, WKNav
                     self?.estimatedProgress = view.estimatedProgress
                 }
             },
+            webView.scrollView.observe(\.contentSize, options: [.new]) { [weak self] _, _ in
+                Task { @MainActor in self?.correctShrunkenZoomIfNeeded(reason: "contentSize") }
+            },
         ]
+    }
+
+    private static let logger = Logger(subsystem: Bundle.main.bundleIdentifier ?? "Ember", category: "InAppBrowser")
+
+    /// WKWebView 先以 980px 布局空白文档（最小缩放约 0.41）。在 sheet 尺寸变化时，
+    /// 这个小于 1 的缩放可能留到已按 device-width 排版的页面上，表现为内容比视口窄、挤在左侧。
+    func correctShrunkenZoomIfNeeded(reason: String) {
+        let sv = webView.scrollView
+        let viewportWidth = webView.bounds.width
+        let contentWidth = sv.contentSize.width
+        let zoom = sv.zoomScale
+        guard viewportWidth >= 200, contentWidth > 0, zoom > 0 else { return }
+        if sv.isZooming || sv.isZoomBouncing { return }
+        if let p = sv.pinchGestureRecognizer, p.state == .began || p.state == .changed { return }
+        guard contentWidth < viewportWidth - 2 else { return }
+        let fit = min(viewportWidth / (contentWidth / zoom), max(sv.maximumZoomScale, 1))
+        guard fit > zoom + 0.01 else { return }
+        Self.logger.notice("Restoring shrunken zoom (\(reason, privacy: .public)): zoom=\(Double(zoom), privacy: .public) min=\(Double(sv.minimumZoomScale), privacy: .public) content=\(Double(contentWidth), privacy: .public) viewport=\(Double(viewportWidth), privacy: .public) -> \(Double(fit), privacy: .public)")
+        sv.setZoomScale(fit, animated: false)
     }
 
     func startInitialLoadIfNeeded() {
@@ -325,12 +348,19 @@ private final class EmberEmbeddedBrowserModel: NSObject, ObservableObject, WKNav
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
+    nonisolated func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        Task { @MainActor [weak self] in self?.correctShrunkenZoomIfNeeded(reason: "commit") }
+    }
+
     nonisolated func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         Task { @MainActor [weak self] in
             guard let self else { return }
             if self.isReaderModeEnabled {
                 self.applyReaderModeState()
             }
+            self.correctShrunkenZoomIfNeeded(reason: "finish")
+            try? await Task.sleep(nanoseconds: 600_000_000)
+            self.correctShrunkenZoomIfNeeded(reason: "finish+600ms")
         }
     }
 
@@ -420,6 +450,7 @@ private final class EmberEmbeddedWebViewController: UIViewController {
         } else if lastReportedSize == .zero {
             lastReportedSize = size
         }
+        model.correctShrunkenZoomIfNeeded(reason: "layout")
     }
 }
 

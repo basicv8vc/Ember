@@ -91,6 +91,7 @@ final class LiveConversationHostModel {
     private(set) var pendingRejectedDraftRestoration: PendingRejectedDraft?
     private(set) var pendingOutgoingText: String?
     private(set) var streamingReplyText: String?
+    private(set) var streamedWebEvidenceByConversation: [ConversationID: [MessageID: WebEvidence]] = [:]
     private(set) var lastTurnMetrics: TurnLatencyMetrics?
     private(set) var stagedAttachments: [ComposerAttachment] = []
     private(set) var isUploadingAttachment = false
@@ -485,6 +486,7 @@ final class LiveConversationHostModel {
         pendingRejectedDraftRestoration = nil
         pendingOutgoingText = nil
         streamingReplyText = nil
+        streamedWebEvidenceByConversation.removeAll()
         lastTurnMetrics = nil
         stagedAttachments.removeAll()
         isUploadingAttachment = false
@@ -1329,41 +1331,53 @@ final class LiveConversationHostModel {
 
     var screen: ConversationScreenState {
         let id = profile?.conversation.conversationID
-        var timeline: [ConversationTimelineEntry] = (snapshot?.messages ?? []).map { message in
+        var timeline: [ConversationTimelineEntry] = []
+        for message in snapshot?.messages ?? [] {
             let stableID = "conversation-message-\(message.id.rawValue.uuidString.lowercased())"
             switch message.kind {
             case .user(let text):
-                return .message(ConversationMessagePresentation(
+                timeline.append(.message(ConversationMessagePresentation(
                     id: stableID,
                     author: .user,
                     text: text,
                     timestamp: message.createdAt
-                ))
+                )))
             case .ember(let text):
-                return .message(ConversationMessagePresentation(
+                timeline.append(.message(ConversationMessagePresentation(
                     id: stableID,
                     author: .ember,
                     text: text,
                     timestamp: message.createdAt
-                ))
+                )))
+                if let evidence = resolvedWebEvidence(for: message.id, conversationID: message.conversationID),
+                   evidence.hasDisplayableSources {
+                    let cardID = "conversation-web-sources-\(message.id.rawValue.uuidString.lowercased())"
+                    let cardLabel = String(
+                        localized: "conversation.web_sources.card_accessibility",
+                        table: "Conversation"
+                    )
+                    timeline.append(.inlineCard(id: cardID, accessibilityLabel: cardLabel) {
+                        ConversationWebSourcesCard(evidence: evidence)
+                    })
+                }
             case .activity(let activity):
-                return .activity(ConversationActivityPresentation(
+                timeline.append(.activity(ConversationActivityPresentation(
                     id: stableID,
                     title: String(localized: "conversation.activity.cloud", table: "Conversation"),
                     detail: activity.text,
                     timestamp: message.createdAt
-                ))
+                )))
             case .taskReference(let ref):
-                return makeTaskReferenceEntry(stableID: stableID, taskID: ref.taskID)
+                timeline.append(makeTaskReferenceEntry(stableID: stableID, taskID: ref.taskID))
             case .commitmentReference(let ref):
-                return .activity(ConversationActivityPresentation(
+                timeline.append(.activity(ConversationActivityPresentation(
                     id: stableID,
                     title: "Commitment reference",
                     detail: ref.commitmentID.uuidString,
                     timestamp: message.createdAt
-                ))
+                )))
             case .outcomeReference(let outcome):
-                return makeOutcomeReferenceEntry(stableID: stableID, outcome: outcome)
+                timeline.append(makeOutcomeReferenceEntry(stableID: stableID, outcome: outcome))
             }
         }
         if let pendingOutgoingText, !pendingOutgoingText.isEmpty {
@@ -1805,7 +1819,8 @@ final class LiveConversationHostModel {
                 snapshot = ConversationSnapshot(
                     conversation: current.conversation,
                     messages: messages,
-                    assistantTurns: current.assistantTurns
+                    assistantTurns: current.assistantTurns,
+                    webEvidenceByMessageID: current.webEvidenceByMessageID
                 )
             }
         } else {
@@ -1815,6 +1830,16 @@ final class LiveConversationHostModel {
                 assistantTurns: []
             )
         }
+    }
+
+    private func resolvedWebEvidence(
+        for messageID: MessageID,
+        conversationID: ConversationID
+    ) -> WebEvidence? {
+        if let hydrated = snapshot?.webEvidenceByMessageID[messageID], hydrated.hasDisplayableSources {
+            return hydrated
+        }
+        return streamedWebEvidenceByConversation[conversationID]?[messageID]
     }
 
     private func beginStreamingObservation(
@@ -1872,8 +1897,15 @@ final class LiveConversationHostModel {
                             }
                             self.streamingReplyText = (self.streamingReplyText ?? "") + chunk
                         }
-                    case .committed(let turn, _, _):
+                    case .committed(let turn, let responseMessageID, _, let webEvidence):
                         committedTurn = turn
+                        if let webEvidence, webEvidence.hasDisplayableSources {
+                            let convID = ConversationID(rawValue: turn.conversationID)
+                            let msgID = MessageID(rawValue: responseMessageID)
+                            var conversationMap = self.streamedWebEvidenceByConversation[convID] ?? [:]
+                            conversationMap[msgID] = webEvidence
+                            self.streamedWebEvidenceByConversation[convID] = conversationMap
+                        }
                     case .handedOff:
                         handedOff = true
                     }

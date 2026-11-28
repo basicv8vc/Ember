@@ -496,8 +496,6 @@ private struct ConversationMessageBubble: View {
                 message.accessibilityIdentifierOverride ?? "conversation-message-user"
             )
         } else {
-            let sourceLinks = message.isStreaming ? [] : EmberLinkDetector.extractWebLinks(from: message.text)
-
             VStack(alignment: .leading, spacing: 10) {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 5) {
@@ -535,41 +533,6 @@ private struct ConversationMessageBubble: View {
                 .accessibilityIdentifier(
                     message.accessibilityIdentifierOverride ?? "conversation-message-ember"
                 )
-
-                if !sourceLinks.isEmpty {
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack(spacing: 8) {
-                            ForEach(sourceLinks) { source in
-                                Button {
-                                    openURL(source.url)
-                                } label: {
-                                    HStack(spacing: 5) {
-                                        Image(systemName: "globe")
-                                            .font(.caption2.weight(.medium))
-                                            .foregroundStyle(.secondary)
-                                        Text(source.displayHost)
-                                            .font(.caption.weight(.medium))
-                                            .foregroundStyle(.primary)
-                                            .lineLimit(1)
-                                        Image(systemName: "arrow.up.right")
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                    }
-                                    .padding(.horizontal, 11)
-                                    .padding(.vertical, 6)
-                                    .background(EmberDesignTokens.chatPaper, in: Capsule())
-                                    .overlay {
-                                        Capsule()
-                                            .strokeBorder(EmberDesignTokens.chatHairline, lineWidth: 1)
-                                    }
-                                }
-                                .buttonStyle(.plain)
-                                .accessibilityLabel(Text(verbatim: source.displayHost))
-                                .accessibilityIdentifier("conversation-source-pill")
-                            }
-                        }
-                    }
-                }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }

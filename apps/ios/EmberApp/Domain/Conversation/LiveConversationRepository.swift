@@ -51,10 +51,63 @@ actor LiveConversationRepository {
         }
         let conversation = Conversation(id: id,
             createdAt: me.conversation.createdAt, updatedAt: me.conversation.updatedAt)
+        let webEvidenceByMessageID = if all.isEmpty {
+            [MessageID: WebEvidence]()
+        } else {
+            await loadWebEvidence(
+                conversationID: id.rawValue,
+                expectedEpoch: me.conversation.transcriptEpoch
+            )
+        }
         return ConversationSnapshot(
             conversation: conversation,
             messages: all.map { $0.domainMessage(conversationID: id) },
-            assistantTurns: [])
+            assistantTurns: [],
+            webEvidenceByMessageID: webEvidenceByMessageID
+        )
+    }
+
+    private func loadWebEvidence(
+        conversationID: UUID,
+        expectedEpoch: Int
+    ) async -> [MessageID: WebEvidence] {
+        var evidenceByMessageID: [MessageID: WebEvidence] = [:]
+        var after = 0
+        var pages = 0
+
+        while true {
+            let page: LiveV2WebEvidencePage
+            do {
+                page = try await client.webEvidencePage(
+                    conversationID: conversationID,
+                    after: after,
+                    limit: 100
+                )
+            } catch {
+                // V2 web-evidence hydration is additive: an unavailable/404 V1 backend or malformed
+                // evidence payload degrades cleanly without blocking the primary chat transcript.
+                return evidenceByMessageID
+            }
+
+            guard page.transcriptEpoch == expectedEpoch,
+                  page.nextAfter >= after,
+                  page.items.first.map({ $0.sequence > after }) ?? true else {
+                return evidenceByMessageID
+            }
+
+            for item in page.items {
+                if let domain = item.webEvidence.domainEvidence(), domain.hasDisplayableSources {
+                    evidenceByMessageID[MessageID(rawValue: item.responseMessageID)] = domain
+                }
+            }
+
+            pages += 1
+            if !page.hasMore { break }
+            guard !page.items.isEmpty, pages < 200 else { break }
+            after = page.nextAfter
+        }
+
+        return evidenceByMessageID
     }
 
     /// On every launch, reconcile an unresolved durable intent before enabling a new send.

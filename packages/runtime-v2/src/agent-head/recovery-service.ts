@@ -35,6 +35,7 @@ import {
 } from './budget.js';
 import { readPersonalMemoriesForTurnSync } from './memory-service.js';
 import {
+  clearRetiredRunArtifactsForTaskSync,
   earliestPendingR2DeleteAtMsSync,
   enqueuePendingR2DeletesSync,
   flushPendingR2Deletes,
@@ -993,6 +994,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         WHERE task_id = ? AND created_by = 'run' AND committed = 0`,
       taskId,
     );
+    clearRetiredRunArtifactsForTaskSync(this.deps.storage.sql, taskId);
   }
 
   materializeScheduleOccurrenceSync(

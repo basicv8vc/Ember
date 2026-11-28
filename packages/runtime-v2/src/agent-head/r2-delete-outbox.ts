@@ -12,13 +12,18 @@ export function computeR2DeleteBackoffMs(nextAttemptCount: number): number {
   return Math.min(R2_DELETE_RETRY_MAX_MS, R2_DELETE_RETRY_BASE_MS * 2 ** exponent);
 }
 
-export function hasR2PendingDeletesTableSync(sql: SqlStorageLike): boolean {
+function hasSqliteTableSync(sql: SqlStorageLike, tableName: string): boolean {
   return (
     sqlExecMaybe<{ readonly name: string }>(
       sql,
-      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_r2_pending_deletes'`,
+      `SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?`,
+      tableName,
     ) !== null
   );
+}
+
+export function hasR2PendingDeletesTableSync(sql: SqlStorageLike): boolean {
+  return hasSqliteTableSync(sql, 'v2_r2_pending_deletes');
 }
 
 /** Return `true` if `r2Key` currently has an outstanding entry in `v2_r2_pending_deletes`. */
@@ -31,6 +36,54 @@ export function isPendingR2DeleteKeySync(sql: SqlStorageLike, r2Key: string): bo
       r2Key,
     ) !== null
   );
+}
+
+/** Return `true` if `(runId, artifactId)` has a retired-artifact tombstone for the active run. */
+export function isRetiredRunArtifactSync(
+  sql: SqlStorageLike,
+  runId: string,
+  artifactId: string,
+): boolean {
+  if (!hasSqliteTableSync(sql, 'v2_retired_run_artifacts')) return false;
+  return (
+    sqlExecMaybe<{ readonly artifact_id: string }>(
+      sql,
+      `SELECT artifact_id
+         FROM v2_retired_run_artifacts
+        WHERE run_id = ? AND artifact_id = ?
+        LIMIT 1`,
+      runId,
+      artifactId,
+    ) !== null
+  );
+}
+
+/** Record run-scoped retired artifact tombstones inside the active SQLite transaction. */
+export function recordRetiredRunArtifactsSync(
+  sql: SqlStorageLike,
+  taskId: string,
+  runId: string,
+  artifactIds: readonly string[],
+  nowMs: number,
+): void {
+  if (artifactIds.length === 0 || !hasSqliteTableSync(sql, 'v2_retired_run_artifacts')) return;
+  for (const artifactId of artifactIds) {
+    sql.exec(
+      `INSERT OR IGNORE INTO v2_retired_run_artifacts (
+        task_id, run_id, artifact_id, retired_at_ms
+      ) VALUES (?, ?, ?, ?)`,
+      taskId,
+      runId,
+      artifactId,
+      nowMs,
+    );
+  }
+}
+
+/** Remove run-scoped retired artifact tombstones once the task/lease is fenced or terminal. */
+export function clearRetiredRunArtifactsForTaskSync(sql: SqlStorageLike, taskId: string): void {
+  if (!hasSqliteTableSync(sql, 'v2_retired_run_artifacts')) return;
+  sql.exec(`DELETE FROM v2_retired_run_artifacts WHERE task_id = ?`, taskId);
 }
 
 /** Return the earliest scheduled retry timestamp across `v2_r2_pending_deletes`, or `null` if empty. */

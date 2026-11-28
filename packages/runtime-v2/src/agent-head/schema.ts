@@ -1051,6 +1051,15 @@ export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
   next_attempt_at_ms INTEGER NOT NULL,
   attempt_count      INTEGER NOT NULL DEFAULT 0
 ) WITHOUT ROWID;`,
+  `CREATE TABLE IF NOT EXISTS v2_retired_run_artifacts (
+  task_id       TEXT    NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id        TEXT    NOT NULL,
+  artifact_id   TEXT    NOT NULL,
+  retired_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (run_id, artifact_id)
+) WITHOUT ROWID;`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_retired_run_artifacts_task
+  ON v2_retired_run_artifacts (task_id);`,
 ] as const;
 
 export function createV2TaskArtifactsR2Migration(

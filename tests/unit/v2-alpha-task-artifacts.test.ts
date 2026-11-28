@@ -1969,8 +1969,39 @@ describe('V2 AgentHeadTaskArtifactService', () => {
     expect(store.has(keyB)).toBe(false);
     expect(store.has(keyA)).toBe(true);
     expect(store.has(keyC)).toBe(true);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
 
-    // 8) Exact replay of [A, C] again followed by commit + download + R2 byte read succeeds.
+    // 8) Delayed replay of [A, B] under the SAME live lease AFTER keyB was successfully deleted
+    // (both v2_task_artifacts and v2_r2_pending_deletes have no B) MUST STILL fail closed!
+    await expect(
+      core.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845029',
+        taskId,
+        runId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId: 'worker-replay',
+        outputs: [outputA, outputB],
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_task_artifacts WHERE id = ?',
+          idB,
+        )
+        .one().cnt,
+    ).toBe(0);
+
+    // 9) Exact replay of [A, C] again followed by commit + download + R2 byte read succeeds,
+    // and run-scoped retired tombstones are cleaned up once terminal.
     await core.taskArtifacts({
       kind: 'publish_task_outputs',
       tenantId: TENANT_ID,
@@ -2001,6 +2032,14 @@ describe('V2 AgentHeadTaskArtifactService', () => {
       },
     });
     expect(committed.accepted).toBe(true);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_retired_run_artifacts WHERE task_id = ?',
+          taskId,
+        )
+        .one().cnt,
+    ).toBe(0);
 
     const downloadA = (await core.taskArtifacts({
       kind: 'download_artifact',
@@ -2018,8 +2057,17 @@ describe('V2 AgentHeadTaskArtifactService', () => {
       requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845028',
       artifactId: idC,
     })) as V2TaskArtifactDownloadDto | null;
+    const downloadB = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845030',
+      artifactId: idB,
+    })) as V2TaskArtifactDownloadDto | null;
     expect(downloadA?.r2Key).toBe(keyA);
     expect(downloadC?.r2Key).toBe(keyC);
+    expect(downloadB).toBeNull();
 
     const r2ObjA = await bucket.get(downloadA!.r2Key!);
     const r2ObjC = await bucket.get(downloadC!.r2Key!);

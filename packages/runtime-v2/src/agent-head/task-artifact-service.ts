@@ -29,9 +29,12 @@ import {
   type V2TaskInputFileDto,
 } from '../contracts/task-artifacts.js';
 import {
+  clearRetiredRunArtifactsForTaskSync,
   enqueuePendingR2DeletesSync,
   flushPendingR2Deletes,
   isPendingR2DeleteKeySync,
+  isRetiredRunArtifactSync,
+  recordRetiredRunArtifactsSync,
 } from './r2-delete-outbox.js';
 import type { ResolvedMessageAttachment } from '../contracts/agent-head-rpc.js';
 import type { V2DispatchEnvelope } from '../recovery/envelope.js';
@@ -946,6 +949,7 @@ export class AgentHeadTaskArtifactService {
         purgedR2Rows.map((row) => row.r2_key),
         now,
       );
+      clearRetiredRunArtifactsForTaskSync(this.sql, task.id);
       if (task.status === 'queued' || task.status === 'retryable_failed') {
         this.sql.exec(
           `UPDATE tasks
@@ -1319,6 +1323,12 @@ export class AgentHeadTaskArtifactService {
             'cannot reuse retired output artifact r2Key while deletion is pending',
           );
         }
+        if (isRetiredRunArtifactSync(this.sql, run.id, item.artifactId)) {
+          throw new DomainError(
+            'IDEMPOTENCY_CONFLICT',
+            'cannot reuse retired output artifactId for this run',
+          );
+        }
       }
 
       const existingRows = sqlExecAll<StagedRunArtifactSnapshot>(
@@ -1381,19 +1391,21 @@ export class AgentHeadTaskArtifactService {
       const keysToDelete = existingRows
         .map((row) => row.r2_key)
         .filter((key): key is string => key !== null && !nextR2Keys.has(key));
+      const retiredArtifactIds = existingRows
+        .filter((row) => !nextArtifactIds.has(row.id))
+        .map((row) => row.id);
+      recordRetiredRunArtifactsSync(this.sql, task.id, run.id, retiredArtifactIds, now);
       enqueuePendingR2DeletesSync(this.sql, keysToDelete, now);
 
-      for (const row of existingRows) {
-        if (!nextArtifactIds.has(row.id)) {
-          this.sql.exec(
-            `DELETE FROM v2_task_artifacts
-              WHERE id = ? AND tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
-            row.id,
-            cmd.tenantId,
-            task.id,
-            run.id,
-          );
-        }
+      for (const rowId of retiredArtifactIds) {
+        this.sql.exec(
+          `DELETE FROM v2_task_artifacts
+            WHERE id = ? AND tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
+          rowId,
+          cmd.tenantId,
+          task.id,
+          run.id,
+        );
       }
 
       const artifactIds: string[] = [];

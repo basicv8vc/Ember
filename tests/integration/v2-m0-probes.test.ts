@@ -1,13 +1,9 @@
-import { mkdtempSync, rmSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { runRttSimulation } from '../../apps/benchmark/src/rtt-simulation.js';
 import { runSqliteProbe } from '../../apps/benchmark/src/sqlite-probe.js';
 import { runTimingMethodology } from '../../apps/benchmark/src/timing-methodology.js';
-import { runV1BaselineBenchmark } from '../../apps/benchmark/src/v1-baseline.js';
 
-describe('V2-M0-D Probes & V1 Baseline (Integration)', () => {
+describe('V2-M0-D Probes (Integration)', () => {
   it('runs the isolated local workerd DO SQLite, GlobalBudgetDO, and D1 probe', async () => {
     const report = await runSqliteProbe({
       iterations: 5,
@@ -82,28 +78,5 @@ describe('V2-M0-D Probes & V1 Baseline (Integration)', () => {
     expect(nearColocated.errorCount).toBe(0);
     expect(nearColocated.withinTargetAck250msP95).toBe(true);
     expect(nearColocated.withinTargetRuntime200msP95).toBe(true);
-  });
-
-  it('measures local V1 baseline with exact COUNT(*) row deltas and sanity checks', async () => {
-    const tempOutDir = mkdtempSync(path.join(os.tmpdir(), 'ember-v1-baseline-test-'));
-    try {
-      const baseline = await runV1BaselineBenchmark({
-        concurrencyLevels: [1, 4],
-        requestsPerLevel: 4,
-        workerConcurrency: 4,
-        enableLocalLoad: false,
-        log: () => undefined,
-      });
-
-      expect(baseline.scenarioId).toBe('ember-v2-m0-v1-baseline');
-      expect(baseline.evidenceKind).toBe('measured_local_pg');
-      expect(baseline.concurrencySweep).toHaveLength(2);
-      expect(baseline.dbMutationStats.length).toBeGreaterThanOrEqual(4);
-      const chatStats = baseline.dbMutationStats[0]!;
-      expect(chatStats.successCount).toBe(4);
-      expect(chatStats.exactTableRowDeltas.conversation_messages).toBeGreaterThanOrEqual(8);
-    } finally {
-      rmSync(tempOutDir, { recursive: true, force: true });
-    }
   });
 });

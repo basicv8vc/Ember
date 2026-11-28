@@ -160,7 +160,7 @@ describe('test suite layout', () => {
     // Guards against a broken directory walk turning this check into a no-op.
     expect(files.length).toBeGreaterThanOrEqual(20);
     expect(files.map((file) => relative(TESTS_DIR, file))).toContain(
-      join('integration', 'http-task-api.test.ts'),
+      join('integration', 'v2-m1-acceptance.test.ts'),
     );
   });
 

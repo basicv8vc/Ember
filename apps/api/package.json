@@ -4,18 +4,15 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "node --env-file-if-exists=../../.env.local --import tsx --watch src/index.ts",
-    "start": "node --env-file-if-exists=../../.env.local dist/index.js",
     "build": "tsc -b tsconfig.build.json",
-    "dev:worker": "wrangler dev --config wrangler.staging.jsonc",
-    "build:worker": "wrangler deploy --dry-run --config wrangler.staging.jsonc",
-    "deploy:worker": "wrangler deploy --config wrangler.staging.jsonc"
+    "dev:worker": "wrangler dev --config wrangler.local-v2.jsonc",
+    "build:worker": "wrangler deploy --dry-run --config wrangler.v2-staging.jsonc",
+    "deploy:worker": "wrangler deploy --config wrangler.v2-staging.jsonc"
   },
   "dependencies": {
     "@ember/contracts": "workspace:*",
     "@ember/domain": "workspace:*",
     "@ember/model-gateway": "workspace:*",
-    "@ember/postgres": "workspace:*",
     "@ember/runtime-v2": "workspace:*",
     "@ember/sandbox-daytona": "workspace:*",
     "@hono/node-server": "2.1.5",

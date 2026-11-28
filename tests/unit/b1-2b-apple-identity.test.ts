@@ -108,16 +108,16 @@ function replaceHeader(token: string, header: Record<string, unknown>): string {
 }
 
 describe('Apple identity-token verification (B1-2B)', () => {
-  it('uses the iOS Bundle ID from the isolated Staging Worker config and rejects invalid assertions', async () => {
+  it('uses the iOS Bundle ID from the V2 Staging Worker config and rejects invalid assertions', async () => {
     const wranglerText = readFileSync(
-      new URL('../../apps/api/wrangler.staging.jsonc', import.meta.url),
+      new URL('../../apps/api/wrangler.v2-staging.jsonc', import.meta.url),
       'utf8',
-    );
-    const wranglerConfig = JSON.parse(wranglerText.replace(/,\s*([}\]])/g, '$1')) as {
+    )
+      .replace(/^\s*\/\/.*$/gm, '')
+      .replace(/,\s*([}\]])/g, '$1');
+    const wranglerConfig = JSON.parse(wranglerText) as {
       name: string;
       vars: { EMBER_APPLE_BUNDLE_ID: string; EMBER_ENV: string };
-      hyperdrive: Array<{ binding: string; id: string }>;
-      queues: { producers: Array<{ binding: string; queue: string }> };
     };
     const apiPackage = JSON.parse(
       readFileSync(new URL('../../apps/api/package.json', import.meta.url), 'utf8'),
@@ -132,18 +132,9 @@ describe('Apple identity-token verification (B1-2B)', () => {
     );
 
     expect(iosProject).toContain(`PRODUCT_BUNDLE_IDENTIFIER = ${IOS_BUNDLE_ID};`);
-    expect(wranglerConfig.name).toBe('ember-cloud-api-staging');
-    expect(wranglerConfig.vars.EMBER_ENV).toBe('staging');
-    expect(wranglerConfig.hyperdrive).toHaveLength(1);
-    expect(wranglerConfig.hyperdrive[0]?.binding).toBe('HYPERDRIVE');
-    expect(wranglerConfig.hyperdrive[0]?.id).toMatch(
-      /^(REPLACE_WITH_STAGING_API_HYPERDRIVE_ID|[a-f0-9]{32})$/i,
-    );
-    expect(wranglerConfig.hyperdrive[0]?.id).not.toBe('a331dbebe08c4f4e9ec7eac2d2baf5a3');
-    expect(wranglerConfig.queues.producers).toEqual([
-      { binding: 'TURN_DISPATCH_QUEUE', queue: 'ember-staging-assistant-turns' },
-    ]);
-    expect(apiPackage.scripts['deploy:worker']).toContain('--config wrangler.staging.jsonc');
+    expect(wranglerConfig.name).toBe('ember-v2-staging');
+    expect(wranglerConfig.vars.EMBER_ENV).toBe('v2-staging');
+    expect(apiPackage.scripts['deploy:worker']).toContain('--config wrangler.v2-staging.jsonc');
     expect(wranglerConfig.vars.EMBER_APPLE_BUNDLE_ID).toBe(IOS_BUNDLE_ID);
     expect(devVarsExample).toContain(`EMBER_APPLE_BUNDLE_ID=${IOS_BUNDLE_ID}`);
 

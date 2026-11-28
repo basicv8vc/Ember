@@ -50,6 +50,7 @@ describe('V2 staging smoke verifier', () => {
     const result = await runV2StagingSmoke({
       v2BaseUrl: 'https://v2.test',
       v1BaseUrl: 'https://v1.test',
+      checkV1: true,
       fetchImpl,
     });
 

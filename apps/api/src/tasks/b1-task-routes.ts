@@ -25,7 +25,28 @@ import {
   unexpectedErrorCategory,
 } from '../http/error-mapping.js';
 import type { Logger } from '../logger.js';
-import { parseAfterCursor } from './routes.js';
+
+const CURSOR_PATTERN = /^\d{1,15}$/;
+
+type CursorResult = { readonly ok: true; readonly after: number } | { readonly ok: false };
+
+function parseAfterCursor(raw: string | undefined): CursorResult {
+  if (raw === undefined) {
+    return { ok: true, after: 0 };
+  }
+
+  if (!CURSOR_PATTERN.test(raw)) {
+    return { ok: false };
+  }
+
+  const after = Number(raw);
+
+  if (!Number.isSafeInteger(after)) {
+    return { ok: false };
+  }
+
+  return { ok: true, after };
+}
 
 export const B1_TASK_LIST_MIN_LIMIT = 1;
 export const B1_TASK_LIST_MAX_LIMIT = 50;

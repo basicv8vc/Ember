@@ -7,9 +7,7 @@
     "paths": {
       "@ember/contracts": ["../../packages/contracts/src/index.ts"],
       "@ember/domain": ["../../packages/domain/src/index.ts"],
-      "@ember/execution": ["../../packages/execution/src/index.ts"],
-      "@ember/model-gateway": ["../../packages/model-gateway/src/index.ts"],
-      "@ember/postgres": ["../../packages/postgres/src/index.ts"]
+      "@ember/model-gateway": ["../../packages/model-gateway/src/index.ts"]
     }
   },
   "include": ["src/**/*.ts"]

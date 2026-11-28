@@ -23,7 +23,7 @@ async function fetchJson(fetchImpl, url, init = {}) {
 export async function runV2StagingSmoke({
   v2BaseUrl = DEFAULT_V2_STAGING_URL,
   v1BaseUrl = DEFAULT_V1_API_URL,
-  checkV1 = true,
+  checkV1 = false,
   fetchImpl = fetch,
 } = {}) {
   const checks = [];

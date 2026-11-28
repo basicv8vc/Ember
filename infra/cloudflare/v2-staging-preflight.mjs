@@ -170,7 +170,7 @@ function parseBoundedPositiveInt(raw, name, max, errors) {
  */
 export function validateV2StagingConfig({
   v2Config,
-  v1Configs,
+  v1Configs = [],
   migrationExists = true,
   requireProvisioned = false,
   allowRealLlmCanary = false,
@@ -561,19 +561,12 @@ async function main() {
   }
 
   const v2Path = resolve(repoRoot, 'apps/api/wrangler.v2-staging.jsonc');
-  const v1Paths = [
-    resolve(repoRoot, 'apps/api/wrangler.staging.jsonc'),
-    resolve(repoRoot, 'apps/cloud-async-runtime/wrangler.staging.jsonc'),
-  ];
   const migrationPath = resolve(
     repoRoot,
     'packages/runtime-v2/migrations/0001_v2_recovery_registry.sql',
   );
 
-  const [v2Source, ...v1Sources] = await Promise.all([
-    readFile(v2Path, 'utf8'),
-    ...v1Paths.map((p) => readFile(p, 'utf8')),
-  ]);
+  const v2Source = await readFile(v2Path, 'utf8');
 
   const v2Config = parseJsonc(v2Source);
   if (modelModeReal) {
@@ -593,7 +586,7 @@ async function main() {
 
   const result = validateV2StagingConfig({
     v2Config,
-    v1Configs: v1Sources.map(parseJsonc),
+    v1Configs: [],
     migrationExists: existsSync(migrationPath),
     requireProvisioned,
     allowRealLlmCanary,

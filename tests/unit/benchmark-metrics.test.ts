@@ -6,7 +6,6 @@ import {
 } from '../../apps/benchmark/src/metrics.js';
 import { generateMarkdownReport } from '../../apps/benchmark/src/report.js';
 import { sanitizeReportConfig } from '../../apps/benchmark/src/evidence.js';
-import { runBenchmark } from '../../apps/benchmark/src/runner.js';
 import { TelemetryCollector } from '../../apps/benchmark/src/telemetry.js';
 import type { BenchmarkResult } from '../../apps/benchmark/src/types.js';
 
@@ -228,28 +227,6 @@ describe('Benchmark Metrics & Math (Unit)', () => {
     expect(safe.databaseUrl).toBe('[REDACTED]');
     expect(safe.apiUrl).toBe('[REDACTED]');
     expect(raw.databaseUrl).toContain('supersecret');
-  });
-
-  it('runner rejects invalid benchmark counts before allocating resources', async () => {
-    await expect(runBenchmark({ agents: -1, enableLocalLoad: true })).rejects.toThrow(
-      /invalid agents/,
-    );
-    await expect(runBenchmark({ concurrency: 101, enableLocalLoad: true })).rejects.toThrow(
-      /invalid concurrency/,
-    );
-    await expect(runBenchmark({ warmup: -1, enableLocalLoad: true })).rejects.toThrow(
-      /invalid warmup/,
-    );
-  });
-
-  it('runner enforces safety guard when heavy load is requested without explicit enablement', async () => {
-    await expect(
-      runBenchmark({
-        agents: 100,
-        concurrency: 50,
-        enableLocalLoad: false,
-      }),
-    ).rejects.toThrow(/Safety guard/);
   });
 
   it('TelemetryCollector defaults to sampling enabled, but skips query and retains 0 samples when disablePostgresSampling is true', async () => {

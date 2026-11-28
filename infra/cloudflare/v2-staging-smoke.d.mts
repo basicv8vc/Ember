@@ -20,3 +20,20 @@ export function runV2StagingSmoke(options?: {
   checkV1?: boolean;
   fetchImpl?: typeof fetch;
 }): Promise<V2StagingSmokeResult>;
+
+export function parseV2StagingSmokeArgs(
+  args?: readonly string[],
+  env?: Readonly<Record<string, string | undefined>>,
+): {
+  readonly v2BaseUrl: string;
+  readonly v1BaseUrl: string;
+  readonly checkV1: boolean;
+};
+
+export function runV2StagingSmokeCli(options?: {
+  args?: readonly string[];
+  env?: Readonly<Record<string, string | undefined>>;
+  fetchImpl?: typeof fetch;
+  stdout?: (msg: string) => void;
+  stderr?: (msg: string) => void;
+}): Promise<{ readonly exitCode: number; readonly result: V2StagingSmokeResult }>;

@@ -134,7 +134,7 @@ describe('Apple identity-token verification (B1-2B)', () => {
     expect(iosProject).toContain(`PRODUCT_BUNDLE_IDENTIFIER = ${IOS_BUNDLE_ID};`);
     expect(wranglerConfig.name).toBe('ember-v2-staging');
     expect(wranglerConfig.vars.EMBER_ENV).toBe('v2-staging');
-    expect(apiPackage.scripts['deploy:worker']).toContain('--config wrangler.v2-staging.jsonc');
+    expect(apiPackage.scripts['deploy:v2-staging']).toContain('--config wrangler.v2-staging.jsonc');
     expect(wranglerConfig.vars.EMBER_APPLE_BUNDLE_ID).toBe(IOS_BUNDLE_ID);
     expect(devVarsExample).toContain(`EMBER_APPLE_BUNDLE_ID=${IOS_BUNDLE_ID}`);
 

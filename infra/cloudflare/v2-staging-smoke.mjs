@@ -114,27 +114,42 @@ export async function runV2StagingSmoke({
   return { ok: errors.length === 0, checks, errors };
 }
 
-async function main() {
-  const args = process.argv.slice(2);
-  const skipV1 = args.includes('--skip-v1');
-  const v2BaseUrl = process.env.EMBER_V2_STAGING_URL ?? DEFAULT_V2_STAGING_URL;
-  const v1BaseUrl = process.env.EMBER_V1_API_URL ?? DEFAULT_V1_API_URL;
+export function parseV2StagingSmokeArgs(args = [], env = process.env) {
+  const checkV1 = args.includes('--check-v1') && !args.includes('--skip-v1');
+  const v2BaseUrl = env.EMBER_V2_STAGING_URL ?? DEFAULT_V2_STAGING_URL;
+  const v1BaseUrl = env.EMBER_V1_API_URL ?? DEFAULT_V1_API_URL;
+  return { v2BaseUrl, v1BaseUrl, checkV1 };
+}
 
-  const result = await runV2StagingSmoke({ v2BaseUrl, v1BaseUrl, checkV1: !skipV1 });
+export async function runV2StagingSmokeCli({
+  args = process.argv.slice(2),
+  env = process.env,
+  fetchImpl = fetch,
+  stdout = (msg) => process.stdout.write(msg),
+  stderr = (msg) => process.stderr.write(msg),
+} = {}) {
+  const { v2BaseUrl, v1BaseUrl, checkV1 } = parseV2StagingSmokeArgs(args, env);
+
+  const result = await runV2StagingSmoke({ v2BaseUrl, v1BaseUrl, checkV1, fetchImpl });
   for (const check of result.checks) {
     const latency = check.latencyMs == null ? '' : ` (${check.latencyMs}ms)`;
-    process.stdout.write(
-      `[${check.ok ? 'PASS' : 'FAIL'}] ${check.name}: HTTP ${check.status}${latency}\n`,
-    );
+    stdout(`[${check.ok ? 'PASS' : 'FAIL'}] ${check.name}: HTTP ${check.status}${latency}\n`);
   }
   if (!result.ok) {
     for (const error of result.errors) {
-      process.stderr.write(`[error] ${error}\n`);
+      stderr(`[error] ${error}\n`);
     }
-    process.exitCode = 1;
-    return;
+    return { exitCode: 1, result };
   }
-  process.stdout.write('EMBER_V2_STAGING_SMOKE_OK\n');
+  stdout('EMBER_V2_STAGING_SMOKE_OK\n');
+  return { exitCode: 0, result };
+}
+
+async function main() {
+  const { exitCode } = await runV2StagingSmokeCli();
+  if (exitCode !== 0) {
+    process.exitCode = exitCode;
+  }
 }
 
 const isEntrypoint =

@@ -6,8 +6,8 @@
   "scripts": {
     "build": "tsc -b tsconfig.build.json",
     "dev:worker": "wrangler dev --config wrangler.local-v2.jsonc",
-    "build:worker": "wrangler deploy --dry-run --config wrangler.v2-staging.jsonc",
-    "deploy:worker": "wrangler deploy --config wrangler.v2-staging.jsonc"
+    "build:v2-staging": "wrangler deploy --dry-run --config wrangler.v2-staging.jsonc",
+    "deploy:v2-staging": "node ../../infra/cloudflare/v2-staging-preflight.mjs --require-provisioned && wrangler deploy --config wrangler.v2-staging.jsonc"
   },
   "dependencies": {
     "@ember/contracts": "workspace:*",

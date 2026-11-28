@@ -21,6 +21,18 @@ export function hasR2PendingDeletesTableSync(sql: SqlStorageLike): boolean {
   );
 }
 
+/** Return `true` if `r2Key` currently has an outstanding entry in `v2_r2_pending_deletes`. */
+export function isPendingR2DeleteKeySync(sql: SqlStorageLike, r2Key: string): boolean {
+  if (!hasR2PendingDeletesTableSync(sql)) return false;
+  return (
+    sqlExecMaybe<{ readonly r2_key: string }>(
+      sql,
+      `SELECT r2_key FROM v2_r2_pending_deletes WHERE r2_key = ? LIMIT 1`,
+      r2Key,
+    ) !== null
+  );
+}
+
 /** Return the earliest scheduled retry timestamp across `v2_r2_pending_deletes`, or `null` if empty. */
 export function earliestPendingR2DeleteAtMsSync(sql: SqlStorageLike): number | null {
   if (!hasR2PendingDeletesTableSync(sql)) return null;

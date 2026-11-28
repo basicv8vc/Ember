@@ -28,7 +28,11 @@ import {
   type V2TaskArtifactDownloadDto,
   type V2TaskInputFileDto,
 } from '../contracts/task-artifacts.js';
-import { enqueuePendingR2DeletesSync, flushPendingR2Deletes } from './r2-delete-outbox.js';
+import {
+  enqueuePendingR2DeletesSync,
+  flushPendingR2Deletes,
+  isPendingR2DeleteKeySync,
+} from './r2-delete-outbox.js';
 import type { ResolvedMessageAttachment } from '../contracts/agent-head-rpc.js';
 import type { V2DispatchEnvelope } from '../recovery/envelope.js';
 import type { EventRuntimeCoordinatorPort } from '../recovery/ports.js';
@@ -158,6 +162,36 @@ function parseSafeTaskEventPayload(rawJson: string): Record<string, unknown> {
     // Fall back to empty allowlisted payload when an internal event has non-public keys.
   }
   return {};
+}
+
+interface PreparedOutputArtifact {
+  readonly artifactId: string;
+  readonly filename: string;
+  readonly mediaType: string;
+  readonly size: number;
+  readonly sha256: string;
+  readonly contentBase64: string;
+  readonly r2Key: string | null;
+}
+
+type StagedRunArtifactSnapshot = Pick<
+  V2TaskArtifactRow,
+  'id' | 'filename' | 'media_type' | 'size_bytes' | 'sha256' | 'content_b64' | 'r2_key'
+>;
+
+function matchesStagedOutputRow(
+  existing: StagedRunArtifactSnapshot,
+  item: PreparedOutputArtifact,
+): boolean {
+  return (
+    existing.id === item.artifactId &&
+    existing.filename === item.filename &&
+    existing.media_type === item.mediaType &&
+    existing.size_bytes === item.size &&
+    existing.sha256 === item.sha256 &&
+    existing.content_b64 === item.contentBase64 &&
+    existing.r2_key === item.r2Key
+  );
 }
 
 export type AgentHeadTaskArtifactServiceDeps = CoverageHelperDeps & {
@@ -386,10 +420,50 @@ export class AgentHeadTaskArtifactService {
       normalizedB64 = parsed.data.contentBase64.replace(/\s+/g, '');
     }
 
-    const now = this.deps.nowMs();
-    const expiryCutoffMs = now - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+    const coverage = await prepareObligationCoverageAsync(this.deps, {
+      tenantId: cmd.tenantId,
+      agentId: cmd.agentId,
+      shouldCoverSync: () => {
+        const nowPre = this.deps.nowMs();
+        const cutoffPre = nowPre - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+        return (
+          sqlExecMaybe<{ readonly hit: number }>(
+            this.sql,
+            `SELECT 1 AS hit
+               FROM v2_task_artifacts
+              WHERE tenant_id = ? AND principal_id = ? AND task_id IS NULL
+                AND created_at_ms <= ? AND r2_key IS NOT NULL
+              LIMIT 1`,
+            cmd.tenantId,
+            cmd.principalId,
+            cutoffPre,
+          ) !== null
+        );
+      },
+    });
 
     const tx = this.deps.storage.transactionSync(() => {
+      const now = this.deps.nowMs();
+      const expiryCutoffMs = now - PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+
+      if (r2Key !== null && isPendingR2DeleteKeySync(this.sql, r2Key)) {
+        throw new DomainError(
+          'IDEMPOTENCY_CONFLICT',
+          'cannot reuse staged upload object key while deletion is pending',
+        );
+      }
+      if ('r2Key' in cmd) {
+        const conflict = sqlExecMaybe<{ readonly id: string }>(
+          this.sql,
+          `SELECT id FROM v2_task_artifacts WHERE id = ? OR r2_key = ? LIMIT 1`,
+          uploadId,
+          r2Key,
+        );
+        if (conflict !== null) {
+          throw new DomainError('IDEMPOTENCY_CONFLICT', 'staged upload id or r2Key already exists');
+        }
+      }
+
       // Lazily prune expired unbound uploads before enforcing quota; never touch bound inputs.
       const expiredRows = sqlExecAll<{ readonly r2_key: string }>(
         this.sql,
@@ -401,6 +475,15 @@ export class AgentHeadTaskArtifactService {
         cmd.principalId,
         expiryCutoffMs,
       );
+      if (expiredRows.length > 0) {
+        confirmOrVerifyCoverageInTxSync(
+          this.deps,
+          coverage,
+          now + V2_TIMING_LIMITS.d1RecoveryGraceMs,
+          now,
+          'expired upload cleanup recovery coverage unavailable',
+        );
+      }
       enqueuePendingR2DeletesSync(
         this.sql,
         expiredRows.map((row) => row.r2_key),
@@ -1112,15 +1195,8 @@ export class AgentHeadTaskArtifactService {
       throw new DomainError('POLICY_DENIED', 'too many output artifacts');
     }
 
-    const prepared: Array<{
-      readonly artifactId: string;
-      readonly filename: string;
-      readonly mediaType: string;
-      readonly size: number;
-      readonly sha256: string;
-      readonly contentBase64: string;
-      readonly r2Key: string | null;
-    }> = [];
+    const prepared: PreparedOutputArtifact[] = [];
+    const seenArtifactIds = new Set<string>();
     let totalOutputBytes = 0;
 
     for (const output of cmd.outputs) {
@@ -1139,6 +1215,10 @@ export class AgentHeadTaskArtifactService {
         if (!parsed.success) {
           throw new DomainError('POLICY_DENIED', 'invalid output artifact metadata');
         }
+        if (seenArtifactIds.has(parsed.data.id)) {
+          throw new DomainError('INVALID_ARGUMENT', 'duplicate output artifactId');
+        }
+        seenArtifactIds.add(parsed.data.id);
         const expectedKey = v2ArtifactR2Key(cmd.tenantId, cmd.taskId, cmd.runId, parsed.data.id);
         if (parsed.data.r2Key !== expectedKey) {
           throw new DomainError('POLICY_DENIED', 'invalid output artifact object key');
@@ -1190,7 +1270,7 @@ export class AgentHeadTaskArtifactService {
           executorKind: 'queue_worker',
         })
       ) {
-        return { accepted: false, artifactIds: [], replacedR2Keys: [] as string[] };
+        return { accepted: false, artifactIds: [] as string[], now, hasPendingDeletes: false };
       }
 
       // Enforce aggregate per-task file budget (bound inputs + staged outputs for this run).
@@ -1232,33 +1312,96 @@ export class AgentHeadTaskArtifactService {
         keyParts[0] ??
         cmd.principalId;
 
-      // Replace any prior uncommitted staging rows for this specific run (idempotent re-stage).
-      // Rows stay `committed = 0` until `commitDurableResult` atomically commits this winning run.
-      const replacedR2Rows = sqlExecAll<{ readonly r2_key: string }>(
+      for (const item of prepared) {
+        if (item.r2Key !== null && isPendingR2DeleteKeySync(this.sql, item.r2Key)) {
+          throw new DomainError(
+            'IDEMPOTENCY_CONFLICT',
+            'cannot reuse retired output artifact r2Key while deletion is pending',
+          );
+        }
+      }
+
+      const existingRows = sqlExecAll<StagedRunArtifactSnapshot>(
         this.sql,
-        `SELECT r2_key
+        `SELECT id, filename, media_type, size_bytes, sha256, content_b64, r2_key
            FROM v2_task_artifacts
           WHERE tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0
-            AND r2_key IS NOT NULL`,
-        cmd.tenantId,
-        task.id,
-        run.id,
-      );
-      enqueuePendingR2DeletesSync(
-        this.sql,
-        replacedR2Rows.map((row) => row.r2_key),
-        now,
-      );
-      this.sql.exec(
-        `DELETE FROM v2_task_artifacts
-          WHERE tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
+          ORDER BY rowid ASC`,
         cmd.tenantId,
         task.id,
         run.id,
       );
 
+      // Exact replay of the currently staged output set is an idempotent no-op.
+      if (
+        existingRows.length === prepared.length &&
+        existingRows.every((row, idx) => matchesStagedOutputRow(row, prepared[idx]!))
+      ) {
+        return {
+          accepted: true,
+          artifactIds: existingRows.map((row) => row.id),
+          now,
+          hasPendingDeletes: false,
+        };
+      }
+
+      const existingById = new Map(existingRows.map((row) => [row.id, row]));
+      for (const item of prepared) {
+        const existingSameRun = existingById.get(item.artifactId);
+        if (existingSameRun !== undefined) {
+          if (!matchesStagedOutputRow(existingSameRun, item)) {
+            throw new DomainError(
+              'IDEMPOTENCY_CONFLICT',
+              'output artifactId reused with different metadata',
+            );
+          }
+          continue;
+        }
+        const conflict = sqlExecMaybe<{ readonly id: string }>(
+          this.sql,
+          item.r2Key !== null
+            ? `SELECT id FROM v2_task_artifacts WHERE id = ? OR r2_key = ? LIMIT 1`
+            : `SELECT id FROM v2_task_artifacts WHERE id = ? LIMIT 1`,
+          ...(item.r2Key !== null ? [item.artifactId, item.r2Key] : [item.artifactId]),
+        );
+        if (conflict !== null) {
+          throw new DomainError(
+            'IDEMPOTENCY_CONFLICT',
+            'output artifactId or r2Key already exists',
+          );
+        }
+      }
+
+      // Retire only uncommitted R2 keys not retained by the replacement set.
+      // Rows stay `committed = 0` until `commitDurableResult` atomically commits this winning run.
+      const nextArtifactIds = new Set(prepared.map((item) => item.artifactId));
+      const nextR2Keys = new Set(
+        prepared.map((item) => item.r2Key).filter((key): key is string => key !== null),
+      );
+      const keysToDelete = existingRows
+        .map((row) => row.r2_key)
+        .filter((key): key is string => key !== null && !nextR2Keys.has(key));
+      enqueuePendingR2DeletesSync(this.sql, keysToDelete, now);
+
+      for (const row of existingRows) {
+        if (!nextArtifactIds.has(row.id)) {
+          this.sql.exec(
+            `DELETE FROM v2_task_artifacts
+              WHERE id = ? AND tenant_id = ? AND task_id = ? AND created_by = 'run' AND run_id = ? AND committed = 0`,
+            row.id,
+            cmd.tenantId,
+            task.id,
+            run.id,
+          );
+        }
+      }
+
       const artifactIds: string[] = [];
       for (const item of prepared) {
+        artifactIds.push(item.artifactId);
+        if (existingById.has(item.artifactId)) {
+          continue;
+        }
         this.sql.exec(
           `INSERT INTO v2_task_artifacts (
             id, tenant_id, principal_id, task_id, run_id, committed, created_by,
@@ -1277,7 +1420,6 @@ export class AgentHeadTaskArtifactService {
           item.r2Key,
           now,
         );
-        artifactIds.push(item.artifactId);
         appendTaskEventSync(this.sql, {
           id: this.deps.newId(),
           taskId: task.id,
@@ -1298,7 +1440,7 @@ export class AgentHeadTaskArtifactService {
         accepted: true,
         artifactIds,
         now,
-        hasPendingDeletes: replacedR2Rows.length > 0,
+        hasPendingDeletes: keysToDelete.length > 0,
       };
     });
 

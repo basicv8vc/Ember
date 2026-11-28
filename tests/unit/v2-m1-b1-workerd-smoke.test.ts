@@ -51,10 +51,8 @@ function transpileRuntimeV2Modules(): Record<string, { type: 'esm'; contents: st
 }
 
 async function loadMiniflareConstructor(): Promise<MiniflareConstructor> {
-  const cloudRuntimeReq = createRequire(
-    resolve(REPO_ROOT, 'apps/cloud-async-runtime/package.json'),
-  );
-  const wranglerPkgPath = cloudRuntimeReq.resolve('wrangler/package.json');
+  const apiReq = createRequire(resolve(REPO_ROOT, 'apps/api/package.json'));
+  const wranglerPkgPath = apiReq.resolve('wrangler/package.json');
   const mfReq = createRequire(wranglerPkgPath);
   const mfMod = (await import(pathToFileURL(mfReq.resolve('miniflare')).href)) as {
     Miniflare: MiniflareConstructor;

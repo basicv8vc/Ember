@@ -5,22 +5,12 @@
     "types": ["node"],
     "baseUrl": ".",
     "paths": {
-      "@ember/connectors": ["./packages/connectors/src/index.ts"],
       "@ember/contracts": ["./packages/contracts/src/index.ts"],
-      "@ember/credentials": ["./packages/credentials/src/index.ts"],
       "@ember/domain": ["./packages/domain/src/index.ts"],
-      "@ember/execution": ["./packages/execution/src/index.ts"],
       "@ember/model-gateway": ["./packages/model-gateway/src/index.ts"],
-      "@ember/postgres": ["./packages/postgres/src/index.ts"],
-      "@ember/postgres/b1-worker": ["./packages/postgres/src/b1-worker.ts"],
-      "@ember/postgres/b2-worker": ["./packages/postgres/src/b2-worker.ts"],
-      "@ember/postgres/b3-worker": ["./packages/postgres/src/b3-worker.ts"],
       "@ember/runtime-v2": ["./packages/runtime-v2/src/index.ts"],
       "@ember/runtime-v2/global-budget-do": ["./packages/runtime-v2/src/global-budget/worker.ts"],
-      "@ember/sandbox-daytona": ["./packages/sandbox-daytona/src/index.ts"],
-      "@ember/telemetry": ["./packages/telemetry/src/index.ts"],
-      "@ember/worker/b1/model-turn-responder": ["./apps/worker/src/b1/model-turn-responder.ts"],
-      "@ember/worker/b3/python-agent-executor": ["./apps/worker/src/b3/python-agent-executor.ts"]
+      "@ember/sandbox-daytona": ["./packages/sandbox-daytona/src/index.ts"]
     }
   },
   "include": [

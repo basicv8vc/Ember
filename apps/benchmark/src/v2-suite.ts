@@ -6,7 +6,6 @@ import { runModelRoutingMatrix } from './model-routing-matrix.js';
 import { runRttSimulation } from './rtt-simulation.js';
 import { runSqliteProbe } from './sqlite-probe.js';
 import { runTimingMethodology } from './timing-methodology.js';
-import { runV1BaselineBenchmark } from './v1-baseline.js';
 import {
   runV2M1CostReestimation,
   runV2M1FullRuntimeBenchmark,
@@ -22,11 +21,9 @@ import type {
   RttSimulationReport,
   SqliteProbeReport,
   TimingMethodologyReport,
-  V1BaselineReport,
 } from './v2-types.js';
 
 export type V2BenchmarkSuiteName =
-  | 'v1-baseline'
   | 'sqlite-probe'
   | 'timing'
   | 'rtt-sim'
@@ -60,7 +57,6 @@ export interface V2SuiteBundleResult {
   readonly gitSha: string;
   readonly timestamp: string;
   readonly suite: V2BenchmarkSuiteName;
-  readonly v1Baseline?: V1BaselineReport;
   readonly sqliteProbe?: SqliteProbeReport;
   readonly timingMethodology?: TimingMethodologyReport;
   readonly rttSimulation?: RttSimulationReport;
@@ -93,7 +89,6 @@ export async function runV2BenchmarkSuite(
     >,
   ): boolean => options.suite === 'all' || options.suite === name;
 
-  let v1Baseline: V1BaselineReport | undefined;
   let sqliteProbe: SqliteProbeReport | undefined;
   let timingMethodology: TimingMethodologyReport | undefined;
   let rttSimulation: RttSimulationReport | undefined;
@@ -103,27 +98,6 @@ export async function runV2BenchmarkSuite(
   let m1HarnessSmoke: V2M1HarnessSmokeBenchmarkReport | undefined;
   let m1CostReestimation: V2M1CostReestimationReport | undefined;
   let m1FullRuntime: V2M1FullRuntimeBenchmarkReport | undefined;
-
-  if (shouldRunM0('v1-baseline')) {
-    v1Baseline = await runV1BaselineBenchmark({
-      ...(options.databaseUrl !== undefined ? { databaseUrl: options.databaseUrl } : {}),
-      ...(options.enableLocalLoad !== undefined
-        ? { enableLocalLoad: options.enableLocalLoad }
-        : {}),
-      ...(options.concurrencyLevels !== undefined
-        ? { concurrencyLevels: options.concurrencyLevels }
-        : {}),
-      ...(options.requestsPerLevel !== undefined
-        ? { requestsPerLevel: options.requestsPerLevel }
-        : {}),
-      log,
-    });
-    writeFileSync(
-      path.join(outDir, 'v1-baseline.json'),
-      JSON.stringify(v1Baseline, null, 2),
-      'utf8',
-    );
-  }
 
   if (shouldRunM0('sqlite-probe')) {
     sqliteProbe = await runSqliteProbe({
@@ -275,7 +249,6 @@ export async function runV2BenchmarkSuite(
     gitSha: resolveBenchmarkGitSha(),
     timestamp: new Date().toISOString(),
     suite: options.suite,
-    ...(v1Baseline !== undefined ? { v1Baseline } : {}),
     ...(sqliteProbe !== undefined ? { sqliteProbe } : {}),
     ...(timingMethodology !== undefined ? { timingMethodology } : {}),
     ...(rttSimulation !== undefined ? { rttSimulation } : {}),

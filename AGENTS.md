@@ -7,7 +7,7 @@ This file is the single source of repository-wide instructions for coding agents
 - The current product milestone and six-agent ownership are defined in [Product Alpha Roadmap](docs/product/PRODUCT-ALPHA-ROADMAP.md). Read it on startup/resume, identify your assigned workstream, and continue authorized work from current repository state.
 - Ship the smallest useful, reliable product increment quickly. Avoid overengineering, speculative features, broad refactors, and unnecessary abstractions.
 - Follow the assigned task scope and the current accepted architecture. For V2, read [ADR-0006](docs/adr/0006-experience-first-device-powered-runtime-v2.md) and the relevant contracts before changing runtime behavior. Do not use the historical README as the current roadmap.
-- Preserve V1 behavior unless the task explicitly changes it. Keep cloud-authoritative task identity, leases, fencing, idempotency, cancellation, durability, tenant isolation, and budget safety intact.
+- V1 is retired (no V1 runtime or V1 data compatibility remains in the repository). V2 is the sole active runtime; keep cloud-authoritative task identity, leases, fencing, idempotency, cancellation, durability, tenant isolation, and budget safety intact.
 
 ## Autonomous development & merge policy
 
@@ -20,11 +20,11 @@ Ember uses milestone-driven autonomous development. You are a long-lived enginee
 
 ### Risk-based merge authorization
 
-| Risk | Examples | Merge gate |
-| --- | --- | --- |
-| Low | Documentation, copy, isolated presentation-only UI changes, localized low-risk fixes | Agent may merge after focused validation |
-| Medium | Ordinary product features, compatible API implementation, module-local changes with broader effects | One independent peer review and relevant validation |
-| High | Architecture, schema/migrations, budget, authorization/privacy, core runtime, persistence/recovery, lease/fencing or shared contract changes | Explicit CTO approval and the applicable targeted safety gates |
+| Risk   | Examples                                                                                                                                     | Merge gate                                                     |
+| ------ | -------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| Low    | Documentation, copy, isolated presentation-only UI changes, localized low-risk fixes                                                         | Agent may merge after focused validation                       |
+| Medium | Ordinary product features, compatible API implementation, module-local changes with broader effects                                          | One independent peer review and relevant validation            |
+| High   | Architecture, schema/migrations, budget, authorization/privacy, core runtime, persistence/recovery, lease/fencing or shared contract changes | Explicit CTO approval and the applicable targeted safety gates |
 
 - This policy grants standing merge authorization for low-risk work and reviewed medium-risk work within the approved milestone. Use the highest applicable risk level; if uncertain, escalate. Cosmetic UI changes that affect authentication, destructive actions, or security are not low-risk.
 - Do not self-approve medium-risk work. Resolve blocking findings before merging. A specific conditional CTO merge approval remains valid once its named gates are met; no redundant approval is needed.
@@ -47,11 +47,11 @@ Avoid overengineering, repeated testing, unnecessary documentation and unauthori
 
 Development velocity is a first-class engineering objective.
 
-| Level | When | Required validation |
-| --- | --- | --- |
-| L1 | Daily development / fixes | Focused tests for changed behavior and necessary compilation/typechecking |
-| L2 | PR merge readiness | Relevant module regression tests, affected integration paths, required build/static checks |
-| L3 | Milestone acceptance | Independent full regression, end-to-end acceptance, and relevant performance/device evidence |
+| Level | When                      | Required validation                                                                          |
+| ----- | ------------------------- | -------------------------------------------------------------------------------------------- |
+| L1    | Daily development / fixes | Focused tests for changed behavior and necessary compilation/typechecking                    |
+| L2    | PR merge readiness        | Relevant module regression tests, affected integration paths, required build/static checks   |
+| L3    | Milestone acceptance      | Independent full regression, end-to-end acceptance, and relevant performance/device evidence |
 
 - Do not run the full repository test suite by default, including after every fix or rebase. Expand validation only when the change's blast radius or an explicit acceptance gate justifies it.
 - Reuse valid test evidence for unchanged code and dependencies. After rebase, test affected conflicts and dependency changes rather than repeating every previous test.

@@ -19,10 +19,26 @@ function loadRealConfigs() {
     readFileSync(resolve(REPO_ROOT, 'apps/api/wrangler.v2-staging.jsonc'), 'utf8'),
   );
   const v1Configs = [
-    parseJsonc(readFileSync(resolve(REPO_ROOT, 'apps/api/wrangler.staging.jsonc'), 'utf8')),
-    parseJsonc(
-      readFileSync(resolve(REPO_ROOT, 'apps/cloud-async-runtime/wrangler.staging.jsonc'), 'utf8'),
-    ),
+    {
+      name: 'ember-cloud-api-staging',
+      routes: [{ pattern: 'ember-api.slowfast.dev', custom_domain: true }],
+      hyperdrive: [{ binding: 'HYPERDRIVE', id: 'f7da9cff26b843fda8187764f9b81b25' }],
+      r2_buckets: [{ binding: 'EMBER_BLOBS', bucket_name: 'ember-blobs-staging' }],
+      queues: {
+        producers: [{ binding: 'TURN_DISPATCH_QUEUE', queue: 'ember-staging-assistant-turns' }],
+      },
+    },
+    {
+      name: 'ember-assistant-turn-runtime-staging',
+      hyperdrive: [{ binding: 'HYPERDRIVE', id: 'f7da9cff26b843fda8187764f9b81b25' }],
+      r2_buckets: [{ binding: 'EMBER_BLOBS', bucket_name: 'ember-blobs-staging' }],
+      queues: {
+        producers: [
+          { binding: 'TURN_DISPATCH_QUEUE', queue: 'ember-staging-assistant-turns' },
+          { binding: 'AGENT_TASK_QUEUE', queue: 'ember-staging-agent-tasks' },
+        ],
+      },
+    },
   ];
   const migrationExists = existsSync(
     resolve(REPO_ROOT, 'packages/runtime-v2/migrations/0001_v2_recovery_registry.sql'),

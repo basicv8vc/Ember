@@ -343,8 +343,13 @@ export function validateV2StagingConfig({
   if ((v2Config.hyperdrive ?? []).length > 0) {
     errors.push('V2 staging must not bind V1 Neon Hyperdrive');
   }
-  if ((v2Config.r2_buckets ?? []).length > 0) {
-    errors.push('V2 staging must not bind V1 R2 buckets');
+  const v2R2Buckets = v2Config.r2_buckets ?? [];
+  for (const bucket of v2R2Buckets) {
+    if (bucket.binding !== 'EMBER_BLOBS' || bucket.bucket_name !== 'ember-v2-staging-blobs') {
+      errors.push(
+        `V2 staging R2 bucket must use isolated binding EMBER_BLOBS -> ember-v2-staging-blobs (got ${JSON.stringify(bucket)})`,
+      );
+    }
   }
 
   // Durable Objects & SQLite migrations

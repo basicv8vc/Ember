@@ -35,6 +35,12 @@ import {
 } from './budget.js';
 import { readPersonalMemoriesForTurnSync } from './memory-service.js';
 import {
+  clearRetiredRunArtifactsForTaskSync,
+  earliestPendingR2DeleteAtMsSync,
+  enqueuePendingR2DeletesSync,
+  flushPendingR2Deletes,
+} from './r2-delete-outbox.js';
+import {
   assertHeadScopeSync,
   earliestBusinessAlarmAtMsSync,
   getHeadMetaSync,
@@ -100,6 +106,7 @@ export interface RecoveryCoordinatorHooks {
   readonly syncPlatformAlarm?: (
     targetAlarmAtMs: number | null,
     nowMs: number,
+    options?: { readonly forceRearmConsumed?: boolean },
   ) => Promise<boolean | void>;
 
   /** Maps to `relayDueBudgetSyncBatch`. */
@@ -115,6 +122,7 @@ export interface RecoveryServiceDeps {
   readonly nowMs: () => number;
   readonly idFactory?: () => Id;
   readonly localCeilings?: LocalBudgetCeilings;
+  readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void>;
 }
 
 /**
@@ -127,6 +135,22 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
 
   constructor(private readonly deps: RecoveryServiceDeps) {
     this.newId = deps.idFactory ?? (() => globalThis.crypto.randomUUID());
+  }
+
+  flushDeletedR2Keys(
+    nowMs = this.deps.nowMs(),
+    options?: { readonly skipAlarmSync?: boolean },
+  ): Promise<number> {
+    return flushPendingR2Deletes({
+      storage: this.deps.storage,
+      nowMs,
+      recomputeAlarmSync: (ts) => this.deps.eventCoordinator.recomputeAlarmSync(ts),
+      ...(this.deps.hooks.syncPlatformAlarm === undefined
+        ? {}
+        : { syncPlatformAlarm: this.deps.hooks.syncPlatformAlarm }),
+      ...(options?.skipAlarmSync === undefined ? {} : { skipAlarmSync: options.skipAlarmSync }),
+      ...(this.deps.deleteR2Keys === undefined ? {} : { deleteR2Keys: this.deps.deleteR2Keys }),
+    });
   }
 
   earliestRequiredDiscoveryAtMsSync(_nowMs: number): number | null {
@@ -144,6 +168,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
          FROM v2_schedules
         WHERE status = 'active'`,
     ).m;
+    const r2DeleteDue = earliestPendingR2DeleteAtMsSync(sql);
 
     // An accepted turn or active task run can create immediate budget_sync work at any
     // time before its lease expires. The lease alarm is not its discovery bound.
@@ -156,7 +181,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
           WHERE t.execution_target = 'cloud' AND t.status = 'running' AND r.status = 'running'
        )`,
     ).m;
-    const candidates = [bizDue, outboxDue, schedDue, activeSince].filter(
+    const candidates = [bizDue, outboxDue, schedDue, r2DeleteDue, activeSince].filter(
       (v): v is number => v !== null,
     );
     if (candidates.length === 0) {
@@ -645,7 +670,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.purgeUncommittedTaskOutputsSync(task.id);
+      this.purgeUncommittedTaskOutputsSync(task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
@@ -691,7 +716,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         task.id,
       );
       this.recordAndDeliverProactiveFailureSync(task, 'model_timeout', nowMs);
-      this.purgeUncommittedTaskOutputsSync(task.id);
+      this.purgeUncommittedTaskOutputsSync(task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('task', task.id, nowMs);
       this.deps.eventCoordinator.cancelEntityOutboxSync('handoff', task.id, nowMs);
       return;
@@ -721,7 +746,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
         nowMs,
         task.id,
       );
-      this.purgeUncommittedTaskOutputsSync(task.id);
+      this.purgeUncommittedTaskOutputsSync(task.id, nowMs);
 
       const hasHandle = task.provider_job_handle !== null && task.provider_job_handle.length > 0;
       const canRetry = task.attempt_count < task.max_attempts && (!anyUncertain || hasHandle);
@@ -950,13 +975,26 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
     );
   }
 
-  private purgeUncommittedTaskOutputsSync(taskId: string): void {
+  private purgeUncommittedTaskOutputsSync(taskId: string, nowMs: number): void {
     if (!this.hasTaskArtifactsTableSync()) return;
+    const rows = sqlExecAll<{ readonly r2_key: string }>(
+      this.deps.storage.sql,
+      `SELECT r2_key
+         FROM v2_task_artifacts
+        WHERE task_id = ? AND created_by = 'run' AND committed = 0 AND r2_key IS NOT NULL`,
+      taskId,
+    );
+    enqueuePendingR2DeletesSync(
+      this.deps.storage.sql,
+      rows.map((row) => row.r2_key),
+      nowMs,
+    );
     this.deps.storage.sql.exec(
       `DELETE FROM v2_task_artifacts
         WHERE task_id = ? AND created_by = 'run' AND committed = 0`,
       taskId,
     );
+    clearRetiredRunArtifactsForTaskSync(this.deps.storage.sql, taskId);
   }
 
   materializeScheduleOccurrenceSync(
@@ -1683,7 +1721,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
             run.id,
           );
         }
-        this.purgeUncommittedTaskOutputsSync(task.id);
+        this.purgeUncommittedTaskOutputsSync(task.id, nowMs);
       }
 
       appendTaskEventSync(this.deps.storage.sql, {
@@ -1714,6 +1752,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
       recomputeAlarmSync: (ts) =>
         this.deps.storage.transactionSync(() => this.deps.eventCoordinator.recomputeAlarmSync(ts)),
     });
+    await this.flushDeletedR2Keys(committed.nowMs);
     return { accepted: committed.accepted };
   }
 

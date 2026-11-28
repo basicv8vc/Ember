@@ -1,6 +1,10 @@
-import { B1ConversationPageSchema, B1SendMessageReceiptSchema, IdSchema } from '@ember/contracts';
+import {
+  B1ConversationPageSchema,
+  B1SendMessageReceiptSchema,
+  IdSchema,
+  type B1ConversationRepository,
+} from '@ember/contracts';
 import { isDomainError } from '@ember/domain';
-import type { B1ConversationRepository } from '@ember/postgres';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireSessionAuth } from '../auth/session-authenticator.js';

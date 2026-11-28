@@ -2177,13 +2177,18 @@ describe('V2 real model runtime & sandbox capability decoupling', () => {
          ('inc-unlinked', 'tenant', ?, '2026-11-20', 'day_ceiling_exceeded', NULL, NULL, NULL, 500, 500, 100, 400, 900)`,
     ).run(TENANT_A, TENANT_A, TENANT_A, TENANT_A);
 
-    const upgraded = applyAgentHeadMigrations(storage, allMigrations, 4_000);
+    const v1To9 = allMigrations.filter((m) => m.version <= 9);
+    const upgraded = applyAgentHeadMigrations(storage, v1To9, 4_000);
     expect(upgraded.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
     expect(upgraded.appliedVersions).toEqual([9]);
 
+    const upgradedV10 = applyAgentHeadMigrations(storage, allMigrations, 4_500);
+    expect(upgradedV10.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(upgradedV10.appliedVersions).toEqual([10]);
+
     const rerun = applyAgentHeadMigrations(storage, allMigrations, 5_000);
     expect(rerun.appliedVersions).toEqual([]);
-    expect(rerun.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    expect(rerun.alreadyAppliedVersions).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
 
     const spendDdl = db
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'agent_spend_days'")

@@ -99,6 +99,7 @@ export type AgentHeadCoreOptions = {
   readonly globalDailyCeilingMicroUsd?: number;
   readonly allowRecurringModelBriefs?: boolean;
   readonly migrations?: readonly AgentHeadMigrationStep[];
+  readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void>;
 } & (
   | AgentHeadEventRuntimeBindings
   | {
@@ -133,8 +134,8 @@ function createLazyRecoveryHooksProxy(
     reconcileCoverageSync: (cmd) => getTarget().reconcileCoverageSync(cmd),
     confirmCoveragePlanSync: (cmd) => getTarget().confirmCoveragePlanSync(cmd),
     getOutboxByIdSync: (outboxId) => getTarget().getOutboxByIdSync?.(outboxId) ?? null,
-    syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
-      getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs) ?? Promise.resolve(),
+    syncPlatformAlarm: (targetAlarmAtMs, nowMs, options) =>
+      getTarget().syncPlatformAlarm?.(targetAlarmAtMs, nowMs, options) ?? Promise.resolve(),
     relayBudgetSync: (nowMs) => getTarget().relayBudgetSync?.(nowMs) ?? Promise.resolve(),
     getCoverageRowSync: () => getTarget().getCoverageRowSync?.() ?? null,
   };
@@ -242,6 +243,7 @@ export class AgentHeadCore
       nowMs: this.nowMsFn,
       idFactory: this.newId,
       ...(this.localCeilings !== undefined ? { localCeilings: this.localCeilings } : {}),
+      ...(options.deleteR2Keys !== undefined ? { deleteR2Keys: options.deleteR2Keys } : {}),
     });
 
     if ('eventRuntimeFactory' in options) {
@@ -292,6 +294,7 @@ export class AgentHeadCore
       eventCoordinator: bindings.eventCoordinator,
       nowMs: this.nowMsFn,
       newId: this.newId,
+      ...(options.deleteR2Keys !== undefined ? { deleteR2Keys: options.deleteR2Keys } : {}),
     });
 
     this.turnService = new AgentHeadTurnService({
@@ -529,13 +532,22 @@ export class AgentHeadCore
 
   // ---- AgentHeadRecoveryPort delegation ----
 
-  reconcileFromRegistry(cmd: {
+  flushDeletedR2Keys(
+    nowMs?: number,
+    options?: { readonly skipAlarmSync?: boolean },
+  ): Promise<number> {
+    return this.recoveryService.flushDeletedR2Keys(nowMs, options);
+  }
+
+  async reconcileFromRegistry(cmd: {
     readonly tenantId: string;
     readonly agentId: string;
     readonly expectedGen: number;
     readonly nowMs: number;
   }) {
-    return this.recoveryService.reconcileFromRegistry(cmd);
+    const result = await this.recoveryService.reconcileFromRegistry(cmd);
+    await this.flushDeletedR2Keys(cmd.nowMs);
+    return result;
   }
 
   confirmRegistryPlan(cmd: {

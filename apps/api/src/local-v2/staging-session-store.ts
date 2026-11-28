@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
+import type { B1SessionRecord } from '@ember/contracts';
 import { DomainError } from '@ember/domain';
-import type { B1SessionRecord } from '@ember/postgres';
 import { deterministicEdgeUuid, type D1DatabaseLike } from '@ember/runtime-v2';
 import type { JWTVerifyGetKey } from 'jose';
 import { createAppleIdentityVerifier } from '../auth/apple-identity.js';

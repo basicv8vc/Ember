@@ -1,5 +1,5 @@
+import type { AgentView, CreateAgentCommand } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
-import type { AgentView, CreateAgentCommand } from '@ember/postgres';
 
 /**
  * Persistence seam for the `/v1/agents` HTTP routes (P0B-07d).

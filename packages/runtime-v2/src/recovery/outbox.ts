@@ -265,6 +265,23 @@ export class OutboxCoordinator implements EventRuntimeCoordinatorPort {
       candidates.push(outboxMin);
     }
 
+    const hasR2Outbox =
+      this.#sql
+        .exec<{ readonly name: string }>(
+          `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'v2_r2_pending_deletes'`,
+        )
+        .toArray().length > 0;
+    if (hasR2Outbox) {
+      const r2Min = this.#sql
+        .exec<{ min_ts: number | null }>(
+          `SELECT MIN(next_attempt_at_ms) AS min_ts FROM v2_r2_pending_deletes`,
+        )
+        .toArray()[0]?.min_ts;
+      if (r2Min !== null && r2Min !== undefined) {
+        candidates.push(r2Min);
+      }
+    }
+
     if (candidates.length === 0) {
       return null;
     }

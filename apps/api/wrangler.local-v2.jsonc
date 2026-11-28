@@ -19,6 +19,12 @@
     ],
   },
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["AgentHeadDO", "GlobalBudgetDO"] }],
+  "r2_buckets": [
+    {
+      "binding": "EMBER_BLOBS",
+      "bucket_name": "ember-v2-local-blobs",
+    },
+  ],
   "d1_databases": [
     {
       "binding": "D1_RECOVERY",

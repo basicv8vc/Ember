@@ -998,6 +998,7 @@ export class AlarmMultiplexer {
     readonly globalBudget: GlobalBudgetSettlePort;
     readonly registry?: RecoveryRegistryPort;
     readonly batchLimit?: number;
+    readonly afterWork?: (nowMs: number) => Promise<unknown>;
   }): Promise<AlarmCycleResult> {
     const limit = Math.max(1, Math.min(cmd.batchLimit ?? DEFAULT_ALARM_BATCH_LIMIT, 10));
 
@@ -1036,6 +1037,10 @@ export class AlarmMultiplexer {
       nowMs: cmd.nowMs,
       limit,
     });
+
+    if (cmd.afterWork !== undefined) {
+      await cmd.afterWork(cmd.nowMs);
+    }
 
     const nextAlarmAtMs = this.#storage.transactionSync(() =>
       this.#coordinator.recomputeAlarmSync(cmd.nowMs),

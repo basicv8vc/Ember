@@ -31,6 +31,7 @@ export default {
       sessions,
       allowedHosts,
       readiness: createD1RecoveryReadiness(env.D1_RECOVERY),
+      ...(env.EMBER_BLOBS === undefined ? {} : { r2Bucket: env.EMBER_BLOBS }),
       async resolveAgentHead(auth) {
         const me = await sessions.me.getMeForTenant(auth.tenantId);
         if (me === null) return null;

@@ -6,9 +6,9 @@ import {
   IdSchema,
   PYTHON_AGENT_LIMITS,
   isSafeArtifactFilename,
+  type B3StagedUploadRepository,
 } from '@ember/contracts';
 import { isDomainError } from '@ember/domain';
-import type { B3StagedUploadRepository } from '@ember/postgres';
 import { Hono } from 'hono';
 import { z } from 'zod';
 import { requireSessionAuth } from '../auth/session-authenticator.js';

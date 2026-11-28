@@ -1041,6 +1041,38 @@ export function createBudgetModePartitionDoMigration(
   };
 }
 
+export const DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION = 10;
+
+export const V2_TASK_ARTIFACTS_R2_STATEMENTS = [
+  `ALTER TABLE v2_task_artifacts ADD COLUMN r2_key TEXT;`,
+  `CREATE TABLE IF NOT EXISTS v2_r2_pending_deletes (
+  r2_key             TEXT    PRIMARY KEY,
+  created_at_ms      INTEGER NOT NULL,
+  next_attempt_at_ms INTEGER NOT NULL,
+  attempt_count      INTEGER NOT NULL DEFAULT 0
+) WITHOUT ROWID;`,
+  `CREATE TABLE IF NOT EXISTS v2_retired_run_artifacts (
+  task_id       TEXT    NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+  run_id        TEXT    NOT NULL,
+  artifact_id   TEXT    NOT NULL,
+  retired_at_ms INTEGER NOT NULL,
+  PRIMARY KEY (run_id, artifact_id)
+) WITHOUT ROWID;`,
+  `CREATE INDEX IF NOT EXISTS idx_v2_retired_run_artifacts_task
+  ON v2_retired_run_artifacts (task_id);`,
+] as const;
+
+export function createV2TaskArtifactsR2Migration(
+  version = DEFAULT_V2_TASK_ARTIFACTS_R2_MIGRATION_VERSION,
+): AgentHeadMigrationStep {
+  return {
+    version,
+    name: 'v2_task_artifacts_r2',
+    statements: V2_TASK_ARTIFACTS_R2_STATEMENTS,
+    checksum: computeMigrationChecksumSync(V2_TASK_ARTIFACTS_R2_STATEMENTS),
+  };
+}
+
 /** Agent Head migrations share the existing DO database and recovery registry. */
 export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationStep[] {
   return [
@@ -1063,5 +1095,6 @@ export function createDefaultAgentHeadMigrations(): readonly AgentHeadMigrationS
     createProactiveSchedulesMigration(),
     createV2TaskArtifactsMigration(),
     createBudgetModePartitionDoMigration(),
+    createV2TaskArtifactsR2Migration(),
   ];
 }

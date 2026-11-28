@@ -8,3 +8,4 @@ export * from './recovery-service.js';
 export * from './turn-service.js';
 export * from './proactive-schedule-service.js';
 export * from './agent-head-do.js';
+export * from './r2-delete-outbox.js';

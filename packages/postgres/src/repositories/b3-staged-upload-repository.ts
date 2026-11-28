@@ -7,8 +7,11 @@ import {
   IdSchema,
   PYTHON_AGENT_LIMITS,
   toInvalidArgumentError,
+  type B3ArtifactDownload,
   type B3StagedUploadReceiptDto,
+  type B3StagedUploadRepository,
   type B3TaskArtifactsListDto,
+  type StageUploadInput,
 } from '@ember/contracts';
 import { DomainError, type AuthContext, type Id } from '@ember/domain';
 import type pg from 'pg';
@@ -116,28 +119,7 @@ const stageUploadInputSchema = z.strictObject({
   now: z.date().optional(),
 });
 
-export interface StageUploadInput {
-  readonly filename: string;
-  readonly mediaType: string;
-  readonly bytes: Uint8Array;
-  readonly now?: Date;
-}
-
-export interface B3ArtifactDownload {
-  readonly artifactId: Id;
-  readonly filename: string | null;
-  readonly mediaType: string;
-  readonly size: number;
-  readonly sha256: string;
-  readonly bytes: Uint8Array;
-}
-
-export interface B3StagedUploadRepository {
-  stageUpload(ctx: AuthContext, input: StageUploadInput): Promise<B3StagedUploadReceiptDto>;
-  listTaskArtifacts(ctx: AuthContext, taskId: Id): Promise<B3TaskArtifactsListDto | null>;
-  getTaskArtifactDownload(ctx: AuthContext, artifactId: Id): Promise<B3ArtifactDownload | null>;
-  sweepExpiredUnboundUploads(now?: Date): Promise<{ readonly removed: number }>;
-}
+export type { B3ArtifactDownload, B3StagedUploadRepository, StageUploadInput };
 
 export interface PostgresB3StagedUploadRepositoryOptions {
   readonly r2Bucket?: R2BucketPort;

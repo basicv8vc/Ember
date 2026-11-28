@@ -874,6 +874,7 @@ export class AgentEventRuntimeFacade {
     readonly globalBudget: GlobalBudgetSettlePort;
     readonly registry?: RecoveryRegistryPort;
     readonly batchLimit?: number;
+    readonly afterWork?: (nowMs: number) => Promise<unknown>;
   }): Promise<AlarmCycleResult> {
     return this.alarm.runAlarmCycle(cmd);
   }
@@ -927,7 +928,11 @@ export class AgentEventRuntimeFacade {
       readonly nowMs: number;
     }) => { readonly confirmed: boolean };
     readonly getOutboxByIdSync: (outboxId: string) => V2DispatchOutboxRow | null;
-    readonly syncPlatformAlarm: (targetAlarmAtMs: number | null, nowMs: number) => Promise<boolean>;
+    readonly syncPlatformAlarm: (
+      targetAlarmAtMs: number | null,
+      nowMs: number,
+      options?: { readonly forceRearmConsumed?: boolean },
+    ) => Promise<boolean>;
     readonly relayBudgetSync: (nowMs: number) => Promise<void>;
   } {
     return {
@@ -935,8 +940,8 @@ export class AgentEventRuntimeFacade {
       reconcileCoverageSync: (req) => this.coverage.reconcileFromRegistrySync(req),
       confirmCoveragePlanSync: (req) => this.coverage.confirmRegistryPlanSync(req),
       getOutboxByIdSync: (outboxId) => this.outbox.getOutboxByIdSync(outboxId),
-      syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
-        this.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs),
+      syncPlatformAlarm: (targetAlarmAtMs, nowMs, options) =>
+        this.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs, options),
       relayBudgetSync: async (nowMs) => {
         await relayDueBudgetSyncBatch({
           sql: this.storage.sql,

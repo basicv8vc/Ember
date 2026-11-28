@@ -6,25 +6,45 @@ import {
   type B1TaskListDto,
   type B3StagedUploadReceiptDto,
   type B3TaskArtifactsListDto,
+  type R2BucketPort,
 } from '@ember/contracts';
+import { DomainError } from '@ember/domain';
 import {
   AgentEventRuntimeFacade,
   AgentHeadCore,
+  D1RecoveryRegistry,
+  R2_DELETE_RETRY_BASE_MS,
+  RecoverySweeper,
   V2_MAX_INLINE_ARTIFACT_BYTES,
+  V2_TIMING_LIMITS,
   applyAgentHeadMigrations,
+  applyD1RecoveryMigrations,
   createDefaultAgentHeadMigrations,
   runV2FakePythonSandbox,
+  type D1DatabaseLike,
+  type D1PreparedStatementLike,
+  type D1ResultLike,
   type DurableObjectStorageLike,
   type GlobalBudgetAuthority,
+  type GlobalBudgetSettlePort,
+  type QueueLike,
   type RecoveryRegistryPort,
   type SqlStorageCursorLike,
   type SqlStorageRow,
+  type V2CheckArtifactsCommittedDto,
   type V2DispatchEnvelope,
   type V2PublishTaskOutputsResultDto,
   type V2PythonTaskSubmitResultDto,
   type V2TaskArtifactDownloadDto,
   type V2TaskInputFileDto,
 } from '@ember/runtime-v2';
+import {
+  deleteV2R2KeysStrict,
+  publishV2OutputsWithR2Reconciliation,
+  putV2R2Bytes,
+  sha256HexBytes,
+  stageV2UploadWithR2,
+} from '../../apps/api/src/local-v2/r2-artifacts.js';
 
 const TENANT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d840101';
 const AGENT_ID = '018f5f2e-0e91-7a30-ae62-bcb97d840102';
@@ -129,7 +149,10 @@ function createMockGlobalBudget(): GlobalBudgetAuthority {
   };
 }
 
-function createTestCore(clockRef: { now: number }) {
+function createTestCore(
+  clockRef: { now: number },
+  options?: { readonly deleteR2Keys?: (keys: readonly string[]) => Promise<void> },
+) {
   const storage = createInMemoryDoStorage();
   const registry = createMockRegistry();
   let facade!: AgentEventRuntimeFacade;
@@ -140,6 +163,7 @@ function createTestCore(clockRef: { now: number }) {
     recoveryRegistry: registry,
     globalBudget: createMockGlobalBudget(),
     nowMs: () => clockRef.now,
+    ...(options?.deleteR2Keys === undefined ? {} : { deleteR2Keys: options.deleteR2Keys }),
     eventRuntimeFactory: (business) => {
       facade = new AgentEventRuntimeFacade({
         tenantId: TENANT_ID,
@@ -154,8 +178,8 @@ function createTestCore(clockRef: { now: number }) {
           reconcileCoverageSync: (cmd) => facade.coverage.reconcileFromRegistrySync(cmd),
           confirmCoveragePlanSync: (cmd) => facade.coverage.confirmRegistryPlanSync(cmd),
           getOutboxByIdSync: (outboxId) => facade.outbox.getOutboxByIdSync(outboxId),
-          syncPlatformAlarm: (targetAlarmAtMs, nowMs) =>
-            facade.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs),
+          syncPlatformAlarm: (targetAlarmAtMs, nowMs, syncOpts) =>
+            facade.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs, syncOpts),
           getCoverageRowSync: () => facade.coverage.getCoverageRowSync(),
         },
       };
@@ -1024,5 +1048,1290 @@ describe('V2 AgentHeadTaskArtifactService', () => {
         .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_task_artifacts')
         .one().cnt,
     ).toBe(0);
+  });
+
+  it('supports >1 MiB R2-backed uploads, inputs, outputs, downloads, and post-commit R2 key cleanup', async () => {
+    const deletedKeys: string[][] = [];
+    const clock = { now: 1_760_000_000_000 };
+    const { core } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
+    });
+
+    const bigSize = V2_MAX_INLINE_ARTIFACT_BYTES + 262_144;
+    const uploadId = '018f5f2e-0e91-7a30-ae62-bcb97d841001';
+    const r2Key = `v2/uploads/${TENANT_ID}/${uploadId}`;
+    const sha256 = 'a'.repeat(64);
+
+    // Reject forged/cross-tenant R2 keys.
+    await expect(
+      core.taskArtifacts({
+        kind: 'stage_upload',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841002',
+        uploadId,
+        filename: 'big.csv',
+        mediaType: 'text/csv',
+        sizeBytes: bigSize,
+        sha256,
+        r2Key: `v2/uploads/018f5f2e-0e91-7a30-ae62-bcb97d849999/${uploadId}`,
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // Stage an R2 upload that expires later and verify lazy cleanup notifies deleteR2Keys.
+    const expiredId = '018f5f2e-0e91-7a30-ae62-bcb97d841003';
+    const expiredKey = `v2/uploads/${TENANT_ID}/${expiredId}`;
+    await core.taskArtifacts({
+      kind: 'stage_upload',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841004',
+      uploadId: expiredId,
+      filename: 'stale.csv',
+      mediaType: 'text/csv',
+      sizeBytes: 128,
+      sha256,
+      r2Key: expiredKey,
+    });
+
+    clock.now += PYTHON_AGENT_LIMITS.maxUploadTtlMs + 1;
+    const receipt = (await core.taskArtifacts({
+      kind: 'stage_upload',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841005',
+      uploadId,
+      filename: 'big.csv',
+      mediaType: 'text/csv',
+      sizeBytes: bigSize,
+      sha256,
+      r2Key,
+    })) as B3StagedUploadReceiptDto;
+    expect(receipt.size).toBe(bigSize);
+    expect(deletedKeys).toEqual([[expiredKey]]);
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841006',
+      input: {
+        prompt: 'Analyze big.csv',
+        attachment_ids: [uploadId],
+      },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+
+    const claimed = await core.claimDurableWork({
+      envelope: {
+        schemaVersion: 2,
+        eventId: `task:${taskId}:epoch:0`,
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        entityKind: 'task',
+        entityId: taskId,
+        queueName: 'agent_task',
+        fenceEpoch: 0,
+      },
+      workerId: 'worker-r2',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const inputs = (await core.taskArtifacts({
+      kind: 'load_task_inputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841007',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+    })) as readonly V2TaskInputFileDto[];
+    expect(inputs).toEqual([
+      {
+        artifactId: uploadId,
+        filename: 'big.csv',
+        mediaType: 'text/csv',
+        size: bigSize,
+        sha256,
+        r2Key,
+      },
+    ]);
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d841008';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    const outSha = 'b'.repeat(64);
+    const published = (await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841009',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'big-report.csv',
+          mediaType: 'text/csv',
+          sizeBytes: bigSize,
+          sha256: outSha,
+          r2Key: outKey,
+        },
+      ],
+    })) as V2PublishTaskOutputsResultDto;
+    expect(published.accepted).toBe(true);
+
+    await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2',
+      outcome: {
+        status: 'completed',
+        summaryText: 'Done',
+        detailText: 'Report generated',
+        modelLabel: 'fake',
+        simulated: true,
+        truncated: false,
+        reasonCode: 'ok',
+      },
+    });
+
+    const download = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d841010',
+      artifactId: outId,
+    })) as V2TaskArtifactDownloadDto | null;
+    expect(download).toEqual({
+      artifactId: outId,
+      filename: 'big-report.csv',
+      mediaType: 'text/csv',
+      sha256: outSha,
+      size: bigSize,
+      r2Key: outKey,
+    });
+  });
+
+  it('fault injection: retains R2 objects on ambiguous DO RPC failures after commit and deletes only on proven non-commit', async () => {
+    const store = new Map<string, Uint8Array>();
+    const deletedLog: string[][] = [];
+    const bucket: R2BucketPort = {
+      put(key, value) {
+        const bytes =
+          value instanceof Uint8Array
+            ? new Uint8Array(value)
+            : typeof value === 'string'
+              ? new TextEncoder().encode(value)
+              : new Uint8Array(value as ArrayBuffer);
+        store.set(key, bytes);
+        return Promise.resolve();
+      },
+      get(key) {
+        const data = store.get(key);
+        if (data === undefined) return Promise.resolve(null);
+        const copy = new Uint8Array(data.byteLength);
+        copy.set(data);
+        return Promise.resolve({
+          size: copy.byteLength,
+          arrayBuffer: () => Promise.resolve(copy.buffer),
+        });
+      },
+      delete(keys) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        deletedLog.push(list);
+        for (const k of list) store.delete(k);
+        return Promise.resolve();
+      },
+    };
+
+    const clock = { now: 1_760_000_000_000 };
+    const { core } = createTestCore(clock);
+
+    // 1) Upload path: DO commits stage_upload, then RPC response is lost (DB_UNAVAILABLE).
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'ambiguous.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('a,b\n1,2\n'),
+        registerInDo: async (cmd) => {
+          await core.taskArtifacts({
+            kind: 'stage_upload',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842001',
+            ...cmd,
+          });
+          throw new DomainError('DB_UNAVAILABLE', 'simulated lost RPC ACK after commit');
+        },
+        checkCommitted: async (artifactIds) =>
+          (await core.taskArtifacts({
+            kind: 'check_artifacts_committed',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842002',
+            artifactIds,
+          })) as V2CheckArtifactsCommittedDto,
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+
+    // Committed R2 object MUST survive the lost RPC ACK!
+    expect(store.size).toBe(1);
+    expect(deletedLog).toEqual([]);
+
+    // 2) Upload path: when reconciliation itself fails, retain R2 object safely.
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'uncertain-check.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('x,y\n3,4\n'),
+        registerInDo: () => Promise.reject(new Error('network drop')),
+        checkCommitted: () => Promise.reject(new Error('DO still unreachable')),
+      }),
+    ).rejects.toThrow('network drop');
+    expect(store.size).toBe(2);
+
+    // 3) Upload path: definite pre-commit rejection (BUDGET_EXCEEDED) deletes R2 object immediately.
+    await expect(
+      stageV2UploadWithR2({
+        bucket,
+        tenantId: TENANT_ID,
+        filename: 'rejected.csv',
+        mediaType: 'text/csv',
+        bytes: new TextEncoder().encode('p,q\n5,6\n'),
+        registerInDo: () => Promise.reject(new DomainError('BUDGET_EXCEEDED', 'quota full')),
+        checkCommitted: () => Promise.reject(new Error('should not reconcile definite rejection')),
+      }),
+    ).rejects.toMatchObject({ code: 'BUDGET_EXCEEDED' });
+    expect(store.size).toBe(2);
+
+    // 4) Output publish path: DO commits outputs then drops RPC ACK -> R2 output MUST survive.
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842003',
+      input: { prompt: 'Run fault injection output test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-fi',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    await expect(
+      publishV2OutputsWithR2Reconciliation({
+        bucket,
+        tenantId: TENANT_ID,
+        taskId,
+        runId,
+        files: [
+          {
+            filename: 'fi-report.csv',
+            mediaType: 'text/csv',
+            bytes: new TextEncoder().encode('col\n42\n'),
+          },
+        ],
+        publishInDo: async (outputs) => {
+          await core.taskArtifacts({
+            kind: 'publish_task_outputs',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842004',
+            taskId,
+            runId,
+            leaseEpoch: claimed.leaseEpoch,
+            workerId: 'worker-fi',
+            outputs,
+          });
+          throw new Error('simulated RPC transport drop after publish_task_outputs commit');
+        },
+        checkCommitted: async (artifactIds) =>
+          (await core.taskArtifacts({
+            kind: 'check_artifacts_committed',
+            tenantId: TENANT_ID,
+            principalId: PRINCIPAL_A,
+            agentId: AGENT_ID,
+            requestId: '018f5f2e-0e91-7a30-ae62-bcb97d842005',
+            artifactIds,
+          })) as V2CheckArtifactsCommittedDto,
+      }),
+    ).rejects.toThrow('simulated RPC transport drop');
+
+    // Output R2 object remains intact alongside the 2 retained upload objects.
+    expect(store.size).toBe(3);
+
+    // 5) Output publish path: authoritative accepted:false deletes staged R2 output immediately.
+    const rejected = await publishV2OutputsWithR2Reconciliation({
+      bucket,
+      tenantId: TENANT_ID,
+      taskId,
+      runId,
+      files: [
+        {
+          filename: 'stale-report.csv',
+          mediaType: 'text/csv',
+          bytes: new TextEncoder().encode('col\n99\n'),
+        },
+      ],
+      publishInDo: () => Promise.resolve({ accepted: false, artifactIds: [] }),
+      checkCommitted: () => Promise.reject(new Error('not needed')),
+    });
+    expect(rejected.accepted).toBe(false);
+    expect(store.size).toBe(3);
+  });
+
+  it('fault injection: does not delete R2 objects when SQLite transaction rolls back after purge', async () => {
+    const deletedKeys: string[][] = [];
+    const clock = { now: 1_760_000_000_000 };
+    const { core, storage } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
+    });
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843001',
+      input: { prompt: 'Rollback & retry test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-rb',
+      leaseMs: 10_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d843002';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843003',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-rb',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'rb-report.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 64,
+          sha256: 'c'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Advance past lease expiry, then simulate an exception AFTER purgeUncommittedTaskOutputsSync
+    // inside transactionSync so SQLite rolls back.
+    clock.now += 15_000;
+    expect(() =>
+      storage.transactionSync(() => {
+        core.recoveryService.convergeDueBusinessItemSync('task', taskId, clock.now);
+        throw new Error('injected post-purge SQLite transaction failure');
+      }),
+    ).toThrow('injected post-purge SQLite transaction failure');
+
+    // SQLite row survived rollback AND v2_r2_pending_deletes must be empty; flush must delete nothing.
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_task_artifacts WHERE id = ?',
+          outId,
+        )
+        .one().cnt,
+    ).toBe(1);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    await core.flushDeletedR2Keys();
+    expect(deletedKeys).toEqual([]);
+  });
+
+  it('fault injection: schedules autonomous DO alarm and discovery bound with bounded exponential backoff on terminal R2 delete failures', async () => {
+    const deletedKeys: string[][] = [];
+    let failDeletes = true;
+    const clock = { now: 1_760_000_000_000 };
+    const { core, storage, facade } = createTestCore(clock, {
+      deleteR2Keys: (keys) => {
+        if (failDeletes) {
+          return Promise.reject(new Error('transient R2 delete outage'));
+        }
+        deletedKeys.push([...keys]);
+        return Promise.resolve();
+      },
+    });
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843101',
+      input: { prompt: 'Autonomous R2 delete retry test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-r2-alarm',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d843102';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d843103',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2-alarm',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'alarm-retry.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 64,
+          sha256: 'e'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Settle the task as terminal 'failed' while R2 delete fails:
+    // ZERO other tasks/turns/outbox/schedules remain, so only v2_r2_pending_deletes can arm recovery!
+    const commitRes = await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-r2-alarm',
+      outcome: {
+        status: 'failed',
+        reasonCode: 'internal_error',
+        simulated: true,
+      },
+    });
+    expect(commitRes.accepted).toBe(true);
+    expect(deletedKeys).toEqual([]);
+    const pendingAfterFirstFail = storage.sql
+      .exec<{ readonly attempt_count: number; readonly next_attempt_at_ms: number }>(
+        'SELECT attempt_count, next_attempt_at_ms FROM v2_r2_pending_deletes',
+      )
+      .one();
+    expect(pendingAfterFirstFail.attempt_count).toBe(1);
+    const firstRetryAt = clock.now + R2_DELETE_RETRY_BASE_MS;
+    expect(pendingAfterFirstFail.next_attempt_at_ms).toBe(firstRetryAt);
+    expect(await storage.getAlarm()).toBe(firstRetryAt);
+    expect(core.earliestRequiredDiscoveryAtMsSync(clock.now)).toBe(
+      firstRetryAt + V2_TIMING_LIMITS.d1RecoveryGraceMs,
+    );
+
+    const noopQueue: QueueLike<V2DispatchEnvelope> = {
+      send: () => Promise.resolve(),
+    };
+    const noopGlobalBudgetSettle: GlobalBudgetSettlePort = {
+      settleGlobal: () => Promise.reject(new Error('unused in R2 alarm retry test')),
+    };
+    const registry = createMockRegistry();
+
+    // Firing an alarm before next_attempt_at_ms does not hit R2 prematurely and preserves alarm.
+    clock.now += 1_000;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+    expect(deletedKeys).toEqual([]);
+    expect(await storage.getAlarm()).toBe(firstRetryAt);
+
+    // Firing autonomous alarm at firstRetryAt while R2 is still failing backs off to 2x base (30s)
+    // and re-arms the DO platform alarm without any manual flushDeletedR2Keys() call.
+    clock.now = firstRetryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+    const pendingAfterSecondFail = storage.sql
+      .exec<{ readonly attempt_count: number; readonly next_attempt_at_ms: number }>(
+        'SELECT attempt_count, next_attempt_at_ms FROM v2_r2_pending_deletes',
+      )
+      .one();
+    const secondRetryAt = firstRetryAt + R2_DELETE_RETRY_BASE_MS * 2;
+    expect(pendingAfterSecondFail.attempt_count).toBe(2);
+    expect(pendingAfterSecondFail.next_attempt_at_ms).toBe(secondRetryAt);
+    expect(await storage.getAlarm()).toBe(secondRetryAt);
+
+    // R2 recovers -> firing the scheduled alarm autonomously deletes the R2 object, clears the
+    // outbox row, clears the DO alarm, and clears discovery obligation.
+    failDeletes = false;
+    clock.now = secondRetryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry,
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+    expect(deletedKeys).toEqual([[outKey]]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
+    expect(core.earliestRequiredDiscoveryAtMsSync(clock.now)).toBeNull();
+  });
+
+  it('fault injection: deleteV2R2KeysStrict fails closed when EMBER_BLOBS is missing and preserves retryability across deploy recovery', async () => {
+    const deletedKeys: string[][] = [];
+    let boundBucket: R2BucketPort | undefined = undefined;
+    const clock = { now: 1_760_100_000_000 };
+    const { core, storage, facade } = createTestCore(clock, {
+      deleteR2Keys: (keys) => deleteV2R2KeysStrict(boundBucket, keys),
+    });
+
+    // Empty delete list when EMBER_BLOBS is absent must succeed cleanly (inline-only DOs).
+    await expect(deleteV2R2KeysStrict(undefined, [])).resolves.toBeUndefined();
+
+    // Non-empty delete list when EMBER_BLOBS is absent must throw DB_UNAVAILABLE, not swallow.
+    await expect(deleteV2R2KeysStrict(undefined, ['v2/uploads/t/u1'])).rejects.toMatchObject({
+      code: 'DB_UNAVAILABLE',
+    });
+
+    // Enqueue a cancel-triggered R2 delete while EMBER_BLOBS binding is missing.
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d844001',
+      input: { prompt: 'Missing R2 binding test' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-missing-r2',
+      leaseMs: 10_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+    const outId = '018f5f2e-0e91-7a30-ae62-bcb97d844002';
+    const outKey = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${outId}`;
+
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d844003',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-missing-r2',
+      outputs: [
+        {
+          artifactId: outId,
+          filename: 'missing-binding.csv',
+          mediaType: 'text/csv',
+          sizeBytes: 32,
+          sha256: 'd'.repeat(64),
+          r2Key: outKey,
+        },
+      ],
+    });
+
+    // Terminate run via commitDurableResult({ status: 'failed' }) while EMBER_BLOBS is missing:
+    // purges outKey into v2_r2_pending_deletes, fails closed on missing binding, and arms alarm.
+    await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-missing-r2',
+      outcome: {
+        status: 'failed',
+        reasonCode: 'internal_error',
+        simulated: true,
+      },
+    });
+
+    // Outbox record MUST be retained and backed off, with DO alarm armed at t + 15s.
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(1);
+    const retryAt = clock.now + R2_DELETE_RETRY_BASE_MS;
+    expect(await storage.getAlarm()).toBe(retryAt);
+
+    // Restore EMBER_BLOBS binding and run scheduled alarm -> pending R2 key is now deleted!
+    boundBucket = {
+      put: () => Promise.resolve(),
+      get: () => Promise.resolve(null),
+      delete: (keys) => {
+        deletedKeys.push(Array.isArray(keys) ? keys : [keys]);
+        return Promise.resolve();
+      },
+    };
+    const noopQueue: QueueLike<V2DispatchEnvelope> = {
+      send: () => Promise.resolve(),
+    };
+    const noopGlobalBudgetSettle: GlobalBudgetSettlePort = {
+      settleGlobal: () => Promise.reject(new Error('unused in missing-R2-binding test')),
+    };
+    clock.now = retryAt;
+    await facade.handleAlarm({
+      nowMs: clock.now,
+      queues: { durable_turn: noopQueue, agent_task: noopQueue },
+      globalBudget: noopGlobalBudgetSettle,
+      registry: createMockRegistry(),
+      afterWork: (cycleNowMs) => core.flushDeletedR2Keys(cycleNowMs, { skipAlarmSync: true }),
+    });
+
+    expect(deletedKeys).toEqual([[outKey]]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
+  });
+
+  it('P1: makes exact R2 publish_task_outputs replay a no-op, preserves retained keys, forbids retired-key resurrection, and completes final download', async () => {
+    const store = new Map<string, Uint8Array>();
+    const deleteCalls: string[][] = [];
+    let failDeletes = false;
+    const bucket: R2BucketPort = {
+      put(key, value) {
+        const bytes =
+          value instanceof Uint8Array
+            ? new Uint8Array(value)
+            : typeof value === 'string'
+              ? new TextEncoder().encode(value)
+              : new Uint8Array(value as ArrayBuffer);
+        store.set(key, bytes);
+        return Promise.resolve();
+      },
+      get(key) {
+        const bytes = store.get(key);
+        if (bytes === undefined) return Promise.resolve(null);
+        return Promise.resolve({
+          arrayBuffer: () => Promise.resolve(bytes.slice().buffer),
+        });
+      },
+      delete(keys) {
+        const list = Array.isArray(keys) ? keys : [keys];
+        if (failDeletes) {
+          return Promise.reject(new Error('transient R2 delete failure'));
+        }
+        deleteCalls.push(list);
+        for (const k of list) store.delete(k);
+        return Promise.resolve();
+      },
+    };
+
+    const clock = { now: 1_760_200_000_000 };
+    const { core, storage } = createTestCore(clock, {
+      deleteR2Keys: (keys) => deleteV2R2KeysStrict(bucket, keys),
+    });
+
+    const submitted = (await core.taskArtifacts({
+      kind: 'submit_python_task',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845001',
+      input: { prompt: 'Test exact R2 publish replay safety' },
+    })) as V2PythonTaskSubmitResultDto;
+    const taskId = submitted.task.task_id;
+    const claimed = await core.claimDurableWork({
+      envelope: makeTaskEnvelope(taskId, 0),
+      workerId: 'worker-replay',
+      leaseMs: 30_000,
+    });
+    expect(claimed.kind).toBe('claimed');
+    if (claimed.kind !== 'claimed') throw new Error('expected claim');
+    const runId = (JSON.parse(claimed.contextJson) as { runId: string }).runId;
+
+    const bytesA = new TextEncoder().encode('col\nalpha\n');
+    const bytesB = new TextEncoder().encode('col\nbeta\n');
+    const bytesC = new TextEncoder().encode('col\ngamma\n');
+    const idA = '018f5f2e-0e91-7a30-ae62-bcb97d845011';
+    const idB = '018f5f2e-0e91-7a30-ae62-bcb97d845012';
+    const idC = '018f5f2e-0e91-7a30-ae62-bcb97d845013';
+    const keyA = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${idA}`;
+    const keyB = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${idB}`;
+    const keyC = `v2/artifacts/${TENANT_ID}/${taskId}/${runId}/${idC}`;
+    const shaA = await sha256HexBytes(bytesA);
+    const shaB = await sha256HexBytes(bytesB);
+    const shaC = await sha256HexBytes(bytesC);
+
+    await putV2R2Bytes(bucket, keyA, bytesA, 'text/csv');
+    await putV2R2Bytes(bucket, keyB, bytesB, 'text/csv');
+    await putV2R2Bytes(bucket, keyC, bytesC, 'text/csv');
+
+    const outputA = {
+      artifactId: idA,
+      filename: 'a.csv',
+      mediaType: 'text/csv',
+      sizeBytes: bytesA.byteLength,
+      sha256: shaA,
+      r2Key: keyA,
+    } as const;
+    const outputB = {
+      artifactId: idB,
+      filename: 'b.csv',
+      mediaType: 'text/csv',
+      sizeBytes: bytesB.byteLength,
+      sha256: shaB,
+      r2Key: keyB,
+    } as const;
+    const outputC = {
+      artifactId: idC,
+      filename: 'c.csv',
+      mediaType: 'text/csv',
+      sizeBytes: bytesC.byteLength,
+      sha256: shaC,
+      r2Key: keyC,
+    } as const;
+
+    // 1) Initial publish [A, B] succeeds.
+    const pub1 = (await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845020',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-replay',
+      outputs: [outputA, outputB],
+    })) as V2PublishTaskOutputsResultDto;
+    expect(pub1).toEqual({ accepted: true, artifactIds: [idA, idB] });
+
+    // 2) Exact same-command replay [A, B] is a no-op: zero deletes enqueued, R2 bytes intact.
+    const pubReplay = (await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845021',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-replay',
+      outputs: [outputA, outputB],
+    })) as V2PublishTaskOutputsResultDto;
+    expect(pubReplay).toEqual({ accepted: true, artifactIds: [idA, idB] });
+    expect(deleteCalls).toEqual([]);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(store.has(keyA)).toBe(true);
+    expect(store.has(keyB)).toBe(true);
+
+    // 3) Reusing an existing artifactId with different metadata fails closed.
+    await expect(
+      core.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845022',
+        taskId,
+        runId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId: 'worker-replay',
+        outputs: [{ ...outputA, sha256: 'f'.repeat(64) }],
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    // 4) Duplicate artifactId within one command fails closed.
+    await expect(
+      core.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845023',
+        taskId,
+        runId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId: 'worker-replay',
+        outputs: [outputA, outputA],
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_ARGUMENT' });
+
+    // 5) Partial replacement [A, C] retains keyA and enqueues only retired keyB.
+    // Force R2 delete failure so keyB stays outstanding in v2_r2_pending_deletes.
+    failDeletes = true;
+    const pubReplace = (await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845024',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-replay',
+      outputs: [outputA, outputC],
+    })) as V2PublishTaskOutputsResultDto;
+    expect(pubReplace).toEqual({ accepted: true, artifactIds: [idA, idC] });
+    expect(
+      storage.sql
+        .exec<{ readonly r2_key: string }>('SELECT r2_key FROM v2_r2_pending_deletes')
+        .toArray(),
+    ).toEqual([{ r2_key: keyB }]);
+
+    // 6) While keyB has an outstanding delete, reintroducing retired keyB fails closed.
+    await expect(
+      core.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845025',
+        taskId,
+        runId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId: 'worker-replay',
+        outputs: [outputA, outputB],
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+
+    // 7) Flush outstanding keyB delete when R2 recovers; keyA and keyC remain live.
+    failDeletes = false;
+    clock.now += R2_DELETE_RETRY_BASE_MS;
+    await core.flushDeletedR2Keys(clock.now);
+    expect(deleteCalls).toEqual([[keyB]]);
+    expect(store.has(keyB)).toBe(false);
+    expect(store.has(keyA)).toBe(true);
+    expect(store.has(keyC)).toBe(true);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+
+    // 8) Delayed replay of [A, B] under the SAME live lease AFTER keyB was successfully deleted
+    // (both v2_task_artifacts and v2_r2_pending_deletes have no B) MUST STILL fail closed!
+    await expect(
+      core.taskArtifacts({
+        kind: 'publish_task_outputs',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845029',
+        taskId,
+        runId,
+        leaseEpoch: claimed.leaseEpoch,
+        workerId: 'worker-replay',
+        outputs: [outputA, outputB],
+      }),
+    ).rejects.toMatchObject({ code: 'IDEMPOTENCY_CONFLICT' });
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_task_artifacts WHERE id = ?',
+          idB,
+        )
+        .one().cnt,
+    ).toBe(0);
+
+    // 9) Exact replay of [A, C] again followed by commit + download + R2 byte read succeeds,
+    // and run-scoped retired tombstones are cleaned up once terminal.
+    await core.taskArtifacts({
+      kind: 'publish_task_outputs',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845026',
+      taskId,
+      runId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-replay',
+      outputs: [outputA, outputC],
+    });
+
+    const committed = await core.commitDurableResult({
+      tenantId: TENANT_ID,
+      agentId: AGENT_ID,
+      entityType: 'task',
+      entityId: taskId,
+      leaseEpoch: claimed.leaseEpoch,
+      workerId: 'worker-replay',
+      outcome: {
+        status: 'completed',
+        summaryText: 'Replay-safe R2 publish',
+        detailText: 'Outputs A and C committed intact',
+        modelLabel: 'fake',
+        simulated: true,
+        reasonCode: 'ok',
+      },
+    });
+    expect(committed.accepted).toBe(true);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>(
+          'SELECT COUNT(*) AS cnt FROM v2_retired_run_artifacts WHERE task_id = ?',
+          taskId,
+        )
+        .one().cnt,
+    ).toBe(0);
+
+    const downloadA = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845027',
+      artifactId: idA,
+    })) as V2TaskArtifactDownloadDto | null;
+    const downloadC = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845028',
+      artifactId: idC,
+    })) as V2TaskArtifactDownloadDto | null;
+    const downloadB = (await core.taskArtifacts({
+      kind: 'download_artifact',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d845030',
+      artifactId: idB,
+    })) as V2TaskArtifactDownloadDto | null;
+    expect(downloadA?.r2Key).toBe(keyA);
+    expect(downloadC?.r2Key).toBe(keyC);
+    expect(downloadB).toBeNull();
+
+    const r2ObjA = await bucket.get(downloadA!.r2Key!);
+    const r2ObjC = await bucket.get(downloadC!.r2Key!);
+    expect(r2ObjA).not.toBeNull();
+    expect(r2ObjC).not.toBeNull();
+    expect(new Uint8Array(await r2ObjA!.arrayBuffer())).toEqual(bytesA);
+    expect(new Uint8Array(await r2ObjC!.arrayBuffer())).toEqual(bytesC);
+  });
+
+  it('P2: admits D1 recovery coverage before lazy R2 upload pruning commits on an idle head and recovers via RecoverySweeper after crash', async () => {
+    const d1Db = new DatabaseSync(':memory:');
+    const makeStatement = (query: string, bound: unknown[] = []): D1PreparedStatementLike => ({
+      bind: (...values: unknown[]) => makeStatement(query, values),
+      first: <T = Record<string, unknown>>(colName?: string): Promise<T | null> => {
+        const row = d1Db
+          .prepare(query)
+          .get(...(bound as Array<string | number | Uint8Array | null>)) as
+          Record<string, unknown> | undefined;
+        if (!row) return Promise.resolve(null);
+        if (colName !== undefined) {
+          return Promise.resolve((row[colName] as T | undefined) ?? null);
+        }
+        return Promise.resolve(row as T);
+      },
+      run: <T = Record<string, unknown>>(): Promise<D1ResultLike<T>> => {
+        const info = d1Db
+          .prepare(query)
+          .run(...(bound as Array<string | number | Uint8Array | null>));
+        return Promise.resolve({
+          results: [],
+          success: true,
+          meta: { changes: Number(info.changes) },
+        });
+      },
+      all: <T = Record<string, unknown>>(): Promise<D1ResultLike<T>> => {
+        const rows = d1Db
+          .prepare(query)
+          .all(...(bound as Array<string | number | Uint8Array | null>)) as T[];
+        return Promise.resolve({ results: rows, success: true });
+      },
+    });
+    const d1: D1DatabaseLike = {
+      prepare: (query: string) => makeStatement(query),
+      batch: async <T = Record<string, unknown>>(statements: D1PreparedStatementLike[]) => {
+        const out: Array<D1ResultLike<T>> = [];
+        for (const s of statements) {
+          out.push(await s.all<T>());
+        }
+        return out;
+      },
+    };
+    await applyD1RecoveryMigrations(d1, 1_000);
+    const registry = new D1RecoveryRegistry(d1);
+
+    const store = new Map<string, Uint8Array>();
+    const bucket: R2BucketPort = {
+      put(key, value) {
+        const bytes =
+          value instanceof Uint8Array
+            ? new Uint8Array(value)
+            : typeof value === 'string'
+              ? new TextEncoder().encode(value)
+              : new Uint8Array(value as ArrayBuffer);
+        store.set(key, bytes);
+        return Promise.resolve();
+      },
+      get(key) {
+        const bytes = store.get(key);
+        return Promise.resolve(
+          bytes === undefined ? null : { arrayBuffer: () => Promise.resolve(bytes.slice().buffer) },
+        );
+      },
+      delete(keys) {
+        for (const k of Array.isArray(keys) ? keys : [keys]) {
+          store.delete(k);
+        }
+        return Promise.resolve();
+      },
+    };
+
+    const clock = { now: 1_760_300_000_000 };
+    const storage = createInMemoryDoStorage();
+    let failD1Upsert = false;
+    let crashAfterStageCommit = false;
+    const wrappedRegistry: RecoveryRegistryPort = {
+      upsertCoverage: (cmd) =>
+        failD1Upsert
+          ? Promise.reject(new Error('D1 temporarily unavailable'))
+          : registry.upsertCoverage(cmd),
+      postponeCoverage: (cmd) => registry.postponeCoverage(cmd),
+      retireCoverage: (cmd) => registry.retireCoverage(cmd),
+      getCoverage: (cmd) => registry.getCoverage(cmd),
+    };
+    const wrappedStorage: DurableObjectStorageLike = {
+      sql: storage.sql,
+      transactionSync<T>(closure: () => T): T {
+        const result = storage.transactionSync(closure);
+        if (
+          crashAfterStageCommit &&
+          storage.sql
+            .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+            .one().cnt > 0
+        ) {
+          crashAfterStageCommit = false;
+          throw new Error('simulated DO crash immediately after commit');
+        }
+        return result;
+      },
+      getAlarm: () => storage.getAlarm(),
+      setAlarm: (at) => storage.setAlarm(at),
+      deleteAlarm: () => storage.deleteAlarm(),
+    };
+
+    const buildCore = (
+      targetStorage: DurableObjectStorageLike,
+      targetReg: RecoveryRegistryPort,
+    ) => {
+      let facade!: AgentEventRuntimeFacade;
+      const core = new AgentHeadCore({
+        storage: targetStorage,
+        tenantId: TENANT_ID,
+        agentId: AGENT_ID,
+        recoveryRegistry: targetReg,
+        globalBudget: createMockGlobalBudget(),
+        nowMs: () => clock.now,
+        deleteR2Keys: (keys) => deleteV2R2KeysStrict(bucket, keys),
+        eventRuntimeFactory: (business) => {
+          facade = new AgentEventRuntimeFacade({
+            tenantId: TENANT_ID,
+            agentId: AGENT_ID,
+            storage: targetStorage,
+            business,
+          });
+          return {
+            recoveryAdmission: facade.coverage,
+            eventCoordinator: facade.outbox,
+            recoveryHooks: {
+              reconcileCoverageSync: (cmd) => facade.coverage.reconcileFromRegistrySync(cmd),
+              confirmCoveragePlanSync: (cmd) => facade.coverage.confirmRegistryPlanSync(cmd),
+              getOutboxByIdSync: (outboxId) => facade.outbox.getOutboxByIdSync(outboxId),
+              syncPlatformAlarm: (targetAlarmAtMs, nowMs, syncOpts) =>
+                facade.alarm.syncPlatformAlarm(targetAlarmAtMs, nowMs, syncOpts),
+              getCoverageRowSync: () => facade.coverage.getCoverageRowSync(),
+            },
+          };
+        },
+      });
+      return { core, facade };
+    };
+
+    const initial = buildCore(wrappedStorage, wrappedRegistry);
+    initial.core.bootstrapHead({ conversationId: CONVERSATION_ID });
+
+    // 1) Idle head stages an R2 upload with zero D1 coverage calls when nothing needs pruning.
+    const expiredUploadId = '018f5f2e-0e91-7a30-ae62-bcb97d846001';
+    const expiredKey = `v2/uploads/${TENANT_ID}/${expiredUploadId}`;
+    const expiredBytes = new TextEncoder().encode('stale,data\n1,2\n');
+    await putV2R2Bytes(bucket, expiredKey, expiredBytes, 'text/csv');
+    await initial.core.taskArtifacts({
+      kind: 'stage_upload',
+      tenantId: TENANT_ID,
+      principalId: PRINCIPAL_A,
+      agentId: AGENT_ID,
+      requestId: '018f5f2e-0e91-7a30-ae62-bcb97d846002',
+      uploadId: expiredUploadId,
+      filename: 'expired.csv',
+      mediaType: 'text/csv',
+      sizeBytes: expiredBytes.byteLength,
+      sha256: await sha256HexBytes(expiredBytes),
+      r2Key: expiredKey,
+    });
+    expect((await registry.getCoverage({ tenantId: TENANT_ID, agentId: AGENT_ID })).exists).toBe(
+      false,
+    );
+
+    // 2) After TTL expires, pruning fails closed if D1 coverage registration is unavailable.
+    clock.now += PYTHON_AGENT_LIMITS.maxUploadTtlMs;
+    failD1Upsert = true;
+    await expect(
+      initial.core.taskArtifacts({
+        kind: 'stage_upload',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d846003',
+        filename: 'blocked-when-d1-down.csv',
+        mediaType: 'text/csv',
+        contentBase64: toBase64('ok,1\n'),
+      }),
+    ).rejects.toMatchObject({ code: 'DB_UNAVAILABLE' });
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(store.has(expiredKey)).toBe(true);
+
+    // 3) With D1 healthy, simulate DO crash immediately after stage_upload commits pruning + pending delete.
+    failD1Upsert = false;
+    crashAfterStageCommit = true;
+    await expect(
+      initial.core.taskArtifacts({
+        kind: 'stage_upload',
+        tenantId: TENANT_ID,
+        principalId: PRINCIPAL_A,
+        agentId: AGENT_ID,
+        requestId: '018f5f2e-0e91-7a30-ae62-bcb97d846004',
+        filename: 'fresh.csv',
+        mediaType: 'text/csv',
+        contentBase64: toBase64('fresh,1\n'),
+      }),
+    ).rejects.toThrow('simulated DO crash immediately after commit');
+
+    // Crash left platform alarm unset, R2 object still present, pending delete committed, and D1 armed.
+    expect(await storage.getAlarm()).toBeNull();
+    expect(store.has(expiredKey)).toBe(true);
+    expect(
+      storage.sql
+        .exec<{ readonly r2_key: string }>('SELECT r2_key FROM v2_r2_pending_deletes')
+        .toArray(),
+    ).toEqual([{ r2_key: expiredKey }]);
+    const d1Coverage = await registry.getCoverage({ tenantId: TENANT_ID, agentId: AGENT_ID });
+    expect(d1Coverage.exists).toBe(true);
+    expect(d1Coverage.status).toBe('armed');
+
+    // 4) No further user requests arrive; D1 RecoverySweeper recovers the crashed idle head and deletes expiredKey.
+    clock.now = d1Coverage.actualRecoveryAtMs!;
+    const recovered = buildCore(storage, registry);
+    const noopQueue: QueueLike<V2DispatchEnvelope> = { send: () => Promise.resolve() };
+    const noopGlobalBudgetSettle: GlobalBudgetSettlePort = {
+      settleGlobal: () => Promise.reject(new Error('unused in idle upload cleanup recovery test')),
+    };
+    const sweeper = new RecoverySweeper({
+      db: d1,
+      registry,
+      targets: {
+        getRecoveryTarget: () => ({
+          reconcileFromRegistry: (cmd) => recovered.core.reconcileFromRegistry(cmd),
+          confirmRegistryPlan: (cmd) => recovered.core.confirmRegistryPlan(cmd),
+          runRecoveryAlarmCycle: async (cycleNowMs) => {
+            await recovered.facade.handleAlarm({
+              nowMs: cycleNowMs,
+              queues: { durable_turn: noopQueue, agent_task: noopQueue },
+              globalBudget: noopGlobalBudgetSettle,
+              registry,
+              afterWork: (ts) => recovered.core.flushDeletedR2Keys(ts, { skipAlarmSync: true }),
+            });
+          },
+        }),
+      },
+    });
+
+    const sweepRes = await sweeper.sweepDueAgents({
+      sweeperId: 'sweeper-idle-prune',
+      nowMs: clock.now,
+    });
+    expect(sweepRes.scannedCount).toBe(1);
+    expect(sweepRes.keptArmedCount).toBe(1);
+    expect(store.has(expiredKey)).toBe(false);
+    expect(
+      storage.sql
+        .exec<{ readonly cnt: number }>('SELECT COUNT(*) AS cnt FROM v2_r2_pending_deletes')
+        .one().cnt,
+    ).toBe(0);
+    expect(await storage.getAlarm()).toBeNull();
   });
 });

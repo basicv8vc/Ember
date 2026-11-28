@@ -8,8 +8,17 @@ actor LiveConversationRepository {
     private let supportsStreaming: Bool
     private let now: @Sendable () -> Date
 
+    private struct WebEvidenceCacheState {
+        let conversationID: UUID
+        let transcriptEpoch: Int
+        var scannedThroughSequence: Int
+        var hasConfirmedEndpoint: Bool
+        var evidenceByMessageID: [MessageID: WebEvidence]
+    }
+
     private var profile: EmberMeDTO?
     private var nextTurnPoll: [UUID: Date] = [:]
+    private var webEvidenceCache: WebEvidenceCacheState?
 
     init(client: LiveB1ConversationClient,
          journal: LiveConversationJournal,
@@ -51,10 +60,95 @@ actor LiveConversationRepository {
         }
         let conversation = Conversation(id: id,
             createdAt: me.conversation.createdAt, updatedAt: me.conversation.updatedAt)
+        let highestSequence = all.map(\.sequence).max() ?? 0
+        let webEvidenceByMessageID = if all.isEmpty {
+            resetWebEvidenceCache(conversationID: id.rawValue, expectedEpoch: me.conversation.transcriptEpoch)
+        } else {
+            await loadWebEvidence(
+                conversationID: id.rawValue,
+                expectedEpoch: me.conversation.transcriptEpoch,
+                highestMessageSequence: highestSequence
+            )
+        }
         return ConversationSnapshot(
             conversation: conversation,
             messages: all.map { $0.domainMessage(conversationID: id) },
-            assistantTurns: [])
+            assistantTurns: [],
+            webEvidenceByMessageID: webEvidenceByMessageID
+        )
+    }
+
+    private func resetWebEvidenceCache(conversationID: UUID, expectedEpoch: Int) -> [MessageID: WebEvidence] {
+        if webEvidenceCache?.conversationID != conversationID || webEvidenceCache?.transcriptEpoch != expectedEpoch {
+            webEvidenceCache = nil
+        }
+        return [:]
+    }
+
+    private func loadWebEvidence(
+        conversationID: UUID,
+        expectedEpoch: Int,
+        highestMessageSequence: Int
+    ) async -> [MessageID: WebEvidence] {
+        if webEvidenceCache?.conversationID != conversationID || webEvidenceCache?.transcriptEpoch != expectedEpoch {
+            webEvidenceCache = nil
+        }
+
+        var cache = webEvidenceCache ?? WebEvidenceCacheState(
+            conversationID: conversationID,
+            transcriptEpoch: expectedEpoch,
+            scannedThroughSequence: 0,
+            hasConfirmedEndpoint: false,
+            evidenceByMessageID: [:]
+        )
+
+        if cache.hasConfirmedEndpoint && highestMessageSequence <= cache.scannedThroughSequence {
+            return cache.evidenceByMessageID
+        }
+
+        var after = cache.scannedThroughSequence
+        var pages = 0
+
+        while true {
+            let page: LiveV2WebEvidencePage
+            do {
+                page = try await client.webEvidencePage(
+                    conversationID: conversationID,
+                    after: after,
+                    limit: 100
+                )
+            } catch {
+                // V2 web-evidence hydration is additive: an unavailable/404 V1 backend or malformed
+                // evidence payload degrades cleanly without blocking the primary chat transcript.
+                webEvidenceCache = cache
+                return cache.evidenceByMessageID
+            }
+
+            guard page.transcriptEpoch == expectedEpoch,
+                  page.nextAfter >= after,
+                  page.items.first.map({ $0.sequence > after }) ?? true else {
+                webEvidenceCache = cache
+                return cache.evidenceByMessageID
+            }
+
+            for item in page.items {
+                if let domain = item.webEvidence.domainEvidence(), domain.hasDisplayableSources {
+                    cache.evidenceByMessageID[MessageID(rawValue: item.responseMessageID)] = domain
+                }
+            }
+
+            cache.hasConfirmedEndpoint = true
+            cache.scannedThroughSequence = max(cache.scannedThroughSequence, page.nextAfter)
+            pages += 1
+            if !page.hasMore { break }
+            // Advance even when `page.items` is empty on sparse transcripts where evidence only appears
+            // in later pages, while still stopping if the cursor stops advancing.
+            guard page.nextAfter > after, pages < 200 else { break }
+            after = page.nextAfter
+        }
+
+        webEvidenceCache = cache
+        return cache.evidenceByMessageID
     }
 
     /// On every launch, reconcile an unresolved durable intent before enabling a new send.
@@ -219,6 +313,7 @@ actor LiveConversationRepository {
         try? await journal.reset()
         profile = nil
         nextTurnPoll.removeAll()
+        webEvidenceCache = nil
     }
 
     private func ensureProfile() async throws -> EmberMeDTO {

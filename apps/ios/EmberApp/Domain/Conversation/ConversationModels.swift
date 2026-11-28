@@ -171,11 +171,13 @@ public struct ConversationSnapshot: Equatable, Sendable {
     public let conversation: Conversation
     public let messages: [ConversationMessage]
     public let assistantTurns: [AssistantTurn]
+    public let webEvidenceByMessageID: [MessageID: WebEvidence]
 
     public init(
         conversation: Conversation,
         messages: [ConversationMessage],
-        assistantTurns: [AssistantTurn]
+        assistantTurns: [AssistantTurn],
+        webEvidenceByMessageID: [MessageID: WebEvidence] = [:]
     ) {
         self.conversation = conversation
         self.messages = messages.sorted {
@@ -190,5 +192,6 @@ public struct ConversationSnapshot: Equatable, Sendable {
             }
             return $0.id.rawValue.uuidString < $1.id.rawValue.uuidString
         }
+        self.webEvidenceByMessageID = webEvidenceByMessageID
     }
 }

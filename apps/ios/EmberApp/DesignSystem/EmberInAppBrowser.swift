@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SafariServices
 import SwiftUI
@@ -9,13 +10,51 @@ struct EmberWebSourceLink: Identifiable, Equatable {
     var id: String { url.absoluteString }
 }
 
+enum EmberOpenURLDisposition: Equatable, Sendable {
+    case openInAppBrowser(URL)
+    case systemAction
+    case discard
+}
+
 enum EmberInAppBrowserPolicy {
-    /// Only HTTP(S) URLs with a non-empty host are safe to open in `SFSafariViewController`.
+    private static let blockedLocalHostnames: Set<String> = [
+        "localhost",
+        "localhost.localdomain",
+        "ip6-localhost",
+        "ip6-loopback",
+    ]
+    private static let allowedExternalSchemes: Set<String> = [
+        "mailto",
+        "tel",
+    ]
+
+    /// Routes public HTTP(S) URLs to the in-app Safari sheet, permits safe external utility schemes
+    /// (`mailto:`, `tel:`), and discards unsafe HTTP(S) or script/file URLs so the system never
+    /// launches them outside the app.
+    static func disposition(for url: URL) -> EmberOpenURLDisposition {
+        if let webURL = webURL(from: url) {
+            return .openInAppBrowser(webURL)
+        }
+        if let scheme = url.scheme?.lowercased(),
+           allowedExternalSchemes.contains(scheme)
+        {
+            return .systemAction
+        }
+        return .discard
+    }
+
+    /// Only public HTTP(S) URLs without embedded credentials or private/local hosts are safe
+    /// to open in `SFSafariViewController`.
     static func webURL(from url: URL) -> URL? {
         guard let scheme = url.scheme?.lowercased(),
               scheme == "https" || scheme == "http",
-              let host = url.host,
-              !host.isEmpty
+              url.user == nil,
+              url.password == nil,
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: true),
+              components.user == nil,
+              components.password == nil,
+              let rawHost = url.host,
+              isPublicWebHost(rawHost)
         else {
             return nil
         }
@@ -31,6 +70,101 @@ enum EmberInAppBrowserPolicy {
             return String(lowercased.dropFirst(4))
         }
         return lowercased
+    }
+
+    private static func isPublicWebHost(_ rawHost: String) -> Bool {
+        var host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while host.hasSuffix(".") {
+            host.removeLast()
+        }
+        guard !host.isEmpty,
+              !host.contains(".."),
+              host.rangeOfCharacter(from: .whitespacesAndNewlines) == nil,
+              host.rangeOfCharacter(from: .controlCharacters) == nil
+        else {
+            return false
+        }
+
+        let unbracketed = if host.hasPrefix("["), host.hasSuffix("]") {
+            String(host.dropFirst().dropLast())
+        } else {
+            host
+        }
+
+        if let ipv4 = parseIPv4(unbracketed) {
+            return isPublicIPv4(ipv4)
+        }
+        if let ipv6 = parseIPv6(unbracketed) {
+            return isPublicIPv6(ipv6)
+        }
+
+        if blockedLocalHostnames.contains(host) ||
+            host.hasSuffix(".localhost") ||
+            host.hasSuffix(".local") ||
+            host.hasSuffix(".internal")
+        {
+            return false
+        }
+
+        let labels = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard labels.count >= 2,
+              labels.allSatisfy({ !$0.isEmpty }),
+              let tld = labels.last,
+              tld.contains(where: { $0.isLetter })
+        else {
+            return false
+        }
+        return true
+    }
+
+    private static func parseIPv4(_ host: String) -> (UInt8, UInt8, UInt8, UInt8)? {
+        var addr = in_addr()
+        guard host.withCString({ inet_pton(AF_INET, $0, &addr) }) == 1 else {
+            return nil
+        }
+        let value = UInt32(bigEndian: addr.s_addr)
+        return (
+            UInt8((value >> 24) & 0xFF),
+            UInt8((value >> 16) & 0xFF),
+            UInt8((value >> 8) & 0xFF),
+            UInt8(value & 0xFF)
+        )
+    }
+
+    private static func isPublicIPv4(_ octets: (UInt8, UInt8, UInt8, UInt8)) -> Bool {
+        let (b0, b1, b2, _) = octets
+        if b0 == 0 || b0 == 10 || b0 == 127 { return false }
+        if b0 == 100, (64...127).contains(b1) { return false }
+        if b0 == 169, b1 == 254 { return false }
+        if b0 == 172, (16...31).contains(b1) { return false }
+        if b0 == 192, b1 == 168 { return false }
+        if b0 == 192, b1 == 0, b2 == 0 { return false }
+        if b0 == 198, b1 == 18 || b1 == 19 { return false }
+        if b0 >= 224 { return false }
+        return true
+    }
+
+    private static func parseIPv6(_ host: String) -> [UInt8]? {
+        let cleanHost = host.split(separator: "%", maxSplits: 1).first.map(String.init) ?? host
+        var addr = in6_addr()
+        guard cleanHost.withCString({ inet_pton(AF_INET6, $0, &addr) }) == 1 else {
+            return nil
+        }
+        return withUnsafeBytes(of: addr) { Array($0) }
+    }
+
+    private static func isPublicIPv6(_ bytes: [UInt8]) -> Bool {
+        guard bytes.count == 16 else { return false }
+        if bytes.allSatisfy({ $0 == 0 }) { return false } // ::
+        if bytes.prefix(15).allSatisfy({ $0 == 0 }), bytes[15] == 1 { return false } // ::1
+        if (bytes[0] & 0xFE) == 0xFC { return false } // fc00::/7 unique local
+        if bytes[0] == 0xFE, (bytes[1] & 0xC0) == 0x80 { return false } // fe80::/10 link-local
+        if bytes[0] == 0xFF { return false } // ff00::/8 multicast
+        // ::ffff:a.b.c.d IPv4-mapped
+        if bytes.prefix(10).allSatisfy({ $0 == 0 }), bytes[10] == 0xFF, bytes[11] == 0xFF {
+            return isPublicIPv4((bytes[12], bytes[13], bytes[14], bytes[15]))
+        }
+        return true
     }
 }
 
@@ -164,11 +298,15 @@ private struct EmberInAppBrowserModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.openURL, OpenURLAction { url in
-                guard let webURL = EmberInAppBrowserPolicy.webURL(from: url) else {
+                switch EmberInAppBrowserPolicy.disposition(for: url) {
+                case .openInAppBrowser(let webURL):
+                    presentedURL = IdentifiableBrowserURL(url: webURL)
+                    return .handled
+                case .systemAction:
                     return .systemAction
+                case .discard:
+                    return .discarded
                 }
-                presentedURL = IdentifiableBrowserURL(url: webURL)
-                return .handled
             })
             .sheet(item: $presentedURL) { item in
                 EmberInAppBrowserSheet(url: item.url)

@@ -241,8 +241,186 @@ struct LiveB1Receipt: Decodable, Sendable {
 
 enum LiveV2StreamEvent: Sendable {
     case delta(turnID: UUID, text: String)
-    case committed(turn: LiveB1Turn, responseMessageID: UUID, sequence: Int)
+    case committed(
+        turn: LiveB1Turn,
+        responseMessageID: UUID,
+        sequence: Int,
+        webEvidence: WebEvidence? = nil
+    )
     case handedOff(turnID: UUID, status: LiveB1Turn.Status)
+}
+
+struct LiveB1WebSource: Decodable, Sendable {
+    let sourceID: String
+    let index: Int
+    let title: String
+    let urlString: String
+    let domain: String
+    let snippet: String?
+    let publishedAt: String?
+    let fetched: Bool
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: LiveWireKey.self)
+        try LiveWire.check(c, allowed: [
+            "source_id", "index", "title", "url", "domain", "snippet", "published_at", "fetched"
+        ])
+        let rawSourceID = try c.decode(String.self, forKey: LiveWire.key("source_id"))
+        let trimmedSourceID = rawSourceID.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedSourceID.isEmpty,
+              trimmedSourceID.count <= WebEvidenceLimits.maxSourceIDCharacters else {
+            throw LiveB1Failure.invalidResponse
+        }
+        sourceID = trimmedSourceID
+
+        let decodedIndex = try LiveWire.integer(c, "index", min: 1)
+        guard decodedIndex <= WebEvidenceLimits.maxSources else {
+            throw LiveB1Failure.invalidResponse
+        }
+        index = decodedIndex
+
+        let rawTitle = try c.decode(String.self, forKey: LiveWire.key("title"))
+        let trimmedTitle = rawTitle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedTitle.isEmpty,
+              trimmedTitle.count <= WebEvidenceLimits.maxTitleCharacters else {
+            throw LiveB1Failure.invalidResponse
+        }
+        title = trimmedTitle
+
+        let rawURL = try c.decode(String.self, forKey: LiveWire.key("url"))
+        let trimmedURL = rawURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedURL.isEmpty,
+              trimmedURL.count <= WebEvidenceLimits.maxURLCharacters else {
+            throw LiveB1Failure.invalidResponse
+        }
+        urlString = trimmedURL
+
+        let rawDomain = try c.decode(String.self, forKey: LiveWire.key("domain"))
+        let trimmedDomain = rawDomain.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedDomain.isEmpty,
+              trimmedDomain.count <= WebEvidenceLimits.maxDomainCharacters else {
+            throw LiveB1Failure.invalidResponse
+        }
+        domain = trimmedDomain
+
+        if let rawSnippet = try c.decodeIfPresent(String.self, forKey: LiveWire.key("snippet")) {
+            let trimmed = rawSnippet.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  trimmed.count <= WebEvidenceLimits.maxSnippetCharacters else {
+                throw LiveB1Failure.invalidResponse
+            }
+            snippet = trimmed
+        } else {
+            snippet = nil
+        }
+
+        if let rawPublishedAt = try c.decodeIfPresent(String.self, forKey: LiveWire.key("published_at")) {
+            let trimmed = rawPublishedAt.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty,
+                  trimmed.count <= WebEvidenceLimits.maxPublishedAtCharacters else {
+                throw LiveB1Failure.invalidResponse
+            }
+            publishedAt = trimmed
+        } else {
+            publishedAt = nil
+        }
+
+        fetched = try c.decode(Bool.self, forKey: LiveWire.key("fetched"))
+    }
+
+    func domainSource() -> WebSource? {
+        guard let url = URL(string: urlString) else { return nil }
+        return WebSource(
+            sourceID: sourceID,
+            index: index,
+            title: title,
+            url: url,
+            domain: domain,
+            snippet: snippet,
+            publishedAt: publishedAt,
+            fetched: fetched
+        )
+    }
+}
+
+struct LiveB1WebEvidence: Decodable, Sendable {
+    let schemaVersion: Int
+    let turnID: UUID
+    let status: WebEvidenceStatus
+    let sources: [LiveB1WebSource]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: LiveWireKey.self)
+        try LiveWire.check(c, allowed: ["schema_version", "turn_id", "status", "sources"])
+        let version = try LiveWire.integer(c, "schema_version", min: 1)
+        guard version == WebEvidenceLimits.schemaVersion else {
+            throw LiveB1Failure.invalidResponse
+        }
+        schemaVersion = version
+        turnID = try LiveWire.uuid(c, "turn_id")
+        let rawStatus = try c.decode(String.self, forKey: LiveWire.key("status"))
+        guard let parsedStatus = WebEvidenceStatus(rawValue: rawStatus) else {
+            throw LiveB1Failure.invalidResponse
+        }
+        status = parsedStatus
+        let decodedSources = try c.decode([LiveB1WebSource].self, forKey: LiveWire.key("sources"))
+        guard decodedSources.count <= WebEvidenceLimits.maxSources else {
+            throw LiveB1Failure.invalidResponse
+        }
+        if status == .completed || status == .partial {
+            guard !decodedSources.isEmpty else {
+                throw LiveB1Failure.invalidResponse
+            }
+        }
+        for (offset, item) in decodedSources.enumerated() where item.index != offset + 1 {
+            throw LiveB1Failure.invalidResponse
+        }
+        sources = decodedSources
+    }
+
+    func domainEvidence() -> WebEvidence? {
+        let safeSources = sources.compactMap { $0.domainSource() }
+        return WebEvidence(
+            schemaVersion: schemaVersion,
+            turnID: turnID,
+            status: status,
+            sources: safeSources
+        )
+    }
+}
+
+struct LiveV2WebEvidenceItem: Decodable, Sendable {
+    let responseMessageID: UUID
+    let sequence: Int
+    let webEvidence: LiveB1WebEvidence
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: LiveWireKey.self)
+        try LiveWire.check(c, allowed: ["response_message_id", "sequence", "web_evidence"])
+        responseMessageID = try LiveWire.uuid(c, "response_message_id")
+        sequence = try LiveWire.integer(c, "sequence", min: 1)
+        webEvidence = try c.decode(LiveB1WebEvidence.self, forKey: LiveWire.key("web_evidence"))
+    }
+}
+
+struct LiveV2WebEvidencePage: Decodable, Sendable {
+    let conversationID: UUID
+    let transcriptEpoch: Int
+    let items: [LiveV2WebEvidenceItem]
+    let nextAfter: Int
+    let hasMore: Bool
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: LiveWireKey.self)
+        try LiveWire.check(c, allowed: [
+            "conversation_id", "transcript_epoch", "items", "next_after", "has_more"
+        ])
+        conversationID = try LiveWire.uuid(c, "conversation_id")
+        transcriptEpoch = try LiveWire.integer(c, "transcript_epoch")
+        items = try c.decode([LiveV2WebEvidenceItem].self, forKey: LiveWire.key("items"))
+        nextAfter = try LiveWire.integer(c, "next_after")
+        hasMore = try c.decode(Bool.self, forKey: LiveWire.key("has_more"))
+    }
 }
 
 enum LiveV2StreamFallbackError: Error, Equatable, Sendable {
@@ -499,6 +677,9 @@ struct LiveB1ConversationClient: Sendable {
             let response_message_id: UUID
             let sequence: Int
         }
+        struct CommittedWebEvidenceContainer: Decodable {
+            let web_evidence: LiveB1WebEvidence?
+        }
         struct HandedOffPayload: Decodable {
             let turn_id: UUID
             let status: LiveB1Turn.Status
@@ -516,10 +697,19 @@ struct LiveB1ConversationClient: Sendable {
                   payload.turn.conversationID == receipt.conversationID else {
                 throw LiveB1Failure.invalidResponse
             }
+            let evidenceContainer = try? JSONDecoder().decode(CommittedWebEvidenceContainer.self, from: data)
+            let domainEvidence: WebEvidence? = if let parsed = evidenceContainer?.web_evidence?.domainEvidence(),
+                                                  parsed.turnID == payload.turn.id,
+                                                  parsed.hasDisplayableSources {
+                parsed
+            } else {
+                nil
+            }
             return .committed(
                 turn: payload.turn,
                 responseMessageID: payload.response_message_id,
-                sequence: payload.sequence
+                sequence: payload.sequence,
+                webEvidence: domainEvidence
             )
         case "turn.handed_off":
             let payload = try decode(HandedOffPayload.self, data)
@@ -549,6 +739,24 @@ struct LiveB1ConversationClient: Sendable {
                          URLQueryItem(name: "limit", value: String(limit))]))
         guard response.statusCode == 200 else { throw Self.failure(response.statusCode) }
         let page = try decode(LiveB1Page.self, response.data)
+        guard page.conversationID == conversationID else { throw LiveB1Failure.invalidResponse }
+        return page
+    }
+
+    func webEvidencePage(
+        conversationID: UUID,
+        after: Int,
+        limit: Int = 50
+    ) async throws -> LiveV2WebEvidencePage {
+        guard after >= 0, (1...100).contains(limit) else { throw LiveB1Failure.invalidResponse }
+        let response = try await auth.authorizedRequest(EmberAuthenticatedRequest(
+            method: "GET",
+            pathComponents: ["v2", "conversations", conversationID.uuidString.lowercased(), "web-evidence"],
+            idempotency: .idempotentRead,
+            queryItems: [URLQueryItem(name: "after", value: String(after)),
+                         URLQueryItem(name: "limit", value: String(limit))]))
+        guard response.statusCode == 200 else { throw Self.failure(response.statusCode) }
+        let page = try decode(LiveV2WebEvidencePage.self, response.data)
         guard page.conversationID == conversationID else { throw LiveB1Failure.invalidResponse }
         return page
     }

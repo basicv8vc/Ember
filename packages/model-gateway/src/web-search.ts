@@ -61,8 +61,7 @@ export interface WebSearchQueryPrivacyContext {
 }
 
 export type WebSearchQueryPrivacyResult =
-  | { readonly ok: true }
-  | { readonly ok: false; readonly reason: WebSearchPrivacyViolationReason };
+  { readonly ok: true } | { readonly ok: false; readonly reason: WebSearchPrivacyViolationReason };
 
 const EMAIL_PATTERN = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/i;
 const PHONE_PATTERN =
@@ -73,8 +72,7 @@ const SECRET_CREDENTIAL_PATTERN =
   /\b(?:sk-[a-z0-9_-]{12,}|gh[pousr]_[a-z0-9]{20,}|AIza[0-9A-Za-z_-]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[0-9a-zA-Z-]{10,}|bearer\s+[a-z0-9._-]{16,})\b/i;
 const PRIVATE_NETWORK_PATTERN =
   /\b(?:127\.0\.0\.1|10\.\d{1,3}\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|localhost(?::\d+)?)\b/i;
-const UUID_IDENTIFIER_PATTERN =
-  /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
+const UUID_IDENTIFIER_PATTERN = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
 const COMMON_MEMORY_STOPWORDS = new Set([
   'about',
@@ -166,7 +164,11 @@ function extractMemorySensitiveCandidates(content: string): {
   for (let i = 0; i < lowerTokens.length - 1; i += 1) {
     const a = lowerTokens[i]!;
     const b = lowerTokens[i + 1]!;
-    if (a.length >= 2 && b.length >= 2 && !(COMMON_MEMORY_STOPWORDS.has(a) && COMMON_MEMORY_STOPWORDS.has(b))) {
+    if (
+      a.length >= 2 &&
+      b.length >= 2 &&
+      !(COMMON_MEMORY_STOPWORDS.has(a) && COMMON_MEMORY_STOPWORDS.has(b))
+    ) {
       phraseCandidates.push(`${a} ${b}`);
     }
   }
@@ -185,7 +187,10 @@ function extractMemorySensitiveCandidates(content: string): {
   }
 
   // Extract CJK runs (Han / Hiragana / Katakana / Hangul) for 2-3+ char sensitive spans.
-  const cjkRuns = content.match(/[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2,}/gu) ?? [];
+  const cjkRuns =
+    content.match(
+      /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]{2,}/gu,
+    ) ?? [];
   for (const run of cjkRuns) {
     if (run.length === 2) {
       cjkCandidates.push(run);
@@ -353,6 +358,18 @@ export function validateWebFetchUrl(rawUrl: string): WebFetchValidationResult {
   return { ok: true, url: parsed.toString() };
 }
 
+/**
+ * Validate and normalize an untrusted web URL using {@link validateWebFetchUrl},
+ * returning `null` for non-HTTP(S), credentialed, private-network, or secret-bearing URLs.
+ */
+export function sanitizePublicWebUrl(rawUrl: string | null | undefined): string | null {
+  if (typeof rawUrl !== 'string') {
+    return null;
+  }
+  const validation = validateWebFetchUrl(rawUrl);
+  return validation.ok ? validation.url : null;
+}
+
 const exaResultSchema = z.object({
   title: z.string().nullable().optional(),
   url: z.string().min(1),
@@ -471,7 +488,7 @@ export class ExaWebSearchClient implements WebSearchPort {
 
     const items: WebSearchResultItem[] = [];
     for (const raw of (parsed.data.results ?? []).slice(0, numResults)) {
-      const url = sanitizeResultUrl(raw.url);
+      const url = sanitizePublicWebUrl(raw.url);
       if (url === null) continue;
       const title = (raw.title?.trim() || url).slice(0, 200);
       const publishedDate = raw.publishedDate?.trim() || undefined;
@@ -561,7 +578,7 @@ export class ExaWebSearchClient implements WebSearchPort {
       });
     }
 
-    const resolvedUrl = sanitizeResultUrl(first.url) ?? validation.url;
+    const resolvedUrl = sanitizePublicWebUrl(first.url) ?? validation.url;
     const title = (first.title?.trim() || resolvedUrl).slice(0, 200);
     const publishedDate = first.publishedDate?.trim() || undefined;
     const rawContent =
@@ -578,18 +595,6 @@ export class ExaWebSearchClient implements WebSearchPort {
       ...(publishedDate === undefined ? {} : { publishedDate }),
       content: rawContent.slice(0, WEB_FETCH_LIMITS.maxContentChars),
     });
-  }
-}
-
-function sanitizeResultUrl(raw: string): string | null {
-  try {
-    const parsed = new URL(raw.trim());
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return null;
-    }
-    return parsed.toString();
-  } catch {
-    return null;
   }
 }
 
@@ -649,7 +654,12 @@ export function formatWebFetchToolOutput(
     response.content.length > 0
       ? response.content
       : 'No readable public text could be extracted from this page.';
-  return [header, `Title: ${response.title}${dateSuffix}`, `URL: ${response.url}`, `Content:\n${body}`]
+  return [
+    header,
+    `Title: ${response.title}${dateSuffix}`,
+    `URL: ${response.url}`,
+    `Content:\n${body}`,
+  ]
     .join('\n\n')
     .slice(0, effectiveMaxChars);
 }

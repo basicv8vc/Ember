@@ -41,6 +41,7 @@ import {
   getHeadMetaSync,
   getTurnRowSync,
   insertEmberMessageSync,
+  insertMessageWebEvidenceSync,
   prepareEdgeSafeTaskCommand,
   sqlExecMaybe,
   toTurnDto,
@@ -1193,6 +1194,18 @@ export async function executeAuthoritativeTurnCommit(
       nowMs,
       turn.id,
     );
+
+    const persistedWebEvidence =
+      publication.result.webEvidence !== undefined
+        ? insertMessageWebEvidenceSync({
+            sql: deps.storage.sql,
+            messageId,
+            turnId: turn.id,
+            webEvidence: publication.result.webEvidence,
+            nowMs,
+          })
+        : undefined;
+
     deps.eventCoordinator.cancelEntityOutboxSync('turn', turn.id, nowMs);
     deps.eventCoordinator.cancelEntityOutboxSync('handoff', turn.id, nowMs);
     const alarmAtMs = deps.eventCoordinator.recomputeAlarmSync(nowMs);
@@ -1205,6 +1218,7 @@ export async function executeAuthoritativeTurnCommit(
         responseMessageId: messageId,
         sequence,
         delegatedTaskId,
+        ...(persistedWebEvidence !== undefined ? { webEvidence: persistedWebEvidence } : {}),
       },
       alarmAtMs,
       nowMs,

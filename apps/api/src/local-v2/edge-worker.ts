@@ -59,6 +59,7 @@ import { createDeviceRoutes } from './device-routes.js';
 import { createMemoryRoutes } from './memory-routes.js';
 import { createProactiveScheduleRoutes } from './proactive-schedule-routes.js';
 import { createPythonTaskRoutes } from './python-task-routes.js';
+import { V2_WEB_EVIDENCE_MOUNT_PATH, createWebEvidenceRoutes } from './web-evidence-routes.js';
 import {
   INTERACTIVE_TIMING,
   executeInteractive,
@@ -401,6 +402,23 @@ export function createLocalV2EdgeWorker(deps: LocalV2EdgeDependencies) {
             );
           },
         ),
+      );
+
+      app.route(
+        V2_WEB_EVIDENCE_MOUNT_PATH,
+        createWebEvidenceRoutes({
+          session: sessions,
+          async readWebEvidence(command) {
+            const { rpc, agentId } = await head();
+            return callRuntime(() =>
+              rpc.readWebEvidence({
+                ...command,
+                conversationId: command.conversationId.toLowerCase(),
+                agentId,
+              }),
+            );
+          },
+        }),
       );
 
       type ScopedTaskArtifactCommand = TaskArtifactCommand extends infer T

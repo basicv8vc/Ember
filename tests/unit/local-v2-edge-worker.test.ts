@@ -213,6 +213,25 @@ function fixture(reasoningMs = 0, usageCostMicroUsd: number | null = 0) {
         has_more: false,
       });
     }),
+    readWebEvidence: mockRpc<EdgeAgentHeadRpc['readWebEvidence']>(
+      ({ after, conversationId: id }) => {
+        if (id !== conversationId)
+          throw new DomainError('NOT_FOUND', 'conversation is not visible');
+        const nextAfter =
+          saved?.turn.response_message_id && assistantText && after < 2
+            ? 2
+            : saved?.prepared.receipt.message && after < saved.prepared.receipt.message.sequence
+              ? saved.prepared.receipt.message.sequence
+              : after;
+        return {
+          conversation_id: id,
+          transcript_epoch: epoch,
+          items: [],
+          next_after: nextAfter,
+          has_more: false,
+        };
+      },
+    ),
     findSubmissionReceipt: mockRpc<EdgeAgentHeadRpc['findSubmissionReceipt']>(
       ({ clientSubmissionId }) =>
         saved?.request.request.client_submission_id === clientSubmissionId

@@ -1,3 +1,4 @@
+import type { WebEvidence, WebSource } from '@ember/contracts';
 import type {
   B2TaskDelegationCommand,
   CommitTurnSettlementInput,
@@ -678,6 +679,118 @@ function parseDelegationCommand(raw: unknown): B2TaskDelegationCommand | null {
   return null;
 }
 
+const WEB_EVIDENCE_OUTER_PROPS = new Set(['schema_version', 'turn_id', 'status', 'sources']);
+const WEB_EVIDENCE_SOURCE_PROPS = new Set([
+  'source_id',
+  'index',
+  'title',
+  'url',
+  'domain',
+  'snippet',
+  'published_at',
+  'fetched',
+]);
+const WEB_EVIDENCE_TEXT_ENCODER = new TextEncoder();
+
+function isPublicHttpUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    if (parsed.username !== '' || parsed.password !== '') return false;
+    return parsed.hostname.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
+
+function parseTurnWebEvidence(raw: unknown, expectedTurnId: string): WebEvidence | null {
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    return null;
+  }
+  const record = raw as Record<string, unknown>;
+  for (const prop of Object.keys(record)) {
+    if (!WEB_EVIDENCE_OUTER_PROPS.has(prop)) return null;
+  }
+  if (record['schema_version'] !== 1) return null;
+  if (record['turn_id'] !== expectedTurnId || !UUID_REGEX.test(expectedTurnId)) return null;
+  const status = record['status'];
+  if (status !== 'completed' && status !== 'partial') return null;
+
+  const rawSources = record['sources'];
+  if (!Array.isArray(rawSources) || rawSources.length === 0 || rawSources.length > 10) {
+    return null;
+  }
+
+  const seenSourceIds = new Set<string>();
+  const seenUrls = new Set<string>();
+  const sources: WebSource[] = [];
+
+  for (let i = 0; i < rawSources.length; i += 1) {
+    const item: unknown = rawSources[i];
+    if (item === null || typeof item !== 'object' || Array.isArray(item)) return null;
+    const src = item as Record<string, unknown>;
+    for (const prop of Object.keys(src)) {
+      if (!WEB_EVIDENCE_SOURCE_PROPS.has(prop)) return null;
+    }
+
+    const sourceId = readBoundedTrimmedString(src['source_id'], 64);
+    const title = readBoundedTrimmedString(src['title'], 200);
+    const url = readBoundedTrimmedString(src['url'], 2_048);
+    const domain = readBoundedTrimmedString(src['domain'], 253);
+    const fetched = src['fetched'];
+    if (
+      sourceId === null ||
+      title === null ||
+      url === null ||
+      domain === null ||
+      src['index'] !== i + 1 ||
+      typeof fetched !== 'boolean' ||
+      !isPublicHttpUrl(url)
+    ) {
+      return null;
+    }
+    if (seenSourceIds.has(sourceId) || seenUrls.has(url)) return null;
+    seenSourceIds.add(sourceId);
+    seenUrls.add(url);
+
+    let snippet: string | undefined;
+    if (src['snippet'] !== undefined) {
+      const parsedSnippet = readBoundedTrimmedString(src['snippet'], 400);
+      if (parsedSnippet === null) return null;
+      snippet = parsedSnippet;
+    }
+
+    let publishedAt: string | undefined;
+    if (src['published_at'] !== undefined) {
+      const parsedPublishedAt = readBoundedTrimmedString(src['published_at'], 64);
+      if (parsedPublishedAt === null) return null;
+      publishedAt = parsedPublishedAt;
+    }
+
+    sources.push({
+      source_id: sourceId,
+      index: i + 1,
+      title,
+      url,
+      domain,
+      ...(snippet !== undefined ? { snippet } : {}),
+      ...(publishedAt !== undefined ? { published_at: publishedAt } : {}),
+      fetched,
+    });
+  }
+
+  const normalized: WebEvidence = {
+    schema_version: 1,
+    turn_id: expectedTurnId,
+    status,
+    sources,
+  };
+  if (WEB_EVIDENCE_TEXT_ENCODER.encode(JSON.stringify(normalized)).byteLength > 16 * 1024) {
+    return null;
+  }
+  return normalized;
+}
+
 /**
  * Converts a worker `FakeOrProviderJobOutcome` into the canonical payload expected by
  * Agent A's `AgentHeadRecoveryService.commitDurableResult`.
@@ -723,6 +836,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
       let personalMemorySave: PersonalMemorySaveTurnCommand | undefined;
       let personalMemoryDelete: PersonalMemoryDeleteTurnCommand | undefined;
       let proactiveScheduleCreate: ProactiveScheduleTurnCommand | undefined;
+      let webEvidence: WebEvidence | undefined;
       if (cmd.outcome.outputJson !== null) {
         try {
           const parsed = JSON.parse(cmd.outcome.outputJson) as Record<string, unknown>;
@@ -761,6 +875,16 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
             }
             proactiveScheduleCreate = parsedSched;
           }
+          if (parsed['webEvidence'] !== undefined) {
+            const parsedEvidence = parseTurnWebEvidence(
+              parsed['webEvidence'],
+              cmd.context.entityId,
+            );
+            if (parsedEvidence === null) {
+              return { ...binding, status: 'failed', failureReason: 'internal_error' };
+            }
+            webEvidence = parsedEvidence;
+          }
         } catch {
           // Retain raw outputJson string when non-JSON text is supplied
         }
@@ -776,6 +900,7 @@ export function toAgentHeadDurableCommitOutcome(cmd: {
         ...(personalMemorySave !== undefined ? { personalMemorySave } : {}),
         ...(personalMemoryDelete !== undefined ? { personalMemoryDelete } : {}),
         ...(proactiveScheduleCreate !== undefined ? { proactiveScheduleCreate } : {}),
+        ...(webEvidence !== undefined ? { webEvidence } : {}),
         ...(cmd.modelLabel !== undefined ? { modelLabel: cmd.modelLabel } : {}),
         ...(cmd.simulated !== undefined ? { simulated: cmd.simulated } : {}),
       };

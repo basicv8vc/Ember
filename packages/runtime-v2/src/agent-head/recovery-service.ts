@@ -1482,6 +1482,7 @@ export class AgentHeadRecoveryService implements AuthoritativeBusinessPort, Agen
               ...(parsed.proactiveScheduleCreate !== undefined
                 ? { proactiveScheduleCreate: parsed.proactiveScheduleCreate }
                 : {}),
+              ...(parsed.webEvidence !== undefined ? { webEvidence: parsed.webEvidence } : {}),
             }
           : parsed.status === 'failed'
             ? {

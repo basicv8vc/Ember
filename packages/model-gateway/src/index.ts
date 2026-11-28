@@ -185,6 +185,7 @@ export {
   WEB_SEARCH_LIMITS,
   formatWebFetchToolOutput,
   formatWebSearchToolOutput,
+  sanitizePublicWebUrl,
   validateWebFetchUrl,
   validateWebSearchQueryPrivacy,
   type ExaWebSearchClientOptions,
@@ -200,6 +201,17 @@ export {
   type WebSearchResponse,
   type WebSearchResultItem,
 } from './web-search.js';
+export {
+  WEB_EVIDENCE_COLLECTOR_LIMITS,
+  WebEvidenceCollector,
+  canonicalizeWebEvidenceUrl,
+  extractDomainFromUrl,
+  type FetchEvidenceResultInput,
+  type SearchEvidenceResultInput,
+  type WebEvidence,
+  type WebEvidenceStatus,
+  type WebSource,
+} from './web-evidence.js';
 export {
   FakeStreamingModelGateway,
   FAKE_STREAM_MAX_REPLY_CHARS,

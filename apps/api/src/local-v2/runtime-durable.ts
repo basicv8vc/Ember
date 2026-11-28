@@ -484,6 +484,9 @@ export function createDurableExecutor(
             ...(claim.targetKind === 'turn' && output.kind === 'create_schedule'
               ? { proactiveScheduleCreate: output.schedule.arguments }
               : {}),
+            ...(claim.targetKind === 'turn' && output.webEvidence !== undefined
+              ? { webEvidence: output.webEvidence }
+              : {}),
           }),
           errorCode: null,
           usage: callResult.usage,

@@ -1,3 +1,5 @@
+import type { WebEvidence } from './web-evidence.js';
+
 /**
  * The gateway is deliberately smaller than a "provider abstraction": it is the closed set of
  * reviewed model operations Ember performs. No input carries a model, a temperature, a system
@@ -147,7 +149,7 @@ export interface CreateProactiveScheduleCall {
   readonly arguments: CreateProactiveScheduleToolArguments;
 }
 
-export type ConversationTurnOutput =
+export type ConversationTurnOutput = (
   | {
       readonly kind: 'reply';
       readonly text: string;
@@ -180,7 +182,10 @@ export type ConversationTurnOutput =
       readonly text: string;
       readonly finishReason: 'stop' | 'length';
       readonly schedule: CreateProactiveScheduleCall;
-    };
+    }
+) & {
+  readonly webEvidence?: WebEvidence;
+};
 
 export interface NotesActionItemsInput {
   readonly taskId: string;

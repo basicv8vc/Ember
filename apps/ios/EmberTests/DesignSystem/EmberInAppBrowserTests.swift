@@ -56,6 +56,38 @@ final class EmberInAppBrowserTests: XCTestCase {
         XCTAssertEqual(EmberInAppBrowserPolicy.webURL(from: publicIPURL), publicIPURL)
     }
 
+    func testOpenURLDispositionDiscardsBlockedWebAndScriptLinksInsteadOfSystemAction() {
+        XCTAssertEqual(
+            EmberInAppBrowserPolicy.disposition(for: URL(string: "https://example.com/docs")!),
+            .openInAppBrowser(URL(string: "https://example.com/docs")!)
+        )
+        XCTAssertEqual(
+            EmberInAppBrowserPolicy.disposition(for: URL(string: "mailto:hello@example.com")!),
+            .systemAction
+        )
+        XCTAssertEqual(
+            EmberInAppBrowserPolicy.disposition(for: URL(string: "tel:+15551234567")!),
+            .systemAction
+        )
+
+        let discarded = [
+            "http://127.0.0.1:8080/admin",
+            "http://localhost:8787/test",
+            "https://user:pass@example.com/secret",
+            "http://169.254.169.254/latest",
+            "javascript:alert(1)",
+            "file:///tmp/test.html",
+        ]
+        for raw in discarded {
+            let url = URL(string: raw)!
+            XCTAssertEqual(
+                EmberInAppBrowserPolicy.disposition(for: url),
+                .discard,
+                "Expected \(raw) to be discarded rather than handed to systemAction"
+            )
+        }
+    }
+
     func testLinkDetectorFastPathReturnsNilWhenNoURLPresent() {
         XCTAssertNil(EmberLinkDetector.linkifiedPlainText(for: "帮我总结一下今天的待办事项"))
         XCTAssertNil(EmberLinkDetector.linkifiedPlainText(for: "Hello Ember, how are you?"))

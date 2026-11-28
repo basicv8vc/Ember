@@ -10,6 +10,12 @@ struct EmberWebSourceLink: Identifiable, Equatable {
     var id: String { url.absoluteString }
 }
 
+enum EmberOpenURLDisposition: Equatable, Sendable {
+    case openInAppBrowser(URL)
+    case systemAction
+    case discard
+}
+
 enum EmberInAppBrowserPolicy {
     private static let blockedLocalHostnames: Set<String> = [
         "localhost",
@@ -17,6 +23,25 @@ enum EmberInAppBrowserPolicy {
         "ip6-localhost",
         "ip6-loopback",
     ]
+    private static let allowedExternalSchemes: Set<String> = [
+        "mailto",
+        "tel",
+    ]
+
+    /// Routes public HTTP(S) URLs to the in-app Safari sheet, permits safe external utility schemes
+    /// (`mailto:`, `tel:`), and discards unsafe HTTP(S) or script/file URLs so the system never
+    /// launches them outside the app.
+    static func disposition(for url: URL) -> EmberOpenURLDisposition {
+        if let webURL = webURL(from: url) {
+            return .openInAppBrowser(webURL)
+        }
+        if let scheme = url.scheme?.lowercased(),
+           allowedExternalSchemes.contains(scheme)
+        {
+            return .systemAction
+        }
+        return .discard
+    }
 
     /// Only public HTTP(S) URLs without embedded credentials or private/local hosts are safe
     /// to open in `SFSafariViewController`.
@@ -273,11 +298,15 @@ private struct EmberInAppBrowserModifier: ViewModifier {
     func body(content: Content) -> some View {
         content
             .environment(\.openURL, OpenURLAction { url in
-                guard let webURL = EmberInAppBrowserPolicy.webURL(from: url) else {
+                switch EmberInAppBrowserPolicy.disposition(for: url) {
+                case .openInAppBrowser(let webURL):
+                    presentedURL = IdentifiableBrowserURL(url: webURL)
+                    return .handled
+                case .systemAction:
                     return .systemAction
+                case .discard:
+                    return .discarded
                 }
-                presentedURL = IdentifiableBrowserURL(url: webURL)
-                return .handled
             })
             .sheet(item: $presentedURL) { item in
                 EmberInAppBrowserSheet(url: item.url)

@@ -457,6 +457,175 @@ final class WebEvidenceSourcesTests: XCTestCase {
         XCTAssertNil(sources[1].formattedPublishedDate)
     }
 
+    func testSparseWebEvidencePaginationContinuesPastEmptyPagesAndCachesIncrementalCursor() async throws {
+        let directory = makeTempDirectory()
+        let conversationID = AuthFixture.conversationID.uuidString.lowercased()
+        let msg101ID = "77777777-7777-4777-8777-777777777101"
+        let msg102ID = "77777777-7777-4777-8777-777777777102"
+        let hasNewMessage102 = LockedFlag(false)
+        let requestedAfter = LockedBox<[String]>([])
+
+        register { request in
+            let path = request.url?.path ?? ""
+            if request.httpMethod == "GET", path == "/v1/me/tasks" {
+                return .json(statusCode: 200, body: #"{"tasks":[]}"#)
+            }
+            if request.httpMethod == "GET", path == "/v1/conversations/\(conversationID)/messages" {
+                let queryItems = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+                let after = queryItems?.first(where: { $0.name == "after" })?.value ?? "0"
+                if after == "0" {
+                    let fillerMessages = (1...100).map { seq in
+                        let id = String(format: "00000000-0000-4000-8000-%012d", seq)
+                        return """
+                        {"message_id":"\(id)","sequence":\(seq),"created_at":"2026-11-28T01:00:00Z","kind":"ember","text":"Plain reply \(seq)","model_label":"deepseek-chat","simulated":false}
+                        """
+                    }.joined(separator: ",")
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "messages":[\(fillerMessages)],
+                      "next_after":100,
+                      "has_more":true
+                    }
+                    """)
+                }
+                var tailMessages = [
+                    """
+                    {"message_id":"\(msg101ID)","sequence":101,"created_at":"2026-11-28T01:02:00Z","kind":"ember","text":"Answer 101","model_label":"deepseek-chat","simulated":false}
+                    """
+                ]
+                var nextAfter = 101
+                if hasNewMessage102.value {
+                    tailMessages.append("""
+                    {"message_id":"\(msg102ID)","sequence":102,"created_at":"2026-11-28T01:03:00Z","kind":"ember","text":"Answer 102","model_label":"deepseek-chat","simulated":false}
+                    """)
+                    nextAfter = 102
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "messages":[\(tailMessages.joined(separator: ","))],
+                  "next_after":\(nextAfter),
+                  "has_more":false
+                }
+                """)
+            }
+            if request.httpMethod == "GET", path == "/v2/conversations/\(conversationID)/web-evidence" {
+                let queryItems = URLComponents(url: request.url!, resolvingAgainstBaseURL: false)?.queryItems
+                let after = queryItems?.first(where: { $0.name == "after" })?.value ?? "0"
+                requestedAfter.modify { $0.append(after) }
+                if after == "0" {
+                    // First 100 messages have NO web evidence, yet `has_more` is true!
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "items":[],
+                      "next_after":100,
+                      "has_more":true
+                    }
+                    """)
+                }
+                if after == "100" {
+                    var items = [
+                        """
+                        {
+                          "response_message_id":"\(msg101ID)",
+                          "sequence":101,
+                          "web_evidence":{
+                            "schema_version":1,
+                            "turn_id":"88888888-8888-4888-8888-888888888101",
+                            "status":"completed",
+                            "sources":[
+                              {"source_id":"s101","index":1,"title":"Sparse Page 2 Source","url":"https://sparse.example.com/101","domain":"sparse.example.com","fetched":true}
+                            ]
+                          }
+                        }
+                        """
+                    ]
+                    var nextAfter = 101
+                    if hasNewMessage102.value {
+                        items.append("""
+                        {
+                          "response_message_id":"\(msg102ID)",
+                          "sequence":102,
+                          "web_evidence":{
+                            "schema_version":1,
+                            "turn_id":"88888888-8888-4888-8888-888888888102",
+                            "status":"completed",
+                            "sources":[
+                              {"source_id":"s102","index":1,"title":"Incremental Delta Source","url":"https://delta.example.com/102","domain":"delta.example.com","fetched":false}
+                            ]
+                          }
+                        }
+                        """)
+                        nextAfter = 102
+                    }
+                    return .json(statusCode: 200, body: """
+                    {
+                      "conversation_id":"\(conversationID)",
+                      "transcript_epoch":0,
+                      "items":[\(items.joined(separator: ","))],
+                      "next_after":\(nextAfter),
+                      "has_more":false
+                    }
+                    """)
+                }
+                return .json(statusCode: 200, body: """
+                {
+                  "conversation_id":"\(conversationID)",
+                  "transcript_epoch":0,
+                  "items":[
+                    {
+                      "response_message_id":"\(msg102ID)",
+                      "sequence":102,
+                      "web_evidence":{
+                        "schema_version":1,
+                        "turn_id":"88888888-8888-4888-8888-888888888102",
+                        "status":"completed",
+                        "sources":[
+                          {"source_id":"s102","index":1,"title":"Incremental Delta Source","url":"https://delta.example.com/102","domain":"delta.example.com","fetched":false}
+                        ]
+                      }
+                    }
+                  ],
+                  "next_after":102,
+                  "has_more":false
+                }
+                """)
+            }
+            return .json(statusCode: 404, body: "{}")
+        }
+
+        let model = try makeHostModel(directory: directory, supportsStreaming: false)
+        await model.start()
+
+        XCTAssertEqual(requestedAfter.value, ["0", "100"])
+        XCTAssertTrue(
+            model.screen.timeline.contains(where: { $0.id == "conversation-web-sources-\(msg101ID)" }),
+            "Sparse history past empty page 1 must hydrate message 101 web sources card"
+        )
+
+        // Refresh with no new messages must reuse cached evidence without re-fetching full history.
+        await model.retry()
+        XCTAssertEqual(requestedAfter.value, ["0", "100"])
+
+        // When message 102 arrives, only delta cursor after=101 should be queried, keeping 101 cached too.
+        hasNewMessage102.value = true
+        await model.retry()
+        XCTAssertEqual(requestedAfter.value, ["0", "100", "101"])
+        XCTAssertTrue(model.screen.timeline.contains(where: { $0.id == "conversation-web-sources-\(msg101ID)" }))
+        XCTAssertTrue(model.screen.timeline.contains(where: { $0.id == "conversation-web-sources-\(msg102ID)" }))
+
+        // Simulated cold relaunch with a fresh repository/model re-hydrates sparse evidence cleanly.
+        let relaunchedModel = try makeHostModel(directory: directory, supportsStreaming: false)
+        await relaunchedModel.start()
+        XCTAssertTrue(relaunchedModel.screen.timeline.contains(where: { $0.id == "conversation-web-sources-\(msg101ID)" }))
+        XCTAssertTrue(relaunchedModel.screen.timeline.contains(where: { $0.id == "conversation-web-sources-\(msg102ID)" }))
+    }
+
     private func makeHostModel(directory: URL, supportsStreaming: Bool) throws -> LiveConversationHostModel {
         let session = StubSession.make()
         sessions.append(session)
